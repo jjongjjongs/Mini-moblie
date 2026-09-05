@@ -1157,7 +1157,23 @@ async fn handle_init_svc(core: &mut ArmCore, context: &mut InitSvcContext, id: S
             // owns these references only when the main class is launched, after
             // this import, so the resolution re-runs as classes appear.
             let start = table.virtual_methods.len() as u32;
-            let end = start + table.virtual_method_offset_capacity().unwrap_or(1024);
+            // `virtual_method_offset_capacity` counts the array's rows from row
+            // zero, so it is the bound itself rather than a length to add to
+            // the first own row - adding it walked past the array's end. The
+            // input tables sit back to back in the image, so the walk does not
+            // stop on its own: Fantasy Knight's virtual rows end at 91 and its
+            // field rows follow, and the extra rows read `out` /
+            // `Ljava/io/PrintStream;` and the rest of its field table as if
+            // they were methods. Nothing matched a method descriptor, so
+            // nothing was written over the arrays that follow, but only by
+            // luck. `field_offset_capacity` is already used this way.
+            let end = match table.virtual_method_offset_capacity() {
+                Some(capacity) => capacity.max(start),
+                // Nothing follows it in `.bss` to bound it, so a blank input
+                // row ends the walk and this only keeps a missing terminator
+                // from running away.
+                None => start + 1024,
+            };
             *context.own_virtual_resolve.lock() = Some((arguments[3], table.outputs.virtual_method_offsets, start, end));
 
             // The trailing rows are grouped by the class whose compiled code
@@ -4423,7 +4439,7 @@ mod dlet_property_tests {
 
 #[cfg(test)]
 mod assignability_tests {
-    use wie_core_arm::{Allocator, ArmCore};
+    use wie_core_arm::ArmCore;
     use wie_util::write_generic;
 
     use super::{CLASS_METADATA_FLAGS, CLASS_METADATA_SIZE, CLASS_METADATA_SUPERCLASS, metadata_assignable};

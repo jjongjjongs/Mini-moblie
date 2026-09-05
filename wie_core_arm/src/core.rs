@@ -1,5 +1,5 @@
 use alloc::{borrow::ToOwned, boxed::Box, collections::BTreeMap, format, string::String, sync::Arc, vec, vec::Vec};
-use core::mem::size_of;
+use core::{fmt::Write as _, mem::size_of};
 
 use spin::Mutex;
 
@@ -495,6 +495,41 @@ impl ArmCore {
                             regs[15],
                             regs[16]
                         );
+
+                        // The fatal path dumps the core again once the error
+                        // reaches it, but by then the engine may be running
+                        // another thread, so that dump can describe the wrong
+                        // one. Take the faulting thread's call stack here.
+                        let mut chain = String::new();
+                        let mut fp = regs[11];
+                        for _ in 0..64 {
+                            if fp < 12 || !inner.engine.is_mapped(fp - 12, 12) {
+                                break;
+                            }
+
+                            let mut word = [0; size_of::<u32>()];
+                            if inner.engine.mem_read(fp - 4, size_of::<u32>(), &mut word).is_err() {
+                                break;
+                            }
+                            let return_address = u32::from_le_bytes(word);
+
+                            if inner.engine.mem_read(fp - 12, size_of::<u32>(), &mut word).is_err() {
+                                break;
+                            }
+                            let caller_fp = u32::from_le_bytes(word);
+
+                            if return_address <= 4 {
+                                break;
+                            }
+                            let _ = write!(chain, " {:#x}", return_address - 4);
+
+                            if caller_fp <= fp {
+                                break;
+                            }
+                            fp = caller_fp;
+                        }
+                        tracing::warn!("engine fault frame chain: {:#x}{chain}", regs[15]);
+
                         return Err(error);
                     }
                 }
@@ -629,8 +664,9 @@ impl ArmCore {
 
     pub fn dump_reg_stack(&self, image_base: u32) -> String {
         format!(
-            "\n{}\nPossible call stack:\n{}\nStack:\n{}",
+            "\n{}\nFrame chain:\n{}\nPossible call stack:\n{}\nStack:\n{}",
             self.dump_regs(),
+            self.dump_frame_chain(image_base).unwrap(),
             self.dump_call_stack(image_base).unwrap(),
             self.dump_stack().unwrap()
         )
@@ -822,6 +858,54 @@ impl ArmCore {
         format!("{address:#x}: {description}\n")
     }
 
+    /// Walks the APCS frame chain, which is the call stack rather than a guess
+    /// at one.
+    ///
+    /// Compiled code opens a frame with `mov ip, sp` / `push {..., fp, ip, lr,
+    /// pc}` / `sub fp, ip, #4`, so `fp` points at the saved `pc` and the two
+    /// words a frame needs sit below it: the return address at `fp - 4` and the
+    /// caller's frame pointer at `fp - 12`. `dump_call_stack` scans the stack
+    /// for anything that reads as a return address, which finds the real frames
+    /// but buries them among words that only look like one; this names the
+    /// callers in order and stops when the chain does.
+    fn dump_frame_chain(&self, image_base: u32) -> Result<String> {
+        const MAX_FRAMES: usize = 64;
+
+        let mut inner = self.inner.lock();
+
+        let mut chain = Self::format_callstack_address(inner.engine.reg_read(ArmRegister::PC), image_base);
+        let mut fp = inner.engine.reg_read(ArmRegister::FP);
+
+        for _ in 0..MAX_FRAMES {
+            // A frame keeps its return address and its caller's frame pointer
+            // in the three words below `fp`, so anything less cannot be one.
+            if fp < 12 || !inner.engine.is_mapped(fp - 12, 12) {
+                break;
+            }
+
+            let mut word = [0; size_of::<u32>()];
+            inner.engine.mem_read(fp - 4, size_of::<u32>(), &mut word)?;
+            let return_address = u32::from_le_bytes(word);
+
+            inner.engine.mem_read(fp - 12, size_of::<u32>(), &mut word)?;
+            let caller_fp = u32::from_le_bytes(word);
+
+            if return_address <= 4 {
+                break;
+            }
+            chain += &Self::format_callstack_address(return_address - 4, image_base);
+
+            // The chain runs up the stack, so a frame pointer that does not
+            // move upwards is not one and would loop here.
+            if caller_fp <= fp {
+                break;
+            }
+            fp = caller_fp;
+        }
+
+        Ok(chain)
+    }
+
     fn dump_call_stack(&self, image_base: u32) -> Result<String> {
         let mut inner = self.inner.lock();
 
@@ -857,8 +941,11 @@ impl ArmCore {
 
         let sp = inner.engine.reg_read(ArmRegister::SP);
 
+        // Enough words to cover a few frames: a compiled frame is a dozen or so
+        // words, and the interesting ones (the arguments a caller pushed) sit
+        // above the innermost.
         let mut result = String::new();
-        for i in 0..16 {
+        for i in 0..64 {
             let address = sp + (i * 4);
 
             if !inner.engine.is_mapped(address, size_of::<u32>()) {
