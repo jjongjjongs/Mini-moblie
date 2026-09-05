@@ -135,36 +135,73 @@ struct ByteArrayWriteback {
     length: usize,
 }
 
-async fn write_back_byte_arrays(jvm: &Jvm, handles: &JavaHandles, writebacks: &[ByteArrayWriteback]) -> Result<()> {
-    for writeback in writebacks {
-        let bytes: Vec<i8> = match jvm.load_array(&writeback.array, 0, writeback.length).await {
-            Ok(bytes) => bytes,
-            Err(error) => return Err(JvmSupport::to_wie_err(jvm, error).await),
-        };
-
-        handles.write_byte_array(writeback.guest_handle, &bytes)?;
-    }
-
-    Ok(())
-}
-
 struct CharArrayWriteback {
     guest_handle: u32,
     array: ClassInstanceRef<Array<u16>>,
     length: usize,
 }
 
-async fn write_back_char_arrays(jvm: &Jvm, handles: &JavaHandles, writebacks: &[CharArrayWriteback]) -> Result<()> {
-    for writeback in writebacks {
-        let chars: Vec<u16> = match jvm.load_array(&writeback.array, 0, writeback.length).await {
-            Ok(chars) => chars,
-            Err(error) => return Err(JvmSupport::to_wie_err(jvm, error).await),
-        };
+struct ReferenceArrayWriteback {
+    guest_handle: u32,
+    array: ClassInstanceRef<Array<ClassInstanceRef<()>>>,
+    /// The handles the guest array held when it was wrapped, so an element the
+    /// JVM only ever saw as null - because no instance was registered under it -
+    /// is left as it was instead of being cleared.
+    original: Vec<u32>,
+}
 
-        handles.write_char_array(writeback.guest_handle, &chars)?;
+/// The temporary JVM arrays a call's guest array arguments were copied into,
+/// and the guest arrays to copy them back to once the call returns.
+#[derive(Default)]
+struct GuestArrayWritebacks {
+    bytes: Vec<ByteArrayWriteback>,
+    chars: Vec<CharArrayWriteback>,
+    references: Vec<ReferenceArrayWriteback>,
+}
+
+impl GuestArrayWritebacks {
+    async fn write_back(&self, jvm: &Jvm, handles: &JavaHandles) -> Result<()> {
+        for writeback in &self.bytes {
+            let bytes: Vec<i8> = match jvm.load_array(&writeback.array, 0, writeback.length).await {
+                Ok(bytes) => bytes,
+                Err(error) => return Err(JvmSupport::to_wie_err(jvm, error).await),
+            };
+
+            handles.write_byte_array(writeback.guest_handle, &bytes)?;
+        }
+
+        for writeback in &self.chars {
+            let chars: Vec<u16> = match jvm.load_array(&writeback.array, 0, writeback.length).await {
+                Ok(chars) => chars,
+                Err(error) => return Err(JvmSupport::to_wie_err(jvm, error).await),
+            };
+
+            handles.write_char_array(writeback.guest_handle, &chars)?;
+        }
+
+        for writeback in &self.references {
+            let elements: Vec<ClassInstanceRef<()>> = match jvm.load_array(&writeback.array, 0, writeback.original.len()).await {
+                Ok(elements) => elements,
+                Err(error) => return Err(JvmSupport::to_wie_err(jvm, error).await),
+            };
+
+            let mut references = Vec::with_capacity(elements.len());
+            for (element, &original) in elements.into_iter().zip(&writeback.original) {
+                references.push(match element.instance {
+                    Some(instance) => handles.address_of(instance)?,
+                    // The JVM saw null here only because nothing was registered
+                    // under the handle the guest had, so it never had the chance
+                    // to replace it. Keep what the guest wrote.
+                    None if handles.get(original).is_none() => original,
+                    None => 0,
+                });
+            }
+
+            handles.write_reference_array(writeback.guest_handle, &references)?;
+        }
+
+        Ok(())
     }
-
-    Ok(())
 }
 
 /// Copies imported native-ABI instance fields from the guest object's word
@@ -236,8 +273,7 @@ async fn marshal_arguments(
     handles: &JavaHandles,
     parameters: &[String],
     first_word: usize,
-    writebacks: &mut Vec<ByteArrayWriteback>,
-    char_writebacks: &mut Vec<CharArrayWriteback>,
+    writebacks: &mut GuestArrayWritebacks,
 ) -> Result<Vec<JavaValue>> {
     let slots: usize = parameters.iter().map(|x| if is_wide(x) { 2 } else { 1 }).sum();
     let words = read_arguments(core, slots + first_word)?;
@@ -277,7 +313,7 @@ async fn marshal_arguments(
                             return Err(JvmSupport::to_wie_err(jvm, error).await);
                         }
 
-                        writebacks.push(ByteArrayWriteback {
+                        writebacks.bytes.push(ByteArrayWriteback {
                             guest_handle: handle,
                             array: array.clone().into(),
                             length,
@@ -312,7 +348,7 @@ async fn marshal_arguments(
                             return Err(JvmSupport::to_wie_err(jvm, error).await);
                         }
 
-                        char_writebacks.push(CharArrayWriteback {
+                        writebacks.chars.push(CharArrayWriteback {
                             guest_handle: handle,
                             array: array.clone().into(),
                             length,
@@ -365,10 +401,39 @@ async fn marshal_arguments(
                             return Err(JvmSupport::to_wie_err(jvm, error).await);
                         }
 
-                        char_writebacks.push(CharArrayWriteback {
+                        writebacks.chars.push(CharArrayWriteback {
                             guest_handle: handle,
                             array: array.clone().into(),
                             length,
+                        });
+
+                        JavaValue::Object(Some(array))
+                    } else if data != 0 && length <= MAX_WRAPPED_ARRAY_BYTES && handles.array_element_type(handle) == Some(b'L') {
+                        // A compiled object array (`System.arraycopy` on the
+                        // `String[]` a word-wrap builds). Its elements are
+                        // handles, one word each: read as bytes it would be
+                        // quartered in length and the copy would land the low
+                        // byte of a handle in an element slot, leaving the guest
+                        // to dispatch on it.
+                        let references = handles.read_reference_array(handle)?;
+                        let elements = references
+                            .iter()
+                            .map(|&reference| ClassInstanceRef::new(handles.get(reference)))
+                            .collect::<Vec<ClassInstanceRef<()>>>();
+
+                        let mut array = match jvm.instantiate_array("Ljava/lang/Object;", elements.len()).await {
+                            Ok(array) => array,
+                            Err(error) => return Err(JvmSupport::to_wie_err(jvm, error).await),
+                        };
+
+                        if let Err(error) = jvm.store_array(&mut array, 0, elements).await {
+                            return Err(JvmSupport::to_wie_err(jvm, error).await);
+                        }
+
+                        writebacks.references.push(ReferenceArrayWriteback {
+                            guest_handle: handle,
+                            array: array.clone().into(),
+                            original: references,
                         });
 
                         JavaValue::Object(Some(array))
@@ -385,7 +450,7 @@ async fn marshal_arguments(
                             return Err(JvmSupport::to_wie_err(jvm, error).await);
                         }
 
-                        writebacks.push(ByteArrayWriteback {
+                        writebacks.bytes.push(ByteArrayWriteback {
                             guest_handle: handle,
                             array: array.clone().into(),
                             length: byte_length,
@@ -569,9 +634,8 @@ pub async fn invoke(core: &mut ArmCore, jvm: &Jvm, handles: &JavaHandles, member
     // object it names is what the caller goes on to use.
     if name == "<init>" {
         let this = core.read_param(0)?;
-        let mut writebacks = Vec::new();
-        let mut char_writebacks = Vec::new();
-        let arguments = marshal_arguments(core, jvm, handles, &parameters, 1, &mut writebacks, &mut char_writebacks).await?;
+        let mut writebacks = GuestArrayWritebacks::default();
+        let arguments = marshal_arguments(core, jvm, handles, &parameters, 1, &mut writebacks).await?;
 
         // Pin the constructor's object arguments for the call's duration: an
         // allocation inside the constructor can trigger a sweep, and these live
@@ -594,8 +658,7 @@ pub async fn invoke(core: &mut ArmCore, jvm: &Jvm, handles: &JavaHandles, member
                 return Err(JvmSupport::to_wie_err(jvm, error).await);
             }
 
-            write_back_byte_arrays(jvm, handles, &writebacks).await?;
-            write_back_char_arrays(jvm, handles, &char_writebacks).await?;
+            writebacks.write_back(jvm, handles).await?;
             sync_jvm_fields_to_guest(jvm, handles, this).await?;
 
             return Ok(this.into());
@@ -608,8 +671,7 @@ pub async fn invoke(core: &mut ArmCore, jvm: &Jvm, handles: &JavaHandles, member
             Err(error) => return Err(JvmSupport::to_wie_err(jvm, error).await),
         };
 
-        write_back_byte_arrays(jvm, handles, &writebacks).await?;
-        write_back_char_arrays(jvm, handles, &char_writebacks).await?;
+        writebacks.write_back(jvm, handles).await?;
         handles.bind(this, instance);
         sync_jvm_fields_to_guest(jvm, handles, this).await?;
 
@@ -630,9 +692,8 @@ pub async fn invoke(core: &mut ArmCore, jvm: &Jvm, handles: &JavaHandles, member
 
     let first_word = usize::from(receiver.is_some());
 
-    let mut writebacks = Vec::new();
-    let mut char_writebacks = Vec::new();
-    let arguments = marshal_arguments(core, jvm, handles, &parameters, first_word, &mut writebacks, &mut char_writebacks).await?;
+    let mut writebacks = GuestArrayWritebacks::default();
+    let arguments = marshal_arguments(core, jvm, handles, &parameters, first_word, &mut writebacks).await?;
 
     // Pin the receiver and object arguments for the call's duration: an
     // allocation inside the callee can trigger a sweep, and these live only on
@@ -667,8 +728,7 @@ pub async fn invoke(core: &mut ArmCore, jvm: &Jvm, handles: &JavaHandles, member
 
     match result {
         Ok(value) => {
-            write_back_byte_arrays(jvm, handles, &writebacks).await?;
-            write_back_char_arrays(jvm, handles, &char_writebacks).await?;
+            writebacks.write_back(jvm, handles).await?;
 
             if let Some(handle) = receiver_handle {
                 sync_jvm_fields_to_guest(jvm, handles, handle).await?;

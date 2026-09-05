@@ -21,7 +21,7 @@ use spin::Mutex;
 use wie_core_arm::{Allocator, ArmCore};
 use wie_util::{ByteRead, ByteWrite, Result, WieError, read_generic, write_generic};
 
-use crate::runtime::savepoint::SavePointState;
+use crate::runtime::{java::interface::REFERENCE_SIZE, savepoint::SavePointState};
 
 /// Instance header the compiled code relies on:
 ///
@@ -669,6 +669,38 @@ impl JavaHandles {
         let bytes: Vec<u8> = bytes[..count].iter().map(|value| *value as u8).collect();
 
         core.write_bytes(data + ARRAY_HEADER_SIZE, &bytes)?;
+
+        Ok(())
+    }
+
+    /// Copies a guest-side reference array's element words into host memory.
+    ///
+    /// The elements are handles, one word each, so this is the object-array
+    /// counterpart of [`Self::read_byte_array`]: a `String[]` the compiled code
+    /// allocated has as many words as the header's count says, not as many
+    /// bytes.
+    pub fn read_reference_array(&self, handle: u32) -> Result<Vec<u32>> {
+        let core = self.core.clone();
+
+        let data: u32 = read_generic(&core, handle + INSTANCE_FIELDS_OFFSET)?;
+        let length: u32 = read_generic(&core, data)?;
+
+        (0..length)
+            .map(|index| read_generic(&core, data + ARRAY_HEADER_SIZE + index * REFERENCE_SIZE))
+            .collect()
+    }
+
+    /// Copies handles back into a guest-side reference array.
+    pub fn write_reference_array(&self, handle: u32, references: &[u32]) -> Result<()> {
+        let mut core = self.core.clone();
+
+        let data: u32 = read_generic(&core, handle + INSTANCE_FIELDS_OFFSET)?;
+        let length: u32 = read_generic(&core, data)?;
+        let count = references.len().min(length as usize);
+
+        for (index, &reference) in references[..count].iter().enumerate() {
+            write_generic(&mut core, data + ARRAY_HEADER_SIZE + index as u32 * REFERENCE_SIZE, reference)?;
+        }
 
         Ok(())
     }
