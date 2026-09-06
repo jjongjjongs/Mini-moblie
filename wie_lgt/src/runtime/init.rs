@@ -1280,6 +1280,19 @@ async fn handle_init_svc(core: &mut ArmCore, context: &mut InitSvcContext, id: S
                 )
                 .await;
                 activate_main_class_dispatch_table(core, context, &name, 0)?;
+
+                // Synthesis parses the main class's root and caches it, so its
+                // own field and method rows can be resolved now - and they have
+                // to be. `VmActivateClass` resolves them for every class the
+                // compiled code instantiates itself; the main class never goes
+                // through it, so until some *other* class is activated its rows
+                // still hold `install_dispatch`'s placeholders, and the main
+                // class runs first. 오즈's `Koablo.startApp` stores
+                // `Display.getDefaultDisplay()` through such a placeholder (slot
+                // 18 rather than its own slot 6) and, once a card's activation
+                // fills the row properly, reads slot 6 back as null and throws.
+                resolve_own_virtual_methods(core, context).await?;
+                resolve_own_fields(core, context).await?;
             }
 
             run_main_class(&context.jvm, arguments).await?.write(core, lr)
@@ -2834,6 +2847,33 @@ fn superclass_name_from_metadata(core: &ArmCore, root: u32) -> Result<Option<Str
     }
 }
 
+/// The superclass root a class's metadata points at, when its superclass is
+/// another application class rather than a platform one.
+///
+/// `vm_register_classes` does not always list the whole hierarchy, so a
+/// superclass named in the registered table may have no entry of its own -
+/// 오즈 registers `menu/b` but not the `base/d` it extends. The metadata
+/// pointer is the root itself in that case, which is all a dispatch-table walk
+/// needs; a platform superclass is a name string instead, and reads as `None`.
+fn superclass_root_from_metadata(core: &ArmCore, root: u32) -> Result<Option<u32>> {
+    let metadata: u32 = read_generic(core, root + 8)?;
+    if metadata == 0 {
+        return Ok(None);
+    }
+
+    let pointer: u32 = read_generic(core, metadata + CLASS_METADATA_SUPERCLASS)?;
+    if pointer == 0 {
+        return Ok(None);
+    }
+
+    let super_metadata: u32 = read_generic(core, pointer + 8)?;
+    if super_metadata != 0 && super_metadata.checked_add(CLASS_METADATA_SIZE) == Some(pointer) {
+        Ok(Some(pointer))
+    } else {
+        Ok(None)
+    }
+}
+
 fn inherited_dispatch_entry(core: &ArmCore, context: &InitSvcContext, root: u32, slot: u32, fallback: u32) -> Result<u32> {
     let app_classes = context.app_classes.lock();
     let imported_classes = context.imported_classes.lock();
@@ -2857,6 +2897,7 @@ fn inherited_dispatch_entry_from_tables(
     // straight from guest metadata so the walk still reaches `c`, rather than
     // giving up and leaving the slot on the unknown-slot trap (a no-op that froze
     // every monster in place).
+    let mut current = root;
     let mut superclass = match app_classes.iter().find(|x| x.root == root) {
         Some(class) => class.superclass.clone(),
         None => superclass_name_from_metadata(core, root)?,
@@ -2865,8 +2906,20 @@ fn inherited_dispatch_entry_from_tables(
     for _ in 0..MAX_SUPERCLASS_DEPTH {
         let Some(name) = superclass else { break };
 
-        if let Some(class) = app_classes.iter().find(|x| x.name == name) {
-            let metadata: u32 = read_generic(core, class.root + 8)?;
+        // An application superclass the registered table left out is still
+        // reachable: the metadata pointer of the class below it *is* its root.
+        // 오즈 registers every `menu/*` screen but not the `base/d` they
+        // extend, and `base/d` is where their draw and key slots live - without
+        // this the walk gave up at `menu/b` and left both on the unknown-slot
+        // trap, so no menu ever drew its own content or answered a key.
+        let class_root = app_classes
+            .iter()
+            .find(|x| x.name == name)
+            .map(|class| class.root)
+            .or(superclass_root_from_metadata(core, current)?);
+
+        if let Some(class_root) = class_root {
+            let metadata: u32 = read_generic(core, class_root + 8)?;
             if metadata != 0 {
                 let vtable: u32 = read_generic(core, metadata + CLASS_DISPATCH_TABLE)?;
                 let slots: u16 = read_generic(core, metadata + CLASS_DISPATCH_SLOTS)?;
@@ -2879,7 +2932,11 @@ fn inherited_dispatch_entry_from_tables(
                 }
             }
 
-            superclass = class.superclass.clone();
+            superclass = match app_classes.iter().find(|x| x.root == class_root) {
+                Some(class) => class.superclass.clone(),
+                None => superclass_name_from_metadata(core, class_root)?,
+            };
+            current = class_root;
             continue;
         }
 
