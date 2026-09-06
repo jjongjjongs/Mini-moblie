@@ -277,6 +277,11 @@ impl LocalConnection for AckConnection {
         out[..taken].copy_from_slice(&self.reply[..taken]);
         self.reply.drain(..taken);
 
+        // Whether a title reads its answer at all is the first thing to know
+        // when it keeps asking: a reply nothing collects says the status bytes
+        // are not what is holding it up.
+        tracing::debug!("ack {}: {} taken, {} left", self.peer, taken, self.reply.len());
+
         LocalRead::Data(taken)
     }
 
