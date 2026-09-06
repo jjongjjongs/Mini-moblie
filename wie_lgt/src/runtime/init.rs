@@ -1728,7 +1728,16 @@ async fn handle_init_svc(core: &mut ArmCore, context: &mut InitSvcContext, id: S
                 return Ok(());
             };
 
-            let implements = class_implements_interface(context, &receiver_name, &requested_name);
+            // `class_implements_interface` reads the platform metadata mirrored
+            // from the reference firmware, which describes the classes an
+            // application can import - not every class the JVM hands back. A
+            // `java/util/Hashtable$Enumerator` (what `Hashtable.keys()`
+            // returns) is not in it, so its `java/util/Enumeration` came out
+            // unimplemented and the compiled code threw NoSuchMethodError:
+            // 오즈-천공의 기사단 ends there confirming a new character. Ask the
+            // JVM about its own instance when the metadata does not describe it.
+            let implements =
+                class_implements_interface(context, &receiver_name, &requested_name) || context.jvm.is_instance(&*instance, &requested_name);
 
             if dispatch == 0 || !implements {
                 tracing::trace!(
