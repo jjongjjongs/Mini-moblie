@@ -3026,7 +3026,35 @@ mod network_state_tests {
 
     use super::*;
 
-    struct LocalBillingTestNetwork;
+    /// The platform network underneath a billing socket.
+    ///
+    /// A socket bound to the in-process gateway never reaches this, but one
+    /// that is not - a title reading a real peer - does, and such a peer hands
+    /// its answer over in whatever pieces the link delivers. `pending` is what
+    /// it has left to give and `chunk` the most it parts with per `read`, so a
+    /// reply that arrives split across several recvs can be reproduced exactly.
+    /// Both empty by default, which is the unreachable peer every other test
+    /// here wants.
+    struct LocalBillingTestNetwork {
+        pending: spin::Mutex<Vec<u8>>,
+        chunk: usize,
+    }
+
+    impl LocalBillingTestNetwork {
+        fn unreachable() -> Self {
+            Self {
+                pending: spin::Mutex::new(Vec::new()),
+                chunk: 0,
+            }
+        }
+
+        fn dribbling(bytes: &[u8], chunk: usize) -> Self {
+            Self {
+                pending: spin::Mutex::new(bytes.to_vec()),
+                chunk,
+            }
+        }
+    }
 
     impl Network for LocalBillingTestNetwork {
         fn socket(&self, family: i32, socket_type: i32) -> core::result::Result<i32, NetworkError> {
@@ -3045,8 +3073,18 @@ mod network_state_tests {
             Err(NetworkError::Unsupported)
         }
 
-        fn read(&self, _socket: i32, _buf: &mut [u8]) -> core::result::Result<usize, NetworkError> {
-            Err(NetworkError::Unsupported)
+        fn read(&self, _socket: i32, buf: &mut [u8]) -> core::result::Result<usize, NetworkError> {
+            let mut pending = self.pending.lock();
+
+            if pending.is_empty() {
+                return Err(NetworkError::WouldBlock);
+            }
+
+            let taken = buf.len().min(self.chunk).min(pending.len());
+            buf[..taken].copy_from_slice(&pending[..taken]);
+            pending.drain(..taken);
+
+            Ok(taken)
         }
 
         fn write(&self, _socket: i32, _buf: &[u8]) -> core::result::Result<usize, NetworkError> {
@@ -3081,7 +3119,15 @@ mod network_state_tests {
         fn new() -> Self {
             Self {
                 base: TestPlatform::new(),
-                network: LocalBillingTestNetwork,
+                network: LocalBillingTestNetwork::unreachable(),
+            }
+        }
+
+        /// A platform whose peer hands `bytes` over `chunk` at a time.
+        fn dribbling(bytes: &[u8], chunk: usize) -> Self {
+            Self {
+                base: TestPlatform::new(),
+                network: LocalBillingTestNetwork::dribbling(bytes, chunk),
             }
         }
     }
@@ -4001,6 +4047,124 @@ mod network_state_tests {
         assert_eq!(rest, [0x00, 0x21, 0x00]);
 
         assert_eq!(socket_read(&mut context, socket, RESPONSE, 32).await.unwrap(), M_E_WOULDBLOCK);
+    }
+
+    /// The reply as it looks on the wire: the 56-byte response header carrying
+    /// the payload length at `+0x30`, then the payload itself.
+    fn billing_wire_reply(payload: &[u8]) -> Vec<u8> {
+        let mut reply = alloc::vec![0u8; LGT_BILL_READ_HEADER_SIZE];
+        reply[LGT_BILL_READ_PAYLOAD_LENGTH_OFFSET..LGT_BILL_READ_PAYLOAD_LENGTH_OFFSET + 4].copy_from_slice(&(payload.len() as u32).to_be_bytes());
+        reply.extend_from_slice(payload);
+
+        reply
+    }
+
+    #[futures_test::test]
+    async fn a_billing_header_split_across_recvs_is_assembled_before_its_payload() {
+        const RESPONSE: u32 = 0x2000;
+
+        let payload = [0xff, 0xff, 0x00, 0x07, 0x00, 0x21, 0x00];
+        let reply = billing_wire_reply(&payload);
+
+        // Twenty bytes a time: 20 + 20 + 16 finishes the header on the third
+        // of the three recvs one read is allowed, and the payload follows on
+        // the same call.
+        let system = System::new(
+            Box::new(LocalBillingTestPlatform::dribbling(&reply, 20)),
+            "test-pid",
+            "test-aid",
+            DefaultTaskRunner,
+        );
+        let mut context = TestContext::with_system(system);
+
+        let state = context.network_state();
+        state.lock().process_state = ProcessNetworkState::Available;
+        state.lock().register_socket(31, 1, 1);
+
+        assert_eq!(socket_read(&mut context, 31, RESPONSE, 32).await.unwrap(), payload.len() as i32);
+
+        let mut answer = [0u8; 7];
+        context.read_bytes(RESPONSE, &mut answer).unwrap();
+        assert_eq!(answer, payload);
+
+        // The header machinery is back where it started, so the next reply
+        // parses as its own rather than as this one's continuation.
+        assert_eq!(state.lock().billing_read.header_offset, 0);
+        assert_eq!(state.lock().billing_read.remaining_header, LGT_BILL_READ_HEADER_SIZE);
+        assert_eq!(state.lock().billing_read.remaining_payload, 0);
+    }
+
+    #[futures_test::test]
+    async fn a_header_that_outlasts_one_read_is_carried_to_the_next() {
+        const RESPONSE: u32 = 0x2000;
+
+        let payload = [0xff, 0xff, 0x00, 0x07, 0x00, 0x21, 0x00];
+        let reply = billing_wire_reply(&payload);
+
+        // Ten bytes a time: three recvs reach thirty of the fifty-six, which
+        // is not a header yet.
+        let system = System::new(
+            Box::new(LocalBillingTestPlatform::dribbling(&reply, 10)),
+            "test-pid",
+            "test-aid",
+            DefaultTaskRunner,
+        );
+        let mut context = TestContext::with_system(system);
+
+        let state = context.network_state();
+        state.lock().process_state = ProcessNetworkState::Available;
+        state.lock().register_socket(31, 1, 1);
+
+        // Native answers zero rather than an error: nothing is lost, there is
+        // just nothing to hand up yet.
+        assert_eq!(socket_read(&mut context, 31, RESPONSE, 32).await.unwrap(), 0);
+        assert_eq!(state.lock().billing_read.header_offset, 30);
+        assert_eq!(state.lock().billing_read.remaining_header, LGT_BILL_READ_HEADER_SIZE - 30);
+
+        // The next read picks the header up where it stopped - 40, 50, 56 -
+        // and the payload comes back whole.
+        assert_eq!(socket_read(&mut context, 31, RESPONSE, 32).await.unwrap(), payload.len() as i32);
+
+        let mut answer = [0u8; 7];
+        context.read_bytes(RESPONSE, &mut answer).unwrap();
+        assert_eq!(answer, payload);
+    }
+
+    #[futures_test::test]
+    async fn a_split_header_s_payload_is_still_continued_across_reads() {
+        const RESPONSE: u32 = 0x2000;
+
+        let payload = [0xff, 0xff, 0x00, 0x07, 0x00, 0x21, 0x00];
+        let reply = billing_wire_reply(&payload);
+
+        let system = System::new(
+            Box::new(LocalBillingTestPlatform::dribbling(&reply, 20)),
+            "test-pid",
+            "test-aid",
+            DefaultTaskRunner,
+        );
+        let mut context = TestContext::with_system(system);
+
+        let state = context.network_state();
+        state.lock().process_state = ProcessNetworkState::Available;
+        state.lock().register_socket(31, 1, 1);
+
+        // Four of the seven, which is all this caller asked for. The length
+        // the header declared is what bounds the rest, not the buffer.
+        assert_eq!(socket_read(&mut context, 31, RESPONSE, 4).await.unwrap(), 4);
+        assert_eq!(state.lock().billing_read.remaining_payload, 3);
+
+        let mut first = [0u8; 4];
+        context.read_bytes(RESPONSE, &mut first).unwrap();
+        assert_eq!(first, payload[..4]);
+
+        assert_eq!(socket_read(&mut context, 31, RESPONSE, 32).await.unwrap(), 3);
+
+        let mut rest = [0u8; 3];
+        context.read_bytes(RESPONSE, &mut rest).unwrap();
+        assert_eq!(rest, payload[4..]);
+
+        assert_eq!(state.lock().billing_read.remaining_payload, 0);
     }
 
     #[futures_test::test]
