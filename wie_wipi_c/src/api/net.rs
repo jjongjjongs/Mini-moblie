@@ -1541,6 +1541,11 @@ pub async fn socket_write(context: &mut dyn WIPICContext, socket: i32, buffer: W
 /// A partial payload is continued on later calls through the shared remaining
 /// payload counter. If socket +0x1c is already set while no payload remains,
 /// native bypasses header parsing and performs one direct recv.
+///
+/// One deliberate departure from the reference: the declared payload length is
+/// recorded before the payload recv rather than only after a successful one, so
+/// a reply whose payload has not arrived when its header has is still read as
+/// one reply. See the comment at that store for what native does instead.
 pub async fn socket_read(context: &mut dyn WIPICContext, socket: i32, buffer: WIPICWord, length: i32) -> Result<i32> {
     if buffer == 0 || length < 0 {
         return Ok(M_E_INVALID);
@@ -1743,12 +1748,31 @@ pub async fn socket_read(context: &mut dyn WIPICContext, socket: i32, buffer: WI
             return Ok(0);
         }
 
+        // The length the header declared is what bounds the rest of this
+        // reply, so record it before the recv rather than after it.
+        //
+        // This is a deliberate improvement on the reference. Native stores the
+        // remaining payload only when the recv returned something - `strgt` at
+        // 0x1a53c4 in `WPBill_Read` @ 0x1a51d4 - while clearing the direct-read
+        // flag unconditionally at 0x1a53d0. A payload that has not arrived when
+        // its header has therefore leaves nothing behind, and the bytes that
+        // follow are read as the front of a header that never finishes: the
+        // stream desyncs and does not recover. Recording the length up front
+        // costs nothing when the recv succeeds, since what is read is
+        // subtracted immediately, and lets a reply split between two deliveries
+        // be read as the one reply it is.
+        state.lock().billing_read.remaining_payload = payload_length as usize;
+
         let requested = data.len().min(payload_length as usize);
 
         let result = transport_read(context, socket, &mut data[..requested]);
 
         // Once the payload recv has been attempted, native clears socket
-        // object +0x1c regardless of success, zero, or lower error.
+        // object +0x1c regardless of success, zero, or lower error. Kept as
+        // native has it: the remaining-payload counter above is consulted
+        // first, so a preserved length is what carries the reply on, and
+        // leaving the flag set would instead send a later read straight at the
+        // transport with a header still to parse.
         if let Some(entry) = state.lock().sockets.get_mut(&socket) {
             entry.billing_read_direct = false;
         }
@@ -4190,7 +4214,7 @@ mod network_state_tests {
     }
 
     #[futures_test::test]
-    async fn a_payload_that_has_not_arrived_when_its_header_has_loses_its_length() {
+    async fn a_payload_that_arrives_after_its_header_is_still_read_as_one_reply() {
         const RESPONSE: u32 = 0x2000;
 
         let payload = [0xff, 0xff, 0x00, 0x07, 0x00, 0x21, 0x00];
@@ -4211,23 +4235,105 @@ mod network_state_tests {
         state.lock().process_state = ProcessNetworkState::Available;
         state.lock().register_socket(31, 1, 1);
 
-        // The header parses, the payload recv finds nothing, and the length it
-        // declared is dropped on the floor: native stores the remaining
-        // payload only when the recv returned something (`strgt` at 0x1a53c4)
-        // but clears the socket's direct-read flag either way (`str r3,
-        // [r2,#0x1c]` at 0x1a53d0, unconditional). WPBill_Read @ 0x1a51d4.
+        // The header parses and the payload recv finds nothing, which is a
+        // would-block the way a live connection with nothing to read is. The
+        // length the header declared is kept, which is where this improves on
+        // the reference - native drops it here and never recovers.
         assert_eq!(socket_read(&mut context, 31, RESPONSE, 32).await.unwrap(), M_E_WOULDBLOCK);
-        assert_eq!(state.lock().billing_read.remaining_payload, 0);
-        assert!(!state.lock().sockets.get(&31).unwrap().billing_read_direct);
+        assert_eq!(state.lock().billing_read.remaining_payload, payload.len());
 
-        // So the payload that arrives next is read as the front of a header
-        // that will never finish, and the stream does not recover. Reproduced
-        // here because it is the reference's behaviour, not ours to invent
-        // around: the in-process gateway always has the whole reply buffered,
-        // so nothing WIE runs can reach it.
+        // No second header is parsed: the payload is read as what it is.
+        assert_eq!(socket_read(&mut context, 31, RESPONSE, 32).await.unwrap(), payload.len() as i32);
+
+        let mut answer = [0u8; 7];
+        context.read_bytes(RESPONSE, &mut answer).unwrap();
+        assert_eq!(answer, payload);
+
+        // And the header machinery is untouched, so the next reply parses as
+        // its own rather than as this one's continuation.
+        let state = state.lock();
+        assert_eq!(state.billing_read.remaining_payload, 0);
+        assert_eq!(state.billing_read.header_offset, 0);
+        assert_eq!(state.billing_read.remaining_header, LGT_BILL_READ_HEADER_SIZE);
+    }
+
+    #[futures_test::test]
+    async fn a_gap_inside_a_payload_does_not_cost_the_rest_of_it() {
+        const RESPONSE: u32 = 0x2000;
+
+        let payload = [0xff, 0xff, 0x00, 0x07, 0x00, 0x21, 0x00];
+        let reply = billing_wire_reply(&payload);
+
+        // Header and the first four payload bytes together, then a gap, then
+        // the last three.
+        let mut first = reply[..LGT_BILL_READ_HEADER_SIZE].to_vec();
+        first.extend_from_slice(&payload[..4]);
+        let segments = alloc::vec![first, Vec::new(), payload[4..].to_vec()];
+
+        let system = System::new(
+            Box::new(LocalBillingTestPlatform::delivering(segments)),
+            "test-pid",
+            "test-aid",
+            DefaultTaskRunner,
+        );
+        let mut context = TestContext::with_system(system);
+
+        let state = context.network_state();
+        state.lock().process_state = ProcessNetworkState::Available;
+        state.lock().register_socket(31, 1, 1);
+
+        assert_eq!(socket_read(&mut context, 31, RESPONSE, 32).await.unwrap(), 4);
+        assert_eq!(state.lock().billing_read.remaining_payload, 3);
+
+        // The gap is reported as a would-block and costs nothing.
         assert_eq!(socket_read(&mut context, 31, RESPONSE, 32).await.unwrap(), M_E_WOULDBLOCK);
-        assert_eq!(state.lock().billing_read.header_offset, payload.len());
-        assert_eq!(state.lock().billing_read.remaining_header, LGT_BILL_READ_HEADER_SIZE - payload.len());
+        assert_eq!(state.lock().billing_read.remaining_payload, 3);
+
+        assert_eq!(socket_read(&mut context, 31, RESPONSE, 32).await.unwrap(), 3);
+
+        let mut rest = [0u8; 3];
+        context.read_bytes(RESPONSE, &mut rest).unwrap();
+        assert_eq!(rest, payload[4..]);
+    }
+
+    #[futures_test::test]
+    async fn two_replies_split_by_gaps_are_each_read_whole() {
+        const RESPONSE: u32 = 0x2000;
+
+        let first_payload = [0xff, 0xff, 0x00, 0x07, 0x00, 0x21, 0x00];
+        let second_payload = [0xff, 0xff, 0x00, 0x07, 0x00, 0x31, 0x00];
+
+        // Both replies split at the same awkward place, back to back.
+        let mut segments = Vec::new();
+        for payload in [first_payload, second_payload] {
+            let reply = billing_wire_reply(&payload);
+            segments.push(reply[..LGT_BILL_READ_HEADER_SIZE].to_vec());
+            segments.push(Vec::new());
+            segments.push(payload.to_vec());
+        }
+
+        let system = System::new(
+            Box::new(LocalBillingTestPlatform::delivering(segments)),
+            "test-pid",
+            "test-aid",
+            DefaultTaskRunner,
+        );
+        let mut context = TestContext::with_system(system);
+
+        let state = context.network_state();
+        state.lock().process_state = ProcessNetworkState::Available;
+        state.lock().register_socket(31, 1, 1);
+
+        // The second reply parses as cleanly as the first, which it could not
+        // do if the first had left the stream out of step.
+        for expected in [first_payload, second_payload] {
+            assert_eq!(socket_read(&mut context, 31, RESPONSE, 32).await.unwrap(), M_E_WOULDBLOCK);
+            assert_eq!(socket_read(&mut context, 31, RESPONSE, 32).await.unwrap(), expected.len() as i32);
+
+            let mut answer = [0u8; 7];
+            context.read_bytes(RESPONSE, &mut answer).unwrap();
+            assert_eq!(answer, expected);
+        }
     }
 
     #[futures_test::test]
