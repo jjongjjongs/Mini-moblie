@@ -12,6 +12,7 @@ use wie_util::Result;
 use crate::{
     AsyncCallable,
     executor::Executor,
+    local_network::LocalNetwork,
     platform::Platform,
     task::{SleepFuture, YieldFuture},
     task_runner::TaskRunner,
@@ -36,6 +37,9 @@ pub struct System {
     audio: Arc<RwLock<Audio>>,
     input_method: Arc<RwLock<InputMethod>>,
     task_runner: Arc<dyn TaskRunner>,
+    /// The servers this run answers for itself, in place of ones that have been
+    /// switched off for years. Empty unless the host registered one.
+    local_network: Arc<RwLock<LocalNetwork>>,
 }
 
 impl System {
@@ -44,6 +48,12 @@ impl System {
         T: TaskRunner + 'static,
     {
         let audio_sink = platform.audio_sink();
+
+        let mut local_network = LocalNetwork::new();
+        for endpoint in platform.local_endpoints() {
+            local_network.register(endpoint);
+        }
+
         let platform = Arc::new(platform);
 
         Self {
@@ -56,6 +66,7 @@ impl System {
             audio: Arc::new(RwLock::new(Audio::new(audio_sink))),
             input_method: Arc::new(RwLock::new(InputMethod::new())),
             task_runner: Arc::new(task_runner),
+            local_network: Arc::new(RwLock::new(local_network)),
         }
     }
 
@@ -104,6 +115,10 @@ impl System {
 
     pub fn aid(&self) -> &str {
         &self.aid
+    }
+
+    pub fn local_network(&self) -> RwLockWriteGuard<'_, LocalNetwork> {
+        self.local_network.write()
     }
 
     pub fn platform(&self) -> &dyn Platform {

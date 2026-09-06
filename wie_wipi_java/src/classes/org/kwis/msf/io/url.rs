@@ -89,6 +89,24 @@ impl URL {
             return Socket::local_billing(jvm).await;
         }
 
+        // A server this run answers for itself takes the connection instead of
+        // the network. Nothing is registered on an ordinary run, so this costs
+        // one lock and falls through.
+        let local = {
+            let system = context.system();
+            let mut local_network = system.local_network();
+
+            if local_network.is_empty() {
+                None
+            } else {
+                local_network.connect(scheme_of(&url), &host, port)
+            }
+        };
+
+        if let Some(descriptor) = local {
+            return Socket::from_descriptor(jvm, descriptor).await;
+        }
+
         match Self::connect(context, &host, port).await {
             Ok(fd) => {
                 tracing::info!("org.kwis.msf.io.URL::find({url:?}) connected as {fd}");
@@ -173,6 +191,12 @@ fn parse_authority(url: &str) -> Option<(RustString, u16)> {
     Some((host.into(), port.parse().ok()?))
 }
 
+/// The scheme `url` opens, or `socket` when it names none - the connections a
+/// WIPI-C title opens carry no scheme, and are stream connections either way.
+fn scheme_of(url: &str) -> &str {
+    url.split_once("://").map_or("socket", |(scheme, _)| scheme)
+}
+
 /// Whether `url` names the carrier's billing gateway rather than a server of
 /// the title's own. The scheme is spelled `BillSocket` by every title here, but
 /// schemes are not case sensitive.
@@ -192,6 +216,17 @@ mod tests {
         assert!(!is_billing_scheme("socket://218.38.12.48:5100"));
         assert!(!is_billing_scheme("BillSocket:218.50.3.88:2508"));
         assert!(!is_billing_scheme("218.50.3.88:2508"));
+    }
+
+    #[test]
+    fn reads_the_scheme_a_title_opens() {
+        use super::scheme_of;
+
+        assert_eq!(scheme_of("socket://210.222.18.25:31000"), "socket");
+        assert_eq!(scheme_of("BillSocket://218.50.3.88:2508"), "BillSocket");
+
+        // No scheme at all is the WIPI-C shape, which is a stream connection.
+        assert_eq!(scheme_of("210.222.18.25:31000"), "socket");
     }
 
     #[test]

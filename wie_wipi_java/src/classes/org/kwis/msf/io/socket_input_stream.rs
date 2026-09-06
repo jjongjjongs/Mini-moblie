@@ -79,9 +79,31 @@ impl SocketInputStream {
 
     /// Reads into `buf`, waiting out a would-block. Zero means the peer closed.
     async fn recv(jvm: &Jvm, context: &mut WieJvmContext, this: &ClassInstanceRef<Self>, buf: &mut [u8]) -> JvmResult<usize> {
-        use wie_backend::NetworkError;
+        use wie_backend::{LocalRead, NetworkError, is_local_descriptor};
 
         let fd: i32 = jvm.get_field(this, "fd", "I").await?;
+
+        // A connection the emulator answers for itself, rather than one the
+        // platform opened. Waiting out its `Pending` is the same wait a live
+        // connection's would-block gets, so a title reading a reply behaves
+        // identically either way.
+        if is_local_descriptor(fd) {
+            loop {
+                let read = {
+                    let system = context.system();
+                    let mut local_network = system.local_network();
+                    local_network.read(fd, buf)
+                };
+
+                match read {
+                    Some(LocalRead::Data(read)) => return Ok(read),
+                    Some(LocalRead::Closed) => return Ok(0),
+                    Some(LocalRead::Pending) => context.system().sleep(1).await,
+                    None => return Err(jvm.exception("java/io/IOException", "Stream closed").await),
+                }
+            }
+        }
+
         if fd < 0 {
             return Err(jvm.exception("java/io/IOException", "Stream closed").await);
         }

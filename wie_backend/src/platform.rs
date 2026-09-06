@@ -73,6 +73,14 @@ pub trait Network: Send + Sync {
 }
 
 pub trait Platform: Send + Sync {
+    /// Servers this host answers for itself, registered before the title runs.
+    ///
+    /// A host that has none - which is the ordinary case - leaves this alone
+    /// and every connection goes to the network as before.
+    fn local_endpoints(&self) -> Vec<Box<dyn crate::local_network::LocalEndpoint>> {
+        Vec::new()
+    }
+
     fn screen(&self) -> &dyn Screen;
     fn now(&self) -> Instant;
     fn database_repository(&self) -> &dyn DatabaseRepository;

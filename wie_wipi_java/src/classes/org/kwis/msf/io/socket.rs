@@ -186,6 +186,14 @@ impl Socket {
         tracing::debug!("org.kwis.msf.io.Socket::close({this:?})");
 
         let fd: i32 = jvm.get_field(&this, "fd", "I").await?;
+
+        if wie_backend::is_local_descriptor(fd) {
+            context.system().local_network().close(fd);
+            jvm.put_field(&mut this, "fd", "I", -1).await?;
+
+            return Ok(());
+        }
+
         if fd < 0 {
             return Ok(());
         }

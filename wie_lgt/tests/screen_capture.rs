@@ -96,6 +96,19 @@ struct CapturePlatform {
 }
 
 impl Platform for CapturePlatform {
+    /// `WIE_LOCAL_NET_CAPTURE` records what a title sends its server rather
+    /// than letting the connection fail: `1` for every connection it opens, or
+    /// `host:port` for one. See `wie_backend::CaptureEndpoint` - a recorded
+    /// connection never answers, so a title waiting on a reply waits.
+    fn local_endpoints(&self) -> Vec<Box<dyn wie_backend::LocalEndpoint>> {
+        let setting = std::env::var("WIE_LOCAL_NET_CAPTURE").ok();
+
+        match wie_backend::CaptureEndpoint::from_setting(setting.as_deref()) {
+            Some(endpoint) => vec![Box::new(endpoint)],
+            None => Vec::new(),
+        }
+    }
+
     fn screen(&self) -> &dyn Screen {
         &self.screen
     }

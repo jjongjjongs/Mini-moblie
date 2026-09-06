@@ -68,6 +68,22 @@ impl SocketOutputStream {
         use wie_backend::NetworkError;
 
         let fd: i32 = jvm.get_field(this, "fd", "I").await?;
+
+        // A connection the emulator answers for itself takes the whole write at
+        // once: there is no send buffer to fill, so it can never block.
+        if wie_backend::is_local_descriptor(fd) {
+            let written = {
+                let system = context.system();
+                let mut local_network = system.local_network();
+                local_network.write(fd, bytes)
+            };
+
+            return match written {
+                Some(_) => Ok(()),
+                None => Err(jvm.exception("java/io/IOException", "Stream closed").await),
+            };
+        }
+
         if fd < 0 {
             return Err(jvm.exception("java/io/IOException", "Stream closed").await);
         }

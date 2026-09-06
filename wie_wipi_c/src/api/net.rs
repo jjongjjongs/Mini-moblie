@@ -167,6 +167,11 @@ pub struct NetworkState {
     /// API hands back to the game.
     http_objects: BTreeMap<i32, HttpObject>,
     next_http_handle: i32,
+    /// Sockets whose connection this run answers for itself, mapped to the
+    /// local network's own descriptor. The platform socket underneath stays
+    /// open and unused until the game closes it, so its number can never be
+    /// handed out again while the game still holds it.
+    local_connections: BTreeMap<i32, i32>,
 }
 
 pub type SharedNetworkState = Arc<Mutex<NetworkState>>;
@@ -207,6 +212,21 @@ impl NetworkState {
         self.process_state == ProcessNetworkState::Available
     }
 
+    /// Records that `socket`'s connection is answered in process by the local
+    /// network's `descriptor`.
+    fn bind_local(&mut self, socket: i32, descriptor: i32) {
+        self.local_connections.insert(socket, descriptor);
+    }
+
+    /// The local-network descriptor `socket` is connected to, if any.
+    fn local_descriptor(&self, socket: i32) -> Option<i32> {
+        self.local_connections.get(&socket).copied()
+    }
+
+    fn unbind_local(&mut self, socket: i32) -> Option<i32> {
+        self.local_connections.remove(&socket)
+    }
+
     fn has_process_network(&self) -> bool {
         self.process_state != ProcessNetworkState::Closed
     }
@@ -229,6 +249,14 @@ impl NetworkState {
         let sockets = self.sockets.keys().copied().collect();
         self.sockets.clear();
         sockets
+    }
+
+    /// The local-network descriptors this process still holds, dropped from the
+    /// state so the caller can release them.
+    fn take_local_connections(&mut self) -> Vec<i32> {
+        let descriptors = self.local_connections.values().copied().collect();
+        self.local_connections.clear();
+        descriptors
     }
 
     fn http_alloc(&mut self, object: HttpObject) -> i32 {
@@ -521,6 +549,15 @@ pub async fn connect(context: &mut dyn WIPICContext, cb: WIPICWord, param: WIPIC
 pub async fn close(context: &mut dyn WIPICContext) -> Result<i32> {
     let sockets = context.network_state().lock().close_process();
 
+    let local = context.network_state().lock().take_local_connections();
+    if !local.is_empty() {
+        let system = context.system();
+        let mut local_network = system.local_network();
+        for descriptor in local {
+            local_network.close(descriptor);
+        }
+    }
+
     if let Some(network) = context.system().platform().network() {
         for socket in sockets {
             let _ = network.close(socket);
@@ -555,6 +592,11 @@ pub async fn socket_close(context: &mut dyn WIPICContext, fd: i32) -> Result<i32
 
     if state.lock().socket_type(fd).is_none() {
         return Ok(M_E_BADFD);
+    }
+
+    if let Some(descriptor) = state.lock().unbind_local(fd) {
+        let system = context.system();
+        system.local_network().close(descriptor);
     }
 
     let Some(network) = context.system().platform().network() else {
@@ -786,6 +828,17 @@ fn build_lgt_bill_header(
     header
 }
 
+/// The dotted-decimal IPv4 a WIPI address spells.
+///
+/// The handset copies the 32-bit address straight into `sockaddr_in`, so on
+/// little-endian ARM its in-memory bytes are the network-order octets - the
+/// same reading the platform's own `connect` takes.
+fn dotted_quad(address: WIPICWord) -> alloc::string::String {
+    let [a, b, c, d] = address.to_le_bytes();
+
+    alloc::format!("{a}.{b}.{c}.{d}")
+}
+
 fn lgt_bill_read_payload_length(header: &[u8; LGT_BILL_READ_HEADER_SIZE]) -> u32 {
     u32::from_be_bytes(
         header[LGT_BILL_READ_PAYLOAD_LENGTH_OFFSET..LGT_BILL_READ_PAYLOAD_LENGTH_OFFSET + 4]
@@ -963,6 +1016,65 @@ pub async fn socket_connect(
     //
     // PATCH85B then handles only the proven purchase request 0x68 locally.
     // Mode 2 remains the native fixed development-gateway path.
+    // A server this run answers for itself takes the connection instead of the
+    // network. The address is already resolved, so the endpoints are offered
+    // the dotted quad it spells - which is how these titles name their servers
+    // anyway. Answered the way the local billing connect above is: the connect
+    // is marked pending and `Connected(socket)` delivered, so the game's own
+    // callback runs exactly as it would for a connection that succeeded.
+    let local = {
+        let system = context.system();
+        let mut local_network = system.local_network();
+
+        if local_network.is_empty() {
+            None
+        } else {
+            local_network.connect("socket", &dotted_quad(address), port as u16)
+        }
+    };
+
+    if let Some(descriptor) = local {
+        {
+            let mut state = state.lock();
+            state.bind_local(socket, descriptor);
+            state.set_connect_pending(socket, true);
+        }
+
+        struct DeferredLocalConnect {
+            socket: i32,
+        }
+
+        #[async_trait::async_trait]
+        impl MethodBody<WieError> for DeferredLocalConnect {
+            async fn call(&self, context: &mut dyn WIPICContext, _: Box<[WIPICWord]>) -> Result<WIPICResult> {
+                let callback = context
+                    .network_state()
+                    .lock()
+                    .take_callback_for_event(wie_backend::NetworkEvent::Connected(self.socket));
+
+                if let Some((callback, args)) = callback {
+                    context.call_function(callback, &args).await?;
+                }
+
+                Ok(WIPICResult { results: Vec::new() })
+            }
+        }
+
+        if let Err(error) = context.spawn(Box::new(DeferredLocalConnect { socket })) {
+            let mut state = state.lock();
+            state.set_connect_pending(socket, false);
+            state.unbind_local(socket);
+            drop(state);
+
+            let system = context.system();
+            system.local_network().close(descriptor);
+
+            return Err(error);
+        }
+
+        return Ok(0);
+    }
+
     if billing_mode == 1 {
         let aid = alloc::string::String::from(context.system().aid());
         let current_time = context.system().platform().now().raw();
@@ -1176,6 +1288,18 @@ pub async fn socket_write(context: &mut dyn WIPICContext, socket: i32, buffer: W
     let mut data = alloc::vec![0u8; length as usize];
     context.read_bytes(buffer, &mut data)?;
 
+    // A connection the emulator answers for itself takes the whole write at
+    // once: there is no send buffer to fill, so it can never block.
+    if let Some(descriptor) = state.lock().local_descriptor(socket) {
+        let system = context.system();
+        let written = system.local_network().write(descriptor, &data);
+
+        return Ok(match written {
+            Some(_) => length,
+            None => M_E_NOTCONN,
+        });
+    }
+
     if billing_mode != 0 {
         if billing_mode == 1 {
             if let Some(response) = lgt_local_purchase_success_response(&data) {
@@ -1270,6 +1394,26 @@ pub async fn socket_read(context: &mut dyn WIPICContext, socket: i32, buffer: WI
     let billing_mode = state.lock().billing_mode(socket).expect("socket metadata disappeared");
 
     let mut data = alloc::vec![0u8; length as usize];
+
+    // `Pending` is reported as a would-block, which is what the platform says
+    // for a live connection with nothing to read yet, so a game polling this
+    // socket behaves identically either way.
+    if let Some(descriptor) = state.lock().local_descriptor(socket) {
+        let read = {
+            let system = context.system();
+            system.local_network().read(descriptor, &mut data)
+        };
+
+        return Ok(match read {
+            Some(wie_backend::LocalRead::Data(read)) => {
+                context.write_bytes(buffer, &data[..read])?;
+                read as i32
+            }
+            Some(wie_backend::LocalRead::Pending) => M_E_WOULDBLOCK,
+            Some(wie_backend::LocalRead::Closed) => 0,
+            None => M_E_NOTCONN,
+        });
+    }
 
     if billing_mode == 1 {
         let local_read = state.lock().take_local_billing_response(socket, &mut data);
