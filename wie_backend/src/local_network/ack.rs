@@ -36,11 +36,29 @@ pub struct Framing {
     pub big_endian: bool,
     /// Whether the length counts the length field itself.
     pub length_includes_prefix: bool,
-    /// Bytes after the length that name the message, echoed into the reply so
-    /// the title can pair the answer with what it asked.
+    /// Width of the field after the length that names the message.
     pub type_width: usize,
-    /// What every reply carries after the echoed type.
+    /// What message the reply is.
+    pub message: MessageType,
+    /// What every reply carries after its message type.
     pub status: Status,
+}
+
+/// The message type a reply carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MessageType {
+    /// The request's own, so the title can pair the answer with what it asked.
+    Echo,
+    /// A counter, one per reply.
+    ///
+    /// A title polling for an event rather than an answer is waiting for a
+    /// message it did not ask for, and which one is not knowable from the
+    /// outside. One run of this offers it a different type each time. 오즈-천공의
+    /// 기사단 polls one request over and over while its screen says CONNECTING,
+    /// and answering that request in kind never satisfies it.
+    Sweep,
+    /// The same type every time, right-aligned in the type field.
+    Fixed(Vec<u8>),
 }
 
 /// The payload a reply carries.
@@ -68,6 +86,7 @@ impl Default for Framing {
             big_endian: true,
             length_includes_prefix: true,
             type_width: 4,
+            message: MessageType::Echo,
             status: Status::Fixed(vec![0, 0, 0, 0]),
         }
     }
@@ -162,6 +181,13 @@ impl AckEndpoint {
             match key {
                 "len" => framing.apply_length_word(value)?,
                 "type" => framing.type_width = value.parse().ok()?,
+                "id" => {
+                    framing.message = match value {
+                        "echo" => MessageType::Echo,
+                        "sweep" => MessageType::Sweep,
+                        hex => MessageType::Fixed(parse_hex(hex)?),
+                    }
+                }
                 "status" => {
                     framing.status = match value {
                         "echo" => Status::Echo,
@@ -287,13 +313,28 @@ impl LocalConnection for AckConnection {
                 Status::Sweep => self.answered.to_be_bytes().to_vec(),
             };
 
-            let message_type = &frame[self.framing.length_width..self.framing.header_size()];
+            let requested_type = &frame[self.framing.length_width..self.framing.header_size()];
 
             let total = self.framing.header_size() + status.len();
             let mut reply = vec![0u8; total];
             self.framing.write_length(&mut reply, total);
-            reply[self.framing.length_width..self.framing.header_size()].copy_from_slice(message_type);
             reply[self.framing.header_size()..].copy_from_slice(&status);
+
+            let message_type = &mut reply[self.framing.length_width..self.framing.header_size()];
+            match &self.framing.message {
+                MessageType::Echo => message_type.copy_from_slice(requested_type),
+                MessageType::Sweep => {
+                    let counter = self.answered.to_be_bytes();
+                    let taken = message_type.len().min(counter.len());
+                    let start = message_type.len() - taken;
+                    message_type[start..].copy_from_slice(&counter[counter.len() - taken..]);
+                }
+                MessageType::Fixed(fixed) => {
+                    let taken = message_type.len().min(fixed.len());
+                    let start = message_type.len() - taken;
+                    message_type[start..].copy_from_slice(&fixed[fixed.len() - taken..]);
+                }
+            }
 
             tracing::info!("ack {}: {} -> {}", self.peer, hex(&frame), hex(&reply));
 
@@ -334,7 +375,7 @@ fn hex(bytes: &[u8]) -> String {
 mod tests {
     use alloc::{string::ToString, vec, vec::Vec};
 
-    use super::{AckEndpoint, Framing, Status, parse_hex};
+    use super::{AckEndpoint, Framing, MessageType, Status, parse_hex};
     use crate::local_network::{LocalEndpoint, LocalRead, capture::CaptureAddress};
 
     fn drain(connection: &mut alloc::boxed::Box<dyn crate::local_network::LocalConnection>) -> Vec<u8> {
@@ -408,6 +449,7 @@ mod tests {
             big_endian: false,
             length_includes_prefix: true,
             type_width: 2,
+            message: MessageType::Echo,
             status: Status::Fixed(vec![0xff]),
         };
         let endpoint = AckEndpoint::new(CaptureAddress::Any, framing);
@@ -468,6 +510,41 @@ mod tests {
     }
 
     #[test]
+    fn a_sweeping_reply_offers_a_different_message_type_each_time() {
+        let framing = Framing {
+            message: MessageType::Sweep,
+            ..Framing::default()
+        };
+        let endpoint = AckEndpoint::new(CaptureAddress::Any, framing);
+        let mut connection = endpoint.open("socket", "host", 1);
+
+        // A title polling one request is offered a different message each time,
+        // which is the only way to find the one it is waiting for.
+        for expected in 0..3u32 {
+            connection.write(&[0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 10]);
+
+            let reply = drain(&mut connection);
+            assert_eq!(&reply[4..8], &expected.to_be_bytes());
+        }
+    }
+
+    #[test]
+    fn a_fixed_message_type_sits_at_the_end_of_its_field() {
+        let framing = Framing {
+            message: MessageType::Fixed(vec![0x2a]),
+            ..Framing::default()
+        };
+        let endpoint = AckEndpoint::new(CaptureAddress::Any, framing);
+        let mut connection = endpoint.open("socket", "host", 1);
+
+        connection.write(&[0, 0, 0, 12, 0, 0, 0, 7, 0, 0, 0, 10]);
+
+        // The one byte given lands in the low byte of the four-byte field,
+        // rather than at its front where it would read as a huge type.
+        assert_eq!(&drain(&mut connection)[4..8], &[0, 0, 0, 0x2a]);
+    }
+
+    #[test]
     fn a_setting_says_the_address_and_the_framing() {
         assert!(AckEndpoint::from_setting(None).is_none());
         assert!(AckEndpoint::from_setting(Some("0")).is_none());
@@ -487,6 +564,7 @@ mod tests {
                 big_endian: false,
                 length_includes_prefix: false,
                 type_width: 2,
+                message: MessageType::Echo,
                 status: Status::Fixed(vec![0x00, 0xff]),
             }
         );
@@ -499,6 +577,14 @@ mod tests {
         assert!(AckEndpoint::from_setting(Some("any,status=abc")).is_none());
         assert_eq!(AckEndpoint::from_setting(Some("any,status=echo")).unwrap().framing.status, Status::Echo);
         assert_eq!(AckEndpoint::from_setting(Some("any,status=sweep")).unwrap().framing.status, Status::Sweep);
+        assert_eq!(
+            AckEndpoint::from_setting(Some("any,id=sweep")).unwrap().framing.message,
+            MessageType::Sweep
+        );
+        assert_eq!(
+            AckEndpoint::from_setting(Some("any,id=0069")).unwrap().framing.message,
+            MessageType::Fixed(alloc::vec![0x00, 0x69])
+        );
         assert!(AckEndpoint::from_setting(Some("any,unknown=1")).is_none());
         assert!(AckEndpoint::from_setting(Some("any,type=x")).is_none());
         assert!(AckEndpoint::from_setting(Some(":31000")).is_none());
