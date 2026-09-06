@@ -3936,6 +3936,73 @@ mod network_state_tests {
     }
 
     #[futures_test::test]
+    async fn a_payload_larger_than_the_read_is_continued_on_the_next_call() {
+        const REQUEST: u32 = 0x1000;
+        const RESPONSE: u32 = 0x2000;
+
+        let system = System::new(Box::new(LocalBillingTestPlatform::new()), "test-pid", "test-aid", DefaultTaskRunner);
+        let mut context = TestContext::with_system(system);
+
+        let state = context.network_state();
+        state.lock().process_state = ProcessNetworkState::Available;
+
+        let socket = bill_socket(&mut context, 2, 1).await.unwrap();
+        socket_connect(&mut context, socket, 0x0102_0304, 2508, 0x1111, 0x2222).await.unwrap();
+
+        let request = [0xff, 0xff, 0x00, 0x06, 0x00, 0x20];
+        context.write_bytes(REQUEST, &request).unwrap();
+        socket_write(&mut context, socket, REQUEST, request.len() as i32).await.unwrap();
+
+        // Four of the seven payload bytes, which is all the caller asked for.
+        assert_eq!(socket_read(&mut context, socket, RESPONSE, 4).await.unwrap(), 4);
+        let mut first = [0u8; 4];
+        context.read_bytes(RESPONSE, &mut first).unwrap();
+        assert_eq!(first, [0xff, 0xff, 0x00, 0x07]);
+
+        // The rest comes back through the remaining-payload continuation, with
+        // no second header parsed in between.
+        assert_eq!(socket_read(&mut context, socket, RESPONSE, 32).await.unwrap(), 3);
+        let mut rest = [0u8; 3];
+        context.read_bytes(RESPONSE, &mut rest).unwrap();
+        assert_eq!(rest, [0x00, 0x21, 0x00]);
+
+        assert_eq!(socket_read(&mut context, socket, RESPONSE, 32).await.unwrap(), M_E_WOULDBLOCK);
+    }
+
+    #[futures_test::test]
+    async fn two_requests_before_a_read_are_answered_in_order() {
+        const REQUEST: u32 = 0x1000;
+        const RESPONSE: u32 = 0x2000;
+
+        let system = System::new(Box::new(LocalBillingTestPlatform::new()), "test-pid", "test-aid", DefaultTaskRunner);
+        let mut context = TestContext::with_system(system);
+
+        let state = context.network_state();
+        state.lock().process_state = ProcessNetworkState::Available;
+
+        let socket = bill_socket(&mut context, 2, 1).await.unwrap();
+        socket_connect(&mut context, socket, 0x0102_0304, 2508, 0x1111, 0x2222).await.unwrap();
+
+        for message_type in [0x20u8, 0x30] {
+            let request = [0xff, 0xff, 0x00, 0x06, 0x00, message_type];
+            context.write_bytes(REQUEST, &request).unwrap();
+            socket_write(&mut context, socket, REQUEST, request.len() as i32).await.unwrap();
+        }
+
+        // Each answer keeps its own 56-byte header, so the second parses as
+        // cleanly as the first rather than being read as the first's payload.
+        for expected in [0x21u8, 0x31] {
+            assert_eq!(socket_read(&mut context, socket, RESPONSE, 32).await.unwrap(), 7);
+
+            let mut answer = [0u8; 7];
+            context.read_bytes(RESPONSE, &mut answer).unwrap();
+            assert_eq!(answer, [0xff, 0xff, 0x00, 0x07, 0x00, expected, 0x00]);
+        }
+
+        assert_eq!(socket_read(&mut context, socket, RESPONSE, 32).await.unwrap(), M_E_WOULDBLOCK);
+    }
+
+    #[futures_test::test]
     async fn closing_a_billing_socket_releases_its_gateway() {
         let system = System::new(Box::new(LocalBillingTestPlatform::new()), "test-pid", "test-aid", DefaultTaskRunner);
         let mut context = TestContext::with_system(system);
