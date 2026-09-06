@@ -3009,7 +3009,7 @@ mod network_state_tests {
         AudioSink, DatabaseRepository, DefaultTaskRunner, Filesystem, Instant, Network, NetworkError, NetworkEvent, NetworkPoll, Platform, Screen,
         System,
     };
-    use wie_util::ByteWrite;
+    use wie_util::{ByteRead, ByteWrite};
 
     use crate::context::test::TestContext;
 
@@ -3889,6 +3889,97 @@ mod network_state_tests {
             state.take_callback_for_event(wie_backend::NetworkEvent::Connected(22)),
             Some((0x3333, [22, 0, 0x4444]))
         );
+    }
+
+    #[futures_test::test]
+    async fn a_billing_socket_carries_a_request_to_its_gateway_and_the_answer_back() {
+        const REQUEST: u32 = 0x1000;
+        const RESPONSE: u32 = 0x2000;
+
+        let system = System::new(Box::new(LocalBillingTestPlatform::new()), "test-pid", "test-aid", DefaultTaskRunner);
+        let mut context = TestContext::with_system(system);
+
+        let state = context.network_state();
+        state.lock().process_state = ProcessNetworkState::Available;
+
+        let socket = bill_socket(&mut context, 2, 1).await.unwrap();
+        assert_eq!(state.lock().billing_mode(socket), Some(1));
+
+        // The connect answers in process and leaves the socket bound to the
+        // gateway, with the `Connected` delivery deferred as native does.
+        assert_eq!(socket_connect(&mut context, socket, 0x0102_0304, 2508, 0x1111, 0x2222).await.unwrap(), 0);
+        assert!(state.lock().local_descriptor(socket).is_some());
+        assert_eq!(context.spawned(), 1);
+
+        // A request that is not the purchase transaction - the kind that used
+        // to be pushed at a socket which had never been connected.
+        let request = [0xff, 0xff, 0x00, 0x06, 0x00, 0x20];
+        context.write_bytes(REQUEST, &request).unwrap();
+
+        assert_eq!(
+            socket_write(&mut context, socket, REQUEST, request.len() as i32).await.unwrap(),
+            lgt_bill_write_public_result(LGT_BILL_HEADER_SIZE + request.len())
+        );
+
+        // `WPBill_Read` assembles the 56-byte header and then hands back the
+        // payload behind it, which is the granted answer to what was asked.
+        let read = socket_read(&mut context, socket, RESPONSE, 32).await.unwrap();
+        assert_eq!(read, 7);
+
+        let mut answer = [0u8; 7];
+        context.read_bytes(RESPONSE, &mut answer).unwrap();
+        assert_eq!(answer, [0xff, 0xff, 0x00, 0x07, 0x00, 0x21, 0x00]);
+
+        // Nothing further until the next request, reported as a would-block the
+        // way a live connection with nothing to read is.
+        assert_eq!(socket_read(&mut context, socket, RESPONSE, 32).await.unwrap(), M_E_WOULDBLOCK);
+    }
+
+    #[futures_test::test]
+    async fn closing_a_billing_socket_releases_its_gateway() {
+        let system = System::new(Box::new(LocalBillingTestPlatform::new()), "test-pid", "test-aid", DefaultTaskRunner);
+        let mut context = TestContext::with_system(system);
+
+        let state = context.network_state();
+        state.lock().process_state = ProcessNetworkState::Available;
+
+        let socket = bill_socket(&mut context, 2, 1).await.unwrap();
+        socket_connect(&mut context, socket, 0x0102_0304, 2508, 0x1111, 0x2222).await.unwrap();
+        assert!(state.lock().local_descriptor(socket).is_some());
+
+        socket_close(&mut context, socket).await.unwrap();
+        assert!(state.lock().local_descriptor(socket).is_none());
+    }
+
+    #[futures_test::test]
+    async fn a_purchase_keeps_the_answer_native_delivers_ahead_of_the_header() {
+        const REQUEST: u32 = 0x1000;
+        const RESPONSE: u32 = 0x2000;
+
+        let system = System::new(Box::new(LocalBillingTestPlatform::new()), "test-pid", "test-aid", DefaultTaskRunner);
+        let mut context = TestContext::with_system(system);
+
+        let state = context.network_state();
+        state.lock().process_state = ProcessNetworkState::Available;
+
+        let socket = bill_socket(&mut context, 2, 1).await.unwrap();
+        socket_connect(&mut context, socket, 0x0102_0304, 2508, 0x1111, 0x2222).await.unwrap();
+
+        let request = [0xff, 0xff, 0x00, 0x06, 0x00, 0x68];
+        context.write_bytes(REQUEST, &request).unwrap();
+        assert_eq!(
+            socket_write(&mut context, socket, REQUEST, request.len() as i32).await.unwrap(),
+            request.len() as i32
+        );
+
+        // The purchase answer comes back on its own, without the 56-byte
+        // header, exactly as it did before the gateway existed.
+        let read = socket_read(&mut context, socket, RESPONSE, 32).await.unwrap();
+        assert_eq!(read, LGT_LOCAL_PURCHASE_RESPONSE_SIZE as i32);
+
+        let mut answer = [0u8; LGT_LOCAL_PURCHASE_RESPONSE_SIZE];
+        context.read_bytes(RESPONSE, &mut answer).unwrap();
+        assert_eq!(answer, [0xff, 0xff, 0x00, 0x07, 0x00, 0x69, 0x00]);
     }
 
     #[futures_test::test]

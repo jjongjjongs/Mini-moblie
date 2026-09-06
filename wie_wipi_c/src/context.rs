@@ -117,6 +117,10 @@ pub mod test {
         network_state: SharedNetworkState,
         serial_state: SharedSerialState,
         filesystem_state: SharedFilesystemState,
+        /// Bodies handed to `spawn`, kept rather than run: a test that drives an
+        /// API which defers work can then say the deferral happened without an
+        /// executor to run it on.
+        spawned: Vec<WIPICMethodBody>,
     }
 
     impl TestContext {
@@ -132,6 +136,7 @@ pub mod test {
                 network_state: new_network_state(),
                 serial_state: new_serial_state(),
                 filesystem_state: new_filesystem_state(),
+                spawned: Vec::new(),
             }
         }
 
@@ -146,7 +151,13 @@ pub mod test {
                 network_state: new_network_state(),
                 serial_state: new_serial_state(),
                 filesystem_state: new_filesystem_state(),
+                spawned: Vec::new(),
             }
+        }
+
+        /// How many bodies have been handed to `spawn`.
+        pub fn spawned(&self) -> usize {
+            self.spawned.len()
         }
 
         pub fn with_resource(mut self, name: &str, data: &[u8]) -> Self {
@@ -219,8 +230,12 @@ pub mod test {
             self.filesystem_state.clone()
         }
 
-        fn spawn(&mut self, _callback: WIPICMethodBody) -> Result<()> {
-            todo!()
+        fn spawn(&mut self, callback: WIPICMethodBody) -> Result<()> {
+            // Kept rather than run: there is no executor here, and a test that
+            // needs the deferred work to happen calls it itself.
+            self.spawned.push(callback);
+
+            Ok(())
         }
 
         async fn get_resource_size(&self, name: &str) -> Result<Option<usize>> {
