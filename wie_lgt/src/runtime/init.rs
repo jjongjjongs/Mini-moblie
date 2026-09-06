@@ -2676,29 +2676,42 @@ fn activate_dispatch_table(core: &mut ArmCore, context: &InitSvcContext, root: u
     // expected to provide - writing the stubs into the image would land them
     // on whatever follows the table, and leaving them out puts a zero where a
     // call goes.
-    let slots = u32::from(slots).min(DISPATCH_TABLE_SLOTS);
+    //
+    // "This runtime's own size" is the longer of the two: the platform's table
+    // length covers the slots a class never mentions, but an application class
+    // can declare far more of its own. 오즈's `game/chars/d` declares 343 and
+    // branches through slot 180, which its superclass `game/chars/b` supplies;
+    // capping the copy at the platform length left that slot off the end, so
+    // the load read zero and the call branched to address zero the moment a
+    // character was created.
+    let declared_slots = u32::from(slots);
+    let table_slots = declared_slots.max(DISPATCH_TABLE_SLOTS);
 
-    let installed = Allocator::alloc(core, (DISPATCH_TABLE_SLOTS + 1) * 4)?;
+    let installed = Allocator::alloc(core, (table_slots + 1) * 4)?;
     write_generic(core, installed, root)?;
 
     let mut declared = 0;
 
-    for slot in 0..DISPATCH_TABLE_SLOTS {
-        let entry: u32 = if slot < slots { read_generic(core, vtable + 4 + slot * 4)? } else { 0 };
+    for slot in 0..table_slots {
+        let entry: u32 = if slot < declared_slots {
+            read_generic(core, vtable + 4 + slot * 4)?
+        } else {
+            0
+        };
 
         let entry = if entry != 0 {
             declared += 1;
             entry
-        } else if slot != 0 && slot < slots {
+        } else if slot != 0 && slot < declared_slots {
             inherited_dispatch_entry(core, context, root, slot, fallback)?
         } else {
-            read_generic(core, fallback + 4 + slot * 4)?
+            unresolved_dispatch_entry(core, fallback, slot)?
         };
 
         write_generic(core, installed + 4 + slot * 4, entry)?;
     }
 
-    tracing::debug!("LGT class at {root:#x} dispatches through {installed:#x}, {declared} of {slots} slots its own");
+    tracing::debug!("LGT class at {root:#x} dispatches through {installed:#x}, {declared} of {declared_slots} slots its own");
 
     Ok(installed)
 }
@@ -2952,7 +2965,19 @@ fn inherited_dispatch_entry_from_tables(
         break;
     }
 
-    read_generic(core, fallback + 4 + slot * 4)
+    unresolved_dispatch_entry(core, fallback, slot)
+}
+
+/// The stub a slot no class in the chain declares falls back to.
+///
+/// The fallback table is the platform's own length, and an application class
+/// can declare several times that many slots of its own - 오즈's
+/// `game/chars/d` declares 343. A slot past the fallback's end has no stub of
+/// its own; give it the last one rather than reading past the table, so a call
+/// nothing accounts for is still reported instead of branching into whatever
+/// happens to follow the allocation.
+fn unresolved_dispatch_entry(core: &ArmCore, fallback: u32, slot: u32) -> Result<u32> {
+    read_generic(core, fallback + 4 + slot.min(DISPATCH_TABLE_SLOTS - 1) * 4)
 }
 
 /// Finds the native virtual slot a superclass already owns for `name+descriptor`.
