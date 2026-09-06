@@ -29,7 +29,8 @@ pub enum CaptureAddress {
 }
 
 impl CaptureAddress {
-    fn matches(&self, host: &str, port: u16) -> bool {
+    /// Whether this address covers `host:port`.
+    pub fn matches_address(&self, host: &str, port: u16) -> bool {
         match self {
             Self::Any => true,
             Self::HostPort(wanted_host, wanted_port) => host == wanted_host && port == *wanted_port,
@@ -87,7 +88,7 @@ impl LocalEndpoint for CaptureEndpoint {
     fn accepts(&self, scheme: &str, host: &str, port: u16) -> bool {
         // Stream connections only. The billing gateway has an answer of its
         // own and is not something to sit silently on.
-        scheme == "socket" && self.address.matches(host, port)
+        scheme == "socket" && self.address.matches_address(host, port)
     }
 
     fn open(&self, _: &str, host: &str, port: u16) -> Box<dyn LocalConnection> {

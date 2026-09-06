@@ -21,9 +21,13 @@
 //! never be mistaken for one the platform handed out (those are zero or above),
 //! for the `-1` a closed socket carries, or for the billing gateway's `-2`.
 
+mod ack;
 mod capture;
 
-pub use self::capture::{CaptureAddress, CaptureEndpoint};
+pub use self::{
+    ack::{AckEndpoint, Framing},
+    capture::{CaptureAddress, CaptureEndpoint},
+};
 
 use alloc::{boxed::Box, collections::BTreeMap, string::String, vec::Vec};
 

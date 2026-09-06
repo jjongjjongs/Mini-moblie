@@ -96,17 +96,31 @@ struct CapturePlatform {
 }
 
 impl Platform for CapturePlatform {
-    /// `WIE_LOCAL_NET_CAPTURE` records what a title sends its server rather
-    /// than letting the connection fail: `1` for every connection it opens, or
-    /// `host:port` for one. See `wie_backend::CaptureEndpoint` - a recorded
-    /// connection never answers, so a title waiting on a reply waits.
+    /// `WIE_LOCAL_NET_ACK` answers a title's requests in process rather than
+    /// letting the connection fail: `1` for every connection it opens, or
+    /// `host:port` for one, then any of `len=`, `type=`, `status=`, `prefix=`
+    /// to describe its framing. See `wie_backend::AckEndpoint`.
+    ///
+    /// `WIE_LOCAL_NET_CAPTURE` takes the connection the same way but records
+    /// what the title sends instead of answering it, which is how a protocol
+    /// gets read in the first place. A recorded connection never answers, so a
+    /// title waiting on a reply waits.
     fn local_endpoints(&self) -> Vec<Box<dyn wie_backend::LocalEndpoint>> {
-        let setting = std::env::var("WIE_LOCAL_NET_CAPTURE").ok();
+        let mut endpoints: Vec<Box<dyn wie_backend::LocalEndpoint>> = Vec::new();
 
-        match wie_backend::CaptureEndpoint::from_setting(setting.as_deref()) {
-            Some(endpoint) => vec![Box::new(endpoint)],
-            None => Vec::new(),
+        // The approving endpoint first: a run that sets both wants its requests
+        // answered, with the recorder behind it for whatever it does not take.
+        let ack = std::env::var("WIE_LOCAL_NET_ACK").ok();
+        if let Some(endpoint) = wie_backend::AckEndpoint::from_setting(ack.as_deref()) {
+            endpoints.push(Box::new(endpoint));
         }
+
+        let capture = std::env::var("WIE_LOCAL_NET_CAPTURE").ok();
+        if let Some(endpoint) = wie_backend::CaptureEndpoint::from_setting(capture.as_deref()) {
+            endpoints.push(Box::new(endpoint));
+        }
+
+        endpoints
     }
 
     fn screen(&self) -> &dyn Screen {

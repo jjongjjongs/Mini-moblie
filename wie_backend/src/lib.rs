@@ -17,7 +17,9 @@ pub use self::{
     audio_sink::AudioSink,
     database::{Database, DatabaseRepository, RecordId},
     executor::{AsyncCallable, AsyncCallableResult},
-    local_network::{CaptureAddress, CaptureEndpoint, LocalConnection, LocalEndpoint, LocalNetwork, LocalRead, is_local_descriptor},
+    local_network::{
+        AckEndpoint, CaptureAddress, CaptureEndpoint, Framing, LocalConnection, LocalEndpoint, LocalNetwork, LocalRead, is_local_descriptor,
+    },
     platform::{
         Filesystem, FilesystemMkdirError, FilesystemRenameError, FilesystemRmDirError, FilesystemSetModeError, Network, NetworkError, NetworkEvent,
         NetworkPoll, Platform,
