@@ -146,21 +146,25 @@ impl AnnunciatorComponent {
         // 2. pushCard(getCard()) when bTrans, otherwise
         //    setDockedCard(getCard(), 0)
         // 3. register a fresh AnnunciatorEventListener.
+        //
+        // Step 2 is deliberately skipped: the handset's status strip does not
+        // appear over a running title on the reference, whichever title it is,
+        // so putting the annunciator's card on the screen shows a bar no player
+        // sees there and costs the title the rows underneath it. Leaving the
+        // card undocked is what makes it invisible - `CardCanvas` paints the
+        // docked card and offsets the pushed ones below it, and with none
+        // docked every card gets the whole panel from its first row, which is
+        // the geometry titles are written for.
+        //
+        // Everything a title can observe is still here: the component is built,
+        // laid out and validated, `getCard` still answers, and the event
+        // listener below still runs, so a title that shows an annunciator and
+        // then asks about it sees what it expects. `paint` and the atlas it
+        // draws stay too, as the record of what the strip is - nothing on the
+        // screen reaches them now.
         let _: () = jvm.invoke_virtual(&this, "validate", "()V", ()).await?;
 
-        let b_trans: bool = jvm.get_field(&this, "__wieBTrans", "Z").await?;
-
         let display: ClassInstanceRef<Display> = jvm.get_field(&this, "display", "Lorg/kwis/msp/lcdui/Display;").await?;
-
-        let card: ClassInstanceRef<()> = jvm.invoke_virtual(&this, "getCard", "()Lorg/kwis/msp/lcdui/Card;", ()).await?;
-
-        if b_trans {
-            let _: () = jvm.invoke_virtual(&display, "pushCard", "(Lorg/kwis/msp/lcdui/Card;)V", (card,)).await?;
-        } else {
-            let _: () = jvm
-                .invoke_virtual(&display, "setDockedCard", "(Lorg/kwis/msp/lcdui/Card;I)V", (card, 0i32))
-                .await?;
-        }
 
         let listener = jvm
             .new_class(
