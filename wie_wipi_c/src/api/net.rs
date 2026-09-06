@@ -872,6 +872,148 @@ fn lgt_bill_read_reject_tag(tag: [u8; 4]) -> bool {
     .all(|candidate| tag == candidate)
 }
 
+/// The LGT billing gateway, answering in process.
+///
+/// The carrier's gateway has been unreachable for years, and a billing socket
+/// that reaches nothing leaves the SDK on a screen it never leaves. Mode 1
+/// already connected locally and answered the one purchase transaction it
+/// recognised; every other request was framed and pushed at a socket that was
+/// never connected, and the read that followed came back from the same place.
+/// This is the peer those frames were missing.
+///
+/// A reply is what `WPBill_Read` expects to parse: the 56-byte response header,
+/// whose payload length sits at `+0x30`, followed by the application frame
+/// itself. The tag at `+0x34` is left zero - native's ten-literal comparison
+/// chain requires the tag to equal all ten at once, so it can reject nothing,
+/// and the guest is handed the payload without the header either way.
+struct LgtBillingGateway {
+    /// What is left of the answer to hand back.
+    pending: Vec<u8>,
+}
+
+impl LgtBillingGateway {
+    fn new() -> Self {
+        Self { pending: Vec::new() }
+    }
+}
+
+impl wie_backend::LocalConnection for LgtBillingGateway {
+    fn write(&mut self, bytes: &[u8]) {
+        // The frame carries the 108-byte billing header WPBill_Write puts in
+        // front of it; the application's own request follows.
+        let Some(request) = bytes.get(LGT_BILL_HEADER_SIZE..) else {
+            tracing::debug!("LGT billing gateway: a {} byte write is shorter than its own header", bytes.len());
+            return;
+        };
+
+        let Some(response) = lgt_local_granted_response(request) else {
+            tracing::debug!(
+                "LGT billing gateway: a {} byte request is not one this can shape a reply to",
+                request.len()
+            );
+            return;
+        };
+
+        let mut header = [0u8; LGT_BILL_READ_HEADER_SIZE];
+        header[LGT_BILL_READ_PAYLOAD_LENGTH_OFFSET..LGT_BILL_READ_PAYLOAD_LENGTH_OFFSET + 4].copy_from_slice(&(response.len() as u32).to_be_bytes());
+
+        self.pending.extend_from_slice(&header);
+        self.pending.extend_from_slice(&response);
+    }
+
+    fn read(&mut self, out: &mut [u8]) -> wie_backend::LocalRead {
+        if self.pending.is_empty() {
+            return wie_backend::LocalRead::Pending;
+        }
+
+        let taken = out.len().min(self.pending.len());
+        out[..taken].copy_from_slice(&self.pending[..taken]);
+        self.pending.drain(..taken);
+
+        wie_backend::LocalRead::Data(taken)
+    }
+}
+
+/// The granted answer to an application billing request, in the frame shape
+/// `lgt_local_purchase_success_response` establishes for the purchase
+/// transaction: the `0xffff` marker, the frame length, the request's own type
+/// plus one, and a zero status - which is what this protocol spells "granted".
+///
+/// `None` for anything that is not one of these frames, which is not something
+/// to answer with a guess.
+fn lgt_local_granted_response(request: &[u8]) -> Option<Vec<u8>> {
+    if request.len() < 6 || request[0] != 0xff || request[1] != 0xff {
+        return None;
+    }
+
+    let declared_length = u16::from_be_bytes([request[2], request[3]]) as usize;
+    let message_type = u16::from_be_bytes([request[4], request[5]]);
+
+    // The same header-complete prefix a native client may present, and the same
+    // rejection of a slice longer than the frame it declares.
+    if declared_length < 6 || request.len() > declared_length {
+        return None;
+    }
+
+    let response_length = LGT_LOCAL_PURCHASE_RESPONSE_SIZE as u16;
+    let response_type = message_type.wrapping_add(1);
+
+    Some(alloc::vec![
+        0xff,
+        0xff,
+        (response_length >> 8) as u8,
+        response_length as u8,
+        (response_type >> 8) as u8,
+        response_type as u8,
+        0x00,
+    ])
+}
+
+/// Reads from whatever `socket` is connected to - the endpoint answering it in
+/// process, or the platform's own connection - with the error already mapped to
+/// the code the public API returns.
+fn transport_read(context: &mut dyn WIPICContext, socket: i32, out: &mut [u8]) -> core::result::Result<usize, i32> {
+    let local = context.network_state().lock().local_descriptor(socket);
+
+    if let Some(descriptor) = local {
+        let system = context.system();
+        let read = system.local_network().read(descriptor, out);
+
+        return match read {
+            Some(wie_backend::LocalRead::Data(read)) => Ok(read),
+            Some(wie_backend::LocalRead::Pending) => Err(M_E_WOULDBLOCK),
+            Some(wie_backend::LocalRead::Closed) => Ok(0),
+            None => Err(M_E_NOTCONN),
+        };
+    }
+
+    let Some(network) = context.system().platform().network() else {
+        return Err(M_E_NOTCONN);
+    };
+
+    network.read(socket, out).map_err(map_network_error)
+}
+
+/// The write half of [`transport_read`].
+fn transport_write(context: &mut dyn WIPICContext, socket: i32, bytes: &[u8]) -> core::result::Result<usize, i32> {
+    let local = context.network_state().lock().local_descriptor(socket);
+
+    if let Some(descriptor) = local {
+        let system = context.system();
+
+        return match system.local_network().write(descriptor, bytes) {
+            Some(written) => Ok(written),
+            None => Err(M_E_NOTCONN),
+        };
+    }
+
+    let Some(network) = context.system().platform().network() else {
+        return Err(M_E_NOTCONN);
+    };
+
+    network.write(socket, bytes).map_err(map_network_error)
+}
+
 fn build_lgt_bill_write_frame(mut header: [u8; LGT_BILL_HEADER_SIZE], payload: &[u8]) -> ([u8; LGT_BILL_HEADER_SIZE], Vec<u8>) {
     // Native WPBill_Write:
     //   total = payload_len + 108
@@ -1081,10 +1223,25 @@ pub async fn socket_connect(
 
         let billing_header = build_lgt_bill_header(context.system().platform(), &aid, current_time, address, port as u16);
 
+        // The gateway itself, so the frames this socket carries have a peer.
+        // Without one a mode 1 write past the purchase transaction went to a
+        // socket that was never connected, and the read after it came back from
+        // the same place.
+        let gateway = {
+            let system = context.system();
+            let mut local_network = system.local_network();
+
+            local_network.open("LGT billing gateway", Box::new(LgtBillingGateway::new()))
+        };
+
         {
             let mut state = state.lock();
             state.install_billing_header(billing_header);
             state.set_connect_pending(socket, true);
+
+            if let Some(descriptor) = gateway {
+                state.bind_local(socket, descriptor);
+            }
         }
 
         struct DeferredLocalBillConnect {
@@ -1289,8 +1446,13 @@ pub async fn socket_write(context: &mut dyn WIPICContext, socket: i32, buffer: W
     context.read_bytes(buffer, &mut data)?;
 
     // A connection the emulator answers for itself takes the whole write at
-    // once: there is no send buffer to fill, so it can never block.
-    if let Some(descriptor) = state.lock().local_descriptor(socket) {
+    // once: there is no send buffer to fill, so it can never block. A billing
+    // socket goes the long way round even when it is answered locally - its
+    // frames are what the gateway reads, and assembling them is what mutates
+    // the shared billing header.
+    if billing_mode == 0
+        && let Some(descriptor) = state.lock().local_descriptor(socket)
+    {
         let system = context.system();
         let written = system.local_network().write(descriptor, &data);
 
@@ -1322,13 +1484,9 @@ pub async fn socket_write(context: &mut dyn WIPICContext, socket: i32, buffer: W
         // the lower allocation/send subsequently fails.
         state.lock().update_billing_header(header);
 
-        let Some(network) = context.system().platform().network() else {
-            return Ok(M_E_NOTCONN);
-        };
-
-        return Ok(match network.write(socket, &frame) {
+        return Ok(match transport_write(context, socket, &frame) {
             Ok(written) => lgt_bill_write_public_result(written),
-            Err(error) => map_network_error(error),
+            Err(error) => error,
         });
     }
 
@@ -1397,8 +1555,12 @@ pub async fn socket_read(context: &mut dyn WIPICContext, socket: i32, buffer: WI
 
     // `Pending` is reported as a would-block, which is what the platform says
     // for a live connection with nothing to read yet, so a game polling this
-    // socket behaves identically either way.
-    if let Some(descriptor) = state.lock().local_descriptor(socket) {
+    // socket behaves identically either way. A billing socket goes through
+    // `WPBill_Read`'s own header machinery instead, reading the same connection
+    // underneath.
+    if billing_mode == 0
+        && let Some(descriptor) = state.lock().local_descriptor(socket)
+    {
         let read = {
             let system = context.system();
             system.local_network().read(descriptor, &mut data)
@@ -1450,13 +1612,7 @@ pub async fn socket_read(context: &mut dyn WIPICContext, socket: i32, buffer: WI
     if remaining_payload > 0 {
         let read_len = data.len().min(remaining_payload);
 
-        let result = {
-            let Some(network) = context.system().platform().network() else {
-                return Ok(M_E_NOTCONN);
-            };
-
-            network.read(socket, &mut data[..read_len])
-        };
+        let result = transport_read(context, socket, &mut data[..read_len]);
 
         return match result {
             Ok(read) => {
@@ -1467,7 +1623,7 @@ pub async fn socket_read(context: &mut dyn WIPICContext, socket: i32, buffer: WI
 
                 Ok(read as i32)
             }
-            Err(error) => Ok(map_network_error(error)),
+            Err(error) => Ok(error),
         };
     }
 
@@ -1481,13 +1637,7 @@ pub async fn socket_read(context: &mut dyn WIPICContext, socket: i32, buffer: WI
         .billing_read_direct;
 
     if direct_read {
-        let result = {
-            let Some(network) = context.system().platform().network() else {
-                return Ok(M_E_NOTCONN);
-            };
-
-            network.read(socket, &mut data)
-        };
+        let result = transport_read(context, socket, &mut data);
 
         return match result {
             Ok(read) => {
@@ -1501,7 +1651,7 @@ pub async fn socket_read(context: &mut dyn WIPICContext, socket: i32, buffer: WI
 
                 Ok(read as i32)
             }
-            Err(error) => Ok(map_network_error(error)),
+            Err(error) => Ok(error),
         };
     }
 
@@ -1515,17 +1665,9 @@ pub async fn socket_read(context: &mut dyn WIPICContext, socket: i32, buffer: WI
 
         let mut chunk = alloc::vec![0u8; remaining_header];
 
-        let result = {
-            let Some(network) = context.system().platform().network() else {
-                return Ok(M_E_NOTCONN);
-            };
-
-            network.read(socket, &mut chunk)
-        };
-
-        let read = match result {
+        let read = match transport_read(context, socket, &mut chunk) {
             Ok(read) => read,
-            Err(error) => return Ok(map_network_error(error)),
+            Err(error) => return Ok(error),
         };
 
         let accumulated = header_offset.saturating_add(read);
@@ -1592,13 +1734,7 @@ pub async fn socket_read(context: &mut dyn WIPICContext, socket: i32, buffer: WI
 
         let requested = data.len().min(payload_length as usize);
 
-        let result = {
-            let Some(network) = context.system().platform().network() else {
-                return Ok(M_E_NOTCONN);
-            };
-
-            network.read(socket, &mut data[..requested])
-        };
+        let result = transport_read(context, socket, &mut data[..requested]);
 
         // Once the payload recv has been attempted, native clears socket
         // object +0x1c regardless of success, zero, or lower error.
@@ -1616,7 +1752,7 @@ pub async fn socket_read(context: &mut dyn WIPICContext, socket: i32, buffer: WI
 
                 Ok(read as i32)
             }
-            Err(error) => Ok(map_network_error(error)),
+            Err(error) => Ok(error),
         };
     }
 
@@ -3166,6 +3302,83 @@ mod network_state_tests {
         }
 
         let _ = require_close_result;
+    }
+
+    #[test]
+    fn a_granted_reply_echoes_the_request_type_and_says_nothing_is_owed() {
+        use super::lgt_local_granted_response;
+
+        // The purchase transaction, which already had an answer of its own:
+        // request 0x68 is answered by response 0x69 with a zero status.
+        let reply = lgt_local_granted_response(&[0xff, 0xff, 0x00, 0x0a, 0x00, 0x68, 1, 2, 3, 4]).unwrap();
+        assert_eq!(reply, alloc::vec![0xff, 0xff, 0x00, 0x07, 0x00, 0x69, 0x00]);
+
+        // Every other request is answered the same way, which is what mode 1
+        // had no peer to do before.
+        let reply = lgt_local_granted_response(&[0xff, 0xff, 0x00, 0x06, 0x00, 0x20]).unwrap();
+        assert_eq!(reply, alloc::vec![0xff, 0xff, 0x00, 0x07, 0x00, 0x21, 0x00]);
+    }
+
+    #[test]
+    fn a_granted_reply_is_shaped_only_for_a_frame_this_reads() {
+        use super::lgt_local_granted_response;
+
+        // No marker, too short, a length that cannot hold a header, and a slice
+        // longer than the frame it declares.
+        assert!(lgt_local_granted_response(&[0x00, 0x00, 0x00, 0x06, 0x00, 0x68]).is_none());
+        assert!(lgt_local_granted_response(&[0xff, 0xff, 0x00]).is_none());
+        assert!(lgt_local_granted_response(&[0xff, 0xff, 0x00, 0x05, 0x00, 0x68]).is_none());
+        assert!(lgt_local_granted_response(&[0xff, 0xff, 0x00, 0x06, 0x00, 0x68, 0x99]).is_none());
+    }
+
+    #[test]
+    fn the_gateway_answers_a_framed_request_with_a_header_the_read_path_parses() {
+        use super::{LGT_BILL_HEADER_SIZE, LGT_BILL_READ_HEADER_SIZE, LGT_BILL_READ_PAYLOAD_LENGTH_OFFSET, LgtBillingGateway};
+        use wie_backend::{LocalConnection, LocalRead};
+
+        let mut gateway = LgtBillingGateway::new();
+
+        let mut frame = alloc::vec![0u8; LGT_BILL_HEADER_SIZE];
+        frame.extend_from_slice(&[0xff, 0xff, 0x00, 0x06, 0x00, 0x68]);
+        gateway.write(&frame);
+
+        // The 56-byte response header first, carrying the payload length.
+        let mut header = [0u8; LGT_BILL_READ_HEADER_SIZE];
+        assert_eq!(gateway.read(&mut header), LocalRead::Data(LGT_BILL_READ_HEADER_SIZE));
+        assert_eq!(
+            u32::from_be_bytes(
+                header[LGT_BILL_READ_PAYLOAD_LENGTH_OFFSET..LGT_BILL_READ_PAYLOAD_LENGTH_OFFSET + 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            7
+        );
+
+        // Then the payload itself.
+        let mut payload = [0u8; 7];
+        assert_eq!(gateway.read(&mut payload), LocalRead::Data(7));
+        assert_eq!(payload, [0xff, 0xff, 0x00, 0x07, 0x00, 0x69, 0x00]);
+
+        // And nothing more until the next request.
+        assert_eq!(gateway.read(&mut [0u8; 8]), LocalRead::Pending);
+    }
+
+    #[test]
+    fn the_gateway_says_nothing_to_a_write_it_cannot_read() {
+        use super::{LGT_BILL_HEADER_SIZE, LgtBillingGateway};
+        use wie_backend::{LocalConnection, LocalRead};
+
+        let mut gateway = LgtBillingGateway::new();
+
+        // Shorter than the billing header WPBill_Write puts in front.
+        gateway.write(&[0u8; 8]);
+        assert_eq!(gateway.read(&mut [0u8; 8]), LocalRead::Pending);
+
+        // A header with a payload that is not one of these frames.
+        let mut frame = alloc::vec![0u8; LGT_BILL_HEADER_SIZE];
+        frame.extend_from_slice(b"not a frame");
+        gateway.write(&frame);
+        assert_eq!(gateway.read(&mut [0u8; 8]), LocalRead::Pending);
     }
 
     #[test]
