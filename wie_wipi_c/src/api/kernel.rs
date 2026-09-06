@@ -98,7 +98,7 @@ pub async fn get_system_property(context: &mut dyn WIPICContext, ptr_id: WIPICWo
 ///
 /// Recovered from the archive by [`wie_backend::subscriber`], which the
 /// WIPI-Java `HandsetProperty` path uses too so the two always agree.
-async fn subscriber_number(context: &mut dyn WIPICContext) -> String {
+pub(crate) async fn subscriber_number(context: &mut dyn WIPICContext) -> String {
     let cert = context.read_resource("cert.c2s").await.ok();
     let certification = context.read_resource("certification").await.ok();
     let app_info = context.read_resource("app_info").await.ok();

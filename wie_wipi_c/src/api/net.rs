@@ -768,6 +768,7 @@ fn normalize_lgt_bill_mdn(mdn: &[u8]) -> Vec<u8> {
 fn build_lgt_bill_header(
     platform: &dyn wie_backend::Platform,
     aid: &str,
+    subscriber: &str,
     current_time: u64,
     address: WIPICWord,
     port: u16,
@@ -790,8 +791,15 @@ fn build_lgt_bill_header(
         copy_lgt_bill_c_string(&mut header, 0x22, value.as_bytes());
     }
 
-    if let Some(value) = platform.system_information(LGT_BILL_INFO_MDN) {
-        let normalized = normalize_lgt_bill_mdn(value.as_bytes());
+    // The handset answered `MDN` from its own SIM. Nothing here has one, so the
+    // number the archive names stands in - the same number
+    // `MC_knlGetSystemProperty("PHONENUMBER")` reports. A title that puts its
+    // own `PHONENUMBER` in a purchase request and lets the platform fill this
+    // header would otherwise send two different numbers, one of them blank.
+    let mdn = platform.system_information(LGT_BILL_INFO_MDN);
+    let mdn = mdn.as_deref().unwrap_or(subscriber);
+    if !mdn.is_empty() {
+        let normalized = normalize_lgt_bill_mdn(mdn.as_bytes());
         copy_lgt_bill_c_string(&mut header, 0x2c, &normalized);
     }
 
@@ -1219,9 +1227,10 @@ pub async fn socket_connect(
 
     if billing_mode == 1 {
         let aid = alloc::string::String::from(context.system().aid());
+        let subscriber = crate::api::kernel::subscriber_number(context).await;
         let current_time = context.system().platform().now().raw();
 
-        let billing_header = build_lgt_bill_header(context.system().platform(), &aid, current_time, address, port as u16);
+        let billing_header = build_lgt_bill_header(context.system().platform(), &aid, &subscriber, current_time, address, port as u16);
 
         // The gateway itself, so the frames this socket carries have a peer.
         // Without one a mode 1 write past the purchase transaction went to a
@@ -1309,9 +1318,10 @@ pub async fn socket_connect(
                 // destination here; outbound header construction follows in
                 // a later billing-write patch.
                 let aid = alloc::string::String::from(context.system().aid());
+                let subscriber = crate::api::kernel::subscriber_number(context).await;
                 let current_time = context.system().platform().now().raw();
 
-                let billing_header = build_lgt_bill_header(context.system().platform(), &aid, current_time, address, port as u16);
+                let billing_header = build_lgt_bill_header(context.system().platform(), &aid, &subscriber, current_time, address, port as u16);
 
                 state.lock().install_billing_header(billing_header);
             }
@@ -1360,9 +1370,10 @@ pub async fn socket_connect(
                 // Native also initializes WPBill_SetHeader state when
                 // dsocket_connect reports its pending result (-19).
                 let aid = alloc::string::String::from(context.system().aid());
+                let subscriber = crate::api::kernel::subscriber_number(context).await;
                 let current_time = context.system().platform().now().raw();
 
-                let billing_header = build_lgt_bill_header(context.system().platform(), &aid, current_time, address, port as u16);
+                let billing_header = build_lgt_bill_header(context.system().platform(), &aid, &subscriber, current_time, address, port as u16);
 
                 state.lock().install_billing_header(billing_header);
             }
@@ -3670,6 +3681,29 @@ mod network_state_tests {
     }
 
     #[test]
+    fn a_header_takes_the_archive_number_when_the_handset_has_no_mdn() {
+        // Nothing here has a SIM, so `MDN` is absent - which is what the
+        // Android platform reports. The number the archive names stands in, so
+        // the header carries the same one `PHONENUMBER` answers with instead of
+        // leaving its field blank.
+        let platform = test_utils::TestPlatform::new().with_system_information(LGT_BILL_INFO_PHONE_MODEL, "MODEL-X");
+
+        let header = build_lgt_bill_header(&platform, "000298AD", "01046119269", 0x11223344, 0x01020304, 0x3075);
+
+        // Eleven digits: first 3 + "0" + remaining 8 = 12 bytes.
+        assert_eq!(&header[0x2c..0x39], b"010046119269\0");
+    }
+
+    #[test]
+    fn a_handset_mdn_still_outranks_the_archive_number() {
+        let platform = test_utils::TestPlatform::new().with_system_information(LGT_BILL_INFO_MDN, "0101234567");
+
+        let header = build_lgt_bill_header(&platform, "000298AD", "01046119269", 0x11223344, 0x01020304, 0x3075);
+
+        assert_eq!(&header[0x2c..0x39], b"010001234567\0");
+    }
+
+    #[test]
     fn bill_header_matches_native_setheader_final_bytes() {
         let platform = test_utils::TestPlatform::new()
             .with_system_information(LGT_BILL_INFO_PHONE_MODEL, "MODEL-X")
@@ -3680,7 +3714,7 @@ mod network_state_tests {
             .with_system_information(LGT_BILL_INFO_BASE_ID, "BASE")
             .with_system_information(LGT_BILL_INFO_BEST_PN, "BEST");
 
-        let header = build_lgt_bill_header(&platform, "000298AD", 0x11223344, 0x01020304, 0x3075);
+        let header = build_lgt_bill_header(&platform, "000298AD", "01099998888", 0x11223344, 0x01020304, 0x3075);
 
         assert_eq!(header.len(), 108);
         assert_eq!(&header[0x00..0x04], &[0, 0, 0, 0]);
