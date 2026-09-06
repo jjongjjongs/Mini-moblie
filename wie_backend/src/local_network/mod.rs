@@ -144,6 +144,27 @@ impl LocalNetwork {
         Some(descriptor)
     }
 
+    /// Takes a connection the caller has already decided on, rather than one an
+    /// endpoint matched. A protocol answered by name rather than by address -
+    /// the carrier's billing gateway is opened by its URL scheme - belongs here
+    /// and still travels as an ordinary local descriptor.
+    pub fn open(&mut self, endpoint: &str, connection: Box<dyn LocalConnection>) -> Option<i32> {
+        let descriptor = self.next_descriptor;
+        self.next_descriptor = self.next_descriptor.checked_sub(1)?;
+
+        self.connections.insert(
+            descriptor,
+            Connection {
+                endpoint: String::from(endpoint),
+                inner: connection,
+            },
+        );
+
+        tracing::info!("{endpoint} answered in process as {descriptor}");
+
+        Some(descriptor)
+    }
+
     /// Hands `bytes` to the endpoint `descriptor` is connected to. `None` when
     /// the descriptor names no open local connection.
     pub fn write(&mut self, descriptor: i32, bytes: &[u8]) -> Option<usize> {
@@ -306,6 +327,32 @@ mod tests {
         assert_eq!(network.read(descriptor, &mut buffer), Some(LocalRead::Data(1)));
         assert_eq!(buffer[0], b'c');
         assert_eq!(network.read(descriptor, &mut buffer), Some(LocalRead::Pending));
+    }
+
+    #[test]
+    fn a_connection_can_be_opened_without_an_endpoint_matching_it() {
+        let mut network = LocalNetwork::new();
+
+        // No endpoint is registered, so nothing would match by address.
+        let descriptor = network.open("billing", Box::new(EchoConnection::default())).unwrap();
+        assert!(is_local_descriptor(descriptor));
+
+        network.write(descriptor, b"request");
+
+        let mut buffer = [0u8; 16];
+        assert_eq!(network.read(descriptor, &mut buffer), Some(LocalRead::Data(7)));
+        assert!(network.close(descriptor));
+    }
+
+    #[test]
+    fn a_directly_opened_connection_shares_the_descriptor_range() {
+        let mut network = LocalNetwork::new();
+        network.register(Box::new(Echo));
+
+        let matched = network.connect("socket", "echo", 1234).unwrap();
+        let direct = network.open("billing", Box::new(EchoConnection::default())).unwrap();
+
+        assert_ne!(matched, direct);
     }
 
     #[test]

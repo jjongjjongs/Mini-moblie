@@ -86,7 +86,7 @@ impl URL {
         if is_billing_scheme(&url) {
             tracing::info!("org.kwis.msf.io.URL::find({url:?}) answered by the in-process billing gateway");
 
-            return Socket::local_billing(jvm).await;
+            return Socket::local_billing(jvm, context).await;
         }
 
         // A server this run answers for itself takes the connection instead of

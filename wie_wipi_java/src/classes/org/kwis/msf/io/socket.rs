@@ -1,19 +1,13 @@
-use alloc::vec;
+use alloc::{boxed::Box, vec, vec::Vec};
 
-use bytemuck::cast_vec;
 use java_class_proto::{JavaFieldProto, JavaMethodProto};
 use java_runtime::classes::java::io::{InputStream, OutputStream};
 use jvm::{ClassInstanceRef, Jvm, Result as JvmResult};
 
+use wie_backend::{LocalConnection, LocalRead};
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 
 use crate::classes::org::kwis::msf::io::Message;
-
-/// Descriptor standing for the carrier's billing gateway, answered in process.
-///
-/// Negative, so it can never collide with one the network backend hands out,
-/// and distinct from the `-1` a closed socket carries.
-const BILLING_DESCRIPTOR: i32 = -2;
 
 /// The gateway's answer to the ez-i SDK's first request.
 ///
@@ -45,6 +39,48 @@ const BILLING_RESPONSE: [u8; 20] = [
     0, 0, 0, 0, // rest of the payload
     0, 0, 0, 0, // checksum
 ];
+
+/// The billing gateway, as a local-network connection.
+///
+/// The answer is armed when the connection opens and again whenever the SDK
+/// sends a request, so it is there whichever order the SDK reads and writes in
+/// - the reference SDK writes its 28 byte request and then reads, but a stream
+/// opened and read without one still finds the answer waiting, which is what
+/// the stand-in stream this replaces always did.
+struct BillingGateway {
+    /// What is left of the answer to hand back.
+    pending: Vec<u8>,
+}
+
+impl BillingGateway {
+    fn armed() -> Self {
+        Self {
+            pending: BILLING_RESPONSE.to_vec(),
+        }
+    }
+}
+
+impl LocalConnection for BillingGateway {
+    fn write(&mut self, bytes: &[u8]) {
+        // The answer does not depend on the request - there is nothing here to
+        // charge a subscriber for - so the request is noted and not parsed.
+        tracing::debug!("billing gateway request of {} bytes", bytes.len());
+
+        self.pending = BILLING_RESPONSE.to_vec();
+    }
+
+    fn read(&mut self, out: &mut [u8]) -> LocalRead {
+        if self.pending.is_empty() {
+            return LocalRead::Pending;
+        }
+
+        let taken = out.len().min(self.pending.len());
+        out[..taken].copy_from_slice(&self.pending[..taken]);
+        self.pending.drain(..taken);
+
+        LocalRead::Data(taken)
+    }
+}
 
 /// A connected WIPI socket, as `org.kwis.msf.io.URL.find` hands one back.
 ///
@@ -99,23 +135,29 @@ impl Socket {
 
     /// Binds a new instance to the in-process billing gateway instead of a
     /// connection.
-    pub async fn local_billing(jvm: &Jvm) -> JvmResult<ClassInstanceRef<Self>> {
-        Self::from_descriptor(jvm, BILLING_DESCRIPTOR).await
+    ///
+    /// It is a local-network connection like any other, so the ordinary socket
+    /// streams carry it and the gateway's answer is queued rather than handed
+    /// out by a stream that stands in for one.
+    pub async fn local_billing(jvm: &Jvm, context: &mut WieJvmContext) -> JvmResult<ClassInstanceRef<Self>> {
+        let descriptor = {
+            let system = context.system();
+            let mut local_network = system.local_network();
+
+            local_network.open("billing gateway", Box::new(BillingGateway::armed()))
+        };
+
+        let Some(descriptor) = descriptor else {
+            return Err(jvm.exception("java/io/IOException", "the local network is full").await);
+        };
+
+        Self::from_descriptor(jvm, descriptor).await
     }
 
     async fn get_input_stream(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<ClassInstanceRef<InputStream>> {
         tracing::debug!("org.kwis.msf.io.Socket::getInputStream({this:?})");
 
         let fd: i32 = jvm.get_field(&this, "fd", "I").await?;
-        if fd == BILLING_DESCRIPTOR {
-            let mut response = jvm.instantiate_array("B", BILLING_RESPONSE.len()).await?;
-            jvm.store_array(&mut response, 0, cast_vec::<u8, i8>(BILLING_RESPONSE.to_vec())).await?;
-
-            let stream = jvm.new_class("java/io/ByteArrayInputStream", "([B)V", (response,)).await?;
-
-            return Ok(stream.into());
-        }
-
         let stream = jvm.new_class("org/kwis/msf/io/SocketInputStream", "(I)V", (fd,)).await?;
 
         Ok(stream.into())
@@ -125,14 +167,6 @@ impl Socket {
         tracing::debug!("org.kwis.msf.io.Socket::getOutputStream({this:?})");
 
         let fd: i32 = jvm.get_field(&this, "fd", "I").await?;
-        if fd == BILLING_DESCRIPTOR {
-            // The request is read only to answer it, and the answer does not
-            // depend on it, so it goes nowhere.
-            let stream = jvm.new_class("java/io/ByteArrayOutputStream", "()V", ()).await?;
-
-            return Ok(stream.into());
-        }
-
         let stream = jvm.new_class("org/kwis/msf/io/SocketOutputStream", "(I)V", (fd,)).await?;
 
         Ok(stream.into())
