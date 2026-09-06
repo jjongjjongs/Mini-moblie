@@ -323,19 +323,19 @@ async fn handle_wipic_svc(
         WIPICSvcId::ClipCreate => media::clip_create.into_body(),
         WIPICSvcId::ClipFree => media::clip_free.into_body(),
         WIPICSvcId::ClipPutData => media::clip_put_data.into_body(),
-        WIPICSvcId::Unk15 => media::clip_control.into_body(),
+        WIPICSvcId::ClipClearData => media::clip_clear_data.into_body(),
         WIPICSvcId::ClipGetVolume => media::clip_get_volume.into_body(),
         WIPICSvcId::ClipSetVolume => media::clip_set_volume.into_body(),
         WIPICSvcId::Play => media::play.into_body(),
         WIPICSvcId::Pause => media::pause.into_body(),
         WIPICSvcId::Resume => media::resume.into_body(),
         WIPICSvcId::Stop => media::stop.into_body(),
-        WIPICSvcId::Unk5 => unk5.into_body(),
+        WIPICSvcId::SetVolume => mda_set_volume.into_body(),
         WIPICSvcId::Vibrator => media::vibrator.into_body(),
-        WIPICSvcId::Unk14 => unk14.into_body(),
+        WIPICSvcId::SetWaterMark => mda_set_water_mark.into_body(),
         WIPICSvcId::ClipAllocPlayer => media::clip_alloc_player.into_body(),
         WIPICSvcId::ClipFreePlayer => media::clip_free_player.into_body(),
-        WIPICSvcId::Unk10 => unk10.into_body(),
+        WIPICSvcId::GetDefaultVolume => mda_get_default_volume.into_body(),
         WIPICSvcId::SetMuteState => media::set_mute_state.into_body(),
         WIPICSvcId::GetMuteState => media::get_mute_state.into_body(),
         WIPICSvcId::CallPlace => phone::call_place.into_body(),
@@ -573,10 +573,17 @@ async fn im_get_supported_modes(context: &mut dyn WIPICContext, a0: u32, a1: u32
     Ok(table)
 }
 
-async fn unk5(_context: &mut dyn WIPICContext, a0: u32, a1: u32, a2: u32, a3: u32) -> Result<u32> {
-    tracing::warn!("stub unk5({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
-
-    // media
+/// `MC_mdaSetVolume` (service 0x4c0), the handset's overall media volume.
+///
+/// The names of these media services come from the reference firmware's own
+/// service table, which carries an `(id, function, name)` record for each; they
+/// were guesses until 판타지포에버3 turned out to be calling this one.
+///
+/// A title sets a level here and expects the platform to remember it; the
+/// clip-level volume (`MC_mdaClipSetVolume`) is what actually reaches the sink,
+/// so this is accepted and left alone rather than routed anywhere.
+async fn mda_set_volume(_context: &mut dyn WIPICContext, volume: u32, a1: u32, a2: u32, a3: u32) -> Result<u32> {
+    tracing::warn!("stub MC_mdaSetVolume({volume:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
 
     Ok(0)
 }
@@ -907,8 +914,9 @@ fn civil_from_days(days: i64) -> (i32, i32, i32) {
     (year as i32, month as i32, day as i32)
 }
 
-async fn unk10(_context: &mut dyn WIPICContext, a0: u32, a1: u32, a2: u32, a3: u32) -> Result<u32> {
-    tracing::warn!("stub unk10({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
+/// `MC_mdaGetDefaultVolume` (service 0x4ce).
+async fn mda_get_default_volume(_context: &mut dyn WIPICContext, a0: u32, a1: u32, a2: u32, a3: u32) -> Result<u32> {
+    tracing::warn!("stub MC_mdaGetDefaultVolume({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
 
     Ok(0)
 }
@@ -943,10 +951,11 @@ async fn get_parent_program_id(_context: &mut dyn WIPICContext, a0: u32, a1: u32
     Ok(0)
 }
 
-async fn unk14(_context: &mut dyn WIPICContext, a0: u32, a1: u32, a2: u32, a3: u32) -> Result<u32> {
-    tracing::warn!("stub unk14({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
-
-    // media
+/// `MC_mdaSetWaterMark` (service 0x4c2), the buffer level at which a streaming
+/// clip asks for more data. Nothing streams here - a clip's data arrives whole
+/// through `MC_mdaClipPutData` - so there is no mark to keep.
+async fn mda_set_water_mark(_context: &mut dyn WIPICContext, a0: u32, a1: u32, a2: u32, a3: u32) -> Result<u32> {
+    tracing::warn!("stub MC_mdaSetWaterMark({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
 
     Ok(0)
 }

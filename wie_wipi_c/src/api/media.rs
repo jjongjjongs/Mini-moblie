@@ -295,6 +295,21 @@ pub async fn play(context: &mut dyn WIPICContext, ptr_clip: WIPICWord, repeat: W
 /// (`load_smaf`). Without this the loaded clip is never played and those effects
 /// are silent. `cmd` selects the play mode: `0x31` loops (BGM), `0x30` plays
 /// once (SFX); other commands are logged and ignored for now.
+/// `MC_mdaClipClearData` (service 0x4b6), which drops whatever a clip has
+/// buffered.
+///
+/// A clip's data arrives whole through `MC_mdaClipPutData` and is decoded into
+/// an audio handle there, so there is no partial buffer to drop and the handle
+/// stays valid for the replay that follows. Accepted and logged: this is the
+/// service 0x4b6 actually is - it was routed to `clip_control` and logged under
+/// that name until the reference firmware's service table gave both their real
+/// numbers (`MC_mdaClipControl` is 0x4ca).
+pub async fn clip_clear_data(_context: &mut dyn WIPICContext, clip: WIPICWord, a1: WIPICWord, a2: WIPICWord, a3: WIPICWord) -> Result<WIPICWord> {
+    tracing::info!("[media] MC_mdaClipClearData(clip={clip:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
+
+    Ok(0)
+}
+
 pub async fn clip_control(_context: &mut dyn WIPICContext, clip: WIPICWord, cmd: WIPICWord, arg1: WIPICWord, arg2: WIPICWord) -> Result<WIPICWord> {
     // Diagnostic (INFO): playing here blindly double-triggered clips the game
     // also drives another way and layered them, so this is a logging no-op for

@@ -59,6 +59,15 @@ pub async fn get_system_property(context: &mut dyn WIPICContext, ptr_id: WIPICWo
             recovered = subscriber_number(context).await;
             recovered.as_str()
         }
+        // The media types the handset can play, which a title reads to decide
+        // whether to load its music at all: 판타지포에버3 asks for this and looks
+        // for `Yamaha_MA3` in the answer, and got `-9` - so it created no clip,
+        // played nothing and ran silent. The reference asks the handset and
+        // reports what its chip does; ours reports what its audio path does,
+        // which is SMAF, so it names the SMAF profiles and nothing else. A
+        // title that finds one of these here goes on to hand us SMAF data,
+        // which is exactly what `MC_mdaClipPutData` decodes.
+        "MEDIADEVICES" => "Yamaha_MA1,Yamaha_MA2,Yamaha_MA3,Yamaha_MA5,Yamaha_SMAF",
         "ANNUN_CALL" => "0",
         "ANNUN_SMS" => "0",
         "ANNUN_SILENT" => "0",
@@ -505,6 +514,24 @@ mod test {
         assert_eq!(get_system_property(&mut context, id, out, 16).await.unwrap(), 0);
         let result = read_null_terminated_string_bytes(&context, out).unwrap();
         assert_eq!(String::from_utf8(result).unwrap(), "01046119269");
+
+        Ok(())
+    }
+
+    #[futures_test::test]
+    async fn test_get_system_property_media_devices() -> Result<()> {
+        // 판타지포에버3 reads this and looks for `Yamaha_MA3` before it will
+        // create a clip at all, so the answer has to name the SMAF profiles the
+        // audio path plays and fit the buffer a title hands over.
+        let mut context = TestContext::new();
+        let id = context.alloc_raw(16).unwrap();
+        let out = context.alloc_raw(128).unwrap();
+
+        write_null_terminated_string_bytes(&mut context, id, b"MEDIADEVICES").unwrap();
+
+        assert_eq!(get_system_property(&mut context, id, out, 128).await.unwrap(), 0);
+        let result = String::from_utf8(read_null_terminated_string_bytes(&context, out).unwrap()).unwrap();
+        assert!(result.contains("Yamaha_MA3"), "{result}");
 
         Ok(())
     }
