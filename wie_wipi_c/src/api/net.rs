@@ -706,6 +706,30 @@ fn lgt_local_purchase_success_response(request: &[u8]) -> Option<[u8; LGT_LOCAL_
     ])
 }
 
+/// A billing frame as a trace line: its header fields read out, then the bytes.
+///
+/// These frames all start `ffff`, a `u16` length and a `u16` type in network
+/// order, so naming those three is what makes a capture readable without
+/// counting nibbles. Anything too short to carry them is shown as bytes alone.
+/// Capped, because a trace is for reading.
+fn bill_frame_trace(frame: &[u8]) -> alloc::string::String {
+    const SHOWN: usize = 64;
+
+    let bytes: Vec<alloc::string::String> = frame.iter().take(SHOWN).map(|byte| alloc::format!("{byte:02x}")).collect();
+    let bytes = alloc::format!("{}{}", bytes.join(" "), if frame.len() > SHOWN { " ..." } else { "" });
+
+    if frame.len() < 6 || frame[0] != 0xff || frame[1] != 0xff {
+        return alloc::format!("{} bytes [{bytes}]", frame.len());
+    }
+
+    alloc::format!(
+        "type {:#06x} len {} of {} bytes [{bytes}]",
+        u16::from_be_bytes([frame[4], frame[5]]),
+        u16::from_be_bytes([frame[2], frame[3]]),
+        frame.len(),
+    )
+}
+
 const LGT_BILL_HEADER_SIZE: usize = 108;
 const LGT_BILL_READ_HEADER_SIZE: usize = 56;
 const LGT_BILL_READ_PAYLOAD_LENGTH_OFFSET: usize = 0x30;
@@ -924,6 +948,8 @@ impl wie_backend::LocalConnection for LgtBillingGateway {
 
         let mut header = [0u8; LGT_BILL_READ_HEADER_SIZE];
         header[LGT_BILL_READ_PAYLOAD_LENGTH_OFFSET..LGT_BILL_READ_PAYLOAD_LENGTH_OFFSET + 4].copy_from_slice(&(response.len() as u32).to_be_bytes());
+
+        tracing::debug!("LGT billing gateway: {} -> {}", bill_frame_trace(request), bill_frame_trace(&response));
 
         self.pending.extend_from_slice(&header);
         self.pending.extend_from_slice(&response);
@@ -1474,8 +1500,17 @@ pub async fn socket_write(context: &mut dyn WIPICContext, socket: i32, buffer: W
     }
 
     if billing_mode != 0 {
+        // A billing exchange is a handful of small frames that decide whether a
+        // title ever leaves its connecting screen, and a title that sits there
+        // is otherwise indistinguishable from one that never asked. Logged at
+        // debug, both halves, so a capture says what was asked and what was
+        // answered.
+        tracing::debug!("bill write {socket}: {}", bill_frame_trace(&data));
+
         if billing_mode == 1 {
             if let Some(response) = lgt_local_purchase_success_response(&data) {
+                tracing::debug!("bill write {socket}: answered in process with {}", bill_frame_trace(&response));
+
                 state.lock().queue_local_billing_response(socket, response);
 
                 // Match a successful application-level socket write. The
@@ -1597,6 +1632,8 @@ pub async fn socket_read(context: &mut dyn WIPICContext, socket: i32, buffer: WI
         let local_read = state.lock().take_local_billing_response(socket, &mut data);
 
         if let Some(read) = local_read {
+            tracing::debug!("bill read {socket}: {}", bill_frame_trace(&data[..read]));
+
             context.write_bytes(buffer, &data[..read])?;
             return Ok(read as i32);
         }
@@ -1781,6 +1818,11 @@ pub async fn socket_read(context: &mut dyn WIPICContext, socket: i32, buffer: WI
             Ok(read) => {
                 if read > 0 {
                     state.lock().billing_read.remaining_payload = (payload_length as usize).saturating_sub(read);
+
+                    tracing::debug!(
+                        "bill read {socket}: {} ({payload_length} byte payload declared)",
+                        bill_frame_trace(&data[..read])
+                    );
 
                     context.write_bytes(buffer, &data[..read])?;
                 }
