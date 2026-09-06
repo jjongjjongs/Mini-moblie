@@ -11,7 +11,7 @@ use crate::runtime::{
     SVC_CATEGORY_INIT,
     java::{
         app_classes::{self, AppClass},
-        class_table::{ClassTable, OutputArrays},
+        class_table::{ClassTable, JavaMember, OutputArrays},
         compiled_class::{self, CompiledContext},
         handles::JavaHandles,
         platform_metadata::platform_class,
@@ -523,6 +523,58 @@ fn build_dispatch_table(core: &mut ArmCore, class_index: u32, class_root: u32, s
     Ok(vtable)
 }
 
+/// The interface dispatch table for an imported interface the application
+/// declared no interface-method rows for.
+///
+/// Each of the interface's methods gets a synthetic row in the interface-method
+/// table so the ordinary interface-method bridge answers it, placed at the slot
+/// the platform metadata records. The rows are ours alone - nothing writes them
+/// into the application's `interface_method_offsets` output, which the compiled
+/// code fills from its own references.
+fn interface_dispatch_from_metadata(core: &mut ArmCore, table: &mut ClassTable, class_index: usize) -> Result<u32> {
+    /// `ACC_INTERFACE`, the flag that separates an interface from a class.
+    const ACC_INTERFACE: u32 = 0x0200;
+
+    let Some(platform) = platform_class(&table.classes[class_index].name) else {
+        return Ok(0);
+    };
+
+    if platform.flags & ACC_INTERFACE == 0 || platform.methods.is_empty() {
+        return Ok(0);
+    }
+
+    let Some(highest_slot) = platform.methods.iter().map(|method| method.slot).max() else {
+        return Ok(0);
+    };
+
+    if highest_slot >= MAX_DISPATCH_SLOT {
+        return Ok(0);
+    }
+
+    let size = (highest_slot + 2) * 4;
+    let dispatch = Allocator::alloc(core, size)?;
+    core.write_bytes(dispatch, &vec![0; size as usize])?;
+    write_generic(core, dispatch, table.class_roots[class_index])?;
+
+    for method in platform.methods {
+        let row = table.interface_methods.len() as u32;
+        if row >= JAVA_METHOD_SVC_LIMIT {
+            break;
+        }
+
+        table.interface_methods.push(Some(JavaMember {
+            class_index: class_index as u32,
+            name: method.name.to_owned(),
+            descriptor: method.descriptor.to_owned(),
+        }));
+
+        let stub = core.make_svc_stub(SVC_CATEGORY_INIT, JAVA_INTERFACE_METHOD_SVC_BASE + row)?;
+        write_generic(core, dispatch + 4 + method.slot * 4, stub)?;
+    }
+
+    Ok(dispatch)
+}
+
 /// Native dispatch slot for each imported virtual-method row.
 ///
 /// The application's import order is only a subset of a platform class's full
@@ -704,7 +756,17 @@ fn install_dispatch(core: &mut ArmCore, handles: &JavaHandles, table: &mut Class
     for class_index in 0..table.classes.len() {
         let class = &table.classes[class_index];
         if class.interface_method_count == 0 {
-            table.interface_vtables.push(0);
+            // An interface the application imported without naming any of its
+            // methods still needs a table. The compiled code takes the slot
+            // from its own reference tail rather than from an import row, so
+            // an empty row range says nothing about whether the interface is
+            // called: 오즈-천공의 기사단 calls `java/util/Enumeration` this way
+            // on what `Hashtable.keys()` returns, and a null table there made
+            // `vm_find_interface` answer zero and the compiled code throw
+            // NoSuchMethodError. Build it from the platform metadata's own
+            // slots instead.
+            let dispatch = interface_dispatch_from_metadata(core, table, class_index)?;
+            table.interface_vtables.push(dispatch);
             continue;
         }
 
