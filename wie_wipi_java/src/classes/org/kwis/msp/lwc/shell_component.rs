@@ -1012,6 +1012,12 @@ impl ShellComponent {
         .await
     }
 
+    /// The identity of a possibly-null reference, so two of them can be
+    /// compared without dereferencing either.
+    fn identity(reference: &ClassInstanceRef<Component>) -> Option<usize> {
+        reference.instance.as_ref().map(|instance| instance.identity())
+    }
+
     async fn add_component(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, component: ClassInstanceRef<Component>) -> JvmResult<i32> {
         // Native ShellComponent.addComponent(Component):
         //   this.addComponent(0, component);
@@ -1049,7 +1055,10 @@ impl ShellComponent {
         let command: ClassInstanceRef<Component> = jvm.get_field(&this, "command", "Lorg/kwis/msp/lwc/Component;").await?;
 
         // A component that is neither the title nor the command becomes work.
-        if component.identity() != title.identity() && component.identity() != command.identity() {
+        // A shell usually has neither yet, and `identity` dereferences the
+        // instance, so the comparison has to survive a null on either side -
+        // 서든어택 포켓's loader adds its first component to an empty shell.
+        if Self::identity(&component) != Self::identity(&title) && Self::identity(&component) != Self::identity(&command) {
             let mut this_mut = this.clone();
 
             jvm.put_field(&mut this_mut, "work", "Lorg/kwis/msp/lwc/Component;", component.clone())

@@ -168,7 +168,7 @@ fn expected_words(descriptor: &str, takes_receiver: bool) -> Option<u32> {
 /// `name` and `parent` are leaked because [`JavaClassProto`] holds them for the
 /// life of the program; an application registers a bounded set of classes once
 /// per run.
-pub fn as_proto(class: &AppClass, inherits_card_paint: bool) -> JavaClassProto<CompiledContext> {
+pub fn as_proto(class: &AppClass, inherits_card_paint: bool, dispatch_run: Option<u32>) -> JavaClassProto<CompiledContext> {
     let name: &'static str = String::leak(class.name.clone());
     let parent: &'static str = String::leak(class.superclass.clone().unwrap_or_else(|| "java/lang/Object".to_owned()));
 
@@ -216,6 +216,30 @@ pub fn as_proto(class: &AppClass, inherits_card_paint: bool) -> JavaClassProto<C
             },
             body: Box::new(body) as Box<dyn MethodBody<JavaError, CompiledContext>>,
         });
+    }
+
+    // A class whose `run()V` override the method table leaves out, found in its
+    // dispatch table instead (see `dispatch_run_entry`). Without it a thread the
+    // application starts runs the platform's own empty `run` and does nothing.
+    if let Some(entry) = dispatch_run
+        && methods.iter().all(|method| method.name != "run" || method.descriptor != "()V")
+    {
+        let body = CompiledMethod {
+            class_name: class.name.clone(),
+            name: "run".to_owned(),
+            descriptor: "()V".to_owned(),
+            entry,
+            takes_receiver: true,
+        };
+
+        methods.push(JavaMethodProto {
+            name: body.name.clone(),
+            descriptor: body.descriptor.clone(),
+            access_flags: MethodAccessFlags::empty(),
+            body: Box::new(body) as Box<dyn MethodBody<JavaError, CompiledContext>>,
+        });
+
+        tracing::debug!("Bridged {}.run()V from its dispatch table @ {entry:#x}", class.name);
     }
 
     // Seed1's Runnable implementation `p` has no external method table,

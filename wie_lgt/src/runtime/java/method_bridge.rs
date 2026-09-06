@@ -31,6 +31,7 @@ use wie_util::{Result, WieError, read_generic};
 use super::{
     class_table::{ClassTable, is_wide, split_descriptor},
     handles::JavaHandles,
+    platform_metadata::platform_class,
 };
 
 /// Per-bridged-Java-method call counts (`class.name`), so the perf meter can
@@ -117,6 +118,35 @@ impl ResolvedMember {
             descriptor: member.descriptor.clone(),
         })
     }
+}
+
+/// Whether the platform declares `name`/`descriptor` on `class_name` or one of
+/// its superclasses as an *instance* method.
+///
+/// The compiled code reaches a `super.m(...)` through a static import row, so a
+/// static row naming an instance method is a non-virtual call with `this` in
+/// the first word rather than a real static call.
+fn platform_declares_instance_method(class_name: &str, name: &str, descriptor: &str) -> bool {
+    const ACC_STATIC: u32 = 0x0008;
+    const MAX_DEPTH: usize = 32;
+
+    let mut current = class_name;
+    for _ in 0..MAX_DEPTH {
+        let Some(class) = platform_class(current) else {
+            return false;
+        };
+
+        if let Some(method) = class.methods.iter().find(|method| method.name == name && method.descriptor == descriptor) {
+            return method.flags & ACC_STATIC == 0;
+        }
+
+        let Some(superclass) = class.superclass else {
+            return false;
+        };
+        current = superclass;
+    }
+
+    false
 }
 
 /// Reads the `count` argument words a call was made with.
@@ -258,18 +288,45 @@ async fn sync_guest_fields_to_jvm(jvm: &Jvm, handles: &JavaHandles, handle: u32)
     for binding in handles.applied_field_bindings(jvm, &*instance).iter() {
         let word = handles.read_field_word(handle, binding.slot)?;
 
-        match binding.descriptor.as_str() {
-            "I" => {
-                if let Err(error) = jvm.put_field(&mut instance, &binding.name, &binding.descriptor, word as i32).await {
-                    return Err(JvmSupport::to_wie_err(jvm, error).await);
-                }
+        let result = match binding.descriptor.as_bytes()[0] {
+            b'Z' => jvm.put_field(&mut instance, &binding.name, &binding.descriptor, word != 0).await,
+            b'B' => jvm.put_field(&mut instance, &binding.name, &binding.descriptor, word as i8).await,
+            b'C' => jvm.put_field(&mut instance, &binding.name, &binding.descriptor, word as u16).await,
+            b'S' => jvm.put_field(&mut instance, &binding.name, &binding.descriptor, word as i16).await,
+            b'I' => jvm.put_field(&mut instance, &binding.name, &binding.descriptor, word as i32).await,
+            b'F' => {
+                jvm.put_field(&mut instance, &binding.name, &binding.descriptor, f32::from_bits(word))
+                    .await
             }
-            descriptor => {
-                return Err(WieError::FatalError(format!(
-                    "Unsupported LGT imported field descriptor {descriptor} for {}.{}",
-                    binding.class_name, binding.name
-                )));
+            // A reference field holds a handle, which names the instance the
+            // JVM side has to see. 서든어택 포켓's loader thread touches a card
+            // whose imported `Lorg/kwis/msp/lcdui/InputMethodHandler;` field
+            // ended the whole thread when this was fatal.
+            b'L' | b'[' => {
+                jvm.put_field(
+                    &mut instance,
+                    &binding.name,
+                    &binding.descriptor,
+                    ClassInstanceRef::<()>::new(handles.get(word)),
+                )
+                .await
             }
+            // `long` and `double` occupy two words, and nothing says which
+            // order this layout puts them in; leave the JVM's own value alone
+            // rather than write a guess over it.
+            _ => {
+                tracing::debug!(
+                    "Leaving imported field {}.{} ({}) as the JVM has it",
+                    binding.class_name,
+                    binding.name,
+                    binding.descriptor
+                );
+                Ok(())
+            }
+        };
+
+        if let Err(error) = result {
+            return Err(JvmSupport::to_wie_err(jvm, error).await);
         }
     }
 
@@ -284,21 +341,40 @@ async fn sync_jvm_fields_to_guest(jvm: &Jvm, handles: &JavaHandles, handle: u32)
     };
 
     for binding in handles.applied_field_bindings(jvm, &*instance).iter() {
-        let word = match binding.descriptor.as_str() {
-            "I" => {
-                let value: i32 = match jvm.get_field(&instance, &binding.name, &binding.descriptor).await {
+        // Each arm reads the field back as the type it was written with; the
+        // word the guest reads is that value in the one word its slot has.
+        macro_rules! word {
+            ($ty:ty, $convert:expr) => {{
+                let value: $ty = match jvm.get_field(&instance, &binding.name, &binding.descriptor).await {
                     Ok(value) => value,
                     Err(error) => return Err(JvmSupport::to_wie_err(jvm, error).await),
                 };
 
-                value as u32
+                #[allow(clippy::redundant_closure_call)]
+                $convert(value)
+            }};
+        }
+
+        let word = match binding.descriptor.as_bytes()[0] {
+            b'Z' => word!(bool, u32::from),
+            b'B' => word!(i8, |value| value as u32),
+            b'C' => word!(u16, u32::from),
+            b'S' => word!(i16, |value| value as u32),
+            b'I' => word!(i32, |value| value as u32),
+            b'F' => word!(f32, f32::to_bits),
+            b'L' | b'[' => {
+                let value: ClassInstanceRef<()> = match jvm.get_field(&instance, &binding.name, &binding.descriptor).await {
+                    Ok(value) => value,
+                    Err(error) => return Err(JvmSupport::to_wie_err(jvm, error).await),
+                };
+
+                match value.instance {
+                    Some(instance) => handles.address_of(instance)?,
+                    None => 0,
+                }
             }
-            descriptor => {
-                return Err(WieError::FatalError(format!(
-                    "Unsupported LGT imported field descriptor {descriptor} for {}.{}",
-                    binding.class_name, binding.name
-                )));
-            }
+            // Two-word fields, as above: nothing to write back.
+            _ => continue,
         };
 
         handles.write_field_word(handle, binding.slot, word)?;
@@ -772,6 +848,18 @@ pub async fn invoke(core: &mut ArmCore, jvm: &Jvm, handles: &JavaHandles, member
         return Ok(this.into());
     }
 
+    // A static row naming an instance method is how the compiled code encodes
+    // `invokespecial` - a `super.m(...)` call - with `this` in the first word.
+    // Invoking it as static hands `this` to the first declared parameter, and
+    // the JVM rejects the call outright: 서든어택 포켓's loader thread died on
+    // `TextFieldComponent.focusNotify` before it could load anything.
+    let super_call = receiver.is_none() && platform_declares_instance_method(class_name, name, descriptor);
+    let receiver = match receiver {
+        Some(handle) => Some(handle),
+        None if super_call => Some(core.read_param(0)?),
+        None => None,
+    };
+
     let receiver = match receiver {
         Some(handle) => match handles.get(handle) {
             Some(instance) => Some(instance),
@@ -813,7 +901,12 @@ pub async fn invoke(core: &mut ArmCore, jvm: &Jvm, handles: &JavaHandles, member
         // needs. Raise `wie_lgt::hot=trace` to see the per-call sequence.
         tracing::debug!(target: "wie_lgt::hot", "LGT invoke virtual {class_name}.{name}{descriptor}");
 
-        jvm.invoke_virtual::<_, JavaValue>(&instance, name, descriptor, arguments).await
+        if super_call {
+            jvm.invoke_special::<_, JavaValue>(&instance, class_name, name, descriptor, arguments)
+                .await
+        } else {
+            jvm.invoke_virtual::<_, JavaValue>(&instance, name, descriptor, arguments).await
+        }
     } else {
         tracing::debug!(target: "wie_lgt::hot", "LGT invoke static {class_name}.{name}{descriptor}");
 

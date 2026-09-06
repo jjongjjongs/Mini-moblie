@@ -26,6 +26,13 @@ const MAX_MAIN_ARGUMENTS: u32 = 16;
 /// Guard on how far an application class hierarchy is followed.
 const MAX_CLASS_DEPTH: usize = 32;
 
+/// A class's dispatch table pointer, `metadata`-relative.
+const CLASS_DISPATCH_TABLE: u32 = 0x0c;
+
+/// The platform marks a method with no dispatch slot with `0xffff`; a real slot
+/// is far below that.
+const MAX_DISPATCH_SLOT: u32 = 0x1000;
+
 /// Diagnostic SVC range used for unresolved LGT Java-interface imports.
 /// The low 12 bits preserve the original function index.
 pub const JAVA_DIAG_SVC_BASE: u32 = 0x1000;
@@ -953,6 +960,68 @@ fn inherits_compiled_card_paint(
     declares || inherits_compiled_card_paint(core, app_classes, image_ranges, class.superclass.as_deref(), depth + 1)
 }
 
+/// The `run()V` override a class carries only in its dispatch table.
+///
+/// A compiled class can extend `java.lang.Thread`, override `run`, and still
+/// ship an empty method table - 서든어택 포켓's loader thread `k` does. Nothing
+/// then bridges the override, so `Thread.start` runs the platform's own empty
+/// `run`, the thread does nothing, and the title waits forever on a load that
+/// never happens. The override is in the class's own dispatch table all the
+/// same, at the slot the platform gives `Thread.run()V`, so read it from there.
+///
+/// Only an entry inside the application image counts: a slot the class did not
+/// override still holds the platform's own `run`, which the JVM already
+/// inherits and which must not be bridged as compiled code.
+fn dispatch_run_entry(core: &ArmCore, app_classes: &Mutex<Vec<AppClass>>, image_ranges: &[(u32, u32)], class: &AppClass) -> Option<u32> {
+    if declares_run(class) {
+        return None;
+    }
+
+    // The slot is the platform's, so walk up to the platform class the chain
+    // reaches. An application superclass that declares `run` itself is bridged
+    // in its own right, and the JVM inherits the method from there.
+    let mut name = class.superclass.clone()?;
+    let slot = loop {
+        if let Some(platform) = platform_class(&name) {
+            break platform
+                .methods
+                .iter()
+                .find(|method| method.name == "run" && method.descriptor == "()V" && method.slot <= MAX_DISPATCH_SLOT)
+                .map(|method| method.slot)?;
+        }
+
+        let superclass = app_class_by_name(core, app_classes, image_ranges, &name)?;
+        if declares_run(&superclass) {
+            return None;
+        }
+        name = superclass.superclass?;
+    };
+
+    let metadata: u32 = read_generic(core, class.root + 8).ok()?;
+    if metadata == 0 {
+        return None;
+    }
+
+    let vtable: u32 = read_generic(core, metadata + CLASS_DISPATCH_TABLE).ok()?;
+    if vtable == 0 {
+        return None;
+    }
+
+    // Slot zero sits one word into the table, as every compiled dispatch does.
+    let entry: u32 = read_generic(core, vtable + 4 + slot * 4).ok()?;
+
+    image_ranges
+        .iter()
+        .any(|(base, size)| entry >= *base && entry < base + size)
+        .then_some(entry)
+}
+
+fn declares_run(class: &AppClass) -> bool {
+    class
+        .methods()
+        .any(|method| method.name() == "run" && method.descriptor() == "()V" && method.is_instance_method())
+}
+
 /// Registers a JVM stand-in for an application class and everything it
 /// inherits from or implements.
 ///
@@ -1004,7 +1073,9 @@ pub async fn bridge_class_chain(
 
             let inherits_card_paint = inherits_compiled_card_paint(core, app_classes, image_ranges, class.superclass.as_deref(), 0);
 
-            compiled_class::as_proto(&class, inherits_card_paint)
+            let dispatch_run = dispatch_run_entry(core, app_classes, image_ranges, &class);
+
+            compiled_class::as_proto(&class, inherits_card_paint, dispatch_run)
         };
 
         if !compiled_class::register(jvm, &context, &class_name, proto).await {
