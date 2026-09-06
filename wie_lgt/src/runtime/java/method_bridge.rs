@@ -302,15 +302,37 @@ async fn sync_guest_fields_to_jvm(jvm: &Jvm, handles: &JavaHandles, handle: u32)
             // JVM side has to see. 서든어택 포켓's loader thread touches a card
             // whose imported `Lorg/kwis/msp/lcdui/InputMethodHandler;` field
             // ended the whole thread when this was fatal.
-            b'L' | b'[' => {
-                jvm.put_field(
-                    &mut instance,
-                    &binding.name,
-                    &binding.descriptor,
-                    ClassInstanceRef::<()>::new(handles.get(word)),
-                )
-                .await
-            }
+            //
+            // A zero word is the one thing it cannot say. It names no object,
+            // and a platform class routinely fills such a field from its own
+            // constructor - 오즈's text field has its `imHandler` built there -
+            // so the guest has not been told the handle yet and a call that
+            // reaches back into the platform mid-construction would clear what
+            // was just built. Leave a reference the JVM has and the guest does
+            // not; the guest's own null is the case this cannot carry across.
+            b'L' | b'[' => match handles.get(word) {
+                Some(referent) => {
+                    jvm.put_field(
+                        &mut instance,
+                        &binding.name,
+                        &binding.descriptor,
+                        ClassInstanceRef::<()>::new(Some(referent)),
+                    )
+                    .await
+                }
+                None => {
+                    let held: ClassInstanceRef<()> = match jvm.get_field(&instance, &binding.name, &binding.descriptor).await {
+                        Ok(held) => held,
+                        Err(error) => return Err(JvmSupport::to_wie_err(jvm, error).await),
+                    };
+
+                    if held.is_null() {
+                        Ok(())
+                    } else {
+                        continue;
+                    }
+                }
+            },
             // `long` and `double` occupy two words, and nothing says which
             // order this layout puts them in; leave the JVM's own value alone
             // rather than write a guess over it.

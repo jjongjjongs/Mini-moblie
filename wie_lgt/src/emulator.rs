@@ -35,6 +35,8 @@ pub struct LgtEmulator {
 
 impl LgtEmulator {
     pub fn from_archive(platform: Box<dyn Platform>, files: BTreeMap<String, Vec<u8>>, options: Options) -> Result<Self> {
+        let files = reroot_archive(files);
+
         let app_info = files
             .get("app_info")
             .ok_or_else(|| WieError::FatalError("Missing app_info in LGT archive".into()))?;
@@ -97,7 +99,7 @@ impl LgtEmulator {
     }
 
     pub fn loadable_archive(files: &BTreeMap<String, Vec<u8>>) -> bool {
-        files.contains_key("app_info")
+        files.contains_key("app_info") || descriptor_directory(files).is_some()
     }
 
     pub fn loadable_jar(jar: &[u8]) -> bool {
@@ -566,6 +568,69 @@ fn is_incompatible_bundled_save(aid: &str, filename: &str) -> bool {
         }
         _ => false,
     }
+}
+
+/// The one directory holding the archive's descriptor, when the archive root
+/// does not.
+///
+/// A handset dump can keep the title's app directory and its data directory
+/// side by side, under one folder: 오즈 arrives as `오즈/app_info` next to
+/// `오즈인증세이브/bo`. `extract_zip` strips only a directory the whole archive
+/// shares, so what is left has no descriptor at its root, nothing recognises it
+/// as an archive at all, and the zip goes on to be tried as a bare jar - which
+/// is where the title stopped dead.
+fn descriptor_directory(files: &BTreeMap<String, Vec<u8>>) -> Option<String> {
+    let mut directories = files
+        .keys()
+        .filter_map(|path| path.strip_suffix("/app_info"))
+        .filter(|directory| !directory.contains('/'));
+
+    match (directories.next(), directories.next()) {
+        (Some(directory), None) => Some(directory.to_owned()),
+        _ => None,
+    }
+}
+
+/// Moves an archive whose descriptor sits one directory down back to the root.
+///
+/// The directory holding the descriptor is the archive. The files beside it are
+/// the title's own data, which it reads from its data-dir root, so they lose
+/// their directory too - the same shape [`data_dir_relative`] gives a dump that
+/// carries `wipi-data/<aid>/`. A name the archive already has is left alone, so
+/// nothing the descriptor's own directory holds can be replaced from outside it.
+fn reroot_archive(files: BTreeMap<String, Vec<u8>>) -> BTreeMap<String, Vec<u8>> {
+    let Some(directory) = descriptor_directory(&files) else {
+        return files;
+    };
+
+    tracing::info!("LGT archive is rooted at {directory}/; the rest is the title's own data");
+
+    let prefix = alloc::format!("{directory}/");
+    let mut rerooted = BTreeMap::new();
+
+    for (path, data) in &files {
+        if let Some(inner) = path.strip_prefix(&prefix) {
+            rerooted.insert(inner.to_owned(), data.clone());
+        }
+    }
+
+    for (path, data) in files {
+        if path.starts_with(&prefix) {
+            continue;
+        }
+
+        // Everything outside the archive is data the title reads by its own
+        // name, whichever folder the dump filed it under.
+        let name = path.rsplit_once('/').map_or(path.as_str(), |(_, name)| name);
+        let inner = match path.split_once('/') {
+            Some((_, rest)) => rest.to_owned(),
+            None => name.to_owned(),
+        };
+
+        rerooted.entry(inner).or_insert(data);
+    }
+
+    rerooted
 }
 
 /// Whether a title is written for a handset showing its status strip.
