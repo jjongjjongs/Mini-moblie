@@ -1630,7 +1630,12 @@ async fn handle_init_svc(core: &mut ArmCore, context: &mut InitSvcContext, id: S
         // message. Preserve the abstract-method failure semantics without
         // interpreting that revision-specific argument as text.
         InitSvcId::LegacyVmThrowAbstractMethodError => {
-            let class_name = "java/lang/VirtualMachineError";
+            // `java/lang/VirtualMachineError`, the class native names here, is
+            // abstract: instantiating it fails, and the InstantiationError that
+            // comes back is fatal - it ends the title where the guest expected
+            // an exception it could handle. Throw the concrete error this
+            // helper is named for instead.
+            let class_name = "java/lang/AbstractMethodError";
             let vtable = synthetic_platform_vtable(core, context, class_name)?;
 
             context.java_handles.set_dispatch_table(class_name, vtable);
@@ -1651,7 +1656,16 @@ async fn handle_init_svc(core: &mut ArmCore, context: &mut InitSvcContext, id: S
         // forwards the incoming r0 as the optional message.
         InitSvcId::VmThrowAbstractMethodError | InitSvcId::VmThrowNoSuchMethodError => {
             let message = core.read_param(0)?;
-            let class_name = "java/lang/VirtualMachineError";
+            // Both forward to `vm_throw_virtual_machine_error` natively, but
+            // `java/lang/VirtualMachineError` is abstract here and cannot be
+            // instantiated - the InstantiationError that comes back is fatal
+            // where the guest expected a catchable one. Each SVC names a
+            // concrete error of its own; throw that.
+            let class_name = if id.0 == InitSvcId::VmThrowAbstractMethodError as u32 {
+                "java/lang/AbstractMethodError"
+            } else {
+                "java/lang/NoSuchMethodError"
+            };
             let vtable = synthetic_platform_vtable(core, context, class_name)?;
 
             context.java_handles.set_dispatch_table(class_name, vtable);
