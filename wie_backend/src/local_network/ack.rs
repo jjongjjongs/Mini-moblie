@@ -39,8 +39,26 @@ pub struct Framing {
     /// Bytes after the length that name the message, echoed into the reply so
     /// the title can pair the answer with what it asked.
     pub type_width: usize,
-    /// The payload every reply carries, after the echoed type.
-    pub status: Vec<u8>,
+    /// What every reply carries after the echoed type.
+    pub status: Status,
+}
+
+/// The payload a reply carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Status {
+    /// The same bytes every time. Zero is how this family of protocols spells
+    /// "granted".
+    Fixed(Vec<u8>),
+    /// The request's own payload, handed straight back - which is what a title
+    /// polling for a value it supplied may be waiting to see.
+    Echo,
+    /// A four-byte counter, one per reply.
+    ///
+    /// A title that keeps repeating a request is waiting for an answer it has
+    /// not been given, and there is no way to know which without trying. One
+    /// run of this covers as many values as the title asks, and the log says
+    /// which one it was on when it stopped.
+    Sweep,
 }
 
 impl Default for Framing {
@@ -50,7 +68,7 @@ impl Default for Framing {
             big_endian: true,
             length_includes_prefix: true,
             type_width: 4,
-            status: vec![0, 0, 0, 0],
+            status: Status::Fixed(vec![0, 0, 0, 0]),
         }
     }
 }
@@ -144,7 +162,13 @@ impl AckEndpoint {
             match key {
                 "len" => framing.apply_length_word(value)?,
                 "type" => framing.type_width = value.parse().ok()?,
-                "status" => framing.status = parse_hex(value)?,
+                "status" => {
+                    framing.status = match value {
+                        "echo" => Status::Echo,
+                        "sweep" => Status::Sweep,
+                        hex => Status::Fixed(parse_hex(hex)?),
+                    }
+                }
                 "prefix" => {
                     framing.length_includes_prefix = match value {
                         "in" => true,
@@ -206,6 +230,7 @@ impl LocalEndpoint for AckEndpoint {
             framing: self.framing.clone(),
             request: Vec::new(),
             reply: Vec::new(),
+            answered: 0,
         })
     }
 }
@@ -217,6 +242,8 @@ struct AckConnection {
     request: Vec<u8>,
     /// What is left to hand back.
     reply: Vec<u8>,
+    /// How many replies have been sent, which is what [`Status::Sweep`] counts.
+    answered: u32,
 }
 
 impl AckConnection {
@@ -254,17 +281,24 @@ impl LocalConnection for AckConnection {
         self.request.extend_from_slice(bytes);
 
         while let Some(frame) = self.take_frame() {
+            let status = match &self.framing.status {
+                Status::Fixed(status) => status.clone(),
+                Status::Echo => frame[self.framing.header_size()..].to_vec(),
+                Status::Sweep => self.answered.to_be_bytes().to_vec(),
+            };
+
             let message_type = &frame[self.framing.length_width..self.framing.header_size()];
 
-            let total = self.framing.header_size() + self.framing.status.len();
+            let total = self.framing.header_size() + status.len();
             let mut reply = vec![0u8; total];
             self.framing.write_length(&mut reply, total);
             reply[self.framing.length_width..self.framing.header_size()].copy_from_slice(message_type);
-            reply[self.framing.header_size()..].copy_from_slice(&self.framing.status);
+            reply[self.framing.header_size()..].copy_from_slice(&status);
 
             tracing::info!("ack {}: {} -> {}", self.peer, hex(&frame), hex(&reply));
 
             self.reply.extend_from_slice(&reply);
+            self.answered = self.answered.wrapping_add(1);
         }
     }
 
@@ -300,7 +334,7 @@ fn hex(bytes: &[u8]) -> String {
 mod tests {
     use alloc::{string::ToString, vec, vec::Vec};
 
-    use super::{AckEndpoint, Framing, parse_hex};
+    use super::{AckEndpoint, Framing, Status, parse_hex};
     use crate::local_network::{LocalEndpoint, LocalRead, capture::CaptureAddress};
 
     fn drain(connection: &mut alloc::boxed::Box<dyn crate::local_network::LocalConnection>) -> Vec<u8> {
@@ -374,7 +408,7 @@ mod tests {
             big_endian: false,
             length_includes_prefix: true,
             type_width: 2,
-            status: vec![0xff],
+            status: Status::Fixed(vec![0xff]),
         };
         let endpoint = AckEndpoint::new(CaptureAddress::Any, framing);
         let mut connection = endpoint.open("socket", "host", 1);
@@ -402,6 +436,38 @@ mod tests {
     }
 
     #[test]
+    fn an_echoing_reply_hands_the_request_payload_straight_back() {
+        let framing = Framing {
+            status: Status::Echo,
+            ..Framing::default()
+        };
+        let endpoint = AckEndpoint::new(CaptureAddress::Any, framing);
+        let mut connection = endpoint.open("socket", "host", 1);
+
+        // 오즈's repeated request, whose payload is a u32 ten.
+        connection.write(&[0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 10]);
+
+        assert_eq!(drain(&mut connection), vec![0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 10]);
+    }
+
+    #[test]
+    fn a_sweeping_reply_counts_up_one_per_answer() {
+        let framing = Framing {
+            status: Status::Sweep,
+            ..Framing::default()
+        };
+        let endpoint = AckEndpoint::new(CaptureAddress::Any, framing);
+        let mut connection = endpoint.open("socket", "host", 1);
+
+        for expected in 0..3u32 {
+            connection.write(&[0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 10]);
+
+            let reply = drain(&mut connection);
+            assert_eq!(&reply[8..], &expected.to_be_bytes());
+        }
+    }
+
+    #[test]
     fn a_setting_says_the_address_and_the_framing() {
         assert!(AckEndpoint::from_setting(None).is_none());
         assert!(AckEndpoint::from_setting(Some("0")).is_none());
@@ -421,7 +487,7 @@ mod tests {
                 big_endian: false,
                 length_includes_prefix: false,
                 type_width: 2,
-                status: vec![0x00, 0xff],
+                status: Status::Fixed(vec![0x00, 0xff]),
             }
         );
     }
@@ -431,6 +497,8 @@ mod tests {
         assert!(AckEndpoint::from_setting(Some("any,len=u24be")).is_none());
         assert!(AckEndpoint::from_setting(Some("any,len=u32me")).is_none());
         assert!(AckEndpoint::from_setting(Some("any,status=abc")).is_none());
+        assert_eq!(AckEndpoint::from_setting(Some("any,status=echo")).unwrap().framing.status, Status::Echo);
+        assert_eq!(AckEndpoint::from_setting(Some("any,status=sweep")).unwrap().framing.status, Status::Sweep);
         assert!(AckEndpoint::from_setting(Some("any,unknown=1")).is_none());
         assert!(AckEndpoint::from_setting(Some("any,type=x")).is_none());
         assert!(AckEndpoint::from_setting(Some(":31000")).is_none());
