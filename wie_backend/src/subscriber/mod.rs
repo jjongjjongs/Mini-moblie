@@ -12,7 +12,10 @@ mod lgt_cert;
 
 pub use self::lgt_cert::recover_phone_number as from_cert;
 
-use alloc::string::{String, ToString};
+use alloc::{
+    borrow::ToOwned,
+    string::{String, ToString},
+};
 
 /// The number reported when nothing in the archive names one.
 ///
@@ -28,7 +31,11 @@ pub const FALLBACK: &str = "01046119269";
 /// the `send_ctn` of a gifted copy - the sender's number, not the subscriber's -
 /// is not mistaken for it. Returns `None` unless the value is a plausible
 /// subscriber number, so a descriptor without one falls back to the caller's
-/// placeholder. The store wrote them 12 digits long as often as 11.
+/// placeholder.
+///
+/// The store wrote the value in the carrier's padded twelve-digit form more
+/// often than in the subscriber's own, so what it names is [`unpad_mdn`]'d back
+/// to the number a handset would report.
 pub fn from_descriptor(app_info: &[u8]) -> Option<String> {
     // Scanned as bytes: a descriptor's name and vendor fields are EUC-KR, so it
     // is not valid UTF-8 as a whole.
@@ -44,7 +51,32 @@ pub fn from_descriptor(app_info: &[u8]) -> Option<String> {
             &digits[..end]
         })
         .find(|number| (10..=12).contains(&number.len()) && number.first() == Some(&b'0'))
-        .map(|number| String::from_utf8_lossy(number).into_owned())
+        .map(|number| unpad_mdn(&String::from_utf8_lossy(number)))
+}
+
+/// The subscriber's own number behind a twelve-digit MDN.
+///
+/// The store wrote the `ctn` in the carrier's twelve-digit form, which is the
+/// subscriber number with its three-digit prefix padded back out: `WPBill_Write`
+/// builds it by inserting `"00"` after the prefix of a ten-digit number and
+/// `"0"` after that of an eleven-digit one. A handset reports the number it was
+/// padded from, not the padding - so undo it, and let the billing header pad it
+/// again when that is what the header wants.
+///
+/// The two paddings are told apart the way they were made: a `"00"` after the
+/// prefix came from a ten-digit number, a single `"0"` from an eleven-digit one.
+/// Anything that is not twelve digits, or that carries no padding to remove, is
+/// already the number and is returned unchanged.
+fn unpad_mdn(number: &str) -> String {
+    if number.len() != 12 || !number.is_char_boundary(5) {
+        return number.to_owned();
+    }
+
+    match &number[3..5] {
+        "00" => alloc::format!("{}{}", &number[..3], &number[5..]),
+        padded if padded.starts_with('0') => alloc::format!("{}{}", &number[..3], &number[4..]),
+        _ => number.to_owned(),
+    }
 }
 
 /// Reads a `certification` file that is just the subscriber number as ASCII
@@ -103,7 +135,7 @@ mod tests {
     #[test]
     fn a_descriptor_names_the_number_its_copy_was_downloaded_for() {
         let app_info = b"AID:000315C6\r\nDDurl:http://omadn.ez-i.co.kr:9089/oma_dd.dn?ctn=010085300848&req_pltf=1\r\n";
-        assert_eq!(from_descriptor(app_info).as_deref(), Some("010085300848"));
+        assert_eq!(from_descriptor(app_info).as_deref(), Some("01085300848"));
 
         // A descriptor with no `ctn`, and a gifted copy's `send_ctn` - the
         // sender's number, not the subscriber's.
@@ -113,6 +145,51 @@ mod tests {
         // Values that are not plausible subscriber numbers.
         assert_eq!(from_descriptor(b"DDurl:http://example/dd.dn?ctn=0100&b=2"), None);
         assert_eq!(from_descriptor(b"DDurl:http://example/dd.dn?ctn=910085300848"), None);
+    }
+
+    #[test]
+    fn a_descriptor_number_comes_back_as_the_subscriber_s_own_not_the_padded_one() {
+        // Every `ctn` measured off these archives is the twelve-digit carrier
+        // form; a handset reports the eleven it was padded from.
+        for (padded, subscriber) in [
+            ("010055452383", "01055452383"),
+            ("010024882970", "01024882970"),
+            ("010023276993", "01023276993"),
+            ("010068780247", "01068780247"),
+            ("010077405004", "01077405004"),
+            ("010024341091", "01024341091"),
+        ] {
+            let app_info = alloc::format!("DDurl:http://example/dd.dn?ctn={padded}");
+            assert_eq!(from_descriptor(app_info.as_bytes()).as_deref(), Some(subscriber), "{padded}");
+        }
+    }
+
+    #[test]
+    fn a_ten_digit_number_is_told_from_an_eleven_digit_one_by_its_padding() {
+        // `"00"` after the prefix is what a ten-digit number was padded with.
+        assert_eq!(
+            from_descriptor(b"DDurl:http://example/dd.dn?ctn=011001234567").as_deref(),
+            Some("0111234567")
+        );
+
+        // A single `"0"` is an eleven-digit number's padding.
+        assert_eq!(
+            from_descriptor(b"DDurl:http://example/dd.dn?ctn=011012345678").as_deref(),
+            Some("01112345678")
+        );
+    }
+
+    #[test]
+    fn a_number_that_carries_no_padding_is_left_as_it_is() {
+        // Eleven digits already, and twelve with no zero where padding would be.
+        assert_eq!(
+            from_descriptor(b"DDurl:http://example/dd.dn?ctn=01055452383").as_deref(),
+            Some("01055452383")
+        );
+        assert_eq!(
+            from_descriptor(b"DDurl:http://example/dd.dn?ctn=010155452383").as_deref(),
+            Some("010155452383")
+        );
     }
 
     #[test]
@@ -126,7 +203,7 @@ mod tests {
             subscriber_number(Some(b"not a certificate"), Some(certification), Some(app_info)),
             "01011112222"
         );
-        assert_eq!(subscriber_number(None, None, Some(app_info)), "010085300848");
+        assert_eq!(subscriber_number(None, None, Some(app_info)), "01085300848");
         assert_eq!(subscriber_number(None, None, None), FALLBACK);
     }
 }
