@@ -581,13 +581,32 @@ fn is_incompatible_bundled_save(aid: &str, filename: &str) -> bool {
 /// MapleStory 도적편 (`0002787C`) holds the strip height in its graphics object
 /// and adds it to every row index it derives from that pointer; without the
 /// strip its splash logos, HUD icons and shortcut numbers sit a strip too low
-/// and its level readout falls off the bottom edge. 나는 마왕이다 2 and 프로야구
-/// 2010 blit from the panel's first row instead and are right without one, as
-/// reference captures of all three confirm.
+/// and its level readout falls off the bottom edge. 액션퍼즐패밀리3 (`0002CB6A`)
+/// is written the same way: without the strip its menu, its dialog backgrounds
+/// and the banner across the bottom of every screen sit a strip low, leaving a
+/// blank band above them and cutting the banner in half. 나는 마왕이다 2 and
+/// 프로야구 2010 blit from the panel's first row instead and are right without
+/// one, as reference captures of all of them confirm.
 ///
 /// Keyed on the descriptor's aid, so nothing else is touched.
 fn title_expects_annunciator(aid: &str) -> bool {
-    matches!(aid.to_ascii_uppercase().as_str(), "0002787C")
+    matches!(aid.to_ascii_uppercase().as_str(), "0002787C" | "0002CB6A")
+}
+
+#[cfg(test)]
+mod annunciator_tests {
+    use super::title_expects_annunciator;
+
+    #[test]
+    fn names_the_titles_that_skip_the_strip_themselves() {
+        assert!(title_expects_annunciator("0002787C"));
+        assert!(title_expects_annunciator("0002cb6a"));
+    }
+
+    #[test]
+    fn leaves_a_title_that_blits_from_the_first_row_alone() {
+        assert!(!title_expects_annunciator("00025C2B"));
+    }
 }
 
 /// SEED (`00027565`) opens `SEED_OP.dat` on launch to decide whether it has
