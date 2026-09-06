@@ -1,10 +1,14 @@
-use alloc::vec;
+use alloc::{string::String as RustString, vec, vec::Vec};
 
 use java_class_proto::JavaMethodProto;
 use java_constants::MethodAccessFlags;
 use java_runtime::classes::java::lang::String;
-use jvm::{ClassInstanceRef, Jvm, Result as JvmResult, runtime::JavaLangString};
+use jvm::{
+    ClassInstanceRef, Jvm, Result as JvmResult,
+    runtime::{JavaIoInputStream, JavaLangClassLoader, JavaLangString},
+};
 
+use wie_backend::subscriber;
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 
 /// What `getFlipState` reports on a handset with nothing to fold.
@@ -59,21 +63,50 @@ impl HandsetProperty {
 
     async fn get_system_property(jvm: &Jvm, _: &mut WieJvmContext, name: ClassInstanceRef<String>) -> JvmResult<ClassInstanceRef<String>> {
         let name = JavaLangString::to_rust_string(jvm, &name).await?;
-        tracing::warn!("stub org.kwis.msp.handset.HandsetProperty::getSystemProperty({name})");
 
+        // The subscriber number is recovered from the archive, the same way and
+        // from the same files as the WIPI-C `MC_knlGetSystemProperty` path. A
+        // title that reads it through both - one to decrypt its certificate,
+        // the other to fill a form - would otherwise be told two different
+        // numbers and reject itself.
+        let recovered;
         let value = match name.as_ref() {
             "VIBRATORLEVEL" => "0",
             "DS_LOCK" => "0",
-            // A valid subscriber number so a title that gates on having one
-            // (e.g. an SMS opt-in that reads its own number) sees a real value
-            // instead of an empty string. Matches the WIPI-C PHONENUMBER path's
-            // fallback so both agree.
-            "PHONENUMBER" | "MIN" => "01046119269",
-            _ => "",
+            "PHONENUMBER" | "MIN" => {
+                recovered = Self::subscriber_number(jvm).await;
+                recovered.as_str()
+            }
+            _ => {
+                tracing::warn!("stub org.kwis.msp.handset.HandsetProperty::getSystemProperty({name})");
+                ""
+            }
         };
+
+        tracing::debug!("org.kwis.msp.handset.HandsetProperty::getSystemProperty({name}) -> {value:?}");
 
         let result = JavaLangString::from_rust_string(jvm, value).await?;
         Ok(result.into())
+    }
+
+    /// The subscriber number the archive names, or the shared fallback.
+    async fn subscriber_number(jvm: &Jvm) -> RustString {
+        let cert = Self::resource(jvm, "cert.c2s").await;
+        let certification = Self::resource(jvm, "certification").await;
+        let app_info = Self::resource(jvm, "app_info").await;
+
+        subscriber::subscriber_number(cert.as_deref(), certification.as_deref(), app_info.as_deref())
+    }
+
+    /// One of the archive's own files, or `None` when it has no such file.
+    ///
+    /// Read through the class loader, which is where these archives' files are:
+    /// the WIPI-C side reaches them the same way.
+    async fn resource(jvm: &Jvm, name: &str) -> Option<Vec<u8>> {
+        let class_loader = jvm.current_class_loader().await.ok()?;
+        let stream = JavaLangClassLoader::get_resource_as_stream(jvm, &class_loader, name).await.ok()??;
+
+        JavaIoInputStream::read_until_end(jvm, &stream).await.ok()
     }
 
     async fn set_system_property(_: &Jvm, _: &mut WieJvmContext, id: ClassInstanceRef<String>, value: ClassInstanceRef<String>) -> JvmResult<bool> {

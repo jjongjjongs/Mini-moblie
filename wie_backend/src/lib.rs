@@ -8,6 +8,7 @@ mod executor;
 mod local_network;
 mod platform;
 mod screen;
+pub mod subscriber;
 mod system;
 mod task;
 mod task_runner;

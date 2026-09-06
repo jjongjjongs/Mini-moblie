@@ -1,4 +1,3 @@
-mod lgt_cert;
 mod sprintf;
 
 use alloc::{
@@ -97,87 +96,14 @@ pub async fn get_system_property(context: &mut dyn WIPICContext, ptr_id: WIPICWo
 
 /// The subscriber number to report for PHONENUMBER / MIN.
 ///
-/// LGT titles use it as the key that decrypts cert.c2s, so recover the exact
-/// number the certificate was issued for from cert.c2s itself. A collection of
-/// titles dumped from one handset shares one number, so the placeholder used
-/// when no certificate is recoverable is also a working default for them.
+/// Recovered from the archive by [`wie_backend::subscriber`], which the
+/// WIPI-Java `HandsetProperty` path uses too so the two always agree.
 async fn subscriber_number(context: &mut dyn WIPICContext) -> String {
-    const FALLBACK: &str = "01046119269";
+    let cert = context.read_resource("cert.c2s").await.ok();
+    let certification = context.read_resource("certification").await.ok();
+    let app_info = context.read_resource("app_info").await.ok();
 
-    if let Ok(cert) = context.read_resource("cert.c2s").await
-        && let Some(number) = lgt_cert::recover_phone_number(&cert)
-    {
-        tracing::info!("recovered subscriber number from cert.c2s: {number:?}");
-        return number;
-    }
-
-    // Some titles (MapleStory 해적편/시그너스 among them) ship a plain
-    // `certification` file that is simply the subscriber number as ASCII digits,
-    // and reject the game unless PHONENUMBER equals it byte for byte (a strcmp
-    // of the two). Report that number so an unmodified title authenticates
-    // without a per-game value.
-    if let Ok(cert) = context.read_resource("certification").await
-        && let Some(number) = parse_ascii_phone_number(&cert)
-    {
-        tracing::info!("recovered subscriber number from certification: {number:?}");
-        return number;
-    }
-
-    // Failing a certificate, the archive's own descriptor names the subscriber:
-    // `app_info` carries the OMA download URL the copy was fetched with, and
-    // that URL's `ctn` is the number the handset downloading it was on. Titles
-    // whose certificate we cannot decrypt (Com2uS's `cert.c2s` is its own
-    // format, not the ez-i one above) still check the number against the
-    // certificate they were issued, so reporting the one their own descriptor
-    // names is what lets them authenticate offline.
-    if let Ok(app_info) = context.read_resource("app_info").await
-        && let Some(number) = descriptor_subscriber_number(&app_info)
-    {
-        tracing::info!("recovered subscriber number from app_info: {number:?}");
-        return number;
-    }
-
-    FALLBACK.to_string()
-}
-
-/// The subscriber number an LGT archive descriptor was downloaded for: the
-/// `ctn` query parameter of the `DDurl` it carries.
-///
-/// Matched only where the URL itself starts a parameter (`?ctn=` / `&ctn=`), so
-/// the `send_ctn` of a gifted copy - the sender's number, not the subscriber's -
-/// is not mistaken for it. Returns `None` unless the value is a plausible
-/// subscriber number, so a descriptor without one falls back to the caller's
-/// placeholder. The store wrote them 12 digits long as often as 11.
-fn descriptor_subscriber_number(app_info: &[u8]) -> Option<String> {
-    // Scanned as bytes: a descriptor's name and vendor fields are EUC-KR, so it
-    // is not valid UTF-8 as a whole.
-    const KEY: &[u8] = b"ctn=";
-
-    app_info
-        .windows(KEY.len())
-        .enumerate()
-        .filter(|&(at, window)| window == KEY && matches!(at.checked_sub(1).map(|before| app_info[before]), Some(b'?' | b'&')))
-        .map(|(at, _)| {
-            let digits = &app_info[at + KEY.len()..];
-            let end = digits.iter().position(|b| !b.is_ascii_digit()).unwrap_or(digits.len());
-            &digits[..end]
-        })
-        .find(|number| (10..=12).contains(&number.len()) && number.first() == Some(&b'0'))
-        .map(|number| String::from_utf8_lossy(number).into_owned())
-}
-
-/// Reads a `certification` file that is just the subscriber number as ASCII
-/// digits (optionally NUL-terminated or padded). Returns `None` when it is not a
-/// plain phone number, so a differently-formatted certification is ignored and
-/// the caller falls back to its placeholder.
-fn parse_ascii_phone_number(data: &[u8]) -> Option<String> {
-    let end = data.iter().position(|&b| b == 0).unwrap_or(data.len());
-    let number = core::str::from_utf8(&data[..end]).ok()?.trim();
-    if (10..=15).contains(&number.len()) && number.bytes().all(|b| b.is_ascii_digit()) {
-        Some(number.to_string())
-    } else {
-        None
-    }
+    wie_backend::subscriber::subscriber_number(cert.as_deref(), certification.as_deref(), app_info.as_deref())
 }
 
 pub async fn set_system_property(context: &mut dyn WIPICContext, ptr_id: WIPICWord, ptr_value: WIPICWord) -> Result<()> {
@@ -473,7 +399,7 @@ mod test {
 
     use crate::{WIPICContext, context::test::TestContext, method::MethodImpl};
 
-    use super::{alloc, calloc, free, get_resource, get_resource_id, get_system_property, parse_ascii_phone_number, sprintk};
+    use super::{alloc, calloc, free, get_resource, get_resource_id, get_system_property, sprintk};
 
     #[futures_test::test]
     async fn test_sprintk() -> Result<()> {
@@ -552,16 +478,6 @@ mod test {
         assert_eq!(String::from_utf8(result).unwrap(), "01000000000");
 
         Ok(())
-    }
-
-    #[test]
-    fn test_parse_ascii_phone_number() {
-        assert_eq!(parse_ascii_phone_number(b"01000000000\0").as_deref(), Some("01000000000"));
-        assert_eq!(parse_ascii_phone_number(b"01046119269").as_deref(), Some("01046119269"));
-        // Not a plain number: ignored so the caller keeps its placeholder.
-        assert_eq!(parse_ascii_phone_number(b"not-a-number"), None);
-        assert_eq!(parse_ascii_phone_number(b"123"), None);
-        assert_eq!(parse_ascii_phone_number(b""), None);
     }
 
     #[futures_test::test]
@@ -647,38 +563,5 @@ mod test {
         assert_eq!(u32::from_le_bytes(result), 0);
 
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod descriptor_tests {
-    use super::descriptor_subscriber_number;
-
-    #[test]
-    fn reads_the_subscriber_number_out_of_a_descriptor() {
-        // A real descriptor: EUC-KR name and vendor fields, and a download URL
-        // carrying both the subscriber's number and, for a gifted copy, the
-        // sender's. The subscriber's is the one the certificate was issued to.
-        let mut app_info =
-            b"AID:000315C6\r\nName:\xbe\xd7\xbc\xc7\r\nDDurl:http://omadn.ez-i.co.kr:9089/oma_dd.dn?ctn=010085300848&req_pltf=4".to_vec();
-        app_info.extend_from_slice(b"&send_ctn=010022055752&gift_type=0\r\n");
-
-        assert_eq!(descriptor_subscriber_number(&app_info).as_deref(), Some("010085300848"));
-    }
-
-    #[test]
-    fn ignores_a_descriptor_that_names_no_subscriber() {
-        assert_eq!(
-            descriptor_subscriber_number(b"AID:000315C6\r\nDDurl:http://example/dd.dn?pid=1\r\n"),
-            None
-        );
-        // `send_ctn` alone is the sender of a gift, not the subscriber.
-        assert_eq!(
-            descriptor_subscriber_number(b"DDurl:http://example/dd.dn?a=1&send_ctn=010022055752"),
-            None
-        );
-        // Too short to be a number, and not starting where one would.
-        assert_eq!(descriptor_subscriber_number(b"DDurl:http://example/dd.dn?ctn=0100&b=2"), None);
-        assert_eq!(descriptor_subscriber_number(b"DDurl:http://example/dd.dn?ctn=910085300848"), None);
     }
 }
