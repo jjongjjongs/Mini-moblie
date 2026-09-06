@@ -659,73 +659,137 @@ const LGT_LOCAL_PURCHASE_REQUEST_TYPE: u16 = 0x0068;
 const LGT_LOCAL_PURCHASE_RESPONSE_TYPE: u16 = 0x0069;
 const LGT_LOCAL_PURCHASE_RESPONSE_SIZE: usize = 7;
 
-/// Build the native-compatible LGT purchase-success application frame.
+/// Build the LGT purchase-success application frame a title can read.
 ///
-/// Red Gem's native protocol establishes:
+/// The frame Red Gem writes is:
 ///
 ///   frame +0x00 : 0xffff
-///   frame +0x02 : total application-frame length (u16, network order)
-///   frame +0x04 : message type (u16, network order)
+///   frame +0x02 : total application-frame length (u16)
+///   frame +0x04 : message type (u16)
 ///   frame +0x06 : application payload
 ///
-/// Request 0x68 is the purchase transaction and response 0x69 carries
-/// its carrier result.  Status zero is purchase success.  Returning the
-/// ordinary 0x69/status-zero frame lets the guest's own parser write its
-/// result enum zero; WIE never modifies guest billing state directly.
+/// Request 0x68 is the purchase transaction and response 0x69 carries its
+/// carrier result. Status zero is purchase success. Returning the ordinary
+/// 0x69/status-zero frame lets the guest's own parser write its result enum
+/// zero; WIE never modifies guest billing state directly.
+///
+/// The two `u16`s are read and written in whichever order the request used -
+/// see [`BillFrame`]. A capture of 붉은보석 has it writing them little end
+/// first, and an answer in the other order is one it reads as a length and type
+/// it does not recognise and drops, which is a title that never leaves its
+/// connecting screen.
 fn lgt_local_purchase_success_response(request: &[u8]) -> Option<[u8; LGT_LOCAL_PURCHASE_RESPONSE_SIZE]> {
-    if request.len() < 6 {
+    let frame = BillFrame::parse(request)?;
+
+    if frame.message_type != LGT_LOCAL_PURCHASE_REQUEST_TYPE {
         return None;
     }
 
-    if request[0] != 0xff || request[1] != 0xff {
-        return None;
+    let length = frame.order.write(LGT_LOCAL_PURCHASE_RESPONSE_SIZE as u16);
+    let message_type = frame.order.write(LGT_LOCAL_PURCHASE_RESPONSE_TYPE);
+
+    Some([0xff, 0xff, length[0], length[1], message_type[0], message_type[1], 0x00])
+}
+
+/// Which end of a billing frame's `u16` header fields comes first.
+///
+/// The frames carry a `0xffff` marker, a length and a message type, and titles
+/// do not agree on how the two `u16`s are laid out: 붉은보석 writes a 19-byte
+/// purchase request as `ff ff 13 00 68 00 ...`, little end first, where the
+/// same frame reconstructed big-endian would be `ff ff 00 13 00 68 ...`. The
+/// marker is a palindrome and says nothing, so the length is what tells them
+/// apart - only one reading of it can describe the frame in hand.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BillFrameOrder {
+    Big,
+    Little,
+}
+
+impl BillFrameOrder {
+    fn read(self, bytes: [u8; 2]) -> u16 {
+        match self {
+            Self::Big => u16::from_be_bytes(bytes),
+            Self::Little => u16::from_le_bytes(bytes),
+        }
     }
 
-    let declared_length = u16::from_be_bytes([request[2], request[3]]) as usize;
-    let message_type = u16::from_be_bytes([request[4], request[5]]);
-
-    // Native LGT clients may expose only the current socket-write slice even
-    // though the application header declares the complete frame length.
-    // Red Gem builds a 19-byte 0x68 frame but calls MC_netSocketWrite with
-    // its first 10 bytes. Accept a header-complete prefix, while rejecting
-    // malformed slices that exceed the declared frame.
-    if declared_length < 6 || request.len() > declared_length || message_type != LGT_LOCAL_PURCHASE_REQUEST_TYPE {
-        return None;
+    fn write(self, value: u16) -> [u8; 2] {
+        match self {
+            Self::Big => value.to_be_bytes(),
+            Self::Little => value.to_le_bytes(),
+        }
     }
+}
 
-    let response_length = LGT_LOCAL_PURCHASE_RESPONSE_SIZE as u16;
+/// A billing frame's header, read in whichever order its own length makes sense
+/// in.
+struct BillFrame {
+    order: BillFrameOrder,
+    message_type: u16,
+}
 
-    Some([
-        0xff,
-        0xff,
-        (response_length >> 8) as u8,
-        response_length as u8,
-        (LGT_LOCAL_PURCHASE_RESPONSE_TYPE >> 8) as u8,
-        LGT_LOCAL_PURCHASE_RESPONSE_TYPE as u8,
-        0x00,
-    ])
+impl BillFrame {
+    /// `None` for anything that is not one of these frames: too short to carry
+    /// a header, no `0xffff` marker, or a length that describes no frame this
+    /// could be under either reading.
+    ///
+    /// A native client may hand `MC_netSocketWrite` only part of the frame it
+    /// built - 붉은보석 declares nineteen bytes and has been seen writing ten -
+    /// so a length longer than the slice is accepted. It has to be at least the
+    /// six a header takes, and where neither reading is exact the shorter one
+    /// wins, being the one that could still be this frame.
+    fn parse(request: &[u8]) -> Option<Self> {
+        if request.len() < 6 || request[0] != 0xff || request[1] != 0xff {
+            return None;
+        }
+
+        let length = [request[2], request[3]];
+        let mut best: Option<(BillFrameOrder, usize)> = None;
+
+        for order in [BillFrameOrder::Big, BillFrameOrder::Little] {
+            let declared = order.read(length) as usize;
+
+            if declared < 6 || declared < request.len() {
+                continue;
+            }
+
+            if best.is_none_or(|(_, shortest)| declared < shortest) {
+                best = Some((order, declared));
+            }
+        }
+
+        let (order, _) = best?;
+
+        Some(Self {
+            order,
+            message_type: order.read([request[4], request[5]]),
+        })
+    }
 }
 
 /// A billing frame as a trace line: its header fields read out, then the bytes.
 ///
-/// These frames all start `ffff`, a `u16` length and a `u16` type in network
-/// order, so naming those three is what makes a capture readable without
-/// counting nibbles. Anything too short to carry them is shown as bytes alone.
-/// Capped, because a trace is for reading.
+/// These frames all start `ffff`, a `u16` length and a `u16` type, so naming
+/// those three is what makes a capture readable without counting nibbles. Read
+/// the way [`BillFrame`] reads them, and named with the order it settled on, so
+/// a trace shows what the code acted on rather than one guess at it. Anything
+/// this cannot read as a frame is shown as bytes alone. Capped, because a trace
+/// is for reading.
 fn bill_frame_trace(frame: &[u8]) -> alloc::string::String {
     const SHOWN: usize = 64;
 
     let bytes: Vec<alloc::string::String> = frame.iter().take(SHOWN).map(|byte| alloc::format!("{byte:02x}")).collect();
     let bytes = alloc::format!("{}{}", bytes.join(" "), if frame.len() > SHOWN { " ..." } else { "" });
 
-    if frame.len() < 6 || frame[0] != 0xff || frame[1] != 0xff {
+    let Some(parsed) = BillFrame::parse(frame) else {
         return alloc::format!("{} bytes [{bytes}]", frame.len());
-    }
+    };
 
     alloc::format!(
-        "type {:#06x} len {} of {} bytes [{bytes}]",
-        u16::from_be_bytes([frame[4], frame[5]]),
-        u16::from_be_bytes([frame[2], frame[3]]),
+        "{:?}-endian type {:#06x} len {} of {} bytes [{bytes}]",
+        parsed.order,
+        parsed.message_type,
+        parsed.order.read([frame[2], frame[3]]),
         frame.len(),
     )
 }
@@ -976,31 +1040,16 @@ impl wie_backend::LocalConnection for LgtBillingGateway {
 /// `None` for anything that is not one of these frames, which is not something
 /// to answer with a guess.
 fn lgt_local_granted_response(request: &[u8]) -> Option<Vec<u8>> {
-    if request.len() < 6 || request[0] != 0xff || request[1] != 0xff {
-        return None;
-    }
+    let frame = BillFrame::parse(request)?;
+    let order = frame.order;
+    let message_type = frame.message_type;
 
-    let declared_length = u16::from_be_bytes([request[2], request[3]]) as usize;
-    let message_type = u16::from_be_bytes([request[4], request[5]]);
+    let length = order.write(LGT_LOCAL_PURCHASE_RESPONSE_SIZE as u16);
+    let response_type = order.write(message_type.wrapping_add(1));
 
-    // The same header-complete prefix a native client may present, and the same
-    // rejection of a slice longer than the frame it declares.
-    if declared_length < 6 || request.len() > declared_length {
-        return None;
-    }
-
-    let response_length = LGT_LOCAL_PURCHASE_RESPONSE_SIZE as u16;
-    let response_type = message_type.wrapping_add(1);
-
-    Some(alloc::vec![
-        0xff,
-        0xff,
-        (response_length >> 8) as u8,
-        response_length as u8,
-        (response_type >> 8) as u8,
-        response_type as u8,
-        0x00,
-    ])
+    // Answered in the order it was asked in: a title that wrote its length
+    // little end first reads the answer's the same way.
+    Some(alloc::vec![0xff, 0xff, length[0], length[1], response_type[0], response_type[1], 0x00])
 }
 
 /// Reads from whatever `socket` is connected to - the endpoint answering it in
@@ -3468,12 +3517,78 @@ mod network_state_tests {
     fn a_granted_reply_is_shaped_only_for_a_frame_this_reads() {
         use super::lgt_local_granted_response;
 
-        // No marker, too short, a length that cannot hold a header, and a slice
-        // longer than the frame it declares.
+        // No marker, and too short to carry a header at all.
         assert!(lgt_local_granted_response(&[0x00, 0x00, 0x00, 0x06, 0x00, 0x68]).is_none());
         assert!(lgt_local_granted_response(&[0xff, 0xff, 0x00]).is_none());
-        assert!(lgt_local_granted_response(&[0xff, 0xff, 0x00, 0x05, 0x00, 0x68]).is_none());
-        assert!(lgt_local_granted_response(&[0xff, 0xff, 0x00, 0x06, 0x00, 0x68, 0x99]).is_none());
+
+        // A length that cannot hold a header whichever end is read first.
+        assert!(lgt_local_granted_response(&[0xff, 0xff, 0x00, 0x00, 0x00, 0x68]).is_none());
+
+        // A slice longer than either reading of the length it declares: 0x0304
+        // one way, 0x0403 the other, both short of the bytes in hand.
+        let overlong = alloc::vec![0xffu8, 0xff, 0x03, 0x04, 0x00, 0x68]
+            .into_iter()
+            .chain(core::iter::repeat_n(0u8, 2000))
+            .collect::<Vec<u8>>();
+        assert!(lgt_local_granted_response(&overlong).is_none());
+    }
+
+    #[test]
+    fn a_frame_s_own_length_says_which_end_of_its_fields_comes_first() {
+        use super::{BillFrame, BillFrameOrder};
+
+        // The 19-byte purchase request 붉은보석 actually writes: length and type
+        // little end first, then the subscriber number as ASCII.
+        let captured = [
+            0xff, 0xff, 0x13, 0x00, 0x68, 0x00, b'0', b'1', b'0', b'5', b'5', b'4', b'5', b'2', b'3', b'8', b'3', 0x00, 0x01,
+        ];
+        let frame = BillFrame::parse(&captured).unwrap();
+        assert_eq!(frame.order, BillFrameOrder::Little);
+        assert_eq!(frame.message_type, 0x68);
+
+        // The same frame written the other way round reads as itself too.
+        let big_endian = [
+            0xff, 0xff, 0x00, 0x13, 0x00, 0x68, b'0', b'1', b'0', b'5', b'5', b'4', b'5', b'2', b'3', b'8', b'3', 0x00, 0x01,
+        ];
+        let frame = BillFrame::parse(&big_endian).unwrap();
+        assert_eq!(frame.order, BillFrameOrder::Big);
+        assert_eq!(frame.message_type, 0x68);
+
+        // And so does a header-complete prefix of either, where the shorter of
+        // the two readings is the one that could still be this frame.
+        assert_eq!(BillFrame::parse(&captured[..10]).unwrap().order, BillFrameOrder::Little);
+        assert_eq!(BillFrame::parse(&big_endian[..10]).unwrap().order, BillFrameOrder::Big);
+    }
+
+    #[test]
+    fn a_reply_comes_back_in_the_order_its_request_was_written_in() {
+        use super::{lgt_local_granted_response, lgt_local_purchase_success_response};
+
+        // 붉은보석's captured request, and the purchase answer it can read.
+        let captured = [
+            0xff, 0xff, 0x13, 0x00, 0x68, 0x00, b'0', b'1', b'0', b'5', b'5', b'4', b'5', b'2', b'3', b'8', b'3', 0x00, 0x01,
+        ];
+        assert_eq!(
+            lgt_local_purchase_success_response(&captured),
+            Some([0xff, 0xff, 0x07, 0x00, 0x69, 0x00, 0x00])
+        );
+
+        // A big-endian request keeps the big-endian answer it always had.
+        let big_endian = [0xff, 0xff, 0x00, 0x13, 0x00, 0x68, 0x31, 0x32, 0x33, 0x34];
+        assert_eq!(
+            lgt_local_purchase_success_response(&big_endian),
+            Some([0xff, 0xff, 0x00, 0x07, 0x00, 0x69, 0x00])
+        );
+
+        // The gateway's granted reply follows the same rule.
+        assert_eq!(
+            lgt_local_granted_response(&[0xff, 0xff, 0x06, 0x00, 0x20, 0x00]).unwrap(),
+            [0xff, 0xff, 0x07, 0x00, 0x21, 0x00, 0x00]
+        );
+        assert_eq!(
+            lgt_local_granted_response(&[0xff, 0xff, 0x00, 0x06, 0x00, 0x20]).unwrap(),
+            [0xff, 0xff, 0x00, 0x07, 0x00, 0x21, 0x00]
+        );
     }
 
     #[test]
