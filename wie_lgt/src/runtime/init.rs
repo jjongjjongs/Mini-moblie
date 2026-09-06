@@ -2053,6 +2053,78 @@ async fn resolve_own_virtual_methods(core: &mut ArmCore, context: &InitSvcContex
         }
     }
 
+    reresolve_own_virtuals_per_owning_class(core, context)?;
+
+    Ok(())
+}
+
+/// Corrects an own-virtual row against the class whose compiled code makes it.
+///
+/// The fill above matches a row by name and descriptor alone, across every
+/// registered class, and obfuscated one-letter names repeat: Battle Monster
+/// declares `h(Lorg/kwis/msp/lcdui/Graphics;)V` in both `b` (slot 54) and `l`
+/// (slot 69), so `b`'s own `this.h(g)` took `l`'s slot and reached a method that
+/// reads a store's item table - null on the field - and threw an NPE out of
+/// paint on every frame.
+///
+/// The class table groups the trailing rows by the class whose code emits them,
+/// and such a row is that class's own self-call, so its hierarchy names the
+/// slot. Only rows whose method that hierarchy actually declares are touched: a
+/// row naming something the class does not have is a call on another object,
+/// which this has nothing better to say about than the fill did.
+fn reresolve_own_virtuals_per_owning_class(core: &mut ArmCore, context: &InitSvcContext) -> Result<()> {
+    let Some((virtual_methods, output, start, end)) = *context.own_virtual_resolve.lock() else {
+        return Ok(());
+    };
+    if virtual_methods == 0 || output == 0 {
+        return Ok(());
+    }
+
+    let owners: Vec<(String, u32, u32)> = context
+        .own_class_entries
+        .lock()
+        .iter()
+        .map(|entry| {
+            (
+                entry.name.clone(),
+                entry.virtual_method_start.max(start),
+                (entry.virtual_method_start + entry.virtual_method_count).min(end),
+            )
+        })
+        .collect();
+
+    for (name, first, last) in owners {
+        let Some(root) = context.app_classes.lock().iter().find(|class| class.name == name).map(|class| class.root) else {
+            continue;
+        };
+
+        for index in first..last {
+            let entry = virtual_methods + index * 8;
+            let name_ptr: u32 = read_generic(core, entry)?;
+            let descriptor_ptr: u32 = read_generic(core, entry + 4)?;
+            if name_ptr == 0 || descriptor_ptr == 0 {
+                continue;
+            }
+
+            // A row still blank belongs to the fill, which runs again as the
+            // class that owns it appears.
+            let current: u16 = read_generic(core, output + index * 2)?;
+            if current == 0 {
+                continue;
+            }
+
+            let method = String::from_utf8_lossy(&read_null_terminated_string_bytes(core, name_ptr)?).into_owned();
+            let descriptor = String::from_utf8_lossy(&read_null_terminated_string_bytes(core, descriptor_ptr)?).into_owned();
+
+            if let Some(slot) = virtual_slot_in_class_chain(core, context, root, &method, &descriptor)
+                && slot as u16 != current
+            {
+                write_generic(core, output + index * 2, slot as u16)?;
+                tracing::debug!("Re-resolved {name}'s own virtual {method}{descriptor} at row {index}: slot {current} -> {slot}");
+            }
+        }
+    }
+
     Ok(())
 }
 
