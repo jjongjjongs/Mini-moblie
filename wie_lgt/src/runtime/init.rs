@@ -3812,6 +3812,37 @@ async fn invoke_object_self_method(core: &mut ArmCore, context: &InitSvcContext,
     result
 }
 
+/// The method a fixed native dispatch slot names for `class`, following the
+/// JVM's own superclass chain when the metadata does not describe `class`
+/// itself.
+///
+/// The metadata mirrors the reference firmware, so it covers the classes an
+/// application can import and not the ones this runtime adds on top of them.
+/// `org/kwis/msf/io/SocketInputStream` is one: a title reading a reply calls
+/// `read([BII)I` through `java/io/InputStream`'s slot 12, which resolved to
+/// nothing and answered zero, so 오즈-천공의 기사단's socket carried no bytes in
+/// either direction. Every such class extends one the metadata does describe,
+/// and it is that ancestor's slot layout the compiled code is using.
+fn platform_slot_method(context: &InitSvcContext, class_name: &str, slot: u32) -> Option<(&'static str, &'static str)> {
+    if let Some(method) = platform_class(class_name).and_then(|class| class.dispatch_method(slot)) {
+        return Some(method);
+    }
+
+    let mut current = context.jvm.get_class(class_name).and_then(|class| class.definition.super_class_name());
+
+    for _ in 0..MAX_SUPERCLASS_DEPTH {
+        let name = current.take()?;
+
+        if let Some(method) = platform_class(&name).and_then(|class| class.dispatch_method(slot)) {
+            return Some(method);
+        }
+
+        current = context.jvm.get_class(&name).and_then(|class| class.definition.super_class_name());
+    }
+
+    None
+}
+
 /// Reports a call through a dispatch table slot the class does not declare.
 ///
 /// The compiled code emits fixed slot numbers for methods the platform is
@@ -3824,7 +3855,7 @@ async fn call_unknown_slot(core: &mut ArmCore, context: &mut InitSvcContext, cla
     // Resolve fixed native dispatch slots from the receiver's actual platform
     // class even when the application never imported that class or method.
     if let Some(receiver_class) = context.java_handles.get(this).map(|instance| instance.class_definition().name())
-        && let Some((method_name, method_descriptor)) = platform_class(&receiver_class).and_then(|class| class.dispatch_method(slot))
+        && let Some((method_name, method_descriptor)) = platform_slot_method(context, &receiver_class, slot)
     {
         let member = ResolvedMember {
             class_name: receiver_class.clone(),
