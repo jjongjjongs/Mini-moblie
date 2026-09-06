@@ -141,6 +141,15 @@ struct CharArrayWriteback {
     length: usize,
 }
 
+struct PrimitiveArrayWriteback {
+    guest_handle: u32,
+    array: ClassInstanceRef<Array<()>>,
+    /// The element's JVM descriptor byte, which says both how to read the JVM
+    /// array back and how wide the guest elements are.
+    element: u8,
+    count: usize,
+}
+
 struct ReferenceArrayWriteback {
     guest_handle: u32,
     array: ClassInstanceRef<Array<ClassInstanceRef<()>>>,
@@ -156,6 +165,7 @@ struct ReferenceArrayWriteback {
 struct GuestArrayWritebacks {
     bytes: Vec<ByteArrayWriteback>,
     chars: Vec<CharArrayWriteback>,
+    primitives: Vec<PrimitiveArrayWriteback>,
     references: Vec<ReferenceArrayWriteback>,
 }
 
@@ -177,6 +187,40 @@ impl GuestArrayWritebacks {
             };
 
             handles.write_char_array(writeback.guest_handle, &chars)?;
+        }
+
+        for writeback in &self.primitives {
+            // Each arm loads the JVM array back as the type it was made with
+            // and lays the elements down at the guest's own width.
+            macro_rules! write_back {
+                ($ty:ty, $width:literal) => {{
+                    let values: Vec<$ty> = match jvm.load_array(&writeback.array, 0, writeback.count).await {
+                        Ok(values) => values,
+                        Err(error) => return Err(JvmSupport::to_wie_err(jvm, error).await),
+                    };
+
+                    let mut bytes = Vec::with_capacity(values.len() * $width);
+                    for value in values {
+                        bytes.extend_from_slice(&value.to_le_bytes());
+                    }
+
+                    handles.write_array_bytes(writeback.guest_handle, $width, &bytes)?;
+                }};
+            }
+
+            match writeback.element {
+                b'S' => write_back!(i16, 2),
+                b'I' => write_back!(i32, 4),
+                b'F' => write_back!(f32, 4),
+                b'J' => write_back!(i64, 8),
+                b'D' => write_back!(f64, 8),
+                element => {
+                    return Err(WieError::FatalError(format!(
+                        "Guest array {:#x} was wrapped as element type {element:#x}, which has no writeback",
+                        writeback.guest_handle
+                    )));
+                }
+            }
         }
 
         for writeback in &self.references {
@@ -372,11 +416,10 @@ async fn marshal_arguments(
 
                     // A compiled array passed where the method declares Object
                     // (System.arraycopy's src/dst, an I/O read buffer) never
-                    // reaches the `[B` path above. Wrap it as a byte array with
-                    // writeback - the buffers these calls carry are byte arrays -
-                    // rather than ending the run. Guard the length first so a
-                    // garbage handle cannot allocate wildly; anything implausible
-                    // keeps the original diagnostic.
+                    // reaches the `[B` path above, so wrap it here from the
+                    // element type its allocation recorded. Guard the length
+                    // first so a garbage handle cannot allocate wildly; anything
+                    // implausible keeps the original diagnostic.
                     let data = read_generic::<u32, _>(core, handle + 8).unwrap_or(0);
                     let length = if data != 0 {
                         read_generic::<u32, _>(core, data).unwrap_or(u32::MAX)
@@ -384,81 +427,7 @@ async fn marshal_arguments(
                         u32::MAX
                     };
 
-                    // A compiled `char[]` handed to a method that takes it as
-                    // `Object` (`System.arraycopy`'s buffers) must be copied out
-                    // as chars: reading its 16-bit units as bytes would halve its
-                    // length and fail the JVM's char type-check on store.
-                    if data != 0 && length <= MAX_WRAPPED_ARRAY_BYTES && handles.array_element_type(handle) == Some(b'C') {
-                        let chars = handles.read_char_array(handle)?;
-                        let length = chars.len();
-
-                        let mut array = match jvm.instantiate_array("C", length).await {
-                            Ok(array) => array,
-                            Err(error) => return Err(JvmSupport::to_wie_err(jvm, error).await),
-                        };
-
-                        if let Err(error) = jvm.store_array(&mut array, 0, chars).await {
-                            return Err(JvmSupport::to_wie_err(jvm, error).await);
-                        }
-
-                        writebacks.chars.push(CharArrayWriteback {
-                            guest_handle: handle,
-                            array: array.clone().into(),
-                            length,
-                        });
-
-                        JavaValue::Object(Some(array))
-                    } else if data != 0 && length <= MAX_WRAPPED_ARRAY_BYTES && handles.array_element_type(handle) == Some(b'L') {
-                        // A compiled object array (`System.arraycopy` on the
-                        // `String[]` a word-wrap builds). Its elements are
-                        // handles, one word each: read as bytes it would be
-                        // quartered in length and the copy would land the low
-                        // byte of a handle in an element slot, leaving the guest
-                        // to dispatch on it.
-                        let references = handles.read_reference_array(handle)?;
-                        let elements = references
-                            .iter()
-                            .map(|&reference| ClassInstanceRef::new(handles.get(reference)))
-                            .collect::<Vec<ClassInstanceRef<()>>>();
-
-                        let mut array = match jvm.instantiate_array("Ljava/lang/Object;", elements.len()).await {
-                            Ok(array) => array,
-                            Err(error) => return Err(JvmSupport::to_wie_err(jvm, error).await),
-                        };
-
-                        if let Err(error) = jvm.store_array(&mut array, 0, elements).await {
-                            return Err(JvmSupport::to_wie_err(jvm, error).await);
-                        }
-
-                        writebacks.references.push(ReferenceArrayWriteback {
-                            guest_handle: handle,
-                            array: array.clone().into(),
-                            original: references,
-                        });
-
-                        JavaValue::Object(Some(array))
-                    } else if data != 0 && length <= MAX_WRAPPED_ARRAY_BYTES {
-                        let bytes = handles.read_byte_array(handle)?;
-                        let byte_length = bytes.len();
-
-                        let mut array = match jvm.instantiate_array("B", byte_length).await {
-                            Ok(array) => array,
-                            Err(error) => return Err(JvmSupport::to_wie_err(jvm, error).await),
-                        };
-
-                        if let Err(error) = jvm.store_array(&mut array, 0, bytes).await {
-                            return Err(JvmSupport::to_wie_err(jvm, error).await);
-                        }
-
-                        writebacks.bytes.push(ByteArrayWriteback {
-                            guest_handle: handle,
-                            array: array.clone().into(),
-                            length: byte_length,
-                        });
-
-                        tracing::warn!("marshalled guest array {handle:#x} as a byte array for parameter {parameter}");
-                        JavaValue::Object(Some(array))
-                    } else {
+                    if data == 0 || length > MAX_WRAPPED_ARRAY_BYTES {
                         let vtable = read_generic::<u32, _>(core, handle).unwrap_or(0);
                         let root = if vtable != 0 {
                             read_generic::<u32, _>(core, vtable).unwrap_or(0)
@@ -470,6 +439,131 @@ async fn marshal_arguments(
                             "Argument {word} of {} is {handle:#x}, which names no object this runtime handed out; vtable={vtable:#x}, class_root={root:#x}",
                             parameters.join("")
                         )));
+                    }
+
+                    // The header counts elements, not bytes, so an array whose
+                    // elements are wider than a byte has to be wrapped at its
+                    // own width: read as bytes it would be a fraction of its
+                    // length, and a copy would move a fraction of its contents
+                    // and land the low byte of each element in a whole slot.
+                    // `System.arraycopy` between two compiled arrays is where
+                    // this shows up.
+                    let element = handles.array_element_type(handle).unwrap_or(b'B');
+
+                    // Every arm builds a JVM array of the right element type,
+                    // fills it from guest memory, and registers the copy back.
+                    macro_rules! wrap {
+                        ($descriptor:literal, $ty:ty, $width:literal) => {{
+                            let bytes = handles.read_array_bytes(handle, $width)?;
+                            let values = bytes
+                                .chunks_exact($width)
+                                .map(|chunk| <$ty>::from_le_bytes(chunk.try_into().unwrap()))
+                                .collect::<Vec<$ty>>();
+                            let count = values.len();
+
+                            let mut array = match jvm.instantiate_array($descriptor, count).await {
+                                Ok(array) => array,
+                                Err(error) => return Err(JvmSupport::to_wie_err(jvm, error).await),
+                            };
+
+                            if let Err(error) = jvm.store_array(&mut array, 0, values).await {
+                                return Err(JvmSupport::to_wie_err(jvm, error).await);
+                            }
+
+                            writebacks.primitives.push(PrimitiveArrayWriteback {
+                                guest_handle: handle,
+                                array: array.clone().into(),
+                                element,
+                                count,
+                            });
+
+                            JavaValue::Object(Some(array))
+                        }};
+                    }
+
+                    match element {
+                        // A compiled `char[]` (`String.<init>([C)`, or a copy
+                        // buffer). Its 16-bit units go to a real JVM `[C`.
+                        b'C' => {
+                            let chars = handles.read_char_array(handle)?;
+                            let length = chars.len();
+
+                            let mut array = match jvm.instantiate_array("C", length).await {
+                                Ok(array) => array,
+                                Err(error) => return Err(JvmSupport::to_wie_err(jvm, error).await),
+                            };
+
+                            if let Err(error) = jvm.store_array(&mut array, 0, chars).await {
+                                return Err(JvmSupport::to_wie_err(jvm, error).await);
+                            }
+
+                            writebacks.chars.push(CharArrayWriteback {
+                                guest_handle: handle,
+                                array: array.clone().into(),
+                                length,
+                            });
+
+                            JavaValue::Object(Some(array))
+                        }
+                        // A compiled object array (`System.arraycopy` on the
+                        // `String[]` a word-wrap builds). Its elements are
+                        // handles, which name JVM objects rather than values.
+                        b'L' => {
+                            let references = handles.read_reference_array(handle)?;
+                            let elements = references
+                                .iter()
+                                .map(|&reference| ClassInstanceRef::new(handles.get(reference)))
+                                .collect::<Vec<ClassInstanceRef<()>>>();
+
+                            let mut array = match jvm.instantiate_array("Ljava/lang/Object;", elements.len()).await {
+                                Ok(array) => array,
+                                Err(error) => return Err(JvmSupport::to_wie_err(jvm, error).await),
+                            };
+
+                            if let Err(error) = jvm.store_array(&mut array, 0, elements).await {
+                                return Err(JvmSupport::to_wie_err(jvm, error).await);
+                            }
+
+                            writebacks.references.push(ReferenceArrayWriteback {
+                                guest_handle: handle,
+                                array: array.clone().into(),
+                                original: references,
+                            });
+
+                            JavaValue::Object(Some(array))
+                        }
+                        b'S' => wrap!("S", i16, 2),
+                        b'I' => wrap!("I", i32, 4),
+                        b'F' => wrap!("F", f32, 4),
+                        b'J' => wrap!("J", i64, 8),
+                        b'D' => wrap!("D", f64, 8),
+                        // `byte`, `boolean`, and anything whose allocation this
+                        // runtime never saw. One byte an element either way.
+                        _ => {
+                            if handles.array_element_type(handle).is_none() {
+                                tracing::debug!("guest array {handle:#x} names no element type; assuming bytes for {parameter}");
+                            }
+
+                            let bytes = handles.read_byte_array(handle)?;
+                            let byte_length = bytes.len();
+
+                            let mut array = match jvm.instantiate_array("B", byte_length).await {
+                                Ok(array) => array,
+                                Err(error) => return Err(JvmSupport::to_wie_err(jvm, error).await),
+                            };
+
+                            if let Err(error) = jvm.store_array(&mut array, 0, bytes).await {
+                                return Err(JvmSupport::to_wie_err(jvm, error).await);
+                            }
+
+                            writebacks.bytes.push(ByteArrayWriteback {
+                                guest_handle: handle,
+                                array: array.clone().into(),
+                                length: byte_length,
+                            });
+
+                            JavaValue::Object(Some(array))
+                        }
                     }
                 }
             },

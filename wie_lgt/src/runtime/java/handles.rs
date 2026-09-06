@@ -673,6 +673,37 @@ impl JavaHandles {
         Ok(())
     }
 
+    /// Copies a guest array's element bytes out, `element_size` bytes an
+    /// element.
+    ///
+    /// The header counts *elements*, so an `int[]` read as bytes would be a
+    /// quarter of its length; a caller that knows the element width gets the
+    /// whole thing.
+    pub fn read_array_bytes(&self, handle: u32, element_size: u32) -> Result<Vec<u8>> {
+        let core = self.core.clone();
+
+        let data: u32 = read_generic(&core, handle + INSTANCE_FIELDS_OFFSET)?;
+        let length: u32 = read_generic(&core, data)?;
+
+        let mut bytes = vec![0; (length * element_size) as usize];
+        core.read_bytes(data + ARRAY_HEADER_SIZE, &mut bytes)?;
+
+        Ok(bytes)
+    }
+
+    /// Copies element bytes back into a guest array of the same element width.
+    pub fn write_array_bytes(&self, handle: u32, element_size: u32, bytes: &[u8]) -> Result<()> {
+        let mut core = self.core.clone();
+
+        let data: u32 = read_generic(&core, handle + INSTANCE_FIELDS_OFFSET)?;
+        let length: u32 = read_generic(&core, data)?;
+        let count = bytes.len().min((length * element_size) as usize);
+
+        core.write_bytes(data + ARRAY_HEADER_SIZE, &bytes[..count])?;
+
+        Ok(())
+    }
+
     /// Copies a guest-side reference array's element words into host memory.
     ///
     /// The elements are handles, one word each, so this is the object-array
