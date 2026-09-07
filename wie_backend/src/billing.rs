@@ -243,6 +243,86 @@ pub fn lgt_local_gamevil_packet_response(request: &[u8]) -> Option<Vec<u8>> {
 
     Some(response)
 }
+/// What answers the big-endian record 레전드오브마스터 sends its purchases in.
+///
+/// 레전드오브마스터 (`0002A4B1`) opens `BillSocket://211.189.18.116:9407` and
+/// writes a 55-byte record. Buying a 최상급강화석 for 500원 writes:
+///
+/// ```text
+/// 00 37  08 36  00 ... 00  64  00 ... 00  12  01 f4  <item, EUC-KR>  00 ... 00  c8 d1
+/// ```
+///
+/// ```text
+/// [0..2]   u16 BE - the record's own length
+/// [2..4]   u16 BE - the command
+/// [4..53]  the body: the item, its price in won, and the counters around them
+/// [53..55] a checksum
+/// ```
+///
+/// The title is compiled ahead of time, so what it does with the answer is ARM
+/// rather than bytecode. Its network thread's `run` is a state machine over one
+/// field, and the read state at `0xf3e68` is the whole of the reply's shape:
+///
+/// - `read(header, 0, 4)`, then `getShort(header, 0)` as the length - which has
+///   to be above zero - and `getShort(header, 2)` as the command, which has to
+///   be **above 1000** or the thread drops the connection. `getShort` at
+///   `0xe26a8` is `(buf[off] << 8) | buf[off + 1]`, so both are big-endian.
+/// - `read(body, 0, length - 6)` when that is positive, kept as the reply body.
+/// - `read(header, 0, 4)` once more - a four-byte tail it reads past and never
+///   looks at.
+///
+/// Which is not the shape of its own requests: the 55 it writes are four of
+/// header, 49 of body and two of checksum, so the length counts six of overhead
+/// either way but the tail it reads is twice the tail it writes. The answer is
+/// built for the reader rather than mirrored off the writer.
+///
+/// The dispatcher at `0x5b79c` then zeroes the body's read cursor and switches
+/// on the command. `0x0837` - the request's own command plus one - reaches
+/// `0x63d04`, which takes **one signed byte** off the body and treats `0` and
+/// `6` as granted; anything else raises the flag the 통신장애 notice is drawn
+/// from. Nothing else in that handler reads the body.
+///
+/// So the answer is the command plus one and a zero status byte. The body is
+/// padded past the one byte this command reads because the cursor is shared
+/// with every other command's handler, and a body only as long as its shortest
+/// reader would put a longer one out of bounds.
+///
+/// `None` for anything that is not one of these records: the declared length has
+/// to be the record in hand, and the command has to be one a title sends - the
+/// even ones - rather than one it is sent.
+pub fn lgt_local_big_endian_record_response(request: &[u8]) -> Option<Vec<u8>> {
+    /// A length and a command, which is what the title reads before anything
+    /// else.
+    const HEADER: usize = 4;
+    /// Read past and discarded, but it has to be there to be read past.
+    const TAIL: usize = 4;
+    /// The length field counts the header and the tail as six between them.
+    const LENGTH_OVERHEAD: usize = 6;
+    /// Room behind the status byte, for the handlers that read further.
+    const BODY: usize = 0x20;
+    /// Which the purchase handler spells "granted".
+    const GRANTED: u8 = 0;
+    /// Below this the title drops the connection rather than dispatching.
+    const LEAST_COMMAND: u16 = 1000;
+
+    if request.len() < HEADER + 2 || u16::from_be_bytes([request[0], request[1]]) as usize != request.len() {
+        return None;
+    }
+
+    // A title's own commands are the even ones; the odd are what it is answered
+    // with. Answering an odd command would be answering an answer.
+    let command = u16::from_be_bytes([request[2], request[3]]);
+    if command <= LEAST_COMMAND || command % 2 != 0 {
+        return None;
+    }
+
+    let mut response = vec![0u8; HEADER + BODY + TAIL];
+    response[0..2].copy_from_slice(&((BODY + LENGTH_OVERHEAD) as u16).to_be_bytes());
+    response[2..4].copy_from_slice(&(command + 1).to_be_bytes());
+    response[HEADER] = GRANTED;
+
+    Some(response)
+}
 /// The granted answer to an application billing request, in the frame shape
 /// `lgt_local_purchase_success_response` establishes for the purchase
 /// transaction: the `0xffff` marker, the frame length, the request's own type
@@ -266,17 +346,23 @@ pub fn lgt_local_granted_response(request: &[u8]) -> Option<Vec<u8>> {
 /// The answer to a billing request, whichever of these protocols it is in.
 ///
 /// Tried in order of how specific each shape is: the `0xffff`-framed message,
-/// then the pipe-delimited cash record, then the GAMEVIL packet. `None` when a
-/// request is none of them, which is not something to answer with a guess.
+/// then the pipe-delimited cash record, then the GAMEVIL packet, then the
+/// big-endian record. `None` when a request is none of them, which is not
+/// something to answer with a guess.
+///
+/// The two packet shapes cannot be mistaken for one another: each declares its
+/// own length, and a length that reads as the record in hand one end first
+/// reads as thousands the other way round.
 pub fn response(request: &[u8]) -> Option<Vec<u8>> {
     lgt_local_granted_response(request)
         .or_else(|| lgt_local_cash_response(request))
         .or_else(|| lgt_local_gamevil_packet_response(request))
+        .or_else(|| lgt_local_big_endian_record_response(request))
 }
 
 #[cfg(test)]
 mod tests {
-    use alloc::{string::ToString, vec, vec::Vec};
+    use alloc::{vec, vec::Vec};
 
     use super::*;
 
@@ -449,12 +535,95 @@ mod tests {
         assert_eq!(lgt_local_cash_response(&[0xff, 0xff, 0x00, 0x06, 0x00, 0x68]), None);
     }
 
+    /// The 55-byte record 레전드오브마스터 writes to buy a 최상급강화석 for
+    /// 500원, captured off the title.
+    fn legend_of_master_purchase_request() -> Vec<u8> {
+        let mut request = vec![0u8; 55];
+        request[0..2].copy_from_slice(&55u16.to_be_bytes());
+        request[2..4].copy_from_slice(&0x0836u16.to_be_bytes());
+        request[18] = 0x64;
+        request[29] = 0x12;
+        request[30..32].copy_from_slice(&500u16.to_be_bytes());
+        // 최상급강화석, EUC-KR.
+        request[32..44].copy_from_slice(&[0xc3, 0xd6, 0xbb, 0xf3, 0xb1, 0xde, 0xb0, 0xad, 0xc8, 0xad, 0xbc, 0xae]);
+        request[53..55].copy_from_slice(&0xc8d1u16.to_be_bytes());
+
+        request
+    }
+
+    #[test]
+    fn a_big_endian_record_is_answered_the_way_its_read_state_reads_it() {
+        use super::lgt_local_big_endian_record_response;
+
+        let request = legend_of_master_purchase_request();
+        let response = lgt_local_big_endian_record_response(&request).unwrap();
+
+        // The four byte header the read state takes first, big end first both
+        // fields - and a length that counts the header and the tail as six.
+        let length = i16::from_be_bytes([response[0], response[1]]);
+        assert!(length > 0);
+        assert_eq!(length as usize, response.len() - 2);
+
+        // The command has to be above 1000 or the thread drops the connection,
+        // and it is the request's own plus one so the dispatcher reaches the
+        // purchase handler.
+        let command = i16::from_be_bytes([response[2], response[3]]);
+        assert!(command > 1000);
+        assert_eq!(command, 0x0837);
+
+        // Which reads one signed byte off the body: zero is granted.
+        assert_eq!(response[4] as i8, 0);
+
+        // A body long enough to read past, and a four byte tail behind it.
+        assert_eq!(response.len(), 4 + (length as usize - 6) + 4);
+
+        // And the same answer every time.
+        assert_eq!(lgt_local_big_endian_record_response(&request), Some(response));
+    }
+
+    #[test]
+    fn only_a_big_endian_record_that_declares_itself_is_answered_as_one() {
+        use super::lgt_local_big_endian_record_response;
+
+        // A length that is not the record in hand.
+        let mut wrong_length = legend_of_master_purchase_request();
+        wrong_length[1] = 0x38;
+        assert_eq!(lgt_local_big_endian_record_response(&wrong_length), None);
+
+        // A command the title is answered with rather than one it sends.
+        let mut answer_shaped = legend_of_master_purchase_request();
+        answer_shaped[2..4].copy_from_slice(&0x0837u16.to_be_bytes());
+        assert_eq!(lgt_local_big_endian_record_response(&answer_shaped), None);
+
+        // A command the read state would drop the connection over rather than
+        // dispatch, so answering it would only cost the title its socket.
+        let mut too_low = legend_of_master_purchase_request();
+        too_low[2..4].copy_from_slice(&0x0064u16.to_be_bytes());
+        assert_eq!(lgt_local_big_endian_record_response(&too_low), None);
+
+        // And the other protocols answered here are not mistaken for it - each
+        // declares its own length, and the GAMEVIL packet's reads as thousands
+        // the other end first.
+        assert_eq!(lgt_local_big_endian_record_response(&zenonia_purchase_request()), None);
+        assert_eq!(
+            lgt_local_big_endian_record_response(b"CASH|0|demon|05590091|00029B60004|500|2034517541"),
+            None
+        );
+        assert_eq!(lgt_local_big_endian_record_response(&[0xff, 0xff, 0x00, 0x06, 0x00, 0x68]), None);
+        assert_eq!(lgt_local_big_endian_record_response(b""), None);
+
+        // Nor is it mistaken for one of them.
+        assert_eq!(lgt_local_gamevil_packet_response(&legend_of_master_purchase_request()), None);
+        assert_eq!(lgt_local_granted_response(&legend_of_master_purchase_request()), None);
+    }
+
     #[test]
     fn one_answer_covers_every_protocol_and_guesses_at_none() {
-        // Each of the three, recognised by its own shape.
+        // Each of the four, recognised by its own shape.
         assert!(response(&[0xff, 0xff, 0x06, 0x00, 0x20, 0x00]).is_some());
         assert!(response(b"CASH|0|demon|05590091|00029B60004|500|2034517541").is_some());
         assert!(response(&zenonia_purchase_request()).is_some());
+        assert!(response(&legend_of_master_purchase_request()).is_some());
 
         // And nothing for a request that is none of them.
         assert_eq!(response(b"hello"), None);
