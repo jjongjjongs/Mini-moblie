@@ -855,49 +855,46 @@ fn lgt_local_cash_response(request: &[u8]) -> Option<Vec<u8>> {
 /// What GAMEVIL's billing server answers a purchase with.
 ///
 /// 제노니아1 (`00027BAA`) opens a billing socket to `218.145.70.36:31206` and
-/// writes a 72-byte record its serialiser at `0x2790` builds:
-///
-/// ```text
-/// 48 00        u16 LE - the record's own length, kept at [stream+0xc]
-/// 00 07        the message type, 7
-/// "01055145031\0"                 the subscriber number, 12 bytes
-/// "축복의 묘약(1개)\0" + padding    the item, 40 bytes, EUC-KR
-/// 84 03 00 00  u32 LE - the price in won
-/// "00027BAA002\0"                 the item code, 12 bytes
-/// ```
-///
-/// The transport works: the title reads four bytes, takes the first two as the
-/// whole reply's length, reads the rest, and cancels its timeout.
+/// writes a 72-byte record its serialiser at `0x2790` builds: its own length as
+/// a `u16` LE, the message type 7, the subscriber number, the item name in
+/// EUC-KR, the price in won, and the item code.
 ///
 /// # This is a diagnostic, not a fix
 ///
-/// A first sweep answered with types `0x107`, `0x103` and `0x101` - the values
-/// the handler at `0x57514` accepts - and then with a reply no reader could take
-/// for valid. The first three moved the title not at all: no error, no progress,
-/// the dialog simply left standing. The fourth drew a red message through the
-/// shared network error dialog at `0x22dc`, which keys a message off a negative
-/// code between -17 and -2.
+/// Two sweeps have narrowed it. The first answered with the types `0x57514`
+/// accepts - `0x107`, `0x103`, `0x101` - and the second with the request echoed
+/// back, the same with its type advanced, and bare headers carrying the type as
+/// the request spells it and byte-reversed. All eight left the title exactly as
+/// it was: no error, no progress, the dialog standing.
 ///
-/// So the reply is being read, and read by something that rejects nonsense - but
-/// those three types are not what it is waiting for. They came from `0x57514`,
-/// whose partner builder `0x572f8` lays out fields of 12, 16, 16 and 16 bytes
-/// where this record is the 12/40/4/12 one from `0x2790`: a different subsystem
-/// that happens to share the `0x1xx` numbering. Which reader this actually is
-/// cannot be had by following calls - this AOT format dispatches through an id
-/// table, so almost nothing has a direct caller to find.
+/// Both sweeps carried a control - every byte past the length `0xff` - and both
+/// times it drew a red message through the shared network error dialog at
+/// `0x22dc`. That dialog keys a message off a signed code: `-17` through `-2`
+/// each have their own, and anything else falls through to a generic one.
 ///
-/// What is left is the request's own header, which is the best model there is
-/// for the reply's. This sweep walks that: the record echoed back as it came,
-/// the same with its type advanced by one, a bare header carrying the type as
-/// the request spells it and as its bytes reversed, and the reply no reader can
-/// accept as a control - if that one still draws its red message, the sweep is
-/// live and the others were understood and dismissed.
+/// So the reply is read, and the reader tells nonsense from the rest. What
+/// separates the control from the bare headers is not the header at all - those
+/// carried a valid length and a type and were ignored - but the body behind it:
+/// zeros were understood and found to say nothing, `0xff` was out of range and
+/// reported. That points at a signed result code near the front of the body,
+/// which is also what the error dialog's own `-17..-2` table implies.
+///
+/// This sweep tests exactly that. Four replies carry a code at the body's first
+/// four bytes, written so that a reader taking it as a signed byte, `i16` or
+/// `i32` all read the same number: `+1`, `+2`, `+3`, and `-2` - a value the
+/// error table has a message of its own for. If `-2` draws that message rather
+/// than the generic one, the field is found and its encoding with it, and the
+/// positive codes are where success will be. The fifth is the control again.
 ///
 /// `None` for anything that is not one of these records.
 fn lgt_local_gamevil_cert_response(request: &[u8]) -> Option<Vec<u8>> {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     const REQUEST_TYPE: u8 = 7;
+    /// Codes to try in the body's first four bytes. `-2` is the one the error
+    /// table at `0x22dc` has a message of its own for, so it says whether this
+    /// is the field at all.
+    const CODES: [i32; 4] = [1, 2, 3, -2];
 
     /// Which answer the next request gets. Process-wide: the title opens a fresh
     /// connection per purchase, so a per-connection counter would hand out the
@@ -914,32 +911,27 @@ fn lgt_local_gamevil_cert_response(request: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    let attempt = ATTEMPT.fetch_add(1, Ordering::Relaxed) % 5;
+    let attempt = ATTEMPT.fetch_add(1, Ordering::Relaxed) % (CODES.len() + 1);
 
-    let (response, what) = match attempt {
-        // The record as it came. A server that answers a transaction by handing
-        // it back is the commonest shape there is.
-        0 => (request.to_vec(), "the request echoed back"),
-        // The same, with the type advanced - the reply to a request, in the
-        // convention the other protocols answered here use.
-        1 => {
-            let mut response = request.to_vec();
-            response[3] = REQUEST_TYPE + 1;
-            (response, "the request echoed with its type advanced")
+    let mut response = bare_gamevil_reply([0x00, REQUEST_TYPE]);
+
+    match CODES.get(attempt) {
+        Some(&code) => {
+            // Written so a reader taking the field as a signed byte, `i16` or
+            // `i32` - little end first, as everything else in this protocol is -
+            // reads the same number.
+            response[4..8].copy_from_slice(&code.to_le_bytes());
+
+            tracing::info!("GAMEVIL purchase probe {attempt}: answering with result code {code}");
         }
-        // A bare header, the type spelled as the request spells it.
-        2 => (bare_gamevil_reply([0x00, REQUEST_TYPE]), "a bare header, type as the request writes it"),
-        // The same with the type's bytes the other way round.
-        3 => (bare_gamevil_reply([REQUEST_TYPE, 0x00]), "a bare header, type byte-reversed"),
-        // The control: past the length, nothing a reader can accept.
-        _ => {
-            let mut response = bare_gamevil_reply([0xff, 0xff]);
+        // The control: past the length, nothing a reader can accept. Both
+        // earlier sweeps had this draw the red message.
+        None => {
             response[2..].fill(0xff);
-            (response, "a reply no reader can accept")
-        }
-    };
 
-    tracing::info!("GAMEVIL purchase probe {attempt}: answering with {what}");
+            tracing::info!("GAMEVIL purchase probe {attempt}: answering with a reply no reader can accept");
+        }
+    }
 
     Some(response)
 }
@@ -3806,7 +3798,7 @@ mod network_state_tests {
     }
 
     #[test]
-    fn a_gamevil_purchase_walks_the_answers_still_to_be_tried() {
+    fn a_gamevil_purchase_walks_the_result_codes_still_to_be_tried() {
         use super::lgt_local_gamevil_cert_response;
 
         let request = zenonia_purchase_request();
@@ -3816,39 +3808,37 @@ mod network_state_tests {
             seen.push(lgt_local_gamevil_cert_response(&request).unwrap());
         }
 
-        // Five answers in turn, then round again, so retrying the purchase walks
-        // the list rather than repeating one guess.
+        // Five answers in turn, then round again.
         assert_eq!(seen[..5], seen[5..]);
-        for (index, response) in seen[..5].iter().enumerate() {
-            for other in &seen[index + 1..5] {
-                assert_ne!(response, other, "two probes answer the same thing");
-            }
-        }
 
-        // Whatever the counter stood at, the five between them are the request
-        // echoed, the request with its type advanced, two bare headers, and the
-        // control no reader can accept.
-        let mut echoed = 0;
-        let mut advanced = 0;
-        let mut bare = 0;
+        let mut codes = Vec::new();
         let mut refused = 0;
 
         for response in &seen[..5] {
-            if *response == request {
-                echoed += 1;
-            } else if response.len() == request.len() && response[3] == 8 && response[4..] == request[4..] {
-                advanced += 1;
-            } else if response[2..].iter().all(|&byte| byte == 0xff) {
+            // Every one declares its own length and carries the type the request
+            // spells, so the transport reads the whole of it either way.
+            assert_eq!(u16::from_le_bytes([response[0], response[1]]) as usize, response.len());
+
+            if response[2..].iter().all(|&byte| byte == 0xff) {
                 refused += 1;
-            } else {
-                // A bare header: its own length, a type, and zeros behind it.
-                assert_eq!(u16::from_le_bytes([response[0], response[1]]) as usize, response.len());
-                assert!(response[4..].iter().all(|&byte| byte == 0));
-                bare += 1;
+                continue;
             }
+
+            assert_eq!(&response[2..4], &[0x00, 7]);
+            // The code reads the same whether it is taken as a byte, an i16 or
+            // an i32, which is the point of writing it this way.
+            let code = i32::from_le_bytes(response[4..8].try_into().unwrap());
+            assert_eq!(i32::from(response[4] as i8), code);
+            assert_eq!(i32::from(i16::from_le_bytes([response[4], response[5]])), code);
+            // Nothing behind it, so only the code is under test.
+            assert!(response[8..].iter().all(|&byte| byte == 0));
+
+            codes.push(code);
         }
 
-        assert_eq!((echoed, advanced, bare, refused), (1, 1, 2, 1));
+        assert_eq!(refused, 1);
+        codes.sort_unstable();
+        assert_eq!(codes, alloc::vec![-2, 1, 2, 3]);
     }
 
     #[test]
