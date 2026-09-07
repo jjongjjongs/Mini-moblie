@@ -852,6 +852,73 @@ fn lgt_local_cash_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(response)
 }
 
+/// The certificate GAMEVIL's billing server hands back for a purchase.
+///
+/// 제노니아1 (`00027BAA`) opens a billing socket to `218.145.70.36:31206` and
+/// writes a 72-byte record its own serialiser at `0x2790` builds:
+///
+/// ```text
+/// 48 00        u16 LE - the record's own length, kept at [stream+0xc]
+/// 00 07        the message type, 7
+/// "01055145031\0"                 the subscriber number, 12 bytes
+/// "생명의 근원(10개)\0" + padding   the item, 40 bytes, EUC-KR
+/// bc 02 00 00  u32 LE - the price in won, 700
+/// "00027BAA002\0"                 the item code, 12 bytes
+/// ```
+///
+/// The reply is read by the handler at `0x57514`, which is exact about it:
+///
+/// - four bytes of header are consumed, of which only `[2..4]` is read - as a
+///   little-endian `u16` (`ldrb r3,[r1,#3]` / `ldrb r2,[r1,#2]` / `lsls` /
+///   `orrs`), and it must be `0x101`, `0x103` or `0x107`. Those are the
+///   request types `0x100`, `0x102` and `0x106` the dispatcher at `0x574d0`
+///   knows, plus one; the request written here carries type 7, so the answer to
+///   it is `0x107`.
+/// - `[4]` is a signed byte and must not be negative, or the handler takes the
+///   error callback at `vtable+0x10` instead.
+/// - `[5..0x2d]` is a NUL-terminated certificate the title copies into the file
+///   `0x56634` writes, alongside the item code and four bytes of its own.
+/// - `[0x2d]` decides the screen: non-zero is 인증이 완료되었습니다, zero is the
+///   SMS opt-in offer instead.
+///
+/// So the answer is forty-six bytes: the header, a zero status, a certificate,
+/// and a non-zero flag. Derived from the title's own code rather than from an
+/// observed exchange - the server has been gone for years - so what it grants
+/// is what the title's success branch asks for and nothing more.
+///
+/// `None` for anything that is not one of these records.
+fn lgt_local_gamevil_cert_response(request: &[u8]) -> Option<Vec<u8>> {
+    const REQUEST_TYPE: u8 = 7;
+    const RESPONSE_TYPE: u16 = 0x107;
+    /// `[5..0x2d]`, the certificate field the title saves.
+    const CERTIFICATE: core::ops::Range<usize> = 5..0x2d;
+    /// `[0x2d]`, the byte that says 완료 rather than the SMS offer.
+    const GRANTED: usize = 0x2d;
+
+    // Its own declared length has to be the record in hand, and the type has to
+    // be the purchase this can answer. Nothing else is one of these.
+    if request.len() < 4 || u16::from_le_bytes([request[0], request[1]]) as usize != request.len() {
+        return None;
+    }
+
+    if request[2] != 0 || request[3] != REQUEST_TYPE {
+        return None;
+    }
+
+    let length = GRANTED + 1;
+    let mut response = alloc::vec![0u8; length];
+    response[0..2].copy_from_slice(&(length as u16).to_le_bytes());
+    response[2..4].copy_from_slice(&RESPONSE_TYPE.to_le_bytes());
+    response[4] = 0;
+    // A certificate of one character. The title only ever copies it back out
+    // and hands it to its own file, so what it holds does not matter - that it
+    // terminates does, since the copy runs to the first NUL.
+    response[CERTIFICATE.start] = b'1';
+    response[GRANTED] = 1;
+
+    Some(response)
+}
+
 const LGT_BILL_HEADER_SIZE: usize = 108;
 const LGT_BILL_READ_HEADER_SIZE: usize = 56;
 const LGT_BILL_READ_PAYLOAD_LENGTH_OFFSET: usize = 0x30;
@@ -1060,7 +1127,10 @@ impl wie_backend::LocalConnection for LgtBillingGateway {
             return;
         };
 
-        let Some(response) = lgt_local_granted_response(request).or_else(|| lgt_local_cash_response(request)) else {
+        let Some(response) = lgt_local_granted_response(request)
+            .or_else(|| lgt_local_cash_response(request))
+            .or_else(|| lgt_local_gamevil_cert_response(request))
+        else {
             tracing::debug!(
                 "LGT billing gateway: a {} byte request is not one this can shape a reply to",
                 request.len()
@@ -3671,6 +3741,64 @@ mod network_state_tests {
             lgt_local_granted_response(&[0xff, 0xff, 0x00, 0x06, 0x00, 0x20]).unwrap(),
             [0xff, 0xff, 0x00, 0x07, 0x00, 0x21, 0x00]
         );
+    }
+
+    /// 제노니아1's own 72-byte purchase record, captured off the title.
+    fn zenonia_purchase_request() -> Vec<u8> {
+        let mut request = alloc::vec![0u8; 72];
+        request[0..2].copy_from_slice(&72u16.to_le_bytes());
+        request[3] = 7;
+        request[4..15].copy_from_slice(b"01055145031");
+        // 생명의 근원(10개), EUC-KR, in its 40-byte field.
+        request[16..33].copy_from_slice(&[
+            0xbb, 0xfd, 0xb8, 0xed, 0xc0, 0xc7, 0x20, 0xb1, 0xd9, 0xbf, 0xf8, 0x28, 0x31, 0x30, 0xb0, 0xb3, 0x29,
+        ]);
+        request[56..60].copy_from_slice(&700u32.to_le_bytes());
+        request[60..71].copy_from_slice(b"00027BAA002");
+
+        request
+    }
+
+    #[test]
+    fn a_gamevil_purchase_is_answered_with_the_certificate_its_reader_wants() {
+        use super::lgt_local_gamevil_cert_response;
+
+        let response = lgt_local_gamevil_cert_response(&zenonia_purchase_request()).unwrap();
+
+        // Forty-six bytes: everything through the byte at 0x2d the title reads.
+        assert_eq!(response.len(), 0x2e);
+        assert_eq!(u16::from_le_bytes([response[0], response[1]]), 0x2e);
+
+        // The type its handler at 0x57514 accepts, read the way that handler
+        // reads it - low byte first.
+        assert_eq!(u16::from_le_bytes([response[2], response[3]]), 0x107);
+
+        // A status it will not take as an error, a certificate that terminates,
+        // and the flag that means 인증이 완료되었습니다 rather than the SMS offer.
+        assert!(response[4] as i8 >= 0);
+        assert!(response[5] != 0);
+        assert_eq!(response[5..0x2d].iter().position(|&b| b == 0), Some(1));
+        assert_ne!(response[0x2d], 0);
+    }
+
+    #[test]
+    fn only_a_record_that_declares_itself_is_answered_as_a_purchase() {
+        use super::lgt_local_gamevil_cert_response;
+
+        // A length that is not the record in hand.
+        let mut wrong_length = zenonia_purchase_request();
+        wrong_length[0] = 0x47;
+        assert_eq!(lgt_local_gamevil_cert_response(&wrong_length), None);
+
+        // A message type this cannot answer.
+        let mut other_type = zenonia_purchase_request();
+        other_type[3] = 6;
+        assert_eq!(lgt_local_gamevil_cert_response(&other_type), None);
+
+        // And the other protocols answered here are not mistaken for it.
+        assert_eq!(lgt_local_gamevil_cert_response(b"CASH|0|demon|05590091|1|1|1"), None);
+        assert_eq!(lgt_local_gamevil_cert_response(&[0xff, 0xff, 0x00, 0x06, 0x00, 0x68]), None);
+        assert_eq!(lgt_local_gamevil_cert_response(b""), None);
     }
 
     #[test]
