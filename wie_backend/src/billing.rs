@@ -432,23 +432,40 @@ pub fn lgt_local_subscriber_record_response(request: &[u8]) -> Option<Vec<u8>> {
 /// the same cursor, big-endian throughout, with a string being a `u16` length
 /// and that many bytes.
 ///
-/// Two commands make up the handshake this answers:
+/// Three commands make up what the shop asks for, and each handler is what
+/// shapes its answer:
 ///
-/// - `0x0000`, the hello, whose handler at `0x1184c` reads a `u16` code, a `u8`
-///   and a string. The `u8` has to be nonzero or the connection is dropped; the
-///   code becomes the tag the next request carries; and the string is a message
-///   to show the player, so an empty one is what lets `0x118c8` run the next
-///   step instead of stopping on a dialog.
-/// - `0x014a`, which `0x10e9c` sends next, and whose handler at `0x1180c` reads
-///   a `u16` it discards and a `u8` that has to be exactly 1. That one hands the
-///   session to whichever screen opened it.
+/// - `0x0000`, the hello `0x10edc` sends with the subscriber number, whose
+///   handler at `0x1184c` reads a `u16` code, a `u8` and a string. The `u8` has
+///   to be nonzero or the connection is dropped; the code becomes the tag the
+///   next request carries; and the string is a message to show the player, so an
+///   empty one is what lets `0x118c8` run the next step instead of stopping on a
+///   dialog.
+/// - `0x014a`, whose handler at `0x1180c` reads a `u16` it discards and a `u8`
+///   that has to be exactly 1. That one hands the session to the screen that
+///   opened it. The title sends this one itself only when nothing else has
+///   claimed the step behind the hello.
+/// - `0x010f`, the shop's own list, which `0x32abc` sends as three bytes - a
+///   category, a first row and how many rows are wanted. Its command is not one
+///   the network layer knows, so `0x11940` reads the tag and hands the rest to
+///   the screen at `0x32fe0`, whose `0x3304a` reads two bytes it discards and
+///   then a `u8` row count. Each row behind that is a `u32`, a `u8`-length
+///   string, a `u8`, a `u32` and one more string.
+///
+/// The rows are answered as none. The `u32` a row opens with indexes the title's
+/// own item table - `0x331f6` multiplies it by the table's stride and reads a
+/// field seven bytes in - and that table is built at runtime from the title's
+/// own data files, so a row invented here would name an entry nothing has
+/// checked. What an empty list buys is the screen: the title stops on 처리 중
+/// only because nothing answers, and a well-formed empty one lets `0x32f68`
+/// build its list widget and draw.
 ///
 /// The tag is the server's to choose, so it comes back as it was sent - the
 /// title picked `2` for the hello itself, and echoing keeps the session on it.
 ///
 /// `None` for anything that is not one of these records: the length has to
-/// describe the body in hand, the command has to be one of the handshake's, and
-/// the subscriber number has to be NUL-terminated digits filling the rest.
+/// describe the body in hand, the command has to be one of these three, and what
+/// follows has to be the payload that command carries.
 pub fn lgt_local_command_tag_response(request: &[u8]) -> Option<Vec<u8>> {
     /// The length field, which the length it holds does not count.
     const LENGTH_FIELD: usize = 2;
@@ -456,42 +473,57 @@ pub fn lgt_local_command_tag_response(request: &[u8]) -> Option<Vec<u8>> {
     const BODY_HEADER: usize = 4;
     /// The subscriber number, written as a fixed twelve bytes.
     const SUBSCRIBER: usize = 12;
-    /// The status both handlers read as success.
+    /// A category, a first row, and how many rows are wanted.
+    const LIST_ARGUMENTS: usize = 3;
+    /// The status both handshake handlers read as success.
     const GRANTED_STATUS: u8 = 1;
     /// The command a session opens with.
     const HELLO_COMMAND: u16 = 0x0000;
     /// The command that follows once the hello is granted.
     const SESSION_COMMAND: u16 = 0x014a;
+    /// The command the shop asks its list for.
+    const LIST_COMMAND: u16 = 0x010f;
 
-    if request.len() != LENGTH_FIELD + BODY_HEADER + SUBSCRIBER {
+    if request.len() < LENGTH_FIELD + BODY_HEADER {
         return None;
     }
     if u16::from_be_bytes([request[0], request[1]]) as usize != request.len() - LENGTH_FIELD {
         return None;
     }
 
-    // The rest is the subscriber number and the NUL it is written with.
-    let subscriber = &request[LENGTH_FIELD + BODY_HEADER..];
-    let digits = subscriber.iter().position(|&byte| byte == 0)?;
-    if digits == 0 || !subscriber[..digits].iter().all(u8::is_ascii_digit) {
-        return None;
-    }
-
     let command = u16::from_be_bytes([request[2], request[3]]);
     let tag = [request[4], request[5]];
+    let payload = &request[LENGTH_FIELD + BODY_HEADER..];
+
+    // Both handshake steps carry the subscriber number and the NUL it is
+    // written with; the list carries its three arguments and nothing else.
+    let carries_subscriber = || {
+        if payload.len() != SUBSCRIBER {
+            return false;
+        }
+        match payload.iter().position(|&byte| byte == 0) {
+            Some(0) | None => false,
+            Some(digits) => payload[..digits].iter().all(u8::is_ascii_digit),
+        }
+    };
 
     let mut body = Vec::from(command.to_be_bytes());
     match command {
         // The code the next request carries, the status, and an empty message.
-        HELLO_COMMAND => {
+        HELLO_COMMAND if carries_subscriber() => {
             body.extend_from_slice(&tag);
             body.push(GRANTED_STATUS);
             body.extend_from_slice(&0u16.to_be_bytes());
         }
         // A word the handler reads past, and the status.
-        SESSION_COMMAND => {
+        SESSION_COMMAND if carries_subscriber() => {
             body.extend_from_slice(&tag);
             body.push(GRANTED_STATUS);
+        }
+        // Two bytes the screen reads past, and a row count of none.
+        LIST_COMMAND if payload.len() == LIST_ARGUMENTS => {
+            body.extend_from_slice(&tag);
+            body.extend_from_slice(&[0, 0, 0]);
         }
         _ => return None,
     }
@@ -1781,6 +1813,23 @@ mod tests {
     }
 
     #[test]
+    fn a_shop_list_is_answered_with_a_count_of_no_rows() {
+        use super::lgt_local_command_tag_response;
+
+        // Byte for byte what the capture shows the shop asking: a category, a
+        // first row and how many rows it wants.
+        let request = vec![0x00, 0x07, 0x01, 0x0f, 0x00, 0x02, 0x01, 0x00, 0x64];
+        assert_eq!(u16::from_be_bytes([request[0], request[1]]) as usize, request.len() - 2);
+
+        // The command and the tag come back, then the two bytes the screen reads
+        // past and a row count of none.
+        assert_eq!(
+            lgt_local_command_tag_response(&request).unwrap(),
+            vec![0x00, 0x07, 0x01, 0x0f, 0x00, 0x02, 0x00, 0x00, 0x00]
+        );
+    }
+
+    #[test]
     fn a_record_that_is_not_the_session_s_is_left_unanswered() {
         use super::{lgt_local_command_tag_response, lgt_local_subscriber_record_response};
 
@@ -1799,6 +1848,12 @@ mod tests {
         let mut lettered = inotia_2_session_request(0x0000);
         lettered[6] = b'x';
         assert_eq!(lgt_local_command_tag_response(&lettered), None);
+
+        // And a command carrying a payload that is not the one it carries.
+        assert_eq!(
+            lgt_local_command_tag_response(&[0x00, 0x07, 0x00, 0x00, 0x00, 0x02, 0x01, 0x00, 0x64]),
+            None
+        );
 
         // And neither record is mistaken for the other game's, either way.
         assert_eq!(lgt_local_subscriber_record_response(&inotia_2_session_request(0x0000)), None);
