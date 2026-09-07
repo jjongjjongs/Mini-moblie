@@ -6,7 +6,7 @@
 //! title that reaches one and is told nothing usually stops on a screen it never
 //! leaves.
 //!
-//! Seven protocols turn up across the titles here, and a request is recognised by
+//! Eight protocols turn up across the titles here, and a request is recognised by
 //! its own shape rather than by which title sent it. Anything that is not one of
 //! them is left unanswered rather than guessed at.
 //!
@@ -244,6 +244,91 @@ pub fn lgt_local_gamevil_packet_response(request: &[u8]) -> Option<Vec<u8>> {
 
     Some(response)
 }
+/// What answers the subscriber record 이노티아연대기 opens its shop with.
+///
+/// 이노티아연대기 (`0001E718`) reads `PHONENUMBER`, takes a server out of its
+/// own `etc.dat` - `어드벤쳐` at `211.115.66.232`, whose fourth port is 19017 -
+/// and opens `MC_netBillSocket` to it the moment the shop is entered. The 16
+/// bytes it writes there are the whole of the request:
+///
+/// ```text
+/// 00 10  1e  0b  30 31 30 35 35 39 33 30 39 30 36  00
+/// ```
+///
+/// ```text
+/// [0..2]  u16 BE - the record's own length, its own two bytes counted
+/// [2]     the command
+/// [3]     how many digits of subscriber number follow
+/// [4..]   the subscriber number, and one byte the request carries behind it
+/// ```
+///
+/// The title is compiled ahead of time, so what it does with the answer is ARM
+/// rather than bytecode, and the framing is not the request's. The reader at
+/// `0x3aff0` takes exactly two bytes, reads them big-endian through `0x7784`
+/// (`(b[0] << 8) | b[1]`), keeps them as the head of the message and asks
+/// `0x3af04` for `length - 2` more. So a reply is one length-prefixed record and
+/// the prefix counts itself, the same way the request's does.
+///
+/// `0x38580` then dispatches it: the read cursor is seeked past the length, one
+/// byte is taken as the command and one more as the status, and the command
+/// indexes the table at `0x4be74`. Every handler there opens by reading that
+/// status, and **1** is the only value any of them treat as success - `0x385de`,
+/// the plainest of them, answers 0 with error 0x45, 2 with 0x4c and 3 with 0xdd.
+///
+/// The shop's command is `0x1e`, whose handler at `0x39540` reads three bytes
+/// and then that many catalogue rows:
+///
+/// ```text
+/// [u8][u8][u8 rows]  then rows x  [u8 name length][name][u8 kind][u32 BE price]
+/// ```
+///
+/// The catalogue was the service's to fill and the service is gone, so the rows
+/// are answered as none. What that buys is the shop screen: the title stops on
+/// 전송중 only because nothing answers it, and a well-formed empty catalogue
+/// leaves `0x39540` free to build its list widget and switch to screen `0x17`
+/// rather than wait. Each row's name is matched against the title's own item
+/// table before it means anything, so rows invented here would not name items
+/// this build can sell.
+///
+/// `None` for anything that is not this request: the declared length has to be
+/// the record in hand, the command has to be the shop's, and the subscriber
+/// number has to be digits that account for the rest of the record.
+pub fn lgt_local_subscriber_record_response(request: &[u8]) -> Option<Vec<u8>> {
+    /// The length and the command, which is what the reader frames on.
+    const HEADER: usize = 3;
+    /// The one status every handler in the table reads as success.
+    const GRANTED_STATUS: u8 = 1;
+    /// The command the shop asks its catalogue for.
+    const CATALOGUE_COMMAND: u8 = 0x1e;
+    /// Two the handler reads and keeps, and the row count behind them.
+    const EMPTY_CATALOGUE: [u8; 3] = [0, 0, 0];
+
+    if request.len() < HEADER + 2 || u16::from_be_bytes([request[0], request[1]]) as usize != request.len() {
+        return None;
+    }
+
+    if request[2] != CATALOGUE_COMMAND {
+        return None;
+    }
+
+    // The subscriber number is length-prefixed and one byte follows it, so the
+    // prefix has to account for the record exactly.
+    let digits = request[3] as usize;
+    let subscriber = request.get(4..4 + digits)?;
+    if digits == 0 || request.len() != 5 + digits || !subscriber.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+
+    let length = HEADER + 1 + EMPTY_CATALOGUE.len();
+    let mut response = Vec::with_capacity(length);
+    response.extend_from_slice(&(length as u16).to_be_bytes());
+    response.push(CATALOGUE_COMMAND);
+    response.push(GRANTED_STATUS);
+    response.extend_from_slice(&EMPTY_CATALOGUE);
+
+    Some(response)
+}
+
 /// What answers the big-endian record 레전드오브마스터 sends its purchases in.
 ///
 /// 레전드오브마스터 (`0002A4B1`) opens `BillSocket://211.189.18.116:9407` and
@@ -736,6 +821,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
     lgt_local_granted_response(request)
         .or_else(|| lgt_local_cash_response(request))
         .or_else(|| lgt_local_gamevil_packet_response(request))
+        .or_else(|| lgt_local_subscriber_record_response(request))
         .or_else(|| lgt_local_big_endian_record_response(request))
         .or_else(|| lgt_local_major_minor_response(request))
         .or_else(|| lgt_local_text_record_response(request))
@@ -1362,9 +1448,68 @@ mod tests {
         assert_eq!(lgt_local_text_record_response(&request), None);
     }
 
+    /// The 16 bytes 이노티아연대기 writes when the shop is entered.
+    fn inotia_shop_request() -> Vec<u8> {
+        let mut request = vec![0u8; 2];
+        request.push(0x1e);
+        request.push(11);
+        request.extend_from_slice(b"01055930906");
+        request.push(0);
+        let length = request.len() as u16;
+        request[0..2].copy_from_slice(&length.to_be_bytes());
+
+        request
+    }
+
+    #[test]
+    fn a_subscriber_record_is_answered_with_a_catalogue_of_no_rows() {
+        use super::lgt_local_subscriber_record_response;
+
+        // Byte for byte what the capture shows going out.
+        assert_eq!(
+            inotia_shop_request(),
+            vec![
+                0x00, 0x10, 0x1e, 0x0b, 0x30, 0x31, 0x30, 0x35, 0x35, 0x39, 0x33, 0x30, 0x39, 0x30, 0x36, 0x00
+            ]
+        );
+
+        // The reply's length counts its own two bytes, the command comes back
+        // as it was asked under, the status is the one every handler reads as
+        // success, and the catalogue is three bytes ending in no rows.
+        let response = lgt_local_subscriber_record_response(&inotia_shop_request()).unwrap();
+        assert_eq!(response, vec![0x00, 0x07, 0x1e, 0x01, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn a_record_that_is_not_the_shop_s_is_left_to_whatever_sent_it() {
+        use super::{lgt_local_big_endian_record_response, lgt_local_subscriber_record_response};
+
+        // A length that does not describe the record in hand.
+        let mut short = inotia_shop_request();
+        short.pop();
+        assert_eq!(lgt_local_subscriber_record_response(&short), None);
+
+        // A subscriber number that is not digits.
+        let mut lettered = inotia_shop_request();
+        lettered[4] = b'x';
+        assert_eq!(lgt_local_subscriber_record_response(&lettered), None);
+
+        // A prefix that does not account for the rest of the record.
+        let mut mismeasured = inotia_shop_request();
+        mismeasured[3] = 10;
+        assert_eq!(lgt_local_subscriber_record_response(&mismeasured), None);
+
+        // And 레전드오브마스터's record, which is big-endian length-first too,
+        // still reaches the handler that reads it rather than this one.
+        let legend = legend_of_master_purchase_request();
+        assert_eq!(lgt_local_subscriber_record_response(&legend), None);
+        assert!(lgt_local_big_endian_record_response(&legend).is_some());
+        assert_eq!(response(&legend), lgt_local_big_endian_record_response(&legend));
+    }
+
     #[test]
     fn one_answer_covers_every_protocol_and_guesses_at_none() {
-        // Each of the seven, recognised by its own shape.
+        // Each of the eight, recognised by its own shape.
         assert!(response(&[0xff, 0xff, 0x06, 0x00, 0x20, 0x00]).is_some());
         assert!(response(b"CASH|0|demon|05590091|00029B60004|500|2034517541").is_some());
         assert!(response(&zenonia_purchase_request()).is_some());
@@ -1373,6 +1518,7 @@ mod tests {
         assert!(response(&anima_purchase_request()).is_some());
         assert!(response(&wild_frontier_purchase_request()).is_some());
         assert!(response(&wild_frontier_2_purchase_request()).is_some());
+        assert!(response(&inotia_shop_request()).is_some());
 
         // And nothing for a request that is none of them.
         assert_eq!(response(b"hello"), None);
