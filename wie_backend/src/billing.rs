@@ -1,11 +1,12 @@
-//! The billing servers these titles were sold through, answered in process.
+//! The services these titles reached over a billing socket, answered in process.
 //!
 //! A handset opened a socket to the carrier or the publisher to authenticate a
-//! copy or to sell an item, and every one of those services has been switched
-//! off for years. A title that reaches one and is told nothing usually stops on
-//! a screen it never leaves.
+//! copy, to sell an item, or - for a title whose online menu went the same way -
+//! to log in, and every one of those services has been switched off for years. A
+//! title that reaches one and is told nothing usually stops on a screen it never
+//! leaves.
 //!
-//! Four protocols turn up across the titles here, and a request is recognised by
+//! Five protocols turn up across the titles here, and a request is recognised by
 //! its own shape rather than by which title sent it. Anything that is not one of
 //! them is left unanswered rather than guessed at.
 //!
@@ -323,6 +324,79 @@ pub fn lgt_local_big_endian_record_response(request: &[u8]) -> Option<Vec<u8>> {
 
     Some(response)
 }
+/// What answers the length-prefixed command 영웅서기4 opens its online menu with.
+///
+/// 영웅서기4 (`0002D74B`) reaches `210.222.18.31:8894` through
+/// `MC_netBillSocket` - the carrier's socket carries a game service here rather
+/// than a purchase - and speaks a frame of its own:
+///
+/// ```text
+/// [0..4]  u32 LE - the frame's own length, this field included
+/// [4]     u8     - the major command
+/// [5]     u8     - the minor command
+/// [6..]   the body
+/// ```
+///
+/// Opening 상점 writes `07 00 00 00 01 01 04`, and five seconds later
+/// `06 00 00 00 00 0a` - which the title names itself, through
+/// `MC_knlPrintk`: `[SEND PROTOCL] MAJOR_SYSTEM_MESSAGE / MINOR_KEEP_ALIVE_MSG`.
+///
+/// The title is native, so its receive path is ARM. The callback at `0x572c8`
+/// queues whatever arrives, and the dispatcher at `0x61518` drops anything under
+/// six bytes, reads the major at `[4]` and the minor at `[5]`, and switches on
+/// the major - `1`, `5`, `0x14` and `0x64` are handled and everything else is
+/// dropped without a word, the title's own major `0` keep-alive included.
+///
+/// Which is what the online menu's login is, read out of those handlers:
+///
+/// | the title sends | the handler | what it does next |
+/// |-----------------|-------------|-------------------|
+/// | `1/0x01`        | `0x612d0`   | reads nothing of the reply; answers with its `PHONENUMBER` as `1/0x3d` |
+/// | `1/0x3d`        | `0x6137a`   | reads nothing of the reply; answers `1/0x3e` |
+/// | `1/0x3e`        | `0x613b8`   | reads nothing of the reply while the 상점 flag is set; closes the 서버 응답을 기다리는중 notice and asks for the catalogue as `5/0x3f` |
+/// | `5/0x3f`        | `0x5eb1e`   | takes a `u16 LE` count at `[8]` and that many 37-byte rows behind it, then opens the shop screen |
+///
+/// So the first three are answered with the command alone - the title only
+/// needs to see its own command come back to take the next step - and the
+/// catalogue is answered with a count of zero, which opens the shop on an empty
+/// list. The service is gone and its stock with it; an invented catalogue would
+/// be a worse answer than an honest empty one.
+///
+/// `None` for anything else, the keep-alive included: the frame has to declare
+/// its own length, and the command pair has to be one of the four whose answer
+/// is known. A command answered wrongly here does not stall the title - it puts
+/// it through a branch meant for a different exchange.
+pub fn lgt_local_major_minor_response(request: &[u8]) -> Option<Vec<u8>> {
+    /// A length, a major and a minor - and the least the dispatcher will look
+    /// at, which drops anything under six bytes.
+    const HEADER: usize = 6;
+
+    if request.len() < HEADER || u32::from_le_bytes([request[0], request[1], request[2], request[3]]) as usize != request.len() {
+        return None;
+    }
+
+    /// The shop screen's own two bytes ahead of the count, which it keeps and
+    /// an empty list gives it nothing to say with.
+    const CATALOGUE_HEADING: [u8; 2] = [0, 0];
+    /// A `u16 LE` row count. Zero rows.
+    const CATALOGUE_ROWS: [u8; 2] = [0, 0];
+
+    let (major, minor) = (request[4], request[5]);
+    let body: &[u8] = match (major, minor) {
+        (1, 0x01) | (1, 0x3d) | (1, 0x3e) => &[],
+        (5, 0x3f) => &[CATALOGUE_HEADING[0], CATALOGUE_HEADING[1], CATALOGUE_ROWS[0], CATALOGUE_ROWS[1]],
+        _ => return None,
+    };
+
+    let length = HEADER + body.len();
+    let mut response = Vec::with_capacity(length);
+    response.extend_from_slice(&(length as u32).to_le_bytes());
+    response.push(major);
+    response.push(minor);
+    response.extend_from_slice(body);
+
+    Some(response)
+}
 /// The granted answer to an application billing request, in the frame shape
 /// `lgt_local_purchase_success_response` establishes for the purchase
 /// transaction: the `0xffff` marker, the frame length, the request's own type
@@ -347,17 +421,20 @@ pub fn lgt_local_granted_response(request: &[u8]) -> Option<Vec<u8>> {
 ///
 /// Tried in order of how specific each shape is: the `0xffff`-framed message,
 /// then the pipe-delimited cash record, then the GAMEVIL packet, then the
-/// big-endian record. `None` when a request is none of them, which is not
-/// something to answer with a guess.
+/// big-endian record, then the length-prefixed command. `None` when a request is
+/// none of them, which is not something to answer with a guess.
 ///
-/// The two packet shapes cannot be mistaken for one another: each declares its
-/// own length, and a length that reads as the record in hand one end first
-/// reads as thousands the other way round.
+/// The three packet shapes cannot be mistaken for one another. Each declares its
+/// own length, and no two of them read that length the same way: a length that
+/// is the record in hand as a `u16` one end first is thousands the other way
+/// round, and a `u32` that is the record in hand has the command in its high
+/// half read as a `u16`.
 pub fn response(request: &[u8]) -> Option<Vec<u8>> {
     lgt_local_granted_response(request)
         .or_else(|| lgt_local_cash_response(request))
         .or_else(|| lgt_local_gamevil_packet_response(request))
         .or_else(|| lgt_local_big_endian_record_response(request))
+        .or_else(|| lgt_local_major_minor_response(request))
 }
 
 #[cfg(test)]
@@ -617,13 +694,98 @@ mod tests {
         assert_eq!(lgt_local_granted_response(&legend_of_master_purchase_request()), None);
     }
 
+    /// The 7-byte frame 영웅서기4 writes to open its online 상점, captured off
+    /// the title, and the 6-byte keep-alive it writes five seconds later.
+    fn hero_lore_frame(major: u8, minor: u8, body: &[u8]) -> Vec<u8> {
+        let length = 6 + body.len();
+        let mut frame = Vec::with_capacity(length);
+        frame.extend_from_slice(&(length as u32).to_le_bytes());
+        frame.push(major);
+        frame.push(minor);
+        frame.extend_from_slice(body);
+
+        frame
+    }
+
+    #[test]
+    fn a_length_prefixed_command_is_answered_the_way_its_dispatcher_reads_it() {
+        use super::lgt_local_major_minor_response;
+
+        // The record the title actually writes on opening 상점.
+        assert_eq!(hero_lore_frame(1, 1, &[4]), [0x07, 0x00, 0x00, 0x00, 0x01, 0x01, 0x04]);
+
+        // The login the title walks: each step is answered with its own command
+        // back, and each handler reads nothing else out of the reply.
+        for (major, minor) in [(1u8, 0x01u8), (1, 0x3d), (1, 0x3e)] {
+            let request = hero_lore_frame(major, minor, &[4]);
+            let response = lgt_local_major_minor_response(&request).unwrap();
+
+            // Six bytes: under that the dispatcher drops the frame unread.
+            assert_eq!(response.len(), 6);
+            assert_eq!(
+                u32::from_le_bytes([response[0], response[1], response[2], response[3]]) as usize,
+                response.len()
+            );
+            assert_eq!((response[4], response[5]), (major, minor));
+        }
+
+        // And the catalogue, answered with no rows in it.
+        let response = lgt_local_major_minor_response(&hero_lore_frame(5, 0x3f, &[0])).unwrap();
+        assert_eq!(
+            u32::from_le_bytes([response[0], response[1], response[2], response[3]]) as usize,
+            response.len()
+        );
+        assert_eq!((response[4], response[5]), (5, 0x3f));
+        assert_eq!(u16::from_le_bytes([response[8], response[9]]), 0);
+    }
+
+    #[test]
+    fn only_a_command_pair_whose_answer_is_known_is_answered() {
+        use super::lgt_local_major_minor_response;
+
+        // The keep-alive: the title's own dispatcher drops major 0, so an answer
+        // to it would be an answer to nothing.
+        assert_eq!(hero_lore_frame(0, 0x0a, &[]), [0x06, 0x00, 0x00, 0x00, 0x00, 0x0a]);
+        assert_eq!(lgt_local_major_minor_response(&hero_lore_frame(0, 0x0a, &[])), None);
+
+        // A command pair this cannot shape a reply to. Answering it would put
+        // the title through a branch meant for a different exchange.
+        assert_eq!(lgt_local_major_minor_response(&hero_lore_frame(5, 0x70, &[])), None);
+        assert_eq!(lgt_local_major_minor_response(&hero_lore_frame(0x14, 0x46, &[1])), None);
+
+        // A length that is not the frame in hand.
+        let mut wrong_length = hero_lore_frame(1, 1, &[4]);
+        wrong_length[0] = 0x08;
+        assert_eq!(lgt_local_major_minor_response(&wrong_length), None);
+
+        // Too short for the dispatcher to read a command out of.
+        assert_eq!(lgt_local_major_minor_response(&[0x05, 0x00, 0x00, 0x00, 0x01]), None);
+        assert_eq!(lgt_local_major_minor_response(b""), None);
+
+        // And the other protocols answered here are not mistaken for it - the
+        // GAMEVIL packet's length is the record in hand as a u16, which as a u32
+        // carries the command in its high half.
+        assert_eq!(lgt_local_major_minor_response(&zenonia_purchase_request()), None);
+        assert_eq!(lgt_local_major_minor_response(&legend_of_master_purchase_request()), None);
+        assert_eq!(lgt_local_major_minor_response(b"CASH|0|demon|05590091|00029B60004|500|2034517541"), None);
+        assert_eq!(lgt_local_major_minor_response(&[0xff, 0xff, 0x00, 0x06, 0x00, 0x68]), None);
+
+        // Nor is it mistaken for one of them.
+        let hello = hero_lore_frame(1, 1, &[4]);
+        assert_eq!(lgt_local_granted_response(&hello), None);
+        assert_eq!(lgt_local_cash_response(&hello), None);
+        assert_eq!(lgt_local_gamevil_packet_response(&hello), None);
+        assert_eq!(lgt_local_big_endian_record_response(&hello), None);
+    }
+
     #[test]
     fn one_answer_covers_every_protocol_and_guesses_at_none() {
-        // Each of the four, recognised by its own shape.
+        // Each of the five, recognised by its own shape.
         assert!(response(&[0xff, 0xff, 0x06, 0x00, 0x20, 0x00]).is_some());
         assert!(response(b"CASH|0|demon|05590091|00029B60004|500|2034517541").is_some());
         assert!(response(&zenonia_purchase_request()).is_some());
         assert!(response(&legend_of_master_purchase_request()).is_some());
+        assert!(response(&hero_lore_frame(1, 1, &[4])).is_some());
 
         // And nothing for a request that is none of them.
         assert_eq!(response(b"hello"), None);
