@@ -4338,6 +4338,46 @@ mod network_state_tests {
     }
 
     #[futures_test::test]
+    async fn a_cash_purchase_is_carried_to_the_gateway_and_paid_back() {
+        const REQUEST: u32 = 0x1000;
+        const RESPONSE: u32 = 0x2000;
+
+        let system = System::new(Box::new(LocalBillingTestPlatform::new()), "test-pid", "test-aid", DefaultTaskRunner);
+        let mut context = TestContext::with_system(system);
+
+        let state = context.network_state();
+        state.lock().process_state = ProcessNetworkState::Available;
+
+        let socket = bill_socket(&mut context, 2, 1).await.unwrap();
+        socket_connect(&mut context, socket, 0x0102_0304, 2508, 0x1111, 0x2222).await.unwrap();
+
+        // Exactly what 데몬헌터 writes, through the same MC_netSocketWrite it
+        // uses: the record goes out behind WPBill_Write's 108-byte header.
+        let request = b"CASH|0|demon|05590091|00029B60004|500|2034517541";
+        context.write_bytes(REQUEST, request).unwrap();
+
+        assert_eq!(
+            socket_write(&mut context, socket, REQUEST, request.len() as i32).await.unwrap(),
+            lgt_bill_write_public_result(LGT_BILL_HEADER_SIZE + request.len())
+        );
+
+        // A title that registered a read callback is told there is something to
+        // collect, rather than being left to poll.
+        let descriptor = state.lock().local_descriptor(socket).unwrap();
+        assert!(context.system().local_network().readable(descriptor));
+
+        // And WPBill_Read hands up the payload alone, which is the word the
+        // title compares against `SASH` before showing 결제가 완료되었습니다.
+        assert_eq!(socket_read(&mut context, socket, RESPONSE, 32).await.unwrap(), 4);
+
+        let mut answer = [0u8; 4];
+        context.read_bytes(RESPONSE, &mut answer).unwrap();
+        assert_eq!(&answer, b"SASH");
+
+        assert_eq!(socket_read(&mut context, socket, RESPONSE, 32).await.unwrap(), M_E_WOULDBLOCK);
+    }
+
+    #[futures_test::test]
     async fn a_payload_larger_than_the_read_is_continued_on_the_next_call() {
         const REQUEST: u32 = 0x1000;
         const RESPONSE: u32 = 0x2000;
