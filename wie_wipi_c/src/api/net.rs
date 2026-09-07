@@ -861,54 +861,54 @@ fn lgt_local_cash_response(request: &[u8]) -> Option<Vec<u8>> {
 /// 48 00        u16 LE - the record's own length, kept at [stream+0xc]
 /// 00 07        the message type, 7
 /// "01055145031\0"                 the subscriber number, 12 bytes
-/// "생명의 근원(10개)\0" + padding   the item, 40 bytes, EUC-KR
-/// bc 02 00 00  u32 LE - the price in won, 700
+/// "축복의 묘약(1개)\0" + padding    the item, 40 bytes, EUC-KR
+/// 84 03 00 00  u32 LE - the price in won
 /// "00027BAA002\0"                 the item code, 12 bytes
 /// ```
 ///
-/// The reply is read in two steps. The transport takes four bytes, reads the
-/// first two as the whole reply's length and then reads the rest - captured as
-/// `bill read: 4 bytes [2e 00 07 01]` followed by `42 bytes`, which is 46 minus
-/// the four. The handler at `0x57514` then takes four bytes of its own
-/// (`[stream+8] += 4`) and reads, relative to where it started:
+/// The transport works: the title reads four bytes, takes the first two as the
+/// whole reply's length, reads the rest, cancels its timeout and closes its
+/// network thread. What it then does is nothing - no `audio.adt` write, and a
+/// screen byte for byte what it had been - so the reply is not reaching a reader
+/// that understands it, and which reader that should be is still open.
 ///
-/// - `[2..4]` as a little-endian `u16` (`ldrb r3,[r1,#3]` / `ldrb r2,[r1,#2]` /
-///   `lsls` / `orrs`), which must be `0x101`, `0x103` or `0x107` - the request
-///   types `0x100`, `0x102` and `0x106` the dispatcher at `0x574d0` knows, plus
-///   one. This request carries type 7, so `0x107`.
-/// - `[4]` as a signed byte, which must not be negative or the error callback at
-///   `vtable+0x10` runs instead.
-/// - `[5..0x2d]`, a NUL-terminated certificate copied into the file `0x56634`
-///   writes (`audio.adt`, opened `mode=8`).
-/// - `[0x2d]`, which decides the screen: non-zero is 인증이 완료되었습니다, zero
-///   is the SMS opt-in offer.
+/// # This is a diagnostic, not a fix
 ///
-/// The fields are written at two offsets - the reply's own, and four bytes in -
-/// because the transport consumes four bytes of its own and the disassembly does
-/// not settle whether it leaves the handler's cursor before or after them.
+/// The reader was taken to be `0x57514`, which accepts a little-endian `u16`
+/// type of `0x101`, `0x103` or `0x107` at `[2..4]`, a non-negative signed byte
+/// at `[4]`, a NUL-terminated certificate at `[5..0x2d]` and a non-zero flag at
+/// `[0x2d]`. Type `0x107` was tried at the reply's own offsets and then at both
+/// those and four bytes in - the transport consumes four of its own and the
+/// disassembly does not settle whose they are - and neither moved the title.
 ///
-/// **This does not yet work, and `0x57514` is probably the wrong reader.** With
-/// the fields at the reply's offsets, and then at both, the title consumed the
-/// whole reply, cancelled its timeout and closed its network thread - and took
-/// no branch: no `audio.adt` write, and a screen byte for byte what it had been.
-/// The reason is likely that `0x57514` belongs to a different message family
-/// altogether. Its partner builder `0x572f8` lays out fields of 12, 16, 16 and
-/// 16 bytes, where the record this answers is the 12/40/4/12 one built at
-/// `0x2790` - a different subsystem that happens to share the `0x1xx` numbering.
-/// Where that subsystem's own reader lives is still open.
+/// `0x57514` may well be the wrong reader: its partner builder `0x572f8` lays
+/// out fields of 12, 16, 16 and 16 bytes, where this record is the 12/40/4/12
+/// one from `0x2790` - a different subsystem that happens to share the `0x1xx`
+/// numbering.
 ///
-/// So this is a standing hypothesis, not a fix. It is kept because it is
-/// harmless - only this exact record shape reaches it, and every other request
-/// is still left unanswered rather than guessed at - and because the shape of
-/// the reply is worth keeping written down while the reader is found.
+/// Rather than spend a build on each remaining guess, each request is answered
+/// with the next one in turn, so a player who retries the purchase walks the
+/// whole list in one sitting and the trace says which reply was in the air when
+/// the screen finally changed. The variants are the two types never tried, then
+/// a reply no reader can take for valid - if even that leaves the title silent,
+/// nothing is reading these bytes and the reader is somewhere else entirely.
 ///
 /// `None` for anything that is not one of these records.
 fn lgt_local_gamevil_cert_response(request: &[u8]) -> Option<Vec<u8>> {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
     const REQUEST_TYPE: u8 = 7;
-    const RESPONSE_TYPE: u16 = 0x107;
     /// What the transport consumes before the handler starts, and so the
-    /// distance between the two readings.
+    /// distance between the two candidate readings.
     const TRANSPORT_HEADER: usize = 4;
+    /// The types `0x57514` accepts, `0x107` first because it is the one its
+    /// numbering points at.
+    const TYPES: [u16; 3] = [0x107, 0x103, 0x101];
+
+    /// Which answer the next request gets. Process-wide: the title opens a
+    /// fresh connection per purchase, so a per-connection counter would hand
+    /// out the same one every time.
+    static ATTEMPT: AtomicUsize = AtomicUsize::new(0);
 
     // Its own declared length has to be the record in hand, and the type has to
     // be the purchase this can answer. Nothing else is one of these.
@@ -920,22 +920,35 @@ fn lgt_local_gamevil_cert_response(request: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    // The furthest byte either reading looks at is the granted flag at `0x2d`
-    // from the later start.
+    // The furthest byte any reading looks at is the granted flag at `0x2d` from
+    // the later start.
     let length = TRANSPORT_HEADER + 0x2d + 1;
     let mut response = alloc::vec![0u8; length];
     response[0..2].copy_from_slice(&(length as u16).to_le_bytes());
 
-    for start in [0, TRANSPORT_HEADER] {
-        response[start + 2..start + 4].copy_from_slice(&RESPONSE_TYPE.to_le_bytes());
-        // The status stays zero, which is the "not an error" the handler wants.
-        //
-        // A certificate of one character. The title only ever copies it back out
-        // and hands it to its own file, so what it holds does not matter - that
-        // it terminates inside its field does, since the copy runs to the first
-        // NUL, and both readings' fields hold one.
-        response[start + 5] = b'1';
-        response[start + 0x2d] = 1;
+    let attempt = ATTEMPT.fetch_add(1, Ordering::Relaxed) % (TYPES.len() + 1);
+
+    match TYPES.get(attempt) {
+        Some(&message_type) => {
+            for start in [0, TRANSPORT_HEADER] {
+                response[start + 2..start + 4].copy_from_slice(&message_type.to_le_bytes());
+                // The status stays zero, which is the "not an error" every
+                // reading wants, and the certificate is one character so that it
+                // terminates inside whichever field holds it.
+                response[start + 5] = b'1';
+                response[start + 0x2d] = 1;
+            }
+
+            tracing::info!("GAMEVIL purchase probe {attempt}: answering with type {message_type:#06x}");
+        }
+        // The last of the four: everything past the length no reader can take
+        // for valid. A title that says nothing to this is not reading the reply
+        // at all.
+        None => {
+            response[2..].fill(0xff);
+
+            tracing::info!("GAMEVIL purchase probe {attempt}: answering with a reply no reader can accept");
+        }
     }
 
     Some(response)
@@ -3790,28 +3803,52 @@ mod network_state_tests {
     }
 
     #[test]
-    fn a_gamevil_purchase_is_answered_with_the_certificate_its_reader_wants() {
+    fn a_gamevil_purchase_walks_the_answers_still_to_be_tried() {
         use super::lgt_local_gamevil_cert_response;
 
-        let response = lgt_local_gamevil_cert_response(&zenonia_purchase_request()).unwrap();
+        let request = zenonia_purchase_request();
 
-        // Long enough for the further of the two readings to find its last byte.
-        assert_eq!(response.len(), 4 + 0x2e);
-        assert_eq!(u16::from_le_bytes([response[0], response[1]]), response.len() as u16);
+        // Four answers in turn, then round again, so retrying the purchase walks
+        // the list rather than repeating one guess.
+        let mut seen = Vec::new();
+        for _ in 0..8 {
+            seen.push(lgt_local_gamevil_cert_response(&request).unwrap());
+        }
 
-        // Both readings find what the handler at 0x57514 asks for: the type it
-        // accepts, read low byte first; a status it will not take as an error; a
-        // certificate that terminates inside its field; and the flag that means
-        // 인증이 완료되었습니다 rather than the SMS offer.
-        for start in [0usize, 4] {
-            assert_eq!(u16::from_le_bytes([response[start + 2], response[start + 3]]), 0x107, "at {start}");
-            assert!(response[start + 4] as i8 >= 0, "at {start}");
-            assert_ne!(response[start + 5], 0, "at {start}");
-            assert!(
-                response[start + 5..start + 0x2d].contains(&0),
-                "certificate does not terminate at {start}"
-            );
-            assert_ne!(response[start + 0x2d], 0, "at {start}");
+        assert_eq!(seen[0], seen[4]);
+        assert_eq!(seen[3], seen[7]);
+        assert_ne!(seen[0], seen[1]);
+        assert_ne!(seen[1], seen[2]);
+        assert_ne!(seen[2], seen[3]);
+
+        // Each is long enough for the further of the two readings, and declares
+        // its own length so the transport reads the whole of it.
+        for response in &seen {
+            assert_eq!(response.len(), 4 + 0x2e);
+            assert_eq!(u16::from_le_bytes([response[0], response[1]]), response.len() as u16);
+        }
+
+        // One of the four is the reply no reader can accept; the other three
+        // carry the three types its reader takes, one each. Which one comes
+        // first depends on where the shared counter stood, so the set is what is
+        // checked rather than the order.
+        let (refused, accepted): (Vec<_>, Vec<_>) = seen[..4].iter().partition(|r| r[2..].iter().all(|&byte| byte == 0xff));
+        assert_eq!(refused.len(), 1);
+
+        let mut types: Vec<u16> = accepted.iter().map(|response| u16::from_le_bytes([response[2], response[3]])).collect();
+        types.sort_unstable();
+        assert_eq!(types, alloc::vec![0x101, 0x103, 0x107]);
+
+        // Each carries its type at both offsets, with a status its reader will
+        // not take as an error and a certificate that terminates in its field.
+        for response in &accepted {
+            let message_type = u16::from_le_bytes([response[2], response[3]]);
+            for start in [0usize, 4] {
+                assert_eq!(u16::from_le_bytes([response[start + 2], response[start + 3]]), message_type);
+                assert!(response[start + 4] as i8 >= 0);
+                assert!(response[start + 5..start + 0x2d].contains(&0));
+                assert_ne!(response[start + 0x2d], 0);
+            }
         }
     }
 
