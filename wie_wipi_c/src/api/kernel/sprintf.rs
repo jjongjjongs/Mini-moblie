@@ -409,6 +409,27 @@ mod test {
     }
 
     #[test]
+    fn test_the_dialogue_line_wild_frontier_draws() -> Result<()> {
+        // 와일드프론티어's speech format at 0x4a9d8, `\x07` and a digit being its
+        // own colour escape: the speaker's name, then a line of the script
+        // buffer measured by the count that comes with it.
+        let mut read = |ptr: u32| {
+            Ok(match ptr {
+                1 => Vec::from(*b"KRISNOAH"),
+                _ => Vec::from(*b"who are you? and more script behind it"),
+            })
+        };
+        let line = super::format("\u{7}2[%s]\u{7}0%.*s", &[1, 16, 2], &mut read)?;
+
+        // Nothing of the format is left in it, and the line stops where its
+        // count says rather than running on into the next one.
+        assert_eq!(line, "\u{7}2[KRISNOAH]\u{7}0who are you? and");
+        assert!(!line.contains('%'));
+
+        Ok(())
+    }
+
+    #[test]
     fn test_precision_is_clamped_like_width() -> Result<()> {
         // Guest-controlled, and `core::fmt` is not what pads here, but a
         // precision that allocated unclamped would be a way to exhaust memory.
