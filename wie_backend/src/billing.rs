@@ -760,11 +760,17 @@ const RAGNAROK_VIOLET_SHOP_ROWS: [(u32, u32, u32); 20] = [
 ///   on. The message was the service's to write, so it is answered as none - a
 ///   zero length is what lets the screen move on rather than wait.
 ///
+/// Buying a row opens `0x6b` the same way, and `0x3943a` is its handler. Its
+/// `0xc9` carries nothing - `0x38dd2` writes a body only for `0xcb` - and its
+/// `0xca` is answered with nothing back; the screen then sends `0xcb` with the
+/// row it chose. `0x38466` reads the result of that off the body rather than
+/// the step's word, and of the four codes it knows only **301** reaches
+/// `0x384a6`, which grants the item before showing its message.
+///
 /// `None` for anything that is not one of these blocks: the block has to be the
-/// full 1024, the screen has to be one the table covers, the step has to be one
-/// of the two, and each has to carry what that step carries - the subscriber
-/// number written as a length and its digits for the first, nothing of its own
-/// for the second.
+/// full 1024, the screen and step have to be a pair this answers, and each has
+/// to carry what that step carries - the subscriber number written as a length
+/// and its digits for the shop's hello, nothing of its own for the rest.
 pub fn lgt_local_fixed_block_response(request: &[u8]) -> Option<Vec<u8>> {
     /// What the title reads and writes a block as, padding included.
     const BLOCK: usize = 1024;
@@ -772,18 +778,21 @@ pub fn lgt_local_fixed_block_response(request: &[u8]) -> Option<Vec<u8>> {
     const HEADER: usize = 20;
     /// Where `[8]` is measured from.
     const LENGTH_FROM: usize = 16;
-    /// The screens `0x38e78`'s table covers.
-    const SCREENS: core::ops::RangeInclusive<u32> = 0x65..=0x75;
-    /// The step the shop opens with, and the one that answers it.
+    /// The screen the list is asked under, and the one a purchase is.
+    const SHOP_SCREEN: u32 = 0x66;
+    const PURCHASE_SCREEN: u32 = 0x6b;
+    /// The step a screen opens with, and the one that answers it.
     const HELLO_STEP: u32 = 0xc9;
     const GRANTED_STEP: u32 = 0xca;
-    /// The step the screen sends behind that, and the message answering it.
-    const MESSAGE_REQUEST_STEP: u32 = 0xcb;
-    const MESSAGE_STEP: u32 = 0xcd;
+    /// The step a screen sends behind that, and the one that answers it.
+    const SECOND_STEP: u32 = 0xcb;
+    const RESULT_STEP: u32 = 0xcd;
     /// A row: the item, the quantity, the price.
     const ROW: usize = 12;
     /// What the list answer holds: the row count, and then the rows.
     const ROWS: u32 = (4 + RAGNAROK_VIOLET_SHOP_ROWS.len() * ROW) as u32;
+    /// The one code `0x384a6` grants a purchase on.
+    const GRANTED_RESULT: u32 = 301;
 
     if request.len() != BLOCK {
         return None;
@@ -792,9 +801,6 @@ pub fn lgt_local_fixed_block_response(request: &[u8]) -> Option<Vec<u8>> {
     let word = |at: usize| u32::from_be_bytes([request[at], request[at + 1], request[at + 2], request[at + 3]]);
 
     let screen = word(0);
-    if !SCREENS.contains(&screen) {
-        return None;
-    }
 
     // What the block says of itself has to fit in the block.
     let length = word(8) as usize;
@@ -802,20 +808,22 @@ pub fn lgt_local_fixed_block_response(request: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    let (step, answer) = match word(4) {
-        // The body opens with the subscriber number, written as a length and
-        // that many digits.
-        HELLO_STEP if length >= 4 => {
-            let digits = word(HEADER) as usize;
-            let subscriber = request.get(HEADER + 4..HEADER + 4 + digits)?;
-            if digits == 0 || !subscriber.iter().all(u8::is_ascii_digit) {
-                return None;
-            }
-
-            (GRANTED_STEP, ROWS)
+    // The shop's hello opens with the subscriber number, written as a length
+    // and that many digits; every other step here carries nothing of its own.
+    let opens_with_subscriber = || {
+        let digits = word(HEADER) as usize;
+        match request.get(HEADER + 4..HEADER + 4 + digits) {
+            Some(subscriber) => digits > 0 && subscriber.iter().all(u8::is_ascii_digit),
+            None => false,
         }
-        // This one carries nothing of its own, and neither does its answer.
-        MESSAGE_REQUEST_STEP if length == 0 => (MESSAGE_STEP, 0),
+    };
+
+    let (step, answer) = match (screen, word(4)) {
+        (SHOP_SCREEN, HELLO_STEP) if length >= 4 && opens_with_subscriber() => (GRANTED_STEP, ROWS),
+        (SHOP_SCREEN, SECOND_STEP) if length == 0 => (RESULT_STEP, 0),
+        (PURCHASE_SCREEN, HELLO_STEP) if length == 0 => (GRANTED_STEP, 0),
+        // The purchase's own result, which is a word behind the step's word.
+        (PURCHASE_SCREEN, SECOND_STEP) => (RESULT_STEP, 8),
         _ => return None,
     };
 
@@ -827,14 +835,19 @@ pub fn lgt_local_fixed_block_response(request: &[u8]) -> Option<Vec<u8>> {
     // message.
     response[8..12].copy_from_slice(&answer.to_be_bytes());
 
-    if step == GRANTED_STEP {
-        response[HEADER - 4..HEADER].copy_from_slice(&(RAGNAROK_VIOLET_SHOP_ROWS.len() as u32).to_be_bytes());
-        for (index, (item, count, price)) in RAGNAROK_VIOLET_SHOP_ROWS.iter().enumerate() {
-            let at = HEADER + index * ROW;
-            response[at..at + 4].copy_from_slice(&item.to_be_bytes());
-            response[at + 4..at + 8].copy_from_slice(&count.to_be_bytes());
-            response[at + 8..at + 12].copy_from_slice(&price.to_be_bytes());
+    match (screen, step) {
+        (SHOP_SCREEN, GRANTED_STEP) => {
+            response[HEADER - 4..HEADER].copy_from_slice(&(RAGNAROK_VIOLET_SHOP_ROWS.len() as u32).to_be_bytes());
+            for (index, (item, count, price)) in RAGNAROK_VIOLET_SHOP_ROWS.iter().enumerate() {
+                let at = HEADER + index * ROW;
+                response[at..at + 4].copy_from_slice(&item.to_be_bytes());
+                response[at + 4..at + 8].copy_from_slice(&count.to_be_bytes());
+                response[at + 8..at + 12].copy_from_slice(&price.to_be_bytes());
+            }
         }
+        // `0x38466` reads the result off the body rather than the step's word.
+        (PURCHASE_SCREEN, RESULT_STEP) => response[HEADER..HEADER + 4].copy_from_slice(&GRANTED_RESULT.to_be_bytes()),
+        _ => {}
     }
 
     Some(response)
@@ -2344,6 +2357,36 @@ mod tests {
         assert_eq!(response.len(), 1024);
         assert_eq!(&response[0..12], &[0, 0, 0, 0x66, 0, 0, 0, 0xcd, 0, 0, 0, 0]);
         assert!(response[12..].iter().all(|&byte| byte == 0));
+    }
+
+    /// The block the shop writes to buy a row, and the one behind it. Neither
+    /// carries a body of its own; the send buffer still holds the shop's.
+    fn ragnarok_violet_purchase_block(step: u32) -> Vec<u8> {
+        let mut block = ragnarok_violet_hello_block();
+        block[0..4].copy_from_slice(&0x6bu32.to_be_bytes());
+        block[4..8].copy_from_slice(&step.to_be_bytes());
+        block[8..12].copy_from_slice(&0u32.to_be_bytes());
+        block[16..20].copy_from_slice(&0u32.to_be_bytes());
+
+        block
+    }
+
+    #[test]
+    fn a_purchase_is_answered_with_the_one_code_that_grants_it() {
+        use super::lgt_local_fixed_block_response;
+
+        // The screen opens with nothing to say, and is answered the same way.
+        let response = lgt_local_fixed_block_response(&ragnarok_violet_purchase_block(0xc9)).unwrap();
+        assert_eq!(&response[0..12], &[0, 0, 0, 0x6b, 0, 0, 0, 0xca, 0, 0, 0, 0]);
+        assert!(response[12..].iter().all(|&byte| byte == 0));
+
+        // The row it chose comes behind that, and the result is a word past the
+        // step's own word rather than the step's word itself.
+        let response = lgt_local_fixed_block_response(&ragnarok_violet_purchase_block(0xcb)).unwrap();
+        assert_eq!(response.len(), 1024);
+        assert_eq!(&response[0..12], &[0, 0, 0, 0x6b, 0, 0, 0, 0xcd, 0, 0, 0, 8]);
+        assert_eq!(u32::from_be_bytes([response[20], response[21], response[22], response[23]]), 301);
+        assert!(response[24..].iter().all(|&byte| byte == 0));
     }
 
     #[test]
