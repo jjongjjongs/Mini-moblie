@@ -819,9 +819,19 @@ fn bill_frame_trace(frame: &[u8]) -> alloc::string::String {
 /// switched-off gateway returns - falls through to 네트워크 장애가
 /// 발생했습니다, which is the notice the title cannot get past.
 ///
-/// So answer `SASH`, and nothing after it: the compare is an equality, and a
-/// bare `SASH` is also the first field of any `SASH|...` a caller might split,
-/// so it reads as success either way.
+/// The answer carries its own length ahead of it. The title's receive is a
+/// two-step state machine at `0x20f76`: state 6 recvs exactly two bytes, reads
+/// them as a `u16` and passes that through `MC_utilHtons` - so the field is
+/// big-endian on the wire - and state 7 recvs exactly that many bytes and
+/// compares them. The length counts the body alone; the two it was read from
+/// are already consumed.
+///
+/// Answered `SASH` bare, the title read `SA` as its length, made 0x5341 of it
+/// and waited for 21313 bytes that were never coming - which the trace caught
+/// as `MC_utilHtons(0x4153)` on the very next line.
+///
+/// So the answer is `00 04` then `SASH`, and nothing after it: the compare is
+/// an equality against a string built to the length just read.
 ///
 /// `None` for anything that is not one of these records, which is not something
 /// to answer with a guess.
@@ -833,7 +843,11 @@ fn lgt_local_cash_response(request: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    Some(GRANTED.to_vec())
+    let mut response = Vec::with_capacity(2 + GRANTED.len());
+    response.extend_from_slice(&(GRANTED.len() as u16).to_be_bytes());
+    response.extend_from_slice(GRANTED);
+
+    Some(response)
 }
 
 const LGT_BILL_HEADER_SIZE: usize = 108;
@@ -3663,12 +3677,12 @@ mod network_state_tests {
 
         // The record 데몬헌터 actually writes, captured off the title.
         let request = b"CASH|0|demon|05590091|00029B60004|500|2034517541";
-        assert_eq!(lgt_local_cash_response(request).as_deref(), Some(b"SASH".as_slice()));
+        assert_eq!(lgt_local_cash_response(request).as_deref(), Some(b"\x00\x04SASH".as_slice()));
 
         // Every item in the title's own price table is the same request.
         assert_eq!(
             lgt_local_cash_response(b"CASH|0|demon|05590091|0002B640007|2900|1").as_deref(),
-            Some(b"SASH".as_slice())
+            Some(b"\x00\x04SASH".as_slice())
         );
 
         // Nothing else is one of these records.
@@ -3701,8 +3715,13 @@ mod network_state_tests {
                     .try_into()
                     .unwrap()
             ),
-            4
+            6
         );
+
+        // The two length bytes the title reads first, then the body they count.
+        let mut length = [0u8; 2];
+        assert_eq!(gateway.read(&mut length), LocalRead::Data(2));
+        assert_eq!(u16::from_be_bytes(length), 4);
 
         let mut payload = [0u8; 4];
         assert_eq!(gateway.read(&mut payload), LocalRead::Data(4));
@@ -4366,9 +4385,15 @@ mod network_state_tests {
         let descriptor = state.lock().local_descriptor(socket).unwrap();
         assert!(context.system().local_network().readable(descriptor));
 
-        // And WPBill_Read hands up the payload alone, which is the word the
-        // title compares against `SASH` before showing 결제가 완료되었습니다.
-        assert_eq!(socket_read(&mut context, socket, RESPONSE, 32).await.unwrap(), 4);
+        // The title reads its two length bytes first, exactly as its own state
+        // machine does, and then the body they count.
+        assert_eq!(socket_read(&mut context, socket, RESPONSE, 2).await.unwrap(), 2);
+
+        let mut length = [0u8; 2];
+        context.read_bytes(RESPONSE, &mut length).unwrap();
+        assert_eq!(u16::from_be_bytes(length), 4);
+
+        assert_eq!(socket_read(&mut context, socket, RESPONSE, 4).await.unwrap(), 4);
 
         let mut answer = [0u8; 4];
         context.read_bytes(RESPONSE, &mut answer).unwrap();
