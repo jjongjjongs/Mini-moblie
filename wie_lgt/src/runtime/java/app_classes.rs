@@ -57,6 +57,9 @@ const METADATA_NAME: u32 = 0x08;
 const METADATA_SUPERCLASS: u32 = 0x10;
 const METADATA_INSTANCE_WORDS: u32 = 0x18;
 const METADATA_INTERFACES: u32 = 0x28;
+/// The other place a class's interfaces are described, whose rows are records
+/// rather than names. See [`parse_linked_interfaces`].
+const METADATA_LINKED_INTERFACES: u32 = 0x14;
 const METADATA_METHODS: u32 = 0x38;
 
 /// Field-table flag marking a static field, whose slot indexes the class's
@@ -344,6 +347,79 @@ fn rebase_instance_field_slots(members: &mut [AppMember], instance_words: u32) {
     }
 }
 
+/// The interfaces a class implements, from whichever of its two tables
+/// describes them.
+///
+/// Most classes name them at [`METADATA_INTERFACES`], a count followed by the
+/// names themselves. Some name them at [`METADATA_LINKED_INTERFACES`] instead,
+/// a count followed by pointers to rows of `{name, first dispatch slot}` -
+/// Legend of Master's `t`, whose `run` a thread it starts needs, is described
+/// only there, and reading just the first table left it with no interfaces at
+/// all and no `run` to call.
+///
+/// The second table is only taken when every row of it reads as a class name,
+/// because that offset holds something else entirely in classes that do not use
+/// it - the same title's `b` and `k` have rows there that point at no name.
+fn parse_class_interfaces<R>(reader: &R, metadata: u32) -> Result<Vec<String>>
+where
+    R: ?Sized + ByteRead,
+{
+    let named = parse_interfaces(reader, read_generic(reader, metadata + METADATA_INTERFACES)?)?;
+    if !named.is_empty() {
+        return Ok(named);
+    }
+
+    parse_linked_interfaces(reader, read_generic(reader, metadata + METADATA_LINKED_INTERFACES)?)
+}
+
+/// Reads the counted table whose rows are `{name, first dispatch slot}`,
+/// returning the names. `None` for any row that does not read as one, so a
+/// table that is not this is not mistaken for it.
+fn parse_linked_interfaces<R>(reader: &R, table: u32) -> Result<Vec<String>>
+where
+    R: ?Sized + ByteRead,
+{
+    let Some(rows) = linked_interface_rows(reader, table)? else {
+        return Ok(Vec::new());
+    };
+
+    Ok(rows.into_iter().map(|(name, _)| name).collect())
+}
+
+/// Every `{name, first dispatch slot}` row of the linked interface table, or
+/// `None` when `table` is not one.
+pub fn linked_interface_rows<R>(reader: &R, table: u32) -> Result<Option<Vec<(String, u32)>>>
+where
+    R: ?Sized + ByteRead,
+{
+    if table == 0 {
+        return Ok(None);
+    }
+
+    let count: u32 = read_generic(reader, table)?;
+    if count == 0 || count > MAX_MEMBERS {
+        return Ok(None);
+    }
+
+    let mut rows = Vec::with_capacity(count as usize);
+
+    for index in 0..count {
+        let row: u32 = read_generic(reader, table + 4 + index * 4)?;
+        if row == 0 {
+            return Ok(None);
+        }
+
+        // A row of anything else has no name where this one keeps its.
+        let Some(name) = read_string(reader, read_generic(reader, row)?)? else {
+            return Ok(None);
+        };
+
+        rows.push((name, read_generic(reader, row + 4)?));
+    }
+
+    Ok(Some(rows))
+}
+
 /// Reads the counted table of interface names a class implements.
 fn parse_interfaces<R>(reader: &R, table: u32) -> Result<Vec<String>>
 where
@@ -388,7 +464,7 @@ where
     let instance_words: u16 = read_generic(reader, metadata + METADATA_INSTANCE_WORDS)?;
 
     let methods_table: u32 = read_generic(reader, metadata + METADATA_METHODS)?;
-    let interfaces = parse_interfaces(reader, read_generic(reader, metadata + METADATA_INTERFACES)?)?;
+    let interfaces = parse_class_interfaces(reader, metadata)?;
 
     // Without a method table there is nothing to bound the fields with, and a
     // class with neither describes no members at all.
@@ -578,8 +654,9 @@ mod tests {
     use wie_util::{ByteRead, Result};
 
     use super::{
-        AppMember, FIELD_ROW_SIZE, FIELD_SLOT_OFFSET, FIELD_TABLE_OFFSET, METADATA_INSTANCE_WORDS, METADATA_METHODS, METADATA_NAME, METADATA_SIZE,
-        METADATA_SUPERCLASS, METHOD_ENTRY_OFFSET, METHOD_ROW_SIZE, descriptor_argument_words, parse_class,
+        AppMember, FIELD_ROW_SIZE, FIELD_SLOT_OFFSET, FIELD_TABLE_OFFSET, METADATA_INSTANCE_WORDS, METADATA_INTERFACES, METADATA_LINKED_INTERFACES,
+        METADATA_METHODS, METADATA_NAME, METADATA_SIZE, METADATA_SUPERCLASS, METHOD_ENTRY_OFFSET, METHOD_ROW_SIZE, descriptor_argument_words,
+        linked_interface_rows, parse_class,
     };
 
     /// A flat image laid out from a fixed base, so a class can be built by
@@ -820,5 +897,78 @@ mod tests {
             argument_words: 0,
         };
         assert!(!static_like.is_instance_method());
+    }
+
+    /// A class described only by the linked interface table, the way Legend of
+    /// Master's `t` is: rows of `{name, first dispatch slot}` rather than names.
+    fn linked_interface_shaped_class() -> (Image, u32) {
+        let base = 0x1000;
+        let mut image = Image::new(base, 0x400);
+
+        let metadata = 0x1100;
+        let root = metadata + METADATA_SIZE;
+        let table = 0x1200;
+
+        image.string(0x1000, "t");
+        image.string(0x1010, "java/lang/Object");
+        image.string(0x1030, "java/lang/Runnable");
+        image.string(0x1050, "k");
+
+        image.word(metadata + METADATA_NAME, 0x1000);
+        image.word(metadata + METADATA_SUPERCLASS, 0x1010);
+        image.word(metadata + METADATA_INSTANCE_WORDS, 14);
+        // No method table at all, and nothing in the table most classes name
+        // their interfaces in.
+        image.word(metadata + METADATA_METHODS, 0);
+        image.word(metadata + METADATA_INTERFACES, 0);
+        image.word(metadata + METADATA_LINKED_INTERFACES, table);
+        image.word(root + 8, metadata);
+
+        image.word(table, 2);
+        image.word(table + 4, 0x1240);
+        image.word(table + 8, 0x1250);
+        // Runnable, whose only method took dispatch slot ten.
+        image.word(0x1240, 0x1030);
+        image.word(0x1244, 10);
+        // An application interface with no methods of its own.
+        image.word(0x1250, 0x1050);
+        image.word(0x1254, 0);
+
+        (image, root)
+    }
+
+    #[test]
+    fn a_class_named_only_by_the_linked_table_still_has_its_interfaces() {
+        let (image, root) = linked_interface_shaped_class();
+        let class = parse_class(&image, root).unwrap();
+
+        assert_eq!(class.name, "t");
+        assert_eq!(class.superclass.as_deref(), Some("java/lang/Object"));
+        assert_eq!(class.interfaces, vec!["java/lang/Runnable".to_string(), "k".to_string()]);
+    }
+
+    #[test]
+    fn the_linked_table_says_which_slot_each_interface_starts_at() {
+        let (image, _) = linked_interface_shaped_class();
+
+        let rows = linked_interface_rows(&image, 0x1200).unwrap().unwrap();
+        assert_eq!(rows, vec![("java/lang/Runnable".to_string(), 10), ("k".to_string(), 0)]);
+    }
+
+    #[test]
+    fn a_table_that_is_not_the_linked_one_is_not_read_as_it() {
+        let base = 0x1000;
+        let mut image = Image::new(base, 0x400);
+
+        // A count and a row, but the row points at no name - which is what that
+        // offset holds in the classes that do not use it.
+        image.word(0x1200, 1);
+        image.word(0x1204, 0x1240);
+        image.word(0x1240, 0x1300);
+
+        assert_eq!(linked_interface_rows(&image, 0x1200).unwrap(), None);
+
+        // And nothing at all is not it either.
+        assert_eq!(linked_interface_rows(&image, 0).unwrap(), None);
     }
 }

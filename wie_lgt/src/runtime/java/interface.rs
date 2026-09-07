@@ -10,7 +10,7 @@ use wie_util::{ByteRead, ByteWrite, Result, read_generic, read_null_terminated_s
 use crate::runtime::{
     SVC_CATEGORY_INIT,
     java::{
-        app_classes::{self, AppClass},
+        app_classes::{self, AppClass, linked_interface_rows},
         class_table::{ClassTable, JavaMember, OutputArrays},
         compiled_class::{self, CompiledContext},
         handles::JavaHandles,
@@ -28,6 +28,10 @@ const MAX_CLASS_DEPTH: usize = 32;
 
 /// A class's dispatch table pointer, `metadata`-relative.
 const CLASS_DISPATCH_TABLE: u32 = 0x0c;
+
+/// A class's linked interface table, `metadata`-relative: rows of
+/// `{name, first dispatch slot}`.
+const METADATA_LINKED_INTERFACES: u32 = 0x14;
 
 /// The platform marks a method with no dispatch slot with `0xffff`; a real slot
 /// is far below that.
@@ -1039,9 +1043,19 @@ fn dispatch_run_entry(core: &ArmCore, app_classes: &Mutex<Vec<AppClass>>, image_
         return None;
     }
 
-    // The slot is the platform's, so walk up to the platform class the chain
-    // reaches. An application superclass that declares `run` itself is bridged
-    // in its own right, and the JVM inherits the method from there.
+    // A class can say where its interfaces' methods sit itself, in the linked
+    // interface table: each row names an interface and the dispatch slot its
+    // first method took. Legend of Master's `t` extends Object and has no method
+    // table at all, so nothing below finds its `run` - but its row for
+    // `java/lang/Runnable` says slot ten, and slot ten of its dispatch table is
+    // the compiled `run` a thread it starts needs.
+    if let Some(entry) = runnable_slot_entry(core, image_ranges, class) {
+        return Some(entry);
+    }
+
+    // Otherwise the slot is the platform's, so walk up to the platform class the
+    // chain reaches. An application superclass that declares `run` itself is
+    // bridged in its own right, and the JVM inherits the method from there.
     let mut name = class.superclass.clone()?;
     let slot = loop {
         if let Some(platform) = platform_class(&name) {
@@ -1061,6 +1075,39 @@ fn dispatch_run_entry(core: &ArmCore, app_classes: &Mutex<Vec<AppClass>>, image_
 
     let metadata: u32 = read_generic(core, class.root + 8).ok()?;
     if metadata == 0 {
+        return None;
+    }
+
+    let vtable: u32 = read_generic(core, metadata + CLASS_DISPATCH_TABLE).ok()?;
+    if vtable == 0 {
+        return None;
+    }
+
+    // Slot zero sits one word into the table, as every compiled dispatch does.
+    let entry: u32 = read_generic(core, vtable + 4 + slot * 4).ok()?;
+
+    image_ranges
+        .iter()
+        .any(|(base, size)| entry >= *base && entry < base + size)
+        .then_some(entry)
+}
+
+/// The compiled `run()V` a class's own linked interface table points at.
+///
+/// The row for an interface carries the dispatch slot its first method took, and
+/// `java/lang/Runnable` declares `run` as its only method, at interface slot
+/// zero - so the row's slot is where `run` is. `None` when the class has no such
+/// row, or the slot holds nothing in the module's own code.
+fn runnable_slot_entry(core: &ArmCore, image_ranges: &[(u32, u32)], class: &AppClass) -> Option<u32> {
+    let metadata: u32 = read_generic(core, class.root + 8).ok()?;
+    if metadata == 0 {
+        return None;
+    }
+
+    let rows = linked_interface_rows(core, read_generic(core, metadata + METADATA_LINKED_INTERFACES).ok()?).ok()??;
+    let slot = rows.into_iter().find(|(name, _)| name == "java/lang/Runnable").map(|(_, slot)| slot)?;
+
+    if slot > MAX_DISPATCH_SLOT {
         return None;
     }
 
