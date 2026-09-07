@@ -616,48 +616,60 @@ fn atoi(field: &[u8]) -> Option<usize> {
 
     value
 }
-/// What answers the tagged record 와일드프론티어 buys a cash item with.
+/// What answers the tagged record the 와일드프론티어 titles buy a cash item with.
 ///
-/// 와일드프론티어 (`0002CB52`) reaches `222.231.57.145:57000` through
-/// `MC_netBillSocket` and writes a fixed record. Buying a 1000원 item writes
-/// thirty-six bytes:
+/// Both reach a billing socket and write a record under the same eight byte
+/// header, which each title's own builder fills the same way - `0x4c0cc` in
+/// 와일드프론티어 (`0002CB52`), `0x2c7ac` in 와일드프론티어2 (`0003535F`):
 ///
 /// ```text
-/// [0..2]   the tag, `KP`
-/// [2..4]   u16 LE - the whole record's length
-/// [4..6]   u16 LE - 7, which `0x4c0cc` writes into every one of these
-/// [6]      u8     - what the record is; `9` is a purchase
-/// [7]      u8
-/// [8..20]  the item, the title's own aid and a three digit code, NUL padded
-/// [20..32] the subscriber's number, NUL padded
-/// [32..36] u32 LE - the price in won
+/// [0..2]  the tag, `KP`
+/// [2..4]  u16 LE - the whole record's length
+/// [4..6]  u16 LE - the shape, which is the one thing the two do not share
+/// [6]     u8     - what the record is
+/// [7]     u8
 /// ```
 ///
-/// A reply is read by `0xfdb6`, which takes four bytes, reads `[2]` as a `u16`
-/// for the whole record's length and then reads the rest of it. `0xfeaa` looks
-/// at `[7]`: anything but zero is an error, and zero passes `[8..]` and `[6]` to
-/// the handler at `0x4c792`. Which switches on that byte, and the purchase's
-/// `9` is `0x4c998`: it compares the **first byte of the body** against `1` and
-/// grants the item on that alone.
+/// The first writes shape `7` and a thirty-six byte purchase as record `9` - the
+/// item as its own aid and a three digit code, the subscriber's number, then the
+/// price. The second writes shape `27` and a forty byte purchase as record `3` -
+/// the subscriber first, then the item, a word, then the price.
 ///
-/// So the answer is the tag, its own length, the seven the title writes, the
-/// record byte it asked under, a zero status and a body of one granted byte.
-/// That is exact for a purchase. The other record kinds share the header and the
-/// status, and the simple ones share the granted byte; one that reads a list
-/// behind it finds an empty one, which is not something to fill in from here.
+/// They read a reply differently, and the difference is what the answer's body
+/// has to be.
+///
+/// The first frames it: `0xfdb6` takes four bytes, reads `[2]` as a `u16` for
+/// the whole record's length, reads the rest, and `0xfeaa` treats `[7]` as an
+/// error unless it is zero before passing `[8..]` and `[6]` to `0x4c792`. That
+/// switches on the record byte, and the purchase's `9` is `0x4c998`: it compares
+/// the **first byte of the body** against `1`.
+///
+/// The second does not frame it at all. `0x2d3c0` appends whatever arrives and
+/// runs the loop at `0x2cc60`, which takes eight bytes whenever that many are
+/// buffered and switches on `[6]` alone - the length and `[7]` go unread, and
+/// each handler waits for as much as it needs of its own. The purchase's `3` is
+/// `0x2d212`: it waits for twelve, takes a **`u32` at `[8]`** and grants on its
+/// low byte being `1`.
+///
+/// So the answer is the tag, its own length, the shape it was asked in, the
+/// record byte it was asked under, a zero status, and a granted body sized the
+/// way that shape's reader reads one. That is exact for a purchase. The other
+/// record kinds share the header; one that reads more behind the body finds
+/// nothing, which is not something to fill in from here.
 ///
 /// `None` for anything that is not one of these records: it has to carry the
-/// tag, declare its own length, and carry the seven that marks the shape.
+/// tag, declare its own length, and be in a shape whose reader is known.
 pub fn lgt_local_tagged_record_response(request: &[u8]) -> Option<Vec<u8>> {
     const TAG: &[u8] = b"KP";
-    /// The tag, the length, the seven, the record byte and one more.
+    /// The tag, the length, the shape, the record byte and one more.
     const HEADER: usize = 8;
-    /// Written into every one of these records by `0x4c0cc`.
-    const SHAPE: u16 = 7;
-    /// `[7]`, where anything but zero is read as an error before the body is.
+    /// `[7]`, which the first title reads as an error unless it is zero.
     const GRANTED_STATUS: u8 = 0;
-    /// The body's first byte, which is what a purchase is granted on.
-    const GRANTED: u8 = 1;
+
+    /// 와일드프론티어's shape, whose purchase is granted on one byte.
+    const BYTE_BODY_SHAPE: u16 = 7;
+    /// 와일드프론티어2's, whose purchase is granted on a `u32`'s low byte.
+    const WORD_BODY_SHAPE: u16 = 27;
 
     if !request.starts_with(TAG) || request.len() < HEADER {
         return None;
@@ -667,20 +679,23 @@ pub fn lgt_local_tagged_record_response(request: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    if u16::from_le_bytes([request[4], request[5]]) != SHAPE {
-        return None;
-    }
+    let shape = u16::from_le_bytes([request[4], request[5]]);
+    let body: &[u8] = match shape {
+        BYTE_BODY_SHAPE => &[1],
+        WORD_BODY_SHAPE => &[1, 0, 0, 0],
+        _ => return None,
+    };
 
-    let length = HEADER + 1;
+    let length = HEADER + body.len();
     let mut response = Vec::with_capacity(length);
     response.extend_from_slice(TAG);
     response.extend_from_slice(&(length as u16).to_le_bytes());
-    response.extend_from_slice(&SHAPE.to_le_bytes());
+    response.extend_from_slice(&shape.to_le_bytes());
     // The record byte comes back as it was asked under, which is what the
     // handler is chosen by.
     response.push(request[6]);
     response.push(GRANTED_STATUS);
-    response.push(GRANTED);
+    response.extend_from_slice(body);
 
     Some(response)
 }
@@ -1240,6 +1255,23 @@ mod tests {
         request
     }
 
+    /// The 40-byte record 와일드프론티어2 writes to buy a 500원 item, captured
+    /// off the title: the same header in shape 27, with the subscriber ahead of
+    /// the item and a word between it and the price.
+    fn wild_frontier_2_purchase_request() -> Vec<u8> {
+        let mut request = Vec::from(*b"KP");
+        request.extend_from_slice(&40u16.to_le_bytes());
+        request.extend_from_slice(&27u16.to_le_bytes());
+        request.push(3);
+        request.push(0);
+        request.extend_from_slice(b"01085300848\0");
+        request.extend_from_slice(b"0003535F004\0");
+        request.extend_from_slice(&0x0d00u32.to_le_bytes());
+        request.extend_from_slice(&500u32.to_le_bytes());
+
+        request
+    }
+
     #[test]
     fn a_tagged_record_is_answered_the_way_its_reader_reads_it() {
         use super::lgt_local_tagged_record_response;
@@ -1254,7 +1286,7 @@ mod tests {
         assert_eq!(&response[..2], b"KP");
         assert_eq!(u16::from_le_bytes([response[2], response[3]]) as usize, response.len());
 
-        // The shape the title writes into every one of these.
+        // The shape it was asked in.
         assert_eq!(u16::from_le_bytes([response[4], response[5]]), 7);
 
         // The record byte it asked under, which chooses the handler, and a
@@ -1268,6 +1300,30 @@ mod tests {
     }
 
     #[test]
+    fn the_second_title_s_shape_is_answered_with_the_body_its_own_reader_takes() {
+        use super::lgt_local_tagged_record_response;
+
+        let request = wild_frontier_2_purchase_request();
+        assert_eq!(request.len(), 40);
+
+        let response = lgt_local_tagged_record_response(&request).unwrap();
+
+        // The same header, in the shape it was asked in and under the record
+        // byte that chooses the handler.
+        assert_eq!(&response[..2], b"KP");
+        assert_eq!(u16::from_le_bytes([response[2], response[3]]) as usize, response.len());
+        assert_eq!(u16::from_le_bytes([response[4], response[5]]), 27);
+        assert_eq!(response[6], 3);
+        assert_eq!(response[7], 0);
+
+        // Its purchase waits for twelve bytes and takes a u32 at [8], granting
+        // on the low byte - so the body is a word, not the byte the first
+        // title's reader takes.
+        assert_eq!(response.len(), 12);
+        assert_eq!(u32::from_le_bytes([response[8], response[9], response[10], response[11]]), 1);
+    }
+
+    #[test]
     fn only_a_tagged_record_that_declares_itself_is_answered() {
         use super::lgt_local_tagged_record_response;
 
@@ -1276,7 +1332,7 @@ mod tests {
         wrong_length[2] = 37;
         assert_eq!(lgt_local_tagged_record_response(&wrong_length), None);
 
-        // Not the shape these records are written in.
+        // A shape whose reader is not known, so there is no body to size.
         let mut wrong_shape = wild_frontier_purchase_request();
         wrong_shape[4] = 8;
         assert_eq!(lgt_local_tagged_record_response(&wrong_shape), None);
@@ -1316,6 +1372,7 @@ mod tests {
         assert!(response(&hero_lore_frame(1, 1, &[4])).is_some());
         assert!(response(&anima_purchase_request()).is_some());
         assert!(response(&wild_frontier_purchase_request()).is_some());
+        assert!(response(&wild_frontier_2_purchase_request()).is_some());
 
         // And nothing for a request that is none of them.
         assert_eq!(response(b"hello"), None);
