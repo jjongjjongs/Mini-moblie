@@ -883,21 +883,24 @@ fn lgt_local_cash_response(request: &[u8]) -> Option<Vec<u8>> {
 /// - `[0x2d]`, which decides the screen: non-zero is 인증이 완료되었습니다, zero
 ///   is the SMS opt-in offer.
 ///
-/// What the disassembly does not settle is whether the handler starts at the
-/// reply's first byte or four in - whether the transport left the stream's read
-/// cursor where it found it or moved it past the header it consumed. Answered
-/// with the fields at the reply's own offsets, the handler matched nothing: no
-/// `audio.adt` write followed, and the title's screen was byte for byte what it
-/// had been. So the cursor moves, and the fields belong four bytes further in.
+/// The fields are written at two offsets - the reply's own, and four bytes in -
+/// because the transport consumes four bytes of its own and the disassembly does
+/// not settle whether it leaves the handler's cursor before or after them.
 ///
-/// They are written at both offsets here. The two readings differ by exactly the
-/// four bytes in question, so one reply can satisfy both, and a run says which
-/// one took without costing a round to find out. Fifty bytes covers the further
-/// of the two.
+/// **This does not yet work, and `0x57514` is probably the wrong reader.** With
+/// the fields at the reply's offsets, and then at both, the title consumed the
+/// whole reply, cancelled its timeout and closed its network thread - and took
+/// no branch: no `audio.adt` write, and a screen byte for byte what it had been.
+/// The reason is likely that `0x57514` belongs to a different message family
+/// altogether. Its partner builder `0x572f8` lays out fields of 12, 16, 16 and
+/// 16 bytes, where the record this answers is the 12/40/4/12 one built at
+/// `0x2790` - a different subsystem that happens to share the `0x1xx` numbering.
+/// Where that subsystem's own reader lives is still open.
 ///
-/// Derived from the title's own code rather than from an observed exchange - the
-/// server has been gone for years - so it grants what the success branch reads
-/// and nothing more.
+/// So this is a standing hypothesis, not a fix. It is kept because it is
+/// harmless - only this exact record shape reaches it, and every other request
+/// is still left unanswered rather than guessed at - and because the shape of
+/// the reply is worth keeping written down while the reader is found.
 ///
 /// `None` for anything that is not one of these records.
 fn lgt_local_gamevil_cert_response(request: &[u8]) -> Option<Vec<u8>> {
