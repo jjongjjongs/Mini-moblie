@@ -6,7 +6,7 @@
 //! title that reaches one and is told nothing usually stops on a screen it never
 //! leaves.
 //!
-//! Ten protocols turn up across the titles here, and a request is recognised by
+//! Eleven protocols turn up across the titles here, and a request is recognised by
 //! its own shape rather than by which title sent it. Anything that is not one of
 //! them is left unanswered rather than guessed at.
 //!
@@ -853,6 +853,83 @@ pub fn lgt_local_fixed_block_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(response)
 }
 
+/// What answers the `ENSLGT` record 블레이드마스터4 buys 하트 with.
+///
+/// 블레이드마스터4 (`0002BA50`) opens a billing socket to port 5018 when a
+/// 하트 purchase is confirmed and writes one 67-byte record:
+///
+/// ```text
+/// "ENSLGT" 11 79 00 31 00 36 00 "01046119269" 00 x9 "Emulator" 00 00
+/// "100" "0002BA50004" 00 x5 54 0b 00 00
+/// ```
+///
+/// `0x5fbbc` builds it, and the pieces are its own: `"ENS"` and `"LGT"` written
+/// three bytes each, a `u8` and then little-endian `u16`s through `0x45134` and
+/// `0x45144`, the subscriber number as a fixed 21 bytes, the handset as ten,
+/// `"100"`, and the product code and its price as one twenty-byte record -
+/// `"0002BA50004"`, one of four the module carries, and `0x0b54` for the 2900원
+/// the screen names.
+///
+/// The `u16` at `[9]` is what the exchange is: `0x5fc6c` keeps it at
+/// `0x150bb70+0x14`, and `0x618d2` switches a reply on the same field. `0x31` is
+/// this one.
+///
+/// A reply is framed by its own magic rather than by any length: `0x61854` walks
+/// the bytes received looking for `E`, `N`, `S`, and reads from there a `u16`
+/// command, a `u16` length it waits on until that many bytes have arrived, and
+/// then `0x60cf8` takes a `u16` result and keeps it at `0x150bb70+0x1a`. Zero is
+/// the only value that is not one of the errors it names, and the handler
+/// `0x618e4` picks for `0x31` - `0x4e508` - grants on exactly that: a nonzero
+/// result returns 2 and reaches the failure at `0x619a6`, while zero runs
+/// `0x4e4d4`, which builds the step behind it.
+///
+/// `None` for anything that is not this record: it has to open with the magic,
+/// be the length the builder writes, carry the two bytes it fixes, and have the
+/// subscriber number in digits where the builder puts it.
+pub fn lgt_local_ens_record_response(request: &[u8]) -> Option<Vec<u8>> {
+    /// What the reply is framed by, and what the request opens with.
+    const REPLY_TAG: &[u8] = b"ENS";
+    const REQUEST_TAG: &[u8] = b"ENSLGT";
+    /// The whole of what `0x5fbbc` writes.
+    const RECORD: usize = 67;
+    /// The two bytes the builder fixes, at `[6]` and `[7..9]`.
+    const MARK: u8 = 0x11;
+    const VERSION: u16 = 0x79;
+    /// Where the subscriber number is written, as a fixed twenty-one bytes.
+    const SUBSCRIBER: usize = 13;
+    /// The exchange a 하트 purchase is, and the result that grants it.
+    const PURCHASE_EXCHANGE: u16 = 0x31;
+    const GRANTED_RESULT: u16 = 0;
+
+    if !request.starts_with(REQUEST_TAG) || request.len() != RECORD {
+        return None;
+    }
+
+    let word = |at: usize| u16::from_le_bytes([request[at], request[at + 1]]);
+    if request[6] != MARK || word(7) != VERSION {
+        return None;
+    }
+
+    // The subscriber number, NUL-padded to twenty-one bytes.
+    let digits = request[SUBSCRIBER..].iter().position(|&byte| byte == 0)?;
+    if digits == 0 || !request[SUBSCRIBER..SUBSCRIBER + digits].iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+
+    let exchange = word(9);
+    if exchange != PURCHASE_EXCHANGE {
+        return None;
+    }
+
+    let mut response = Vec::from(REPLY_TAG);
+    response.extend_from_slice(&exchange.to_le_bytes());
+    // What follows the length is the result and nothing else.
+    response.extend_from_slice(&(size_of::<u16>() as u16).to_le_bytes());
+    response.extend_from_slice(&GRANTED_RESULT.to_le_bytes());
+
+    Some(response)
+}
+
 /// What answers the big-endian record 레전드오브마스터 sends its purchases in.
 ///
 /// 레전드오브마스터 (`0002A4B1`) opens `BillSocket://211.189.18.116:9407` and
@@ -1348,6 +1425,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_subscriber_record_response(request))
         .or_else(|| lgt_local_command_tag_response(request))
         .or_else(|| lgt_local_fixed_block_response(request))
+        .or_else(|| lgt_local_ens_record_response(request))
         .or_else(|| lgt_local_big_endian_record_response(request))
         .or_else(|| lgt_local_major_minor_response(request))
         .or_else(|| lgt_local_text_record_response(request))
@@ -2419,9 +2497,84 @@ mod tests {
         assert_eq!(lgt_local_fixed_block_response(&overlong), None);
     }
 
+    /// The 67 bytes 블레이드마스터4 writes to buy 4000하트 for 2900원, byte
+    /// for byte as the capture shows them.
+    fn blade_master_4_purchase_record() -> Vec<u8> {
+        let mut record = Vec::from(*b"ENSLGT");
+        record.push(0x11);
+        record.extend_from_slice(&0x79u16.to_le_bytes());
+        record.extend_from_slice(&0x31u16.to_le_bytes());
+        record.extend_from_slice(&0x36u16.to_le_bytes());
+
+        let mut subscriber = [0u8; 21];
+        subscriber[..11].copy_from_slice(b"01046119269");
+        record.extend_from_slice(&subscriber);
+
+        let mut handset = [0u8; 10];
+        handset[..8].copy_from_slice(b"Emulator");
+        record.extend_from_slice(&handset);
+
+        record.extend_from_slice(b"100");
+        let mut product = [0u8; 20];
+        product[..11].copy_from_slice(b"0002BA50004");
+        product[16..].copy_from_slice(&2900u32.to_le_bytes());
+        record.extend_from_slice(&product);
+
+        record
+    }
+
+    #[test]
+    fn an_ens_record_is_answered_with_the_result_that_grants_it() {
+        use super::lgt_local_ens_record_response;
+
+        let request = blade_master_4_purchase_record();
+        assert_eq!(request.len(), 67);
+        assert_eq!(
+            &request[..24],
+            &[
+                0x45, 0x4e, 0x53, 0x4c, 0x47, 0x54, 0x11, 0x79, 0x00, 0x31, 0x00, 0x36, 0x00, 0x30, 0x31, 0x30, 0x34, 0x36, 0x31, 0x31, 0x39, 0x32,
+                0x36, 0x39
+            ]
+        );
+        // The price the screen names, little-endian behind the product code.
+        assert_eq!(&request[63..], &2900u32.to_le_bytes());
+
+        // The reply is found by its own magic, and carries the exchange it was
+        // asked under, a length, and the one result that is not an error.
+        assert_eq!(
+            lgt_local_ens_record_response(&request).unwrap(),
+            vec![0x45, 0x4e, 0x53, 0x31, 0x00, 0x02, 0x00, 0x00, 0x00]
+        );
+    }
+
+    #[test]
+    fn only_an_ens_record_this_knows_the_exchange_of_is_answered() {
+        use super::lgt_local_ens_record_response;
+
+        // A record that is not the length the builder writes.
+        let mut short = blade_master_4_purchase_record();
+        short.pop();
+        assert_eq!(lgt_local_ens_record_response(&short), None);
+
+        // An exchange this does not answer.
+        let mut other = blade_master_4_purchase_record();
+        other[9..11].copy_from_slice(&0x33u16.to_le_bytes());
+        assert_eq!(lgt_local_ens_record_response(&other), None);
+
+        // A subscriber number that is not digits.
+        let mut lettered = blade_master_4_purchase_record();
+        lettered[13] = b'x';
+        assert_eq!(lgt_local_ens_record_response(&lettered), None);
+
+        // And the bytes the builder fixes.
+        let mut unmarked = blade_master_4_purchase_record();
+        unmarked[6] = 0x12;
+        assert_eq!(lgt_local_ens_record_response(&unmarked), None);
+    }
+
     #[test]
     fn one_answer_covers_every_protocol_and_guesses_at_none() {
-        // Each of the ten, recognised by its own shape.
+        // Each of the eleven, recognised by its own shape.
         assert!(response(&[0xff, 0xff, 0x06, 0x00, 0x20, 0x00]).is_some());
         assert!(response(b"CASH|0|demon|05590091|00029B60004|500|2034517541").is_some());
         assert!(response(&zenonia_purchase_request()).is_some());
@@ -2433,6 +2586,7 @@ mod tests {
         assert!(response(&inotia_shop_request()).is_some());
         assert!(response(&inotia_2_session_request(0x0000)).is_some());
         assert!(response(&ragnarok_violet_hello_block()).is_some());
+        assert!(response(&blade_master_4_purchase_record()).is_some());
 
         // And nothing for a request that is none of them.
         assert_eq!(response(b"hello"), None);
