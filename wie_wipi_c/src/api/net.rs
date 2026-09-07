@@ -852,7 +852,7 @@ fn lgt_local_cash_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(response)
 }
 
-/// The certificate GAMEVIL's billing server hands back for a purchase.
+/// What GAMEVIL's billing server answers a purchase with.
 ///
 /// 제노니아1 (`00027BAA`) opens a billing socket to `218.145.70.36:31206` and
 /// writes a 72-byte record its serialiser at `0x2790` builds:
@@ -867,47 +867,41 @@ fn lgt_local_cash_response(request: &[u8]) -> Option<Vec<u8>> {
 /// ```
 ///
 /// The transport works: the title reads four bytes, takes the first two as the
-/// whole reply's length, reads the rest, cancels its timeout and closes its
-/// network thread. What it then does is nothing - no `audio.adt` write, and a
-/// screen byte for byte what it had been - so the reply is not reaching a reader
-/// that understands it, and which reader that should be is still open.
+/// whole reply's length, reads the rest, and cancels its timeout.
 ///
 /// # This is a diagnostic, not a fix
 ///
-/// The reader was taken to be `0x57514`, which accepts a little-endian `u16`
-/// type of `0x101`, `0x103` or `0x107` at `[2..4]`, a non-negative signed byte
-/// at `[4]`, a NUL-terminated certificate at `[5..0x2d]` and a non-zero flag at
-/// `[0x2d]`. Type `0x107` was tried at the reply's own offsets and then at both
-/// those and four bytes in - the transport consumes four of its own and the
-/// disassembly does not settle whose they are - and neither moved the title.
+/// A first sweep answered with types `0x107`, `0x103` and `0x101` - the values
+/// the handler at `0x57514` accepts - and then with a reply no reader could take
+/// for valid. The first three moved the title not at all: no error, no progress,
+/// the dialog simply left standing. The fourth drew a red message through the
+/// shared network error dialog at `0x22dc`, which keys a message off a negative
+/// code between -17 and -2.
 ///
-/// `0x57514` may well be the wrong reader: its partner builder `0x572f8` lays
-/// out fields of 12, 16, 16 and 16 bytes, where this record is the 12/40/4/12
-/// one from `0x2790` - a different subsystem that happens to share the `0x1xx`
-/// numbering.
+/// So the reply is being read, and read by something that rejects nonsense - but
+/// those three types are not what it is waiting for. They came from `0x57514`,
+/// whose partner builder `0x572f8` lays out fields of 12, 16, 16 and 16 bytes
+/// where this record is the 12/40/4/12 one from `0x2790`: a different subsystem
+/// that happens to share the `0x1xx` numbering. Which reader this actually is
+/// cannot be had by following calls - this AOT format dispatches through an id
+/// table, so almost nothing has a direct caller to find.
 ///
-/// Rather than spend a build on each remaining guess, each request is answered
-/// with the next one in turn, so a player who retries the purchase walks the
-/// whole list in one sitting and the trace says which reply was in the air when
-/// the screen finally changed. The variants are the two types never tried, then
-/// a reply no reader can take for valid - if even that leaves the title silent,
-/// nothing is reading these bytes and the reader is somewhere else entirely.
+/// What is left is the request's own header, which is the best model there is
+/// for the reply's. This sweep walks that: the record echoed back as it came,
+/// the same with its type advanced by one, a bare header carrying the type as
+/// the request spells it and as its bytes reversed, and the reply no reader can
+/// accept as a control - if that one still draws its red message, the sweep is
+/// live and the others were understood and dismissed.
 ///
 /// `None` for anything that is not one of these records.
 fn lgt_local_gamevil_cert_response(request: &[u8]) -> Option<Vec<u8>> {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     const REQUEST_TYPE: u8 = 7;
-    /// What the transport consumes before the handler starts, and so the
-    /// distance between the two candidate readings.
-    const TRANSPORT_HEADER: usize = 4;
-    /// The types `0x57514` accepts, `0x107` first because it is the one its
-    /// numbering points at.
-    const TYPES: [u16; 3] = [0x107, 0x103, 0x101];
 
-    /// Which answer the next request gets. Process-wide: the title opens a
-    /// fresh connection per purchase, so a per-connection counter would hand
-    /// out the same one every time.
+    /// Which answer the next request gets. Process-wide: the title opens a fresh
+    /// connection per purchase, so a per-connection counter would hand out the
+    /// same one every time.
     static ATTEMPT: AtomicUsize = AtomicUsize::new(0);
 
     // Its own declared length has to be the record in hand, and the type has to
@@ -920,38 +914,47 @@ fn lgt_local_gamevil_cert_response(request: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    // The furthest byte any reading looks at is the granted flag at `0x2d` from
-    // the later start.
-    let length = TRANSPORT_HEADER + 0x2d + 1;
-    let mut response = alloc::vec![0u8; length];
-    response[0..2].copy_from_slice(&(length as u16).to_le_bytes());
+    let attempt = ATTEMPT.fetch_add(1, Ordering::Relaxed) % 5;
 
-    let attempt = ATTEMPT.fetch_add(1, Ordering::Relaxed) % (TYPES.len() + 1);
-
-    match TYPES.get(attempt) {
-        Some(&message_type) => {
-            for start in [0, TRANSPORT_HEADER] {
-                response[start + 2..start + 4].copy_from_slice(&message_type.to_le_bytes());
-                // The status stays zero, which is the "not an error" every
-                // reading wants, and the certificate is one character so that it
-                // terminates inside whichever field holds it.
-                response[start + 5] = b'1';
-                response[start + 0x2d] = 1;
-            }
-
-            tracing::info!("GAMEVIL purchase probe {attempt}: answering with type {message_type:#06x}");
+    let (response, what) = match attempt {
+        // The record as it came. A server that answers a transaction by handing
+        // it back is the commonest shape there is.
+        0 => (request.to_vec(), "the request echoed back"),
+        // The same, with the type advanced - the reply to a request, in the
+        // convention the other protocols answered here use.
+        1 => {
+            let mut response = request.to_vec();
+            response[3] = REQUEST_TYPE + 1;
+            (response, "the request echoed with its type advanced")
         }
-        // The last of the four: everything past the length no reader can take
-        // for valid. A title that says nothing to this is not reading the reply
-        // at all.
-        None => {
+        // A bare header, the type spelled as the request spells it.
+        2 => (bare_gamevil_reply([0x00, REQUEST_TYPE]), "a bare header, type as the request writes it"),
+        // The same with the type's bytes the other way round.
+        3 => (bare_gamevil_reply([REQUEST_TYPE, 0x00]), "a bare header, type byte-reversed"),
+        // The control: past the length, nothing a reader can accept.
+        _ => {
+            let mut response = bare_gamevil_reply([0xff, 0xff]);
             response[2..].fill(0xff);
-
-            tracing::info!("GAMEVIL purchase probe {attempt}: answering with a reply no reader can accept");
+            (response, "a reply no reader can accept")
         }
-    }
+    };
+
+    tracing::info!("GAMEVIL purchase probe {attempt}: answering with {what}");
 
     Some(response)
+}
+
+/// A reply carrying only the header the transport reads - its own length and a
+/// type - and zeros behind it, long enough for a reader to find whatever body it
+/// expects rather than run off the end.
+fn bare_gamevil_reply(message_type: [u8; 2]) -> Vec<u8> {
+    const LENGTH: usize = 0x32;
+
+    let mut response = alloc::vec![0u8; LENGTH];
+    response[0..2].copy_from_slice(&(LENGTH as u16).to_le_bytes());
+    response[2..4].copy_from_slice(&message_type);
+
+    response
 }
 
 const LGT_BILL_HEADER_SIZE: usize = 108;
@@ -3808,48 +3811,44 @@ mod network_state_tests {
 
         let request = zenonia_purchase_request();
 
-        // Four answers in turn, then round again, so retrying the purchase walks
-        // the list rather than repeating one guess.
         let mut seen = Vec::new();
-        for _ in 0..8 {
+        for _ in 0..10 {
             seen.push(lgt_local_gamevil_cert_response(&request).unwrap());
         }
 
-        assert_eq!(seen[0], seen[4]);
-        assert_eq!(seen[3], seen[7]);
-        assert_ne!(seen[0], seen[1]);
-        assert_ne!(seen[1], seen[2]);
-        assert_ne!(seen[2], seen[3]);
-
-        // Each is long enough for the further of the two readings, and declares
-        // its own length so the transport reads the whole of it.
-        for response in &seen {
-            assert_eq!(response.len(), 4 + 0x2e);
-            assert_eq!(u16::from_le_bytes([response[0], response[1]]), response.len() as u16);
-        }
-
-        // One of the four is the reply no reader can accept; the other three
-        // carry the three types its reader takes, one each. Which one comes
-        // first depends on where the shared counter stood, so the set is what is
-        // checked rather than the order.
-        let (refused, accepted): (Vec<_>, Vec<_>) = seen[..4].iter().partition(|r| r[2..].iter().all(|&byte| byte == 0xff));
-        assert_eq!(refused.len(), 1);
-
-        let mut types: Vec<u16> = accepted.iter().map(|response| u16::from_le_bytes([response[2], response[3]])).collect();
-        types.sort_unstable();
-        assert_eq!(types, alloc::vec![0x101, 0x103, 0x107]);
-
-        // Each carries its type at both offsets, with a status its reader will
-        // not take as an error and a certificate that terminates in its field.
-        for response in &accepted {
-            let message_type = u16::from_le_bytes([response[2], response[3]]);
-            for start in [0usize, 4] {
-                assert_eq!(u16::from_le_bytes([response[start + 2], response[start + 3]]), message_type);
-                assert!(response[start + 4] as i8 >= 0);
-                assert!(response[start + 5..start + 0x2d].contains(&0));
-                assert_ne!(response[start + 0x2d], 0);
+        // Five answers in turn, then round again, so retrying the purchase walks
+        // the list rather than repeating one guess.
+        assert_eq!(seen[..5], seen[5..]);
+        for (index, response) in seen[..5].iter().enumerate() {
+            for other in &seen[index + 1..5] {
+                assert_ne!(response, other, "two probes answer the same thing");
             }
         }
+
+        // Whatever the counter stood at, the five between them are the request
+        // echoed, the request with its type advanced, two bare headers, and the
+        // control no reader can accept.
+        let mut echoed = 0;
+        let mut advanced = 0;
+        let mut bare = 0;
+        let mut refused = 0;
+
+        for response in &seen[..5] {
+            if *response == request {
+                echoed += 1;
+            } else if response.len() == request.len() && response[3] == 8 && response[4..] == request[4..] {
+                advanced += 1;
+            } else if response[2..].iter().all(|&byte| byte == 0xff) {
+                refused += 1;
+            } else {
+                // A bare header: its own length, a type, and zeros behind it.
+                assert_eq!(u16::from_le_bytes([response[0], response[1]]) as usize, response.len());
+                assert!(response[4..].iter().all(|&byte| byte == 0));
+                bare += 1;
+            }
+        }
+
+        assert_eq!((echoed, advanced, bare, refused), (1, 1, 2, 1));
     }
 
     #[test]
