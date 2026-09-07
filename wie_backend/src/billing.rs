@@ -6,7 +6,7 @@
 //! title that reaches one and is told nothing usually stops on a screen it never
 //! leaves.
 //!
-//! Five protocols turn up across the titles here, and a request is recognised by
+//! Six protocols turn up across the titles here, and a request is recognised by
 //! its own shape rather than by which title sent it. Anything that is not one of
 //! them is left unanswered rather than guessed at.
 //!
@@ -515,6 +515,107 @@ fn hero4_catalogue() -> Vec<u8> {
 
     body
 }
+/// What answers the text record 아니마 buys a cash item with.
+///
+/// 아니마 (`0003266D`) reaches `211.239.165.13:8035` through `MC_netBillSocket`
+/// and writes ASCII. Buying a 부활마법서 for 3000원 writes forty bytes:
+///
+/// ```text
+/// AM40    1911112222 10 SB_부활마법서_3000_M
+/// ^^ ^^^^^^ ^^^^^^^^^^ ^^ ^^^^^^^^^^^^^^^^^^
+/// |  |      |          |  the command, EUC-KR
+/// |  |      |          the two characters `%2.2s` fills, always "10"
+/// |  |      the ten digits `0xf03c` copies in
+/// |  the whole record's length, `%-6d`
+/// the tag
+/// ```
+///
+/// which `0x3d954` builds as `sprintk(dest, "AM%-6d%10.10s%2.2s", length, id,
+/// "10")` and copies out as exactly twenty bytes before the command.
+///
+/// A **reply** is framed differently, and much more simply. `0x3ebd8` waits for
+/// the tag - `AM` as a `u16`, or `@` for the other server's `@A` - then
+/// `atoi`s the text at `[2]` as the whole record's length and hands the record
+/// on once that many bytes have arrived. `0x3dd4c` then takes six characters of
+/// that length and reads the body from `[8]`:
+///
+/// ```text
+/// AM10    SB
+/// ^^ ^^^^^^ ^^
+/// |  |      the body
+/// |  the length, six characters this side rather than twenty
+/// the tag
+/// ```
+///
+/// The body's first two characters are all a purchase is asked for. `0x3df38`
+/// switches on the transaction the title set - `0x3cb7c` sets `15` for a
+/// purchase - and every one of those thirty-two handlers opens by comparing two
+/// characters. `15` is `0x3e954`, which compares them against `SB` and returns
+/// granted or refused on that alone.
+///
+/// So the answer is the tag, the reply's own length, and the two characters the
+/// command was sent under - taken from the request rather than chosen here. That
+/// is exact for a purchase. A handler that reads a body past those two
+/// characters finds it empty, which is not something to fill in from this side.
+///
+/// `None` for anything that is not one of these records: it has to carry the
+/// tag, declare its own length there, and have a command behind the header.
+pub fn lgt_local_text_record_response(request: &[u8]) -> Option<Vec<u8>> {
+    const TAG: &[u8] = b"AM";
+    /// `%-6d`, which is also the width the reply's own length is read at.
+    const LENGTH_FIELD: usize = 6;
+    /// The tag, the length, the subscriber's ten digits and the two `%2.2s`
+    /// fills - what the title copies out before its command.
+    const REQUEST_HEADER: usize = TAG.len() + LENGTH_FIELD + 10 + 2;
+    /// A reply carries the tag and the length alone.
+    const REPLY_HEADER: usize = TAG.len() + LENGTH_FIELD;
+    /// Which is all a purchase's handler compares.
+    const COMMAND: usize = 2;
+
+    if !request.starts_with(TAG) || request.len() < REQUEST_HEADER + COMMAND {
+        return None;
+    }
+
+    if atoi(&request[TAG.len()..TAG.len() + LENGTH_FIELD])? != request.len() {
+        return None;
+    }
+
+    let command = &request[REQUEST_HEADER..REQUEST_HEADER + COMMAND];
+    if !command.iter().all(u8::is_ascii_alphanumeric) {
+        return None;
+    }
+
+    let length = REPLY_HEADER + COMMAND;
+    let digits = format!("{length}");
+    if digits.len() > LENGTH_FIELD {
+        return None;
+    }
+
+    let mut response = Vec::with_capacity(length);
+    response.extend_from_slice(TAG);
+    // Left justified, the way the title writes its own.
+    response.extend_from_slice(digits.as_bytes());
+    response.resize(REPLY_HEADER, b' ');
+    response.extend_from_slice(command);
+
+    Some(response)
+}
+
+/// The leading number of an ASCII field, as C's `atoi` reads one: optional
+/// blanks, then digits, stopping at the first byte that is not one.
+///
+/// `None` where there is no number at all, so a field that is not one is not
+/// read as zero.
+fn atoi(field: &[u8]) -> Option<usize> {
+    let digits = field.iter().skip_while(|byte| byte.is_ascii_whitespace());
+    let mut value: Option<usize> = None;
+
+    for byte in digits.take_while(|byte| byte.is_ascii_digit()) {
+        value = Some(value.unwrap_or(0).checked_mul(10)?.checked_add((byte - b'0') as usize)?);
+    }
+
+    value
+}
 /// The granted answer to an application billing request, in the frame shape
 /// `lgt_local_purchase_success_response` establishes for the purchase
 /// transaction: the `0xffff` marker, the frame length, the request's own type
@@ -539,8 +640,9 @@ pub fn lgt_local_granted_response(request: &[u8]) -> Option<Vec<u8>> {
 ///
 /// Tried in order of how specific each shape is: the `0xffff`-framed message,
 /// then the pipe-delimited cash record, then the GAMEVIL packet, then the
-/// big-endian record, then the length-prefixed command. `None` when a request is
-/// none of them, which is not something to answer with a guess.
+/// big-endian record, then the length-prefixed command, then the text record.
+/// `None` when a request is none of them, which is not something to answer with
+/// a guess.
 ///
 /// The three packet shapes cannot be mistaken for one another. Each declares its
 /// own length, and no two of them read that length the same way: a length that
@@ -553,6 +655,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_gamevil_packet_response(request))
         .or_else(|| lgt_local_big_endian_record_response(request))
         .or_else(|| lgt_local_major_minor_response(request))
+        .or_else(|| lgt_local_text_record_response(request))
 }
 
 #[cfg(test)]
@@ -972,14 +1075,95 @@ mod tests {
         assert_eq!(lgt_local_big_endian_record_response(&hello), None);
     }
 
+    /// The forty-byte record 아니마 writes to buy a 부활마법서 for 3000원,
+    /// captured off the title.
+    fn anima_purchase_request() -> Vec<u8> {
+        let mut request = Vec::from(*b"AM40    191111222210SB_");
+        // 부활마법서, EUC-KR.
+        request.extend_from_slice(&[0xba, 0xce, 0xc8, 0xb0, 0xb8, 0xb6, 0xb9, 0xfd, 0xbc, 0xad]);
+        request.extend_from_slice(b"_3000_M");
+
+        request
+    }
+
+    #[test]
+    fn a_text_record_is_answered_in_the_shape_its_framing_reads() {
+        use super::lgt_local_text_record_response;
+
+        let request = anima_purchase_request();
+        assert_eq!(request.len(), 40);
+
+        let response = lgt_local_text_record_response(&request).unwrap();
+
+        // The tag the framing compares as a u16 before anything else, then the
+        // record's own length as text - which is what it waits for.
+        assert_eq!(&response[..2], b"AM");
+        assert_eq!(super::atoi(&response[2..8]), Some(response.len()));
+
+        // The body starts at [8], and its two characters are the ones the
+        // command was sent under.
+        assert_eq!(&response[8..], b"SB");
+        assert_eq!(response, b"AM10    SB");
+    }
+
+    #[test]
+    fn only_a_text_record_that_declares_itself_is_answered() {
+        use super::lgt_local_text_record_response;
+
+        // A length that is not the record in hand.
+        let mut wrong_length = anima_purchase_request();
+        wrong_length[2..4].copy_from_slice(b"41");
+        assert_eq!(lgt_local_text_record_response(&wrong_length), None);
+
+        // No tag, and no length behind one.
+        assert_eq!(lgt_local_text_record_response(b"XX40    191111222210SB_x"), None);
+        assert_eq!(lgt_local_text_record_response(b"AM      191111222210SB_x"), None);
+
+        // Too short to carry a command behind its header.
+        assert_eq!(lgt_local_text_record_response(b"AM20    191111222210"), None);
+        assert_eq!(lgt_local_text_record_response(b""), None);
+
+        // And the other protocols answered here are not mistaken for it.
+        assert_eq!(lgt_local_text_record_response(&zenonia_purchase_request()), None);
+        assert_eq!(lgt_local_text_record_response(&legend_of_master_purchase_request()), None);
+        assert_eq!(lgt_local_text_record_response(&hero_lore_frame(1, 1, &[4])), None);
+        assert_eq!(lgt_local_text_record_response(b"CASH|0|demon|05590091|00029B60004|500|2034517541"), None);
+
+        // Nor is it mistaken for one of them - "AM" is 0x4d41 one end first and
+        // 0x414d the other, and neither is this record's forty bytes.
+        let request = anima_purchase_request();
+        assert_eq!(lgt_local_granted_response(&request), None);
+        assert_eq!(lgt_local_cash_response(&request), None);
+        assert_eq!(lgt_local_gamevil_packet_response(&request), None);
+        assert_eq!(lgt_local_big_endian_record_response(&request), None);
+        assert_eq!(lgt_local_major_minor_response(&request), None);
+    }
+
+    #[test]
+    fn a_length_field_is_read_the_way_atoi_reads_one() {
+        use super::atoi;
+
+        // Digits, stopping at the first byte that is not one - which is how the
+        // title's own left-justified `%-6d` is read back.
+        assert_eq!(atoi(b"40    "), Some(40));
+        assert_eq!(atoi(b"    40"), Some(40));
+        assert_eq!(atoi(b"1000"), Some(1000));
+
+        // A field with no number in it is not a zero.
+        assert_eq!(atoi(b"      "), None);
+        assert_eq!(atoi(b"SB_xxx"), None);
+        assert_eq!(atoi(b""), None);
+    }
+
     #[test]
     fn one_answer_covers_every_protocol_and_guesses_at_none() {
-        // Each of the five, recognised by its own shape.
+        // Each of the six, recognised by its own shape.
         assert!(response(&[0xff, 0xff, 0x06, 0x00, 0x20, 0x00]).is_some());
         assert!(response(b"CASH|0|demon|05590091|00029B60004|500|2034517541").is_some());
         assert!(response(&zenonia_purchase_request()).is_some());
         assert!(response(&legend_of_master_purchase_request()).is_some());
         assert!(response(&hero_lore_frame(1, 1, &[4])).is_some());
+        assert!(response(&anima_purchase_request()).is_some());
 
         // And nothing for a request that is none of them.
         assert_eq!(response(b"hello"), None);
