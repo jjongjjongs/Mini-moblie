@@ -356,9 +356,25 @@ pub fn lgt_local_big_endian_record_response(request: &[u8]) -> Option<Vec<u8>> {
 /// | `1/0x3e`        | `0x613b8`   | reads nothing of the reply while the 상점 flag is set; closes the 서버 응답을 기다리는중 notice and asks for the catalogue as `5/0x3f` |
 /// | `5/0x3f`        | `0x5eb1e`   | takes a `u16 LE` count at `[8]` and that many 37-byte rows behind it, then opens the shop screen |
 ///
+/// Buying from that screen is two more, and both read a status byte at `[6]`
+/// and a NUL-terminated message at `[8]` - the pattern every `major 5` handler
+/// shares, where `1` is the only status that is not an error box:
+///
+/// | the title sends | the handler | what it does next |
+/// |-----------------|-------------|-------------------|
+/// | `5/0x42`        | `0x5e9b2`   | the charge, carrying the row's handle and price. On `1` it asks for the item as `5/0x40`; on anything else it draws the message and stops |
+/// | `5/0x40`        | `0x5e882`   | the delivery. On `1` it reads `[7]` as an offset and takes the byte at `[8 + offset]`: `0xff` puts the row's own item in the bag and returns to the shop, and anything else is an index into `/ITM/DAT/_ITM_CASH_RANOMBOX` |
+///
 /// So the first three are answered with the command alone - the title only needs
-/// to see its own command come back to take the next step - and the catalogue is
-/// answered with the sixteen items [`hero4_catalogue`] lays out.
+/// to see its own command come back to take the next step - the catalogue is
+/// answered with the sixteen items [`hero4_catalogue`] lays out, and the two
+/// halves of a purchase are granted.
+///
+/// The item a purchase delivers is `0xff`, the plain one: the title puts the row
+/// it already has in the bag rather than rolling a random box, so what arrives
+/// is the item the shop screen named and nothing this side chose. Both messages
+/// are left empty, because there is no server here to have written one and the
+/// granted path draws its own notice rather than the reply's.
 ///
 /// `None` for anything else, the keep-alive included: the frame has to declare
 /// its own length, and the command pair has to be one of the four whose answer
@@ -373,10 +389,22 @@ pub fn lgt_local_major_minor_response(request: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
+    /// The status every `major 5` handler reads at `[6]`, and the only one that
+    /// is not an error box.
+    const GRANTED: u8 = 1;
+    /// What the delivery reads as "the row's own item", rather than an index
+    /// into the random box table.
+    const PLAIN_ITEM: u8 = 0xff;
+
     let (major, minor) = (request[4], request[5]);
     let body: Vec<u8> = match (major, minor) {
         (1, 0x01) | (1, 0x3d) | (1, 0x3e) => Vec::new(),
         (5, 0x3f) => hero4_catalogue(),
+        // Charged. The message is at `[8]`, empty, and unread on this path.
+        (5, 0x42) => vec![GRANTED, 0, 0, 0],
+        // Delivered. `[7]` is how far past the message the item byte sits, so
+        // the empty message takes the one byte and `0xff` follows it.
+        (5, 0x40) => vec![GRANTED, 1, 0, PLAIN_ITEM],
         _ => return None,
     };
 
@@ -819,6 +847,23 @@ mod tests {
             assert_eq!((response[4], response[5]), (major, minor));
         }
 
+        // Both halves of a purchase, which carry the row's handle and its price.
+        let purchase = hero_lore_frame(5, 0x42, &[0, 0, 0, 0, 0, 0, 0, 0, 0xf4, 0x01, 0x00, 0x00]);
+        assert_eq!(purchase.len(), 18);
+        let response = lgt_local_major_minor_response(&purchase).unwrap();
+        assert_eq!((response[4], response[5]), (5, 0x42));
+        // Granted, and an empty message where the error box would read one.
+        assert_eq!(response[6], 1);
+        assert_eq!(response[8], 0);
+
+        let response = lgt_local_major_minor_response(&hero_lore_frame(5, 0x40, &[0; 12])).unwrap();
+        assert_eq!((response[4], response[5]), (5, 0x40));
+        assert_eq!(response[6], 1);
+        // The item byte sits `[7]` past the message, and is the plain item.
+        let offset = response[7] as usize;
+        assert_eq!(response[8], 0);
+        assert_eq!(response[8 + offset], 0xff);
+
         // And the catalogue.
         let response = lgt_local_major_minor_response(&hero_lore_frame(5, 0x3f, &[0])).unwrap();
         assert_eq!(
@@ -899,6 +944,7 @@ mod tests {
         // A command pair this cannot shape a reply to. Answering it would put
         // the title through a branch meant for a different exchange.
         assert_eq!(lgt_local_major_minor_response(&hero_lore_frame(5, 0x70, &[])), None);
+        assert_eq!(lgt_local_major_minor_response(&hero_lore_frame(5, 0x41, &[])), None);
         assert_eq!(lgt_local_major_minor_response(&hero_lore_frame(0x14, 0x46, &[1])), None);
 
         // A length that is not the frame in hand.
