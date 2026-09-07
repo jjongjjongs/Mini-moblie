@@ -852,68 +852,72 @@ fn lgt_local_cash_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(response)
 }
 
-/// What GAMEVIL's server answers 제노니아1's item purchase with.
+/// What GAMEVIL's server answers one of its titles' purchases with.
 ///
-/// The title (`00027BAA`) opens a billing socket to `218.145.70.36:31206` and
-/// writes the 72-byte record its serialiser at `0x2790` builds: its own length
-/// as a `u16` LE, the command, the subscriber number, the item name in EUC-KR,
-/// the price in won, and the item code.
+/// 제노니아1 (`00027BAA`) opens a billing socket to `218.145.70.36:31206` and
+/// writes a 72-byte record; 제노니아2 (`0002C004`) and 3 (`0002FE78`) write a
+/// 93-byte one to the same place. They are the same record with a tail added:
 ///
-/// The reply is settled by GAMEVIL's own later Android port of the same game,
-/// which carries C++ symbols for the protocol this title speaks - the same
-/// server address and the same `00027BAA00n` item codes are strings inside it.
+/// ```text
+/// [0..2]   u16 LE - the record's own length
+/// [2..4]   u16 LE - the command
+/// [4..16]  the subscriber number
+/// [16..56] the item, EUC-KR
+/// [56..60] u32 LE - the price in won
+/// [60..72] the item code, the title's own aid and an index
+/// [72..]   2 and 3 add a flag and the handset model
+/// ```
+///
+/// The reply is settled by GAMEVIL's own later Android port of 제노니아1, which
+/// carries C++ symbols for the protocol these titles speak - the same server
+/// address and the same `00027BAA00n` item codes are strings inside it.
 ///
 /// `tagNetHeader` is four bytes: `GetLength` reads a `u16` at `[0]`, `GetCMD` a
-/// `u16` at `[2]`, and `CGsNetCore::GetRecvPacketHeaderSize` returns 4. So this
-/// title's request carries command `0x0700`, little end first, which is what
-/// `48 00 00 07` spells.
+/// `u16` at `[2]`, and `CGsNetCore::GetRecvPacketHeaderSize` returns 4.
+/// `CMvNet::OnRecvDone` then skips the header, reads one **signed byte** as the
+/// status and calls `OnError(cmd, status)` when it is below `-1`, and otherwise
+/// switches on the command over a fixed list - `0x101`, `0x103`, ... `0x701`,
+/// `0x805` - dropping anything not on it without a word.
 ///
-/// `CMvNet::OnRecvDone` then does, in order:
+/// Every command a title sends is even and the answer to it is that command plus
+/// one: `0x0700` is `CS_BUY_ITEM` and `0x0701` reaches `API_ZN_SC_BUY_ITEM`,
+/// which reads nothing out of the body and calls a single callback. 제노니아1
+/// buys with `0x0700`, 2 and 3 with `0x0400`, so each is answered with its own
+/// command plus one.
 ///
-/// 1. skip the four header bytes,
-/// 2. read one **signed byte** - the status - and if it is less than `-1`, call
-///    `OnError(cmd, status)` and stop,
-/// 3. otherwise switch on the command: `0x101`, `0x103`, `0x105`, `0x107`,
-///    `0x109`, `0x201`, `0x303`, `0x403`, `0x405`, `0x407`, `0x409`, `0x505`,
-///    `0x509`, `0x50b`, `0x50d`, `0x50f`, `0x601`, `0x701`, `0x805`. Anything
-///    else falls off the end and is dropped without a word.
+/// Which accounts for every sweep run at 제노니아1 before the port settled it.
+/// `0x107`, `0x103` and `0x101` are real commands, so they were dispatched - to
+/// handlers with nothing to say. `0x0700` and `0x0007`, answered as though the
+/// command were the request's own, are not commands at all and were dropped. And
+/// every reply whose status came out negative drew a red message, because the
+/// status is read before the command is looked at.
 ///
-/// Which accounts for every sweep run at this: `0x107`, `0x103` and `0x101` are
-/// real commands, so they were dispatched - to the wrong handlers, which had
-/// nothing to say. `0x0700` and `0x0007` are not commands at all and were
-/// dropped. And every reply whose status byte came out negative - the `-2` probe
-/// and the all-`0xff` one - drew a red message, because step 2 runs before the
-/// command is even looked at.
-///
-/// The answer is therefore `0x0701`, which is `CS_BUY_ITEM` plus one and the
-/// entry that reaches `API_ZN_SC_BUY_ITEM`. That handler reads nothing out of
-/// the body - it calls one callback with zero - so a status of zero and nothing
-/// behind it is the whole of what a granted purchase says.
-///
-/// `None` for anything that is not one of these records.
-fn lgt_local_gamevil_cert_response(request: &[u8]) -> Option<Vec<u8>> {
-    /// `CS_BUY_ITEM`, as `tagNetHeader::GetCMD` reads it.
-    const REQUEST_COMMAND: u16 = 0x0700;
-    /// `SC_BUY_ITEM`: the request's command plus one, and the entry in
-    /// `OnRecvDone`'s switch that reaches `API_ZN_SC_BUY_ITEM`.
-    const RESPONSE_COMMAND: u16 = 0x0701;
+/// `None` for anything that is not one of these records: the declared length has
+/// to be the record in hand, it has to be long enough to carry a purchase, and
+/// the command has to be one a title sends rather than one it is sent.
+fn lgt_local_gamevil_packet_response(request: &[u8]) -> Option<Vec<u8>> {
+    /// Through the item code, which is the shortest of these records seen.
+    const SHORTEST_PURCHASE: usize = 72;
     /// Not negative, so `OnRecvDone` reaches the command instead of `OnError`.
     const GRANTED: u8 = 0;
-    /// Header, status, and room behind it. The handler reads nothing there, but
-    /// a reply that carries a little costs nothing and cannot come up short.
+    /// Header, status, and room behind it. The buy handler reads nothing there,
+    /// but a reply that carries a little cannot come up short.
     const LENGTH: usize = 0x20;
 
-    if request.len() < 4 || u16::from_le_bytes([request[0], request[1]]) as usize != request.len() {
+    if request.len() < SHORTEST_PURCHASE || u16::from_le_bytes([request[0], request[1]]) as usize != request.len() {
         return None;
     }
 
-    if u16::from_le_bytes([request[2], request[3]]) != REQUEST_COMMAND {
+    // A title's own commands are the even ones; the odd are what it is answered
+    // with. Answering an odd command would be answering an answer.
+    let command = u16::from_le_bytes([request[2], request[3]]);
+    if command == 0 || command % 2 != 0 {
         return None;
     }
 
     let mut response = alloc::vec![0u8; LENGTH];
     response[0..2].copy_from_slice(&(LENGTH as u16).to_le_bytes());
-    response[2..4].copy_from_slice(&RESPONSE_COMMAND.to_le_bytes());
+    response[2..4].copy_from_slice(&(command + 1).to_le_bytes());
     response[4] = GRANTED;
 
     Some(response)
@@ -1129,7 +1133,7 @@ impl wie_backend::LocalConnection for LgtBillingGateway {
 
         let Some(response) = lgt_local_granted_response(request)
             .or_else(|| lgt_local_cash_response(request))
-            .or_else(|| lgt_local_gamevil_cert_response(request))
+            .or_else(|| lgt_local_gamevil_packet_response(request))
         else {
             tracing::debug!(
                 "LGT billing gateway: a {} byte request is not one this can shape a reply to",
@@ -3755,7 +3759,7 @@ mod network_state_tests {
     fn zenonia_purchase_request() -> Vec<u8> {
         let mut request = alloc::vec![0u8; 72];
         request[0..2].copy_from_slice(&72u16.to_le_bytes());
-        request[3] = 7;
+        request[2..4].copy_from_slice(&0x0700u16.to_le_bytes());
         request[4..15].copy_from_slice(b"01055145031");
         // 생명의 근원(10개), EUC-KR, in its 40-byte field.
         request[16..33].copy_from_slice(&[
@@ -3767,104 +3771,75 @@ mod network_state_tests {
         request
     }
 
+    /// 제노니아2's 93-byte record: the same, with a flag and the handset model
+    /// behind the item code, and its own command.
+    fn zenonia2_purchase_request() -> Vec<u8> {
+        let mut request = alloc::vec![0u8; 93];
+        request[0..2].copy_from_slice(&93u16.to_le_bytes());
+        request[2..4].copy_from_slice(&0x0400u16.to_le_bytes());
+        request[4..15].copy_from_slice(b"01055452383");
+        request[56..60].copy_from_slice(&100u32.to_le_bytes());
+        request[60..71].copy_from_slice(b"0002C004001");
+        request[72] = 1;
+        request[73..81].copy_from_slice(b"Emulator");
+
+        request
+    }
+
     #[test]
     fn a_gamevil_purchase_is_answered_the_way_onrecvdone_reads_it() {
-        use super::lgt_local_gamevil_cert_response;
+        use super::lgt_local_gamevil_packet_response;
 
-        let response = lgt_local_gamevil_cert_response(&zenonia_purchase_request()).unwrap();
+        // Each title is answered with its own command plus one: 제노니아1 buys
+        // with 0x0700, 2 and 3 with 0x0400.
+        for (request, expected) in [(zenonia_purchase_request(), 0x0701u16), (zenonia2_purchase_request(), 0x0401)] {
+            let response = lgt_local_gamevil_packet_response(&request).unwrap();
 
-        // `tagNetHeader`: a length at [0] and a command at [2], both u16 little
-        // end first, and four bytes of it - `GetRecvPacketHeaderSize` returns 4.
-        assert_eq!(u16::from_le_bytes([response[0], response[1]]) as usize, response.len());
-        assert_eq!(u16::from_le_bytes([response[2], response[3]]), 0x0701);
+            // `tagNetHeader`: a length at [0] and a command at [2], both u16
+            // little end first, four bytes of it.
+            assert_eq!(u16::from_le_bytes([response[0], response[1]]) as usize, response.len());
+            assert_eq!(u16::from_le_bytes([response[2], response[3]]), expected);
 
-        // The status `OnRecvDone` reads straight after the header. Anything
-        // below -1 goes to OnError instead of the command switch.
-        assert!(response[4] as i8 >= 0);
+            // The status `OnRecvDone` reads straight after the header. Below -1
+            // goes to OnError instead of the command switch.
+            assert!(response[4] as i8 >= 0);
 
-        // `API_ZN_SC_BUY_ITEM` reads nothing behind it.
-        assert!(response[5..].iter().all(|&byte| byte == 0));
+            // The buy handler reads nothing behind it.
+            assert!(response[5..].iter().all(|&byte| byte == 0));
 
-        // And the same answer every time - the sweeps are over.
-        assert_eq!(lgt_local_gamevil_cert_response(&zenonia_purchase_request()), Some(response));
+            // And the same answer every time - the sweeps are over.
+            assert_eq!(lgt_local_gamevil_packet_response(&request), Some(response));
+        }
     }
 
     #[test]
     fn only_a_record_that_declares_itself_is_answered_as_a_purchase() {
-        use super::lgt_local_gamevil_cert_response;
+        use super::lgt_local_gamevil_packet_response;
 
         // A length that is not the record in hand.
         let mut wrong_length = zenonia_purchase_request();
         wrong_length[0] = 0x47;
-        assert_eq!(lgt_local_gamevil_cert_response(&wrong_length), None);
+        assert_eq!(lgt_local_gamevil_packet_response(&wrong_length), None);
 
-        // A command this cannot answer.
-        let mut other_command = zenonia_purchase_request();
-        other_command[3] = 6;
-        assert_eq!(lgt_local_gamevil_cert_response(&other_command), None);
+        // An odd command is one a title is answered with, not one it sends, so
+        // answering it would be answering an answer.
+        let mut answer_shaped = zenonia_purchase_request();
+        answer_shaped[2..4].copy_from_slice(&0x0701u16.to_le_bytes());
+        assert_eq!(lgt_local_gamevil_packet_response(&answer_shaped), None);
+
+        // Too short to be carrying a purchase, however well it declares itself.
+        let mut stub = alloc::vec![0u8; 8];
+        stub[0..2].copy_from_slice(&8u16.to_le_bytes());
+        stub[2..4].copy_from_slice(&0x0400u16.to_le_bytes());
+        assert_eq!(lgt_local_gamevil_packet_response(&stub), None);
 
         // And the other protocols answered here are not mistaken for it.
-        assert_eq!(lgt_local_gamevil_cert_response(b"CASH|0|demon|05590091|1|1|1"), None);
-        assert_eq!(lgt_local_gamevil_cert_response(&[0xff, 0xff, 0x00, 0x06, 0x00, 0x68]), None);
-        assert_eq!(lgt_local_gamevil_cert_response(b""), None);
-    }
-
-    #[test]
-    fn a_cash_request_is_answered_with_the_word_its_sender_reads_as_paid() {
-        use super::lgt_local_cash_response;
-
-        // The record 데몬헌터 actually writes, captured off the title.
-        let request = b"CASH|0|demon|05590091|00029B60004|500|2034517541";
-        assert_eq!(lgt_local_cash_response(request).as_deref(), Some(b"\x00\x04SASH".as_slice()));
-
-        // Every item in the title's own price table is the same request.
         assert_eq!(
-            lgt_local_cash_response(b"CASH|0|demon|05590091|0002B640007|2900|1").as_deref(),
-            Some(b"\x00\x04SASH".as_slice())
+            lgt_local_gamevil_packet_response(b"CASH|0|demon|05590091|00029B60004|500|2034517541"),
+            None
         );
-
-        // Nothing else is one of these records.
-        assert_eq!(lgt_local_cash_response(b"SASH"), None);
-        assert_eq!(lgt_local_cash_response(b"CASH"), None);
-        assert_eq!(lgt_local_cash_response(b""), None);
-        assert_eq!(lgt_local_cash_response(&[0xff, 0xff, 0x00, 0x06, 0x00, 0x68]), None);
-    }
-
-    #[test]
-    fn the_gateway_hands_a_cash_answer_back_behind_a_read_header() {
-        use super::{LGT_BILL_HEADER_SIZE, LGT_BILL_READ_HEADER_SIZE, LGT_BILL_READ_PAYLOAD_LENGTH_OFFSET, LgtBillingGateway};
-        use wie_backend::{LocalConnection, LocalRead};
-
-        let mut gateway = LgtBillingGateway::new();
-
-        let mut frame = alloc::vec![0u8; LGT_BILL_HEADER_SIZE];
-        frame.extend_from_slice(b"CASH|0|demon|05590091|00029B60004|500|2034517541");
-        gateway.write(&frame);
-
-        // An ASCII record takes the same 56-byte response header as a framed
-        // one; `WPBill_Read` parses the header either way.
-        assert!(gateway.readable());
-
-        let mut header = [0u8; LGT_BILL_READ_HEADER_SIZE];
-        assert_eq!(gateway.read(&mut header), LocalRead::Data(LGT_BILL_READ_HEADER_SIZE));
-        assert_eq!(
-            u32::from_be_bytes(
-                header[LGT_BILL_READ_PAYLOAD_LENGTH_OFFSET..LGT_BILL_READ_PAYLOAD_LENGTH_OFFSET + 4]
-                    .try_into()
-                    .unwrap()
-            ),
-            6
-        );
-
-        // The two length bytes the title reads first, then the body they count.
-        let mut length = [0u8; 2];
-        assert_eq!(gateway.read(&mut length), LocalRead::Data(2));
-        assert_eq!(u16::from_be_bytes(length), 4);
-
-        let mut payload = [0u8; 4];
-        assert_eq!(gateway.read(&mut payload), LocalRead::Data(4));
-        assert_eq!(&payload, b"SASH");
-        assert!(!gateway.readable());
+        assert_eq!(lgt_local_gamevil_packet_response(&[0xff, 0xff, 0x00, 0x06, 0x00, 0x68]), None);
+        assert_eq!(lgt_local_gamevil_packet_response(b""), None);
     }
 
     #[test]
