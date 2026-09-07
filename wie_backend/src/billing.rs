@@ -6,7 +6,7 @@
 //! title that reaches one and is told nothing usually stops on a screen it never
 //! leaves.
 //!
-//! Six protocols turn up across the titles here, and a request is recognised by
+//! Seven protocols turn up across the titles here, and a request is recognised by
 //! its own shape rather than by which title sent it. Anything that is not one of
 //! them is left unanswered rather than guessed at.
 //!
@@ -616,6 +616,74 @@ fn atoi(field: &[u8]) -> Option<usize> {
 
     value
 }
+/// What answers the tagged record 와일드프론티어 buys a cash item with.
+///
+/// 와일드프론티어 (`0002CB52`) reaches `222.231.57.145:57000` through
+/// `MC_netBillSocket` and writes a fixed record. Buying a 1000원 item writes
+/// thirty-six bytes:
+///
+/// ```text
+/// [0..2]   the tag, `KP`
+/// [2..4]   u16 LE - the whole record's length
+/// [4..6]   u16 LE - 7, which `0x4c0cc` writes into every one of these
+/// [6]      u8     - what the record is; `9` is a purchase
+/// [7]      u8
+/// [8..20]  the item, the title's own aid and a three digit code, NUL padded
+/// [20..32] the subscriber's number, NUL padded
+/// [32..36] u32 LE - the price in won
+/// ```
+///
+/// A reply is read by `0xfdb6`, which takes four bytes, reads `[2]` as a `u16`
+/// for the whole record's length and then reads the rest of it. `0xfeaa` looks
+/// at `[7]`: anything but zero is an error, and zero passes `[8..]` and `[6]` to
+/// the handler at `0x4c792`. Which switches on that byte, and the purchase's
+/// `9` is `0x4c998`: it compares the **first byte of the body** against `1` and
+/// grants the item on that alone.
+///
+/// So the answer is the tag, its own length, the seven the title writes, the
+/// record byte it asked under, a zero status and a body of one granted byte.
+/// That is exact for a purchase. The other record kinds share the header and the
+/// status, and the simple ones share the granted byte; one that reads a list
+/// behind it finds an empty one, which is not something to fill in from here.
+///
+/// `None` for anything that is not one of these records: it has to carry the
+/// tag, declare its own length, and carry the seven that marks the shape.
+pub fn lgt_local_tagged_record_response(request: &[u8]) -> Option<Vec<u8>> {
+    const TAG: &[u8] = b"KP";
+    /// The tag, the length, the seven, the record byte and one more.
+    const HEADER: usize = 8;
+    /// Written into every one of these records by `0x4c0cc`.
+    const SHAPE: u16 = 7;
+    /// `[7]`, where anything but zero is read as an error before the body is.
+    const GRANTED_STATUS: u8 = 0;
+    /// The body's first byte, which is what a purchase is granted on.
+    const GRANTED: u8 = 1;
+
+    if !request.starts_with(TAG) || request.len() < HEADER {
+        return None;
+    }
+
+    if u16::from_le_bytes([request[2], request[3]]) as usize != request.len() {
+        return None;
+    }
+
+    if u16::from_le_bytes([request[4], request[5]]) != SHAPE {
+        return None;
+    }
+
+    let length = HEADER + 1;
+    let mut response = Vec::with_capacity(length);
+    response.extend_from_slice(TAG);
+    response.extend_from_slice(&(length as u16).to_le_bytes());
+    response.extend_from_slice(&SHAPE.to_le_bytes());
+    // The record byte comes back as it was asked under, which is what the
+    // handler is chosen by.
+    response.push(request[6]);
+    response.push(GRANTED_STATUS);
+    response.push(GRANTED);
+
+    Some(response)
+}
 /// The granted answer to an application billing request, in the frame shape
 /// `lgt_local_purchase_success_response` establishes for the purchase
 /// transaction: the `0xffff` marker, the frame length, the request's own type
@@ -640,9 +708,9 @@ pub fn lgt_local_granted_response(request: &[u8]) -> Option<Vec<u8>> {
 ///
 /// Tried in order of how specific each shape is: the `0xffff`-framed message,
 /// then the pipe-delimited cash record, then the GAMEVIL packet, then the
-/// big-endian record, then the length-prefixed command, then the text record.
-/// `None` when a request is none of them, which is not something to answer with
-/// a guess.
+/// big-endian record, then the length-prefixed command, then the text record,
+/// then the tagged record. `None` when a request is none of them, which is not
+/// something to answer with a guess.
 ///
 /// The three packet shapes cannot be mistaken for one another. Each declares its
 /// own length, and no two of them read that length the same way: a length that
@@ -656,6 +724,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_big_endian_record_response(request))
         .or_else(|| lgt_local_major_minor_response(request))
         .or_else(|| lgt_local_text_record_response(request))
+        .or_else(|| lgt_local_tagged_record_response(request))
 }
 
 #[cfg(test)]
@@ -1155,15 +1224,98 @@ mod tests {
         assert_eq!(atoi(b""), None);
     }
 
+    /// The 36-byte record 와일드프론티어 writes to buy a 1000원 item, captured
+    /// off the title.
+    fn wild_frontier_purchase_request() -> Vec<u8> {
+        let mut request = Vec::from(*b"KP");
+        request.extend_from_slice(&36u16.to_le_bytes());
+        request.extend_from_slice(&7u16.to_le_bytes());
+        // A purchase, and the byte behind it.
+        request.push(9);
+        request.push(0);
+        request.extend_from_slice(b"0002CB52004\0");
+        request.extend_from_slice(b"01055452383\0");
+        request.extend_from_slice(&1000u32.to_le_bytes());
+
+        request
+    }
+
+    #[test]
+    fn a_tagged_record_is_answered_the_way_its_reader_reads_it() {
+        use super::lgt_local_tagged_record_response;
+
+        let request = wild_frontier_purchase_request();
+        assert_eq!(request.len(), 36);
+
+        let response = lgt_local_tagged_record_response(&request).unwrap();
+
+        // Four bytes are read before anything else, and [2] is the whole
+        // record's length - which is what the reader then waits for.
+        assert_eq!(&response[..2], b"KP");
+        assert_eq!(u16::from_le_bytes([response[2], response[3]]) as usize, response.len());
+
+        // The shape the title writes into every one of these.
+        assert_eq!(u16::from_le_bytes([response[4], response[5]]), 7);
+
+        // The record byte it asked under, which chooses the handler, and a
+        // status that is not an error.
+        assert_eq!(response[6], 9);
+        assert_eq!(response[7], 0);
+
+        // The body's first byte, which is all the purchase is granted on.
+        assert_eq!(response[8], 1);
+        assert_eq!(response.len(), 9);
+    }
+
+    #[test]
+    fn only_a_tagged_record_that_declares_itself_is_answered() {
+        use super::lgt_local_tagged_record_response;
+
+        // A length that is not the record in hand.
+        let mut wrong_length = wild_frontier_purchase_request();
+        wrong_length[2] = 37;
+        assert_eq!(lgt_local_tagged_record_response(&wrong_length), None);
+
+        // Not the shape these records are written in.
+        let mut wrong_shape = wild_frontier_purchase_request();
+        wrong_shape[4] = 8;
+        assert_eq!(lgt_local_tagged_record_response(&wrong_shape), None);
+
+        // No tag, and too short to carry a header.
+        assert_eq!(lgt_local_tagged_record_response(b"XP\x24\x00\x07\x00\x09\x00"), None);
+        assert_eq!(lgt_local_tagged_record_response(b"KP\x04\x00"), None);
+        assert_eq!(lgt_local_tagged_record_response(b""), None);
+
+        // And the other protocols answered here are not mistaken for it.
+        assert_eq!(lgt_local_tagged_record_response(&zenonia_purchase_request()), None);
+        assert_eq!(lgt_local_tagged_record_response(&legend_of_master_purchase_request()), None);
+        assert_eq!(lgt_local_tagged_record_response(&hero_lore_frame(1, 1, &[4])), None);
+        assert_eq!(lgt_local_tagged_record_response(&anima_purchase_request()), None);
+        assert_eq!(
+            lgt_local_tagged_record_response(b"CASH|0|demon|05590091|00029B60004|500|2034517541"),
+            None
+        );
+
+        // Nor is it mistaken for one of them.
+        let request = wild_frontier_purchase_request();
+        assert_eq!(lgt_local_granted_response(&request), None);
+        assert_eq!(lgt_local_cash_response(&request), None);
+        assert_eq!(lgt_local_gamevil_packet_response(&request), None);
+        assert_eq!(lgt_local_big_endian_record_response(&request), None);
+        assert_eq!(lgt_local_major_minor_response(&request), None);
+        assert_eq!(lgt_local_text_record_response(&request), None);
+    }
+
     #[test]
     fn one_answer_covers_every_protocol_and_guesses_at_none() {
-        // Each of the six, recognised by its own shape.
+        // Each of the seven, recognised by its own shape.
         assert!(response(&[0xff, 0xff, 0x06, 0x00, 0x20, 0x00]).is_some());
         assert!(response(b"CASH|0|demon|05590091|00029B60004|500|2034517541").is_some());
         assert!(response(&zenonia_purchase_request()).is_some());
         assert!(response(&legend_of_master_purchase_request()).is_some());
         assert!(response(&hero_lore_frame(1, 1, &[4])).is_some());
         assert!(response(&anima_purchase_request()).is_some());
+        assert!(response(&wild_frontier_purchase_request()).is_some());
 
         // And nothing for a request that is none of them.
         assert_eq!(response(b"hello"), None);
