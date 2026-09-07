@@ -331,7 +331,7 @@ pub async fn sprintk(
     a4: WIPICWord,
     a5: WIPICWord,
 ) -> Result<WIPICWord> {
-    tracing::debug!("MC_knlSprintk({dest:#x}, {ptr_format:#x}, {a1}, {a2}, {a3}, {a4}, {a5})",);
+    tracing::debug!("MC_knlSprintk({dest:#x}, {ptr_format:#x}, {a0}, {a1}, {a2}, {a3}, {a4}, {a5})",);
 
     let format_string = read_null_terminated_string_bytes(context, ptr_format)?;
     let format_string = encoding_rs::EUC_KR.decode(&format_string).0;
@@ -342,7 +342,10 @@ pub async fn sprintk(
 
     write_null_terminated_string_bytes(context, dest, &result_bytes)?;
 
-    Ok(result.len() as _)
+    // What `sprintf` returns is what it wrote, and what it wrote is the encoded
+    // bytes - which is not the same count as the characters they came from once
+    // any of them is Korean.
+    Ok(result_bytes.len() as _)
 }
 
 pub async fn get_total_memory(_context: &mut dyn WIPICContext) -> Result<i32> {
