@@ -679,6 +679,42 @@ pub fn lgt_local_command_tag_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(response)
 }
 
+/// The rows 라그나로크 바이올렛's 럭셔리샵 is answered with.
+///
+/// A row is an item, how many one purchase grants, and its price. The item is
+/// the index the title's own table gives it: `0x1aff0` reads its icon out of
+/// the record table at `0x1407fc0`, stride `0x34`, and `0x1b07c` reads its name
+/// out of the fixed 17-byte names at `0x140ed70` - 540 of them, both tables in
+/// the module's own `.data`. So these are the title's own items rather than
+/// names invented here, and the last twenty of that table are what a shop
+/// called 럭셔리샵 sold: the bags, the springs, the pet eggs and hats, the
+/// wallpapers and the pouches.
+///
+/// What each went for went with the service; these are priced in the round
+/// hundreds a cash shop's were.
+const RAGNAROK_VIOLET_SHOP_ROWS: [(u32, u32, u32); 20] = [
+    (521, 1, 1000), // 여행자 가방
+    (524, 1, 2000), // 튼튼한 가방
+    (522, 1, 500),  // 마력의 샘물
+    (523, 1, 500),  // 신비의 샘물
+    (520, 1, 1000), // 비너스의 눈물
+    (525, 1, 1500), // 오리하르콘
+    (526, 1, 1000), // 대장장이의 손
+    (527, 1, 2000), // 까만 펫 알
+    (528, 1, 2000), // 녹색 펫 알
+    (529, 1, 2000), // 푸른 펫 알
+    (533, 1, 500),  // 밥그릇
+    (534, 1, 800),  // 모형칼 펫모자
+    (535, 1, 800),  // 밀짚 펫모자
+    (536, 1, 800),  // 천사하트 펫모자
+    (537, 1, 800),  // 바람개비 펫모자
+    (530, 1, 500),  // 태양 벽지
+    (531, 1, 500),  // 해변 벽지
+    (532, 1, 500),  // 노을 벽지
+    (538, 1, 1000), // 재료주머니
+    (539, 1, 1500), // 카드북
+];
+
 /// What answers the fixed blocks 라그나로크 바이올렛 opens its shop with.
 ///
 /// 라그나로크 바이올렛 (`000256A7`) opens a billing socket to port 9000 when its
@@ -711,11 +747,13 @@ pub fn lgt_local_command_tag_response(request: &[u8]) -> Option<Vec<u8>> {
 /// by the screen. `0x3931c` is where `0x66` lands, and it has a case for the two
 /// steps this answers:
 ///
-/// - `0xca`, for the `0xc9` the screen opens with. `0x381f4`, which parses a
-///   step's body, has a case for `0x66` that reads a body only under `0xcd`, so
-///   this one carries none. The screen sends `0xcb` next, which `0x38b44` builds
-///   with nothing of its own - a zero length over a body the send buffer still
-///   holds from the `0xc9`.
+/// - `0xca`, for the `0xc9` the screen opens with, and this is the shop's list:
+///   `0x381f4`'s case for `0x66` at `0x38404` takes `[16]` as a row count and
+///   reads that many rows of three words - the item, how many one purchase
+///   grants, and its price - into the three arrays `0x1aff0`, `0x1b036` and
+///   `0x1b0c0` draw a row from. The screen sends `0xcb` next, which `0x38b44`
+///   builds with nothing of its own - a zero length over a body the send buffer
+///   still holds from the `0xc9`.
 /// - `0xcd`, for that `0xcb`. `0x37fec` copies `[8]` bytes from the block's
 ///   offset 20 into `0x150de98` and NUL-terminates them, and that is a message
 ///   the screen draws before acknowledging with `0xce` and moving its own state
@@ -742,6 +780,10 @@ pub fn lgt_local_fixed_block_response(request: &[u8]) -> Option<Vec<u8>> {
     /// The step the screen sends behind that, and the message answering it.
     const MESSAGE_REQUEST_STEP: u32 = 0xcb;
     const MESSAGE_STEP: u32 = 0xcd;
+    /// A row: the item, the quantity, the price.
+    const ROW: usize = 12;
+    /// What the list answer holds: the row count, and then the rows.
+    const ROWS: u32 = (4 + RAGNAROK_VIOLET_SHOP_ROWS.len() * ROW) as u32;
 
     if request.len() != BLOCK {
         return None;
@@ -770,7 +812,7 @@ pub fn lgt_local_fixed_block_response(request: &[u8]) -> Option<Vec<u8>> {
                 return None;
             }
 
-            (GRANTED_STEP, 4u32)
+            (GRANTED_STEP, ROWS)
         }
         // This one carries nothing of its own, and neither does its answer.
         MESSAGE_REQUEST_STEP if length == 0 => (MESSAGE_STEP, 0),
@@ -780,9 +822,20 @@ pub fn lgt_local_fixed_block_response(request: &[u8]) -> Option<Vec<u8>> {
     let mut response = vec![0u8; BLOCK];
     response[0..4].copy_from_slice(&screen.to_be_bytes());
     response[4..8].copy_from_slice(&step.to_be_bytes());
-    // What the answer says of itself: the step's own word for the first, and
-    // nothing for the second. Neither handler reads past it.
+    // What the answer says of itself, measured from [16] the way the request's
+    // own length is: the count and its rows for the list, nothing for the
+    // message.
     response[8..12].copy_from_slice(&answer.to_be_bytes());
+
+    if step == GRANTED_STEP {
+        response[HEADER - 4..HEADER].copy_from_slice(&(RAGNAROK_VIOLET_SHOP_ROWS.len() as u32).to_be_bytes());
+        for (index, (item, count, price)) in RAGNAROK_VIOLET_SHOP_ROWS.iter().enumerate() {
+            let at = HEADER + index * ROW;
+            response[at..at + 4].copy_from_slice(&item.to_be_bytes());
+            response[at + 4..at + 8].copy_from_slice(&count.to_be_bytes());
+            response[at + 8..at + 12].copy_from_slice(&price.to_be_bytes());
+        }
+    }
 
     Some(response)
 }
@@ -2233,7 +2286,7 @@ mod tests {
 
     #[test]
     fn a_fixed_block_is_answered_with_the_step_that_follows_it() {
-        use super::lgt_local_fixed_block_response;
+        use super::{RAGNAROK_VIOLET_SHOP_ROWS, lgt_local_fixed_block_response};
 
         let request = ragnarok_violet_hello_block();
         assert_eq!(
@@ -2245,11 +2298,33 @@ mod tests {
         assert_eq!(u32::from_be_bytes([request[8], request[9], request[10], request[11]]), 0x33);
 
         // A reply is one block of the same size, under the same screen, at the
-        // step that answers the one asked.
+        // step that answers the one asked, and that step is the shop's list.
         let response = lgt_local_fixed_block_response(&request).unwrap();
         assert_eq!(response.len(), 1024);
-        assert_eq!(&response[0..12], &[0, 0, 0, 0x66, 0, 0, 0, 0xca, 0, 0, 0, 4]);
-        assert!(response[12..].iter().all(|&byte| byte == 0));
+        assert_eq!(&response[0..8], &[0, 0, 0, 0x66, 0, 0, 0, 0xca]);
+
+        // What it says of itself is the count and its rows, measured from [16]
+        // the way the request's own length is.
+        let rows = RAGNAROK_VIOLET_SHOP_ROWS.len();
+        assert_eq!(
+            u32::from_be_bytes([response[8], response[9], response[10], response[11]]) as usize,
+            4 + rows * 12
+        );
+        assert_eq!(
+            u32::from_be_bytes([response[16], response[17], response[18], response[19]]) as usize,
+            rows
+        );
+
+        // Which walks as an item, a quantity and a price, and each item is one
+        // the title's own 540-entry table has.
+        for (index, (item, count, price)) in RAGNAROK_VIOLET_SHOP_ROWS.iter().enumerate() {
+            let at = 20 + index * 12;
+            assert!(*item < 540);
+            assert_eq!(&response[at..at + 4], &item.to_be_bytes());
+            assert_eq!(&response[at + 4..at + 8], &count.to_be_bytes());
+            assert_eq!(&response[at + 8..at + 12], &price.to_be_bytes());
+        }
+        assert!(response[20 + rows * 12..].iter().all(|&byte| byte == 0));
     }
 
     #[test]
