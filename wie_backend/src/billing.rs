@@ -562,6 +562,12 @@ const INOTIA_2_SHOP_TABS: [(u8, &[InotiaShopRow]); 7] = [
 /// drawn from: `0x331f6` reads its icon out of that table, `0x71e8` reads its
 /// name, and above a count of one `0x33238` renders the two as `%s(%d)`. So the
 /// rows carry items the title already knows rather than anything named here.
+/// - `0x010e`, the buy, which `0x32af2` sends as the subscriber number, a fixed
+///   `9`, the row's name as the title spells it and a `u16` quantity. Its
+///   handler at `0x3301c` reads one byte and does not look at it: this protocol
+///   reports a refusal by answering `0x0000` with a message instead, so a reply
+///   under the command that was asked is the grant. The screen then sends
+///   `0x0112` behind it, in the same shape, and reads nothing back at all.
 ///
 /// The tag is the server's to choose, so it comes back as it was sent - the
 /// title picked `2` for the hello itself, and echoing keeps the session on it.
@@ -586,6 +592,10 @@ pub fn lgt_local_command_tag_response(request: &[u8]) -> Option<Vec<u8>> {
     const SESSION_COMMAND: u16 = 0x014a;
     /// The command the shop asks its list for.
     const LIST_COMMAND: u16 = 0x010f;
+    /// The command a chosen row is bought with.
+    const BUY_COMMAND: u16 = 0x010e;
+    /// The command the screen sends once the buy is granted.
+    const COMMIT_COMMAND: u16 = 0x0112;
 
     if request.len() < LENGTH_FIELD + BODY_HEADER {
         return None;
@@ -598,16 +608,25 @@ pub fn lgt_local_command_tag_response(request: &[u8]) -> Option<Vec<u8>> {
     let tag = [request[4], request[5]];
     let payload = &request[LENGTH_FIELD + BODY_HEADER..];
 
-    // Both handshake steps carry the subscriber number and the NUL it is
-    // written with; the list carries its three arguments and nothing else.
-    let carries_subscriber = || {
-        if payload.len() != SUBSCRIBER {
+    // Every request but the list opens with the subscriber number and the NUL
+    // it is written with.
+    let subscriber_first = |field: &[u8]| match field.iter().position(|&byte| byte == 0) {
+        Some(0) | None => false,
+        Some(digits) => field[..digits].iter().all(u8::is_ascii_digit),
+    };
+
+    // The handshake steps carry the subscriber number and nothing else; the
+    // list carries its three arguments; a purchase carries the subscriber
+    // number, a byte, the row's name and the quantity.
+    let carries_subscriber = || payload.len() == SUBSCRIBER && subscriber_first(payload);
+    let buys_a_row = || {
+        let Some((subscriber, rest)) = payload.split_at_checked(SUBSCRIBER) else {
             return false;
-        }
-        match payload.iter().position(|&byte| byte == 0) {
-            Some(0) | None => false,
-            Some(digits) => payload[..digits].iter().all(u8::is_ascii_digit),
-        }
+        };
+        let Some(&name_length) = rest.get(1) else {
+            return false;
+        };
+        subscriber_first(subscriber) && rest.len() == 2 + name_length as usize + 2
     };
 
     let mut body = Vec::from(command.to_be_bytes());
@@ -642,6 +661,13 @@ pub fn lgt_local_command_tag_response(request: &[u8]) -> Option<Vec<u8>> {
                 body.extend_from_slice(&price.to_be_bytes());
                 body.push(0);
             }
+        }
+        // Nothing the buy handler at `0x3301c` reads past its own byte, and
+        // nothing at all for the commit behind it - the screen has already
+        // moved on to its own message by then.
+        BUY_COMMAND | COMMIT_COMMAND if buys_a_row() => {
+            body.extend_from_slice(&tag);
+            body.push(GRANTED_STATUS);
         }
         _ => return None,
     }
@@ -1988,6 +2014,56 @@ mod tests {
 
         let response = lgt_local_command_tag_response(&inotia_2_list_request(1, 200, 100)).unwrap();
         assert_eq!(response[8], 0);
+    }
+
+    /// What the shop writes to buy a row: the subscriber number, the byte the
+    /// builder fixes at 9, the row's name as the title's own table spells it,
+    /// and a u16 quantity. Byte for byte what the capture shows for
+    /// 용사의 인장, EUC-KR.
+    fn inotia_2_buy_request(command: u16) -> Vec<u8> {
+        let mut request = vec![0u8; 2];
+        request.extend_from_slice(&command.to_be_bytes());
+        request.extend_from_slice(&2u16.to_be_bytes());
+        request.extend_from_slice(b"01046119269\0");
+        request.push(9);
+        let name = [0xbf, 0xeb, 0xbb, 0xe7, 0xc0, 0xc7, 0x20, 0xc0, 0xce, 0xc0, 0xe5];
+        request.push(name.len() as u8);
+        request.extend_from_slice(&name);
+        request.extend_from_slice(&1u16.to_be_bytes());
+        let body = (request.len() - 2) as u16;
+        request[0..2].copy_from_slice(&body.to_be_bytes());
+
+        request
+    }
+
+    #[test]
+    fn a_purchase_is_answered_under_the_command_that_asked() {
+        use super::lgt_local_command_tag_response;
+
+        assert_eq!(
+            inotia_2_buy_request(0x010e),
+            vec![
+                0x00, 0x1f, 0x01, 0x0e, 0x00, 0x02, 0x30, 0x31, 0x30, 0x34, 0x36, 0x31, 0x31, 0x39, 0x32, 0x36, 0x39, 0x00, 0x09, 0x0b, 0xbf, 0xeb,
+                0xbb, 0xe7, 0xc0, 0xc7, 0x20, 0xc0, 0xce, 0xc0, 0xe5, 0x00, 0x01
+            ]
+        );
+
+        // A refusal would come back as `0x0000` with a message, so answering
+        // under the command that was asked is what grants it.
+        assert_eq!(
+            lgt_local_command_tag_response(&inotia_2_buy_request(0x010e)).unwrap(),
+            vec![0x00, 0x05, 0x01, 0x0e, 0x00, 0x02, 0x01]
+        );
+        // And the commit the screen sends behind it, in the same shape.
+        assert_eq!(
+            lgt_local_command_tag_response(&inotia_2_buy_request(0x0112)).unwrap(),
+            vec![0x00, 0x05, 0x01, 0x12, 0x00, 0x02, 0x01]
+        );
+
+        // A name field that does not account for the rest is not this request.
+        let mut ragged = inotia_2_buy_request(0x010e);
+        ragged[19] = 3;
+        assert_eq!(lgt_local_command_tag_response(&ragged), None);
     }
 
     #[test]
