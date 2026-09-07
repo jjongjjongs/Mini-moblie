@@ -58,6 +58,17 @@ pub trait LocalConnection: Send + Sync {
     /// Fills `out` with what the endpoint has to say.
     fn read(&mut self, out: &mut [u8]) -> LocalRead;
 
+    /// Whether a read right now would hand back bytes rather than wait.
+    ///
+    /// A title that registers a read callback stops polling and waits to be
+    /// told, so an endpoint holding an answer has to say so or that title never
+    /// reads it. The default is `false`, which costs such a title only its
+    /// callback - a polling title reads either way - so an endpoint that
+    /// buffers an answer should override it.
+    fn readable(&self) -> bool {
+        false
+    }
+
     /// The title hung up.
     fn close(&mut self) {}
 }
@@ -184,6 +195,13 @@ impl LocalNetwork {
         Some(connection.inner.read(out))
     }
 
+    /// Whether the connection on `descriptor` has bytes waiting. `false` for a
+    /// descriptor this does not know, which is also what a title gets for one
+    /// that has been closed.
+    pub fn readable(&self, descriptor: i32) -> bool {
+        self.connections.get(&descriptor).is_some_and(|connection| connection.inner.readable())
+    }
+
     /// Closes a local connection. `false` when the descriptor named none.
     pub fn close(&mut self, descriptor: i32) -> bool {
         match self.connections.remove(&descriptor) {
@@ -247,6 +265,69 @@ mod tests {
 
             LocalRead::Data(taken)
         }
+
+        fn readable(&self) -> bool {
+            !self.pending.is_empty()
+        }
+    }
+
+    /// An endpoint that answers but never says it has, the way one written
+    /// before `readable` existed behaves.
+    struct Mute;
+
+    impl LocalConnection for Mute {
+        fn write(&mut self, _: &[u8]) {}
+
+        fn read(&mut self, _: &mut [u8]) -> LocalRead {
+            LocalRead::Pending
+        }
+    }
+
+    #[test]
+    fn a_connection_says_when_it_has_an_answer_waiting() {
+        let mut network = LocalNetwork::new();
+        network.register(Box::new(Echo));
+
+        let descriptor = network.connect("socket", "echo", 1234).unwrap();
+
+        // Nothing asked, nothing to read.
+        assert!(!network.readable(descriptor));
+
+        network.write(descriptor, b"hello");
+        assert!(network.readable(descriptor));
+
+        // Still readable while part of the answer is left, and not once it is
+        // all taken.
+        let mut out = [0u8; 2];
+        assert_eq!(network.read(descriptor, &mut out), Some(LocalRead::Data(2)));
+        assert!(network.readable(descriptor));
+
+        let mut rest = [0u8; 8];
+        assert_eq!(network.read(descriptor, &mut rest), Some(LocalRead::Data(3)));
+        assert!(!network.readable(descriptor));
+    }
+
+    #[test]
+    fn a_descriptor_that_names_no_connection_is_not_readable() {
+        let mut network = LocalNetwork::new();
+        network.register(Box::new(Echo));
+
+        let descriptor = network.connect("socket", "echo", 1234).unwrap();
+        network.write(descriptor, b"hello");
+
+        assert!(!network.readable(descriptor - 1));
+
+        // And a closed one has nothing to say either.
+        assert!(network.close(descriptor));
+        assert!(!network.readable(descriptor));
+    }
+
+    #[test]
+    fn an_endpoint_that_does_not_answer_the_question_is_taken_as_silent() {
+        let mut network = LocalNetwork::new();
+        let descriptor = network.open("mute", Box::new(Mute)).unwrap();
+
+        assert!(!network.readable(descriptor));
     }
 
     #[test]

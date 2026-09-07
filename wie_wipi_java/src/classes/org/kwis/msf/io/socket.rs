@@ -80,6 +80,10 @@ impl LocalConnection for BillingGateway {
 
         LocalRead::Data(taken)
     }
+
+    fn readable(&self) -> bool {
+        !self.pending.is_empty()
+    }
 }
 
 /// A connected WIPI socket, as `org.kwis.msf.io.URL.find` hands one back.

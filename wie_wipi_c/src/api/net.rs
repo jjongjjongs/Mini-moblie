@@ -253,6 +253,11 @@ impl NetworkState {
 
     /// The local-network descriptors this process still holds, dropped from the
     /// state so the caller can release them.
+    /// Every socket answered in process, with the local descriptor behind it.
+    fn local_connection_pairs(&self) -> Vec<(i32, i32)> {
+        self.local_connections.iter().map(|(&socket, &descriptor)| (socket, descriptor)).collect()
+    }
+
     fn take_local_connections(&mut self) -> Vec<i32> {
         let descriptors = self.local_connections.values().copied().collect();
         self.local_connections.clear();
@@ -1029,6 +1034,10 @@ impl wie_backend::LocalConnection for LgtBillingGateway {
         self.pending.drain(..taken);
 
         wie_backend::LocalRead::Data(taken)
+    }
+
+    fn readable(&self) -> bool {
+        !self.pending.is_empty()
     }
 }
 
@@ -2154,14 +2163,34 @@ fn ensure_event_dispatcher(context: &mut dyn WIPICContext) -> Result<()> {
                     return Ok(WIPICResult { results: Vec::new() });
                 }
 
-                let event = {
+                // A connection answered in process has no platform socket to
+                // poll, so its readiness is asked for directly. A title that
+                // registers a read callback stops polling and waits to be told;
+                // without this it waits on an answer already sitting in the
+                // endpoint. Checked first so an in-process answer is never held
+                // up behind a quiet platform network.
+                let local_event = {
+                    let pairs = state.lock().local_connection_pairs();
                     let system = context.system();
-                    let Some(network) = system.platform().network() else {
-                        state.lock().stop_dispatcher(self.generation);
-                        return Ok(WIPICResult { results: Vec::new() });
-                    };
+                    let local_network = system.local_network();
 
-                    network.poll_event()
+                    pairs
+                        .into_iter()
+                        .find(|&(_, descriptor)| local_network.readable(descriptor))
+                        .map(|(socket, _)| wie_backend::NetworkEvent::Readable(socket))
+                };
+
+                let event = match local_event {
+                    Some(event) => Some(event),
+                    None => {
+                        let system = context.system();
+                        let Some(network) = system.platform().network() else {
+                            state.lock().stop_dispatcher(self.generation);
+                            return Ok(WIPICResult { results: Vec::new() });
+                        };
+
+                        network.poll_event()
+                    }
                 };
 
                 let Some(event) = event else {
@@ -4524,6 +4553,35 @@ mod network_state_tests {
         }
 
         assert_eq!(socket_read(&mut context, socket, RESPONSE, 32).await.unwrap(), M_E_WOULDBLOCK);
+    }
+
+    #[futures_test::test]
+    async fn a_gateway_holding_an_answer_reports_its_socket_readable() {
+        const REQUEST: u32 = 0x1000;
+
+        let system = System::new(Box::new(LocalBillingTestPlatform::new()), "test-pid", "test-aid", DefaultTaskRunner);
+        let mut context = TestContext::with_system(system);
+
+        let state = context.network_state();
+        state.lock().process_state = ProcessNetworkState::Available;
+
+        let socket = bill_socket(&mut context, 2, 1).await.unwrap();
+        socket_connect(&mut context, socket, 0x0102_0304, 2508, 0x1111, 0x2222).await.unwrap();
+
+        let descriptor = state.lock().local_descriptor(socket).unwrap();
+        assert_eq!(state.lock().local_connection_pairs(), alloc::vec![(socket, descriptor)]);
+
+        // Nothing asked yet, so nothing for a read callback to be told about.
+        assert!(!context.system().local_network().readable(descriptor));
+
+        let request = [0xff, 0xff, 0x06, 0x00, 0x20, 0x00];
+        context.write_bytes(REQUEST, &request).unwrap();
+        socket_write(&mut context, socket, REQUEST, request.len() as i32).await.unwrap();
+
+        // The answer is waiting, which is what the event dispatcher turns into
+        // the readable event a title that registered a callback is waiting for.
+        // Without it such a title never reads an answer already in hand.
+        assert!(context.system().local_network().readable(descriptor));
     }
 
     #[futures_test::test]

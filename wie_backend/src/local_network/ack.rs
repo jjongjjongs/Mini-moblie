@@ -360,6 +360,10 @@ impl LocalConnection for AckConnection {
         LocalRead::Data(taken)
     }
 
+    fn readable(&self) -> bool {
+        !self.reply.is_empty()
+    }
+
     fn close(&mut self) {
         if !self.request.is_empty() {
             tracing::debug!("ack {} closed with {} bytes of an incomplete frame", self.peer, self.request.len());
