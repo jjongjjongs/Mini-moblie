@@ -6,7 +6,7 @@
 //! title that reaches one and is told nothing usually stops on a screen it never
 //! leaves.
 //!
-//! Eight protocols turn up across the titles here, and a request is recognised by
+//! Nine protocols turn up across the titles here, and a request is recognised by
 //! its own shape rather than by which title sent it. Anything that is not one of
 //! them is left unanswered rather than guessed at.
 //!
@@ -397,6 +397,107 @@ pub fn lgt_local_subscriber_record_response(request: &[u8]) -> Option<Vec<u8>> {
     response.extend_from_slice(&(length as u16).to_be_bytes());
     response.push(request[2]);
     response.push(GRANTED_STATUS);
+    response.extend_from_slice(&body);
+
+    Some(response)
+}
+
+/// What answers the command records 이노티아연대기2 opens a session with.
+///
+/// 이노티아연대기2 (`0002BA13`) connects to `211.115.66.232:20009` - the same
+/// host the first game's shop used, on a different port - the moment its shop
+/// is entered, and sits on 처리 중 until something answers. `0x116a4` is that
+/// connect, and `0x10edc` is what it runs once the socket is up: the 18 bytes
+/// the capture shows going out are the whole of the first request.
+///
+/// ```text
+/// 00 10  00 00  00 02  30 31 30 34 36 31 31 39 32 36 39 00
+/// ```
+///
+/// ```text
+/// [0..2]  u16 BE - the body's length, which does NOT count these two bytes
+/// [2..4]  u16 BE - the command
+/// [4..6]  u16 BE - the tag the session carries from step to step
+/// [6..]   the subscriber number, twelve bytes with its own NUL
+/// ```
+///
+/// The length is written last, over the two bytes the writer reserved: `0x10b64`
+/// sets the length to the cursor **minus two** and rewinds to write it there. A
+/// reply is framed the same way - `0x10f48` reads two bytes, `0x5346c` reads them
+/// through `MC_utilNtohs`, and `0x112f4` reads exactly that many more.
+///
+/// `0x11920` then dispatches the body: `0x5346c` again for the command, which is
+/// compared against the command last sent (`0x10c88` keeps it) to dismiss the
+/// 처리 중 dialog, and then switched on. Each handler reads its own fields off
+/// the same cursor, big-endian throughout, with a string being a `u16` length
+/// and that many bytes.
+///
+/// Two commands make up the handshake this answers:
+///
+/// - `0x0000`, the hello, whose handler at `0x1184c` reads a `u16` code, a `u8`
+///   and a string. The `u8` has to be nonzero or the connection is dropped; the
+///   code becomes the tag the next request carries; and the string is a message
+///   to show the player, so an empty one is what lets `0x118c8` run the next
+///   step instead of stopping on a dialog.
+/// - `0x014a`, which `0x10e9c` sends next, and whose handler at `0x1180c` reads
+///   a `u16` it discards and a `u8` that has to be exactly 1. That one hands the
+///   session to whichever screen opened it.
+///
+/// The tag is the server's to choose, so it comes back as it was sent - the
+/// title picked `2` for the hello itself, and echoing keeps the session on it.
+///
+/// `None` for anything that is not one of these records: the length has to
+/// describe the body in hand, the command has to be one of the handshake's, and
+/// the subscriber number has to be NUL-terminated digits filling the rest.
+pub fn lgt_local_command_tag_response(request: &[u8]) -> Option<Vec<u8>> {
+    /// The length field, which the length it holds does not count.
+    const LENGTH_FIELD: usize = 2;
+    /// A command and the tag behind it.
+    const BODY_HEADER: usize = 4;
+    /// The subscriber number, written as a fixed twelve bytes.
+    const SUBSCRIBER: usize = 12;
+    /// The status both handlers read as success.
+    const GRANTED_STATUS: u8 = 1;
+    /// The command a session opens with.
+    const HELLO_COMMAND: u16 = 0x0000;
+    /// The command that follows once the hello is granted.
+    const SESSION_COMMAND: u16 = 0x014a;
+
+    if request.len() != LENGTH_FIELD + BODY_HEADER + SUBSCRIBER {
+        return None;
+    }
+    if u16::from_be_bytes([request[0], request[1]]) as usize != request.len() - LENGTH_FIELD {
+        return None;
+    }
+
+    // The rest is the subscriber number and the NUL it is written with.
+    let subscriber = &request[LENGTH_FIELD + BODY_HEADER..];
+    let digits = subscriber.iter().position(|&byte| byte == 0)?;
+    if digits == 0 || !subscriber[..digits].iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+
+    let command = u16::from_be_bytes([request[2], request[3]]);
+    let tag = [request[4], request[5]];
+
+    let mut body = Vec::from(command.to_be_bytes());
+    match command {
+        // The code the next request carries, the status, and an empty message.
+        HELLO_COMMAND => {
+            body.extend_from_slice(&tag);
+            body.push(GRANTED_STATUS);
+            body.extend_from_slice(&0u16.to_be_bytes());
+        }
+        // A word the handler reads past, and the status.
+        SESSION_COMMAND => {
+            body.extend_from_slice(&tag);
+            body.push(GRANTED_STATUS);
+        }
+        _ => return None,
+    }
+
+    let mut response = Vec::with_capacity(LENGTH_FIELD + body.len());
+    response.extend_from_slice(&(body.len() as u16).to_be_bytes());
     response.extend_from_slice(&body);
 
     Some(response)
@@ -895,6 +996,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_cash_response(request))
         .or_else(|| lgt_local_gamevil_packet_response(request))
         .or_else(|| lgt_local_subscriber_record_response(request))
+        .or_else(|| lgt_local_command_tag_response(request))
         .or_else(|| lgt_local_big_endian_record_response(request))
         .or_else(|| lgt_local_major_minor_response(request))
         .or_else(|| lgt_local_text_record_response(request))
@@ -1639,9 +1741,77 @@ mod tests {
         assert_eq!(response(&legend), lgt_local_big_endian_record_response(&legend));
     }
 
+    /// The 18 bytes 이노티아연대기2 writes when its shop is entered.
+    fn inotia_2_session_request(command: u16) -> Vec<u8> {
+        let mut request = vec![0u8; 2];
+        request.extend_from_slice(&command.to_be_bytes());
+        request.extend_from_slice(&2u16.to_be_bytes());
+        request.extend_from_slice(b"01046119269\0");
+        let body = (request.len() - 2) as u16;
+        request[0..2].copy_from_slice(&body.to_be_bytes());
+
+        request
+    }
+
+    #[test]
+    fn a_session_hello_is_answered_with_a_code_and_no_message() {
+        use super::lgt_local_command_tag_response;
+
+        // Byte for byte what the capture shows going out.
+        assert_eq!(
+            inotia_2_session_request(0x0000),
+            vec![
+                0x00, 0x10, 0x00, 0x00, 0x00, 0x02, 0x30, 0x31, 0x30, 0x34, 0x36, 0x31, 0x31, 0x39, 0x32, 0x36, 0x39, 0x00
+            ]
+        );
+
+        // The length counts the body alone, the command comes back as it was
+        // asked under, the tag is echoed as the code the next step carries, the
+        // status is the nonzero the handler needs, and the message is empty.
+        assert_eq!(
+            lgt_local_command_tag_response(&inotia_2_session_request(0x0000)).unwrap(),
+            vec![0x00, 0x07, 0x00, 0x00, 0x00, 0x02, 0x01, 0x00, 0x00]
+        );
+
+        // The step behind it reads a word it discards and a status of exactly 1.
+        assert_eq!(
+            lgt_local_command_tag_response(&inotia_2_session_request(0x014a)).unwrap(),
+            vec![0x00, 0x05, 0x01, 0x4a, 0x00, 0x02, 0x01]
+        );
+    }
+
+    #[test]
+    fn a_record_that_is_not_the_session_s_is_left_unanswered() {
+        use super::{lgt_local_command_tag_response, lgt_local_subscriber_record_response};
+
+        // A command that is not one of the handshake's.
+        let mut unknown = inotia_2_session_request(0x0000);
+        unknown[3] = 0x0c;
+        assert_eq!(lgt_local_command_tag_response(&unknown), None);
+
+        // A length that counts itself, which is the other game's convention.
+        let mut inclusive = inotia_2_session_request(0x0000);
+        let whole = inclusive.len() as u16;
+        inclusive[0..2].copy_from_slice(&whole.to_be_bytes());
+        assert_eq!(lgt_local_command_tag_response(&inclusive), None);
+
+        // A subscriber number that is not digits.
+        let mut lettered = inotia_2_session_request(0x0000);
+        lettered[6] = b'x';
+        assert_eq!(lgt_local_command_tag_response(&lettered), None);
+
+        // And neither record is mistaken for the other game's, either way.
+        assert_eq!(lgt_local_subscriber_record_response(&inotia_2_session_request(0x0000)), None);
+        assert_eq!(lgt_local_command_tag_response(&inotia_shop_request()), None);
+        assert_eq!(
+            response(&inotia_shop_request()),
+            lgt_local_subscriber_record_response(&inotia_shop_request())
+        );
+    }
+
     #[test]
     fn one_answer_covers_every_protocol_and_guesses_at_none() {
-        // Each of the eight, recognised by its own shape.
+        // Each of the nine, recognised by its own shape.
         assert!(response(&[0xff, 0xff, 0x06, 0x00, 0x20, 0x00]).is_some());
         assert!(response(b"CASH|0|demon|05590091|00029B60004|500|2034517541").is_some());
         assert!(response(&zenonia_purchase_request()).is_some());
@@ -1651,6 +1821,7 @@ mod tests {
         assert!(response(&wild_frontier_purchase_request()).is_some());
         assert!(response(&wild_frontier_2_purchase_request()).is_some());
         assert!(response(&inotia_shop_request()).is_some());
+        assert!(response(&inotia_2_session_request(0x0000)).is_some());
 
         // And nothing for a request that is none of them.
         assert_eq!(response(b"hello"), None);
