@@ -781,7 +781,9 @@ impl BillFrame {
 /// this cannot read as a frame is shown as bytes alone. Capped, because a trace
 /// is for reading.
 fn bill_frame_trace(frame: &[u8]) -> alloc::string::String {
-    const SHOWN: usize = 64;
+    // Enough for a whole request. 제노니아1's is 72 bytes and a 64-byte cap cut
+    // off the end of it, which is the half that says what the title asked for.
+    const SHOWN: usize = 256;
 
     let bytes: Vec<alloc::string::String> = frame.iter().take(SHOWN).map(|byte| alloc::format!("{byte:02x}")).collect();
     let bytes = alloc::format!("{}{}", bytes.join(" "), if frame.len() > SHOWN { " ..." } else { "" });
