@@ -356,11 +356,9 @@ pub fn lgt_local_big_endian_record_response(request: &[u8]) -> Option<Vec<u8>> {
 /// | `1/0x3e`        | `0x613b8`   | reads nothing of the reply while the 상점 flag is set; closes the 서버 응답을 기다리는중 notice and asks for the catalogue as `5/0x3f` |
 /// | `5/0x3f`        | `0x5eb1e`   | takes a `u16 LE` count at `[8]` and that many 37-byte rows behind it, then opens the shop screen |
 ///
-/// So the first three are answered with the command alone - the title only
-/// needs to see its own command come back to take the next step - and the
-/// catalogue is answered with a count of zero, which opens the shop on an empty
-/// list. The service is gone and its stock with it; an invented catalogue would
-/// be a worse answer than an honest empty one.
+/// So the first three are answered with the command alone - the title only needs
+/// to see its own command come back to take the next step - and the catalogue is
+/// answered with the sixteen items [`hero4_catalogue`] lays out.
 ///
 /// `None` for anything else, the keep-alive included: the frame has to declare
 /// its own length, and the command pair has to be one of the four whose answer
@@ -375,16 +373,10 @@ pub fn lgt_local_major_minor_response(request: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    /// The shop screen's own two bytes ahead of the count, which it keeps and
-    /// an empty list gives it nothing to say with.
-    const CATALOGUE_HEADING: [u8; 2] = [0, 0];
-    /// A `u16 LE` row count. Zero rows.
-    const CATALOGUE_ROWS: [u8; 2] = [0, 0];
-
     let (major, minor) = (request[4], request[5]);
-    let body: &[u8] = match (major, minor) {
-        (1, 0x01) | (1, 0x3d) | (1, 0x3e) => &[],
-        (5, 0x3f) => &[CATALOGUE_HEADING[0], CATALOGUE_HEADING[1], CATALOGUE_ROWS[0], CATALOGUE_ROWS[1]],
+    let body: Vec<u8> = match (major, minor) {
+        (1, 0x01) | (1, 0x3d) | (1, 0x3e) => Vec::new(),
+        (5, 0x3f) => hero4_catalogue(),
         _ => return None,
     };
 
@@ -393,9 +385,107 @@ pub fn lgt_local_major_minor_response(request: &[u8]) -> Option<Vec<u8>> {
     response.extend_from_slice(&(length as u32).to_le_bytes());
     response.push(major);
     response.push(minor);
-    response.extend_from_slice(body);
+    response.extend_from_slice(&body);
 
     Some(response)
+}
+
+/// The body of 영웅서기4's shop catalogue: the page it is on, how many pages
+/// there are, and the rows themselves.
+///
+/// The handler at `0x5eb1e` reads the body as
+///
+/// ```text
+/// [0]      u8  - the page this is
+/// [1]      u8  - how many pages there are
+/// [2..4]   u16 LE - how many rows follow
+/// [4..]    the rows, 37 bytes each
+/// ```
+///
+/// and keeps the first three at `0x15669e8+0x132`, which is where the shop
+/// screen's own left/right handler at `0x5ee10` reads the page from and wraps it
+/// against the page count. One page and sixteen rows on it.
+///
+/// A row is read by `0x5e1d8`, which builds each item with the title's own
+/// factory and then overrides four of its fields out of the row:
+///
+/// ```text
+/// [0]      u8  - a per-row flag the shop screen keeps beside the list
+/// [1..9]   the server's first handle for the row, echoed back on a purchase
+/// [9..17]  its second, which is what a purchase actually sends
+/// [17]     u8  - the item kind, which is what the local item table is keyed by
+/// [18]     u8  - the item id in that table, where its name and icon come from
+/// [19]     u8  - the grade
+/// [21..25] u32 LE - the price
+/// ```
+///
+/// **The list itself is not the original service's.** It is the one the
+/// 영웅서기4_보물함 build carries, which reaches the same screen without a server
+/// at all: its patch redirects the two `0x5ded8` catalogue requests to a stub
+/// that returns without sending, and builds the sixteen items itself at
+/// `0x7d31c` from a table of ids at `0x7d3c4` and a table of grades at `0x7d3d4`,
+/// the grade in the low nibble and a multiplier in the high one, priced at fifty
+/// won a step for the first twelve rows and five hundred for the last four. The
+/// first row's grade is `0x14` rather than its low nibble, which is that build's
+/// own exception and is kept here.
+///
+/// Reproducing it over the wire rather than patching the module is what lets an
+/// unmodified archive reach the same screen: the title's own handler builds the
+/// same items from the same ids, and everything the row does not name - the
+/// item's name, icon and stats - still comes from the archive's own item table.
+fn hero4_catalogue() -> Vec<u8> {
+    /// Every row is this wide, whether or not it fills it.
+    const ROW: usize = 37;
+    /// The kind the local item table is keyed by for all sixteen, which is what
+    /// the 보물함 build passes its factory.
+    const KIND: u8 = 8;
+    /// Rows one to twelve are priced in fifties, the last four in five hundreds.
+    const CHEAP_ROWS: usize = 12;
+    const CHEAP_STEP: u32 = 50;
+    const COSTLY_STEP: u32 = 500;
+    /// The first row's grade, which the reference build spells out rather than
+    /// taking from its table.
+    const FIRST_GRADE: u8 = 0x14;
+
+    /// `(item id, packed grade)` - the grade in the low nibble and the price's
+    /// multiplier in the high one, as `0x7d3c4` and `0x7d3d4` pair them.
+    const ROWS: [(u8, u8); 16] = [
+        (0x0f, 0x50),
+        (0x05, 0x5a),
+        (0x10, 0x45),
+        (0x14, 0x21),
+        (0x13, 0xa1),
+        (0x18, 0xaa),
+        (0x15, 0xa5),
+        (0x16, 0xa1),
+        (0x11, 0x61),
+        (0x12, 0x61),
+        (0x1d, 0xa1),
+        (0x17, 0xa1),
+        (0x19, 0x31),
+        (0x1a, 0x41),
+        (0x1b, 0x51),
+        (0x1c, 0x61),
+    ];
+
+    let mut body = vec![0u8; 4 + ROWS.len() * ROW];
+    body[0] = 0;
+    body[1] = 1;
+    body[2..4].copy_from_slice(&(ROWS.len() as u16).to_le_bytes());
+
+    for (index, (item, packed)) in ROWS.into_iter().enumerate() {
+        let step = if index < CHEAP_ROWS { CHEAP_STEP } else { COSTLY_STEP };
+        let price = step * (packed >> 4) as u32;
+        let grade = if index == 0 { FIRST_GRADE } else { packed & 0x0f };
+
+        let row = &mut body[4 + index * ROW..4 + (index + 1) * ROW];
+        row[17] = KIND;
+        row[18] = item;
+        row[19] = grade;
+        row[21..25].copy_from_slice(&price.to_le_bytes());
+    }
+
+    body
 }
 /// The granted answer to an application billing request, in the frame shape
 /// `lgt_local_purchase_success_response` establishes for the purchase
@@ -729,14 +819,72 @@ mod tests {
             assert_eq!((response[4], response[5]), (major, minor));
         }
 
-        // And the catalogue, answered with no rows in it.
+        // And the catalogue.
         let response = lgt_local_major_minor_response(&hero_lore_frame(5, 0x3f, &[0])).unwrap();
         assert_eq!(
             u32::from_le_bytes([response[0], response[1], response[2], response[3]]) as usize,
             response.len()
         );
         assert_eq!((response[4], response[5]), (5, 0x3f));
-        assert_eq!(u16::from_le_bytes([response[8], response[9]]), 0);
+    }
+
+    #[test]
+    fn the_catalogue_lays_out_the_sixteen_rows_its_reader_walks() {
+        use super::lgt_local_major_minor_response;
+
+        const ROW: usize = 37;
+
+        let response = lgt_local_major_minor_response(&hero_lore_frame(5, 0x3f, &[0])).unwrap();
+        let body = &response[6..];
+
+        // One page, and the count the reader takes before the rows.
+        assert_eq!((body[0], body[1]), (0, 1));
+        assert_eq!(u16::from_le_bytes([body[2], body[3]]), 16);
+
+        // Every row is walked at its full stride, so the frame has to carry all
+        // sixteen of them - the reader reads to the last one's 35th byte.
+        assert_eq!(body.len(), 4 + 16 * ROW);
+        assert_eq!(response.len(), 6 + 4 + 16 * ROW);
+
+        // The ids, grades and prices the 보물함 build builds its own sixteen
+        // from: the grade in a packed byte's low nibble, the price its high
+        // nibble by fifty for the first twelve rows and by five hundred for the
+        // last four - and the first row's grade spelled 0x14 instead.
+        let expected: [(u8, u8, u32); 16] = [
+            (0x0f, 0x14, 250),
+            (0x05, 0x0a, 250),
+            (0x10, 0x05, 200),
+            (0x14, 0x01, 100),
+            (0x13, 0x01, 500),
+            (0x18, 0x0a, 500),
+            (0x15, 0x05, 500),
+            (0x16, 0x01, 500),
+            (0x11, 0x01, 300),
+            (0x12, 0x01, 300),
+            (0x1d, 0x01, 500),
+            (0x17, 0x01, 500),
+            (0x19, 0x01, 1500),
+            (0x1a, 0x01, 2000),
+            (0x1b, 0x01, 2500),
+            (0x1c, 0x01, 3000),
+        ];
+
+        for (index, (item, grade, price)) in expected.into_iter().enumerate() {
+            let row = &body[4 + index * ROW..4 + (index + 1) * ROW];
+
+            // The kind the local item table is keyed by, then the id in it.
+            assert_eq!(row[17], 8, "row {index} kind");
+            assert_eq!(row[18], item, "row {index} item");
+            assert_eq!(row[19], grade, "row {index} grade");
+            assert_eq!(u32::from_le_bytes([row[21], row[22], row[23], row[24]]), price, "row {index} price");
+
+            // Everything the row does not name is left for the title's own
+            // factory to have set, and the server's two handles are nothing
+            // this side has to invent.
+            assert!(row[..17].iter().all(|&byte| byte == 0), "row {index} handles");
+            assert_eq!(row[20], 0, "row {index}");
+            assert!(row[25..].iter().all(|&byte| byte == 0), "row {index} tail");
+        }
     }
 
     #[test]
