@@ -347,15 +347,14 @@ async fn sprintf(core: &mut ArmCore, _: &mut (), dest: u32, format: u32, a0: u32
     tracing::debug!("sprintf({dest:#x}, {:?})", format_string);
 
     let args = [a0, a1, a2, a3, a4, a5];
-    let result = format_varargs(&format_string, &args, &mut |ptr| {
-        let bytes = read_null_terminated_string_bytes(core, ptr)?;
-        Ok(encoding_rs::EUC_KR.decode(&bytes).0.into_owned())
-    })?;
+    let result = format_varargs(&format_string, &args, &mut |ptr| read_null_terminated_string_bytes(core, ptr))?;
 
     let result_bytes = encoding_rs::EUC_KR.encode(&result).0;
     write_null_terminated_string_bytes(core, dest, &result_bytes)?;
 
-    Ok(result.len() as u32)
+    // What C returns is what it wrote, and what it wrote is the encoded bytes -
+    // not the same count as the characters they came from once any is Korean.
+    Ok(result_bytes.len() as u32)
 }
 
 async fn strncmp(core: &mut ArmCore, _: &mut (), ptr_str1: u32, ptr_str2: u32, size: u32) -> Result<u32> {
@@ -657,10 +656,7 @@ async fn snprintf(core: &mut ArmCore, _: &mut (), dest: u32, size: u32, format: 
     tracing::debug!("snprintf({dest:#x}, {size}, {:?})", format_string);
 
     let args = [a0, a1, a2, a3, a4];
-    let result = format_varargs(&format_string, &args, &mut |ptr| {
-        let bytes = read_null_terminated_string_bytes(core, ptr)?;
-        Ok(encoding_rs::EUC_KR.decode(&bytes).0.into_owned())
-    })?;
+    let result = format_varargs(&format_string, &args, &mut |ptr| read_null_terminated_string_bytes(core, ptr))?;
 
     let result_bytes = encoding_rs::EUC_KR.encode(&result).0;
 
@@ -670,7 +666,9 @@ async fn snprintf(core: &mut ArmCore, _: &mut (), dest: u32, size: u32, format: 
         write_null_terminated_string_bytes(core, dest, &result_bytes[..take])?;
     }
 
-    Ok(result.len() as u32)
+    // C returns what it would have written, in bytes, whether or not the buffer
+    // held it.
+    Ok(result_bytes.len() as u32)
 }
 
 #[cfg(test)]

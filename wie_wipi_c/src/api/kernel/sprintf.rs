@@ -1,4 +1,4 @@
-use alloc::{format, string::String};
+use alloc::{format, string::String, vec::Vec};
 
 use wie_util::{Result, read_null_terminated_string_bytes};
 
@@ -7,22 +7,24 @@ use crate::context::WIPICContext;
 const MAX_WIDTH: usize = 4096;
 
 pub fn sprintf(context: &mut dyn WIPICContext, format: &str, args: &[u32]) -> Result<String> {
-    self::format(format, args, &mut |ptr| {
-        let bytes = read_null_terminated_string_bytes(context, ptr)?;
-
-        Ok(encoding_rs::EUC_KR.decode(&bytes).0.into_owned())
-    })
+    self::format(format, args, &mut |ptr| read_null_terminated_string_bytes(context, ptr))
 }
 
 /// Formats `format` with `args`, resolving `%s` pointers through `read_string`.
 /// Exposed so callers that hold something other than a `WIPICContext` - the LGT
 /// stdlib works straight off `ArmCore` - can format with their own reader.
 ///
+/// `read_string` hands back the guest's bytes rather than text, because a
+/// string's precision is a count of those: 와일드프론티어 draws a line of script
+/// as `%.*s` over a buffer that is not terminated between lines, and the count
+/// it passes is how many bytes that line is. Decoding first and counting
+/// characters would run one line into the next.
+///
 /// Conversions carry the flags, width and precision C gives them, because
 /// titles build fixed-width records with them: 아니마 writes its billing request
 /// as `AM%-6d%10.10s%2.2s`, a twenty byte header it then copies out by length,
 /// and a conversion that ignored the width would leave it the wrong size.
-pub fn format(format: &str, args: &[u32], read_string: &mut dyn FnMut(u32) -> Result<String>) -> Result<String> {
+pub fn format(format: &str, args: &[u32], read_string: &mut dyn FnMut(u32) -> Result<Vec<u8>>) -> Result<String> {
     let mut result = String::with_capacity(format.len());
     let mut chars = format.chars();
     let mut arg_iter = args.iter();
@@ -74,17 +76,15 @@ pub fn format(format: &str, args: &[u32], read_string: &mut dyn FnMut(u32) -> Re
                 }
                 's' => {
                     let ptr = next_arg(&mut arg_iter);
-                    let value = if ptr == 0 { String::from("(null)") } else { read_string(ptr)? };
+                    let value = if ptr == 0 { Vec::from(*b"(null)") } else { read_string(ptr)? };
 
                     conversion.push_string(&mut result, &value);
                     break;
                 }
                 'c' => {
-                    let value = next_arg(&mut arg_iter) as u8 as char;
-                    let mut text = String::new();
-                    text.push(value);
+                    let value = next_arg(&mut arg_iter) as u8;
 
-                    conversion.push_string(&mut result, &text);
+                    conversion.push_string(&mut result, &[value]);
                     break;
                 }
                 'x' => {
@@ -98,6 +98,21 @@ pub fn format(format: &str, args: &[u32], read_string: &mut dyn FnMut(u32) -> Re
                     break;
                 }
                 'l' => longs += 1,
+                // `*` takes the field from the arguments, ahead of the value it
+                // measures. A negative width is C's other way of writing `-`,
+                // and a negative precision is no precision at all.
+                '*' => {
+                    let field = next_arg(&mut arg_iter) as i32;
+
+                    if in_precision {
+                        conversion.precision = (field >= 0).then_some(field as usize);
+                    } else if field < 0 {
+                        conversion.left = true;
+                        conversion.width = Some(field.unsigned_abs() as usize);
+                    } else {
+                        conversion.width = Some(field as usize);
+                    }
+                }
                 '-' if conversion.width.is_none() && !in_precision => conversion.left = true,
                 '0' if conversion.width.is_none() && !in_precision => conversion.zero = true,
                 '.' if !in_precision => {
@@ -169,25 +184,23 @@ impl Conversion {
         }
     }
 
-    /// A string, whose precision is the most characters to print.
+    /// A string, whose precision is the most bytes to print and whose width is
+    /// counted in them too, as C counts both.
     ///
-    /// C counts those in bytes and will cut a multi-byte character in half.
-    /// What is formatted here is already decoded text, so this cuts on a
-    /// character instead - the fields these titles measure this way carry
-    /// ASCII, where the two are the same thing, and half a character is not
-    /// something to reproduce where they are not.
-    fn push_string(&self, result: &mut String, value: &str) {
-        let taken = match self.precision() {
-            Some(precision) => value.chars().take(precision).count(),
-            None => value.chars().count(),
-        };
+    /// The guest's bytes are EUC-KR, which is what every caller reads and what
+    /// the result is written back as. Cutting at a precision that falls inside
+    /// a character is what C does and what the reference would have drawn; the
+    /// half character decodes to a replacement rather than being hidden, so a
+    /// caller that cuts in the wrong place can see that it did.
+    fn push_string(&self, result: &mut String, value: &[u8]) {
+        let taken = self.precision().unwrap_or(value.len()).min(value.len());
         let padding = self.width().saturating_sub(taken);
 
         if !self.left {
             result.extend(core::iter::repeat_n(' ', padding));
         }
 
-        result.extend(value.chars().take(taken));
+        result.push_str(&encoding_rs::EUC_KR.decode(&value[..taken]).0);
 
         if self.left {
             result.extend(core::iter::repeat_n(' ', padding));
@@ -218,12 +231,12 @@ fn next_arg64<'a>(arg_iter: &mut impl Iterator<Item = &'a u32>) -> u64 {
 
 #[cfg(test)]
 mod test {
-    use alloc::string::{String, ToString};
+    use alloc::{string::String, vec::Vec};
 
     use wie_util::Result;
 
     fn format(format_string: &str, args: &[u32]) -> Result<String> {
-        super::format(format_string, args, &mut |_| Ok("stub".to_string()))
+        super::format(format_string, args, &mut |_| Ok(Vec::from(*b"stub")))
     }
 
     #[test]
@@ -340,8 +353,8 @@ mod test {
         // the ten digits `0xf03c` copies in.
         let mut read = |ptr: u32| {
             Ok(match ptr {
-                1 => "1911112222".to_string(),
-                _ => "10".to_string(),
+                1 => Vec::from(*b"1911112222"),
+                _ => Vec::from(*b"10"),
             })
         };
         let header = super::format("AM%-6d%10.10s%2.2s", &[38, 1, 2], &mut read)?;
@@ -351,6 +364,46 @@ mod test {
         // fronts is measured by the number inside it.
         assert_eq!(header, "AM38    191111222210");
         assert_eq!(header.len(), 20);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_star_takes_the_field_from_the_arguments() -> Result<()> {
+        // Ahead of the value it measures, in argument order.
+        assert_eq!(format("%*d|", &[6, 42])?, "    42|");
+        assert_eq!(format("%.*s|", &[2, 1])?, "st|");
+        assert_eq!(format("%*.*s|", &[6, 2, 1])?, "    st|");
+
+        // A negative width is C's other way of writing `-`, and a negative
+        // precision is no precision at all.
+        assert_eq!(format("%*d|", &[-6i32 as u32, 42])?, "42    |");
+        assert_eq!(format("%.*s|", &[-1i32 as u32, 1])?, "stub|");
+
+        // And the star's own argument is not left for the value.
+        assert_eq!(format("%.*s %d", &[2, 1, 7])?, "st 7");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_a_string_is_measured_in_the_bytes_it_came_as() -> Result<()> {
+        // 와일드프론티어 draws one line of a script buffer as `%.*s`, and the
+        // count is that line's length in bytes - the buffer is not terminated
+        // between lines, so a character count would run into the next one.
+        // 프론티어호에 탔던 건 is twenty EUC-KR bytes, twelve of them the first
+        // six characters - which a character count would read as twenty.
+        let line: Vec<u8> = alloc::vec![
+            0xc7, 0xc1, 0xb7, 0xd0, 0xc6, 0xbc, 0xbe, 0xee, 0xc8, 0xa3, 0xbf, 0xa1, 0x20, 0xc5, 0xc0, 0xb4, 0xf8, 0x20, 0xb0, 0xc7
+        ];
+        assert_eq!(line.len(), 20);
+
+        let mut read = |_| Ok(line.clone());
+        assert_eq!(super::format("%.*s", &[12, 1], &mut read)?, "프론티어호에");
+        assert_eq!(super::format("%.*s", &[20, 1], &mut read)?, "프론티어호에 탔던 건");
+
+        // Past its end is the whole of it, not a read past it.
+        assert_eq!(super::format("%.*s", &[99, 1], &mut read)?, "프론티어호에 탔던 건");
 
         Ok(())
     }
