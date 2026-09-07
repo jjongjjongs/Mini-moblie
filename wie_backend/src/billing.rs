@@ -402,6 +402,109 @@ pub fn lgt_local_subscriber_record_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(response)
 }
 
+/// The rows 이노티아연대기2's 캐쉬템 구매 screen is answered with, by the tab
+/// each belongs to.
+///
+/// A row is an item, how many one purchase grants, and its price. The item is
+/// the index the title's own table gives it - the shop draws a row by handing
+/// that index to `0x71e8`, which reads the name out of `game.dat`'s 970-entry
+/// item table (block 12, stride 17) and resolves it through `memorytext.dat` -
+/// so these are the title's own items rather than names invented here.
+///
+/// The tabs are `game.dat`'s block 80, seven rows whose codes are 1 to 7:
+/// 싱글 플레이용, 강화, 조합용, 공성전용, one the text table leaves unnamed,
+/// 용병 and 이벤트. Which items the service sold under each, and for how much,
+/// went with the service; these are the ones from the title's own table that
+/// belong under the tab they are filed here.
+/// One row of a shop tab: the item, how many one purchase grants, its price.
+type InotiaShopRow = (u32, u8, u32);
+
+const INOTIA_2_SHOP_TABS: [(u8, &[InotiaShopRow]); 7] = [
+    // 싱글 플레이용
+    (
+        1,
+        &[
+            (7, 5, 500),    // 회복약(대)
+            (11, 5, 500),   // 마나물약(대)
+            (17, 3, 500),   // 원기회복의 물약
+            (347, 1, 500),  // 부활주문서
+            (647, 1, 1000), // 축복받은 부활주문서
+            (969, 1, 1000), // 빠른 성장의 물약
+            (4, 1, 2000),   // 무한의 가방
+        ],
+    ),
+    // 강화
+    (
+        2,
+        &[
+            (23, 1, 1000),  // 무기강화 주문서
+            (24, 1, 1000),  // 방어구강화 주문서
+            (27, 3, 500),   // 상급 에테르
+            (28, 1, 1000),  // 최상급 에테르
+            (29, 1, 2000),  // 혼돈의 에테르
+            (935, 1, 3000), // 강화세트
+        ],
+    ),
+    // 조합용
+    (
+        3,
+        &[
+            (32, 1, 1000),  // 조합대전집
+            (364, 5, 500),  // 마법의 양피지
+            (361, 5, 500),  // 마력의 결정
+            (362, 3, 1000), // 고동치는 결정
+            (369, 3, 1000), // 오리하르콘 조각
+            (932, 1, 2000), // 오색 수정
+        ],
+    ),
+    // 공성전용
+    (
+        4,
+        &[
+            (931, 1, 1000), // 공성전 명령서
+            (936, 1, 3000), // 공성전세트
+            (871, 5, 500),  // 확성기
+            (872, 3, 1000), // 길드 확성기
+        ],
+    ),
+    // The tab the title's own text table leaves unnamed.
+    (
+        5,
+        &[
+            (873, 1, 1000), // 창고 쿠폰
+            (874, 1, 2000), // 길드 창고 쿠폰
+            (870, 1, 500),  // 채팅 이용권
+            (868, 1, 500),  // 광산 출입증
+            (869, 1, 2000), // 광산 개발권
+        ],
+    ),
+    // 용병
+    (
+        6,
+        &[
+            (30, 1, 1000),  // 용사의 인장
+            (31, 1, 500),   // 견습용 용사의 인장
+            (943, 1, 1000), // 초월의 영약(힘)
+            (944, 1, 1000), // 초월의 영약(민첩)
+            (945, 1, 1000), // 초월의 영약(체력)
+            (946, 1, 1000), // 초월의 영약(지능)
+            (947, 1, 1000), // 초월의 영약(정신)
+        ],
+    ),
+    // 이벤트
+    (
+        7,
+        &[
+            (933, 1, 3000), // 카오스세트
+            (934, 1, 5000), // 에픽카오스세트
+            (880, 1, 500),  // 부활의 기도문
+            (949, 1, 1000), // 신수의 물약
+            (968, 3, 500),  // 신성한 가루
+            (879, 5, 300),  // 장난감 폭탄
+        ],
+    ),
+];
+
 /// What answers the command records 이노티아연대기2 opens a session with.
 ///
 /// 이노티아연대기2 (`0002BA13`) connects to `211.115.66.232:20009` - the same
@@ -445,20 +548,20 @@ pub fn lgt_local_subscriber_record_response(request: &[u8]) -> Option<Vec<u8>> {
 ///   that has to be exactly 1. That one hands the session to the screen that
 ///   opened it. The title sends this one itself only when nothing else has
 ///   claimed the step behind the hello.
-/// - `0x010f`, the shop's own list, which `0x32abc` sends as three bytes - a
-///   category, a first row and how many rows are wanted. Its command is not one
-///   the network layer knows, so `0x11940` reads the tag and hands the rest to
-///   the screen at `0x32fe0`, whose `0x3304a` reads two bytes it discards and
-///   then a `u8` row count. Each row behind that is a `u32`, a `u8`-length
-///   string, a `u8`, a `u32` and one more string.
+/// - `0x010f`, the shop's own list, which `0x32abc` sends as three bytes - the
+///   tab's code, a first row and how many rows are wanted. Its command is not
+///   one the network layer knows, so `0x11940` reads the tag and hands the rest
+///   to the screen at `0x32fe0`, whose `0x3304a` reads two bytes it discards and
+///   then a `u8` row count. Each row behind that is:
 ///
-/// The rows are answered as none. The `u32` a row opens with indexes the title's
-/// own item table - `0x331f6` multiplies it by the table's stride and reads a
-/// field seven bytes in - and that table is built at runtime from the title's
-/// own data files, so a row invented here would name an entry nothing has
-/// checked. What an empty list buys is the screen: the title stops on 처리 중
-/// only because nothing answers, and a well-formed empty one lets `0x32f68`
-/// build its list widget and draw.
+/// ```text
+/// [u32 item][u8 length][a string the reader drops][u8 count][u32 price][u8 length][description]
+/// ```
+///
+/// The item is an index into the title's own table, which is what the row is
+/// drawn from: `0x331f6` reads its icon out of that table, `0x71e8` reads its
+/// name, and above a count of one `0x33238` renders the two as `%s(%d)`. So the
+/// rows carry items the title already knows rather than anything named here.
 ///
 /// The tag is the server's to choose, so it comes back as it was sent - the
 /// title picked `2` for the hello itself, and echoing keeps the session on it.
@@ -520,10 +623,25 @@ pub fn lgt_local_command_tag_response(request: &[u8]) -> Option<Vec<u8>> {
             body.extend_from_slice(&tag);
             body.push(GRANTED_STATUS);
         }
-        // Two bytes the screen reads past, and a row count of none.
+        // Two bytes the screen reads past, then the tab's rows from the one
+        // asked for, as many as were asked for.
         LIST_COMMAND if payload.len() == LIST_ARGUMENTS => {
+            let (_, rows) = INOTIA_2_SHOP_TABS.iter().find(|(tab, _)| *tab == payload[0])?;
+            let rows = rows.get(payload[1] as usize..).unwrap_or_default();
+            let rows = &rows[..rows.len().min(payload[2] as usize)];
+
             body.extend_from_slice(&tag);
-            body.extend_from_slice(&[0, 0, 0]);
+            body.extend_from_slice(&[0, 0]);
+            body.push(rows.len() as u8);
+            for (item, count, price) in rows {
+                body.extend_from_slice(&item.to_be_bytes());
+                // The string the reader drops, and the description, both empty:
+                // the row is drawn from the title's own item table either way.
+                body.push(0);
+                body.push(*count);
+                body.extend_from_slice(&price.to_be_bytes());
+                body.push(0);
+            }
         }
         _ => return None,
     }
@@ -1812,21 +1930,64 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_shop_list_is_answered_with_a_count_of_no_rows() {
-        use super::lgt_local_command_tag_response;
+    /// What the shop writes for one of its tabs: the tab's code, the first row
+    /// it wants and how many. Byte for byte what the capture shows.
+    fn inotia_2_list_request(tab: u8, first: u8, wanted: u8) -> Vec<u8> {
+        vec![0x00, 0x07, 0x01, 0x0f, 0x00, 0x02, tab, first, wanted]
+    }
 
-        // Byte for byte what the capture shows the shop asking: a category, a
-        // first row and how many rows it wants.
-        let request = vec![0x00, 0x07, 0x01, 0x0f, 0x00, 0x02, 0x01, 0x00, 0x64];
+    #[test]
+    fn a_shop_list_is_answered_with_the_tab_s_own_rows() {
+        use super::{INOTIA_2_SHOP_TABS, lgt_local_command_tag_response};
+
+        let request = inotia_2_list_request(1, 0, 100);
         assert_eq!(u16::from_be_bytes([request[0], request[1]]) as usize, request.len() - 2);
 
-        // The command and the tag come back, then the two bytes the screen reads
-        // past and a row count of none.
+        let response = lgt_local_command_tag_response(&request).unwrap();
+        assert_eq!(u16::from_be_bytes([response[0], response[1]]) as usize, response.len() - 2);
+        // The command, the tag, the two bytes the screen reads past, and the
+        // whole of the first tab.
         assert_eq!(
-            lgt_local_command_tag_response(&request).unwrap(),
-            vec![0x00, 0x07, 0x01, 0x0f, 0x00, 0x02, 0x00, 0x00, 0x00]
+            &response[2..9],
+            &[0x01, 0x0f, 0x00, 0x02, 0x00, 0x00, INOTIA_2_SHOP_TABS[0].1.len() as u8]
         );
+
+        // Which walks as rows of an item, an empty string, a count, a price and
+        // one more empty string, and accounts for the record exactly.
+        let mut rest = &response[9..];
+        for (item, count, price) in INOTIA_2_SHOP_TABS[0].1 {
+            assert_eq!(&rest[0..4], &item.to_be_bytes());
+            assert_eq!(rest[4], 0);
+            assert_eq!(rest[5], *count);
+            assert_eq!(&rest[6..10], &price.to_be_bytes());
+            assert_eq!(rest[10], 0);
+            rest = &rest[11..];
+        }
+        assert!(rest.is_empty());
+
+        // Every tab the title asks for is one this knows, and each item is one
+        // the title's own 970-entry table has.
+        for tab in 1..=7 {
+            let response = lgt_local_command_tag_response(&inotia_2_list_request(tab, 0, 100)).unwrap();
+            assert!(response[8] > 0);
+        }
+        assert!(INOTIA_2_SHOP_TABS.iter().flat_map(|(_, rows)| *rows).all(|(item, ..)| *item < 970));
+
+        // A tab that is not one of the seven is left unanswered.
+        assert_eq!(lgt_local_command_tag_response(&inotia_2_list_request(8, 0, 100)), None);
+    }
+
+    #[test]
+    fn a_shop_list_gives_back_only_the_rows_that_were_asked_for() {
+        use super::{INOTIA_2_SHOP_TABS, lgt_local_command_tag_response};
+
+        // Two rows from the second, and nothing past the end of the tab.
+        let response = lgt_local_command_tag_response(&inotia_2_list_request(1, 1, 2)).unwrap();
+        assert_eq!(response[8], 2);
+        assert_eq!(&response[9..13], &INOTIA_2_SHOP_TABS[0].1[1].0.to_be_bytes());
+
+        let response = lgt_local_command_tag_response(&inotia_2_list_request(1, 200, 100)).unwrap();
+        assert_eq!(response[8], 0);
     }
 
     #[test]
