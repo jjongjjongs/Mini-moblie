@@ -799,6 +799,43 @@ fn bill_frame_trace(frame: &[u8]) -> alloc::string::String {
     )
 }
 
+/// The answer to the pipe-delimited cash request NHN's titles send.
+///
+/// 데몬헌터 (`0002B5EB`) opens a billing socket to `222.237.78.175` and writes an
+/// ASCII record rather than a framed message:
+///
+/// ```text
+/// CASH|0|demon|05590091|00029B60004|500|2034517541
+/// ```
+///
+/// - the transaction, the game's own code and account, the item code, its price
+///   in won, and a token. The item codes and prices are a table in the title's
+///   own `binary.mod`, `00029B60001|100|` through `0002B640007|2900|`.
+///
+/// What it does with the answer is a chain of string compares at `0x21004`:
+/// equal to `SASH` takes the branch that shows 결제가 완료되었습니다, and the
+/// two failures it knows by name are `SFL|MOVER` (monthly purchase limit) and
+/// `SFL|PNUM` (staff accounts). Anything else - including the nothing a
+/// switched-off gateway returns - falls through to 네트워크 장애가
+/// 발생했습니다, which is the notice the title cannot get past.
+///
+/// So answer `SASH`, and nothing after it: the compare is an equality, and a
+/// bare `SASH` is also the first field of any `SASH|...` a caller might split,
+/// so it reads as success either way.
+///
+/// `None` for anything that is not one of these records, which is not something
+/// to answer with a guess.
+fn lgt_local_cash_response(request: &[u8]) -> Option<Vec<u8>> {
+    const REQUEST: &[u8] = b"CASH|";
+    const GRANTED: &[u8] = b"SASH";
+
+    if !request.starts_with(REQUEST) {
+        return None;
+    }
+
+    Some(GRANTED.to_vec())
+}
+
 const LGT_BILL_HEADER_SIZE: usize = 108;
 const LGT_BILL_READ_HEADER_SIZE: usize = 56;
 const LGT_BILL_READ_PAYLOAD_LENGTH_OFFSET: usize = 0x30;
@@ -1007,7 +1044,7 @@ impl wie_backend::LocalConnection for LgtBillingGateway {
             return;
         };
 
-        let Some(response) = lgt_local_granted_response(request) else {
+        let Some(response) = lgt_local_granted_response(request).or_else(|| lgt_local_cash_response(request)) else {
             tracing::debug!(
                 "LGT billing gateway: a {} byte request is not one this can shape a reply to",
                 request.len()
@@ -3618,6 +3655,59 @@ mod network_state_tests {
             lgt_local_granted_response(&[0xff, 0xff, 0x00, 0x06, 0x00, 0x20]).unwrap(),
             [0xff, 0xff, 0x00, 0x07, 0x00, 0x21, 0x00]
         );
+    }
+
+    #[test]
+    fn a_cash_request_is_answered_with_the_word_its_sender_reads_as_paid() {
+        use super::lgt_local_cash_response;
+
+        // The record 데몬헌터 actually writes, captured off the title.
+        let request = b"CASH|0|demon|05590091|00029B60004|500|2034517541";
+        assert_eq!(lgt_local_cash_response(request).as_deref(), Some(b"SASH".as_slice()));
+
+        // Every item in the title's own price table is the same request.
+        assert_eq!(
+            lgt_local_cash_response(b"CASH|0|demon|05590091|0002B640007|2900|1").as_deref(),
+            Some(b"SASH".as_slice())
+        );
+
+        // Nothing else is one of these records.
+        assert_eq!(lgt_local_cash_response(b"SASH"), None);
+        assert_eq!(lgt_local_cash_response(b"CASH"), None);
+        assert_eq!(lgt_local_cash_response(b""), None);
+        assert_eq!(lgt_local_cash_response(&[0xff, 0xff, 0x00, 0x06, 0x00, 0x68]), None);
+    }
+
+    #[test]
+    fn the_gateway_hands_a_cash_answer_back_behind_a_read_header() {
+        use super::{LGT_BILL_HEADER_SIZE, LGT_BILL_READ_HEADER_SIZE, LGT_BILL_READ_PAYLOAD_LENGTH_OFFSET, LgtBillingGateway};
+        use wie_backend::{LocalConnection, LocalRead};
+
+        let mut gateway = LgtBillingGateway::new();
+
+        let mut frame = alloc::vec![0u8; LGT_BILL_HEADER_SIZE];
+        frame.extend_from_slice(b"CASH|0|demon|05590091|00029B60004|500|2034517541");
+        gateway.write(&frame);
+
+        // An ASCII record takes the same 56-byte response header as a framed
+        // one; `WPBill_Read` parses the header either way.
+        assert!(gateway.readable());
+
+        let mut header = [0u8; LGT_BILL_READ_HEADER_SIZE];
+        assert_eq!(gateway.read(&mut header), LocalRead::Data(LGT_BILL_READ_HEADER_SIZE));
+        assert_eq!(
+            u32::from_be_bytes(
+                header[LGT_BILL_READ_PAYLOAD_LENGTH_OFFSET..LGT_BILL_READ_PAYLOAD_LENGTH_OFFSET + 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            4
+        );
+
+        let mut payload = [0u8; 4];
+        assert_eq!(gateway.read(&mut payload), LocalRead::Data(4));
+        assert_eq!(&payload, b"SASH");
+        assert!(!gateway.readable());
     }
 
     #[test]
