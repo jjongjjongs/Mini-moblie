@@ -1851,7 +1851,15 @@ pub async fn socket_read(context: &mut dyn WIPICContext, socket: i32, buffer: WI
         return match result {
             Ok(read) => {
                 if read > 0 {
-                    state.lock().billing_read.remaining_payload = remaining_payload.saturating_sub(read);
+                    let left = remaining_payload.saturating_sub(read);
+                    state.lock().billing_read.remaining_payload = left;
+
+                    // The rest of a reply is as much of the exchange as its
+                    // front, and a title that reads its header and body in two
+                    // calls - 제노니아1 does - leaves only the header in a trace
+                    // that logs the header path alone.
+                    tracing::debug!("bill read {socket}: {} ({left} more to come)", bill_frame_trace(&data[..read]));
+
                     context.write_bytes(buffer, &data[..read])?;
                 }
 
