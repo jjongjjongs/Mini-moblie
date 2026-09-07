@@ -855,7 +855,7 @@ fn lgt_local_cash_response(request: &[u8]) -> Option<Vec<u8>> {
 /// The certificate GAMEVIL's billing server hands back for a purchase.
 ///
 /// 제노니아1 (`00027BAA`) opens a billing socket to `218.145.70.36:31206` and
-/// writes a 72-byte record its own serialiser at `0x2790` builds:
+/// writes a 72-byte record its serialiser at `0x2790` builds:
 ///
 /// ```text
 /// 48 00        u16 LE - the record's own length, kept at [stream+0xc]
@@ -866,34 +866,46 @@ fn lgt_local_cash_response(request: &[u8]) -> Option<Vec<u8>> {
 /// "00027BAA002\0"                 the item code, 12 bytes
 /// ```
 ///
-/// The reply is read by the handler at `0x57514`, which is exact about it:
+/// The reply is read in two steps. The transport takes four bytes, reads the
+/// first two as the whole reply's length and then reads the rest - captured as
+/// `bill read: 4 bytes [2e 00 07 01]` followed by `42 bytes`, which is 46 minus
+/// the four. The handler at `0x57514` then takes four bytes of its own
+/// (`[stream+8] += 4`) and reads, relative to where it started:
 ///
-/// - four bytes of header are consumed, of which only `[2..4]` is read - as a
-///   little-endian `u16` (`ldrb r3,[r1,#3]` / `ldrb r2,[r1,#2]` / `lsls` /
-///   `orrs`), and it must be `0x101`, `0x103` or `0x107`. Those are the
-///   request types `0x100`, `0x102` and `0x106` the dispatcher at `0x574d0`
-///   knows, plus one; the request written here carries type 7, so the answer to
-///   it is `0x107`.
-/// - `[4]` is a signed byte and must not be negative, or the handler takes the
-///   error callback at `vtable+0x10` instead.
-/// - `[5..0x2d]` is a NUL-terminated certificate the title copies into the file
-///   `0x56634` writes, alongside the item code and four bytes of its own.
-/// - `[0x2d]` decides the screen: non-zero is 인증이 완료되었습니다, zero is the
-///   SMS opt-in offer instead.
+/// - `[2..4]` as a little-endian `u16` (`ldrb r3,[r1,#3]` / `ldrb r2,[r1,#2]` /
+///   `lsls` / `orrs`), which must be `0x101`, `0x103` or `0x107` - the request
+///   types `0x100`, `0x102` and `0x106` the dispatcher at `0x574d0` knows, plus
+///   one. This request carries type 7, so `0x107`.
+/// - `[4]` as a signed byte, which must not be negative or the error callback at
+///   `vtable+0x10` runs instead.
+/// - `[5..0x2d]`, a NUL-terminated certificate copied into the file `0x56634`
+///   writes (`audio.adt`, opened `mode=8`).
+/// - `[0x2d]`, which decides the screen: non-zero is 인증이 완료되었습니다, zero
+///   is the SMS opt-in offer.
 ///
-/// So the answer is forty-six bytes: the header, a zero status, a certificate,
-/// and a non-zero flag. Derived from the title's own code rather than from an
-/// observed exchange - the server has been gone for years - so what it grants
-/// is what the title's success branch asks for and nothing more.
+/// What the disassembly does not settle is whether the handler starts at the
+/// reply's first byte or four in - whether the transport left the stream's read
+/// cursor where it found it or moved it past the header it consumed. Answered
+/// with the fields at the reply's own offsets, the handler matched nothing: no
+/// `audio.adt` write followed, and the title's screen was byte for byte what it
+/// had been. So the cursor moves, and the fields belong four bytes further in.
+///
+/// They are written at both offsets here. The two readings differ by exactly the
+/// four bytes in question, so one reply can satisfy both, and a run says which
+/// one took without costing a round to find out. Fifty bytes covers the further
+/// of the two.
+///
+/// Derived from the title's own code rather than from an observed exchange - the
+/// server has been gone for years - so it grants what the success branch reads
+/// and nothing more.
 ///
 /// `None` for anything that is not one of these records.
 fn lgt_local_gamevil_cert_response(request: &[u8]) -> Option<Vec<u8>> {
     const REQUEST_TYPE: u8 = 7;
     const RESPONSE_TYPE: u16 = 0x107;
-    /// `[5..0x2d]`, the certificate field the title saves.
-    const CERTIFICATE: core::ops::Range<usize> = 5..0x2d;
-    /// `[0x2d]`, the byte that says 완료 rather than the SMS offer.
-    const GRANTED: usize = 0x2d;
+    /// What the transport consumes before the handler starts, and so the
+    /// distance between the two readings.
+    const TRANSPORT_HEADER: usize = 4;
 
     // Its own declared length has to be the record in hand, and the type has to
     // be the purchase this can answer. Nothing else is one of these.
@@ -905,16 +917,23 @@ fn lgt_local_gamevil_cert_response(request: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    let length = GRANTED + 1;
+    // The furthest byte either reading looks at is the granted flag at `0x2d`
+    // from the later start.
+    let length = TRANSPORT_HEADER + 0x2d + 1;
     let mut response = alloc::vec![0u8; length];
     response[0..2].copy_from_slice(&(length as u16).to_le_bytes());
-    response[2..4].copy_from_slice(&RESPONSE_TYPE.to_le_bytes());
-    response[4] = 0;
-    // A certificate of one character. The title only ever copies it back out
-    // and hands it to its own file, so what it holds does not matter - that it
-    // terminates does, since the copy runs to the first NUL.
-    response[CERTIFICATE.start] = b'1';
-    response[GRANTED] = 1;
+
+    for start in [0, TRANSPORT_HEADER] {
+        response[start + 2..start + 4].copy_from_slice(&RESPONSE_TYPE.to_le_bytes());
+        // The status stays zero, which is the "not an error" the handler wants.
+        //
+        // A certificate of one character. The title only ever copies it back out
+        // and hands it to its own file, so what it holds does not matter - that
+        // it terminates inside its field does, since the copy runs to the first
+        // NUL, and both readings' fields hold one.
+        response[start + 5] = b'1';
+        response[start + 0x2d] = 1;
+    }
 
     Some(response)
 }
@@ -3773,20 +3792,24 @@ mod network_state_tests {
 
         let response = lgt_local_gamevil_cert_response(&zenonia_purchase_request()).unwrap();
 
-        // Forty-six bytes: everything through the byte at 0x2d the title reads.
-        assert_eq!(response.len(), 0x2e);
-        assert_eq!(u16::from_le_bytes([response[0], response[1]]), 0x2e);
+        // Long enough for the further of the two readings to find its last byte.
+        assert_eq!(response.len(), 4 + 0x2e);
+        assert_eq!(u16::from_le_bytes([response[0], response[1]]), response.len() as u16);
 
-        // The type its handler at 0x57514 accepts, read the way that handler
-        // reads it - low byte first.
-        assert_eq!(u16::from_le_bytes([response[2], response[3]]), 0x107);
-
-        // A status it will not take as an error, a certificate that terminates,
-        // and the flag that means 인증이 완료되었습니다 rather than the SMS offer.
-        assert!(response[4] as i8 >= 0);
-        assert!(response[5] != 0);
-        assert_eq!(response[5..0x2d].iter().position(|&b| b == 0), Some(1));
-        assert_ne!(response[0x2d], 0);
+        // Both readings find what the handler at 0x57514 asks for: the type it
+        // accepts, read low byte first; a status it will not take as an error; a
+        // certificate that terminates inside its field; and the flag that means
+        // 인증이 완료되었습니다 rather than the SMS offer.
+        for start in [0usize, 4] {
+            assert_eq!(u16::from_le_bytes([response[start + 2], response[start + 3]]), 0x107, "at {start}");
+            assert!(response[start + 4] as i8 >= 0, "at {start}");
+            assert_ne!(response[start + 5], 0, "at {start}");
+            assert!(
+                response[start + 5..start + 0x2d].contains(&0),
+                "certificate does not terminate at {start}"
+            );
+            assert_ne!(response[start + 0x2d], 0, "at {start}");
+        }
     }
 
     #[test]
