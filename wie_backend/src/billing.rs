@@ -6,7 +6,7 @@
 //! title that reaches one and is told nothing usually stops on a screen it never
 //! leaves.
 //!
-//! Nine protocols turn up across the titles here, and a request is recognised by
+//! Ten protocols turn up across the titles here, and a request is recognised by
 //! its own shape rather than by which title sent it. Anything that is not one of
 //! them is left unanswered rather than guessed at.
 //!
@@ -679,6 +679,92 @@ pub fn lgt_local_command_tag_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(response)
 }
 
+/// What answers the fixed blocks 라그나로크 바이올렛 opens its shop with.
+///
+/// 라그나로크 바이올렛 (`000256A7`) opens a billing socket to port 9000 when its
+/// shop is entered and writes one 1024-byte block, zero-padded past what it
+/// says:
+///
+/// ```text
+/// 00 00 00 66  00 00 00 c9  00 00 00 33  00 00 00 00  00 00 00 04
+/// 00 00 00 0a "1046119269"  00 00 00 08 "Emulator"  00 00 00 09 "ver 1.0.2"
+/// 00 00 00 04  00 00 00 02  00 ... 00
+/// ```
+///
+/// ```text
+/// [0..4]   u32 BE - the screen, one of 0x65..=0x75
+/// [4..8]   u32 BE - the step
+/// [8..12]  u32 BE - how much of the block past [16] is meant
+/// [12..16] u32 BE - carried back and forth, and part of what marks a repeat
+/// [16..20] u32 BE - the step's own word
+/// [20..]   the step's body, strings written as a u32 length and that many bytes
+/// ```
+///
+/// The title is compiled ahead of time, so what it does with the answer is ARM
+/// rather than bytecode. `0x39528` reads up to 1024 bytes into one buffer and
+/// `0x37fa4` appends them to an accumulator, and `0x38e78` looks at that
+/// accumulator only once it holds **more than 1023 bytes** - so a reply is one
+/// 1024-byte block, the same way the request is.
+///
+/// `0x38e78` then reads the five words above, drops the block if the screen, the
+/// step and `[12]` all repeat what came last, and indexes the table at `0x3ed90`
+/// by the screen. `0x3931c` is where `0x66` lands, and what it wants back from
+/// the `0xc9` this answers is `0xca` and nothing else: `0x381f4`, which parses a
+/// step's body, has a case for `0x66` that reads a body only under `0xcd`. The
+/// screen sends `0xcb` next.
+///
+/// `None` for anything that is not one of these blocks: the block has to be the
+/// full 1024, the screen has to be one the table covers, the step has to be the
+/// one this answers, and the body has to open with the subscriber number
+/// written as a length and its digits.
+pub fn lgt_local_fixed_block_response(request: &[u8]) -> Option<Vec<u8>> {
+    /// What the title reads and writes a block as, padding included.
+    const BLOCK: usize = 1024;
+    /// The five words in front of a step's body.
+    const HEADER: usize = 20;
+    /// Where `[8]` is measured from.
+    const LENGTH_FROM: usize = 16;
+    /// The screens `0x38e78`'s table covers.
+    const SCREENS: core::ops::RangeInclusive<u32> = 0x65..=0x75;
+    /// The step the shop opens with, and the one that answers it.
+    const HELLO_STEP: u32 = 0xc9;
+    const GRANTED_STEP: u32 = 0xca;
+
+    if request.len() != BLOCK {
+        return None;
+    }
+
+    let word = |at: usize| u32::from_be_bytes([request[at], request[at + 1], request[at + 2], request[at + 3]]);
+
+    let screen = word(0);
+    if !SCREENS.contains(&screen) || word(4) != HELLO_STEP {
+        return None;
+    }
+
+    // What the block says of itself has to fit in the block.
+    let length = word(8) as usize;
+    if !(4..=BLOCK - LENGTH_FROM).contains(&length) {
+        return None;
+    }
+
+    // The body opens with the subscriber number, written as a length and that
+    // many digits.
+    let digits = word(HEADER) as usize;
+    let subscriber = request.get(HEADER + 4..HEADER + 4 + digits)?;
+    if digits == 0 || !subscriber.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+
+    let mut response = vec![0u8; BLOCK];
+    response[0..4].copy_from_slice(&screen.to_be_bytes());
+    response[4..8].copy_from_slice(&GRANTED_STEP.to_be_bytes());
+    // The step's own word is all this block is: four bytes past [16], and the
+    // handler for this step reads none of them.
+    response[8..12].copy_from_slice(&4u32.to_be_bytes());
+
+    Some(response)
+}
+
 /// What answers the big-endian record 레전드오브마스터 sends its purchases in.
 ///
 /// 레전드오브마스터 (`0002A4B1`) opens `BillSocket://211.189.18.116:9407` and
@@ -1173,6 +1259,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_gamevil_packet_response(request))
         .or_else(|| lgt_local_subscriber_record_response(request))
         .or_else(|| lgt_local_command_tag_response(request))
+        .or_else(|| lgt_local_fixed_block_response(request))
         .or_else(|| lgt_local_big_endian_record_response(request))
         .or_else(|| lgt_local_major_minor_response(request))
         .or_else(|| lgt_local_text_record_response(request))
@@ -2101,9 +2188,81 @@ mod tests {
         );
     }
 
+    /// The 1024-byte block 라그나로크 바이올렛 writes when its shop is entered,
+    /// byte for byte as the capture shows it, zero padding included.
+    fn ragnarok_violet_hello_block() -> Vec<u8> {
+        let mut block = vec![0u8; 1024];
+        block[0..4].copy_from_slice(&0x66u32.to_be_bytes());
+        block[4..8].copy_from_slice(&0xc9u32.to_be_bytes());
+        block[8..12].copy_from_slice(&0x33u32.to_be_bytes());
+        block[16..20].copy_from_slice(&4u32.to_be_bytes());
+
+        let mut at = 20;
+        for field in [b"1046119269".as_slice(), b"Emulator".as_slice(), b"ver 1.0.2".as_slice()] {
+            block[at..at + 4].copy_from_slice(&(field.len() as u32).to_be_bytes());
+            block[at + 4..at + 4 + field.len()].copy_from_slice(field);
+            at += 4 + field.len();
+        }
+        block[at..at + 4].copy_from_slice(&4u32.to_be_bytes());
+        block[at + 4..at + 8].copy_from_slice(&2u32.to_be_bytes());
+
+        block
+    }
+
+    #[test]
+    fn a_fixed_block_is_answered_with_the_step_that_follows_it() {
+        use super::lgt_local_fixed_block_response;
+
+        let request = ragnarok_violet_hello_block();
+        assert_eq!(
+            &request[..24],
+            &[0, 0, 0, 0x66, 0, 0, 0, 0xc9, 0, 0, 0, 0x33, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0x0a]
+        );
+        // What [8] counts is the block from [16] on: the step's own word, the
+        // three fields and the two words behind them.
+        assert_eq!(u32::from_be_bytes([request[8], request[9], request[10], request[11]]), 0x33);
+
+        // A reply is one block of the same size, under the same screen, at the
+        // step that answers the one asked.
+        let response = lgt_local_fixed_block_response(&request).unwrap();
+        assert_eq!(response.len(), 1024);
+        assert_eq!(&response[0..12], &[0, 0, 0, 0x66, 0, 0, 0, 0xca, 0, 0, 0, 4]);
+        assert!(response[12..].iter().all(|&byte| byte == 0));
+    }
+
+    #[test]
+    fn only_a_block_this_knows_the_step_of_is_answered() {
+        use super::lgt_local_fixed_block_response;
+
+        // A block that is not the full 1024 the title reads.
+        let mut short = ragnarok_violet_hello_block();
+        short.truncate(1023);
+        assert_eq!(lgt_local_fixed_block_response(&short), None);
+
+        // A screen outside the table `0x38e78` indexes.
+        let mut offscreen = ragnarok_violet_hello_block();
+        offscreen[0..4].copy_from_slice(&0x76u32.to_be_bytes());
+        assert_eq!(lgt_local_fixed_block_response(&offscreen), None);
+
+        // A step this does not answer.
+        let mut later = ragnarok_violet_hello_block();
+        later[4..8].copy_from_slice(&0xcbu32.to_be_bytes());
+        assert_eq!(lgt_local_fixed_block_response(&later), None);
+
+        // A subscriber number that is not digits.
+        let mut lettered = ragnarok_violet_hello_block();
+        lettered[24] = b'x';
+        assert_eq!(lgt_local_fixed_block_response(&lettered), None);
+
+        // A length that does not fit the block.
+        let mut overlong = ragnarok_violet_hello_block();
+        overlong[8..12].copy_from_slice(&2000u32.to_be_bytes());
+        assert_eq!(lgt_local_fixed_block_response(&overlong), None);
+    }
+
     #[test]
     fn one_answer_covers_every_protocol_and_guesses_at_none() {
-        // Each of the nine, recognised by its own shape.
+        // Each of the ten, recognised by its own shape.
         assert!(response(&[0xff, 0xff, 0x06, 0x00, 0x20, 0x00]).is_some());
         assert!(response(b"CASH|0|demon|05590091|00029B60004|500|2034517541").is_some());
         assert!(response(&zenonia_purchase_request()).is_some());
@@ -2114,6 +2273,7 @@ mod tests {
         assert!(response(&wild_frontier_2_purchase_request()).is_some());
         assert!(response(&inotia_shop_request()).is_some());
         assert!(response(&inotia_2_session_request(0x0000)).is_some());
+        assert!(response(&ragnarok_violet_hello_block()).is_some());
 
         // And nothing for a request that is none of them.
         assert_eq!(response(b"hello"), None);
