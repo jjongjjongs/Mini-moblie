@@ -852,101 +852,71 @@ fn lgt_local_cash_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(response)
 }
 
-/// What GAMEVIL's billing server answers a purchase with.
+/// What GAMEVIL's server answers 제노니아1's item purchase with.
 ///
-/// 제노니아1 (`00027BAA`) opens a billing socket to `218.145.70.36:31206` and
-/// writes a 72-byte record its serialiser at `0x2790` builds: its own length as
-/// a `u16` LE, the message type 7, the subscriber number, the item name in
-/// EUC-KR, the price in won, and the item code.
+/// The title (`00027BAA`) opens a billing socket to `218.145.70.36:31206` and
+/// writes the 72-byte record its serialiser at `0x2790` builds: its own length
+/// as a `u16` LE, the command, the subscriber number, the item name in EUC-KR,
+/// the price in won, and the item code.
 ///
-/// # This is a diagnostic, not a fix
+/// The reply is settled by GAMEVIL's own later Android port of the same game,
+/// which carries C++ symbols for the protocol this title speaks - the same
+/// server address and the same `00027BAA00n` item codes are strings inside it.
 ///
-/// Two sweeps have narrowed it. The first answered with the types `0x57514`
-/// accepts - `0x107`, `0x103`, `0x101` - and the second with the request echoed
-/// back, the same with its type advanced, and bare headers carrying the type as
-/// the request spells it and byte-reversed. All eight left the title exactly as
-/// it was: no error, no progress, the dialog standing.
+/// `tagNetHeader` is four bytes: `GetLength` reads a `u16` at `[0]`, `GetCMD` a
+/// `u16` at `[2]`, and `CGsNetCore::GetRecvPacketHeaderSize` returns 4. So this
+/// title's request carries command `0x0700`, little end first, which is what
+/// `48 00 00 07` spells.
 ///
-/// Both sweeps carried a control - every byte past the length `0xff` - and both
-/// times it drew a red message through the shared network error dialog at
-/// `0x22dc`. That dialog keys a message off a signed code: `-17` through `-2`
-/// each have their own, and anything else falls through to a generic one.
+/// `CMvNet::OnRecvDone` then does, in order:
 ///
-/// So the reply is read, and the reader tells nonsense from the rest. What
-/// separates the control from the bare headers is not the header at all - those
-/// carried a valid length and a type and were ignored - but the body behind it:
-/// zeros were understood and found to say nothing, `0xff` was out of range and
-/// reported. That points at a signed result code near the front of the body,
-/// which is also what the error dialog's own `-17..-2` table implies.
+/// 1. skip the four header bytes,
+/// 2. read one **signed byte** - the status - and if it is less than `-1`, call
+///    `OnError(cmd, status)` and stop,
+/// 3. otherwise switch on the command: `0x101`, `0x103`, `0x105`, `0x107`,
+///    `0x109`, `0x201`, `0x303`, `0x403`, `0x405`, `0x407`, `0x409`, `0x505`,
+///    `0x509`, `0x50b`, `0x50d`, `0x50f`, `0x601`, `0x701`, `0x805`. Anything
+///    else falls off the end and is dropped without a word.
 ///
-/// This sweep tests exactly that. Four replies carry a code at the body's first
-/// four bytes, written so that a reader taking it as a signed byte, `i16` or
-/// `i32` all read the same number: `+1`, `+2`, `+3`, and `-2` - a value the
-/// error table has a message of its own for. If `-2` draws that message rather
-/// than the generic one, the field is found and its encoding with it, and the
-/// positive codes are where success will be. The fifth is the control again.
+/// Which accounts for every sweep run at this: `0x107`, `0x103` and `0x101` are
+/// real commands, so they were dispatched - to the wrong handlers, which had
+/// nothing to say. `0x0700` and `0x0007` are not commands at all and were
+/// dropped. And every reply whose status byte came out negative - the `-2` probe
+/// and the all-`0xff` one - drew a red message, because step 2 runs before the
+/// command is even looked at.
+///
+/// The answer is therefore `0x0701`, which is `CS_BUY_ITEM` plus one and the
+/// entry that reaches `API_ZN_SC_BUY_ITEM`. That handler reads nothing out of
+/// the body - it calls one callback with zero - so a status of zero and nothing
+/// behind it is the whole of what a granted purchase says.
 ///
 /// `None` for anything that is not one of these records.
 fn lgt_local_gamevil_cert_response(request: &[u8]) -> Option<Vec<u8>> {
-    use core::sync::atomic::{AtomicUsize, Ordering};
+    /// `CS_BUY_ITEM`, as `tagNetHeader::GetCMD` reads it.
+    const REQUEST_COMMAND: u16 = 0x0700;
+    /// `SC_BUY_ITEM`: the request's command plus one, and the entry in
+    /// `OnRecvDone`'s switch that reaches `API_ZN_SC_BUY_ITEM`.
+    const RESPONSE_COMMAND: u16 = 0x0701;
+    /// Not negative, so `OnRecvDone` reaches the command instead of `OnError`.
+    const GRANTED: u8 = 0;
+    /// Header, status, and room behind it. The handler reads nothing there, but
+    /// a reply that carries a little costs nothing and cannot come up short.
+    const LENGTH: usize = 0x20;
 
-    const REQUEST_TYPE: u8 = 7;
-    /// Codes to try in the body's first four bytes. `-2` is the one the error
-    /// table at `0x22dc` has a message of its own for, so it says whether this
-    /// is the field at all.
-    const CODES: [i32; 4] = [1, 2, 3, -2];
-
-    /// Which answer the next request gets. Process-wide: the title opens a fresh
-    /// connection per purchase, so a per-connection counter would hand out the
-    /// same one every time.
-    static ATTEMPT: AtomicUsize = AtomicUsize::new(0);
-
-    // Its own declared length has to be the record in hand, and the type has to
-    // be the purchase this can answer. Nothing else is one of these.
     if request.len() < 4 || u16::from_le_bytes([request[0], request[1]]) as usize != request.len() {
         return None;
     }
 
-    if request[2] != 0 || request[3] != REQUEST_TYPE {
+    if u16::from_le_bytes([request[2], request[3]]) != REQUEST_COMMAND {
         return None;
     }
 
-    let attempt = ATTEMPT.fetch_add(1, Ordering::Relaxed) % (CODES.len() + 1);
-
-    let mut response = bare_gamevil_reply([0x00, REQUEST_TYPE]);
-
-    match CODES.get(attempt) {
-        Some(&code) => {
-            // Written so a reader taking the field as a signed byte, `i16` or
-            // `i32` - little end first, as everything else in this protocol is -
-            // reads the same number.
-            response[4..8].copy_from_slice(&code.to_le_bytes());
-
-            tracing::info!("GAMEVIL purchase probe {attempt}: answering with result code {code}");
-        }
-        // The control: past the length, nothing a reader can accept. Both
-        // earlier sweeps had this draw the red message.
-        None => {
-            response[2..].fill(0xff);
-
-            tracing::info!("GAMEVIL purchase probe {attempt}: answering with a reply no reader can accept");
-        }
-    }
-
-    Some(response)
-}
-
-/// A reply carrying only the header the transport reads - its own length and a
-/// type - and zeros behind it, long enough for a reader to find whatever body it
-/// expects rather than run off the end.
-fn bare_gamevil_reply(message_type: [u8; 2]) -> Vec<u8> {
-    const LENGTH: usize = 0x32;
-
     let mut response = alloc::vec![0u8; LENGTH];
     response[0..2].copy_from_slice(&(LENGTH as u16).to_le_bytes());
-    response[2..4].copy_from_slice(&message_type);
+    response[2..4].copy_from_slice(&RESPONSE_COMMAND.to_le_bytes());
+    response[4] = GRANTED;
 
-    response
+    Some(response)
 }
 
 const LGT_BILL_HEADER_SIZE: usize = 108;
@@ -3798,47 +3768,25 @@ mod network_state_tests {
     }
 
     #[test]
-    fn a_gamevil_purchase_walks_the_result_codes_still_to_be_tried() {
+    fn a_gamevil_purchase_is_answered_the_way_onrecvdone_reads_it() {
         use super::lgt_local_gamevil_cert_response;
 
-        let request = zenonia_purchase_request();
+        let response = lgt_local_gamevil_cert_response(&zenonia_purchase_request()).unwrap();
 
-        let mut seen = Vec::new();
-        for _ in 0..10 {
-            seen.push(lgt_local_gamevil_cert_response(&request).unwrap());
-        }
+        // `tagNetHeader`: a length at [0] and a command at [2], both u16 little
+        // end first, and four bytes of it - `GetRecvPacketHeaderSize` returns 4.
+        assert_eq!(u16::from_le_bytes([response[0], response[1]]) as usize, response.len());
+        assert_eq!(u16::from_le_bytes([response[2], response[3]]), 0x0701);
 
-        // Five answers in turn, then round again.
-        assert_eq!(seen[..5], seen[5..]);
+        // The status `OnRecvDone` reads straight after the header. Anything
+        // below -1 goes to OnError instead of the command switch.
+        assert!(response[4] as i8 >= 0);
 
-        let mut codes = Vec::new();
-        let mut refused = 0;
+        // `API_ZN_SC_BUY_ITEM` reads nothing behind it.
+        assert!(response[5..].iter().all(|&byte| byte == 0));
 
-        for response in &seen[..5] {
-            // Every one declares its own length and carries the type the request
-            // spells, so the transport reads the whole of it either way.
-            assert_eq!(u16::from_le_bytes([response[0], response[1]]) as usize, response.len());
-
-            if response[2..].iter().all(|&byte| byte == 0xff) {
-                refused += 1;
-                continue;
-            }
-
-            assert_eq!(&response[2..4], &[0x00, 7]);
-            // The code reads the same whether it is taken as a byte, an i16 or
-            // an i32, which is the point of writing it this way.
-            let code = i32::from_le_bytes(response[4..8].try_into().unwrap());
-            assert_eq!(i32::from(response[4] as i8), code);
-            assert_eq!(i32::from(i16::from_le_bytes([response[4], response[5]])), code);
-            // Nothing behind it, so only the code is under test.
-            assert!(response[8..].iter().all(|&byte| byte == 0));
-
-            codes.push(code);
-        }
-
-        assert_eq!(refused, 1);
-        codes.sort_unstable();
-        assert_eq!(codes, alloc::vec![-2, 1, 2, 3]);
+        // And the same answer every time - the sweeps are over.
+        assert_eq!(lgt_local_gamevil_cert_response(&zenonia_purchase_request()), Some(response));
     }
 
     #[test]
@@ -3850,10 +3798,10 @@ mod network_state_tests {
         wrong_length[0] = 0x47;
         assert_eq!(lgt_local_gamevil_cert_response(&wrong_length), None);
 
-        // A message type this cannot answer.
-        let mut other_type = zenonia_purchase_request();
-        other_type[3] = 6;
-        assert_eq!(lgt_local_gamevil_cert_response(&other_type), None);
+        // A command this cannot answer.
+        let mut other_command = zenonia_purchase_request();
+        other_command[3] = 6;
+        assert_eq!(lgt_local_gamevil_cert_response(&other_command), None);
 
         // And the other protocols answered here are not mistaken for it.
         assert_eq!(lgt_local_gamevil_cert_response(b"CASH|0|demon|05590091|1|1|1"), None);
