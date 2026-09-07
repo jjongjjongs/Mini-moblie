@@ -708,15 +708,25 @@ pub fn lgt_local_command_tag_response(request: &[u8]) -> Option<Vec<u8>> {
 ///
 /// `0x38e78` then reads the five words above, drops the block if the screen, the
 /// step and `[12]` all repeat what came last, and indexes the table at `0x3ed90`
-/// by the screen. `0x3931c` is where `0x66` lands, and what it wants back from
-/// the `0xc9` this answers is `0xca` and nothing else: `0x381f4`, which parses a
-/// step's body, has a case for `0x66` that reads a body only under `0xcd`. The
-/// screen sends `0xcb` next.
+/// by the screen. `0x3931c` is where `0x66` lands, and it has a case for the two
+/// steps this answers:
+///
+/// - `0xca`, for the `0xc9` the screen opens with. `0x381f4`, which parses a
+///   step's body, has a case for `0x66` that reads a body only under `0xcd`, so
+///   this one carries none. The screen sends `0xcb` next, which `0x38b44` builds
+///   with nothing of its own - a zero length over a body the send buffer still
+///   holds from the `0xc9`.
+/// - `0xcd`, for that `0xcb`. `0x37fec` copies `[8]` bytes from the block's
+///   offset 20 into `0x150de98` and NUL-terminates them, and that is a message
+///   the screen draws before acknowledging with `0xce` and moving its own state
+///   on. The message was the service's to write, so it is answered as none - a
+///   zero length is what lets the screen move on rather than wait.
 ///
 /// `None` for anything that is not one of these blocks: the block has to be the
-/// full 1024, the screen has to be one the table covers, the step has to be the
-/// one this answers, and the body has to open with the subscriber number
-/// written as a length and its digits.
+/// full 1024, the screen has to be one the table covers, the step has to be one
+/// of the two, and each has to carry what that step carries - the subscriber
+/// number written as a length and its digits for the first, nothing of its own
+/// for the second.
 pub fn lgt_local_fixed_block_response(request: &[u8]) -> Option<Vec<u8>> {
     /// What the title reads and writes a block as, padding included.
     const BLOCK: usize = 1024;
@@ -729,6 +739,9 @@ pub fn lgt_local_fixed_block_response(request: &[u8]) -> Option<Vec<u8>> {
     /// The step the shop opens with, and the one that answers it.
     const HELLO_STEP: u32 = 0xc9;
     const GRANTED_STEP: u32 = 0xca;
+    /// The step the screen sends behind that, and the message answering it.
+    const MESSAGE_REQUEST_STEP: u32 = 0xcb;
+    const MESSAGE_STEP: u32 = 0xcd;
 
     if request.len() != BLOCK {
         return None;
@@ -737,30 +750,39 @@ pub fn lgt_local_fixed_block_response(request: &[u8]) -> Option<Vec<u8>> {
     let word = |at: usize| u32::from_be_bytes([request[at], request[at + 1], request[at + 2], request[at + 3]]);
 
     let screen = word(0);
-    if !SCREENS.contains(&screen) || word(4) != HELLO_STEP {
+    if !SCREENS.contains(&screen) {
         return None;
     }
 
     // What the block says of itself has to fit in the block.
     let length = word(8) as usize;
-    if !(4..=BLOCK - LENGTH_FROM).contains(&length) {
+    if length > BLOCK - LENGTH_FROM {
         return None;
     }
 
-    // The body opens with the subscriber number, written as a length and that
-    // many digits.
-    let digits = word(HEADER) as usize;
-    let subscriber = request.get(HEADER + 4..HEADER + 4 + digits)?;
-    if digits == 0 || !subscriber.iter().all(u8::is_ascii_digit) {
-        return None;
-    }
+    let (step, answer) = match word(4) {
+        // The body opens with the subscriber number, written as a length and
+        // that many digits.
+        HELLO_STEP if length >= 4 => {
+            let digits = word(HEADER) as usize;
+            let subscriber = request.get(HEADER + 4..HEADER + 4 + digits)?;
+            if digits == 0 || !subscriber.iter().all(u8::is_ascii_digit) {
+                return None;
+            }
+
+            (GRANTED_STEP, 4u32)
+        }
+        // This one carries nothing of its own, and neither does its answer.
+        MESSAGE_REQUEST_STEP if length == 0 => (MESSAGE_STEP, 0),
+        _ => return None,
+    };
 
     let mut response = vec![0u8; BLOCK];
     response[0..4].copy_from_slice(&screen.to_be_bytes());
-    response[4..8].copy_from_slice(&GRANTED_STEP.to_be_bytes());
-    // The step's own word is all this block is: four bytes past [16], and the
-    // handler for this step reads none of them.
-    response[8..12].copy_from_slice(&4u32.to_be_bytes());
+    response[4..8].copy_from_slice(&step.to_be_bytes());
+    // What the answer says of itself: the step's own word for the first, and
+    // nothing for the second. Neither handler reads past it.
+    response[8..12].copy_from_slice(&answer.to_be_bytes());
 
     Some(response)
 }
@@ -2231,6 +2253,25 @@ mod tests {
     }
 
     #[test]
+    fn the_step_behind_the_hello_is_answered_with_an_empty_message() {
+        use super::lgt_local_fixed_block_response;
+
+        // What the capture shows going out once the hello is answered: the same
+        // block with the step moved on and a zero length over the body the send
+        // buffer still holds.
+        let mut request = ragnarok_violet_hello_block();
+        request[4..8].copy_from_slice(&0xcbu32.to_be_bytes());
+        request[8..12].copy_from_slice(&0u32.to_be_bytes());
+        request[16..20].copy_from_slice(&0u32.to_be_bytes());
+
+        // The message the screen draws, answered as none.
+        let response = lgt_local_fixed_block_response(&request).unwrap();
+        assert_eq!(response.len(), 1024);
+        assert_eq!(&response[0..12], &[0, 0, 0, 0x66, 0, 0, 0, 0xcd, 0, 0, 0, 0]);
+        assert!(response[12..].iter().all(|&byte| byte == 0));
+    }
+
+    #[test]
     fn only_a_block_this_knows_the_step_of_is_answered() {
         use super::lgt_local_fixed_block_response;
 
@@ -2245,9 +2286,9 @@ mod tests {
         assert_eq!(lgt_local_fixed_block_response(&offscreen), None);
 
         // A step this does not answer.
-        let mut later = ragnarok_violet_hello_block();
-        later[4..8].copy_from_slice(&0xcbu32.to_be_bytes());
-        assert_eq!(lgt_local_fixed_block_response(&later), None);
+        let mut unknown = ragnarok_violet_hello_block();
+        unknown[4..8].copy_from_slice(&0xccu32.to_be_bytes());
+        assert_eq!(lgt_local_fixed_block_response(&unknown), None);
 
         // A subscriber number that is not digits.
         let mut lettered = ragnarok_violet_hello_block();
