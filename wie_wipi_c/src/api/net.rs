@@ -684,7 +684,7 @@ const LGT_LOCAL_PURCHASE_RESPONSE_SIZE: usize = 7;
 /// it does not recognise and drops, which is a title that never leaves its
 /// connecting screen.
 fn lgt_local_purchase_success_response(request: &[u8]) -> Option<[u8; LGT_LOCAL_PURCHASE_RESPONSE_SIZE]> {
-    let frame = BillFrame::parse(request)?;
+    let frame = wie_backend::billing::BillFrame::parse(request)?;
 
     if frame.message_type != LGT_LOCAL_PURCHASE_REQUEST_TYPE {
         return None;
@@ -694,233 +694,6 @@ fn lgt_local_purchase_success_response(request: &[u8]) -> Option<[u8; LGT_LOCAL_
     let message_type = frame.order.write(LGT_LOCAL_PURCHASE_RESPONSE_TYPE);
 
     Some([0xff, 0xff, length[0], length[1], message_type[0], message_type[1], 0x00])
-}
-
-/// Which end of a billing frame's `u16` header fields comes first.
-///
-/// The frames carry a `0xffff` marker, a length and a message type, and titles
-/// do not agree on how the two `u16`s are laid out: 붉은보석 writes a 19-byte
-/// purchase request as `ff ff 13 00 68 00 ...`, little end first, where the
-/// same frame reconstructed big-endian would be `ff ff 00 13 00 68 ...`. The
-/// marker is a palindrome and says nothing, so the length is what tells them
-/// apart - only one reading of it can describe the frame in hand.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum BillFrameOrder {
-    Big,
-    Little,
-}
-
-impl BillFrameOrder {
-    fn read(self, bytes: [u8; 2]) -> u16 {
-        match self {
-            Self::Big => u16::from_be_bytes(bytes),
-            Self::Little => u16::from_le_bytes(bytes),
-        }
-    }
-
-    fn write(self, value: u16) -> [u8; 2] {
-        match self {
-            Self::Big => value.to_be_bytes(),
-            Self::Little => value.to_le_bytes(),
-        }
-    }
-}
-
-/// A billing frame's header, read in whichever order its own length makes sense
-/// in.
-struct BillFrame {
-    order: BillFrameOrder,
-    message_type: u16,
-}
-
-impl BillFrame {
-    /// `None` for anything that is not one of these frames: too short to carry
-    /// a header, no `0xffff` marker, or a length that describes no frame this
-    /// could be under either reading.
-    ///
-    /// A native client may hand `MC_netSocketWrite` only part of the frame it
-    /// built - 붉은보석 declares nineteen bytes and has been seen writing ten -
-    /// so a length longer than the slice is accepted. It has to be at least the
-    /// six a header takes, and where neither reading is exact the shorter one
-    /// wins, being the one that could still be this frame.
-    fn parse(request: &[u8]) -> Option<Self> {
-        if request.len() < 6 || request[0] != 0xff || request[1] != 0xff {
-            return None;
-        }
-
-        let length = [request[2], request[3]];
-        let mut best: Option<(BillFrameOrder, usize)> = None;
-
-        for order in [BillFrameOrder::Big, BillFrameOrder::Little] {
-            let declared = order.read(length) as usize;
-
-            if declared < 6 || declared < request.len() {
-                continue;
-            }
-
-            if best.is_none_or(|(_, shortest)| declared < shortest) {
-                best = Some((order, declared));
-            }
-        }
-
-        let (order, _) = best?;
-
-        Some(Self {
-            order,
-            message_type: order.read([request[4], request[5]]),
-        })
-    }
-}
-
-/// A billing frame as a trace line: its header fields read out, then the bytes.
-///
-/// These frames all start `ffff`, a `u16` length and a `u16` type, so naming
-/// those three is what makes a capture readable without counting nibbles. Read
-/// the way [`BillFrame`] reads them, and named with the order it settled on, so
-/// a trace shows what the code acted on rather than one guess at it. Anything
-/// this cannot read as a frame is shown as bytes alone. Capped, because a trace
-/// is for reading.
-fn bill_frame_trace(frame: &[u8]) -> alloc::string::String {
-    // Enough for a whole request. 제노니아1's is 72 bytes and a 64-byte cap cut
-    // off the end of it, which is the half that says what the title asked for.
-    const SHOWN: usize = 256;
-
-    let bytes: Vec<alloc::string::String> = frame.iter().take(SHOWN).map(|byte| alloc::format!("{byte:02x}")).collect();
-    let bytes = alloc::format!("{}{}", bytes.join(" "), if frame.len() > SHOWN { " ..." } else { "" });
-
-    let Some(parsed) = BillFrame::parse(frame) else {
-        return alloc::format!("{} bytes [{bytes}]", frame.len());
-    };
-
-    alloc::format!(
-        "{:?}-endian type {:#06x} len {} of {} bytes [{bytes}]",
-        parsed.order,
-        parsed.message_type,
-        parsed.order.read([frame[2], frame[3]]),
-        frame.len(),
-    )
-}
-
-/// The answer to the pipe-delimited cash request NHN's titles send.
-///
-/// 데몬헌터 (`0002B5EB`) opens a billing socket to `222.237.78.175` and writes an
-/// ASCII record rather than a framed message:
-///
-/// ```text
-/// CASH|0|demon|05590091|00029B60004|500|2034517541
-/// ```
-///
-/// - the transaction, the game's own code and account, the item code, its price
-///   in won, and a token. The item codes and prices are a table in the title's
-///   own `binary.mod`, `00029B60001|100|` through `0002B640007|2900|`.
-///
-/// What it does with the answer is a chain of string compares at `0x21004`:
-/// equal to `SASH` takes the branch that shows 결제가 완료되었습니다, and the
-/// two failures it knows by name are `SFL|MOVER` (monthly purchase limit) and
-/// `SFL|PNUM` (staff accounts). Anything else - including the nothing a
-/// switched-off gateway returns - falls through to 네트워크 장애가
-/// 발생했습니다, which is the notice the title cannot get past.
-///
-/// The answer carries its own length ahead of it. The title's receive is a
-/// two-step state machine at `0x20f76`: state 6 recvs exactly two bytes, reads
-/// them as a `u16` and passes that through `MC_utilHtons` - so the field is
-/// big-endian on the wire - and state 7 recvs exactly that many bytes and
-/// compares them. The length counts the body alone; the two it was read from
-/// are already consumed.
-///
-/// Answered `SASH` bare, the title read `SA` as its length, made 0x5341 of it
-/// and waited for 21313 bytes that were never coming - which the trace caught
-/// as `MC_utilHtons(0x4153)` on the very next line.
-///
-/// So the answer is `00 04` then `SASH`, and nothing after it: the compare is
-/// an equality against a string built to the length just read.
-///
-/// `None` for anything that is not one of these records, which is not something
-/// to answer with a guess.
-fn lgt_local_cash_response(request: &[u8]) -> Option<Vec<u8>> {
-    const REQUEST: &[u8] = b"CASH|";
-    const GRANTED: &[u8] = b"SASH";
-
-    if !request.starts_with(REQUEST) {
-        return None;
-    }
-
-    let mut response = Vec::with_capacity(2 + GRANTED.len());
-    response.extend_from_slice(&(GRANTED.len() as u16).to_be_bytes());
-    response.extend_from_slice(GRANTED);
-
-    Some(response)
-}
-
-/// What GAMEVIL's server answers one of its titles' purchases with.
-///
-/// 제노니아1 (`00027BAA`) opens a billing socket to `218.145.70.36:31206` and
-/// writes a 72-byte record; 제노니아2 (`0002C004`) and 3 (`0002FE78`) write a
-/// 93-byte one to the same place. They are the same record with a tail added:
-///
-/// ```text
-/// [0..2]   u16 LE - the record's own length
-/// [2..4]   u16 LE - the command
-/// [4..16]  the subscriber number
-/// [16..56] the item, EUC-KR
-/// [56..60] u32 LE - the price in won
-/// [60..72] the item code, the title's own aid and an index
-/// [72..]   2 and 3 add a flag and the handset model
-/// ```
-///
-/// The reply is settled by GAMEVIL's own later Android port of 제노니아1, which
-/// carries C++ symbols for the protocol these titles speak - the same server
-/// address and the same `00027BAA00n` item codes are strings inside it.
-///
-/// `tagNetHeader` is four bytes: `GetLength` reads a `u16` at `[0]`, `GetCMD` a
-/// `u16` at `[2]`, and `CGsNetCore::GetRecvPacketHeaderSize` returns 4.
-/// `CMvNet::OnRecvDone` then skips the header, reads one **signed byte** as the
-/// status and calls `OnError(cmd, status)` when it is below `-1`, and otherwise
-/// switches on the command over a fixed list - `0x101`, `0x103`, ... `0x701`,
-/// `0x805` - dropping anything not on it without a word.
-///
-/// Every command a title sends is even and the answer to it is that command plus
-/// one: `0x0700` is `CS_BUY_ITEM` and `0x0701` reaches `API_ZN_SC_BUY_ITEM`,
-/// which reads nothing out of the body and calls a single callback. 제노니아1
-/// buys with `0x0700`, 2 and 3 with `0x0400`, so each is answered with its own
-/// command plus one.
-///
-/// Which accounts for every sweep run at 제노니아1 before the port settled it.
-/// `0x107`, `0x103` and `0x101` are real commands, so they were dispatched - to
-/// handlers with nothing to say. `0x0700` and `0x0007`, answered as though the
-/// command were the request's own, are not commands at all and were dropped. And
-/// every reply whose status came out negative drew a red message, because the
-/// status is read before the command is looked at.
-///
-/// `None` for anything that is not one of these records: the declared length has
-/// to be the record in hand, it has to be long enough to carry a purchase, and
-/// the command has to be one a title sends rather than one it is sent.
-fn lgt_local_gamevil_packet_response(request: &[u8]) -> Option<Vec<u8>> {
-    /// Through the item code, which is the shortest of these records seen.
-    const SHORTEST_PURCHASE: usize = 72;
-    /// Not negative, so `OnRecvDone` reaches the command instead of `OnError`.
-    const GRANTED: u8 = 0;
-    /// Header, status, and room behind it. The buy handler reads nothing there,
-    /// but a reply that carries a little cannot come up short.
-    const LENGTH: usize = 0x20;
-
-    if request.len() < SHORTEST_PURCHASE || u16::from_le_bytes([request[0], request[1]]) as usize != request.len() {
-        return None;
-    }
-
-    // A title's own commands are the even ones; the odd are what it is answered
-    // with. Answering an odd command would be answering an answer.
-    let command = u16::from_le_bytes([request[2], request[3]]);
-    if command == 0 || command % 2 != 0 {
-        return None;
-    }
-
-    let mut response = alloc::vec![0u8; LENGTH];
-    response[0..2].copy_from_slice(&(LENGTH as u16).to_le_bytes());
-    response[2..4].copy_from_slice(&(command + 1).to_le_bytes());
-    response[4] = GRANTED;
-
-    Some(response)
 }
 
 const LGT_BILL_HEADER_SIZE: usize = 108;
@@ -1131,10 +904,7 @@ impl wie_backend::LocalConnection for LgtBillingGateway {
             return;
         };
 
-        let Some(response) = lgt_local_granted_response(request)
-            .or_else(|| lgt_local_cash_response(request))
-            .or_else(|| lgt_local_gamevil_packet_response(request))
-        else {
+        let Some(response) = wie_backend::billing::response(request) else {
             tracing::debug!(
                 "LGT billing gateway: a {} byte request is not one this can shape a reply to",
                 request.len()
@@ -1145,7 +915,11 @@ impl wie_backend::LocalConnection for LgtBillingGateway {
         let mut header = [0u8; LGT_BILL_READ_HEADER_SIZE];
         header[LGT_BILL_READ_PAYLOAD_LENGTH_OFFSET..LGT_BILL_READ_PAYLOAD_LENGTH_OFFSET + 4].copy_from_slice(&(response.len() as u32).to_be_bytes());
 
-        tracing::debug!("LGT billing gateway: {} -> {}", bill_frame_trace(request), bill_frame_trace(&response));
+        tracing::debug!(
+            "LGT billing gateway: {} -> {}",
+            wie_backend::billing::bill_frame_trace(request),
+            wie_backend::billing::bill_frame_trace(&response)
+        );
 
         self.pending.extend_from_slice(&header);
         self.pending.extend_from_slice(&response);
@@ -1166,26 +940,6 @@ impl wie_backend::LocalConnection for LgtBillingGateway {
     fn readable(&self) -> bool {
         !self.pending.is_empty()
     }
-}
-
-/// The granted answer to an application billing request, in the frame shape
-/// `lgt_local_purchase_success_response` establishes for the purchase
-/// transaction: the `0xffff` marker, the frame length, the request's own type
-/// plus one, and a zero status - which is what this protocol spells "granted".
-///
-/// `None` for anything that is not one of these frames, which is not something
-/// to answer with a guess.
-fn lgt_local_granted_response(request: &[u8]) -> Option<Vec<u8>> {
-    let frame = BillFrame::parse(request)?;
-    let order = frame.order;
-    let message_type = frame.message_type;
-
-    let length = order.write(LGT_LOCAL_PURCHASE_RESPONSE_SIZE as u16);
-    let response_type = order.write(message_type.wrapping_add(1));
-
-    // Answered in the order it was asked in: a title that wrote its length
-    // little end first reads the answer's the same way.
-    Some(alloc::vec![0xff, 0xff, length[0], length[1], response_type[0], response_type[1], 0x00])
 }
 
 /// Reads from whatever `socket` is connected to - the endpoint answering it in
@@ -1690,11 +1444,14 @@ pub async fn socket_write(context: &mut dyn WIPICContext, socket: i32, buffer: W
         // is otherwise indistinguishable from one that never asked. Logged at
         // debug, both halves, so a capture says what was asked and what was
         // answered.
-        tracing::debug!("bill write {socket}: {}", bill_frame_trace(&data));
+        tracing::debug!("bill write {socket}: {}", wie_backend::billing::bill_frame_trace(&data));
 
         if billing_mode == 1 {
             if let Some(response) = lgt_local_purchase_success_response(&data) {
-                tracing::debug!("bill write {socket}: answered in process with {}", bill_frame_trace(&response));
+                tracing::debug!(
+                    "bill write {socket}: answered in process with {}",
+                    wie_backend::billing::bill_frame_trace(&response)
+                );
 
                 state.lock().queue_local_billing_response(socket, response);
 
@@ -1817,7 +1574,7 @@ pub async fn socket_read(context: &mut dyn WIPICContext, socket: i32, buffer: WI
         let local_read = state.lock().take_local_billing_response(socket, &mut data);
 
         if let Some(read) = local_read {
-            tracing::debug!("bill read {socket}: {}", bill_frame_trace(&data[..read]));
+            tracing::debug!("bill read {socket}: {}", wie_backend::billing::bill_frame_trace(&data[..read]));
 
             context.write_bytes(buffer, &data[..read])?;
             return Ok(read as i32);
@@ -1862,7 +1619,10 @@ pub async fn socket_read(context: &mut dyn WIPICContext, socket: i32, buffer: WI
                     // front, and a title that reads its header and body in two
                     // calls - 제노니아1 does - leaves only the header in a trace
                     // that logs the header path alone.
-                    tracing::debug!("bill read {socket}: {} ({left} more to come)", bill_frame_trace(&data[..read]));
+                    tracing::debug!(
+                        "bill read {socket}: {} ({left} more to come)",
+                        wie_backend::billing::bill_frame_trace(&data[..read])
+                    );
 
                     context.write_bytes(buffer, &data[..read])?;
                 }
@@ -2014,7 +1774,7 @@ pub async fn socket_read(context: &mut dyn WIPICContext, socket: i32, buffer: WI
 
                     tracing::debug!(
                         "bill read {socket}: {} ({payload_length} byte payload declared)",
-                        bill_frame_trace(&data[..read])
+                        wie_backend::billing::bill_frame_trace(&data[..read])
                     );
 
                     context.write_bytes(buffer, &data[..read])?;
@@ -3663,70 +3423,9 @@ mod network_state_tests {
     }
 
     #[test]
-    fn a_granted_reply_echoes_the_request_type_and_says_nothing_is_owed() {
-        use super::lgt_local_granted_response;
-
-        // The purchase transaction, which already had an answer of its own:
-        // request 0x68 is answered by response 0x69 with a zero status.
-        let reply = lgt_local_granted_response(&[0xff, 0xff, 0x00, 0x0a, 0x00, 0x68, 1, 2, 3, 4]).unwrap();
-        assert_eq!(reply, alloc::vec![0xff, 0xff, 0x00, 0x07, 0x00, 0x69, 0x00]);
-
-        // Every other request is answered the same way, which is what mode 1
-        // had no peer to do before.
-        let reply = lgt_local_granted_response(&[0xff, 0xff, 0x00, 0x06, 0x00, 0x20]).unwrap();
-        assert_eq!(reply, alloc::vec![0xff, 0xff, 0x00, 0x07, 0x00, 0x21, 0x00]);
-    }
-
-    #[test]
-    fn a_granted_reply_is_shaped_only_for_a_frame_this_reads() {
-        use super::lgt_local_granted_response;
-
-        // No marker, and too short to carry a header at all.
-        assert!(lgt_local_granted_response(&[0x00, 0x00, 0x00, 0x06, 0x00, 0x68]).is_none());
-        assert!(lgt_local_granted_response(&[0xff, 0xff, 0x00]).is_none());
-
-        // A length that cannot hold a header whichever end is read first.
-        assert!(lgt_local_granted_response(&[0xff, 0xff, 0x00, 0x00, 0x00, 0x68]).is_none());
-
-        // A slice longer than either reading of the length it declares: 0x0304
-        // one way, 0x0403 the other, both short of the bytes in hand.
-        let overlong = alloc::vec![0xffu8, 0xff, 0x03, 0x04, 0x00, 0x68]
-            .into_iter()
-            .chain(core::iter::repeat_n(0u8, 2000))
-            .collect::<Vec<u8>>();
-        assert!(lgt_local_granted_response(&overlong).is_none());
-    }
-
-    #[test]
-    fn a_frame_s_own_length_says_which_end_of_its_fields_comes_first() {
-        use super::{BillFrame, BillFrameOrder};
-
-        // The 19-byte purchase request 붉은보석 actually writes: length and type
-        // little end first, then the subscriber number as ASCII.
-        let captured = [
-            0xff, 0xff, 0x13, 0x00, 0x68, 0x00, b'0', b'1', b'0', b'5', b'5', b'4', b'5', b'2', b'3', b'8', b'3', 0x00, 0x01,
-        ];
-        let frame = BillFrame::parse(&captured).unwrap();
-        assert_eq!(frame.order, BillFrameOrder::Little);
-        assert_eq!(frame.message_type, 0x68);
-
-        // The same frame written the other way round reads as itself too.
-        let big_endian = [
-            0xff, 0xff, 0x00, 0x13, 0x00, 0x68, b'0', b'1', b'0', b'5', b'5', b'4', b'5', b'2', b'3', b'8', b'3', 0x00, 0x01,
-        ];
-        let frame = BillFrame::parse(&big_endian).unwrap();
-        assert_eq!(frame.order, BillFrameOrder::Big);
-        assert_eq!(frame.message_type, 0x68);
-
-        // And so does a header-complete prefix of either, where the shorter of
-        // the two readings is the one that could still be this frame.
-        assert_eq!(BillFrame::parse(&captured[..10]).unwrap().order, BillFrameOrder::Little);
-        assert_eq!(BillFrame::parse(&big_endian[..10]).unwrap().order, BillFrameOrder::Big);
-    }
-
-    #[test]
     fn a_reply_comes_back_in_the_order_its_request_was_written_in() {
-        use super::{lgt_local_granted_response, lgt_local_purchase_success_response};
+        use super::lgt_local_purchase_success_response;
+        use wie_backend::billing::lgt_local_granted_response;
 
         // 붉은보석's captured request, and the purchase answer it can read.
         let captured = [
@@ -3753,93 +3452,6 @@ mod network_state_tests {
             lgt_local_granted_response(&[0xff, 0xff, 0x00, 0x06, 0x00, 0x20]).unwrap(),
             [0xff, 0xff, 0x00, 0x07, 0x00, 0x21, 0x00]
         );
-    }
-
-    /// 제노니아1's own 72-byte purchase record, captured off the title.
-    fn zenonia_purchase_request() -> Vec<u8> {
-        let mut request = alloc::vec![0u8; 72];
-        request[0..2].copy_from_slice(&72u16.to_le_bytes());
-        request[2..4].copy_from_slice(&0x0700u16.to_le_bytes());
-        request[4..15].copy_from_slice(b"01055145031");
-        // 생명의 근원(10개), EUC-KR, in its 40-byte field.
-        request[16..33].copy_from_slice(&[
-            0xbb, 0xfd, 0xb8, 0xed, 0xc0, 0xc7, 0x20, 0xb1, 0xd9, 0xbf, 0xf8, 0x28, 0x31, 0x30, 0xb0, 0xb3, 0x29,
-        ]);
-        request[56..60].copy_from_slice(&700u32.to_le_bytes());
-        request[60..71].copy_from_slice(b"00027BAA002");
-
-        request
-    }
-
-    /// 제노니아2's 93-byte record: the same, with a flag and the handset model
-    /// behind the item code, and its own command.
-    fn zenonia2_purchase_request() -> Vec<u8> {
-        let mut request = alloc::vec![0u8; 93];
-        request[0..2].copy_from_slice(&93u16.to_le_bytes());
-        request[2..4].copy_from_slice(&0x0400u16.to_le_bytes());
-        request[4..15].copy_from_slice(b"01055452383");
-        request[56..60].copy_from_slice(&100u32.to_le_bytes());
-        request[60..71].copy_from_slice(b"0002C004001");
-        request[72] = 1;
-        request[73..81].copy_from_slice(b"Emulator");
-
-        request
-    }
-
-    #[test]
-    fn a_gamevil_purchase_is_answered_the_way_onrecvdone_reads_it() {
-        use super::lgt_local_gamevil_packet_response;
-
-        // Each title is answered with its own command plus one: 제노니아1 buys
-        // with 0x0700, 2 and 3 with 0x0400.
-        for (request, expected) in [(zenonia_purchase_request(), 0x0701u16), (zenonia2_purchase_request(), 0x0401)] {
-            let response = lgt_local_gamevil_packet_response(&request).unwrap();
-
-            // `tagNetHeader`: a length at [0] and a command at [2], both u16
-            // little end first, four bytes of it.
-            assert_eq!(u16::from_le_bytes([response[0], response[1]]) as usize, response.len());
-            assert_eq!(u16::from_le_bytes([response[2], response[3]]), expected);
-
-            // The status `OnRecvDone` reads straight after the header. Below -1
-            // goes to OnError instead of the command switch.
-            assert!(response[4] as i8 >= 0);
-
-            // The buy handler reads nothing behind it.
-            assert!(response[5..].iter().all(|&byte| byte == 0));
-
-            // And the same answer every time - the sweeps are over.
-            assert_eq!(lgt_local_gamevil_packet_response(&request), Some(response));
-        }
-    }
-
-    #[test]
-    fn only_a_record_that_declares_itself_is_answered_as_a_purchase() {
-        use super::lgt_local_gamevil_packet_response;
-
-        // A length that is not the record in hand.
-        let mut wrong_length = zenonia_purchase_request();
-        wrong_length[0] = 0x47;
-        assert_eq!(lgt_local_gamevil_packet_response(&wrong_length), None);
-
-        // An odd command is one a title is answered with, not one it sends, so
-        // answering it would be answering an answer.
-        let mut answer_shaped = zenonia_purchase_request();
-        answer_shaped[2..4].copy_from_slice(&0x0701u16.to_le_bytes());
-        assert_eq!(lgt_local_gamevil_packet_response(&answer_shaped), None);
-
-        // Too short to be carrying a purchase, however well it declares itself.
-        let mut stub = alloc::vec![0u8; 8];
-        stub[0..2].copy_from_slice(&8u16.to_le_bytes());
-        stub[2..4].copy_from_slice(&0x0400u16.to_le_bytes());
-        assert_eq!(lgt_local_gamevil_packet_response(&stub), None);
-
-        // And the other protocols answered here are not mistaken for it.
-        assert_eq!(
-            lgt_local_gamevil_packet_response(b"CASH|0|demon|05590091|00029B60004|500|2034517541"),
-            None
-        );
-        assert_eq!(lgt_local_gamevil_packet_response(&[0xff, 0xff, 0x00, 0x06, 0x00, 0x68]), None);
-        assert_eq!(lgt_local_gamevil_packet_response(b""), None);
     }
 
     #[test]

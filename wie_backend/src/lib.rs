@@ -2,6 +2,7 @@
 extern crate alloc;
 
 mod audio_sink;
+pub mod billing;
 pub mod canvas;
 mod database;
 mod executor;

@@ -62,11 +62,23 @@ impl BillingGateway {
 
 impl LocalConnection for BillingGateway {
     fn write(&mut self, bytes: &[u8]) {
-        // The answer does not depend on the request - there is nothing here to
-        // charge a subscriber for - so the request is noted and not parsed.
-        tracing::debug!("billing gateway request of {} bytes", bytes.len());
+        // Titles reach this through `BillSocket://` the same way a WIPI-C one
+        // reaches `MC_netBillSocket`, and they speak the same protocols - Legend
+        // of Master writes a 55-byte record here. So try those answers first and
+        // keep the ez-i SDK's own for what is left, which is what this endpoint
+        // was written for.
+        let response = wie_backend::billing::response(bytes);
 
-        self.pending = BILLING_RESPONSE.to_vec();
+        tracing::debug!(
+            "billing gateway: {} -> {}",
+            wie_backend::billing::bill_frame_trace(bytes),
+            match &response {
+                Some(response) => wie_backend::billing::bill_frame_trace(response),
+                None => alloc::format!("the ez-i SDK's own answer, {} bytes", BILLING_RESPONSE.len()),
+            }
+        );
+
+        self.pending = response.unwrap_or_else(|| BILLING_RESPONSE.to_vec());
     }
 
     fn read(&mut self, out: &mut [u8]) -> LocalRead {
