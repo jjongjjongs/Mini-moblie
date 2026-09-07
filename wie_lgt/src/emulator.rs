@@ -102,6 +102,20 @@ impl LgtEmulator {
         files.contains_key("app_info") || descriptor_directory(files).is_some()
     }
 
+    /// The panel this archive's title was drawn for, when that is not the one a
+    /// host would pick by default.
+    ///
+    /// A host has to size its screen before there is an emulator to ask, so this
+    /// reads the archive's own descriptor and answers from [`native_screen_size`].
+    /// `None` means the title has nothing to say and the host's own default
+    /// stands.
+    pub fn screen_size(archive: &[u8]) -> Option<(u32, u32)> {
+        let files = extract_zip(archive).ok()?;
+        let files = reroot_archive(files);
+
+        native_screen_size(&LgtAppInfo::parse(files.get("app_info")?).aid)
+    }
+
     pub fn loadable_jar(jar: &[u8]) -> bool {
         let Ok(files) = extract_zip(jar) else {
             return false;
@@ -559,6 +573,32 @@ fn apply_gamevil_baseball_auth_patch(aid: &str, binary_mod: &mut [u8]) {
 ///
 /// Scoped to each title's aid and its own save filenames, so nothing else is
 /// touched.
+/// The panel a title was drawn for, where it is not the 240x320 a host defaults
+/// to.
+///
+/// WIPI titles size everything from `MC_grpGetDisplayInfo`: 미니게임히어로즈2
+/// asks once, creates an off-screen buffer of exactly that size, and every
+/// frame repaints its 240x80 sponsor banner along the bottom of it - proven by
+/// blanking those rows in its own buffer and watching the same 19166 non-black
+/// pixels come back on the next frame. The banner is the title's, not a stale
+/// region, and it is drawn at `height - 80` whatever height it is told.
+///
+/// So on a 320-row panel the title has 240 rows left to draw in, and its screens
+/// are not 240 rows: `1000/70.png` and `1000/71.png` are two 160-row halves of
+/// one seamless 240x320 background, whose own bottom-edge buttons the banner
+/// covers. 320 rows of screen plus the 80-row banner is a 400-row panel, which
+/// is what this title was written for.
+///
+/// Keyed by aid so nothing else is touched, and returning `None` for everything
+/// else leaves every other title on the host's default.
+fn native_screen_size(aid: &str) -> Option<(u32, u32)> {
+    match aid.to_ascii_uppercase().as_str() {
+        // 미니게임 히어로즈2 터치
+        "00030F5B" => Some((240, 400)),
+        _ => None,
+    }
+}
+
 fn is_incompatible_bundled_save(aid: &str, filename: &str) -> bool {
     match aid.to_ascii_uppercase().as_str() {
         "0002E749" => filename.eq_ignore_ascii_case("SaveFile.dat"),
@@ -879,7 +919,7 @@ impl LgtAppInfo {
 mod tests {
     use super::{
         LgtAppInfo, apply_com2us_cert_patch, apply_gamevil_baseball_auth_patch, apply_gamevil_online_auth_patch, data_dir_relative,
-        is_incompatible_bundled_save,
+        is_incompatible_bundled_save, native_screen_size,
     };
 
     // The 2009 verifier window (2010 differs only in the wildcard `bl`/`ldr`
@@ -1000,5 +1040,21 @@ mod tests {
         assert_eq!(data_dir_relative("wipi-data/0002EBC9/cert.c2s", "000315C6"), None);
         assert_eq!(data_dir_relative("wipi-data/000315C6/", "000315C6"), None);
         assert_eq!(data_dir_relative("app_info", "000315C6"), None);
+    }
+
+    #[test]
+    fn only_a_title_that_was_drawn_for_another_panel_names_one() {
+        // 미니게임 히어로즈2 터치 draws a 240x320 screen and repaints its own
+        // 240x80 banner along the bottom of whatever it is told it has, so the
+        // panel it wants is the two together.
+        assert_eq!(native_screen_size("00030F5B"), Some((240, 400)));
+
+        // Descriptor casing varies, and the lookup follows the aid rather than
+        // its spelling.
+        assert_eq!(native_screen_size("00030f5b"), Some((240, 400)));
+
+        // Everything else leaves the host on its own default.
+        assert_eq!(native_screen_size("000315C6"), None);
+        assert_eq!(native_screen_size(""), None);
     }
 }

@@ -88,13 +88,18 @@ impl Runner {
         self.stop();
 
         let shared = Shared::default();
-        let platform = Box::new(AndroidPlatform::new(
-            runtime_dir,
-            SCREEN_WIDTH,
-            SCREEN_HEIGHT,
-            shared.clone(),
-            handset_information,
-        ));
+
+        // A title sizes its own drawing from what the screen reports, so a panel
+        // it was not written for is one it lays out wrongly - and the screen has
+        // to exist before there is an emulator to ask about it. Give the archive
+        // the chance to name its own panel first; almost none do, and those fall
+        // back to the default.
+        let (width, height) = LgtEmulator::screen_size(&data).unwrap_or((SCREEN_WIDTH, SCREEN_HEIGHT));
+        if (width, height) != (SCREEN_WIDTH, SCREEN_HEIGHT) {
+            tracing::info!("archive names its own panel: {width}x{height}");
+        }
+
+        let platform = Box::new(AndroidPlatform::new(runtime_dir, width, height, shared.clone(), handset_information));
 
         let options = Options {
             enable_gdbserver: false,

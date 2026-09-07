@@ -28,6 +28,8 @@ struct Captured {
 #[derive(Default, Clone)]
 struct CaptureScreen {
     captured: Arc<Mutex<Captured>>,
+    /// The panel the archive under capture names for itself, when it names one.
+    native_size: Option<(u32, u32)>,
 }
 
 impl Screen for CaptureScreen {
@@ -76,16 +78,26 @@ impl Screen for CaptureScreen {
         }
     }
 
-    /// The LCD the title is told it has. `WIE_SCR_W`/`WIE_SCR_H` override it so
-    /// a layout that a title derives from the screen size can be swept: how a
-    /// splash or a HUD element moves as the reported size changes says whether
-    /// the title centred it, anchored it, or placed it at a fixed offset.
+    /// The LCD the title is told it has: the panel the archive names for itself
+    /// where it names one, and 240x320 otherwise - the same choice the player
+    /// app makes, so a capture shows what a player would see.
+    ///
+    /// `WIE_SCR_W`/`WIE_SCR_H` override both so a layout that a title derives
+    /// from the screen size can be swept: how a splash or a HUD element moves as
+    /// the reported size changes says whether the title centred it, anchored it,
+    /// or placed it at a fixed offset.
     fn width(&self) -> u32 {
-        std::env::var("WIE_SCR_W").ok().and_then(|x| x.parse().ok()).unwrap_or(240)
+        std::env::var("WIE_SCR_W")
+            .ok()
+            .and_then(|x| x.parse().ok())
+            .unwrap_or_else(|| self.native_size.map_or(240, |(width, _)| width))
     }
 
     fn height(&self) -> u32 {
-        std::env::var("WIE_SCR_H").ok().and_then(|x| x.parse().ok()).unwrap_or(320)
+        std::env::var("WIE_SCR_H")
+            .ok()
+            .and_then(|x| x.parse().ok())
+            .unwrap_or_else(|| self.native_size.map_or(320, |(_, height)| height))
     }
 }
 
@@ -241,7 +253,10 @@ fn run(label: &str, archive: &[u8], ticks_limit: u32) {
 
     let exited = Arc::new(AtomicBool::new(false));
     let exited_clone = exited.clone();
-    let screen = CaptureScreen::default();
+    let screen = CaptureScreen {
+        native_size: wie_lgt::LgtEmulator::screen_size(archive),
+        ..Default::default()
+    };
 
     let platform = Box::new(CapturePlatform {
         inner: TestPlatform::with_event_handler(move |event| match event {
@@ -453,7 +468,10 @@ fn run_scripted(label: &str, archive: &[u8], ticks_limit: u32, script: &[(u32, w
 
     let exited = Arc::new(AtomicBool::new(false));
     let exited_clone = exited.clone();
-    let screen = CaptureScreen::default();
+    let screen = CaptureScreen {
+        native_size: wie_lgt::LgtEmulator::screen_size(archive),
+        ..Default::default()
+    };
 
     let platform = Box::new(CapturePlatform {
         inner: TestPlatform::with_event_handler(move |event| match event {
