@@ -244,12 +244,53 @@ pub fn lgt_local_gamevil_packet_response(request: &[u8]) -> Option<Vec<u8>> {
 
     Some(response)
 }
-/// What answers the subscriber record 이노티아연대기 opens its shop with.
+/// The rows 이노티아연대기's 캐쉬템 구매 screen is answered with.
+///
+/// A row is a name, how many one purchase grants, and its price. The name is
+/// what carries the item: the handler matches it against the title's own table
+/// of 545 item names and keeps the index that matched, and the index is what
+/// the purchase then hands to the routine that puts an item in the bag. So
+/// these are the title's own names, byte for byte as `inotia.bar` spells them,
+/// and each one is unique in that table. A name it does not know would leave
+/// the row's index at -1 and buy nothing.
+///
+/// Which of the 545 the service sold, and for how much, went with the service.
+/// These are the ones that read as a cash shop's rather than a town shop's -
+/// the blessed scrolls, the coupons, the keys and the styles - priced in the
+/// hundreds of won those went for.
+const INOTIA_SHOP_ROWS: [(&[u8], u8, u32); 12] = [
+    // 축복받은 부활주문서
+    (b"\xc3\xe0\xba\xb9\xb9\xde\xc0\xba \xba\xce\xc8\xb0\xc1\xd6\xb9\xae\xbc\xad", 1, 500),
+    // 축복받은 용사의 인장
+    (b"\xc3\xe0\xba\xb9\xb9\xde\xc0\xba \xbf\xeb\xbb\xe7\xc0\xc7 \xc0\xce\xc0\xe5", 1, 500),
+    // 부활의 기도문
+    (b"\xba\xce\xc8\xb0\xc0\xc7 \xb1\xe2\xb5\xb5\xb9\xae", 1, 300),
+    // 창고확장 쿠폰(3칸)
+    (b"\xc3\xa2\xb0\xed\xc8\xae\xc0\xe5 \xc4\xed\xc6\xf9(3\xc4\xad)", 1, 1000),
+    // 스킬 초기화
+    (b"\xbd\xba\xc5\xb3 \xc3\xca\xb1\xe2\xc8\xad", 1, 1000),
+    // 자원 교환권
+    (b"\xc0\xda\xbf\xf8 \xb1\xb3\xc8\xaf\xb1\xc7", 1, 500),
+    // 행운의 열쇠
+    (b"\xc7\xe0\xbf\xee\xc0\xc7 \xbf\xad\xbc\xe8", 1, 300),
+    // 신비의 열쇠
+    (b"\xbd\xc5\xba\xf1\xc0\xc7 \xbf\xad\xbc\xe8", 1, 500),
+    // 흑기사의 투구
+    (b"\xc8\xe6\xb1\xe2\xbb\xe7\xc0\xc7 \xc5\xf5\xb1\xb8", 1, 1000),
+    // 레게 스타일
+    (b"\xb7\xb9\xb0\xd4 \xbd\xba\xc5\xb8\xc0\xcf", 1, 800),
+    // 번개 스타일
+    (b"\xb9\xf8\xb0\xb3 \xbd\xba\xc5\xb8\xc0\xcf", 1, 800),
+    // 스텔스 가면
+    (b"\xbd\xba\xc5\xda\xbd\xba \xb0\xa1\xb8\xe9", 1, 800),
+];
+
+/// What answers the subscriber records 이노티아연대기 shops with.
 ///
 /// 이노티아연대기 (`0001E718`) reads `PHONENUMBER`, takes a server out of its
 /// own `etc.dat` - `어드벤쳐` at `211.115.66.232`, whose fourth port is 19017 -
-/// and opens `MC_netBillSocket` to it the moment the shop is entered. The 16
-/// bytes it writes there are the whole of the request:
+/// and opens `MC_netBillSocket` to it the moment 캐쉬템 구매 is entered. The 16
+/// bytes it writes there are the whole of the first request:
 ///
 /// ```text
 /// 00 10  1e  0b  30 31 30 35 35 39 33 30 39 30 36  00
@@ -259,7 +300,7 @@ pub fn lgt_local_gamevil_packet_response(request: &[u8]) -> Option<Vec<u8>> {
 /// [0..2]  u16 BE - the record's own length, its own two bytes counted
 /// [2]     the command
 /// [3]     how many digits of subscriber number follow
-/// [4..]   the subscriber number, and one byte the request carries behind it
+/// [4..]   the subscriber number, and the page of the catalogue being asked for
 /// ```
 ///
 /// The title is compiled ahead of time, so what it does with the answer is ARM
@@ -275,24 +316,27 @@ pub fn lgt_local_gamevil_packet_response(request: &[u8]) -> Option<Vec<u8>> {
 /// status, and **1** is the only value any of them treat as success - `0x385de`,
 /// the plainest of them, answers 0 with error 0x45, 2 with 0x4c and 3 with 0xdd.
 ///
-/// The shop's command is `0x1e`, whose handler at `0x39540` reads three bytes
-/// and then that many catalogue rows:
+/// `0x1e` is the catalogue, and its handler at `0x39540` reads:
 ///
 /// ```text
-/// [u8][u8][u8 rows]  then rows x  [u8 name length][name][u8 kind][u32 BE price]
+/// [u8 pages][u8 page]  [u8 rows]  then rows x  [u8 name length][name][u8 count][u32 BE price]
 /// ```
 ///
-/// The catalogue was the service's to fill and the service is gone, so the rows
-/// are answered as none. What that buys is the shop screen: the title stops on
-/// 전송중 only because nothing answers it, and a well-formed empty catalogue
-/// leaves `0x39540` free to build its list widget and switch to screen `0x17`
-/// rather than wait. Each row's name is matched against the title's own item
-/// table before it means anything, so rows invented here would not name items
-/// this build can sell.
+/// The first two are what the screen draws as `page + 1`/`pages` and what its
+/// left and right arrows step through - `0x315d8` asks for `page - 1` while the
+/// page is above zero, `0x315ec` for `page + 1` while it is below `pages - 1` -
+/// so the page a reply declares is the page it was asked for, and one page
+/// holding the whole catalogue is one to page through.
 ///
-/// `None` for anything that is not this request: the declared length has to be
-/// the record in hand, the command has to be the shop's, and the subscriber
-/// number has to be digits that account for the rest of the record.
+/// Each row's name is matched against the title's own item table, and the count
+/// is a quantity: above one, `0x39628` appends `(N)` to the displayed name.
+/// Choosing a row writes the matched index and that quantity aside (`0x3ec5a`)
+/// and sends `0x1f`, whose reply is a status and nothing else - the handler at
+/// `0x396b2` reads no further and puts the item in the bag itself.
+///
+/// `None` for anything that is not one of these two records: the declared length
+/// has to be the record in hand, the command has to be one of the shop's, and
+/// the fields behind it have to account for the rest of the record exactly.
 pub fn lgt_local_subscriber_record_response(request: &[u8]) -> Option<Vec<u8>> {
     /// The length and the command, which is what the reader frames on.
     const HEADER: usize = 3;
@@ -300,31 +344,60 @@ pub fn lgt_local_subscriber_record_response(request: &[u8]) -> Option<Vec<u8>> {
     const GRANTED_STATUS: u8 = 1;
     /// The command the shop asks its catalogue for.
     const CATALOGUE_COMMAND: u8 = 0x1e;
-    /// Two the handler reads and keeps, and the row count behind them.
-    const EMPTY_CATALOGUE: [u8; 3] = [0, 0, 0];
+    /// The command a chosen row is bought with.
+    const PURCHASE_COMMAND: u8 = 0x1f;
+    /// One page holds every row, so there is one page to step through.
+    const PAGES: u8 = 1;
 
     if request.len() < HEADER + 2 || u16::from_be_bytes([request[0], request[1]]) as usize != request.len() {
         return None;
     }
 
-    if request[2] != CATALOGUE_COMMAND {
-        return None;
-    }
-
-    // The subscriber number is length-prefixed and one byte follows it, so the
-    // prefix has to account for the record exactly.
+    // Both records open with the subscriber number, length-prefixed.
     let digits = request[3] as usize;
     let subscriber = request.get(4..4 + digits)?;
-    if digits == 0 || request.len() != 5 + digits || !subscriber.iter().all(u8::is_ascii_digit) {
+    if digits == 0 || !subscriber.iter().all(u8::is_ascii_digit) {
         return None;
     }
+    let rest = &request[4 + digits..];
 
-    let length = HEADER + 1 + EMPTY_CATALOGUE.len();
+    let body = match request[2] {
+        // The page asked for is the last byte, and there is nothing behind it.
+        CATALOGUE_COMMAND => {
+            let [page] = *rest else { return None };
+            if page >= PAGES {
+                return None;
+            }
+
+            let mut body = vec![PAGES, page, INOTIA_SHOP_ROWS.len() as u8];
+            for (name, count, price) in INOTIA_SHOP_ROWS {
+                body.push(name.len() as u8);
+                body.extend_from_slice(name);
+                body.push(count);
+                body.extend_from_slice(&price.to_be_bytes());
+            }
+
+            body
+        }
+        // The row's own name, length-prefixed as the subscriber number was,
+        // and the quantity behind it.
+        PURCHASE_COMMAND => {
+            let name_length = *rest.first()? as usize;
+            if rest.len() != name_length + 2 {
+                return None;
+            }
+
+            Vec::new()
+        }
+        _ => return None,
+    };
+
+    let length = HEADER + 1 + body.len();
     let mut response = Vec::with_capacity(length);
     response.extend_from_slice(&(length as u16).to_be_bytes());
-    response.push(CATALOGUE_COMMAND);
+    response.push(request[2]);
     response.push(GRANTED_STATUS);
-    response.extend_from_slice(&EMPTY_CATALOGUE);
+    response.extend_from_slice(&body);
 
     Some(response)
 }
@@ -1461,9 +1534,25 @@ mod tests {
         request
     }
 
+    /// What the shop writes to buy a row: the subscriber number, the row's own
+    /// name as the title's table spells it, and the quantity.
+    fn inotia_purchase_request(name: &[u8], quantity: u8) -> Vec<u8> {
+        let mut request = vec![0u8; 2];
+        request.push(0x1f);
+        request.push(11);
+        request.extend_from_slice(b"01055930906");
+        request.push(name.len() as u8);
+        request.extend_from_slice(name);
+        request.push(quantity);
+        let length = request.len() as u16;
+        request[0..2].copy_from_slice(&length.to_be_bytes());
+
+        request
+    }
+
     #[test]
-    fn a_subscriber_record_is_answered_with_a_catalogue_of_no_rows() {
-        use super::lgt_local_subscriber_record_response;
+    fn a_catalogue_request_is_answered_with_the_page_it_asked_for() {
+        use super::{INOTIA_SHOP_ROWS, lgt_local_subscriber_record_response};
 
         // Byte for byte what the capture shows going out.
         assert_eq!(
@@ -1473,11 +1562,43 @@ mod tests {
             ]
         );
 
-        // The reply's length counts its own two bytes, the command comes back
-        // as it was asked under, the status is the one every handler reads as
-        // success, and the catalogue is three bytes ending in no rows.
         let response = lgt_local_subscriber_record_response(&inotia_shop_request()).unwrap();
-        assert_eq!(response, vec![0x00, 0x07, 0x1e, 0x01, 0x00, 0x00, 0x00]);
+
+        // The length counts its own two bytes, the command comes back as it was
+        // asked under, and the status is the one every handler reads as success.
+        assert_eq!(u16::from_be_bytes([response[0], response[1]]) as usize, response.len());
+        assert_eq!(&response[2..4], &[0x1e, 0x01]);
+        // One page, the page that was asked for, and every row on it.
+        assert_eq!(&response[4..7], &[1, 0, INOTIA_SHOP_ROWS.len() as u8]);
+
+        // Which walks as rows of a name, a quantity and a big-endian price, and
+        // accounts for the record exactly.
+        let mut rest = &response[7..];
+        for (name, count, price) in INOTIA_SHOP_ROWS {
+            assert_eq!(rest[0] as usize, name.len());
+            assert_eq!(&rest[1..1 + name.len()], name);
+            assert_eq!(rest[1 + name.len()], count);
+            assert_eq!(&rest[2 + name.len()..6 + name.len()], &price.to_be_bytes());
+            rest = &rest[6 + name.len()..];
+        }
+        assert!(rest.is_empty());
+
+        // 축복받은 부활주문서, EUC-KR, as `inotia.bar` spells it.
+        assert_eq!(
+            INOTIA_SHOP_ROWS[0].0,
+            &[
+                0xc3, 0xe0, 0xba, 0xb9, 0xb9, 0xde, 0xc0, 0xba, 0x20, 0xba, 0xce, 0xc8, 0xb0, 0xc1, 0xd6, 0xb9, 0xae, 0xbc, 0xad
+            ]
+        );
+    }
+
+    #[test]
+    fn a_purchase_is_answered_with_a_status_and_nothing_else() {
+        use super::{INOTIA_SHOP_ROWS, lgt_local_subscriber_record_response};
+
+        // The handler reads no further than the status, so neither does this.
+        let request = inotia_purchase_request(INOTIA_SHOP_ROWS[0].0, INOTIA_SHOP_ROWS[0].1);
+        assert_eq!(lgt_local_subscriber_record_response(&request).unwrap(), vec![0x00, 0x04, 0x1f, 0x01]);
     }
 
     #[test]
@@ -1498,6 +1619,17 @@ mod tests {
         let mut mismeasured = inotia_shop_request();
         mismeasured[3] = 10;
         assert_eq!(lgt_local_subscriber_record_response(&mismeasured), None);
+
+        // A page past the one the catalogue declares, which the screen's own
+        // arrows will not ask for.
+        let mut second_page = inotia_shop_request();
+        *second_page.last_mut().unwrap() = 1;
+        assert_eq!(lgt_local_subscriber_record_response(&second_page), None);
+
+        // A purchase whose name field does not account for the rest.
+        let mut ragged = inotia_purchase_request(b"\xc7\xe0\xbf\xee\xc0\xc7 \xbf\xad\xbc\xe8", 1);
+        ragged[15] = 3;
+        assert_eq!(lgt_local_subscriber_record_response(&ragged), None);
 
         // And 레전드오브마스터's record, which is big-endian length-first too,
         // still reaches the handler that reads it rather than this one.
