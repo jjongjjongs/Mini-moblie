@@ -141,6 +141,9 @@ impl FilesystemOverlay {
         let Some(normalized) = normalize_guest_path(path) else {
             return 0;
         };
+
+        self.materialize(&normalized).await;
+
         self.platform.filesystem().write(&self.aid, &normalized, offset, data).await
     }
 
@@ -148,7 +151,41 @@ impl FilesystemOverlay {
         let Some(normalized) = normalize_guest_path(path) else {
             return;
         };
+
+        // Truncating to 0 wants an empty file, which is what an absent platform
+        // file already becomes. Any other length keeps a prefix of what is
+        // there, so the packaged bytes have to be there first.
+        if len > 0 {
+            self.materialize(&normalized).await;
+        }
+
         self.platform.filesystem().truncate(&self.aid, &normalized, len).await;
+    }
+
+    /// Copies a packaged file into the writable layer before it is modified.
+    ///
+    /// Reads prefer the platform layer and fall back to the packaged one, but
+    /// writes only ever reach the platform layer. Writing part of a packaged
+    /// file would therefore leave a file holding just that part, with the rest
+    /// of the packaged bytes shadowed and gone.
+    ///
+    /// 영웅서기5 is what this costs: its saves live in one 15396-byte `kickass`
+    /// container, and deleting a character slot rewrites the 804-byte header
+    /// and directory at the front of it. That write created an 804-byte file,
+    /// the other 14592 bytes stopped existing, and the next launch read a
+    /// container whose every entry pointed past the end - which the title
+    /// reports as 인증실패, refusing to start.
+    async fn materialize(&self, normalized: &str) {
+        if self.platform.filesystem().exists(&self.aid, normalized).await {
+            return;
+        }
+
+        let packaged = self.virtual_files.lock().get(normalized).cloned();
+        if let Some(packaged) = packaged
+            && !packaged.is_empty()
+        {
+            self.platform.filesystem().write(&self.aid, normalized, 0, &packaged).await;
+        }
     }
 
     pub async fn remove(&self, path: &str) -> bool {
@@ -607,6 +644,71 @@ mod tests {
         let mut buf = [0u8; 4];
         assert_eq!(fs.read("cfg.dat", 0, 4, &mut buf).await, Some(4));
         assert_eq!(buf, [1, 2, 3, 4]);
+    }
+
+    /// 영웅서기5 rewrites the directory at the front of its packaged `kickass`
+    /// save container when a slot is deleted. The rest of the container has to
+    /// still be there afterwards, or the next launch reads a file whose entries
+    /// all point past its end and refuses to start.
+    #[futures_test::test]
+    async fn a_partial_write_to_a_packaged_file_keeps_the_rest_of_it() {
+        let fs = setup();
+        fs.add_virtual("kickass", vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+
+        fs.write("kickass", 0, &[1, 2]).await;
+
+        assert_eq!(fs.size("kickass").await, Some(6));
+        let mut buf = [0u8; 6];
+        assert_eq!(fs.read("kickass", 0, 6, &mut buf).await, Some(6));
+        assert_eq!(buf, [1, 2, 0xCC, 0xDD, 0xEE, 0xFF]);
+    }
+
+    /// A write past the end of the packaged bytes still lands where it was
+    /// aimed, rather than at the front of a file that was never filled in.
+    #[futures_test::test]
+    async fn a_write_beyond_a_packaged_file_extends_it_from_its_real_length() {
+        let fs = setup();
+        fs.add_virtual("kickass", vec![0xAA, 0xBB, 0xCC, 0xDD]);
+
+        fs.write("kickass", 6, &[9]).await;
+
+        assert_eq!(fs.size("kickass").await, Some(7));
+        let mut buf = [0u8; 7];
+        assert_eq!(fs.read("kickass", 0, 7, &mut buf).await, Some(7));
+        assert_eq!(buf, [0xAA, 0xBB, 0xCC, 0xDD, 0, 0, 9]);
+    }
+
+    /// Only the first write copies. Once the file is in the writable layer the
+    /// packaged bytes are stale and must not come back over what was written.
+    #[futures_test::test]
+    async fn a_second_write_does_not_restore_the_packaged_bytes() {
+        let fs = setup();
+        fs.add_virtual("kickass", vec![0xAA, 0xBB, 0xCC, 0xDD]);
+
+        fs.write("kickass", 0, &[1, 2, 3, 4]).await;
+        fs.write("kickass", 0, &[5]).await;
+
+        let mut buf = [0u8; 4];
+        assert_eq!(fs.read("kickass", 0, 4, &mut buf).await, Some(4));
+        assert_eq!(buf, [5, 2, 3, 4]);
+    }
+
+    /// Truncating to a length keeps that much of the packaged file; truncating
+    /// to nothing still means nothing.
+    #[futures_test::test]
+    async fn truncate_keeps_a_prefix_of_a_packaged_file() {
+        let fs = setup();
+        fs.add_virtual("a", vec![1, 2, 3, 4, 5]);
+        fs.add_virtual("b", vec![1, 2, 3, 4, 5]);
+
+        fs.truncate("a", 3).await;
+        fs.truncate("b", 0).await;
+
+        let mut buf = [0u8; 3];
+        assert_eq!(fs.size("a").await, Some(3));
+        assert_eq!(fs.read("a", 0, 3, &mut buf).await, Some(3));
+        assert_eq!(buf, [1, 2, 3]);
+        assert_eq!(fs.size("b").await, Some(0));
     }
 
     #[futures_test::test]
