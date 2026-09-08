@@ -1788,6 +1788,87 @@ pub fn lgt_local_dnf_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(response)
 }
 
+/// 바이오크로니클's login, answered the way its own reader reads it.
+///
+/// The title opens a `MC_netBillSocket` and writes one frame before it will
+/// leave 처리중, then repeats a second one every three seconds while it waits.
+/// `0x3050c` is the one place a frame's header is written and `0x34cd0` the one
+/// place it is read, and between them the shape is:
+///
+/// ```text
+/// [0..4]    u32 BE - the whole frame's length, the only field this end first
+/// [4..8]    u32 LE - that length less these four bytes
+/// [8..12]   u32 LE - the command
+/// [12..16]  u32 LE - the session, which the login's answer is what issues
+/// [16]      u8     - zero
+/// [17..21]  u32 LE - 123456789, a constant the title carries at 0x30550
+/// [21..]             the body
+/// ```
+///
+/// The reader takes the first four bytes, swaps them through `0x305b4`, waits
+/// for that many, and hands everything past them to a queue its main loop at
+/// `0x441ac` walks. That loop takes the command out of the record and jumps
+/// through the table at `0x5f494`, which has an entry for each command from 1
+/// to 0x44 - and every one of them is a request's command plus one. The login
+/// is command `0`:
+///
+/// ```text
+/// 00 00 00 7a 76 00 00 00 00 00 00 00 00 00 00 00 00 15 cd 5b 07 00 03 02
+/// "01055452383" ... "Emulator" ...
+/// ```
+///
+/// So its answer is command `1`, and `0x44368` reads none of the body: it
+/// takes the session out of the header, keeps it at `[0x150eee4]`, and every
+/// frame the title writes afterwards carries it. A session of zero is what it
+/// has already, so the answer issues one.
+///
+/// The frame it repeats while waiting is command `8`, whose answer `0x45052`
+/// walks a table of sessions rather than the title's own - it is other players,
+/// not the login - so it is left alone until the login has gone through.
+///
+/// `None` for anything that is not that login: it has to declare its length at
+/// both ends, carry the constant, and be command `0`.
+pub fn lgt_local_biochronicle_response(request: &[u8]) -> Option<Vec<u8>> {
+    /// The length twice, the command, the session, a zero and the constant.
+    const HEADER: usize = 21;
+    /// What `0x30550` holds and `0x3050c` writes into every frame.
+    const CONSTANT: u32 = 123_456_789;
+
+    const LOGIN_REQUEST: u32 = 0;
+    const LOGIN_ANSWER: u32 = 1;
+
+    /// The session `0x44368` keeps and the title then carries. Anything but the
+    /// zero it starts with; nothing compares it against anything else.
+    const SESSION: u32 = 1;
+
+    fn u32_le(bytes: &[u8], offset: usize) -> u32 {
+        u32::from_le_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]])
+    }
+
+    if request.len() < HEADER {
+        return None;
+    }
+
+    let declared = u32::from_be_bytes(request[0..4].try_into().ok()?) as usize;
+    if declared != request.len() || u32_le(request, 4) as usize != request.len() - 4 {
+        return None;
+    }
+
+    if u32_le(request, 17) != CONSTANT || u32_le(request, 8) != LOGIN_REQUEST {
+        return None;
+    }
+
+    let mut response = Vec::with_capacity(HEADER);
+    response.extend_from_slice(&(HEADER as u32).to_be_bytes());
+    response.extend_from_slice(&((HEADER - 4) as u32).to_le_bytes());
+    response.extend_from_slice(&LOGIN_ANSWER.to_le_bytes());
+    response.extend_from_slice(&SESSION.to_le_bytes());
+    response.push(0);
+    response.extend_from_slice(&CONSTANT.to_le_bytes());
+
+    Some(response)
+}
+
 /// The answer to a billing request, whichever of these protocols it is in.
 ///
 /// Tried in order of how specific each shape is: the `0xffff`-framed message,
@@ -1815,6 +1896,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_tagged_record_response(request))
         .or_else(|| lgt_local_opcode_header_response(request))
         .or_else(|| lgt_local_dnf_response(request))
+        .or_else(|| lgt_local_biochronicle_response(request))
 }
 
 #[cfg(test)]
@@ -3223,6 +3305,71 @@ mod tests {
 
         // A header with nothing behind it.
         assert!(lgt_local_dnf_response(&[0x08, 0x00, 0x00, 0x00, 0xff, 0xff, 0x11, 0x27]).is_none());
+    }
+
+    /// 바이오크로니클's login is answered with the session its own reader keeps.
+    #[test]
+    fn the_login_that_title_waits_on_is_answered_with_a_session() {
+        // The header off the socket, with the body the title wrote behind it.
+        let mut request = vec![0x00, 0x00, 0x00, 0x7a, 0x76, 0x00, 0x00, 0x00];
+        request.extend_from_slice(&0u32.to_le_bytes());
+        request.extend_from_slice(&0u32.to_le_bytes());
+        request.push(0);
+        request.extend_from_slice(&123_456_789u32.to_le_bytes());
+        request.extend_from_slice(&[0u8; 101]);
+        assert_eq!(request.len(), 0x7a);
+
+        let response = lgt_local_biochronicle_response(&request).unwrap();
+
+        assert_eq!(
+            response,
+            vec![
+                0x00, 0x00, 0x00, 0x15, 0x11, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x15, 0xcd, 0x5b, 0x07
+            ]
+        );
+
+        // Both ends of the length agree, which is what the reader and the
+        // queue its main loop walks each take.
+        assert_eq!(u32::from_be_bytes(response[0..4].try_into().unwrap()) as usize, response.len());
+        assert_eq!(u32::from_le_bytes(response[4..8].try_into().unwrap()) as usize, response.len() - 4);
+
+        // The session is what `0x44368` keeps, and zero is what the title
+        // already has.
+        assert_ne!(u32::from_le_bytes(response[12..16].try_into().unwrap()), 0);
+    }
+
+    /// The frame that title repeats while it waits is not the login, and
+    /// neither is anything else that is not shaped like one.
+    #[test]
+    fn only_that_title_s_login_is_answered() {
+        let mut login = vec![0x00, 0x00, 0x00, 0x15, 0x11, 0x00, 0x00, 0x00];
+        login.extend_from_slice(&0u32.to_le_bytes());
+        login.extend_from_slice(&0u32.to_le_bytes());
+        login.push(0);
+        login.extend_from_slice(&123_456_789u32.to_le_bytes());
+        assert!(lgt_local_biochronicle_response(&login).is_some());
+
+        // Command 8, the one it repeats every three seconds - answered by a
+        // reader that walks other players' sessions, not this.
+        let mut keepalive = login.clone();
+        keepalive[8] = 8;
+        assert!(lgt_local_biochronicle_response(&keepalive).is_none());
+
+        // Without the constant it is not this title's frame.
+        let mut plain = login.clone();
+        plain[17] = 0;
+        assert!(lgt_local_biochronicle_response(&plain).is_none());
+
+        // The two lengths have to agree with the frame and with each other.
+        let mut mismatched = login.clone();
+        mismatched[4] = 0x10;
+        assert!(lgt_local_biochronicle_response(&mismatched).is_none());
+
+        let mut short = login.clone();
+        short[3] = 0x14;
+        assert!(lgt_local_biochronicle_response(&short).is_none());
+
+        assert!(lgt_local_biochronicle_response(&login[..20]).is_none());
     }
 
     /// A message this does not know the shape of is left alone rather than
