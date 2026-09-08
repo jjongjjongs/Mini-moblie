@@ -1437,7 +1437,17 @@ pub fn lgt_local_tagged_record_response(request: &[u8]) -> Option<Vec<u8>> {
 /// [68..98]        - the handset model
 /// ```
 ///
-/// Ninety-eight bytes, so a hundred and three on the wire. Opcode zero's handler
+/// Ninety-eight bytes, so a hundred and three on the wire - for 엘피스.
+/// 슈퍼액션히어로3 writes the same layout under service 1017 and stops at the
+/// subscriber's number, sixty-eight bytes and seventy-three on the wire:
+///
+/// ```text
+/// 00 49 00 00 00 03 f9 00 00 02 05 "V.1.0.0" ... "01062170215" ...
+/// ```
+///
+/// So the handset model is what the longer one carries and the shorter one
+/// leaves off, and what says a frame is this opening is the service in front of
+/// it rather than the length behind it. Opcode zero's handler
 /// at `0x488f0` reads no body at all: it switches on the screen the menu was
 /// entered from and sends that screen's own next request. Opcode one, which the
 /// library's type `5` writes with no body of its own, is the same kind of thing:
@@ -1476,8 +1486,10 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
 
     /// The opcode the menu opens the session under, and answers under.
     const SESSION_OPCODE: u8 = 0x00;
-    /// What `0x64d28` lays out, before the header.
-    const SESSION_BODY_SIZE: usize = 98;
+    /// What `0x64d28` lays out, before the header - up to and including the
+    /// subscriber's number. The handset model behind it brings 엘피스's to 98,
+    /// and 슈퍼액션히어로3 leaves it off.
+    const SESSION_BODY_MIN: usize = 68;
     /// The three services `0x471f8` writes into the body's first two bytes.
     const SERVICES: [u16; 3] = [1006, 1017, 1036];
 
@@ -1514,7 +1526,7 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
 
     let body = &request[HEADER..];
     let (opcode, answer): (u8, Vec<u8>) = match request[3] {
-        SESSION_OPCODE if body.len() == SESSION_BODY_SIZE && SERVICES.contains(&u16::from_be_bytes([body[0], body[1]])) => {
+        SESSION_OPCODE if body.len() >= SESSION_BODY_MIN && SERVICES.contains(&u16::from_be_bytes([body[0], body[1]])) => {
             (SESSION_OPCODE, Vec::new())
         }
         SIGNAL_OPCODE if body.is_empty() => (SIGNAL_OPCODE, Vec::new()),
@@ -3290,6 +3302,35 @@ mod tests {
         // `0x47e70` reads nothing out of the answer either.
         let response = lgt_local_opcode_header_response(&[0x00, 0x05, 0x00, 0x01, 0x00]).unwrap();
         assert_eq!(response, vec![0x00, 0x05, 0x00, 0x01, 0x00]);
+    }
+
+    /// 슈퍼액션히어로3 opens the same session with the same layout stopped at
+    /// the subscriber's number, and is answered the same way.
+    #[test]
+    fn that_opening_is_answered_whether_or_not_it_carries_a_handset_model() {
+        // The frame that title wrote, byte for byte.
+        let mut request = vec![0x00, 0x49, 0x00, 0x00, 0x00];
+        request.extend_from_slice(&1017u16.to_be_bytes());
+        request.extend_from_slice(&[0x00, 0x00, 0x02, 0x05]);
+        request.extend_from_slice(b"V.1.0.0");
+        request.resize(5 + 6 + 20, 0);
+        request.extend_from_slice(b"01062170215");
+        request.resize(5 + 68, 0);
+        assert_eq!(request.len(), 0x49);
+
+        let response = lgt_local_opcode_header_response(&request).unwrap();
+        assert_eq!(response, vec![0x00, 0x05, 0x00, 0x00, 0x00]);
+
+        // Shorter than the layout names is not that opening.
+        let mut clipped = request.clone();
+        clipped.truncate(5 + 67);
+        clipped[1] = clipped.len() as u8;
+        assert!(lgt_local_opcode_header_response(&clipped).is_none());
+
+        // Neither is a service this opening never carries.
+        let mut other_service = request;
+        other_service[5..7].copy_from_slice(&1018u16.to_be_bytes());
+        assert!(lgt_local_opcode_header_response(&other_service).is_none());
     }
 
     /// Each step of the purchase walk is answered with what its own reader takes
