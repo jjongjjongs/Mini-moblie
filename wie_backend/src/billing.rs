@@ -871,21 +871,28 @@ pub fn lgt_local_fixed_block_response(request: &[u8]) -> Option<Vec<u8>> {
 /// the screen names.
 ///
 /// The `u16` at `[9]` is what the exchange is: `0x5fc6c` keeps it at
-/// `0x150bb70+0x14`, and `0x618d2` switches a reply on the same field. `0x31` is
-/// this one.
+/// `0x150bb70+0x14`, and `0x618d2` switches a reply on the same field. A 하트
+/// purchase walks `0x31` to `0x34`, each granted step building the next.
 ///
 /// A reply is framed by its own magic rather than by any length: `0x61854` walks
 /// the bytes received looking for `E`, `N`, `S`, and reads from there a `u16`
 /// command, a `u16` length it waits on until that many bytes have arrived, and
 /// then `0x60cf8` takes a `u16` result and keeps it at `0x150bb70+0x1a`. Zero is
-/// the only value that is not one of the errors it names, and the handler
-/// `0x618e4` picks for `0x31` - `0x4e508` - grants on exactly that: a nonzero
-/// result returns 2 and reaches the failure at `0x619a6`, while zero runs
-/// `0x4e4d4`, which builds the step behind it.
+/// the only value that is not one of the errors it names, and every handler
+/// `0x618e4` picks for these exchanges turns on exactly that:
 ///
-/// `None` for anything that is not this record: it has to open with the magic,
-/// be the length the builder writes, carry the two bytes it fixes, and have the
-/// subscriber number in digits where the builder puts it.
+/// - `0x4e508` for `0x31` returns 2 on a nonzero result, which reaches the
+///   failure at `0x619a6`; on zero it runs `0x4e4d4`, which builds the step
+///   behind it.
+/// - `0x4e524` for `0x32` and `0x34` hands `0x150bb70+0x60` to `0x1ad0c` when
+///   the result is zero and skips it otherwise.
+/// - `0x4e544` for `0x33` reads one more `u32` behind the result, so that is the
+///   one exchange whose answer carries a body past it.
+///
+/// `None` for anything that is not one of these records: it has to open with the
+/// magic, be the length the builder writes, carry the two bytes it fixes, name
+/// an exchange in the walk, and have the subscriber number in digits where the
+/// builder puts it.
 pub fn lgt_local_ens_record_response(request: &[u8]) -> Option<Vec<u8>> {
     /// What the reply is framed by, and what the request opens with.
     const REPLY_TAG: &[u8] = b"ENS";
@@ -897,8 +904,11 @@ pub fn lgt_local_ens_record_response(request: &[u8]) -> Option<Vec<u8>> {
     const VERSION: u16 = 0x79;
     /// Where the subscriber number is written, as a fixed twenty-one bytes.
     const SUBSCRIBER: usize = 13;
-    /// The exchange a 하트 purchase is, and the result that grants it.
-    const PURCHASE_EXCHANGE: u16 = 0x31;
+    /// The exchanges a 하트 purchase walks, and the result that grants each.
+    const FIRST_EXCHANGE: u16 = 0x31;
+    const LAST_EXCHANGE: u16 = 0x34;
+    /// The one exchange whose handler reads a word behind the result.
+    const WORD_EXCHANGE: u16 = 0x33;
     const GRANTED_RESULT: u16 = 0;
 
     if !request.starts_with(REQUEST_TAG) || request.len() != RECORD {
@@ -917,15 +927,21 @@ pub fn lgt_local_ens_record_response(request: &[u8]) -> Option<Vec<u8>> {
     }
 
     let exchange = word(9);
-    if exchange != PURCHASE_EXCHANGE {
+    if !(FIRST_EXCHANGE..=LAST_EXCHANGE).contains(&exchange) {
         return None;
+    }
+
+    // The result, and for the one exchange that reads further, the word behind
+    // it.
+    let mut body = Vec::from(GRANTED_RESULT.to_le_bytes());
+    if exchange == WORD_EXCHANGE {
+        body.extend_from_slice(&0u32.to_le_bytes());
     }
 
     let mut response = Vec::from(REPLY_TAG);
     response.extend_from_slice(&exchange.to_le_bytes());
-    // What follows the length is the result and nothing else.
-    response.extend_from_slice(&(size_of::<u16>() as u16).to_le_bytes());
-    response.extend_from_slice(&GRANTED_RESULT.to_le_bytes());
+    response.extend_from_slice(&(body.len() as u16).to_le_bytes());
+    response.extend_from_slice(&body);
 
     Some(response)
 }
@@ -2545,6 +2561,28 @@ mod tests {
             lgt_local_ens_record_response(&request).unwrap(),
             vec![0x45, 0x4e, 0x53, 0x31, 0x00, 0x02, 0x00, 0x00, 0x00]
         );
+
+        // The step behind it, which the capture shows going out once the first
+        // is granted, and the two behind that.
+        let mut step = blade_master_4_purchase_record();
+        step[9..11].copy_from_slice(&0x32u16.to_le_bytes());
+        assert_eq!(
+            lgt_local_ens_record_response(&step).unwrap(),
+            vec![0x45, 0x4e, 0x53, 0x32, 0x00, 0x02, 0x00, 0x00, 0x00]
+        );
+
+        // `0x4e544` reads a word behind the result for this one alone.
+        step[9..11].copy_from_slice(&0x33u16.to_le_bytes());
+        assert_eq!(
+            lgt_local_ens_record_response(&step).unwrap(),
+            vec![0x45, 0x4e, 0x53, 0x33, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        );
+
+        step[9..11].copy_from_slice(&0x34u16.to_le_bytes());
+        assert_eq!(
+            lgt_local_ens_record_response(&step).unwrap(),
+            vec![0x45, 0x4e, 0x53, 0x34, 0x00, 0x02, 0x00, 0x00, 0x00]
+        );
     }
 
     #[test]
@@ -2556,9 +2594,9 @@ mod tests {
         short.pop();
         assert_eq!(lgt_local_ens_record_response(&short), None);
 
-        // An exchange this does not answer.
+        // An exchange outside the walk.
         let mut other = blade_master_4_purchase_record();
-        other[9..11].copy_from_slice(&0x33u16.to_le_bytes());
+        other[9..11].copy_from_slice(&0x35u16.to_le_bytes());
         assert_eq!(lgt_local_ens_record_response(&other), None);
 
         // A subscriber number that is not digits.
