@@ -1565,7 +1565,7 @@ pub fn lgt_local_granted_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(vec![0xff, 0xff, length[0], length[1], response_type[0], response_type[1], 0x00])
 }
 
-/// 던파귀검사편's authentication, answered the way its own reader reads it.
+/// 던파귀검사편's opening exchange, answered the way its own readers read it.
 ///
 /// The title opens a `MC_netBillSocket` for `211.115.203.30:10012` and writes
 /// one frame before it will leave `사용자 인증`. Both directions carry the same
@@ -1602,15 +1602,38 @@ pub fn lgt_local_granted_response(request: &[u8]) -> Option<Vec<u8>> {
 /// answers 0, with no message behind it: nothing displays one on the way
 /// through, and `0xe360` copies a zero-length one happily.
 ///
-/// The payload cannot be left out altogether. `0x70a0` allocates a block only
-/// for a frame that declares more than its header, and hands `0xe3c0` a null
-/// pointer otherwise, which `0xe360` would read from - so the answer is the
-/// three bytes its reader takes and no fewer.
+/// What the title sends next, having gone on, is command `0x28a0`: one string
+/// of the pairs `0x7890` spells out -
 ///
-/// `None` for anything that is not that request: it has to declare its own
-/// length, carry the marker, be command `0x2711`, and spell two strings that
-/// end exactly where the frame does, the first of them this title's name.
-pub fn lgt_local_dnf_auth_response(request: &[u8]) -> Option<Vec<u8>> {
+/// ```text
+///   phonenum:01024417543 carrier:lgt platform:lgt_wipic app_name:DnFSwordMan
+///   external_app_version:1.0.0 ... sms:(null)
+/// ```
+///
+/// Its answer is `0x28a1`, and `0xe140` reads a longer fixed shape:
+///
+/// ```text
+/// [0]       u8  - the result
+/// [1..12]         eleven bytes it copies to a buffer nothing then reads
+/// [12..14]  u16 - a message length
+/// [14..]          the message, that many bytes
+/// ```
+///
+/// `0xb234` reads that result too, and this one is the other way round: **0**
+/// closes the socket and anything from 1 up goes on. So it answers 1, with the
+/// eleven bytes zero and no message.
+///
+/// Neither payload can be left out altogether. `0x70a0` allocates a block only
+/// for a frame that declares more than its header, and hands `0xe3c0` a null
+/// pointer otherwise, which both readers would read from - so each answer is
+/// the bytes its own reader takes and no fewer.
+///
+/// `None` for anything that is not one of those two requests: it has to declare
+/// its own length, carry the marker, be a command whose reader's shape is
+/// known, and spell strings that end exactly where the frame does - the first
+/// of the authentication request's two being this title's own name, which is
+/// what says the frame is this title's.
+pub fn lgt_local_dnf_response(request: &[u8]) -> Option<Vec<u8>> {
     /// The length, the marker and the command.
     const HEADER: usize = 8;
     const MARKER: u16 = 0xffff;
@@ -1619,52 +1642,80 @@ pub fn lgt_local_dnf_auth_response(request: &[u8]) -> Option<Vec<u8>> {
     const AUTH_REQUEST: u16 = 0x2711;
     const AUTH_ANSWER: u16 = 0x2712;
 
+    /// What `0x7890` sends after that, and `0xe140` reads the answer of.
+    const REGISTER_REQUEST: u16 = 0x28a0;
+    const REGISTER_ANSWER: u16 = 0x28a1;
+
     /// The name `0xb030` always writes first, whichever screen asked.
     const TITLE: &[u8] = b"DnFSwordMan";
 
-    /// The result `0xb234` goes on from.
-    const GRANTED: u8 = 0;
+    /// The results `0xb234` goes on from, which are opposite ends for the two.
+    const AUTH_GRANTED: u8 = 0;
+    const REGISTER_GRANTED: u8 = 1;
+
+    /// The eleven bytes `0xe140` takes between the result and the message,
+    /// and then reads nothing out of - it copies them to a stack buffer and
+    /// the message length has to land at `[12..14]` behind them.
+    const REGISTER_UNREAD: usize = 11;
 
     fn u16_at(bytes: &[u8], offset: usize) -> u16 {
         u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
+    }
+
+    /// One length-prefixed string off the front of a body.
+    fn string_at(body: &[u8]) -> Option<(&[u8], &[u8])> {
+        if body.len() < 2 {
+            return None;
+        }
+
+        let length = u16_at(body, 0) as usize;
+        body[2..].split_at_checked(length)
     }
 
     if request.len() < HEADER || u32::from_le_bytes(request[0..4].try_into().ok()?) as usize != request.len() {
         return None;
     }
 
-    if u16_at(request, 4) != MARKER || u16_at(request, 6) != AUTH_REQUEST {
+    if u16_at(request, 4) != MARKER {
         return None;
     }
 
-    // Two length-prefixed strings, ending where the frame does. The first is
-    // the title's own name, which is what says this request is this title's.
-    let mut body = &request[HEADER..];
-    for index in 0..2 {
-        if body.len() < 2 {
-            return None;
+    let body = &request[HEADER..];
+    let (answer, payload): (u16, Vec<u8>) = match u16_at(request, 6) {
+        // Two strings, ending where the frame does. The first is the title's
+        // own name, which is what says this request is this title's.
+        AUTH_REQUEST => {
+            let (name, rest) = string_at(body)?;
+            let (_, rest) = string_at(rest)?;
+
+            if name != TITLE || !rest.is_empty() {
+                return None;
+            }
+
+            (AUTH_ANSWER, vec![AUTH_GRANTED, 0, 0])
         }
+        // One string of pairs, ending where the frame does.
+        REGISTER_REQUEST => {
+            let (_, rest) = string_at(body)?;
 
-        let length = u16_at(body, 0) as usize;
-        let (name, rest) = body[2..].split_at_checked(length)?;
+            if !rest.is_empty() {
+                return None;
+            }
 
-        if index == 0 && name != TITLE {
-            return None;
+            let mut payload = vec![0u8; 1 + REGISTER_UNREAD + 2];
+            payload[0] = REGISTER_GRANTED;
+
+            (REGISTER_ANSWER, payload)
         }
+        _ => return None,
+    };
 
-        body = rest;
-    }
-
-    if !body.is_empty() {
-        return None;
-    }
-
-    let mut response = Vec::with_capacity(HEADER + 3);
-    response.extend_from_slice(&((HEADER + 3) as u32).to_le_bytes());
+    let length = HEADER + payload.len();
+    let mut response = Vec::with_capacity(length);
+    response.extend_from_slice(&(length as u32).to_le_bytes());
     response.extend_from_slice(&MARKER.to_le_bytes());
-    response.extend_from_slice(&AUTH_ANSWER.to_le_bytes());
-    response.push(GRANTED);
-    response.extend_from_slice(&0u16.to_le_bytes());
+    response.extend_from_slice(&answer.to_le_bytes());
+    response.extend_from_slice(&payload);
 
     Some(response)
 }
@@ -1695,7 +1746,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_text_record_response(request))
         .or_else(|| lgt_local_tagged_record_response(request))
         .or_else(|| lgt_local_opcode_header_response(request))
-        .or_else(|| lgt_local_dnf_auth_response(request))
+        .or_else(|| lgt_local_dnf_response(request))
 }
 
 #[cfg(test)]
@@ -2952,7 +3003,7 @@ mod tests {
         ];
         assert_eq!(request.len(), 0x29);
 
-        let response = lgt_local_dnf_auth_response(&request).unwrap();
+        let response = lgt_local_dnf_response(&request).unwrap();
 
         // Its own length, the marker, the answer's command, and the three bytes
         // `0xe360` takes: a granted result and an empty message.
@@ -2968,7 +3019,45 @@ mod tests {
         first_pass.extend_from_slice(&[0x0b, 0x00]);
         first_pass.extend_from_slice(b"DnFSwordMan");
         first_pass[0] = first_pass.len() as u8;
-        assert_eq!(lgt_local_dnf_auth_response(&first_pass).unwrap(), response);
+        assert_eq!(lgt_local_dnf_response(&first_pass).unwrap(), response);
+    }
+
+    /// The step the title takes once authentication has gone through is
+    /// answered under the command its own reader is registered at.
+    #[test]
+    fn the_step_past_that_title_s_authentication_is_answered_too() {
+        // The pairs 0x7890 spells out, as the title wrote them.
+        let pairs: &[u8] = b"  phonenum:01024417543 carrier:lgt platform:lgt_wipic app_name:DnFSwordMan sms:(null) ";
+        let mut request = Vec::new();
+        request.extend_from_slice(&((8 + 2 + pairs.len()) as u32).to_le_bytes());
+        request.extend_from_slice(&[0xff, 0xff, 0xa0, 0x28]);
+        request.extend_from_slice(&(pairs.len() as u16).to_le_bytes());
+        request.extend_from_slice(pairs);
+
+        let response = lgt_local_dnf_response(&request).unwrap();
+
+        // `0xe140` takes a result, eleven bytes it drops, and a message length
+        // at [12..14] - so the answer is fourteen bytes behind its header.
+        assert_eq!(response[0..8], [0x16, 0x00, 0x00, 0x00, 0xff, 0xff, 0xa1, 0x28]);
+        assert_eq!(response.len(), 8 + 14);
+        assert_eq!(u32::from_le_bytes(response[0..4].try_into().unwrap()) as usize, response.len());
+
+        // 0 is the result `0xb234` closes the socket on here, unlike the
+        // authentication answer, where 0 is the one it goes on from.
+        assert_eq!(response[8], 1);
+        assert_eq!(response[9..20], [0; 11]);
+        assert_eq!(response[20..22], [0, 0]);
+
+        // A string that does not end where the frame does is not that request.
+        let mut overrun = request.clone();
+        overrun[8] = 0xff;
+        assert!(lgt_local_dnf_response(&overrun).is_none());
+
+        // Nor is a frame carrying a second string behind it.
+        let mut trailing = request.clone();
+        trailing.extend_from_slice(&[0x00, 0x00]);
+        trailing[0] += 2;
+        assert!(lgt_local_dnf_response(&trailing).is_none());
     }
 
     /// A frame that is not that request is left alone, whether it is another
@@ -2983,31 +3072,31 @@ mod tests {
         // A length that is not the frame in hand.
         let mut short = request;
         short[0] = 0x28;
-        assert!(lgt_local_dnf_auth_response(&short).is_none());
+        assert!(lgt_local_dnf_response(&short).is_none());
 
         // No marker.
         let mut unmarked = request;
         unmarked[4] = 0;
-        assert!(lgt_local_dnf_auth_response(&unmarked).is_none());
+        assert!(lgt_local_dnf_response(&unmarked).is_none());
 
-        // `0x7818`'s step, which this does not know the answer to yet.
+        // `0x7890`'s later `0x50`, which this does not know the answer to yet.
         let mut next_step = request;
-        next_step[6] = 0x00;
+        next_step[6] = 0x50;
         next_step[7] = 0x00;
-        assert!(lgt_local_dnf_auth_response(&next_step).is_none());
+        assert!(lgt_local_dnf_response(&next_step).is_none());
 
         // Another title's name in the first string.
         let mut other = request;
         other[10] = b'X';
-        assert!(lgt_local_dnf_auth_response(&other).is_none());
+        assert!(lgt_local_dnf_response(&other).is_none());
 
         // A string that runs past the frame.
         let mut overrun = request;
         overrun[8] = 0xff;
-        assert!(lgt_local_dnf_auth_response(&overrun).is_none());
+        assert!(lgt_local_dnf_response(&overrun).is_none());
 
         // A header with nothing behind it.
-        assert!(lgt_local_dnf_auth_response(&[0x08, 0x00, 0x00, 0x00, 0xff, 0xff, 0x11, 0x27]).is_none());
+        assert!(lgt_local_dnf_response(&[0x08, 0x00, 0x00, 0x00, 0xff, 0xff, 0x11, 0x27]).is_none());
     }
 
     /// A message this does not know the shape of is left alone rather than
