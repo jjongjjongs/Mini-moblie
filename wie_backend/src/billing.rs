@@ -1463,6 +1463,7 @@ pub fn lgt_local_tagged_record_response(request: &[u8]) -> Option<Vec<u8>> {
 ///   quantity. Its answer at `0x47fea` takes a **`u32` and eight bytes** - the
 ///   order and the code that stands for it - and hands both straight to
 ///   `0x47b04`, which sends them back out under opcode `0xcb`.
+///
 /// - That one's answer at `0x47dd0` takes a **`u32`** and moves the title on to
 ///   `0x47b5c`, which sends opcode `0x44` as the order, the product code and the
 ///   quantity, and the code that stands for the order - four, two, two and eight
@@ -1470,6 +1471,17 @@ pub fn lgt_local_tagged_record_response(request: &[u8]) -> Option<Vec<u8>> {
 /// - That last one's answer at `0x481d6` takes **nothing** out of the body. It
 ///   releases the message, raises the title's event `5`, and writes the step
 ///   marker back to zero, which is the purchase finishing.
+///
+/// 슈퍼액션히어로3 sends one more of these once its session is open - opcode
+/// `0x32`, ninety-seven bytes of body:
+///
+/// ```text
+/// 00 66 00 32 00 00 00 ... 01 00 00 38 ... 0c b6 1d 5b ...
+/// ```
+///
+/// 엘피스's handler for that opcode, `0x48c5c`, takes a **`u32`** and keeps it
+/// at `[0x15041b8]` without comparing it against anything, so it is answered
+/// with one.
 ///
 /// None of them compares what it reads against anything, so the numbers are the
 /// shop's to issue; the eight bytes come back as a string, and the two the title
@@ -1495,6 +1507,10 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
 
     /// The library's type `5`, which carries nothing and is answered in kind.
     const SIGNAL_OPCODE: u8 = 0x01;
+
+    /// What 슈퍼액션히어로3 sends once its session is open, and `0x48c5c` reads
+    /// the answer of.
+    const REPORT_OPCODE: u8 = 0x32;
 
     /// `0x474a4`'s product code and quantity.
     const ORDER_OPCODE: u8 = 0x43;
@@ -1530,6 +1546,8 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
             (SESSION_OPCODE, Vec::new())
         }
         SIGNAL_OPCODE if body.is_empty() => (SIGNAL_OPCODE, Vec::new()),
+        // Whatever it carries, its answer is the one `u32` `0x48c5c` takes.
+        REPORT_OPCODE if !body.is_empty() => (REPORT_OPCODE, Vec::from(0u32.to_be_bytes())),
         // The product code and the quantity, and a `u32` back.
         ORDER_OPCODE if body.len() == 4 => (ORDER_OPCODE, Vec::from(ORDER.to_be_bytes())),
         // The `u16` `0x14` `0x47604` opens with, the amount, and the quantity.
@@ -3320,6 +3338,16 @@ mod tests {
 
         let response = lgt_local_opcode_header_response(&request).unwrap();
         assert_eq!(response, vec![0x00, 0x05, 0x00, 0x00, 0x00]);
+
+        // Once its session is open it sends opcode 0x32, and 0x48c5c takes a
+        // u32 out of that answer.
+        let mut report = vec![0x00, 0x66, 0x00, 0x32, 0x00];
+        report.resize(0x66, 0);
+        let answer = lgt_local_opcode_header_response(&report).unwrap();
+        assert_eq!(answer, vec![0x00, 0x09, 0x00, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00]);
+
+        // With nothing behind its header it is not that message.
+        assert!(lgt_local_opcode_header_response(&[0x00, 0x05, 0x00, 0x32, 0x00]).is_none());
 
         // Shorter than the layout names is not that opening.
         let mut clipped = request.clone();
