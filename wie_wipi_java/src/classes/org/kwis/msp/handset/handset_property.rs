@@ -72,6 +72,20 @@ impl HandsetProperty {
         let recovered;
         let value = match name.as_ref() {
             "VIBRATORLEVEL" => "0",
+            // How many steps the handset's volume control has, which is what a
+            // title divides its own scale by. 지크 reads it in the constructor
+            // of the object that owns its sound, as
+            // `Integer.parseInt(getSystemProperty("VOLUMELEVEL"))`, and there is
+            // no answer that string can be for which that call is safe: the
+            // empty string a stub returns throws NumberFormatException, and the
+            // constructor's handler for it resumes past `q = new Clip(...)`, so
+            // the static clip stays null and the first paint that reaches for it
+            // dies with a NullPointerException at NOW LOADING. Zero is no better
+            // - the title divides by this - so the answer has to be a real step
+            // count. Five is what these handsets have, and it divides 100
+            // evenly, so the title's own `(100 / steps) * step` reaches exactly
+            // full volume at its top step rather than stopping short.
+            "VOLUMELEVEL" => "5",
             "DS_LOCK" => "0",
             "PHONENUMBER" => {
                 recovered = Self::subscriber_number(jvm).await;
@@ -142,6 +156,32 @@ mod test {
     use wie_util::Result;
 
     use crate::get_protos;
+
+    /// The property a title parses as a number, so an answer it cannot parse
+    /// is caught here rather than as a `NumberFormatException` inside a title's
+    /// own constructor. It divides by this too, so zero is no answer either.
+    #[test]
+    fn the_volume_level_is_a_step_count_a_title_can_divide_by() -> Result<()> {
+        run_jvm_test(Box::new([get_protos().into()]), |jvm| async move {
+            let name: ClassInstanceRef<String> = JavaLangString::from_rust_string(&jvm, "VOLUMELEVEL").await?.into();
+            let value: ClassInstanceRef<String> = jvm
+                .invoke_static(
+                    "org/kwis/msp/handset/HandsetProperty",
+                    "getSystemProperty",
+                    "(Ljava/lang/String;)Ljava/lang/String;",
+                    (name,),
+                )
+                .await?;
+
+            let value = JavaLangString::to_rust_string(&jvm, &value.into()).await?;
+            let steps: i32 = value.parse().expect("a step count a title can parse");
+
+            assert!(steps > 0, "a title divides by the step count");
+            assert_eq!(100 % steps, 0, "a title's own (100 / steps) * step should reach full volume");
+
+            Ok(())
+        })
+    }
 
     #[test]
     fn test_set_system_property_returns_false() -> Result<()> {

@@ -45,6 +45,11 @@ pub async fn get_system_property(context: &mut dyn WIPICContext, ptr_id: WIPICWo
         "RSSILEVEL" => "30",
         "BATTERYLEVEL" => "100",
         "PHONEMODEL" => "Emulator",
+        // The handset's volume step count, answered the same here as through
+        // `HandsetProperty.getSystemProperty` so a title that reads it by
+        // either door is told the same handset. See that arm for what a title
+        // does with it.
+        "VOLUMELEVEL" => "5",
         "MAXSERIALNUM" | "MAXSOCKETNUM" => "4",
         // LGT ez-i cert.c2s DRM keys on the subscriber phone number: cert.c2s
         // encodes "<appID><phoneNumber><checksums>" encrypted with the phone
