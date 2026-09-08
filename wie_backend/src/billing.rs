@@ -2680,7 +2680,7 @@ pub fn lgt_local_tera_response(request: &[u8]) -> Option<Vec<u8>> {
 /// | 5 | 1 | result, message (`0x360e8`) | 5/2 |
 /// | 5 | 2 | result, message, a `u32` it stores (`0x36146`) | — |
 /// | 6 | 2 | result, message (`0x35b0a`) | 6/3 |
-/// | 6 | 3 | result, message, a row count (`0x35b88`) | — |
+/// | 6 | 3 | result, message, a row count and the rows (`0x35b88`) | — |
 /// | 7 | 1 | result, message, a text the title draws (`0x33b94`) | — |
 ///
 /// 0/2 is the keep-alive `0x392b8` sends on a timer of its own rather than an
@@ -2699,10 +2699,12 @@ pub fn lgt_local_tera_response(request: &[u8]) -> Option<Vec<u8>> {
 /// compares the row it is on against the count before reading anything, so
 /// nothing is read - and the same holds for 5/2's own list at `0x361a0`.
 ///
-/// Two fields here are not zero, because zero is a wrong answer rather than an
-/// empty one: 1/1's keep-alive interval, which zero makes "every tick", and
-/// 1/3's nickname, which the 창고 greets by name - see [`HERO5_PING_SECONDS`]
-/// and [`HERO5_SUBSCRIBER`].
+/// Three fields here are not zero, because zero is a wrong answer there rather
+/// than an empty one: 1/1's keep-alive interval, which zero makes "every tick";
+/// 1/3's nickname, which the 창고 greets by name; and 6/3's list, which is the
+/// purchase being handed to the bag rather than a receipt for it, so an empty
+/// one is a purchase that never arrives. See [`HERO5_PING_SECONDS`],
+/// [`HERO5_SUBSCRIBER`] and [`hero5_delivery`].
 ///
 /// `None` for everything else: the frame has to declare its own length, carry
 /// this title's service code, and be one of the steps above. The commands whose
@@ -2754,6 +2756,103 @@ fn hero5_subscriber(request: &[u8]) -> Vec<u8> {
     number[..number.len().min(HERO5_NICKNAME)].to_vec()
 }
 
+/// The table of 영웅서기5's `res/c/csv/item_18.dat`, as `0xe748` numbers them.
+///
+/// That call takes a table and a row and hands back a name; it checks the table
+/// against 0x12 and indexes a nineteen-entry jump table, one per `item_NN.dat`.
+/// 18 is the last of them and everything the shop sells is in it - every name in
+/// the three catalogues is in that file and in no other.
+const HERO5_ITEM_TABLE: u8 = 18;
+
+/// What 영웅서기5's shop hands over for each of its own product ids.
+///
+/// The catalogue is in the title, not on the wire: `res/c/csv/cash_single.dat`,
+/// `cash_network.dat` and `cash_expert.dat` carry a product id, a name, a price
+/// and an `x` and a `y`, and a purchase names the product by that id - 4 for
+/// 엘릭서(20), 18 to 21 for the four 유물함. `x` is the `item_18.dat` row the
+/// product is and `y` how many of it: 엘릭서(20) is row 34 twenty times,
+/// 작은 유물함 row 15 once, 달성의부적(5) row 9 five times. Every row of all
+/// three catalogues lines up that way, and the three agree wherever they
+/// overlap, so this is their union.
+///
+/// (product id, `item_18.dat` row, how many).
+const HERO5_SHOP_ROWS: [(u32, u8, u32); 42] = [
+    (0, 0, 1),   // 창고확장(nt)
+    (1, 1, 1),   // 프리미엄판매권
+    (2, 2, 1),   // 기간연장(7일)
+    (3, 3, 1),   // 기간제한해제
+    (4, 34, 20), // 엘릭서(20)
+    (5, 5, 1),   // 작은오브원석
+    (6, 6, 1),   // 오브원석
+    (7, 7, 1),   // 하이퍼오브
+    (8, 8, 1),   // 고급제련석
+    (9, 9, 1),   // 달성의부적
+    (10, 9, 5),  // 달성의부적(5)
+    (11, 10, 1), // 안전의부적
+    (12, 10, 5), // 안전의부적(5)
+    (13, 11, 1), // 역행의 기원
+    (14, 12, 1), // 소켓확장
+    (15, 13, 1), // 복원의 서
+    (16, 13, 3), // 복원의 서(5)
+    (17, 14, 1), // 창고 확장
+    (18, 15, 1), // 작은 유물함
+    (19, 16, 1), // 유물함
+    (20, 17, 1), // 큰 유물함
+    (21, 18, 1), // 오래된 유물함
+    (22, 19, 1), // 특성 초기화
+    (23, 20, 1), // 스탯 초기화
+    (24, 21, 1), // 초기화 세트
+    (26, 23, 1), // 부활의 부적
+    (27, 23, 5), // 부활의 부적(5)
+    (28, 24, 1), // 오토루팅
+    (29, 25, 1), // 성장의 서
+    (30, 26, 3), // 환생의 서(3)
+    (31, 27, 3), // 장갑의 서(3)
+    (32, 28, 3), // 시간의 서(3)
+    (33, 29, 3), // 집중의 서(3)
+    (34, 30, 1), // 보호의 부적(3)
+    (35, 31, 1), // 마석
+    (36, 35, 3), // 포도주(3)
+    (37, 36, 5), // 천사의 날개(5)
+    (41, 38, 1), // 환전한도증가
+    (42, 39, 1), // 워리어의 혼
+    (43, 40, 1), // 로그의 혼
+    (44, 41, 1), // 건슬링어의혼
+    (45, 42, 1), // 나이트의 혼
+];
+
+/// The list 6/3 hands the bag, for a purchase of `product`.
+///
+/// A row count and then one row each, which `0x333fc` reads as a `u32` of how
+/// many, the item table and the row in it as one byte apiece, and a name. What
+/// `0x35b88` does with a row is not draw it - `0x35ea4` hands it straight to the
+/// bag - so this list is the purchase arriving rather than a receipt for it,
+/// which is why a count of zero left the 엘릭서 paid for and undelivered.
+///
+/// The name is left empty. `0x35c1a` draws a row by asking the item table for
+/// the name at that row rather than by what the reply carried, and a zero-length
+/// blob reads nothing and moves the cursor nowhere.
+///
+/// A product this has no row for - and a 6/3 that names no product at all - is
+/// answered with an empty list rather than a guessed one. `0x35c1a` compares the
+/// row it is on against the count before reading anything, so an empty list is a
+/// list.
+fn hero5_delivery(product: Option<u32>) -> Vec<u8> {
+    let mut list = Vec::new();
+    let Some((_, row, many)) = HERO5_SHOP_ROWS.iter().find(|(id, _, _)| Some(*id) == product) else {
+        list.extend_from_slice(&0u32.to_be_bytes());
+        return list;
+    };
+
+    list.extend_from_slice(&1u32.to_be_bytes());
+    list.extend_from_slice(&many.to_be_bytes());
+    list.push(HERO5_ITEM_TABLE);
+    list.push(*row);
+    list.extend_from_slice(&0u32.to_be_bytes());
+
+    list
+}
+
 pub fn lgt_local_hero5_response(request: &[u8]) -> Option<Vec<u8>> {
     /// A length, the service code, a command and a sub-command - and the least
     /// `0x38498` will look at, which drops anything under 20 bytes.
@@ -2776,7 +2875,7 @@ pub fn lgt_local_hero5_response(request: &[u8]) -> Option<Vec<u8>> {
         (5, 1, &[0, 0]),
         (5, 2, &[0, 0, 0]),
         (6, 2, &[0, 0]),
-        (6, 3, &[0, 0, 0]),
+        (6, 3, &[0, 0]),
         (7, 1, &[0, 0, 0]),
     ];
 
@@ -2817,6 +2916,13 @@ pub fn lgt_local_hero5_response(request: &[u8]) -> Option<Vec<u8>> {
         let name = HERO5_SUBSCRIBER.lock();
         response.extend_from_slice(&(name.len() as u32).to_be_bytes());
         response.extend_from_slice(&name);
+    }
+
+    // 6/3's last field is a row count and the rows themselves - the purchase
+    // being handed over, which is what the request's own field names.
+    if (command, sub) == (6, 3) {
+        let product = request.get(HEADER..HEADER + 4).map(|id| u32::from_be_bytes(id.try_into().unwrap()));
+        response.extend_from_slice(&hero5_delivery(product));
     }
 
     let length = response.len() as u32;
@@ -2956,7 +3062,7 @@ mod tests {
         // 5/1-5/2, the shop's 6/2-6/3, the 창고's closing 7/1, and the 0/2
         // keep-alive that runs alongside all of it. The field counts are what
         // each handler reads off the reply.
-        for (command, sub, fields) in [(0, 2, 0), (1, 1, 3), (5, 1, 2), (5, 2, 3), (6, 2, 2), (6, 3, 3), (7, 1, 3)] {
+        for (command, sub, fields) in [(0, 2, 0), (1, 1, 3), (5, 1, 2), (5, 2, 3), (6, 2, 2), (7, 1, 3)] {
             let request = hero5_frame(command, sub, &[]);
             let reply = lgt_local_hero5_response(&request).unwrap_or_else(|| panic!("{command}/{sub} unanswered"));
 
@@ -2995,6 +3101,55 @@ mod tests {
         let ping = hero5_frame(0, 2, &[]);
 
         assert_eq!(lgt_local_hero5_response(&ping), Some(ping));
+    }
+
+    /// 6/3 is the purchase arriving, not a receipt for it: `0x35ea4` hands each
+    /// row of its list to the bag. An empty list is what left the 엘릭서 paid
+    /// for and never delivered.
+    #[test]
+    fn a_purchase_is_answered_with_the_item_it_bought() {
+        // The id the shop capture's own 6/2 and 6/3 carried: 엘릭서(20), which
+        // the catalogues put at row 34 of `item_18.dat`, twenty of it.
+        let reply = lgt_local_hero5_response(&hero5_frame(6, 3, &4u32.to_be_bytes())).unwrap();
+
+        assert_eq!(u32::from_be_bytes(reply[0..4].try_into().unwrap()) as usize, reply.len());
+        // Result, then an empty message, then one row.
+        assert_eq!(&reply[20..28], [0; 8]);
+        assert_eq!(u32::from_be_bytes(reply[28..32].try_into().unwrap()), 1);
+
+        // How many, the item table and the row in it, and no name.
+        assert_eq!(u32::from_be_bytes(reply[32..36].try_into().unwrap()), 20);
+        assert_eq!(reply[36], HERO5_ITEM_TABLE);
+        assert_eq!(reply[37], 34);
+        assert_eq!(&reply[38..], 0u32.to_be_bytes());
+    }
+
+    /// Every product has one row, and one row only, and every row is in the one
+    /// table `0xe748` numbers to 0x12.
+    #[test]
+    fn each_product_names_one_row_of_the_one_table_the_shop_sells_out_of() {
+        for (id, row, many) in HERO5_SHOP_ROWS {
+            let reply = lgt_local_hero5_response(&hero5_frame(6, 3, &id.to_be_bytes())).unwrap();
+
+            assert_eq!(u32::from_be_bytes(reply[28..32].try_into().unwrap()), 1, "{id}");
+            assert_eq!(u32::from_be_bytes(reply[32..36].try_into().unwrap()), many, "{id}");
+            assert_eq!(reply[37], row, "{id}");
+            assert!(many > 0 && row <= 42, "{id}");
+            assert_eq!(HERO5_SHOP_ROWS.iter().filter(|(other, _, _)| *other == id).count(), 1, "{id}");
+        }
+    }
+
+    /// A product the catalogues have no row for is an empty list rather than a
+    /// guessed one - and an empty list is still a list `0x35c1a` walks.
+    #[test]
+    fn a_product_that_is_not_in_the_catalogue_delivers_nothing() {
+        let reply = lgt_local_hero5_response(&hero5_frame(6, 3, &25u32.to_be_bytes())).unwrap();
+
+        assert_eq!(reply.len(), 32);
+        assert!(reply[20..].iter().all(|&byte| byte == 0));
+
+        // And so is a 6/3 with no product on it at all.
+        assert_eq!(lgt_local_hero5_response(&hero5_frame(6, 3, &[])).unwrap().len(), 32);
     }
 
     /// 1/3's last field is a blob, and the 창고 draws 15 bytes of it in front of
