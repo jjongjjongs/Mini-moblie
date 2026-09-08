@@ -6,7 +6,7 @@
 //! title that reaches one and is told nothing usually stops on a screen it never
 //! leaves.
 //!
-//! Eleven protocols turn up across the titles here, and a request is recognised by
+//! Twelve protocols turn up across the titles here, and a request is recognised by
 //! its own shape rather than by which title sent it. Anything that is not one of
 //! them is left unanswered rather than guessed at.
 //!
@@ -1401,6 +1401,78 @@ pub fn lgt_local_tagged_record_response(request: &[u8]) -> Option<Vec<u8>> {
 
     Some(response)
 }
+/// 엘피스's online menu, whose every message is one byte of opcode behind a
+/// five byte header.
+///
+/// The title carries its own message library at `0x64000`, and both directions
+/// go through it. `0x64984` writes a message and `0x64888` reads one, and the
+/// frame they agree on is five bytes:
+///
+/// ```text
+/// [0..2]  u16 BE - the whole message, this header counted
+/// [2]     u8
+/// [3]     u8     - the opcode
+/// [4]     u8
+/// [5..]          - the body
+/// ```
+///
+/// `0x64a88` is where every one of the writer's message kinds ends up, and it
+/// is the one place the length is written: `total = body + 5`. The reader's
+/// `0x64354` takes the same five apart, refuses a message whose declared length
+/// is not the bytes in hand, and hands `[3]` to the title's own table at
+/// `0x6d160` - two hundred and sixteen entries, one per opcode.
+///
+/// The message the menu opens with is the library's type `4`, whose body
+/// `0x64d28` lays out and whose opcode `0x64dde` fixes at zero:
+///
+/// ```text
+/// [0..2]   u16 BE - the service, which is 1006, 1017 or 1036
+/// [2..4]   u16 BE
+/// [4]      u8
+/// [5]      u8
+/// [6..26]         - the build, "Ver 1.0.4"
+/// [26..68]        - the subscriber's number
+/// [68..98]        - the handset model
+/// ```
+///
+/// Ninety-eight bytes, so a hundred and three on the wire. What comes back is
+/// read the same way and dispatched on its own opcode byte, and zero's handler
+/// at `0x488f0` reads nothing else: it switches on the screen the menu was
+/// entered from and sends that screen's next request. So the answer to the
+/// opening message is the opening message's own opcode and no body at all -
+/// five bytes that say the session stands.
+///
+/// `None` for anything that is not that message: it has to declare its own
+/// length, leave `[2]` and `[4]` clear, be opcode zero, and carry a body of the
+/// one size in one of the three services this knows.
+pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
+    /// The length, two bytes the title writes clear, and the opcode between
+    /// them.
+    const HEADER: usize = 5;
+    /// The opcode the menu opens the session under, and answers under.
+    const SESSION_OPCODE: u8 = 0;
+    /// What `0x64d28` lays out, before the header.
+    const SESSION_BODY_SIZE: usize = 98;
+
+    /// The three services `0x471f8` writes into the body's first two bytes.
+    const SERVICES: [u16; 3] = [1006, 1017, 1036];
+
+    if request.len() < HEADER || u16::from_be_bytes([request[0], request[1]]) as usize != request.len() {
+        return None;
+    }
+
+    if request[2] != 0 || request[3] != SESSION_OPCODE || request[4] != 0 {
+        return None;
+    }
+
+    let body = &request[HEADER..];
+    if body.len() != SESSION_BODY_SIZE || !SERVICES.contains(&u16::from_be_bytes([body[0], body[1]])) {
+        return None;
+    }
+
+    Some(vec![0x00, HEADER as u8, 0x00, SESSION_OPCODE, 0x00])
+}
+
 /// The granted answer to an application billing request, in the frame shape
 /// `lgt_local_purchase_success_response` establishes for the purchase
 /// transaction: the `0xffff` marker, the frame length, the request's own type
@@ -1446,6 +1518,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_major_minor_response(request))
         .or_else(|| lgt_local_text_record_response(request))
         .or_else(|| lgt_local_tagged_record_response(request))
+        .or_else(|| lgt_local_opcode_header_response(request))
 }
 
 #[cfg(test)]
@@ -2629,5 +2702,48 @@ mod tests {
         // And nothing for a request that is none of them.
         assert_eq!(response(b"hello"), None);
         assert_eq!(response(&[0u8; 64]), None);
+    }
+    /// The opening message of 엘피스's online menu is answered with its own
+    /// opcode and nothing behind it, which is what `0x488f0` needs to run the
+    /// screen's next request.
+    #[test]
+    fn a_session_opening_is_answered_with_its_own_opcode_and_no_body() {
+        let mut request = vec![0x00, 0x00, 0x00, 0x00, 0x00];
+        // The service, then the rest of what `0x64d28` lays out.
+        request.extend_from_slice(&1036u16.to_be_bytes());
+        request.resize(5 + 98, 0);
+        let whole = request.len() as u16;
+        request[0..2].copy_from_slice(&whole.to_be_bytes());
+
+        let response = lgt_local_opcode_header_response(&request).unwrap();
+
+        assert_eq!(response, vec![0x00, 0x05, 0x00, 0x00, 0x00]);
+        assert_eq!(u16::from_be_bytes([response[0], response[1]]) as usize, response.len());
+    }
+
+    /// A message this does not know the shape of is left alone rather than
+    /// answered with a frame the title would read as a session it never opened.
+    #[test]
+    fn only_the_opening_message_of_that_menu_is_answered() {
+        let mut request = vec![0x00, 0x00, 0x00, 0x00, 0x00];
+        request.extend_from_slice(&1036u16.to_be_bytes());
+        request.resize(5 + 98, 0);
+        let whole = request.len() as u16;
+        request[0..2].copy_from_slice(&whole.to_be_bytes());
+
+        // Another opcode is another service's message, whose answer is its own.
+        let mut other_opcode = request.clone();
+        other_opcode[3] = 0x14;
+        assert!(lgt_local_opcode_header_response(&other_opcode).is_none());
+
+        // A service this has not seen the body of.
+        let mut other_service = request.clone();
+        other_service[5..7].copy_from_slice(&2000u16.to_be_bytes());
+        assert!(lgt_local_opcode_header_response(&other_service).is_none());
+
+        // A length that is not the bytes in hand.
+        let mut ragged = request.clone();
+        ragged[1] = 0x66;
+        assert!(lgt_local_opcode_header_response(&ragged).is_none());
     }
 }
