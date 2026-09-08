@@ -1993,6 +1993,70 @@ pub fn lgt_local_destinia_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(response)
 }
 
+/// 블레이드마스터3's login, answered the way its own reader reads it.
+///
+/// The title opens a `MC_netBillSocket` and writes one frame, twenty-eight
+/// bytes, and waits:
+///
+/// ```text
+/// 14 00 01 00 "01031768576" 00 00 00 00 68 00 00 00 ba 02 de 24
+/// ```
+///
+/// A length and a kind, both little end first, then the body and four bytes
+/// behind it. `0x179d0` is what decides a reply has all arrived and `0x176c0`
+/// what reads it, and both pick their shape from the connection's own state at
+/// `[0x150bc8c + 8]` rather than from anything the frame carries. The state this
+/// exchange runs in reads a `u16` length - `0x17b5e`, the same shape the request
+/// is written in - where the two states above it read a `u32` one.
+///
+/// `0x176c0` then wants three fields and compares two of them:
+///
+/// ```text
+/// u16 - 4, in both of the states that read a length this way
+/// u16 - the kind: 1 where the reply's third field is kept, 2 where it must be 0
+/// ?   - the third field, which the first of those two stores at [0x150002c+0x18]
+/// ```
+///
+/// So the answer is that `4`, the kind the request came under, and zeroes -
+/// which the state that keeps the third field keeps as nothing, and the state
+/// that checks it accepts.
+///
+/// `None` for anything that is not that login: it has to declare its own length,
+/// be that kind, and carry the subscriber's number where this one carries it.
+pub fn lgt_local_blademaster3_response(request: &[u8]) -> Option<Vec<u8>> {
+    /// The length and the kind.
+    const HEADER: usize = 4;
+    /// What the title writes, and what `0x176c0` reads the answer of.
+    const LOGIN_REQUEST: usize = 28;
+    const LOGIN_BODY: u16 = 20;
+    const LOGIN_KIND: u16 = 1;
+
+    /// The first field `0x17710` and `0x17740` both insist on.
+    const MARK: u16 = 4;
+    /// The kind, the third field and the four bytes every frame ends with.
+    const ANSWER_BODY: u16 = 4;
+
+    fn u16_le(bytes: &[u8], offset: usize) -> u16 {
+        u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
+    }
+
+    if request.len() != LOGIN_REQUEST || u16_le(request, 0) != LOGIN_BODY || u16_le(request, 2) != LOGIN_KIND {
+        return None;
+    }
+
+    if !request[HEADER].is_ascii_digit() {
+        return None;
+    }
+
+    let mut response = Vec::with_capacity(12);
+    response.extend_from_slice(&ANSWER_BODY.to_le_bytes());
+    response.extend_from_slice(&MARK.to_le_bytes());
+    response.extend_from_slice(&LOGIN_KIND.to_le_bytes());
+    response.extend_from_slice(&[0u8; 6]);
+
+    Some(response)
+}
+
 /// The answer to a billing request, whichever of these protocols it is in.
 ///
 /// Tried in order of how specific each shape is: the `0xffff`-framed message,
@@ -2022,6 +2086,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_dnf_response(request))
         .or_else(|| lgt_local_biochronicle_response(request))
         .or_else(|| lgt_local_destinia_response(request))
+        .or_else(|| lgt_local_blademaster3_response(request))
 }
 
 #[cfg(test)]
@@ -3596,6 +3661,50 @@ mod tests {
 
         // And a frame of another size under the same kind.
         assert!(lgt_local_destinia_response(&request[..70]).is_none());
+    }
+
+    /// 블레이드마스터3's login is answered with the three fields its own reader
+    /// takes.
+    #[test]
+    fn the_login_blademaster3_waits_on_is_answered() {
+        // The frame the title wrote, byte for byte.
+        let mut request = vec![0x14, 0x00, 0x01, 0x00];
+        request.extend_from_slice(b"01031768576\0");
+        request.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x68, 0x00, 0x00, 0x00, 0xba, 0x02, 0xde, 0x24]);
+        assert_eq!(request.len(), 28);
+
+        let response = lgt_local_blademaster3_response(&request).unwrap();
+
+        // The `4` both of the states that read a length this way insist on,
+        // the kind the request came under, and zeroes.
+        assert_eq!(response, vec![0x04, 0x00, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    /// A frame that is not that login is left alone.
+    #[test]
+    fn only_blademaster3_s_login_is_answered() {
+        let mut request = vec![0x14, 0x00, 0x01, 0x00];
+        request.extend_from_slice(b"01031768576\0");
+        request.extend_from_slice(&[0u8; 12]);
+        assert!(lgt_local_blademaster3_response(&request).is_some());
+
+        // A kind this does not know the reader of.
+        let mut other_kind = request.clone();
+        other_kind[2] = 3;
+        assert!(lgt_local_blademaster3_response(&other_kind).is_none());
+
+        // A length that is not the one this login declares.
+        let mut mislaid = request.clone();
+        mislaid[0] = 0x12;
+        assert!(lgt_local_blademaster3_response(&mislaid).is_none());
+
+        // Where the subscriber's number goes, something that is not one.
+        let mut lettered = request.clone();
+        lettered[4] = b'x';
+        assert!(lgt_local_blademaster3_response(&lettered).is_none());
+
+        // And a frame of another size.
+        assert!(lgt_local_blademaster3_response(&request[..27]).is_none());
     }
 
     /// A message this does not know the shape of is left alone rather than
