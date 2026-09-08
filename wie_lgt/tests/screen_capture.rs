@@ -6,7 +6,7 @@ use std::{
     },
 };
 
-use test_utils::{TestPlatform, TestPlatformEvent};
+use test_utils::{TestPlatform, TestPlatformEvent, TestPlatformState};
 use wie_backend::{AudioSink, DatabaseRepository, Emulator, Event, Filesystem, Instant, Options, Platform, Screen, canvas::Image, extract_zip};
 use wie_util::Result;
 
@@ -461,6 +461,18 @@ fn capture_legend_of_master() {
 /// written ~300 ticks after each press so every step's screen is visible, plus
 /// `final.ppm` at the end.
 fn run_scripted(label: &str, archive: &[u8], ticks_limit: u32, script: &[(u32, wie_backend::KeyCode)]) {
+    run_scripted_over(label, archive, ticks_limit, script, TestPlatformState::default());
+}
+
+/// The same run, over storage that may already hold what an earlier run wrote,
+/// and handing that storage back for the run after this one.
+fn run_scripted_over(
+    label: &str,
+    archive: &[u8],
+    ticks_limit: u32,
+    script: &[(u32, wie_backend::KeyCode)],
+    state: TestPlatformState,
+) -> TestPlatformState {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_writer(std::io::stderr)
@@ -473,12 +485,15 @@ fn run_scripted(label: &str, archive: &[u8], ticks_limit: u32, script: &[(u32, w
         ..Default::default()
     };
 
+    let inner = TestPlatform::with_state_and_event_handler(state, move |event| match event {
+        TestPlatformEvent::Stdout(buf) => eprint!("[stdout] {}", String::from_utf8_lossy(&buf)),
+        TestPlatformEvent::OpenUrl(url) => eprintln!("[open-url] {url}"),
+        TestPlatformEvent::Exit => exited_clone.store(true, Ordering::SeqCst),
+    });
+    let state = inner.state();
+
     let platform = Box::new(CapturePlatform {
-        inner: TestPlatform::with_event_handler(move |event| match event {
-            TestPlatformEvent::Stdout(buf) => eprint!("[stdout] {}", String::from_utf8_lossy(&buf)),
-            TestPlatformEvent::OpenUrl(url) => eprintln!("[open-url] {url}"),
-            TestPlatformEvent::Exit => exited_clone.store(true, Ordering::SeqCst),
-        }),
+        inner,
         screen: screen.clone(),
         clock: Arc::new(AtomicU64::new(0)),
     });
@@ -558,13 +573,20 @@ fn run_scripted(label: &str, archive: &[u8], ticks_limit: u32, script: &[(u32, w
     }
     let c = screen.captured.lock().unwrap();
     eprintln!("[{label}] {ticks} ticks, {} frames, last sig={:016x}", c.frames, c.last_sig);
+
+    state
 }
 
 /// Parses `WIE_SCRIPT` (`tick:KEY,tick:KEY,...`) into the press schedule
 /// `run_scripted` takes.
 fn script_from_env() -> Vec<(u32, wie_backend::KeyCode)> {
-    std::env::var("WIE_SCRIPT")
-        .expect("set WIE_SCRIPT=tick:KEY,tick:KEY,...")
+    script_from_env_named("WIE_SCRIPT")
+}
+
+/// The same, out of whichever variable names the schedule.
+fn script_from_env_named(name: &str) -> Vec<(u32, wie_backend::KeyCode)> {
+    std::env::var(name)
+        .unwrap_or_else(|_| panic!("set {name}=tick:KEY,tick:KEY,..."))
         .split(',')
         .filter(|s| !s.trim().is_empty())
         .map(|pair| {
@@ -591,6 +613,55 @@ fn capture_scripted_archive() {
         .map_or("archive", |x| x.to_str().unwrap_or("archive"));
 
     run_scripted(label, &archive, ticks, &script_from_env());
+}
+
+/// Launches the archive at `WIE_ARCHIVE` twice over one handset's storage, so
+/// a title that only gets going on its second run can be captured.
+///
+/// 던파귀검사편 is the case this exists for: its first run builds a cache, parks
+/// on `속도 최적화를 위해 종료 후 재실행 해주시기 바랍니다`, and goes no
+/// further; the run that finds that cache is the one that reaches `사용자 인증`
+/// and opens its billing socket. `WIE_SCRIPT` drives the first launch and
+/// `WIE_SCRIPT2` the second, and only the second launch's frames are dumped.
+#[test]
+#[ignore = "diagnostic"]
+fn capture_scripted_archive_twice() {
+    let Ok(path) = std::env::var("WIE_ARCHIVE") else {
+        eprintln!("Set WIE_ARCHIVE to an archive, WIE_SCRIPT/WIE_SCRIPT2 to tick:KEY,...");
+        return;
+    };
+    let archive = std::fs::read(&path).expect("archive");
+    let ticks: u32 = std::env::var("WIE_TICKS").ok().and_then(|x| x.parse().ok()).unwrap_or(4000);
+    let ticks2: u32 = std::env::var("WIE_TICKS2").ok().and_then(|x| x.parse().ok()).unwrap_or(ticks);
+    let label = std::path::Path::new(&path)
+        .file_stem()
+        .map_or("archive", |x| x.to_str().unwrap_or("archive"));
+
+    let first = script_from_env();
+    let second = std::env::var("WIE_SCRIPT2").map_or_else(|_| first.clone(), |_| script_from_env_named("WIE_SCRIPT2"));
+
+    // The first launch writes; its frames are not what this is for, so the
+    // dump directories are left to the second.
+    let state = {
+        let dump = std::env::var("WIE_FDUMP_DIR").ok();
+        let shot = std::env::var("WIE_SHOT_DIR").ok();
+        unsafe {
+            std::env::remove_var("WIE_FDUMP_DIR");
+            std::env::remove_var("WIE_SHOT_DIR");
+        }
+        let state = run_scripted_over(&format!("{label} run 1"), &archive, ticks, &first, TestPlatformState::default());
+        unsafe {
+            if let Some(dump) = dump {
+                std::env::set_var("WIE_FDUMP_DIR", dump);
+            }
+            if let Some(shot) = shot {
+                std::env::set_var("WIE_SHOT_DIR", shot);
+            }
+        }
+        state
+    };
+
+    run_scripted_over(&format!("{label} run 2"), &archive, ticks2, &second, state);
 }
 
 /// Drives LoM with a scripted key sequence from `WIE_SCRIPT` (`tick:KEY,...`),

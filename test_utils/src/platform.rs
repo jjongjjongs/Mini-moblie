@@ -21,11 +21,23 @@ pub enum TestPlatformEvent {
     Exit,
 }
 
+/// The storage a `TestPlatform` keeps, held apart from the platform itself.
+///
+/// A handset's files and databases outlive the application that wrote them, and
+/// some titles depend on that: 던파귀검사편 writes a cache on its first run and
+/// asks to be restarted, and only the run that finds that cache goes on to
+/// authenticate. Handing the same state to a second `TestPlatform` is how that
+/// second run gets captured.
+#[derive(Clone, Default)]
+pub struct TestPlatformState {
+    fs: Arc<MemoryFilesystem>,
+    db: Arc<MemoryDatabaseRepository>,
+}
+
 pub struct TestPlatform {
     screen: TestScreen,
     event_handler: Option<Box<dyn Fn(TestPlatformEvent) + Sync + Send>>,
-    fs: Arc<MemoryFilesystem>,
-    db: Arc<MemoryDatabaseRepository>,
+    state: TestPlatformState,
     system_information: HashMap<String, String>,
 }
 
@@ -40,8 +52,7 @@ impl TestPlatform {
         Self {
             screen: TestScreen,
             event_handler: None,
-            fs: Arc::new(MemoryFilesystem::default()),
-            db: Arc::new(MemoryDatabaseRepository::default()),
+            state: TestPlatformState::default(),
             system_information: HashMap::new(),
         }
     }
@@ -53,10 +64,28 @@ impl TestPlatform {
         Self {
             screen: TestScreen,
             event_handler: Some(Box::new(event_handler)),
-            fs: Arc::new(MemoryFilesystem::default()),
-            db: Arc::new(MemoryDatabaseRepository::default()),
+            state: TestPlatformState::default(),
             system_information: HashMap::new(),
         }
+    }
+
+    /// The same, over storage that already exists - so a second run sees what
+    /// the first one wrote.
+    pub fn with_state_and_event_handler<T>(state: TestPlatformState, event_handler: T) -> Self
+    where
+        T: Fn(TestPlatformEvent) + Sync + Send + 'static,
+    {
+        Self {
+            screen: TestScreen,
+            event_handler: Some(Box::new(event_handler)),
+            state,
+            system_information: HashMap::new(),
+        }
+    }
+
+    /// The storage this platform is over, to hand to the next one.
+    pub fn state(&self) -> TestPlatformState {
+        self.state.clone()
     }
 
     pub fn with_system_information(mut self, key: &str, value: &str) -> Self {
@@ -76,11 +105,11 @@ impl Platform for TestPlatform {
     }
 
     fn database_repository(&self) -> &dyn DatabaseRepository {
-        self.db.as_ref()
+        self.state.db.as_ref()
     }
 
     fn filesystem(&self) -> &dyn Filesystem {
-        self.fs.as_ref()
+        self.state.fs.as_ref()
     }
 
     fn audio_sink(&self) -> Box<dyn AudioSink> {
@@ -123,7 +152,7 @@ type DatabaseKey = (String, String);
 type DatabaseStore = HashMap<DatabaseKey, HashMap<RecordId, Vec<u8>>>;
 
 #[derive(Default)]
-struct MemoryDatabaseRepository {
+pub(crate) struct MemoryDatabaseRepository {
     store: Arc<Mutex<DatabaseStore>>,
 }
 
