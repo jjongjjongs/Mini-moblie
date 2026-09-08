@@ -1088,11 +1088,11 @@ pub fn lgt_local_big_endian_record_response(request: &[u8]) -> Option<Vec<u8>> {
 /// what [`hero4_deposit`] has been handed and [`hero4_withdraw`] has not taken
 /// back, and the two halves of a purchase are granted.
 ///
-/// The item a purchase delivers is a record of the random box, drawn by
-/// [`next_box_draw`] - four of the sixteen rows are the boxes themselves, and
-/// the plain-item answer put one of those in the bag instead of opening it. Both
-/// messages are left empty, because there is no server here to have written one
-/// and the granted path draws its own notice rather than the reply's.
+/// What a purchase delivers is decided by [`hero4_delivery`]: the four box rows
+/// by a draw over the box table, and the other twelve by the `0xff` that hands
+/// over the row's own item. Both messages are left empty, because there is no
+/// server here to have written one and the granted path draws its own notice
+/// rather than the reply's.
 ///
 /// `None` for anything else, the keep-alive included: the frame has to declare
 /// its own length, and the command pair has to be one of the four whose answer
@@ -1110,10 +1110,6 @@ pub fn lgt_local_major_minor_response(request: &[u8]) -> Option<Vec<u8>> {
     /// The status every `major 5` handler reads at `[6]`, and the only one that
     /// is not an error box.
     const GRANTED: u8 = 1;
-    /// How many records `/ITM/DAT/_ITM_CASH_RANOMBOX` holds - the range the
-    /// drawn index has to stay inside. See [`next_box_draw`].
-    const BOX_RECORDS: u8 = 23;
-
     let (major, minor) = (request[4], request[5]);
     let body: Vec<u8> = match (major, minor) {
         (1, 0x01) | (1, 0x3d) | (1, 0x3e) => Vec::new(),
@@ -1129,9 +1125,7 @@ pub fn lgt_local_major_minor_response(request: &[u8]) -> Option<Vec<u8>> {
         (5, 0x14) => vec![0, 0, 0, 0],
         // Charged. The message is at `[8]`, empty, and unread on this path.
         (5, 0x42) => vec![GRANTED, 0, 0, 0],
-        // Delivered. `[7]` is how far past the message the item byte sits, so
-        // the empty message takes the one byte and the drawn record follows it.
-        (5, 0x40) => vec![GRANTED, 1, 0, next_box_draw(BOX_RECORDS)],
+        (5, 0x40) => hero4_delivery(&request[HEADER..])?,
         _ => return None,
     };
 
@@ -1145,7 +1139,83 @@ pub fn lgt_local_major_minor_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(response)
 }
 
-/// Which record of 영웅서기4's random box the next purchase draws.
+/// Which stretch of `/ITM/DAT/_ITM_CASH_RANOMBOX` each 보물함 draws from.
+///
+/// Keyed by the price, because that is what the delivery carries back. Four of
+/// [`hero4_catalogue`]'s sixteen rows are the boxes, and they are the only rows
+/// priced in five hundreds - the other twelve top out at 500 - so a price of
+/// 1500 upward names one box and nothing else.
+///
+/// The table it draws from is in three parts, and the parts are what the
+/// stretches follow:
+///
+/// ```text
+///  0..7   the consumable bundles: 30..50 엘릭서, 3..6 부활의서, 2..5 고급제련석
+///  7..17  the four-piece 투구/갑옷/장갑/신발 sets, levels 15-20 up to 50-60
+/// 17..23  the 검/건/스태프 sets, over the same level bands
+/// ```
+///
+/// **How the carrier's server weighted a box is not in the archive.** The table
+/// is the title's own and every record here is one of its twenty-three, but
+/// which of them each box could draw was the server's to decide and it is gone.
+/// So: the cheapest box draws the consumables, the dearest draws the weapon
+/// sets, and the two between them span the middle - dearer is further up the
+/// table, which is the one thing the prices themselves say.
+const HERO4_BOX_DRAWS: [(u32, u8, u8); 4] = [
+    // 작은보물함, 1500.
+    (1500, 0, 7),
+    // 보물함, 2000.
+    (2000, 0, 17),
+    // 큰보물함, 2500.
+    (2500, 7, 23),
+    // 오래된보물함, 3000.
+    (3000, 17, 23),
+];
+
+/// What answers 영웅서기4 taking delivery of what it just paid for.
+///
+/// `0x5e9e0` writes `5/0x40` behind the charge: eight bytes of the row's own
+/// `+0x254` and then four of its `+0x60`, which `0x5e1d8` filled from bytes 21
+/// to 25 of the catalogue row - the price this side priced it at. The `+0x254`
+/// block is zero for every row [`hero4_catalogue`] lays out, so the price is the
+/// whole of what names which row was bought.
+///
+/// `0x5e882` reads `[6]` as the status, `[7]` as how far past the message the
+/// item byte sits, and that byte as either `0xff` - put the row's own item in the
+/// bag - or an index into `/ITM/DAT/_ITM_CASH_RANOMBOX`, which `0x2544c` opens.
+///
+/// So only the four rows [`HERO4_BOX_DRAWS`] names are answered with a draw.
+/// Everything else is answered `0xff` and hands over what the shop said it was
+/// selling, which is what buying 엘릭서 or 소켓확장 was always supposed to do -
+/// answering those with a draw as well turned every purchase into a box.
+///
+/// `None` for a frame that is not the length this message is.
+fn hero4_delivery(bought: &[u8]) -> Option<Vec<u8>> {
+    /// The status `0x5e882` reads at `[6]`.
+    const GRANTED: u8 = 1;
+    /// The one item byte that is not an index: hand over the row's own item.
+    const OWN_ITEM: u8 = 0xff;
+    /// The row's `+0x254` and then its `+0x60`.
+    const DELIVERY_REQUEST: usize = 8 + 4;
+    const PRICE_AT: usize = 8;
+
+    if bought.len() != DELIVERY_REQUEST {
+        return None;
+    }
+
+    let price = u32::from_le_bytes([bought[PRICE_AT], bought[PRICE_AT + 1], bought[PRICE_AT + 2], bought[PRICE_AT + 3]]);
+
+    let item = match HERO4_BOX_DRAWS.iter().find(|(paid, _, _)| *paid == price) {
+        Some(&(_, from, to)) => from + next_box_draw(to - from),
+        None => OWN_ITEM,
+    };
+
+    // `[7]` is how far past the message the item byte sits, so the empty message
+    // takes the one byte and the item follows it.
+    Some(vec![GRANTED, 1, 0, item])
+}
+
+/// How far into a box's stretch of the table the next purchase draws.
 ///
 /// The item byte in a `5/0x40` delivery is an index into
 /// `/ITM/DAT/_ITM_CASH_RANOMBOX`, and `0xff` is the one value that is not: it
@@ -1174,11 +1244,11 @@ pub fn lgt_local_major_minor_response(request: &[u8]) -> Option<Vec<u8>> {
 /// ```
 ///
 /// Which record the carrier's server drew, and how it weighted them, is not
-/// something the archive knows - so draw uniformly over the twenty-three, which
-/// is the whole table and nothing outside it. The sequence is a step of a
-/// xorshift rather than a counter so consecutive purchases are not the table in
-/// order, and it is deterministic within a run, which is what lets a test say
-/// what it does.
+/// something the archive knows - so draw uniformly over the stretch
+/// [`HERO4_BOX_DRAWS`] gives the box, which is inside the table and nowhere
+/// else. The sequence is a step of a xorshift rather than a counter so
+/// consecutive purchases are not the table in order, and it is deterministic
+/// within a run, which is what lets a test say what it does.
 fn next_box_draw(records: u8) -> u8 {
     use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -2977,6 +3047,22 @@ mod tests {
         frame
     }
 
+    /// The sixteen prices [`hero4_catalogue`] lays out, read back out of the rows
+    /// it writes rather than restated here.
+    fn hero4_catalogue_prices() -> Vec<u32> {
+        const ROW: usize = 37;
+
+        let body = super::hero4_catalogue();
+        let rows = u16::from_le_bytes([body[2], body[3]]) as usize;
+
+        (0..rows)
+            .map(|index| {
+                let row = &body[4 + index * ROW..4 + (index + 1) * ROW];
+                u32::from_le_bytes([row[21], row[22], row[23], row[24]])
+            })
+            .collect()
+    }
+
     #[test]
     fn a_length_prefixed_command_is_answered_the_way_its_dispatcher_reads_it() {
         use super::lgt_local_major_minor_response;
@@ -3008,13 +3094,40 @@ mod tests {
         assert_eq!(response[6], 1);
         assert_eq!(response[8], 0);
 
-        let response = lgt_local_major_minor_response(&hero_lore_frame(5, 0x40, &[0; 12])).unwrap();
-        assert_eq!((response[4], response[5]), (5, 0x40));
-        assert_eq!(response[6], 1);
-        // The item byte sits `[7]` past the message, and names a box record.
-        let offset = response[7] as usize;
-        assert_eq!(response[8], 0);
-        assert!(response[8 + offset] < 23, "{}", response[8 + offset]);
+        // The delivery, which carries the row's own `+0x254` and the price this
+        // side priced it at.
+        let delivered = |price: u32| {
+            let mut body = [0u8; 12];
+            body[8..].copy_from_slice(&price.to_le_bytes());
+            let response = lgt_local_major_minor_response(&hero_lore_frame(5, 0x40, &body)).unwrap();
+            assert_eq!((response[4], response[5]), (5, 0x40));
+            assert_eq!(response[6], 1);
+            // The item byte sits `[7]` past the message.
+            let offset = response[7] as usize;
+            assert_eq!(response[8], 0);
+            response[8 + offset]
+        };
+
+        // The four box rows draw inside their own stretch of the table, and
+        // nothing outside it.
+        for (paid, from, to) in super::HERO4_BOX_DRAWS {
+            for _ in 0..64 {
+                let drawn = delivered(paid);
+                assert!((from..to).contains(&drawn), "{paid} drew {drawn}, outside {from}..{to}");
+            }
+        }
+
+        // Every other row hands over what the shop said it was selling. Answering
+        // these with a draw as well turned every purchase into a box.
+        for (index, price) in hero4_catalogue_prices().into_iter().enumerate() {
+            if HERO4_BOX_DRAWS.iter().any(|(paid, _, _)| *paid == price) {
+                continue;
+            }
+            assert_eq!(delivered(price), 0xff, "row {index} at {price}");
+        }
+
+        // A frame that is not the length this message is.
+        assert_eq!(lgt_local_major_minor_response(&hero_lore_frame(5, 0x40, &[0; 8])), None);
 
         // And the catalogue.
         let response = lgt_local_major_minor_response(&hero_lore_frame(5, 0x3f, &[0])).unwrap();
