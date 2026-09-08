@@ -5,11 +5,11 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::mem::size_of;
+use core::mem::{offset_of, size_of};
 
 use java_runtime::classes::java::util::Vector;
 use jvm::{ClassInstanceRef, Jvm, runtime::JavaLangString};
-use wipi_types::ktf::java::WIPIJBInterface;
+use wipi_types::ktf::{InitParam2, java::WIPIJBInterface};
 
 use wie_core_arm::{Allocator, ArmCore, EmulatedFunction, ResultWriter, SvcId};
 use wie_jvm_support::JvmSupport;
@@ -116,11 +116,11 @@ async fn get_java_method(core: &mut ArmCore, _: &mut (), ptr_class: u32, ptr_ful
 
     tracing::debug!("get_java_method({ptr_class:#x}, {fullname})");
 
-    // ptr_class might be vtable
+    // ptr_class can also be a JVM-context-relative vtable reference.
     let first_item: u32 = read_generic(core, ptr_class)?;
     let method = if first_item != ptr_class + 4 {
-        // ptr_class is pointer to vtable
-        let vtable = JavaVtable::from_raw(core, first_item);
+        let ptr_vtable: u32 = read_generic(core, ptr_class + offset_of!(InitParam2, ptr_java_vtables) as u32)?;
+        let vtable = JavaVtable::from_raw(core, ptr_vtable);
         let method = vtable.find_method(&fullname.name, &fullname.descriptor)?;
 
         if method.is_none() {
@@ -176,21 +176,19 @@ async fn register_class(core: &mut ArmCore, jvm: &mut Jvm, ptr_class: u32) -> Re
 
     let class: JavaClassDefinition = KtfJvmSupport::class_from_raw(core, ptr_class);
     let class_name = class.name()?;
-    if jvm.has_class(&class_name) {
-        return Ok(());
+    if !jvm.has_class(&class_name) {
+        let ktf_class_loader = jvm
+            .get_static_field("net/wie/KtfClassLoader", "instance", "Lnet/wie/KtfClassLoader;")
+            .await
+            .unwrap();
+
+        let result = jvm.register_class(Box::new(class), Some(ktf_class_loader)).await;
+        if let Err(x) = result {
+            return Err(JvmSupport::to_wie_err(jvm, x).await);
+        }
     }
 
-    let ktf_class_loader = jvm
-        .get_static_field("net/wie/KtfClassLoader", "instance", "Lnet/wie/KtfClassLoader;")
-        .await
-        .unwrap();
-
-    let result = jvm.register_class(Box::new(class), Some(ktf_class_loader)).await;
-    if let Err(x) = result {
-        return Err(JvmSupport::to_wie_err(jvm, x).await);
-    }
-
-    // TODO we shouldn't resolve again.
+    // KTF AOT also calls this entry point to initialize classes before static field access.
     let class = jvm.resolve_class(&class_name).await.unwrap();
     jvm.ensure_initialized(&class).await.unwrap();
 
