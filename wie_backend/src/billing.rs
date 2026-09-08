@@ -2214,42 +2214,53 @@ pub fn lgt_local_id_framed_response(request: &[u8]) -> Option<Vec<u8>> {
 /// The reply it waits for is not that shape at all. Its receive is a two-step
 /// state machine at `0x128d10`: state 4 reads exactly four bytes, state 5 reads
 /// those four back as a `u32` little-endian through `0x2847c` and waits for that
-/// many more. So an answer is a length and a body, and the body is what
-/// `0x1282ea` reads:
+/// many more. So an answer is a length and a body.
 ///
-/// - `[0]` is `0x18` on anything the server accepted. Anything else sets the
-///   state that draws `연결 상태가 원활하지 않습니다`.
-/// - `[1]` picks between the two accepted outcomes: zero draws `서버에 저장된
-///   데이터가 없습니다`, and anything else takes the quiet path at `0x128458`
-///   that draws no notice at all and lets the shop carry on.
+/// What the body has to say is not one thing. `0x118e5e` jumps through a table
+/// at `0x177f44`, indexed by the transaction the title set before it wrote, and
+/// each entry opens by comparing the body's first byte against the one reply
+/// that transaction takes - anything else lands on `연결 상태가 원활하지
+/// 않습니다`. `0x11f854` is the one the shop takes: it sets the transaction to
+/// `0x78` and the request byte to `0x14`, which is the `[3]` of the record on
+/// the wire. Index `0x78 - 0x64` is `0x119208`, and that handler wants a `3`.
 ///
-/// So the answer is a two-byte body saying accepted, and nothing else - the
-/// title already knows which item it asked for, and the granted path draws its
-/// own screen rather than the reply's.
+/// Behind the `3` it reads a count as a `u32` little-endian and then that many
+/// 24-byte rows, each carrying an eleven-character item code. Answered with a
+/// count of none it sets the flag at `0x150fe0d` that says the exchange
+/// succeeded and goes on, which is the whole of what a purchase needs from this
+/// side: the title already knows the item it asked for, and the granted path
+/// draws its own screen rather than the reply's.
 ///
 /// `None` for anything that is not that record: it has to carry the tag, be the
-/// length this message is, and name an app id where this one does.
+/// length this message is, name an app id where this one does, and be the one
+/// request byte whose answer is known. Another of this title's transactions
+/// takes a different first byte, and answering it with this one would be
+/// answering it wrongly.
 pub fn lgt_local_tera_response(request: &[u8]) -> Option<Vec<u8>> {
     const TAG: &[u8] = b"LGT";
     /// The whole of the purchase record, header and both fixed-width fields.
     const PURCHASE_REQUEST: usize = 111;
+    /// The request byte at `[3]`, which is the transaction the shop set.
+    const PURCHASE_AT: usize = 3;
+    const PURCHASE: u8 = 0x14;
     /// Where the item field starts, and the app id at the head of it.
     const APP_ID_AT: usize = 14;
     const APP_ID_LEN: usize = 8;
 
-    /// What `0x1282f2` reads as "the server took it".
-    const ACCEPTED: u8 = 0x18;
-    /// The second byte's quiet outcome - zero is the one that draws a notice.
-    const NOTHING_TO_SAY: u8 = 1;
+    /// What `0x119208` takes as its own reply, and nothing else.
+    const DELIVERED: u8 = 3;
 
-    if request.len() != PURCHASE_REQUEST || !request.starts_with(TAG) {
+    if request.len() != PURCHASE_REQUEST || !request.starts_with(TAG) || request[PURCHASE_AT] != PURCHASE {
         return None;
     }
     if !request[APP_ID_AT..APP_ID_AT + APP_ID_LEN].iter().all(u8::is_ascii_hexdigit) {
         return None;
     }
 
-    let body = [ACCEPTED, NOTHING_TO_SAY];
+    let mut body = Vec::with_capacity(5);
+    body.push(DELIVERED);
+    // The rows behind the count, of which there are none to send.
+    body.extend_from_slice(&0u32.to_le_bytes());
 
     let mut response = Vec::with_capacity(4 + body.len());
     response.extend_from_slice(&(body.len() as u32).to_le_bytes());
@@ -2324,9 +2335,9 @@ mod tests {
         let reply = lgt_local_tera_response(&tera_purchase_request()).unwrap();
 
         // The four bytes its state 4 reads, as the u32 its state 5 makes of them.
-        assert_eq!(u32::from_le_bytes([reply[0], reply[1], reply[2], reply[3]]) as usize, 2);
-        // Accepted, and the outcome that draws no notice of its own.
-        assert_eq!(&reply[4..], &[0x18, 0x01]);
+        assert_eq!(u32::from_le_bytes([reply[0], reply[1], reply[2], reply[3]]) as usize, 5);
+        // The reply `0x119208` takes, and a count of no rows behind it.
+        assert_eq!(&reply[4..], &[0x03, 0x00, 0x00, 0x00, 0x00]);
         assert_eq!(response(&tera_purchase_request()), Some(reply));
     }
 
@@ -2342,6 +2353,12 @@ mod tests {
         let mut unnamed = tera_purchase_request();
         unnamed[14] = 0;
         assert_eq!(lgt_local_tera_response(&unnamed), None);
+
+        // Another transaction of this title's, whose handler takes a different
+        // first byte than the one this answers with.
+        let mut other = tera_purchase_request();
+        other[3] = 0x1e;
+        assert_eq!(lgt_local_tera_response(&other), None);
     }
 
     #[test]
