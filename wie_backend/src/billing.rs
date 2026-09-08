@@ -1898,6 +1898,75 @@ pub fn lgt_local_biochronicle_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(response)
 }
 
+/// 데스티니아's certificate, answered the way its own reader reads it.
+///
+/// The title opens a `MC_netBillSocket` and writes one frame, seventy-one
+/// bytes, before it will go on:
+///
+/// ```text
+/// 47 00 0a 01 "01046119269" ... "Emulator" ... "1.0.1" ... 38 50 00 00 ...
+/// ```
+///
+/// Its frames carry a four-byte header, both fields little end first - the
+/// length, counting the header, and then the kind. `0x3290` is the one place a
+/// reply's is read: it takes the length at `[0..2]`, keeps the kind at `[2..4]`,
+/// subtracts the four it already holds, and reads that many more before handing
+/// the message to `0x7ab0`.
+///
+/// That handler takes a **signed byte** off the front of the body and stops on
+/// a negative one; then it switches on the kind, and `0x010b` - the request's
+/// kind and one - is the one that goes on. It reads **forty bytes** and then
+/// **one more**, and does not check the forty against anything: `0x794c` lays
+/// them beside twelve bytes of its own and four more, runs the lot through
+/// `0x7858`, and writes it to `certi.crc`. What it returns is whether that file
+/// took more than nothing, not whether the bytes were right.
+///
+/// So the answer is a granted zero, forty bytes for the title to keep, and the
+/// byte behind them - which picks between two states the title goes on in, and
+/// is zero here for the plainer of the two.
+///
+/// `None` for anything that is not that request: it has to declare its own
+/// length, be kind `0x010a`, and carry the subscriber's number where this one
+/// carries it.
+pub fn lgt_local_destinia_response(request: &[u8]) -> Option<Vec<u8>> {
+    /// The length and the kind, both little end first.
+    const HEADER: usize = 4;
+
+    /// What the title sends, and what `0x7ab0` reads the answer of.
+    const CERTIFICATE_REQUEST: u16 = 0x010a;
+    const CERTIFICATE_ANSWER: u16 = 0x010b;
+    /// The subscriber's number, the handset, the build and the rest of what
+    /// `0x7ab0`'s request carries - a fixed frame.
+    const REQUEST_SIZE: usize = 71;
+
+    /// The signed byte `0x7ab0` stops on when it is negative.
+    const GRANTED: u8 = 0;
+    /// The forty bytes `0x794c` writes to `certi.crc` without reading.
+    const CERTIFICATE: usize = 40;
+
+    fn u16_le(bytes: &[u8], offset: usize) -> u16 {
+        u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
+    }
+
+    if request.len() != REQUEST_SIZE || u16_le(request, 0) as usize != request.len() {
+        return None;
+    }
+
+    if u16_le(request, 2) != CERTIFICATE_REQUEST || !request[4].is_ascii_digit() {
+        return None;
+    }
+
+    let length = HEADER + 1 + CERTIFICATE + 1;
+    let mut response = Vec::with_capacity(length);
+    response.extend_from_slice(&(length as u16).to_le_bytes());
+    response.extend_from_slice(&CERTIFICATE_ANSWER.to_le_bytes());
+    response.push(GRANTED);
+    response.extend_from_slice(&[0u8; CERTIFICATE]);
+    response.push(0);
+
+    Some(response)
+}
+
 /// The answer to a billing request, whichever of these protocols it is in.
 ///
 /// Tried in order of how specific each shape is: the `0xffff`-framed message,
@@ -1926,6 +1995,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_opcode_header_response(request))
         .or_else(|| lgt_local_dnf_response(request))
         .or_else(|| lgt_local_biochronicle_response(request))
+        .or_else(|| lgt_local_destinia_response(request))
 }
 
 #[cfg(test)]
@@ -3423,6 +3493,60 @@ mod tests {
         assert!(lgt_local_biochronicle_response(&short).is_none());
 
         assert!(lgt_local_biochronicle_response(&login[..20]).is_none());
+    }
+
+    /// 데스티니아's certificate request is answered with the bytes its own
+    /// reader keeps.
+    #[test]
+    fn the_certificate_that_title_waits_on_is_answered() {
+        // The frame the title wrote, byte for byte.
+        let mut request = vec![0x47, 0x00, 0x0a, 0x01];
+        request.extend_from_slice(b"01046119269\0");
+        request.extend_from_slice(&[0u8; 16]);
+        request.extend_from_slice(b"Emulator");
+        request.extend_from_slice(&[0u8; 8]);
+        request.extend_from_slice(b"1.0.1");
+        request.extend_from_slice(&[0u8; 5]);
+        request.extend_from_slice(&[0x38, 0x50, 0x00, 0x00, 0x01, 0x00, 0x60, 0x00, 0x00, 0xff, 0xff, 0x1f, 0x00]);
+        assert_eq!(request.len(), 0x47);
+
+        let response = lgt_local_destinia_response(&request).unwrap();
+
+        // Its own length, the kind the request's reader is registered at, the
+        // signed byte it stops on when negative, forty bytes and one more.
+        assert_eq!(response.len(), 4 + 1 + 40 + 1);
+        assert_eq!(u16::from_le_bytes(response[0..2].try_into().unwrap()) as usize, response.len());
+        assert_eq!(u16::from_le_bytes(response[2..4].try_into().unwrap()), 0x010b);
+        assert!((response[4] as i8) >= 0);
+        assert_eq!(response[5..45], [0; 40]);
+    }
+
+    /// A frame that is not that request is left alone.
+    #[test]
+    fn only_that_title_s_certificate_request_is_answered() {
+        let mut request = vec![0x47, 0x00, 0x0a, 0x01];
+        request.extend_from_slice(b"01046119269");
+        request.extend_from_slice(&[0u8; 56]);
+        assert_eq!(request.len(), 0x47);
+        assert!(lgt_local_destinia_response(&request).is_some());
+
+        // A kind this does not know the reader of.
+        let mut other_kind = request.clone();
+        other_kind[2] = 0x0c;
+        assert!(lgt_local_destinia_response(&other_kind).is_none());
+
+        // A length that is not the frame in hand.
+        let mut mislaid = request.clone();
+        mislaid[0] = 0x46;
+        assert!(lgt_local_destinia_response(&mislaid).is_none());
+
+        // Where the subscriber's number goes, something that is not one.
+        let mut lettered = request.clone();
+        lettered[4] = b'x';
+        assert!(lgt_local_destinia_response(&lettered).is_none());
+
+        // And a frame of another size under the same kind.
+        assert!(lgt_local_destinia_response(&request[..70]).is_none());
     }
 
     /// A message this does not know the shape of is left alone rather than
