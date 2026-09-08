@@ -15,7 +15,6 @@ bitflags = { workspace = true }
 bytemuck = { workspace = true }
 encoding_rs = { version = "^0.8", default-features = false, features = ["alloc"] }
 futures = { workspace = true }
-miniz_oxide = { version = "^0.8", default-features = false, features = ["with-alloc"] }
 spin = { workspace = true }
 tracing = { workspace = true }
 
