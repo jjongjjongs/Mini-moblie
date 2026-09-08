@@ -2645,6 +2645,92 @@ pub fn lgt_local_tera_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(response)
 }
 
+/// The answer to 영웅서기5's shop, whose gateway is the one it opens to buy from.
+///
+/// 영웅서기5 (`00032870`) connects to `210.222.18.28:18182` when the shop opens
+/// and writes an 80-byte frame. Everything about it is big-endian, and the reply
+/// is the same shape as the request:
+///
+/// ```text
+/// [0..4]    u32  the frame's own length, which has to be the bytes on the wire
+/// [4..12]   the eight-byte service code, "G1000157"
+/// [12..16]  u32  command, 0..8
+/// [16..20]  u32  sub-command
+/// [20..]    fields: a u32, or a u32 length and that many bytes
+/// ```
+///
+/// The title is native, so all of this is ARM. `0x385b8` is the socket callback:
+/// on data it reads the length at `[0]`, drops the frame unless it equals what
+/// arrived, and queues it. `0x38498` takes it off the queue, drops anything
+/// under 20 bytes, sets its cursor to `[12]` and reads two `u32`s - the command
+/// and the sub-command - then dispatches through the table at `0x111ee8`, which
+/// has nine entries and ignores anything above 8.
+///
+/// The captured frame is command 1 sub 1, built at `0x34c9c` out of
+/// `PHONENUMBER`, `PHONEMODEL`, two numbers and `HERO5.ALL.SS.000`. Command 1
+/// lands in `0x37cc4`, which dispatches the sub through `0x111ea0` - six
+/// entries, and sub 1 is `0x37cec`:
+///
+/// ```text
+/// [20..24]  u32              the result; 0 is the only one that is not an error
+/// [24..]    u32 length + that many bytes
+/// [..]      u32              a value, stored as value * 1000
+/// ```
+///
+/// A zero length reads nothing and moves the cursor nowhere, so the smallest
+/// answer to this step is 32 bytes. On a zero result `0x37cec` asks for the next
+/// thing in the exchange rather than drawing anything, so this is one step of a
+/// handshake and not the end of it.
+///
+/// `None` for everything else: the frame has to declare its own length, carry
+/// this title's service code, and be the one command whose answer has been read
+/// out of the binary. The other eight commands are left unanswered rather than
+/// guessed - a command answered wrongly does not leave the title waiting, it
+/// puts it through a branch meant for a different exchange.
+pub fn lgt_local_hero5_response(request: &[u8]) -> Option<Vec<u8>> {
+    /// A length, the service code, a command and a sub-command - and the least
+    /// `0x38498` will look at, which drops anything under 20 bytes.
+    const HEADER: usize = 20;
+    const SERVICE_AT: usize = 4;
+    const SERVICE: &[u8] = b"G1000157";
+    const COMMAND_AT: usize = 12;
+    const SUB_AT: usize = 16;
+
+    /// The one exchange whose answer `0x37cec` has been read for.
+    const COMMAND: u32 = 1;
+    const SUB: u32 = 1;
+    /// The result `0x37cec` takes as "carry on"; anything else is its error path.
+    const GRANTED: u32 = 0;
+
+    if request.len() < HEADER {
+        return None;
+    }
+
+    let field = |at: usize| u32::from_be_bytes([request[at], request[at + 1], request[at + 2], request[at + 3]]);
+
+    if field(0) as usize != request.len() || &request[SERVICE_AT..SERVICE_AT + SERVICE.len()] != SERVICE {
+        return None;
+    }
+    if field(COMMAND_AT) != COMMAND || field(SUB_AT) != SUB {
+        return None;
+    }
+
+    // The result, an empty blob, and the value it stores as value * 1000.
+    let body = [GRANTED, 0, 0];
+
+    let length = HEADER + body.len() * 4;
+    let mut response = Vec::with_capacity(length);
+    response.extend_from_slice(&(length as u32).to_be_bytes());
+    response.extend_from_slice(SERVICE);
+    response.extend_from_slice(&COMMAND.to_be_bytes());
+    response.extend_from_slice(&SUB.to_be_bytes());
+    for value in body {
+        response.extend_from_slice(&value.to_be_bytes());
+    }
+
+    Some(response)
+}
+
 /// The answer to a billing request, whichever of these protocols it is in.
 ///
 /// Tried in order of how specific each shape is: the `0xffff`-framed message,
@@ -2677,6 +2763,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_blademaster3_response(request))
         .or_else(|| lgt_local_id_framed_response(request))
         .or_else(|| lgt_local_tera_response(request))
+        .or_else(|| lgt_local_hero5_response(request))
 }
 
 #[cfg(test)]
@@ -2735,6 +2822,75 @@ mod tests {
         let mut other = tera_purchase_request();
         other[3] = 0x1e;
         assert_eq!(lgt_local_tera_response(&other), None);
+    }
+
+    /// The 80-byte frame 영웅서기5 writes when its shop opens, captured off its
+    /// billing socket.
+    fn hero5_shop_request() -> Vec<u8> {
+        let mut request = Vec::new();
+        request.extend_from_slice(&80u32.to_be_bytes());
+        request.extend_from_slice(b"G1000157");
+        request.extend_from_slice(&1u32.to_be_bytes());
+        request.extend_from_slice(&1u32.to_be_bytes());
+        request.extend_from_slice(&16u32.to_be_bytes());
+        request.extend_from_slice(b"01064256416\0\xb8\x0e\x40\x01");
+        request.extend_from_slice(&8u32.to_be_bytes());
+        request.extend_from_slice(b"Emulator");
+        request.extend_from_slice(&300u32.to_be_bytes());
+        request.extend_from_slice(&101u32.to_be_bytes());
+        request.extend_from_slice(&16u32.to_be_bytes());
+        request.extend_from_slice(b"HERO5.ALL.SS.000");
+
+        assert_eq!(request.len(), 80);
+        request
+    }
+
+    #[test]
+    fn the_shop_step_is_answered_with_its_own_command_and_a_zero_result() {
+        let reply = lgt_local_hero5_response(&hero5_shop_request()).unwrap();
+
+        // The length has to be the reply in hand, or `0x385b8` drops it, and it
+        // has to clear the 20 bytes `0x38498` needs to read a command at all.
+        assert_eq!(u32::from_be_bytes(reply[0..4].try_into().unwrap()) as usize, reply.len());
+        assert!(reply.len() >= 20);
+
+        assert_eq!(&reply[4..12], b"G1000157");
+        // The command and sub-command `0x38498` reads at [12] and [16].
+        assert_eq!(u32::from_be_bytes(reply[12..16].try_into().unwrap()), 1);
+        assert_eq!(u32::from_be_bytes(reply[16..20].try_into().unwrap()), 1);
+        // The result `0x37cec` takes as "carry on", then an empty blob and the
+        // value it multiplies by 1000.
+        assert_eq!(u32::from_be_bytes(reply[20..24].try_into().unwrap()), 0);
+        assert_eq!(u32::from_be_bytes(reply[24..28].try_into().unwrap()), 0);
+        assert_eq!(reply.len(), 32);
+
+        assert_eq!(response(&hero5_shop_request()), Some(reply));
+    }
+
+    #[test]
+    fn a_frame_that_is_not_that_shop_step_is_left_unanswered() {
+        // A length that is not the frame in hand.
+        let mut mislength = hero5_shop_request();
+        mislength[3] = 0x51;
+        assert_eq!(lgt_local_hero5_response(&mislength), None);
+
+        // Another title's frame that happens to be big-endian framed.
+        let mut unnamed = hero5_shop_request();
+        unnamed[4] = b'X';
+        assert_eq!(lgt_local_hero5_response(&unnamed), None);
+
+        // One of the eight other commands, whose answers have not been read.
+        let mut other_command = hero5_shop_request();
+        other_command[15] = 4;
+        assert_eq!(lgt_local_hero5_response(&other_command), None);
+
+        // Another of command 1's six sub-commands.
+        let mut other_sub = hero5_shop_request();
+        other_sub[19] = 5;
+        assert_eq!(lgt_local_hero5_response(&other_sub), None);
+
+        // Too short to carry a command at all.
+        assert_eq!(lgt_local_hero5_response(&hero5_shop_request()[..19]), None);
     }
 
     #[test]
