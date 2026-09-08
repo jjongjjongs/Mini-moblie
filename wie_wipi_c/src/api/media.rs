@@ -9,6 +9,10 @@ use wie_util::{Result, WieError, read_generic, write_generic};
 
 use crate::{WIPICResult, context::WIPICContext, method::MethodBody};
 
+/// Top of the `MC_mdaClipSetVolume` range, and what a clip with no level of its
+/// own reads back as.
+const FULL_VOLUME: u8 = 100;
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct MdaClip {
@@ -177,10 +181,33 @@ pub async fn clip_set_position(_context: &mut dyn WIPICContext, clip: WIPICWord,
     Ok(0)
 }
 
-pub async fn clip_get_volume(_context: &mut dyn WIPICContext, clip: WIPICWord) -> Result<WIPICWord> {
-    tracing::warn!("stub MC_mdaClipGetVolume({clip:#x})");
+/// The level a clip is at, which is the level [`clip_set_volume`] last routed
+/// to its handle.
+///
+/// This answered 0 as a stub, and 0 is the one answer that silences a title:
+/// they read the level to put it back. 영웅서기5 sets a clip to 20, reads it, and
+/// sets what it read - so every effect it loaded played at zero, and the game
+/// ran mute. A clip whose data has not been loaded yet has no level of its own,
+/// so answer full scale rather than the silence a zero would restore.
+pub async fn clip_get_volume(context: &mut dyn WIPICContext, clip: WIPICWord) -> Result<WIPICWord> {
+    let handle = if clip == 0 {
+        // Default-player titles ask about the clip-0 handle, as they set it.
+        context.system().audio().default_clip()
+    } else {
+        // A clip record is zeroed at creation and only gets its handle from
+        // `MC_mdaClipPutData`, so a 0 here is "nothing loaded" - no handle is
+        // ever 0.
+        let mda_clip: MdaClip = read_generic(context, clip)?;
+        (mda_clip.handle != 0).then_some(mda_clip.handle)
+    };
 
-    Ok(0)
+    let level = handle
+        .and_then(|handle| context.system().audio().get_volume(handle).ok())
+        .unwrap_or(FULL_VOLUME);
+
+    tracing::info!("[media] MC_mdaClipGetVolume(clip={clip:#x}) handle={handle:?} level={level}");
+
+    Ok(level as WIPICWord)
 }
 
 pub async fn clip_set_volume(context: &mut dyn WIPICContext, clip: WIPICWord, volume: WIPICWord) -> Result<WIPICWord> {
@@ -188,7 +215,7 @@ pub async fn clip_set_volume(context: &mut dyn WIPICContext, clip: WIPICWord, vo
         // Default-player titles set the volume of the clip-0 handle.
         let default = context.system().audio().default_clip();
         if let Some(handle) = default {
-            let level = (volume & 0xFF).min(100) as u8;
+            let level = (volume & 0xFF).min(FULL_VOLUME as WIPICWord) as u8;
             let _ = context.system().audio().set_volume(handle, level);
         }
         return Ok(0);
@@ -202,7 +229,7 @@ pub async fn clip_set_volume(context: &mut dyn WIPICContext, clip: WIPICWord, vo
     // sounding harsh.
     let mda_clip: MdaClip = read_generic(context, clip)?;
     let handle = mda_clip.handle;
-    let level = (volume & 0xFF).min(100) as u8;
+    let level = (volume & 0xFF).min(FULL_VOLUME as WIPICWord) as u8;
     tracing::info!("[media] MC_mdaClipSetVolume(clip={clip:#x}, volume={volume:#x}) handle={handle:#x} level={level}");
 
     let _ = context.system().audio().set_volume(handle, level);
@@ -210,10 +237,15 @@ pub async fn clip_set_volume(context: &mut dyn WIPICContext, clip: WIPICWord, vo
     Ok(0)
 }
 
+/// The handset's media volume, which nothing here models.
+///
+/// Answer full scale for the same reason [`clip_get_volume`] does: a title that
+/// reads this reads it to restore it, or to decide whether there is any point
+/// playing at all, and a zero tells it the handset is muted.
 pub async fn get_volume(_context: &mut dyn WIPICContext) -> Result<WIPICWord> {
-    tracing::warn!("stub MC_mdaGetVolume");
+    tracing::debug!("MC_mdaGetVolume -> {FULL_VOLUME}");
 
-    Ok(0)
+    Ok(FULL_VOLUME as WIPICWord)
 }
 
 pub async fn play(context: &mut dyn WIPICContext, ptr_clip: WIPICWord, repeat: WIPICWord) -> Result<i32> {
@@ -427,4 +459,60 @@ pub async fn unk18(_context: &mut dyn WIPICContext, clip: WIPICWord) -> Result<W
     tracing::warn!("stub MC_mdaUnk18({clip:#x})");
 
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::boxed::Box;
+
+    use test_utils::TestPlatform;
+    use wie_backend::{DefaultTaskRunner, System};
+    use wie_util::ByteWrite;
+
+    use crate::context::test::TestContext;
+
+    use super::{FULL_VOLUME, clip_create, clip_get_volume, clip_put_data, clip_set_volume};
+
+    fn test_context() -> TestContext {
+        let system = System::new(Box::new(TestPlatform::new()), "test-pid", "test-aid", DefaultTaskRunner);
+        TestContext::with_system(system)
+    }
+
+    /// 영웅서기5's own sequence: it sets an effect's level, reads it back, and
+    /// sets what it read. While the read answered 0 every effect it loaded
+    /// played at zero and the game ran mute.
+    #[futures_test::test]
+    async fn a_clip_reads_back_the_level_it_was_set_to() {
+        let mut context = test_context();
+
+        let clip = clip_create(&mut context, 0, 0x793, 0).await.unwrap();
+        context.write_bytes(0x1000, b"MMMD\0\0\0\0").unwrap();
+        assert_eq!(clip_put_data(&mut context, clip, 0x1000, 8).await.unwrap(), 8);
+
+        assert_eq!(clip_set_volume(&mut context, clip, 20).await.unwrap(), 0);
+        assert_eq!(clip_get_volume(&mut context, clip).await.unwrap(), 20);
+
+        // And what it reads is what it can set back.
+        let level = clip_get_volume(&mut context, clip).await.unwrap();
+        assert_eq!(clip_set_volume(&mut context, clip, level).await.unwrap(), 0);
+        assert_eq!(clip_get_volume(&mut context, clip).await.unwrap(), 20);
+    }
+
+    /// A clip with nothing loaded has no level of its own. Answer full scale:
+    /// a title restoring what it read must not restore silence. It must also
+    /// not read back some other clip's level - a clip record is zeroed at
+    /// creation, so the handle it has not been given yet must not name one.
+    #[futures_test::test]
+    async fn a_clip_with_no_data_reads_back_full_volume() {
+        let mut context = test_context();
+
+        let loaded = clip_create(&mut context, 0, 0x793, 0).await.unwrap();
+        context.write_bytes(0x1000, b"MMMD\0\0\0\0").unwrap();
+        clip_put_data(&mut context, loaded, 0x1000, 8).await.unwrap();
+        clip_set_volume(&mut context, loaded, 20).await.unwrap();
+
+        let empty = clip_create(&mut context, 0, 0x793, 0).await.unwrap();
+
+        assert_eq!(clip_get_volume(&mut context, empty).await.unwrap(), FULL_VOLUME as _);
+    }
 }

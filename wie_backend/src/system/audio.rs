@@ -84,7 +84,12 @@ impl Audio {
             files: BTreeMap::new(),
             volumes: BTreeMap::new(),
             playing: BTreeMap::new(),
-            last_audio_handle: 0,
+            // Handles start at 1 so 0 can mean "nothing loaded here". A WIPI-C
+            // clip record is zeroed when the title creates it and only gets its
+            // handle from `MC_mdaClipPutData`, so a 0 there has to be tellable
+            // from a real handle - otherwise a clip with no data reads back the
+            // first-ever clip's volume instead of its own default.
+            last_audio_handle: 1,
             default_clip_handle: None,
             active: None,
             reaper_started: false,
