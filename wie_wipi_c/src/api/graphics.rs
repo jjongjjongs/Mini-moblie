@@ -235,6 +235,30 @@ pub async fn get_context(context: &mut dyn WIPICContext, p_grp_ctx: WIPICWord, o
     Ok(())
 }
 
+/// The colour a primitive paints with: the context's foreground pixel, carrying
+/// the context's alpha so a title that asked for a translucent shape gets one.
+///
+/// 테일즈위버 이스핀편 (`00026308`) draws every one of its panels this way. A
+/// two-call helper of its own at `0x160c` sets the foreground pixel and an alpha
+/// together - `MC_grpSetContext(gc, 1, pixel)` then `MC_grpSetContext(gc, 4,
+/// alpha)`, with alphas from `0x50` to `0xc8` - and fills a rectangle with it;
+/// thirty of its thirty-four calls to that helper are followed by
+/// `MC_grpFillRect`. Painted opaque, its menu panels came out solid white and
+/// its in-game panels solid black, and the white text it then drew on them
+/// disappeared into the fill.
+///
+/// XOR mode is the exception: the reference zeroes the alpha when it turns XOR
+/// on, so reading it there would paint nothing at all.
+fn context_color(framebuffer: &FrameBuffer, gctx: &WIPICGraphicsContext) -> Color {
+    let mut color = framebuffer.pixel_to_color(gctx.fgpxl);
+
+    if gctx.xor_mode == 0 && gctx.alpha <= 0xff {
+        color.a = gctx.alpha as u8;
+    }
+
+    color
+}
+
 pub async fn put_pixel(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr, x: i32, y: i32, p_gctx: WIPICWord) -> Result<()> {
     tracing::debug!("MC_grpPutPixel({:#x}, {x}, {y}, {p_gctx:?})", dst_fb.0);
 
@@ -242,7 +266,7 @@ pub async fn put_pixel(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
     let gctx: WIPICGraphicsContext = read_generic(context, p_gctx)?;
 
     let mut canvas = framebuffer.canvas(context)?;
-    let color = framebuffer.pixel_to_color(gctx.fgpxl);
+    let color = context_color(&framebuffer, &gctx);
     canvas.put_pixel(x as _, y as _, color);
     canvas.flush()?;
 
@@ -267,7 +291,7 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
         height: h as _,
     };
 
-    let color = framebuffer.pixel_to_color(gctx.fgpxl);
+    let color = context_color(&framebuffer, &gctx);
     canvas.fill_rect(x as _, y as _, w as _, h as _, color, clip);
     canvas.flush()?;
 
@@ -303,7 +327,7 @@ pub async fn draw_arc(
         height: h as _,
     };
 
-    let color = framebuffer.pixel_to_color(gctx.fgpxl);
+    let color = context_color(&framebuffer, &gctx);
     canvas.draw_arc(
         x as _,
         y as _,
@@ -348,7 +372,7 @@ pub async fn fill_arc(
         height: h as _,
     };
 
-    let color = framebuffer.pixel_to_color(gctx.fgpxl);
+    let color = context_color(&framebuffer, &gctx);
     canvas.fill_arc(
         x as _,
         y as _,
@@ -418,7 +442,7 @@ pub async fn draw_polygon(
     let points = read_polygon_points(context, x_points, y_points, n_points as usize)?;
 
     let bounds = polygon_bounds(&points);
-    let color = framebuffer.pixel_to_color(gctx.fgpxl);
+    let color = context_color(&framebuffer, &gctx);
     let mut canvas = framebuffer.canvas(context)?;
 
     // Close the outline back to the first vertex, which is what a polygon is.
@@ -451,7 +475,7 @@ pub async fn fill_polygon(
     let points = read_polygon_points(context, x_points, y_points, n_points as usize)?;
 
     let bounds = polygon_bounds(&points);
-    let color = framebuffer.pixel_to_color(gctx.fgpxl);
+    let color = context_color(&framebuffer, &gctx);
     let (min_y, max_y) = (bounds.1, bounds.3);
     let mut canvas = framebuffer.canvas(context)?;
 
@@ -1187,7 +1211,7 @@ pub async fn draw_string(
         height: framebuffer.0.height,
     };
 
-    let color = framebuffer.pixel_to_color(gctx.fgpxl);
+    let color = context_color(&framebuffer, &gctx);
 
     // The handset's own face when the BIOS supplied one, drawn a pixel at a
     // time exactly as it is stored. The face is the one the title selected with
@@ -1420,7 +1444,7 @@ pub async fn draw_rect(context: &mut dyn WIPICContext, dst: WIPICIndirectPtr, x:
         height: h as _,
     };
 
-    let color = framebuffer.pixel_to_color(gctx.fgpxl);
+    let color = context_color(&framebuffer, &gctx);
     canvas.draw_rect(x as _, y as _, w as _, h as _, color, clip);
     canvas.flush()?;
 
@@ -1441,7 +1465,7 @@ pub async fn draw_line(context: &mut dyn WIPICContext, dst: WIPICIndirectPtr, x1
         height: framebuffer.0.height as _,
     };
 
-    let color = framebuffer.pixel_to_color(gctx.fgpxl);
+    let color = context_color(&framebuffer, &gctx);
     canvas.draw_line(x1 as _, y1 as _, x2 as _, y2 as _, color, clip);
     canvas.flush()?;
 

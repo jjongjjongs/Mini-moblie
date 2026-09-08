@@ -859,7 +859,12 @@ where
     }
 
     fn put_pixel(&mut self, x: i32, y: i32, color: Color) {
-        self.compose_pixel(x, y, color, false);
+        // A colour that is not fully opaque is composed with what is already
+        // there rather than replacing it: a caller that hands a primitive an
+        // alpha is asking for a translucent shape. Fully opaque - which is what
+        // a colour read back out of a framebuffer always is - stays the plain
+        // store it was.
+        self.compose_pixel(x, y, color, color.a < 0xff);
     }
 }
 
@@ -1130,6 +1135,80 @@ mod tests {
     use crate::canvas::{Clip, Image, ImageBufferCanvas};
 
     use super::{ArgbPixel, Canvas, Color, Rgb332Pixel, TextAlignment, VecImageBuffer};
+
+    /// A shape drawn in a colour that is not fully opaque is composed with what
+    /// is under it, which is what a title asking for a translucent panel gets.
+    #[test]
+    fn a_fill_that_is_not_opaque_is_blended_with_what_is_under_it() {
+        let mut canvas = ImageBufferCanvas::<VecImageBuffer<ArgbPixel>>::new(VecImageBuffer::new(2, 1));
+        let clip = Clip {
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 1,
+        };
+
+        canvas.fill_rect(0, 0, 2, 1, Color { a: 0xff, r: 0, g: 0, b: 0 }, clip);
+
+        let clip = Clip {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        };
+        // Half-covering white over black lands halfway between the two.
+        canvas.fill_rect(
+            0,
+            0,
+            1,
+            1,
+            Color {
+                a: 0x80,
+                r: 0xff,
+                g: 0xff,
+                b: 0xff,
+            },
+            clip,
+        );
+
+        let blended = canvas.image().get_pixel(0, 0);
+        assert!((0x76..=0x8a).contains(&blended.r), "{:#x}", blended.r);
+        assert_eq!((blended.r, blended.g, blended.b), (blended.r, blended.r, blended.r));
+
+        // The pixel the translucent fill did not cover is untouched.
+        let untouched = canvas.image().get_pixel(1, 0);
+        assert_eq!((untouched.r, untouched.g, untouched.b), (0, 0, 0));
+    }
+
+    /// A fully opaque colour still replaces what is under it outright.
+    #[test]
+    fn an_opaque_fill_replaces_what_is_under_it() {
+        let mut canvas = ImageBufferCanvas::<VecImageBuffer<ArgbPixel>>::new(VecImageBuffer::new(1, 1));
+        let whole = || Clip {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        };
+
+        canvas.fill_rect(0, 0, 1, 1, Color { a: 0xff, r: 0, g: 0, b: 0 }, whole());
+        canvas.fill_rect(
+            0,
+            0,
+            1,
+            1,
+            Color {
+                a: 0xff,
+                r: 0xff,
+                g: 0xff,
+                b: 0xff,
+            },
+            whole(),
+        );
+
+        let pixel = canvas.image().get_pixel(0, 0);
+        assert_eq!((pixel.r, pixel.g, pixel.b), (0xff, 0xff, 0xff));
+    }
 
     #[test]
     fn test_decode_gif_animation_frames_and_delay() -> Result<()> {
