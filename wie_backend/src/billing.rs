@@ -2090,6 +2090,64 @@ pub fn lgt_local_blademaster3_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(response)
 }
 
+/// The answer to the id-framed request 짜요짜요타이쿤4 opens with.
+///
+/// 짜요짜요타이쿤4 (`0002AB99`) opens a billing socket and writes a 36-byte
+/// record that is not one of the `0xffff`-framed messages above:
+///
+/// ```text
+/// [0..4]   u32 LE - the record's own length, header included
+/// [4..8]   u32 LE - the message id
+/// [8..12]  u32 LE - 0x33, the protocol revision every request carries
+/// [12..36] the request's own fields
+/// ```
+///
+/// Its receive side is the same shape read back. `0x9a4e` waits for more than
+/// seven bytes, reads the leading `u32` as the frame's length, and holds the
+/// frame back until that many bytes have arrived; `0x9afc` then reads the second
+/// `u32` and returns it as the id the dispatcher switches on. So an answer is a
+/// length and an id, and nothing else is required of it.
+///
+/// The id the title opens with is `0x01F00000`, built at `0xf8d4` as
+/// `0xf8 << 17`, and its handler at `0xf6f0` is two instructions: it posts
+/// `0x01F00000` to the title's own event queue and reads nothing out of the
+/// frame. The eight-byte frame that carries just the id is therefore the whole
+/// answer, and the smallest one this protocol can express.
+///
+/// `None` for anything else, including this protocol's other ids - their
+/// handlers read fields out of the frame, and what those fields should say is
+/// not something to answer with a guess.
+pub fn lgt_local_id_framed_response(request: &[u8]) -> Option<Vec<u8>> {
+    /// The length and the id ahead of every frame.
+    const HEADER: usize = 8;
+    /// The revision at `+8` that `0xef7c` and `0xe80c` alike write.
+    const REVISION: u32 = 0x33;
+    /// What the title asks first, and what its answer is addressed by.
+    const OPENING: u32 = 0x01F0_0000;
+    /// The whole of that request: the header, the revision, and its fields.
+    /// Those fields are not held to anything - the capture that named this
+    /// request had them zero and the emulator's own run has one of them at 1,
+    /// so they are the request's arguments rather than part of its shape.
+    const OPENING_REQUEST: usize = 36;
+
+    fn u32_le(bytes: &[u8], offset: usize) -> u32 {
+        u32::from_le_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]])
+    }
+
+    if request.len() != OPENING_REQUEST || u32_le(request, 0) != OPENING_REQUEST as u32 {
+        return None;
+    }
+    if u32_le(request, 4) != OPENING || u32_le(request, 8) != REVISION {
+        return None;
+    }
+
+    let mut response = Vec::with_capacity(HEADER);
+    response.extend_from_slice(&(HEADER as u32).to_le_bytes());
+    response.extend_from_slice(&OPENING.to_le_bytes());
+
+    Some(response)
+}
+
 /// The answer to a billing request, whichever of these protocols it is in.
 ///
 /// Tried in order of how specific each shape is: the `0xffff`-framed message,
@@ -2120,6 +2178,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_biochronicle_response(request))
         .or_else(|| lgt_local_destinia_response(request))
         .or_else(|| lgt_local_blademaster3_response(request))
+        .or_else(|| lgt_local_id_framed_response(request))
 }
 
 #[cfg(test)]
@@ -2127,6 +2186,58 @@ mod tests {
     use alloc::{vec, vec::Vec};
 
     use super::*;
+
+    /// The 36-byte record 짜요짜요타이쿤4 opens with, captured off its socket.
+    const ZZT4_OPENING: [u8; 36] = [
+        0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x01, 0x33, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+
+    #[test]
+    fn the_opening_id_frame_is_answered_with_its_own_id_and_nothing_else() {
+        assert_eq!(
+            lgt_local_id_framed_response(&ZZT4_OPENING),
+            Some(vec![0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x01])
+        );
+        assert_eq!(
+            response(&ZZT4_OPENING).as_deref(),
+            Some(&[0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x01][..])
+        );
+    }
+
+    #[test]
+    fn a_frame_that_is_not_that_opening_is_left_unanswered() {
+        // Another id in the same protocol: its handler reads fields out of the
+        // frame, so an id alone is not an answer to it.
+        let mut other = ZZT4_OPENING;
+        other[4..8].copy_from_slice(&0x01F0_0002u32.to_le_bytes());
+        assert_eq!(lgt_local_id_framed_response(&other), None);
+
+        // The length has to be the record in hand.
+        let mut mislabelled = ZZT4_OPENING;
+        mislabelled[0] = 0x28;
+        assert_eq!(lgt_local_id_framed_response(&mislabelled), None);
+
+        // The revision every request in this protocol carries.
+        let mut revised = ZZT4_OPENING;
+        revised[8] = 0x34;
+        assert_eq!(lgt_local_id_framed_response(&revised), None);
+
+        assert_eq!(lgt_local_id_framed_response(&ZZT4_OPENING[..8]), None);
+    }
+
+    /// The request's own fields carry its arguments, and the emulator's run of
+    /// the title sends the same request with one of them set.
+    #[test]
+    fn the_opening_is_answered_whatever_its_arguments_say() {
+        let mut with_argument = ZZT4_OPENING;
+        with_argument[12] = 1;
+        assert_eq!(
+            lgt_local_id_framed_response(&with_argument),
+            Some(vec![0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x01])
+        );
+        assert_eq!(lgt_local_id_framed_response(&ZZT4_OPENING[..8]), None);
+    }
 
     #[test]
     fn a_frame_s_own_length_says_which_end_of_its_fields_comes_first() {
