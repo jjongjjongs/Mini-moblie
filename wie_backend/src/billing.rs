@@ -1454,12 +1454,17 @@ pub fn lgt_local_tagged_record_response(request: &[u8]) -> Option<Vec<u8>> {
 ///   order and the code that stands for it - and hands both straight to
 ///   `0x47b04`, which sends them back out under opcode `0xcb`.
 /// - That one's answer at `0x47dd0` takes a **`u32`** and moves the title on to
-///   whatever its own state says comes next.
+///   `0x47b5c`, which sends opcode `0x44` as the order, the product code and the
+///   quantity, and the code that stands for the order - four, two, two and eight
+///   bytes.
+/// - That last one's answer at `0x481d6` takes **nothing** out of the body. It
+///   releases the message, raises the title's event `5`, and writes the step
+///   marker back to zero, which is the purchase finishing.
 ///
-/// None of the three compares what it reads against anything, so the numbers are
-/// the shop's to issue; the eight bytes come back as a string, and the two the
-/// title copies past them are the zeroes it cleared. What matters is the size
-/// each reader takes, which is what these answers are.
+/// None of them compares what it reads against anything, so the numbers are the
+/// shop's to issue; the eight bytes come back as a string, and the two the title
+/// copies past them are the zeroes it cleared. What matters is the size each
+/// reader takes, which is what these answers are.
 ///
 /// `None` for anything that is not one of those messages: it has to declare its
 /// own length, leave `[2]` and `[4]` clear, and be an opcode whose reader's
@@ -1487,6 +1492,9 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
     /// `0x47b04` sends the approval back, and `0x47dd0` reads the answer.
     const CONFIRM_OPCODE: u8 = 0xcb;
     const CONFIRM_ANSWER_OPCODE: u8 = 0xcc;
+    /// `0x47b5c` closes the walk, and `0x481d6` reads the answer for its opcode
+    /// alone.
+    const SETTLE_OPCODE: u8 = 0x44;
 
     /// The order every step of the walk carries, which is the shop's to issue
     /// and which nothing in the title compares against anything.
@@ -1520,6 +1528,9 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
         }
         // The order and its code, sent back the way `0x47fea` handed them over.
         CONFIRM_OPCODE if body.len() == 4 + ORDER_CODE.len() => (CONFIRM_ANSWER_OPCODE, Vec::from(ORDER.to_be_bytes())),
+        // The order, the product code and the quantity, and the order's code
+        // behind them. Nothing reads the answer's body, so it has none.
+        SETTLE_OPCODE if body.len() == 4 + 4 + ORDER_CODE.len() => (SETTLE_OPCODE, Vec::new()),
         _ => return None,
     };
 
@@ -2807,7 +2818,18 @@ mod tests {
         assert_eq!(confirmed[3], 0xcc);
         assert_eq!(confirmed.len(), 5 + 4);
 
-        for answer in [order, approved, confirmed] {
+        // `0x47b5c` closes it out with the order, the code, the quantity and the
+        // order's code, and `0x481d6` reads none of the answer's body.
+        let mut settle = vec![0x00, 0x15, 0x00, 0x44, 0x00];
+        settle.extend_from_slice(&confirmed[5..]);
+        settle.extend_from_slice(&0x29u16.to_be_bytes());
+        settle.extend_from_slice(&1u16.to_be_bytes());
+        settle.extend_from_slice(&approved[9..]);
+        let settled = lgt_local_opcode_header_response(&settle).unwrap();
+        assert_eq!(settled[3], 0x44);
+        assert_eq!(settled.len(), 5);
+
+        for answer in [order, approved, confirmed, settled] {
             assert_eq!(u16::from_be_bytes([answer[0], answer[1]]) as usize, answer.len());
             assert_eq!((answer[2], answer[4]), (0, 0));
         }
