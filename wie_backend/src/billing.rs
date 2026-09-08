@@ -2674,12 +2674,20 @@ pub fn lgt_local_tera_response(request: &[u8]) -> Option<Vec<u8>> {
 ///
 /// | command | sub | the fields the handler reads | it then asks |
 /// |---------|-----|------------------------------|--------------|
+/// | 0 | 2 | nothing at all (`0x33e58` answers only sub 1) | — |
 /// | 1 | 1 | result, message, a value it keeps as value * 1000 (`0x37cec`) | 1/5, or 1/3 or 1/2 |
-/// | 1 | 3 | result, message, a second blob it keeps 15 bytes of (`0x37ef6`) | 5/1 |
+/// | 1 | 3 | result, message, a second blob it keeps 15 bytes of (`0x37ef6`) | 5/1, or a greeting |
 /// | 5 | 1 | result, message (`0x360e8`) | 5/2 |
 /// | 5 | 2 | result, message, a `u32` it stores (`0x36146`) | — |
 /// | 6 | 2 | result, message (`0x35b0a`) | 6/3 |
 /// | 6 | 3 | result, message, a row count (`0x35b88`) | — |
+/// | 7 | 1 | result, message, a text the title draws (`0x33b94`) | — |
+///
+/// 0/2 is the keep-alive `0x392b8` sends on a timer of its own rather than an
+/// exchange the title is waiting on, and 7/1 is what the 창고 asks for once its
+/// greeting is dismissed - the one request whose builder (`0x340c8`) leaves the
+/// waiting flag at `ctx + 0xb` clear, so `0x35824` puts the "Recieve" progress
+/// dialog up and nothing but an answer takes it down again.
 ///
 /// The two the title actually opens with are 1/1, which both the shop and the
 /// 창고 send on connecting, and then 6/2 for a purchase or 1/3 for the 창고.
@@ -2691,11 +2699,61 @@ pub fn lgt_local_tera_response(request: &[u8]) -> Option<Vec<u8>> {
 /// compares the row it is on against the count before reading anything, so
 /// nothing is read - and the same holds for 5/2's own list at `0x361a0`.
 ///
+/// Two fields here are not zero, because zero is a wrong answer rather than an
+/// empty one: 1/1's keep-alive interval, which zero makes "every tick", and
+/// 1/3's nickname, which the 창고 greets by name - see [`HERO5_PING_SECONDS`]
+/// and [`HERO5_SUBSCRIBER`].
+///
 /// `None` for everything else: the frame has to declare its own length, carry
 /// this title's service code, and be one of the steps above. The commands whose
 /// handlers have not been read are left unanswered rather than guessed - a
 /// command answered wrongly does not leave the title waiting, it puts it through
 /// a branch meant for a different exchange.
+/// How often, in seconds, 영웅서기5 is told to send its keep-alive.
+///
+/// `0x37cec` keeps 1/1's third field as `value * 1000` in `ctx + 0x14`, and
+/// `0x392b8` writes a 0/2 frame once the clock is past the last request plus
+/// half of that. Zero is therefore not "no keep-alive", it is one per tick -
+/// which is what the 창고 capture is nearly all of, 26 pings a second.
+const HERO5_PING_SECONDS: u32 = 60;
+
+/// The bytes of 1/3's third blob the 창고 greets by name.
+///
+/// Both of `0x37ef6`'s paths read the blob into a cleared 0x28 buffer and copy
+/// exactly this many of it to `ctx + 0x351`; `0x38044` then formats that into
+/// the "님 반갑습니다." line. A zero-length blob reads nothing, which is why the
+/// greeting in the capture had no name in front of it.
+const HERO5_NICKNAME: usize = 15;
+
+/// The subscriber number 영웅서기5 puts in its 1/1 frame, kept for 1/3.
+///
+/// There is no account here to hold a nickname, and 1/3 is a bare header, so the
+/// only name to greet with is the one the title itself supplied one step
+/// earlier. Empty until a 1/1 has gone by, which in both captured flows is the
+/// first frame on the socket.
+static HERO5_SUBSCRIBER: spin::Mutex<Vec<u8>> = spin::Mutex::new(Vec::new());
+
+/// The subscriber number out of a 영웅서기5 1/1 frame.
+///
+/// The first field after the header: a length and that many bytes. The title
+/// pads it to 16 with a NUL and whatever was after it in memory, so the number
+/// is what comes before the NUL.
+fn hero5_subscriber(request: &[u8]) -> Vec<u8> {
+    const FIELDS_AT: usize = 20;
+
+    let Some(length) = request.get(FIELDS_AT..FIELDS_AT + 4) else {
+        return Vec::new();
+    };
+    let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
+
+    let Some(number) = request.get(FIELDS_AT + 4..FIELDS_AT + 4 + length) else {
+        return Vec::new();
+    };
+    let number = &number[..number.iter().position(|&byte| byte == 0).unwrap_or(number.len())];
+
+    number[..number.len().min(HERO5_NICKNAME)].to_vec()
+}
+
 pub fn lgt_local_hero5_response(request: &[u8]) -> Option<Vec<u8>> {
     /// A length, the service code, a command and a sub-command - and the least
     /// `0x38498` will look at, which drops anything under 20 bytes.
@@ -2705,10 +2763,22 @@ pub fn lgt_local_hero5_response(request: &[u8]) -> Option<Vec<u8>> {
     const COMMAND_AT: usize = 12;
     const SUB_AT: usize = 16;
 
-    /// Each step this has been read for, and how many `u32`s its handler takes
-    /// off the reply. The first is always the result and the second always the
-    /// length of a message; a zero length is no message at all.
-    const STEPS: [(u32, u32, usize); 6] = [(1, 1, 3), (1, 3, 3), (5, 1, 2), (5, 2, 3), (6, 2, 2), (6, 3, 3)];
+    /// Each step this has been read for, and the `u32`s its handler takes off
+    /// the reply. The first is always the result, of which only zero is not an
+    /// error, and the second always the length of the message the error paths
+    /// draw, which is zero because there is no error. The rest is that step's
+    /// own, and zero unless a zero there would be an answer rather than an
+    /// absence.
+    const STEPS: [(u32, u32, &[u32]); 8] = [
+        (0, 2, &[]),
+        (1, 1, &[0, 0, HERO5_PING_SECONDS]),
+        (1, 3, &[0, 0]),
+        (5, 1, &[0, 0]),
+        (5, 2, &[0, 0, 0]),
+        (6, 2, &[0, 0]),
+        (6, 3, &[0, 0, 0]),
+        (7, 1, &[0, 0, 0]),
+    ];
 
     if request.len() < HEADER {
         return None;
@@ -2721,15 +2791,36 @@ pub fn lgt_local_hero5_response(request: &[u8]) -> Option<Vec<u8>> {
     }
 
     let (command, sub) = (field(COMMAND_AT), field(SUB_AT));
-    let (_, _, fields) = STEPS.iter().find(|(c, s, _)| *c == command && *s == sub)?;
+    let (_, _, values) = STEPS.iter().find(|(c, s, _)| *c == command && *s == sub)?;
 
-    let length = HEADER + fields * 4;
-    let mut response = Vec::with_capacity(length);
-    response.extend_from_slice(&(length as u32).to_be_bytes());
+    // A 1/1 without the field is not a 1/1 that says the number is gone, so an
+    // empty read leaves what the last one gave.
+    if (command, sub) == (1, 1)
+        && let number = hero5_subscriber(request)
+        && !number.is_empty()
+    {
+        *HERO5_SUBSCRIBER.lock() = number;
+    }
+
+    let mut response = Vec::with_capacity(HEADER + values.len() * 4);
+    response.extend_from_slice(&0u32.to_be_bytes());
     response.extend_from_slice(SERVICE);
     response.extend_from_slice(&command.to_be_bytes());
     response.extend_from_slice(&sub.to_be_bytes());
-    response.resize(length, 0);
+    for value in *values {
+        response.extend_from_slice(&value.to_be_bytes());
+    }
+
+    // 1/3's last field is the blob the 창고 greets by name, not a `u32`, and a
+    // length of zero there is the greeting with nothing in front of it.
+    if (command, sub) == (1, 3) {
+        let name = HERO5_SUBSCRIBER.lock();
+        response.extend_from_slice(&(name.len() as u32).to_be_bytes());
+        response.extend_from_slice(&name);
+    }
+
+    let length = response.len() as u32;
+    response[..4].copy_from_slice(&length.to_be_bytes());
 
     Some(response)
 }
@@ -2862,9 +2953,10 @@ mod tests {
     #[test]
     fn each_step_is_answered_with_its_own_command_and_a_zero_result() {
         // The steps both flows walk: 1/1 on connecting, then the 창고's 1/3 and
-        // 5/1-5/2, and the shop's 6/2-6/3. The field counts are what each
-        // handler reads off the reply.
-        for (command, sub, fields) in [(1, 1, 3), (1, 3, 3), (5, 1, 2), (5, 2, 3), (6, 2, 2), (6, 3, 3)] {
+        // 5/1-5/2, the shop's 6/2-6/3, the 창고's closing 7/1, and the 0/2
+        // keep-alive that runs alongside all of it. The field counts are what
+        // each handler reads off the reply.
+        for (command, sub, fields) in [(0, 2, 0), (1, 1, 3), (5, 1, 2), (5, 2, 3), (6, 2, 2), (6, 3, 3), (7, 1, 3)] {
             let request = hero5_frame(command, sub, &[]);
             let reply = lgt_local_hero5_response(&request).unwrap_or_else(|| panic!("{command}/{sub} unanswered"));
 
@@ -2877,12 +2969,49 @@ mod tests {
             // The command and sub-command `0x38498` reads at [12] and [16].
             assert_eq!(u32::from_be_bytes(reply[12..16].try_into().unwrap()), command);
             assert_eq!(u32::from_be_bytes(reply[16..20].try_into().unwrap()), sub);
-            // The result every handler reads first, and then nothing but zeroes:
-            // an empty message, and whatever else the step takes.
-            assert!(reply[20..].iter().all(|&byte| byte == 0));
+            // The result every handler reads first, then an empty message, then
+            // whatever else that step takes - all zero but 1/1's interval.
+            let zeroed = if (command, sub) == (1, 1) { &reply[20..28] } else { &reply[20..] };
+            assert!(zeroed.iter().all(|&byte| byte == 0));
 
             assert_eq!(response(&request), Some(reply));
         }
+    }
+
+    /// 1/1's third field is the seconds `0x37cec` keeps as `value * 1000` and
+    /// `0x392b8` halves to decide when to ping. Zero there is a ping per tick.
+    #[test]
+    fn the_first_step_hands_back_a_keep_alive_interval_of_its_own() {
+        let reply = lgt_local_hero5_response(&hero5_shop_request()).unwrap();
+
+        assert_eq!(u32::from_be_bytes(reply[28..32].try_into().unwrap()), HERO5_PING_SECONDS);
+        assert_ne!(HERO5_PING_SECONDS, 0);
+    }
+
+    /// The keep-alive is a frame the title sends on a timer rather than one it
+    /// waits on, so its answer is the bare header `0x33e58` reads nothing out of.
+    #[test]
+    fn the_keep_alive_is_answered_with_a_bare_header() {
+        let ping = hero5_frame(0, 2, &[]);
+
+        assert_eq!(lgt_local_hero5_response(&ping), Some(ping));
+    }
+
+    /// 1/3's last field is a blob, and the 창고 draws 15 bytes of it in front of
+    /// "님 반갑습니다." - so it carries the number 1/1 came in with.
+    #[test]
+    fn the_greeting_step_carries_the_number_the_first_step_came_in_with() {
+        lgt_local_hero5_response(&hero5_shop_request()).unwrap();
+        let reply = lgt_local_hero5_response(&hero5_frame(1, 3, &[])).unwrap();
+
+        // Result, message length, then the name's own length and the name.
+        assert_eq!(&reply[20..28], [0; 8]);
+        assert_eq!(u32::from_be_bytes(reply[28..32].try_into().unwrap()) as usize, reply.len() - 32);
+        assert_eq!(&reply[32..], b"01064256416");
+
+        // Never more than `0x37ef6` copies to `ctx + 0x351`.
+        assert!(reply.len() - 32 <= HERO5_NICKNAME);
+        assert_eq!(u32::from_be_bytes(reply[0..4].try_into().unwrap()) as usize, reply.len());
     }
 
     /// The frame the shop actually writes, captured off its billing socket, is
@@ -2912,6 +3041,8 @@ mod tests {
         // A sub-command of a command that is answered, but which is not.
         assert_eq!(lgt_local_hero5_response(&hero5_frame(1, 5, &[])), None);
         assert_eq!(lgt_local_hero5_response(&hero5_frame(6, 1, &[])), None);
+        assert_eq!(lgt_local_hero5_response(&hero5_frame(0, 1, &[])), None);
+        assert_eq!(lgt_local_hero5_response(&hero5_frame(7, 2, &[])), None);
 
         // Too short to carry a command at all.
         assert_eq!(lgt_local_hero5_response(&hero5_shop_request()[..19]), None);
