@@ -696,7 +696,7 @@ fn capture_scripted_archive() {
 #[ignore = "diagnostic"]
 fn capture_scripted_archive_twice() {
     let Ok(path) = std::env::var("WIE_ARCHIVE") else {
-        eprintln!("Set WIE_ARCHIVE to an archive, WIE_SCRIPT/WIE_SCRIPT2 to tick:KEY,...");
+        eprintln!("Set WIE_ARCHIVE to an archive, WIE_SCRIPT/WIE_SCRIPT2 to tick:KEY,... (WIE_RUNS for more than two)");
         return;
     };
     let archive = std::fs::read(&path).expect("archive");
@@ -707,30 +707,39 @@ fn capture_scripted_archive_twice() {
         .map_or("archive", |x| x.to_str().unwrap_or("archive"));
 
     let first = script_from_env();
-    let second = std::env::var("WIE_SCRIPT2").map_or_else(|_| first.clone(), |_| script_from_env_named("WIE_SCRIPT2"));
+    let later = std::env::var("WIE_SCRIPT2").map_or_else(|_| first.clone(), |_| script_from_env_named("WIE_SCRIPT2"));
 
-    // The first launch writes; its frames are not what this is for, so the
-    // dump directories are left to the second.
-    let state = {
-        let dump = std::env::var("WIE_FDUMP_DIR").ok();
-        let shot = std::env::var("WIE_SHOT_DIR").ok();
-        unsafe {
-            std::env::remove_var("WIE_FDUMP_DIR");
-            std::env::remove_var("WIE_SHOT_DIR");
-        }
-        let state = run_scripted_over(&format!("{label} run 1"), &archive, ticks, &first, TestPlatformState::default());
-        unsafe {
-            if let Some(dump) = dump {
-                std::env::set_var("WIE_FDUMP_DIR", dump);
-            }
-            if let Some(shot) = shot {
-                std::env::set_var("WIE_SHOT_DIR", shot);
-            }
-        }
-        state
-    };
+    // `WIE_RUNS` launches more than twice, which is how a title that should
+    // only ask something once - 던파귀검사편's 사용자 인증 says it runs on the
+    // first launch alone - is held to it.
+    let runs: u32 = std::env::var("WIE_RUNS").ok().and_then(|x| x.parse().ok()).unwrap_or(2).max(2);
 
-    run_scripted_over(&format!("{label} run 2"), &archive, ticks2, &second, state);
+    // Only the last launch's frames are what this is for, so the dump
+    // directories are kept back until it.
+    let dump = std::env::var("WIE_FDUMP_DIR").ok();
+    let shot = std::env::var("WIE_SHOT_DIR").ok();
+    unsafe {
+        std::env::remove_var("WIE_FDUMP_DIR");
+        std::env::remove_var("WIE_SHOT_DIR");
+    }
+
+    let mut state = TestPlatformState::default();
+    for run in 1..=runs {
+        if run == runs {
+            unsafe {
+                if let Some(dump) = &dump {
+                    std::env::set_var("WIE_FDUMP_DIR", dump);
+                }
+                if let Some(shot) = &shot {
+                    std::env::set_var("WIE_SHOT_DIR", shot);
+                }
+            }
+        }
+
+        let (ticks, script) = if run == 1 { (ticks, &first) } else { (ticks2, &later) };
+
+        state = run_scripted_over(&format!("{label} run {run}"), &archive, ticks, script, state);
+    }
 }
 
 /// Drives LoM with a scripted key sequence from `WIE_SCRIPT` (`tick:KEY,...`),
