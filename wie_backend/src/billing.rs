@@ -1565,6 +1565,110 @@ pub fn lgt_local_granted_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(vec![0xff, 0xff, length[0], length[1], response_type[0], response_type[1], 0x00])
 }
 
+/// 던파귀검사편's authentication, answered the way its own reader reads it.
+///
+/// The title opens a `MC_netBillSocket` for `211.115.203.30:10012` and writes
+/// one frame before it will leave `사용자 인증`. Both directions carry the same
+/// eight-byte header, little end first, and the length counts the header:
+///
+/// ```text
+/// [0..4]   u32 - the whole frame's length
+/// [4..6]   u16 - 0xffff
+/// [6..8]   u16 - the command
+/// ```
+///
+/// `0x727c` is the one place that header is written and `0x6fdc` the one place
+/// it is read. The reader takes bytes until it holds more than seven, refuses a
+/// frame whose `[4..6]` is not `0xffff`, waits until it holds the length the
+/// frame declares, and hands everything past the header to `0xe3c0` - which
+/// switches on the command alone.
+///
+/// The request is command `0x2711`, laid out by `0xb030` as two length-prefixed
+/// strings: the title, `DnFSwordMan`, and then either that same name or
+/// `UserAuthentication`, whichever the screen asked under.
+///
+/// Its answer is command `0x2712`, whose reader `0xe360` takes a fixed shape
+/// out of the body and compares it against nothing:
+///
+/// ```text
+/// [0]      u8  - the result
+/// [1..3]   u16 - a message length
+/// [3..]          the message, that many bytes
+/// ```
+///
+/// `0xb234` is what reads the result, and during authentication - where
+/// `[0x1500097]` is the non-zero state `0x2e824` put there - **0** and **2**
+/// both go on, while 1, 3 and 4 close the socket and stop the title. So this
+/// answers 0, with no message behind it: nothing displays one on the way
+/// through, and `0xe360` copies a zero-length one happily.
+///
+/// The payload cannot be left out altogether. `0x70a0` allocates a block only
+/// for a frame that declares more than its header, and hands `0xe3c0` a null
+/// pointer otherwise, which `0xe360` would read from - so the answer is the
+/// three bytes its reader takes and no fewer.
+///
+/// `None` for anything that is not that request: it has to declare its own
+/// length, carry the marker, be command `0x2711`, and spell two strings that
+/// end exactly where the frame does, the first of them this title's name.
+pub fn lgt_local_dnf_auth_response(request: &[u8]) -> Option<Vec<u8>> {
+    /// The length, the marker and the command.
+    const HEADER: usize = 8;
+    const MARKER: u16 = 0xffff;
+
+    /// What `0xb030` sends, and what `0xe360` reads the answer of.
+    const AUTH_REQUEST: u16 = 0x2711;
+    const AUTH_ANSWER: u16 = 0x2712;
+
+    /// The name `0xb030` always writes first, whichever screen asked.
+    const TITLE: &[u8] = b"DnFSwordMan";
+
+    /// The result `0xb234` goes on from.
+    const GRANTED: u8 = 0;
+
+    fn u16_at(bytes: &[u8], offset: usize) -> u16 {
+        u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
+    }
+
+    if request.len() < HEADER || u32::from_le_bytes(request[0..4].try_into().ok()?) as usize != request.len() {
+        return None;
+    }
+
+    if u16_at(request, 4) != MARKER || u16_at(request, 6) != AUTH_REQUEST {
+        return None;
+    }
+
+    // Two length-prefixed strings, ending where the frame does. The first is
+    // the title's own name, which is what says this request is this title's.
+    let mut body = &request[HEADER..];
+    for index in 0..2 {
+        if body.len() < 2 {
+            return None;
+        }
+
+        let length = u16_at(body, 0) as usize;
+        let (name, rest) = body[2..].split_at_checked(length)?;
+
+        if index == 0 && name != TITLE {
+            return None;
+        }
+
+        body = rest;
+    }
+
+    if !body.is_empty() {
+        return None;
+    }
+
+    let mut response = Vec::with_capacity(HEADER + 3);
+    response.extend_from_slice(&((HEADER + 3) as u32).to_le_bytes());
+    response.extend_from_slice(&MARKER.to_le_bytes());
+    response.extend_from_slice(&AUTH_ANSWER.to_le_bytes());
+    response.push(GRANTED);
+    response.extend_from_slice(&0u16.to_le_bytes());
+
+    Some(response)
+}
+
 /// The answer to a billing request, whichever of these protocols it is in.
 ///
 /// Tried in order of how specific each shape is: the `0xffff`-framed message,
@@ -1591,6 +1695,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_text_record_response(request))
         .or_else(|| lgt_local_tagged_record_response(request))
         .or_else(|| lgt_local_opcode_header_response(request))
+        .or_else(|| lgt_local_dnf_auth_response(request))
 }
 
 #[cfg(test)]
@@ -2833,6 +2938,76 @@ mod tests {
             assert_eq!(u16::from_be_bytes([answer[0], answer[1]]) as usize, answer.len());
             assert_eq!((answer[2], answer[4]), (0, 0));
         }
+    }
+
+    /// 던파귀검사편's authentication request is answered under the command its
+    /// own reader is registered at, with the body that reader takes.
+    #[test]
+    fn the_authentication_this_title_waits_on_is_answered() {
+        // The frame the title wrote, byte for byte, off the socket it opened
+        // for 211.115.203.30.
+        let request = [
+            0x29, 0x00, 0x00, 0x00, 0xff, 0xff, 0x11, 0x27, 0x0b, 0x00, b'D', b'n', b'F', b'S', b'w', b'o', b'r', b'd', b'M', b'a', b'n', 0x12, 0x00,
+            b'U', b's', b'e', b'r', b'A', b'u', b't', b'h', b'e', b'n', b't', b'i', b'c', b'a', b't', b'i', b'o', b'n',
+        ];
+        assert_eq!(request.len(), 0x29);
+
+        let response = lgt_local_dnf_auth_response(&request).unwrap();
+
+        // Its own length, the marker, the answer's command, and the three bytes
+        // `0xe360` takes: a granted result and an empty message.
+        assert_eq!(response, vec![0x0b, 0x00, 0x00, 0x00, 0xff, 0xff, 0x12, 0x27, 0x00, 0x00, 0x00]);
+        assert_eq!(u32::from_le_bytes(response[0..4].try_into().unwrap()) as usize, response.len());
+
+        // `0x70a0` hands `0xe3c0` a null pointer for a frame that declares
+        // nothing past its header, which `0xe360` would read from.
+        assert!(response.len() > 8);
+
+        // The screen that asks under the title's own name is the same request.
+        let mut first_pass = Vec::from(&request[..21]);
+        first_pass.extend_from_slice(&[0x0b, 0x00]);
+        first_pass.extend_from_slice(b"DnFSwordMan");
+        first_pass[0] = first_pass.len() as u8;
+        assert_eq!(lgt_local_dnf_auth_response(&first_pass).unwrap(), response);
+    }
+
+    /// A frame that is not that request is left alone, whether it is another
+    /// title's or this one's own next step.
+    #[test]
+    fn only_that_title_s_authentication_request_is_answered() {
+        let request = [
+            0x29, 0x00, 0x00, 0x00, 0xff, 0xff, 0x11, 0x27, 0x0b, 0x00, b'D', b'n', b'F', b'S', b'w', b'o', b'r', b'd', b'M', b'a', b'n', 0x12, 0x00,
+            b'U', b's', b'e', b'r', b'A', b'u', b't', b'h', b'e', b'n', b't', b'i', b'c', b'a', b't', b'i', b'o', b'n',
+        ];
+
+        // A length that is not the frame in hand.
+        let mut short = request;
+        short[0] = 0x28;
+        assert!(lgt_local_dnf_auth_response(&short).is_none());
+
+        // No marker.
+        let mut unmarked = request;
+        unmarked[4] = 0;
+        assert!(lgt_local_dnf_auth_response(&unmarked).is_none());
+
+        // `0x7818`'s step, which this does not know the answer to yet.
+        let mut next_step = request;
+        next_step[6] = 0x00;
+        next_step[7] = 0x00;
+        assert!(lgt_local_dnf_auth_response(&next_step).is_none());
+
+        // Another title's name in the first string.
+        let mut other = request;
+        other[10] = b'X';
+        assert!(lgt_local_dnf_auth_response(&other).is_none());
+
+        // A string that runs past the frame.
+        let mut overrun = request;
+        overrun[8] = 0xff;
+        assert!(lgt_local_dnf_auth_response(&overrun).is_none());
+
+        // A header with nothing behind it.
+        assert!(lgt_local_dnf_auth_response(&[0x08, 0x00, 0x00, 0x00, 0xff, 0xff, 0x11, 0x27]).is_none());
     }
 
     /// A message this does not know the shape of is left alone rather than
