@@ -1205,12 +1205,111 @@ const HERO4_WAREHOUSE_ROWS: usize = 16;
 /// sends is the row a listing sends back, behind one byte.
 const HERO4_ITEM_RECORD: usize = 36;
 
-/// What 영웅서기4's 창고 has been given, for as long as this process runs.
+/// The namespace the answers here keep what they are given under.
+///
+/// Not the title's own - a database opened under a title's id is one the title
+/// can list, and this is not the title's to see. It is the emulator's side of an
+/// exchange, kept beside the title's saves rather than among them.
+pub const BILLING_STORE_NAMESPACE: &str = "wie_billing";
+
+/// What 영웅서기4's 창고 is kept under in that namespace.
+pub const HERO4_WAREHOUSE_STORE: &str = "hero4_warehouse";
+
+/// What 영웅서기4's 창고 has been given.
 ///
 /// There is no account here for a 창고 to have been left on, so this is the
-/// whole of one: what the title deposited this run, in the order it deposited
-/// it. It does not outlive the process - see [`hero4_deposit`].
-static HERO4_WAREHOUSE: spin::Mutex<Vec<[u8; HERO4_ITEM_RECORD]>> = spin::Mutex::new(Vec::new());
+/// whole of one: what the title deposited, in the order it deposited it, as the
+/// records [`HERO4_ITEM_RECORD`] describes back to back.
+///
+/// It is brought in from [`HERO4_WAREHOUSE_STORE`] the first time a frame needs
+/// it and written back whenever it changes, because the item is out of the
+/// title's own bag the moment a deposit is granted - see [`hero4_deposit`].
+static HERO4_WAREHOUSE: spin::Mutex<Hero4Warehouse> = spin::Mutex::new(Hero4Warehouse::new());
+
+/// The rows, and whether they have been read in and whether they still match
+/// what was written out.
+struct Hero4Warehouse {
+    rows: Vec<[u8; HERO4_ITEM_RECORD]>,
+    /// False until [`load_hero4_warehouse`] has run, whether or not anything was
+    /// kept - an empty 창고 is a 창고, and reading it in twice would lose a
+    /// deposit made between the two.
+    loaded: bool,
+    changed: bool,
+}
+
+impl Hero4Warehouse {
+    const fn new() -> Self {
+        Self {
+            rows: Vec::new(),
+            loaded: false,
+            changed: false,
+        }
+    }
+}
+
+/// Whether this frame is one whose answer 영웅서기4's 창고 is behind, and the
+/// 창고 has not been read in yet.
+///
+/// The listing and the deposit are the two: `5/0x3d` answers out of it and
+/// `5/0x41` adds to it. Every other frame here, and every other title's, is
+/// none of its business - which is what keeps this off the path of a title that
+/// has no 창고 at all.
+pub fn hero4_warehouse_needs_loading(request: &[u8]) -> bool {
+    const HEADER: usize = 6;
+
+    if request.len() < HEADER || u32::from_le_bytes([request[0], request[1], request[2], request[3]]) as usize != request.len() {
+        return false;
+    }
+    if !matches!((request[4], request[5]), (5, 0x3d) | (5, 0x41)) {
+        return false;
+    }
+
+    !HERO4_WAREHOUSE.lock().loaded
+}
+
+/// Fill 영웅서기4's 창고 from what was kept for it.
+///
+/// The records back to back, as [`hero4_warehouse_to_keep`] wrote them. A
+/// trailing part-record is dropped rather than guessed at, and anything past
+/// [`HERO4_WAREHOUSE_ROWS`] with it - the listing has no room to send it back.
+///
+/// Marks the 창고 read in whether or not anything was there, so an empty store
+/// is not read again over a deposit made after it.
+pub fn load_hero4_warehouse(kept: &[u8]) {
+    let mut warehouse = HERO4_WAREHOUSE.lock();
+
+    warehouse.rows = kept
+        .chunks_exact(HERO4_ITEM_RECORD)
+        .take(HERO4_WAREHOUSE_ROWS)
+        .map(|record| {
+            let mut row = [0u8; HERO4_ITEM_RECORD];
+            row.copy_from_slice(record);
+            row
+        })
+        .collect();
+    warehouse.loaded = true;
+    warehouse.changed = false;
+}
+
+/// What 영웅서기4's 창고 holds, when it is not what was last kept for it.
+///
+/// `None` when nothing has changed, so the caller writes only what a deposit
+/// actually moved.
+pub fn hero4_warehouse_to_keep() -> Option<Vec<u8>> {
+    let mut warehouse = HERO4_WAREHOUSE.lock();
+
+    if !warehouse.changed {
+        return None;
+    }
+    warehouse.changed = false;
+
+    let mut kept = Vec::with_capacity(warehouse.rows.len() * HERO4_ITEM_RECORD);
+    for row in &warehouse.rows {
+        kept.extend_from_slice(row);
+    }
+
+    Some(kept)
+}
 
 /// What 영웅서기4's 창고 holds.
 ///
@@ -1258,12 +1357,12 @@ fn hero4_warehouse() -> Vec<u8> {
 
     let held = HERO4_WAREHOUSE.lock();
 
-    let mut body = Vec::with_capacity(1 + LEAD.len() + 2 + held.len() * ROW);
+    let mut body = Vec::with_capacity(1 + LEAD.len() + 2 + held.rows.len() * ROW);
     body.push(GRANTED);
     body.extend_from_slice(&LEAD);
-    body.extend_from_slice(&(held.len() as u16).to_le_bytes());
+    body.extend_from_slice(&(held.rows.len() as u16).to_le_bytes());
 
-    for record in held.iter() {
+    for record in &held.rows {
         // The byte `0x1566b1e + i` takes, which the catalogue leaves zero.
         body.push(0);
         body.extend_from_slice(record);
@@ -1286,10 +1385,11 @@ fn hero4_warehouse() -> Vec<u8> {
 /// what a 창고 was, and it is why this keeps what it is handed rather than
 /// granting and forgetting.
 ///
-/// **It keeps it for this process and no longer.** The carrier's server held a
-/// 창고 between sessions; nothing here does. An item deposited and then left
-/// behind by a restart is not in the bag either, because the title already saved
-/// itself without it.
+/// So it is kept where it survives the run: [`hero4_warehouse_to_keep`] hands
+/// the rows to whoever answered the frame, to write into
+/// [`HERO4_WAREHOUSE_STORE`], and [`load_hero4_warehouse`] brings them back the
+/// next time a 창고 frame needs them. Losing them would be losing the item
+/// outright - the title has already saved itself without it.
 ///
 /// A deposit past the sixteenth is refused rather than dropped, with the empty
 /// message the error box reads at `[8]`: `0x5ea26` only has room for
@@ -1308,7 +1408,7 @@ fn hero4_deposit(record: &[u8]) -> Option<Vec<u8>> {
 
     let mut held = HERO4_WAREHOUSE.lock();
 
-    if held.len() >= HERO4_WAREHOUSE_ROWS {
+    if held.rows.len() >= HERO4_WAREHOUSE_ROWS {
         // The status, a byte where the granted path reads none, and the message
         // the error box draws - empty, because there is no server to have
         // written one.
@@ -1317,7 +1417,8 @@ fn hero4_deposit(record: &[u8]) -> Option<Vec<u8>> {
 
     let mut row = [0u8; HERO4_ITEM_RECORD];
     row.copy_from_slice(record);
-    held.push(row);
+    held.rows.push(row);
+    held.changed = true;
 
     Some(vec![GRANTED])
 }
@@ -2876,27 +2977,38 @@ mod tests {
 
     #[test]
     fn the_warehouse_keeps_what_it_is_handed_and_lists_it_back() {
-        use super::lgt_local_major_minor_response;
+        use super::{hero4_warehouse_needs_loading, hero4_warehouse_to_keep, lgt_local_major_minor_response, load_hero4_warehouse};
 
         const ROW: usize = 37;
 
         // The upload, which `0x5e4f0` reads nothing of - the command alone.
-        let mut record = vec![0u8; 1132];
-        record[1] = 0x67;
-        let response = lgt_local_major_minor_response(&hero_lore_frame(0x14, 0x46, &record)).unwrap();
+        let mut character = vec![0u8; 1132];
+        character[1] = 0x67;
+        let response = lgt_local_major_minor_response(&hero_lore_frame(0x14, 0x46, &character)).unwrap();
         assert_eq!(response, [0x06, 0x00, 0x00, 0x00, 0x14, 0x46]);
+        // And which the 창고 is not behind, so it does not read one in.
+        assert!(!hero4_warehouse_needs_loading(&hero_lore_frame(0x14, 0x46, &character)));
 
-        // The listing it asks for next, which is the catalogue's own shape one
-        // byte further along: a granted status, the two bytes `0x1566b1a`
-        // takes, and a count.
-        let listing = |request: &[u8]| lgt_local_major_minor_response(request).unwrap();
-        let before = listing(&hero_lore_frame(5, 0x3d, &[0, 0]));
-        assert_eq!(u32::from_le_bytes([before[0], before[1], before[2], before[3]]) as usize, before.len());
-        assert_eq!((before[4], before[5]), (5, 0x3d));
-        assert_eq!(before[6], 1);
-        assert_eq!(&before[7..9], &[0, 1]);
-        let held = u16::from_le_bytes([before[9], before[10]]) as usize;
-        assert_eq!(before.len(), 11 + held * ROW);
+        // The listing is, and nothing has been kept for it.
+        let asks = hero_lore_frame(5, 0x3d, &[0, 0]);
+        assert!(hero4_warehouse_needs_loading(&asks));
+        load_hero4_warehouse(&[]);
+        // Read in once, whether or not anything was there.
+        assert!(!hero4_warehouse_needs_loading(&asks));
+        assert_eq!(hero4_warehouse_to_keep(), None);
+
+        // Which is the catalogue's own shape one byte further along: a granted
+        // status, the two bytes `0x1566b1a` takes, and a count of no rows.
+        let listing = lgt_local_major_minor_response(&asks).unwrap();
+        assert_eq!(
+            u32::from_le_bytes([listing[0], listing[1], listing[2], listing[3]]) as usize,
+            listing.len()
+        );
+        assert_eq!((listing[4], listing[5]), (5, 0x3d));
+        assert_eq!(listing[6], 1);
+        assert_eq!(&listing[7..9], &[0, 1]);
+        assert_eq!(u16::from_le_bytes([listing[9], listing[10]]), 0);
+        assert_eq!(listing.len(), 11);
 
         // The deposit the 예 on 대전 창고에 옮기겠습니까 writes, as it came off
         // the wire: the kind at `[16]`, the grade, and 300 for its price.
@@ -2910,15 +3022,33 @@ mod tests {
         let response = lgt_local_major_minor_response(&request).unwrap();
         assert_eq!(response, [0x07, 0x00, 0x00, 0x00, 0x05, 0x41, 0x01]);
 
-        // And it is in the listing behind a row byte of its own.
-        let after = listing(&hero_lore_frame(5, 0x3d, &[0, 0]));
-        assert_eq!(u16::from_le_bytes([after[9], after[10]]) as usize, held + 1);
-        let row = &after[11 + held * ROW..11 + (held + 1) * ROW];
+        // And it is what has to be kept, once - the item is out of the bag now.
+        let kept = hero4_warehouse_to_keep().unwrap();
+        assert_eq!(kept, deposit);
+        assert_eq!(hero4_warehouse_to_keep(), None);
+
+        // It is in the listing behind a row byte of its own.
+        let listing = lgt_local_major_minor_response(&asks).unwrap();
+        assert_eq!(u16::from_le_bytes([listing[9], listing[10]]), 1);
+        let row = &listing[11..11 + ROW];
         assert_eq!(row[0], 0);
         assert_eq!(&row[1..], &deposit);
         // Which is where its reader takes the kind and the price.
         assert_eq!(row[17], 0x0b);
         assert_eq!(u32::from_le_bytes([row[21], row[22], row[23], row[24]]), 300);
+
+        // And what was kept is the same 창고 read back after a restart.
+        load_hero4_warehouse(&kept);
+        let listing = lgt_local_major_minor_response(&asks).unwrap();
+        assert_eq!(u16::from_le_bytes([listing[9], listing[10]]), 1);
+        assert_eq!(&listing[11..11 + ROW][1..], &deposit);
+        // Reading it in is not a change to write back out.
+        assert_eq!(hero4_warehouse_to_keep(), None);
+
+        // A trailing part-record is dropped rather than guessed at.
+        load_hero4_warehouse(&kept[..HERO4_ITEM_RECORD - 1]);
+        let listing = lgt_local_major_minor_response(&asks).unwrap();
+        assert_eq!(u16::from_le_bytes([listing[9], listing[10]]), 0);
 
         // A frame that is not the record this message carries.
         assert_eq!(lgt_local_major_minor_response(&hero_lore_frame(5, 0x41, &[0; 12])), None);

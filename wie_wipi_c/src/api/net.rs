@@ -1360,6 +1360,34 @@ pub async fn socket_connect(
     }
 }
 
+/// What an answer here kept for itself, under
+/// [`BILLING_STORE_NAMESPACE`](wie_backend::billing::BILLING_STORE_NAMESPACE).
+///
+/// Empty when nothing has been kept yet, which is what an untouched store is.
+/// The namespace is the emulator's rather than the title's, so a title listing
+/// its own databases never sees this one.
+async fn read_billing_store(context: &mut dyn WIPICContext, name: &str) -> Vec<u8> {
+    let namespace = wie_backend::billing::BILLING_STORE_NAMESPACE;
+    let system = context.system();
+
+    if !system.platform().database_repository().exists(name, namespace).await {
+        return Vec::new();
+    }
+
+    let database = system.platform().database_repository().open(name, namespace).await;
+
+    database.get(1).await.unwrap_or_default()
+}
+
+/// Keeps what an answer here has to hand back after a restart.
+async fn write_billing_store(context: &mut dyn WIPICContext, name: &str, kept: &[u8]) {
+    let namespace = wie_backend::billing::BILLING_STORE_NAMESPACE;
+    let system = context.system();
+    let mut database = system.platform().database_repository().open(name, namespace).await;
+
+    database.set(1, kept).await;
+}
+
 /// `MC_netSocketWrite` (0x25c) @ native 0x1b35ec.
 ///
 /// ABI: r0 = socket, r1 = buffer, r2 = length. The native gates in this exact
@@ -1446,6 +1474,15 @@ pub async fn socket_write(context: &mut dyn WIPICContext, socket: i32, buffer: W
         // answered.
         tracing::debug!("bill write {socket}: {}", wie_backend::billing::bill_frame_trace(&data));
 
+        // The 창고 answers out of what it was given, and what it was given has
+        // to outlive the run - the item is out of the title's own bag the
+        // moment a deposit is granted. Read in on the first frame that needs
+        // it, and only that frame, so no other title pays for it.
+        if wie_backend::billing::hero4_warehouse_needs_loading(&data) {
+            let kept = read_billing_store(context, wie_backend::billing::HERO4_WAREHOUSE_STORE).await;
+            wie_backend::billing::load_hero4_warehouse(&kept);
+        }
+
         if billing_mode == 1 {
             if let Some(response) = lgt_local_purchase_success_response(&data) {
                 tracing::debug!(
@@ -1454,6 +1491,10 @@ pub async fn socket_write(context: &mut dyn WIPICContext, socket: i32, buffer: W
                 );
 
                 state.lock().queue_local_billing_response(socket, response);
+
+                if let Some(kept) = wie_backend::billing::hero4_warehouse_to_keep() {
+                    write_billing_store(context, wie_backend::billing::HERO4_WAREHOUSE_STORE, &kept).await;
+                }
 
                 // Match a successful application-level socket write. The
                 // request is consumed locally, so no carrier/backend write
@@ -1472,7 +1513,15 @@ pub async fn socket_write(context: &mut dyn WIPICContext, socket: i32, buffer: W
         // the lower allocation/send subsequently fails.
         state.lock().update_billing_header(header);
 
-        return Ok(match transport_write(context, socket, &frame) {
+        // The gateway answers inside this write, so anything it was given has
+        // already changed the 창고 by the time the write returns.
+        let written = transport_write(context, socket, &frame);
+
+        if let Some(kept) = wie_backend::billing::hero4_warehouse_to_keep() {
+            write_billing_store(context, wie_backend::billing::HERO4_WAREHOUSE_STORE, &kept).await;
+        }
+
+        return Ok(match written {
             Ok(written) => lgt_bill_write_public_result(written),
             Err(error) => error,
         });
