@@ -1623,6 +1623,28 @@ pub fn lgt_local_granted_response(request: &[u8]) -> Option<Vec<u8>> {
 /// closes the socket and anything from 1 up goes on. So it answers 1, with the
 /// eleven bytes zero and no message.
 ///
+/// A screen that opens its own connection - 세라샵 does, to buy an item - takes
+/// a third step instead of that one. `0xb234` sends it to `0x7818` rather than
+/// to `0xaebc` when `[0x1500097]` is set, and `0x7818` writes command `0x00`:
+/// the subscriber's number as eleven bytes and a `u16` behind it.
+///
+/// ```text
+/// 15 00 00 00 ff ff 00 00 "01024417543" 01 00
+/// ```
+///
+/// Its answer is command `0x01`, read by `0xe084`:
+///
+/// ```text
+/// [0]      u8  - the result
+/// [1..3]   u16 - a message length
+/// [3..]          the message, that many bytes
+/// [3+n..]        four bytes, which `0xe084` keeps only when the result is 0
+/// ```
+///
+/// Here **0** is the result that goes on and 1 or more stops - the opposite of
+/// the step before it again - so it answers 0, no message, and the four bytes
+/// zero, which is what makes the reader take all four.
+///
 /// Neither payload can be left out altogether. `0x70a0` allocates a block only
 /// for a frame that declares more than its header, and hands `0xe3c0` a null
 /// pointer otherwise, which both readers would read from - so each answer is
@@ -1646,12 +1668,25 @@ pub fn lgt_local_dnf_response(request: &[u8]) -> Option<Vec<u8>> {
     const REGISTER_REQUEST: u16 = 0x28a0;
     const REGISTER_ANSWER: u16 = 0x28a1;
 
+    /// What `0x7818` sends instead, on a connection a screen opened for
+    /// itself, and `0xe084` reads the answer of.
+    const SESSION_REQUEST: u16 = 0x0000;
+    const SESSION_ANSWER: u16 = 0x0001;
+    /// The subscriber's number and the `u16` behind it, which is the whole of
+    /// that request's body.
+    const SESSION_BODY: usize = 11 + 2;
+    /// The four bytes `0xe084` takes past the message, and only for a granted
+    /// result.
+    const SESSION_TRAILER: usize = 4;
+
     /// The name `0xb030` always writes first, whichever screen asked.
     const TITLE: &[u8] = b"DnFSwordMan";
 
-    /// The results `0xb234` goes on from, which are opposite ends for the two.
+    /// The results `0xb234` goes on from. They are not the same value: the
+    /// register step stops on 0 where the other two go on from it.
     const AUTH_GRANTED: u8 = 0;
     const REGISTER_GRANTED: u8 = 1;
+    const SESSION_GRANTED: u8 = 0;
 
     /// The eleven bytes `0xe140` takes between the result and the message,
     /// and then reads nothing out of - it copies them to a stack buffer and
@@ -1706,6 +1741,15 @@ pub fn lgt_local_dnf_response(request: &[u8]) -> Option<Vec<u8>> {
             payload[0] = REGISTER_GRANTED;
 
             (REGISTER_ANSWER, payload)
+        }
+        // The subscriber's number and a `u16`, and nothing else. Digits are
+        // what say the frame is that request rather than some other title's
+        // thirteen bytes under a command as plain as zero.
+        SESSION_REQUEST if body.len() == SESSION_BODY && body[..11].iter().all(u8::is_ascii_digit) => {
+            let mut payload = vec![0u8; 1 + 2 + SESSION_TRAILER];
+            payload[0] = SESSION_GRANTED;
+
+            (SESSION_ANSWER, payload)
         }
         _ => return None,
     };
@@ -3058,6 +3102,43 @@ mod tests {
         trailing.extend_from_slice(&[0x00, 0x00]);
         trailing[0] += 2;
         assert!(lgt_local_dnf_response(&trailing).is_none());
+    }
+
+    /// The step a screen that opened its own connection takes - 세라샵 does, to
+    /// buy an item - is answered under its own reader's command.
+    #[test]
+    fn the_step_a_screen_s_own_connection_takes_is_answered() {
+        // The frame the title wrote off the socket 세라샵 opened.
+        let mut request = vec![0x15, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00];
+        request.extend_from_slice(b"01024417543");
+        request.extend_from_slice(&1u16.to_le_bytes());
+        assert_eq!(request.len(), 0x15);
+
+        let response = lgt_local_dnf_response(&request).unwrap();
+
+        // `0xe084` takes a result, a message length, the message, and four
+        // bytes past it - which it only reads for a granted result.
+        assert_eq!(
+            response,
+            vec![0x0f, 0x00, 0x00, 0x00, 0xff, 0xff, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        );
+        assert_eq!(u32::from_le_bytes(response[0..4].try_into().unwrap()) as usize, response.len());
+
+        // 0 is what `0xb234` goes on from here, where the step before it stops
+        // on 0 - the two are not the same answer.
+        assert_eq!(response[8], 0);
+
+        // Thirteen bytes that are not a subscriber's number are some other
+        // frame that happens to be under a command as plain as zero.
+        let mut lettered = request.clone();
+        lettered[8] = b'x';
+        assert!(lgt_local_dnf_response(&lettered).is_none());
+
+        // Nor is a body of another length.
+        let mut longer = request.clone();
+        longer.push(0);
+        longer[0] += 1;
+        assert!(lgt_local_dnf_response(&longer).is_none());
     }
 
     /// A frame that is not that request is left alone, whether it is another
