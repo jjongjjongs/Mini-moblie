@@ -1822,12 +1822,24 @@ pub fn lgt_local_dnf_response(request: &[u8]) -> Option<Vec<u8>> {
 /// frame the title writes afterwards carries it. A session of zero is what it
 /// has already, so the answer issues one.
 ///
+/// With a session in hand the title sends command `0x36`, four bytes of body:
+///
+/// ```text
+/// 00 00 00 19 15 00 00 00 36 00 00 00 01 00 00 00 00 15 cd 5b 07 3a 9d 4f 7f
+/// ```
+///
+/// Its answer is command `0x37`, and `0x45a46` takes two `u32` out of the body
+/// and compares neither against anything the frame carries: the first has to be
+/// **0**, or the title takes its failure branch, and the second it keeps at
+/// `[0x1504be4]` before advancing to state 6. So that answer is two zeroes.
+///
 /// The frame it repeats while waiting is command `8`, whose answer `0x45052`
 /// walks a table of sessions rather than the title's own - it is other players,
-/// not the login - so it is left alone until the login has gone through.
+/// not this walk - so it is left alone.
 ///
-/// `None` for anything that is not that login: it has to declare its length at
-/// both ends, carry the constant, and be command `0`.
+/// `None` for anything that is not one of those two: it has to declare its
+/// length at both ends, carry the constant, and be a command whose reader's
+/// shape is known.
 pub fn lgt_local_biochronicle_response(request: &[u8]) -> Option<Vec<u8>> {
     /// The length twice, the command, the session, a zero and the constant.
     const HEADER: usize = 21;
@@ -1836,6 +1848,13 @@ pub fn lgt_local_biochronicle_response(request: &[u8]) -> Option<Vec<u8>> {
 
     const LOGIN_REQUEST: u32 = 0;
     const LOGIN_ANSWER: u32 = 1;
+
+    /// What the title sends once it has a session, and `0x45a46` reads the
+    /// answer of.
+    const READY_REQUEST: u32 = 0x36;
+    const READY_ANSWER: u32 = 0x37;
+    /// The result `0x45a46` goes on from, and the value it keeps behind it.
+    const READY_BODY: usize = 8;
 
     /// The session `0x44368` keeps and the title then carries. Anything but the
     /// zero it starts with; nothing compares it against anything else.
@@ -1854,17 +1873,27 @@ pub fn lgt_local_biochronicle_response(request: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    if u32_le(request, 17) != CONSTANT || u32_le(request, 8) != LOGIN_REQUEST {
+    if u32_le(request, 17) != CONSTANT {
         return None;
     }
 
-    let mut response = Vec::with_capacity(HEADER);
-    response.extend_from_slice(&(HEADER as u32).to_be_bytes());
-    response.extend_from_slice(&((HEADER - 4) as u32).to_le_bytes());
-    response.extend_from_slice(&LOGIN_ANSWER.to_le_bytes());
-    response.extend_from_slice(&SESSION.to_le_bytes());
+    // The login is what issues a session; everything after it carries the one
+    // it was issued, and is answered under the same.
+    let (answer, session, body): (u32, u32, Vec<u8>) = match u32_le(request, 8) {
+        LOGIN_REQUEST => (LOGIN_ANSWER, SESSION, Vec::new()),
+        READY_REQUEST => (READY_ANSWER, u32_le(request, 12), vec![0u8; READY_BODY]),
+        _ => return None,
+    };
+
+    let length = HEADER + body.len();
+    let mut response = Vec::with_capacity(length);
+    response.extend_from_slice(&(length as u32).to_be_bytes());
+    response.extend_from_slice(&((length - 4) as u32).to_le_bytes());
+    response.extend_from_slice(&answer.to_le_bytes());
+    response.extend_from_slice(&session.to_le_bytes());
     response.push(0);
     response.extend_from_slice(&CONSTANT.to_le_bytes());
+    response.extend_from_slice(&body);
 
     Some(response)
 }
@@ -3336,6 +3365,30 @@ mod tests {
         // The session is what `0x44368` keeps, and zero is what the title
         // already has.
         assert_ne!(u32::from_le_bytes(response[12..16].try_into().unwrap()), 0);
+    }
+
+    /// The step that title takes once it has a session is answered under its
+    /// own reader's command.
+    #[test]
+    fn the_step_past_that_login_is_answered() {
+        // The frame the title wrote with the session it had just been issued.
+        let mut request = vec![0x00, 0x00, 0x00, 0x19, 0x15, 0x00, 0x00, 0x00];
+        request.extend_from_slice(&0x36u32.to_le_bytes());
+        request.extend_from_slice(&1u32.to_le_bytes());
+        request.push(0);
+        request.extend_from_slice(&123_456_789u32.to_le_bytes());
+        request.extend_from_slice(&[0x3a, 0x9d, 0x4f, 0x7f]);
+        assert_eq!(request.len(), 0x19);
+
+        let response = lgt_local_biochronicle_response(&request).unwrap();
+
+        // Command 0x37, the session it was asked under, and the two u32
+        // `0x45a46` takes - the first of which has to be 0.
+        assert_eq!(response[0..4], [0x00, 0x00, 0x00, 0x1d]);
+        assert_eq!(u32::from_le_bytes(response[4..8].try_into().unwrap()) as usize, response.len() - 4);
+        assert_eq!(u32::from_le_bytes(response[8..12].try_into().unwrap()), 0x37);
+        assert_eq!(u32::from_le_bytes(response[12..16].try_into().unwrap()), 1);
+        assert_eq!(response[21..], [0; 8]);
     }
 
     /// The frame that title repeats while it waits is not the login, and
