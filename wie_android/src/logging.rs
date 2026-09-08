@@ -29,7 +29,11 @@ static INIT: Once = Once::new();
 /// bookkeeping (`wie_core_arm`) drop to info/warn; every graphics service's
 /// per-op drawing stays at info; the standard-library call echo
 /// (`java_runtime`: every `Vector.size`, `arraycopy`, `String`, stream read the
-/// game makes) drops to info; and the LGT paint-loop housekeeping that dwarfs
+/// game makes) drops to info - with `java.lang.System` held back out of that,
+/// because `arraycopy` is where a title's own out-of-bounds copy surfaces and
+/// its five arguments are the only thing in a capture that says which arrays
+/// were involved; 지크 dies in one and the answer was not in the log; and the
+/// LGT paint-loop housekeeping that dwarfs
 /// everything else - `vm_activate_class`/`vm_thread_reschedule`/
 /// `vm_check_stack_overflow` and the per-call `LGT invoke virtual/static` echo,
 /// the bulk of a capture - is routed to the `wie_lgt::hot` target and held at
@@ -39,7 +43,7 @@ static INIT: Once = Once::new();
 /// the input path (event queue, canvas, clet) stays at debug so a press is
 /// always captured. Setting `RUST_LOG`, or the in-app log filter (e.g.
 /// `wie_lgt::hot=trace`), overrides this entirely.
-const DEFAULT_LOG_DIRECTIVE: &str = "debug,wie_lgt=trace,wie_lgt::hot=warn,wie_lgt::runtime::wipi_c=debug,wie_ktf=trace,wie_j2me=trace,wie_skt=trace,wie_core_arm=info,wie_wipi_c::api::graphics=debug,wie_wipi_java::classes::org::kwis::msp::lcdui::graphics=info,wie_midp::classes::javax::microedition::lcdui::graphics=info,java_runtime=info,arm32_cpu=warn";
+const DEFAULT_LOG_DIRECTIVE: &str = "debug,wie_lgt=trace,wie_lgt::hot=warn,wie_lgt::runtime::wipi_c=debug,wie_ktf=trace,wie_j2me=trace,wie_skt=trace,wie_core_arm=info,wie_wipi_c::api::graphics=debug,wie_wipi_java::classes::org::kwis::msp::lcdui::graphics=info,wie_midp::classes::javax::microedition::lcdui::graphics=info,java_runtime=info,java_runtime::classes::java::lang::system=debug,arm32_cpu=warn";
 
 /// Lets the player swap the log filter at runtime, so capturing a module's
 /// debug/trace detail no longer means editing the default above and rebuilding.
