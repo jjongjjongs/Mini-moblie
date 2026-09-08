@@ -2197,6 +2197,67 @@ pub fn lgt_local_id_framed_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(response)
 }
 
+/// The answer to the `LGT`-tagged purchase 테라-영원의혼돈 writes.
+///
+/// 테라-영원의혼돈 (`0002B76D`) parks on `전송 중입니다..` the moment a shop
+/// purchase is confirmed. What it wrote is a 111-byte record of its own, not one
+/// of the framed messages above:
+///
+/// ```text
+/// [0..3]    "LGT"
+/// [3..14]   the header: the message it is, and the item's price as a u32 LE
+/// [14..65]  the item, as ASCII - the title's own app id and the item's code,
+///           then its name in EUC-KR, zero filled
+/// [65..111] the shop it is, the same way
+/// ```
+///
+/// The reply it waits for is not that shape at all. Its receive is a two-step
+/// state machine at `0x128d10`: state 4 reads exactly four bytes, state 5 reads
+/// those four back as a `u32` little-endian through `0x2847c` and waits for that
+/// many more. So an answer is a length and a body, and the body is what
+/// `0x1282ea` reads:
+///
+/// - `[0]` is `0x18` on anything the server accepted. Anything else sets the
+///   state that draws `연결 상태가 원활하지 않습니다`.
+/// - `[1]` picks between the two accepted outcomes: zero draws `서버에 저장된
+///   데이터가 없습니다`, and anything else takes the quiet path at `0x128458`
+///   that draws no notice at all and lets the shop carry on.
+///
+/// So the answer is a two-byte body saying accepted, and nothing else - the
+/// title already knows which item it asked for, and the granted path draws its
+/// own screen rather than the reply's.
+///
+/// `None` for anything that is not that record: it has to carry the tag, be the
+/// length this message is, and name an app id where this one does.
+pub fn lgt_local_tera_response(request: &[u8]) -> Option<Vec<u8>> {
+    const TAG: &[u8] = b"LGT";
+    /// The whole of the purchase record, header and both fixed-width fields.
+    const PURCHASE_REQUEST: usize = 111;
+    /// Where the item field starts, and the app id at the head of it.
+    const APP_ID_AT: usize = 14;
+    const APP_ID_LEN: usize = 8;
+
+    /// What `0x1282f2` reads as "the server took it".
+    const ACCEPTED: u8 = 0x18;
+    /// The second byte's quiet outcome - zero is the one that draws a notice.
+    const NOTHING_TO_SAY: u8 = 1;
+
+    if request.len() != PURCHASE_REQUEST || !request.starts_with(TAG) {
+        return None;
+    }
+    if !request[APP_ID_AT..APP_ID_AT + APP_ID_LEN].iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+
+    let body = [ACCEPTED, NOTHING_TO_SAY];
+
+    let mut response = Vec::with_capacity(4 + body.len());
+    response.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    response.extend_from_slice(&body);
+
+    Some(response)
+}
+
 /// The answer to a billing request, whichever of these protocols it is in.
 ///
 /// Tried in order of how specific each shape is: the `0xffff`-framed message,
@@ -2228,6 +2289,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_destinia_response(request))
         .or_else(|| lgt_local_blademaster3_response(request))
         .or_else(|| lgt_local_id_framed_response(request))
+        .or_else(|| lgt_local_tera_response(request))
 }
 
 #[cfg(test)]
@@ -2241,6 +2303,46 @@ mod tests {
         0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x01, 0x33, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ];
+
+    /// The 111-byte record 테라-영원의혼돈 writes when a purchase is confirmed.
+    fn tera_purchase_request() -> Vec<u8> {
+        let mut request = vec![0u8; 111];
+        request[..3].copy_from_slice(b"LGT");
+        request[3..14].copy_from_slice(&[0x14, 0x01, 0x1d, 0x00, 0x00, 0x00, 0x01, 0x84, 0x03, 0x00, 0x00]);
+        request[14..25].copy_from_slice(b"0002B76D012");
+        // 흡수링, the item bought, in EUC-KR.
+        request[25..31].copy_from_slice(&[0xc8, 0xed, 0xbc, 0xf6, 0xb8, 0xb5]);
+        request[65..70].copy_from_slice(b"41001");
+        // 테라.
+        request[70..74].copy_from_slice(&[0xc5, 0xd7, 0xb6, 0xf3]);
+
+        request
+    }
+
+    #[test]
+    fn a_purchase_is_answered_with_a_length_and_an_accepted_body() {
+        let reply = lgt_local_tera_response(&tera_purchase_request()).unwrap();
+
+        // The four bytes its state 4 reads, as the u32 its state 5 makes of them.
+        assert_eq!(u32::from_le_bytes([reply[0], reply[1], reply[2], reply[3]]) as usize, 2);
+        // Accepted, and the outcome that draws no notice of its own.
+        assert_eq!(&reply[4..], &[0x18, 0x01]);
+        assert_eq!(response(&tera_purchase_request()), Some(reply));
+    }
+
+    #[test]
+    fn a_record_that_is_not_that_purchase_is_left_unanswered() {
+        // The tag, the length, and an app id where this record names one.
+        let mut untagged = tera_purchase_request();
+        untagged[0] = b'K';
+        assert_eq!(lgt_local_tera_response(&untagged), None);
+
+        assert_eq!(lgt_local_tera_response(&tera_purchase_request()[..110]), None);
+
+        let mut unnamed = tera_purchase_request();
+        unnamed[14] = 0;
+        assert_eq!(lgt_local_tera_response(&unnamed), None);
+    }
 
     #[test]
     fn the_opening_id_frame_is_answered_with_its_own_id_and_nothing_else() {
