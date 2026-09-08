@@ -1925,9 +1925,26 @@ pub fn lgt_local_biochronicle_response(request: &[u8]) -> Option<Vec<u8>> {
 /// byte behind them - which picks between two states the title goes on in, and
 /// is zero here for the plainer of the two.
 ///
-/// `None` for anything that is not that request: it has to declare its own
-/// length, be kind `0x010a`, and carry the subscriber's number where this one
-/// carries it.
+/// Having kept them the title opens a second socket and asks the other kind
+/// `0x7ab0` knows, `0x0200`, twenty bytes of the subscriber's number and four
+/// more:
+///
+/// ```text
+/// 14 00 00 02 "01046119269" 38 50 00 00
+/// ```
+///
+/// Its answer is `0x0201`, and `0x7b74` reads nothing at all past the signed
+/// byte every reply starts with: it closes the socket and goes on to state
+/// `0xd`. So that answer is the header and that byte.
+///
+/// This exchange is a title's first run only. `0x78c0` opens `certi.crc` at
+/// startup and, when it is there, decodes the sixty bytes back and the title
+/// asks for nothing - which is why the log that shows this walk also shows
+/// `MC_fsOpen("certi.crc", mode=1) exists=false` just before it.
+///
+/// `None` for anything that is not one of those two: it has to declare its own
+/// length, be a kind whose reader's shape is known, and carry the subscriber's
+/// number where these carry it.
 pub fn lgt_local_destinia_response(request: &[u8]) -> Option<Vec<u8>> {
     /// The length and the kind, both little end first.
     const HEADER: usize = 4;
@@ -1937,7 +1954,13 @@ pub fn lgt_local_destinia_response(request: &[u8]) -> Option<Vec<u8>> {
     const CERTIFICATE_ANSWER: u16 = 0x010b;
     /// The subscriber's number, the handset, the build and the rest of what
     /// `0x7ab0`'s request carries - a fixed frame.
-    const REQUEST_SIZE: usize = 71;
+    const CERTIFICATE_SIZE: usize = 71;
+
+    /// What it asks on the socket it opens next, and `0x7b74` reads the answer
+    /// of - which is nothing past the byte every reply starts with.
+    const CONFIRM_REQUEST: u16 = 0x0200;
+    const CONFIRM_ANSWER: u16 = 0x0201;
+    const CONFIRM_SIZE: usize = 20;
 
     /// The signed byte `0x7ab0` stops on when it is negative.
     const GRANTED: u8 = 0;
@@ -1948,21 +1971,24 @@ pub fn lgt_local_destinia_response(request: &[u8]) -> Option<Vec<u8>> {
         u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
     }
 
-    if request.len() != REQUEST_SIZE || u16_le(request, 0) as usize != request.len() {
+    if request.len() < HEADER + 1 || u16_le(request, 0) as usize != request.len() || !request[4].is_ascii_digit() {
         return None;
     }
 
-    if u16_le(request, 2) != CERTIFICATE_REQUEST || !request[4].is_ascii_digit() {
-        return None;
-    }
+    // Every reply starts with the signed byte `0x7ab0` stops on when it is
+    // negative; what follows it is whatever that kind's own reader takes.
+    let (answer, body): (u16, Vec<u8>) = match (u16_le(request, 2), request.len()) {
+        (CERTIFICATE_REQUEST, CERTIFICATE_SIZE) => (CERTIFICATE_ANSWER, vec![0u8; CERTIFICATE + 1]),
+        (CONFIRM_REQUEST, CONFIRM_SIZE) => (CONFIRM_ANSWER, Vec::new()),
+        _ => return None,
+    };
 
-    let length = HEADER + 1 + CERTIFICATE + 1;
+    let length = HEADER + 1 + body.len();
     let mut response = Vec::with_capacity(length);
     response.extend_from_slice(&(length as u16).to_le_bytes());
-    response.extend_from_slice(&CERTIFICATE_ANSWER.to_le_bytes());
+    response.extend_from_slice(&answer.to_le_bytes());
     response.push(GRANTED);
-    response.extend_from_slice(&[0u8; CERTIFICATE]);
-    response.push(0);
+    response.extend_from_slice(&body);
 
     Some(response)
 }
@@ -3521,7 +3547,23 @@ mod tests {
         assert_eq!(response[5..45], [0; 40]);
     }
 
-    /// A frame that is not that request is left alone.
+    /// The socket that title opens next asks the other kind its reader knows.
+    #[test]
+    fn the_confirmation_that_title_asks_next_is_answered() {
+        // The frame the second socket carried, byte for byte.
+        let mut request = vec![0x14, 0x00, 0x00, 0x02];
+        request.extend_from_slice(b"01046119269\0");
+        request.extend_from_slice(&[0x38, 0x50, 0x00, 0x00]);
+        assert_eq!(request.len(), 0x14);
+
+        let response = lgt_local_destinia_response(&request).unwrap();
+
+        // `0x7b74` reads nothing past the byte every reply starts with.
+        assert_eq!(response, vec![0x05, 0x00, 0x01, 0x02, 0x00]);
+        assert_eq!(u16::from_le_bytes(response[0..2].try_into().unwrap()) as usize, response.len());
+    }
+
+    /// A frame that is not one of those requests is left alone.
     #[test]
     fn only_that_title_s_certificate_request_is_answered() {
         let mut request = vec![0x47, 0x00, 0x0a, 0x01];
@@ -3534,6 +3576,13 @@ mod tests {
         let mut other_kind = request.clone();
         other_kind[2] = 0x0c;
         assert!(lgt_local_destinia_response(&other_kind).is_none());
+
+        // The right kind at the wrong size is not that request either - the
+        // two this knows are both fixed frames.
+        let mut confirm_sized = request.clone();
+        confirm_sized[2] = 0x00;
+        confirm_sized[3] = 0x02;
+        assert!(lgt_local_destinia_response(&confirm_sized).is_none());
 
         // A length that is not the frame in hand.
         let mut mislaid = request.clone();
