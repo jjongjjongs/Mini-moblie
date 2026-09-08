@@ -1401,8 +1401,8 @@ pub fn lgt_local_tagged_record_response(request: &[u8]) -> Option<Vec<u8>> {
 
     Some(response)
 }
-/// 엘피스's online menu, whose every message is one byte of opcode behind a
-/// five byte header.
+/// 엘피스's online menu and its item purchase, whose every message is one byte
+/// of opcode behind a five byte header.
 ///
 /// The title carries its own message library at `0x64000`, and both directions
 /// go through it. `0x64984` writes a message and `0x64888` reads one, and the
@@ -1420,10 +1420,12 @@ pub fn lgt_local_tagged_record_response(request: &[u8]) -> Option<Vec<u8>> {
 /// is the one place the length is written: `total = body + 5`. The reader's
 /// `0x64354` takes the same five apart, refuses a message whose declared length
 /// is not the bytes in hand, and hands `[3]` to the title's own table at
-/// `0x6d160` - two hundred and sixteen entries, one per opcode.
+/// `0x6d160` - two hundred and sixteen entries, one per opcode. So an answer is
+/// read by whichever handler its own opcode names, and what each one takes out
+/// of the body is what the body has to be.
 ///
-/// The message the menu opens with is the library's type `4`, whose body
-/// `0x64d28` lays out and whose opcode `0x64dde` fixes at zero:
+/// The menu opens with the library's type `4`, whose body `0x64d28` lays out and
+/// whose opcode `0x64dde` fixes at zero:
 ///
 /// ```text
 /// [0..2]   u16 BE - the service, which is 1006, 1017 or 1036
@@ -1435,42 +1437,101 @@ pub fn lgt_local_tagged_record_response(request: &[u8]) -> Option<Vec<u8>> {
 /// [68..98]        - the handset model
 /// ```
 ///
-/// Ninety-eight bytes, so a hundred and three on the wire. What comes back is
-/// read the same way and dispatched on its own opcode byte, and zero's handler
-/// at `0x488f0` reads nothing else: it switches on the screen the menu was
-/// entered from and sends that screen's next request. So the answer to the
-/// opening message is the opening message's own opcode and no body at all -
-/// five bytes that say the session stands.
+/// Ninety-eight bytes, so a hundred and three on the wire. Opcode zero's handler
+/// at `0x488f0` reads no body at all: it switches on the screen the menu was
+/// entered from and sends that screen's own next request. Opcode one, which the
+/// library's type `5` writes with no body of its own, is the same kind of thing:
+/// `0x47e70` raises the title's event `5` and returns. Both are answered with
+/// the opcode they were asked under and nothing behind it.
 ///
-/// `None` for anything that is not that message: it has to declare its own
-/// length, leave `[2]` and `[4]` clear, be opcode zero, and carry a body of the
-/// one size in one of the three services this knows.
+/// Buying an item is a walk, and each step is a message whose sender records
+/// which step it left off at in `[0x16c9bac + 0x20]`:
+///
+/// - `0x474a4` sends opcode `0x43` as the product code and a quantity, two `u16`
+///   each, and its answer at `0x480c6` takes a **`u32`** and keeps it.
+/// - `0x47604` sends opcode `0xc9` as a `u16` `0x14`, the amount, and the
+///   quantity. Its answer at `0x47fea` takes a **`u32` and eight bytes** - the
+///   order and the code that stands for it - and hands both straight to
+///   `0x47b04`, which sends them back out under opcode `0xcb`.
+/// - That one's answer at `0x47dd0` takes a **`u32`** and moves the title on to
+///   whatever its own state says comes next.
+///
+/// None of the three compares what it reads against anything, so the numbers are
+/// the shop's to issue; the eight bytes come back as a string, and the two the
+/// title copies past them are the zeroes it cleared. What matters is the size
+/// each reader takes, which is what these answers are.
+///
+/// `None` for anything that is not one of those messages: it has to declare its
+/// own length, leave `[2]` and `[4]` clear, and be an opcode whose reader's
+/// shape is known.
 pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
     /// The length, two bytes the title writes clear, and the opcode between
     /// them.
     const HEADER: usize = 5;
+
     /// The opcode the menu opens the session under, and answers under.
-    const SESSION_OPCODE: u8 = 0;
+    const SESSION_OPCODE: u8 = 0x00;
     /// What `0x64d28` lays out, before the header.
     const SESSION_BODY_SIZE: usize = 98;
-
     /// The three services `0x471f8` writes into the body's first two bytes.
     const SERVICES: [u16; 3] = [1006, 1017, 1036];
+
+    /// The library's type `5`, which carries nothing and is answered in kind.
+    const SIGNAL_OPCODE: u8 = 0x01;
+
+    /// `0x474a4`'s product code and quantity.
+    const ORDER_OPCODE: u8 = 0x43;
+    /// `0x47604`'s amount, and `0x47fea` reads the answer.
+    const APPROVAL_OPCODE: u8 = 0xc9;
+    const APPROVAL_ANSWER_OPCODE: u8 = 0xca;
+    /// `0x47b04` sends the approval back, and `0x47dd0` reads the answer.
+    const CONFIRM_OPCODE: u8 = 0xcb;
+    const CONFIRM_ANSWER_OPCODE: u8 = 0xcc;
+
+    /// The order every step of the walk carries, which is the shop's to issue
+    /// and which nothing in the title compares against anything.
+    const ORDER: u32 = 1;
+    /// The eight bytes `0x47fea` keeps as the order's code, and `0x47b04` sends
+    /// back out. It reads ten of them into a buffer it cleared, so this is a
+    /// string of eight with its terminator already behind it.
+    const ORDER_CODE: &[u8; 8] = b"00000001";
 
     if request.len() < HEADER || u16::from_be_bytes([request[0], request[1]]) as usize != request.len() {
         return None;
     }
 
-    if request[2] != 0 || request[3] != SESSION_OPCODE || request[4] != 0 {
+    if request[2] != 0 || request[4] != 0 {
         return None;
     }
 
     let body = &request[HEADER..];
-    if body.len() != SESSION_BODY_SIZE || !SERVICES.contains(&u16::from_be_bytes([body[0], body[1]])) {
-        return None;
-    }
+    let (opcode, answer): (u8, Vec<u8>) = match request[3] {
+        SESSION_OPCODE if body.len() == SESSION_BODY_SIZE && SERVICES.contains(&u16::from_be_bytes([body[0], body[1]])) => {
+            (SESSION_OPCODE, Vec::new())
+        }
+        SIGNAL_OPCODE if body.is_empty() => (SIGNAL_OPCODE, Vec::new()),
+        // The product code and the quantity, and a `u32` back.
+        ORDER_OPCODE if body.len() == 4 => (ORDER_OPCODE, Vec::from(ORDER.to_be_bytes())),
+        // The `u16` `0x14` `0x47604` opens with, the amount, and the quantity.
+        APPROVAL_OPCODE if body.len() == 8 && u16::from_be_bytes([body[0], body[1]]) == 0x14 => {
+            let mut answer = Vec::from(ORDER.to_be_bytes());
+            answer.extend_from_slice(ORDER_CODE);
+            (APPROVAL_ANSWER_OPCODE, answer)
+        }
+        // The order and its code, sent back the way `0x47fea` handed them over.
+        CONFIRM_OPCODE if body.len() == 4 + ORDER_CODE.len() => (CONFIRM_ANSWER_OPCODE, Vec::from(ORDER.to_be_bytes())),
+        _ => return None,
+    };
 
-    Some(vec![0x00, HEADER as u8, 0x00, SESSION_OPCODE, 0x00])
+    let length = HEADER + answer.len();
+    let mut response = Vec::with_capacity(length);
+    response.extend_from_slice(&(length as u16).to_be_bytes());
+    response.push(0);
+    response.push(opcode);
+    response.push(0);
+    response.extend_from_slice(&answer);
+
+    Some(response)
 }
 
 /// The granted answer to an application billing request, in the frame shape
@@ -2708,30 +2769,57 @@ mod tests {
     /// screen's next request.
     #[test]
     fn a_session_opening_is_answered_with_its_own_opcode_and_no_body() {
-        let mut request = vec![0x00, 0x00, 0x00, 0x00, 0x00];
-        // The service, then the rest of what `0x64d28` lays out.
-        request.extend_from_slice(&1036u16.to_be_bytes());
-        request.resize(5 + 98, 0);
-        let whole = request.len() as u16;
-        request[0..2].copy_from_slice(&whole.to_be_bytes());
+        let request = elpis_session_opening();
 
         let response = lgt_local_opcode_header_response(&request).unwrap();
 
         assert_eq!(response, vec![0x00, 0x05, 0x00, 0x00, 0x00]);
         assert_eq!(u16::from_be_bytes([response[0], response[1]]) as usize, response.len());
+
+        // The signal the library's type 5 writes is the same kind of thing, and
+        // `0x47e70` reads nothing out of the answer either.
+        let response = lgt_local_opcode_header_response(&[0x00, 0x05, 0x00, 0x01, 0x00]).unwrap();
+        assert_eq!(response, vec![0x00, 0x05, 0x00, 0x01, 0x00]);
+    }
+
+    /// Each step of the purchase walk is answered with what its own reader takes
+    /// out of the body, under the opcode that reader is registered at.
+    #[test]
+    fn a_purchase_walk_is_answered_a_step_at_a_time() {
+        // `0x474a4`: the product code and a quantity, and `0x480c6` takes a u32.
+        let order = lgt_local_opcode_header_response(&[0x00, 0x09, 0x00, 0x43, 0x00, 0x00, 0x29, 0x00, 0x01]).unwrap();
+        assert_eq!(order[3], 0x43);
+        assert_eq!(order.len(), 5 + 4);
+
+        // `0x47604`: the amount, and `0x47fea` takes a u32 and eight bytes.
+        let mut approval = vec![0x00, 0x0d, 0x00, 0xc9, 0x00];
+        approval.extend_from_slice(&0x14u16.to_be_bytes());
+        approval.extend_from_slice(&4000u32.to_be_bytes());
+        approval.extend_from_slice(&1u16.to_be_bytes());
+        let approved = lgt_local_opcode_header_response(&approval).unwrap();
+        assert_eq!(approved[3], 0xca);
+        assert_eq!(approved.len(), 5 + 4 + 8);
+
+        // `0x47b04` sends those twelve back, and `0x47dd0` takes a u32.
+        let mut confirm = vec![0x00, 0x11, 0x00, 0xcb, 0x00];
+        confirm.extend_from_slice(&approved[5..]);
+        let confirmed = lgt_local_opcode_header_response(&confirm).unwrap();
+        assert_eq!(confirmed[3], 0xcc);
+        assert_eq!(confirmed.len(), 5 + 4);
+
+        for answer in [order, approved, confirmed] {
+            assert_eq!(u16::from_be_bytes([answer[0], answer[1]]) as usize, answer.len());
+            assert_eq!((answer[2], answer[4]), (0, 0));
+        }
     }
 
     /// A message this does not know the shape of is left alone rather than
-    /// answered with a frame the title would read as a session it never opened.
+    /// answered with a frame the title would read as a step it never took.
     #[test]
-    fn only_the_opening_message_of_that_menu_is_answered() {
-        let mut request = vec![0x00, 0x00, 0x00, 0x00, 0x00];
-        request.extend_from_slice(&1036u16.to_be_bytes());
-        request.resize(5 + 98, 0);
-        let whole = request.len() as u16;
-        request[0..2].copy_from_slice(&whole.to_be_bytes());
+    fn only_the_messages_of_that_menu_whose_readers_are_known_are_answered() {
+        let request = elpis_session_opening();
 
-        // Another opcode is another service's message, whose answer is its own.
+        // An opcode whose reader this has not followed.
         let mut other_opcode = request.clone();
         other_opcode[3] = 0x14;
         assert!(lgt_local_opcode_header_response(&other_opcode).is_none());
@@ -2745,5 +2833,19 @@ mod tests {
         let mut ragged = request.clone();
         ragged[1] = 0x66;
         assert!(lgt_local_opcode_header_response(&ragged).is_none());
+
+        // A step of the walk whose body is not the size its sender writes.
+        assert!(lgt_local_opcode_header_response(&[0x00, 0x07, 0x00, 0x43, 0x00, 0x00, 0x29]).is_none());
+    }
+
+    /// The hundred and three bytes 엘피스's menu opens with.
+    fn elpis_session_opening() -> Vec<u8> {
+        let mut request = vec![0x00, 0x00, 0x00, 0x00, 0x00];
+        // The service, then the rest of what `0x64d28` lays out.
+        request.extend_from_slice(&1036u16.to_be_bytes());
+        request.resize(5 + 98, 0);
+        let whole = request.len() as u16;
+        request[0..2].copy_from_slice(&whole.to_be_bytes());
+        request
     }
 }
