@@ -7,7 +7,10 @@ use std::{
 };
 
 use test_utils::{TestPlatform, TestPlatformEvent, TestPlatformState};
-use wie_backend::{AudioSink, DatabaseRepository, Emulator, Event, Filesystem, Instant, Options, Platform, Screen, canvas::Image, extract_zip};
+use wie_backend::{
+    AudioSink, DatabaseRepository, Emulator, Event, Filesystem, Instant, Network, NetworkError, NetworkPoll, Options, Platform, Screen,
+    canvas::Image, extract_zip,
+};
 use wie_util::Result;
 
 #[derive(Default)]
@@ -105,6 +108,65 @@ struct CapturePlatform {
     inner: TestPlatform,
     screen: CaptureScreen,
     clock: Arc<AtomicU64>,
+    network: CaptureNetwork,
+}
+
+/// A network that hands out sockets and refuses every operation on them.
+///
+/// The runtime answers some connections in process - a local endpoint, or the
+/// LGT billing gateway - but it still asks the platform for the socket those
+/// connections are carried on, and `Platform::network` is `None` by default.
+/// A capture over that default never reaches the in-process paths at all:
+/// 던파귀검사편 asks for its billing socket, `MC_netSocketConnect` answers
+/// `M_E_NOTCONN` before either path is consulted, and the title puts up
+/// `현재 서버에 접속할 수 없습니다` without a byte having been written.
+///
+/// So this hands out descriptors and nothing else. Everything that would reach
+/// a host fails, which is what a capture wants: what it records came from the
+/// answer this run gives rather than from somewhere off the machine.
+#[derive(Default)]
+struct CaptureNetwork {
+    next: AtomicU64,
+}
+
+impl Network for CaptureNetwork {
+    fn socket(&self, _family: i32, _socket_type: i32) -> std::result::Result<i32, NetworkError> {
+        Ok(self.next.fetch_add(1, Ordering::SeqCst) as i32 + 1)
+    }
+
+    fn connect(&self, _socket: i32, _address: u32, _port: u16) -> NetworkPoll<()> {
+        NetworkPoll::Ready(Err(NetworkError::HostUnreachable))
+    }
+
+    fn bind(&self, _socket: i32, _address: u32, _port: u16) -> std::result::Result<(), NetworkError> {
+        Err(NetworkError::Unsupported)
+    }
+
+    fn read(&self, _socket: i32, _buf: &mut [u8]) -> std::result::Result<usize, NetworkError> {
+        Err(NetworkError::NotConnected)
+    }
+
+    fn write(&self, _socket: i32, _buf: &[u8]) -> std::result::Result<usize, NetworkError> {
+        Err(NetworkError::NotConnected)
+    }
+
+    fn send_to(&self, _socket: i32, _buf: &[u8], _address: u32, _port: u16) -> std::result::Result<usize, NetworkError> {
+        Err(NetworkError::NotConnected)
+    }
+
+    fn recv_from(&self, _socket: i32, _buf: &mut [u8]) -> std::result::Result<(usize, u32, u16), NetworkError> {
+        Err(NetworkError::NotConnected)
+    }
+
+    fn close(&self, _socket: i32) -> std::result::Result<(), NetworkError> {
+        Ok(())
+    }
+
+    fn resolve_host(&self, _host: &str, _query_id: u32) {}
+
+    fn poll_event(&self) -> Option<wie_backend::NetworkEvent> {
+        None
+    }
 }
 
 impl Platform for CapturePlatform {
@@ -138,6 +200,11 @@ impl Platform for CapturePlatform {
     fn screen(&self) -> &dyn Screen {
         &self.screen
     }
+
+    fn network(&self) -> Option<&dyn Network> {
+        Some(&self.network)
+    }
+
     /// A clock that advances a millisecond on every read.
     ///
     /// The wall clock does not work here. `Executor::tick` runs until eight
@@ -266,6 +333,7 @@ fn run(label: &str, archive: &[u8], ticks_limit: u32) {
         }),
         screen: screen.clone(),
         clock: Arc::new(AtomicU64::new(0)),
+        network: CaptureNetwork::default(),
     });
 
     let files = match extract_zip(archive) {
@@ -496,6 +564,7 @@ fn run_scripted_over(
         inner,
         screen: screen.clone(),
         clock: Arc::new(AtomicU64::new(0)),
+        network: CaptureNetwork::default(),
     });
 
     let files = extract_zip(archive).expect("archive");
