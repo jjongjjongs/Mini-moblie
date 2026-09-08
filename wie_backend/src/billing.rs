@@ -1067,10 +1067,20 @@ pub fn lgt_local_big_endian_record_response(request: &[u8]) -> Option<Vec<u8>> {
 /// | `5/0x42`        | `0x5e9b2`   | the charge, carrying the row's handle and price. On `1` it asks for the item as `5/0x40`; on anything else it draws the message and stops |
 /// | `5/0x40`        | `0x5e882`   | the delivery. On `1` it reads `[7]` as an offset and takes the byte at `[8 + offset]`: `0xff` puts the row's own item in the bag and returns to the shop, and anything else is an index into `/ITM/DAT/_ITM_CASH_RANOMBOX` (`0x2544c`) |
 ///
+/// The 창고 is the same menu under its other label, and three more of the same
+/// shape - see [`hero4_warehouse`] for how its listing is the catalogue's:
+///
+/// | the title sends | the handler | what it does next |
+/// |-----------------|-------------|-------------------|
+/// | `0x14/0x46`     | `0x5e4f0`   | the character, 1138 bytes of it. Reads nothing of the reply; closes the notice and asks for the listing as `5/0x3d` |
+/// | `5/0x3d`        | `0x5ea26`   | takes a byte at `[6]`, then the catalogue's own header and 37-byte rows one further along, and asks `5/0x14` |
+/// | `5/0x14`        | `0x5eb04`   | takes four bytes at `[6]` into `0x1566d70`, which nothing reads back |
+///
 /// So the first three are answered with the command alone - the title only needs
 /// to see its own command come back to take the next step - the catalogue is
-/// answered with the sixteen items [`hero4_catalogue`] lays out, and the two
-/// halves of a purchase are granted.
+/// answered with the sixteen items [`hero4_catalogue`] lays out, the 창고 with
+/// the empty listing [`hero4_warehouse`] lays out, and the two halves of a
+/// purchase are granted.
 ///
 /// The item a purchase delivers is a record of the random box, drawn by
 /// [`next_box_draw`] - four of the sixteen rows are the boxes themselves, and
@@ -1101,7 +1111,14 @@ pub fn lgt_local_major_minor_response(request: &[u8]) -> Option<Vec<u8>> {
     let (major, minor) = (request[4], request[5]);
     let body: Vec<u8> = match (major, minor) {
         (1, 0x01) | (1, 0x3d) | (1, 0x3e) => Vec::new(),
+        // The 창고 upload. `0x5e4f0` reads nothing of the reply - it closes the
+        // notice, counts the save and asks for the listing as `5/0x3d`.
+        (0x14, 0x46) => Vec::new(),
         (5, 0x3f) => hero4_catalogue(),
+        (5, 0x3d) => hero4_warehouse(),
+        // Whatever `0x5eb04` stores at `0x1566d70` and no other instruction in
+        // the archive reads back.
+        (5, 0x14) => vec![0, 0, 0, 0],
         // Charged. The message is at `[8]`, empty, and unread on this path.
         (5, 0x42) => vec![GRANTED, 0, 0, 0],
         // Delivered. `[7]` is how far past the message the item byte sits, so
@@ -1167,6 +1184,60 @@ fn next_box_draw(records: u8) -> u8 {
     STATE.store(state, Ordering::Relaxed);
 
     (state % records as u32) as u8
+}
+
+/// What 영웅서기4's 창고 holds.
+///
+/// The 창고 is the other half of the online menu `0x61998` labels - the same NPC
+/// screen that reads 상점 when the flag at `+0xd4` is set. Opening it writes a
+/// `0x14/0x46` of its own: a 1138-byte record carrying the character as it
+/// stands. `0x5e3a0` takes major `0x14`, `0x5e4f0` takes minor `0x46`, and that
+/// handler reads nothing at all of the reply - it closes the 서버 응답을
+/// 기다리는중 notice, counts the save at `0x151b190`, and appends `05 3d 00 00`
+/// through `0x56f5c` to ask for the listing.
+///
+/// Which is `5/0x3d` at `0x5ea26`, and it is `5/0x3f` - the catalogue
+/// [`hero4_catalogue`] answers - with one byte in front. Laid side by side, the
+/// two handlers fill the same fields of the same record:
+///
+/// ```text
+///           5/0x3f (0x5eb1e)      5/0x3d (0x5ea26)
+/// 0x1566b1a  <- [6]                <- [7]
+/// 0x1566b1b  <- [7]                <- [8]
+/// 0x1566b1c  <- [8..10] the count  <- [9..11] the count
+/// 0x1566b1e  <- rows from [10]     <- rows from [11]
+/// 0x1566b18  -                     <- [6]
+/// ```
+///
+/// Rows are the same 37 bytes either way, walked by the same `0x5e1d8`. The one
+/// field `0x3d` has to itself is `[6]`, into `0x1566b18`, which no instruction
+/// in the archive reads back - so it takes the granted status every other
+/// `major 5` reply carries at `[6]`, which is the only value that could matter
+/// if something did.
+///
+/// Behind the listing the title asks `5/0x14`, and that one is answered with
+/// four bytes for the same reason: `0x5eb04` stores them at `0x1566d70` and
+/// nothing reads them.
+///
+/// The 창고 itself is empty. There is no account here for anything to have been
+/// left in - the carrier's server held what a 창고 holds, and the record the
+/// title uploads is its own character, not its deposits. So the listing is a
+/// count of no rows, which is what an untouched 창고 is, and the screen opens on
+/// it rather than stopping on the notice.
+fn hero4_warehouse() -> Vec<u8> {
+    /// The status every `major 5` reply carries at `[6]`.
+    const GRANTED: u8 = 1;
+    /// The two bytes the catalogue leads with, which this listing shares.
+    const LEAD: [u8; 2] = [0, 1];
+    /// How many rows are behind the count.
+    const ROWS: u16 = 0;
+
+    let mut body = Vec::with_capacity(1 + LEAD.len() + 2);
+    body.push(GRANTED);
+    body.extend_from_slice(&LEAD);
+    body.extend_from_slice(&ROWS.to_le_bytes());
+
+    body
 }
 
 /// The body of 영웅서기4's shop catalogue: the page it is on, how many pages
@@ -2722,6 +2793,37 @@ mod tests {
     }
 
     #[test]
+    fn the_warehouse_is_answered_the_way_its_own_listing_is_read() {
+        use super::lgt_local_major_minor_response;
+
+        // The upload, which `0x5e4f0` reads nothing of - the command alone.
+        let mut record = vec![0u8; 1132];
+        record[1] = 0x67;
+        let response = lgt_local_major_minor_response(&hero_lore_frame(0x14, 0x46, &record)).unwrap();
+        assert_eq!(response, [0x06, 0x00, 0x00, 0x00, 0x14, 0x46]);
+
+        // The listing it asks for next, which is the catalogue's own shape one
+        // byte further along: a granted status, the two bytes `0x1566b1a` takes,
+        // and a count of no rows.
+        let response = lgt_local_major_minor_response(&hero_lore_frame(5, 0x3d, &[0, 0])).unwrap();
+        assert_eq!(
+            u32::from_le_bytes([response[0], response[1], response[2], response[3]]) as usize,
+            response.len()
+        );
+        assert_eq!((response[4], response[5]), (5, 0x3d));
+        assert_eq!(response[6], 1);
+        assert_eq!(&response[7..9], &[0, 1]);
+        assert_eq!(u16::from_le_bytes([response[9], response[10]]), 0);
+        // Nothing behind the count, which is what an untouched 창고 holds.
+        assert_eq!(response.len(), 11);
+
+        // And the four bytes behind that, which `0x5eb04` stores and no
+        // instruction in the archive reads back.
+        let response = lgt_local_major_minor_response(&hero_lore_frame(5, 0x14, &[])).unwrap();
+        assert_eq!(response, [0x0a, 0x00, 0x00, 0x00, 0x05, 0x14, 0, 0, 0, 0]);
+    }
+
+    #[test]
     fn the_catalogue_lays_out_the_sixteen_rows_its_reader_walks() {
         use super::lgt_local_major_minor_response;
 
@@ -2808,7 +2910,9 @@ mod tests {
         // the title through a branch meant for a different exchange.
         assert_eq!(lgt_local_major_minor_response(&hero_lore_frame(5, 0x70, &[])), None);
         assert_eq!(lgt_local_major_minor_response(&hero_lore_frame(5, 0x41, &[])), None);
-        assert_eq!(lgt_local_major_minor_response(&hero_lore_frame(0x14, 0x46, &[1])), None);
+        // The 창고's other minor: `0x5e3a0` takes `0x47` as well, and that one
+        // deserialises a record this has none of.
+        assert_eq!(lgt_local_major_minor_response(&hero_lore_frame(0x14, 0x47, &[1])), None);
 
         // A length that is not the frame in hand.
         let mut wrong_length = hero_lore_frame(1, 1, &[4]);
