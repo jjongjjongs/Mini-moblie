@@ -1645,6 +1645,19 @@ pub fn lgt_local_granted_response(request: &[u8]) -> Option<Vec<u8>> {
 /// the step before it again - so it answers 0, no message, and the four bytes
 /// zero, which is what makes the reader take all four.
 ///
+/// Past that the screen sends what it opened the connection for. 세라샵's is
+/// command `0x20`, which `0x7390` lays out as a `u32` code and the byte
+/// `0x1e` behind it - thirteen bytes in all:
+///
+/// ```text
+/// 0d 00 00 00 ff ff 20 00 42 00 00 00 1e
+/// ```
+///
+/// Its answer is command `0x21`, and `0xc098` reads the same three fields
+/// `0xe360` does - a result, a message length, and that many bytes. Nothing in
+/// `0xb234` branches on this one's result at all; the screen's own state is
+/// what moves on. So it answers 0 with no message.
+///
 /// Neither payload can be left out altogether. `0x70a0` allocates a block only
 /// for a frame that declares more than its header, and hands `0xe3c0` a null
 /// pointer otherwise, which both readers would read from - so each answer is
@@ -1678,6 +1691,14 @@ pub fn lgt_local_dnf_response(request: &[u8]) -> Option<Vec<u8>> {
     /// The four bytes `0xe084` takes past the message, and only for a granted
     /// result.
     const SESSION_TRAILER: usize = 4;
+
+    /// What `0x7390` sends for the screen's own errand, and `0xc098` reads the
+    /// answer of.
+    const ERRAND_REQUEST: u16 = 0x0020;
+    const ERRAND_ANSWER: u16 = 0x0021;
+    /// A `u32` code and the byte `0x7390` always writes behind it.
+    const ERRAND_BODY: usize = 5;
+    const ERRAND_TAIL: u8 = 0x1e;
 
     /// The name `0xb030` always writes first, whichever screen asked.
     const TITLE: &[u8] = b"DnFSwordMan";
@@ -1751,6 +1772,9 @@ pub fn lgt_local_dnf_response(request: &[u8]) -> Option<Vec<u8>> {
 
             (SESSION_ANSWER, payload)
         }
+        // A `u32` code and the byte behind it, which is what says the frame is
+        // `0x7390`'s rather than five other bytes under this command.
+        ERRAND_REQUEST if body.len() == ERRAND_BODY && body[4] == ERRAND_TAIL => (ERRAND_ANSWER, vec![AUTH_GRANTED, 0, 0]),
         _ => return None,
     };
 
@@ -3139,6 +3163,27 @@ mod tests {
         longer.push(0);
         longer[0] += 1;
         assert!(lgt_local_dnf_response(&longer).is_none());
+    }
+
+    /// The errand a screen opened its connection for is answered under its own
+    /// reader's command.
+    #[test]
+    fn the_errand_that_connection_was_opened_for_is_answered() {
+        // What 0x7390 writes: a u32 code, then the byte it always puts behind.
+        let request = [0x0d, 0x00, 0x00, 0x00, 0xff, 0xff, 0x20, 0x00, 0x42, 0x00, 0x00, 0x00, 0x1e];
+
+        let response = lgt_local_dnf_response(&request).unwrap();
+
+        // `0xc098` reads a result, a message length and that many bytes, the
+        // same three fields the authentication answer carries.
+        assert_eq!(response, vec![0x0b, 0x00, 0x00, 0x00, 0xff, 0xff, 0x21, 0x00, 0x00, 0x00, 0x00]);
+        assert_eq!(u32::from_le_bytes(response[0..4].try_into().unwrap()) as usize, response.len());
+
+        // Five bytes that do not end the way 0x7390 ends them are some other
+        // frame under a command this plain.
+        let mut other = request;
+        other[12] = 0x00;
+        assert!(lgt_local_dnf_response(&other).is_none());
     }
 
     /// A frame that is not that request is left alone, whether it is another
