@@ -52,10 +52,23 @@ pub async fn get_system_property(context: &mut dyn WIPICContext, ptr_id: WIPICWo
         // mismatch (error 3100, observed in 이노티아 연대기 2). We recover the
         // exact number the certificate was issued for from cert.c2s itself, so
         // an unmodified title authenticates without a per-game value. When no
-        // certificate is recoverable we fall back to a valid placeholder. MIN
-        // carries the same number so a title that cross-checks them agrees.
-        "PHONENUMBER" | "MIN" => {
+        // certificate is recoverable we fall back to a valid placeholder.
+        "PHONENUMBER" => {
             recovered = subscriber_number(context).await;
+            recovered.as_str()
+        }
+        // MIN carries the same number, so a title that cross-checks the two
+        // agrees with itself - unless its own certificate names a MIN, which
+        // outranks it. 액션퍼즐패밀리4 GS2 ships a cert.c2s encrypted with a key
+        // of its own whose first field is the MIN it was issued for, reads MIN
+        // here, and stops at error 5001 when the two differ; the certificate
+        // names an empty one, and that is what the handset it was issued for
+        // reported.
+        "MIN" => {
+            recovered = match handset_identity(context).await {
+                Some(identity) => identity.min,
+                None => subscriber_number(context).await,
+            };
             recovered.as_str()
         }
         // The media types the handset can play, which a title reads to decide
@@ -104,6 +117,14 @@ pub(crate) async fn subscriber_number(context: &mut dyn WIPICContext) -> String 
     let app_info = context.read_resource("app_info").await.ok();
 
     wie_backend::subscriber::subscriber_number(cert.as_deref(), certification.as_deref(), app_info.as_deref())
+}
+
+/// The handset identity a title's own-key `cert.c2s` was issued for, or `None`
+/// when the archive has no such certificate.
+async fn handset_identity(context: &mut dyn WIPICContext) -> Option<wie_backend::subscriber::HandsetIdentity> {
+    let cert = context.read_resource("cert.c2s").await.ok()?;
+
+    wie_backend::subscriber::identity_from_cert(&cert)
 }
 
 pub async fn set_system_property(context: &mut dyn WIPICContext, ptr_id: WIPICWord, ptr_value: WIPICWord) -> Result<()> {

@@ -8,9 +8,13 @@
 //! `HandsetProperty.getSystemProperty` one have to answer the same thing, or a
 //! title that reads it through both disagrees with itself.
 
+mod fixed_key_cert;
 mod lgt_cert;
 
-pub use self::lgt_cert::recover_phone_number as from_cert;
+pub use self::{
+    fixed_key_cert::{HandsetIdentity, recover_identity as identity_from_cert},
+    lgt_cert::recover_phone_number as from_cert,
+};
 
 use alloc::{
     borrow::ToOwned,
