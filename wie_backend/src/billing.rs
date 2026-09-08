@@ -1565,7 +1565,8 @@ pub fn lgt_local_granted_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(vec![0xff, 0xff, length[0], length[1], response_type[0], response_type[1], 0x00])
 }
 
-/// 던파귀검사편's opening exchange, answered the way its own readers read it.
+/// The opening exchange 던파귀검사편 and 바람의나라 share, answered the way
+/// their own readers read it.
 ///
 /// The title opens a `MC_netBillSocket` for `211.115.203.30:10012` and writes
 /// one frame before it will leave `사용자 인증`. Both directions carry the same
@@ -1584,8 +1585,15 @@ pub fn lgt_local_granted_response(request: &[u8]) -> Option<Vec<u8>> {
 /// switches on the command alone.
 ///
 /// The request is command `0x2711`, laid out by `0xb030` as two length-prefixed
-/// strings: the title, `DnFSwordMan`, and then either that same name or
-/// `UserAuthentication`, whichever the screen asked under.
+/// strings: the title's own name, and then either that name again or
+/// `UserAuthentication`, whichever the screen asked under. The name is the
+/// title's alone - `DnFSwordMan` for one, `Baram` for the other - so it is the
+/// shape that says a frame is this exchange, not the name:
+///
+/// ```text
+/// 29 00 00 00 ff ff 11 27 0b 00 "DnFSwordMan"       12 00 "UserAuthentication"
+/// 23 00 00 00 ff ff 11 27 05 00 "Baram"             12 00 "UserAuthentication"
+/// ```
 ///
 /// Its answer is command `0x2712`, whose reader `0xe360` takes a fixed shape
 /// out of the body and compares it against nothing:
@@ -1663,12 +1671,10 @@ pub fn lgt_local_granted_response(request: &[u8]) -> Option<Vec<u8>> {
 /// pointer otherwise, which both readers would read from - so each answer is
 /// the bytes its own reader takes and no fewer.
 ///
-/// `None` for anything that is not one of those two requests: it has to declare
-/// its own length, carry the marker, be a command whose reader's shape is
-/// known, and spell strings that end exactly where the frame does - the first
-/// of the authentication request's two being this title's own name, which is
-/// what says the frame is this title's.
-pub fn lgt_local_dnf_response(request: &[u8]) -> Option<Vec<u8>> {
+/// `None` for anything that is not one of those requests: it has to declare its
+/// own length, carry the marker, be a command whose reader's shape is known,
+/// and spell strings that end exactly where the frame does.
+pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
     /// The length, the marker and the command.
     const HEADER: usize = 8;
     const MARKER: u16 = 0xffff;
@@ -1699,9 +1705,6 @@ pub fn lgt_local_dnf_response(request: &[u8]) -> Option<Vec<u8>> {
     /// A `u32` code and the byte `0x7390` always writes behind it.
     const ERRAND_BODY: usize = 5;
     const ERRAND_TAIL: u8 = 0x1e;
-
-    /// The name `0xb030` always writes first, whichever screen asked.
-    const TITLE: &[u8] = b"DnFSwordMan";
 
     /// The results `0xb234` goes on from. They are not the same value: the
     /// register step stops on 0 where the other two go on from it.
@@ -1739,12 +1742,12 @@ pub fn lgt_local_dnf_response(request: &[u8]) -> Option<Vec<u8>> {
     let body = &request[HEADER..];
     let (answer, payload): (u16, Vec<u8>) = match u16_at(request, 6) {
         // Two strings, ending where the frame does. The first is the title's
-        // own name, which is what says this request is this title's.
+        // own name, so it is only held to being one - printable and not empty.
         AUTH_REQUEST => {
             let (name, rest) = string_at(body)?;
             let (_, rest) = string_at(rest)?;
 
-            if name != TITLE || !rest.is_empty() {
+            if name.is_empty() || !name.iter().all(u8::is_ascii_graphic) || !rest.is_empty() {
                 return None;
             }
 
@@ -2083,7 +2086,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_text_record_response(request))
         .or_else(|| lgt_local_tagged_record_response(request))
         .or_else(|| lgt_local_opcode_header_response(request))
-        .or_else(|| lgt_local_dnf_response(request))
+        .or_else(|| lgt_local_marked_command_response(request))
         .or_else(|| lgt_local_biochronicle_response(request))
         .or_else(|| lgt_local_destinia_response(request))
         .or_else(|| lgt_local_blademaster3_response(request))
@@ -3343,7 +3346,7 @@ mod tests {
         ];
         assert_eq!(request.len(), 0x29);
 
-        let response = lgt_local_dnf_response(&request).unwrap();
+        let response = lgt_local_marked_command_response(&request).unwrap();
 
         // Its own length, the marker, the answer's command, and the three bytes
         // `0xe360` takes: a granted result and an empty message.
@@ -3354,12 +3357,21 @@ mod tests {
         // nothing past its header, which `0xe360` would read from.
         assert!(response.len() > 8);
 
+        // 바람의나라 writes the same frame under its own name, and is answered
+        // the same way.
+        let mut baram = vec![0x23, 0x00, 0x00, 0x00, 0xff, 0xff, 0x11, 0x27, 0x05, 0x00];
+        baram.extend_from_slice(b"Baram");
+        baram.extend_from_slice(&[0x12, 0x00]);
+        baram.extend_from_slice(b"UserAuthentication");
+        assert_eq!(baram.len(), 0x23);
+        assert_eq!(lgt_local_marked_command_response(&baram).unwrap(), response);
+
         // The screen that asks under the title's own name is the same request.
         let mut first_pass = Vec::from(&request[..21]);
         first_pass.extend_from_slice(&[0x0b, 0x00]);
         first_pass.extend_from_slice(b"DnFSwordMan");
         first_pass[0] = first_pass.len() as u8;
-        assert_eq!(lgt_local_dnf_response(&first_pass).unwrap(), response);
+        assert_eq!(lgt_local_marked_command_response(&first_pass).unwrap(), response);
     }
 
     /// The step the title takes once authentication has gone through is
@@ -3374,7 +3386,7 @@ mod tests {
         request.extend_from_slice(&(pairs.len() as u16).to_le_bytes());
         request.extend_from_slice(pairs);
 
-        let response = lgt_local_dnf_response(&request).unwrap();
+        let response = lgt_local_marked_command_response(&request).unwrap();
 
         // `0xe140` takes a result, eleven bytes it drops, and a message length
         // at [12..14] - so the answer is fourteen bytes behind its header.
@@ -3391,13 +3403,13 @@ mod tests {
         // A string that does not end where the frame does is not that request.
         let mut overrun = request.clone();
         overrun[8] = 0xff;
-        assert!(lgt_local_dnf_response(&overrun).is_none());
+        assert!(lgt_local_marked_command_response(&overrun).is_none());
 
         // Nor is a frame carrying a second string behind it.
         let mut trailing = request.clone();
         trailing.extend_from_slice(&[0x00, 0x00]);
         trailing[0] += 2;
-        assert!(lgt_local_dnf_response(&trailing).is_none());
+        assert!(lgt_local_marked_command_response(&trailing).is_none());
     }
 
     /// The step a screen that opened its own connection takes - 세라샵 does, to
@@ -3410,7 +3422,7 @@ mod tests {
         request.extend_from_slice(&1u16.to_le_bytes());
         assert_eq!(request.len(), 0x15);
 
-        let response = lgt_local_dnf_response(&request).unwrap();
+        let response = lgt_local_marked_command_response(&request).unwrap();
 
         // `0xe084` takes a result, a message length, the message, and four
         // bytes past it - which it only reads for a granted result.
@@ -3428,13 +3440,13 @@ mod tests {
         // frame that happens to be under a command as plain as zero.
         let mut lettered = request.clone();
         lettered[8] = b'x';
-        assert!(lgt_local_dnf_response(&lettered).is_none());
+        assert!(lgt_local_marked_command_response(&lettered).is_none());
 
         // Nor is a body of another length.
         let mut longer = request.clone();
         longer.push(0);
         longer[0] += 1;
-        assert!(lgt_local_dnf_response(&longer).is_none());
+        assert!(lgt_local_marked_command_response(&longer).is_none());
     }
 
     /// The errand a screen opened its connection for is answered under its own
@@ -3444,7 +3456,7 @@ mod tests {
         // What 0x7390 writes: a u32 code, then the byte it always puts behind.
         let request = [0x0d, 0x00, 0x00, 0x00, 0xff, 0xff, 0x20, 0x00, 0x42, 0x00, 0x00, 0x00, 0x1e];
 
-        let response = lgt_local_dnf_response(&request).unwrap();
+        let response = lgt_local_marked_command_response(&request).unwrap();
 
         // `0xc098` reads a result, a message length and that many bytes, the
         // same three fields the authentication answer carries.
@@ -3455,7 +3467,7 @@ mod tests {
         // frame under a command this plain.
         let mut other = request;
         other[12] = 0x00;
-        assert!(lgt_local_dnf_response(&other).is_none());
+        assert!(lgt_local_marked_command_response(&other).is_none());
     }
 
     /// A frame that is not that request is left alone, whether it is another
@@ -3470,31 +3482,31 @@ mod tests {
         // A length that is not the frame in hand.
         let mut short = request;
         short[0] = 0x28;
-        assert!(lgt_local_dnf_response(&short).is_none());
+        assert!(lgt_local_marked_command_response(&short).is_none());
 
         // No marker.
         let mut unmarked = request;
         unmarked[4] = 0;
-        assert!(lgt_local_dnf_response(&unmarked).is_none());
+        assert!(lgt_local_marked_command_response(&unmarked).is_none());
 
         // `0x7890`'s later `0x50`, which this does not know the answer to yet.
         let mut next_step = request;
         next_step[6] = 0x50;
         next_step[7] = 0x00;
-        assert!(lgt_local_dnf_response(&next_step).is_none());
+        assert!(lgt_local_marked_command_response(&next_step).is_none());
 
-        // Another title's name in the first string.
-        let mut other = request;
-        other[10] = b'X';
-        assert!(lgt_local_dnf_response(&other).is_none());
+        // A name that is not one - the first string is only held to that.
+        let mut unnamed = request;
+        unnamed[10] = 0;
+        assert!(lgt_local_marked_command_response(&unnamed).is_none());
 
         // A string that runs past the frame.
         let mut overrun = request;
         overrun[8] = 0xff;
-        assert!(lgt_local_dnf_response(&overrun).is_none());
+        assert!(lgt_local_marked_command_response(&overrun).is_none());
 
         // A header with nothing behind it.
-        assert!(lgt_local_dnf_response(&[0x08, 0x00, 0x00, 0x00, 0xff, 0xff, 0x11, 0x27]).is_none());
+        assert!(lgt_local_marked_command_response(&[0x08, 0x00, 0x00, 0x00, 0xff, 0xff, 0x11, 0x27]).is_none());
     }
 
     /// 바이오크로니클's login is answered with the session its own reader keeps.
