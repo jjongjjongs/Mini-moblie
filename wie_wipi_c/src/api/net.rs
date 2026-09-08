@@ -1360,30 +1360,31 @@ pub async fn socket_connect(
     }
 }
 
-/// What an answer here kept for itself, under
-/// [`BILLING_STORE_NAMESPACE`](wie_backend::billing::BILLING_STORE_NAMESPACE).
+/// What an answer here kept for itself, in the running title's record store.
 ///
 /// Empty when nothing has been kept yet, which is what an untouched store is.
-/// The namespace is the emulator's rather than the title's, so a title listing
-/// its own databases never sees this one.
+/// The title's own namespace rather than one of the emulator's, because that is
+/// the one a save export collects - see the store's own documentation for what
+/// that costs.
 async fn read_billing_store(context: &mut dyn WIPICContext, name: &str) -> Vec<u8> {
-    let namespace = wie_backend::billing::BILLING_STORE_NAMESPACE;
     let system = context.system();
+    let namespace = String::from(system.pid());
 
-    if !system.platform().database_repository().exists(name, namespace).await {
+    if !system.platform().database_repository().exists(name, &namespace).await {
         return Vec::new();
     }
 
-    let database = system.platform().database_repository().open(name, namespace).await;
+    let database = system.platform().database_repository().open(name, &namespace).await;
 
     database.get(1).await.unwrap_or_default()
 }
 
-/// Keeps what an answer here has to hand back after a restart.
+/// Keeps what an answer here has to hand back after a restart, or after the save
+/// it belongs with is carried somewhere else.
 async fn write_billing_store(context: &mut dyn WIPICContext, name: &str, kept: &[u8]) {
-    let namespace = wie_backend::billing::BILLING_STORE_NAMESPACE;
     let system = context.system();
-    let mut database = system.platform().database_repository().open(name, namespace).await;
+    let namespace = String::from(system.pid());
+    let mut database = system.platform().database_repository().open(name, &namespace).await;
 
     database.set(1, kept).await;
 }

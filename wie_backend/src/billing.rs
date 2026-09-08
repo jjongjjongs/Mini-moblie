@@ -1251,14 +1251,18 @@ const HERO4_ITEM_RECORD: usize = 36;
 /// differ here and nowhere else in the front half of a record.
 const HERO4_ITEM_IDENTITY: usize = 16;
 
-/// The namespace the answers here keep what they are given under.
+/// What 영웅서기4's 창고 is kept under, in the title's own record namespace.
 ///
-/// Not the title's own - a database opened under a title's id is one the title
-/// can list, and this is not the title's to see. It is the emulator's side of an
-/// exchange, kept beside the title's saves rather than among them.
-pub const BILLING_STORE_NAMESPACE: &str = "wie_billing";
-
-/// What 영웅서기4's 창고 is kept under in that namespace.
+/// Among the title's saves rather than beside them, and deliberately: an export
+/// collects a title's record stores by its product id, so a 창고 kept anywhere
+/// else is one a reinstall loses even when the save comes back. The item is out
+/// of the bag by then and the save says so, which makes that a loss of the item
+/// rather than of a convenience.
+///
+/// The cost is that a title enumerating its own databases would see this one.
+/// 영웅서기4 cannot: it imports no record-store call at all, keeping its save in
+/// a file. A title that both reaches these answers and lists its databases would
+/// need this somewhere it cannot look.
 pub const HERO4_WAREHOUSE_STORE: &str = "hero4_warehouse";
 
 /// What 영웅서기4's 창고 has been given.
