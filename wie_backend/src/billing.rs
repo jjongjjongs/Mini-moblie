@@ -1076,12 +1076,17 @@ pub fn lgt_local_big_endian_record_response(request: &[u8]) -> Option<Vec<u8>> {
 /// | `5/0x3d`        | `0x5ea26`   | takes a byte at `[6]`, then the catalogue's own header and 37-byte rows one further along, and asks `5/0x14` |
 /// | `5/0x14`        | `0x5eb04`   | takes four bytes at `[6]` into `0x1566d70`, which nothing reads back |
 /// | `5/0x41`        | `0x5ea10`   | the deposit, carrying the item as 36 bytes. Reads `[6]` alone: zero draws the error box at `0x5ec80` and the item stays in the bag, anything else runs the move at `0x5e658` |
+/// | `5/0x04`        | `0x5ec20`   | the withdrawal, naming the row by the first 16 bytes of its record. Reads nothing of the reply; builds the item out of its own tables and asks for the listing again |
+///
+/// `5/0x03` follows a deposit carrying the same record, and is not answered
+/// because it cannot be: the title's own dispatcher takes `minor - 4`, so a
+/// `5/0x03` reply lands under `0x5e868`'s table and is dropped unread.
 ///
 /// So the first three are answered with the command alone - the title only needs
 /// to see its own command come back to take the next step - the catalogue is
 /// answered with the sixteen items [`hero4_catalogue`] lays out, the 창고 with
-/// what [`hero4_deposit`] has been handed, and the two halves of a purchase are
-/// granted.
+/// what [`hero4_deposit`] has been handed and [`hero4_withdraw`] has not taken
+/// back, and the two halves of a purchase are granted.
 ///
 /// The item a purchase delivers is a record of the random box, drawn by
 /// [`next_box_draw`] - four of the sixteen rows are the boxes themselves, and
@@ -1118,6 +1123,7 @@ pub fn lgt_local_major_minor_response(request: &[u8]) -> Option<Vec<u8>> {
         (5, 0x3f) => hero4_catalogue(),
         (5, 0x3d) => hero4_warehouse(),
         (5, 0x41) => hero4_deposit(&request[HEADER..])?,
+        (5, 0x04) => hero4_withdraw(&request[HEADER..])?,
         // Whatever `0x5eb04` stores at `0x1566d70` and no other instruction in
         // the archive reads back.
         (5, 0x14) => vec![0, 0, 0, 0],
@@ -1188,6 +1194,38 @@ fn next_box_draw(records: u8) -> u8 {
     (state % records as u32) as u8
 }
 
+/// What answers 영웅서기4 taking an item back out of its 창고.
+///
+/// 선택된 장비를 싱글 창고에 옮기겠습니까 writes `5/0x04`: twenty-two bytes, the
+/// six of a header and the [`HERO4_ITEM_IDENTITY`] naming which row. `0x5ec20`
+/// reads none of the answer at all - it builds the item out of its own tables
+/// and `0x5de8c` asks for the listing again - so the answer is the command back
+/// and nothing else.
+///
+/// Which is why the row has to go here rather than on the listing that follows:
+/// the item is in the bag by then, and a 창고 that still had it would be handing
+/// out a second one. `changed` is set only when a row actually went, so a
+/// withdrawal that names nothing held writes nothing back.
+///
+/// `None` for a frame that is not the length this message is.
+fn hero4_withdraw(identity: &[u8]) -> Option<Vec<u8>> {
+    if identity.len() != HERO4_ITEM_IDENTITY {
+        return None;
+    }
+
+    let mut held = HERO4_WAREHOUSE.lock();
+
+    match held.rows.iter().position(|row| row[..HERO4_ITEM_IDENTITY] == *identity) {
+        Some(at) => {
+            held.rows.remove(at);
+            held.changed = true;
+        }
+        None => tracing::debug!("영웅서기4 asked for an item its 창고 was not holding: {identity:02x?}"),
+    }
+
+    Some(Vec::new())
+}
+
 /// How many rows 영웅서기4's 창고 screen has room for.
 ///
 /// `0x5ea26` clears the row array at `0x1566b1e` sixteen bytes wide before it
@@ -1204,6 +1242,14 @@ const HERO4_WAREHOUSE_ROWS: usize = 16;
 /// back through the same offsets one further along. So the record a deposit
 /// sends is the row a listing sends back, behind one byte.
 const HERO4_ITEM_RECORD: usize = 36;
+
+/// What names one item of 영웅서기4's among the others.
+///
+/// The first sixteen of its record: the two eight-byte blocks `0x5e6ac` writes
+/// out of `+0x24c` and `+0x254`. They are the whole of what a withdrawal
+/// carries behind `1600 0000 0504`, and two items of the same kind and grade
+/// differ here and nowhere else in the front half of a record.
+const HERO4_ITEM_IDENTITY: usize = 16;
 
 /// The namespace the answers here keep what they are given under.
 ///
@@ -1250,17 +1296,17 @@ impl Hero4Warehouse {
 /// Whether this frame is one whose answer 영웅서기4's 창고 is behind, and the
 /// 창고 has not been read in yet.
 ///
-/// The listing and the deposit are the two: `5/0x3d` answers out of it and
-/// `5/0x41` adds to it. Every other frame here, and every other title's, is
-/// none of its business - which is what keeps this off the path of a title that
-/// has no 창고 at all.
+/// Three: `5/0x3d` answers out of it, `5/0x41` adds to it and `5/0x04` takes
+/// from it. Every other frame here, and every other title's, is none of its
+/// business - which is what keeps this off the path of a title that has no 창고
+/// at all.
 pub fn hero4_warehouse_needs_loading(request: &[u8]) -> bool {
     const HEADER: usize = 6;
 
     if request.len() < HEADER || u32::from_le_bytes([request[0], request[1], request[2], request[3]]) as usize != request.len() {
         return false;
     }
-    if !matches!((request[4], request[5]), (5, 0x3d) | (5, 0x41)) {
+    if !matches!((request[4], request[5]), (5, 0x3d) | (5, 0x41) | (5, 0x04)) {
         return false;
     }
 
@@ -3016,6 +3062,7 @@ mod tests {
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x85, 0xb8, 0xed, 0x7f, 0xa0, 0x01, 0x00, 0x00, 0x0b, 0x00, 0x01, 0x00, 0x2c, 0x01, 0x00,
             0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         ];
+        let identity = &deposit[..16];
         let request = hero_lore_frame(5, 0x41, &deposit);
         assert_eq!(request.len(), 42);
         // Granted, which is what runs the move at `0x5e658`.
@@ -3044,6 +3091,26 @@ mod tests {
         assert_eq!(&listing[11..11 + ROW][1..], &deposit);
         // Reading it in is not a change to write back out.
         assert_eq!(hero4_warehouse_to_keep(), None);
+
+        // 싱글 창고에 옮기겠습니까 takes it back out, naming the row by the
+        // first sixteen bytes of its record. `0x5ec20` reads none of the
+        // answer, so the answer is the command back.
+        let takes = hero_lore_frame(5, 0x04, identity);
+        assert_eq!(takes.len(), 22);
+        let response = lgt_local_major_minor_response(&takes).unwrap();
+        assert_eq!(response, [0x06, 0x00, 0x00, 0x00, 0x05, 0x04]);
+
+        // The item is in the bag now, so the 창고 must not still be holding it -
+        // the listing `0x5de8c` asks for next would be a second one.
+        let listing = lgt_local_major_minor_response(&asks).unwrap();
+        assert_eq!(u16::from_le_bytes([listing[9], listing[10]]), 0);
+        assert_eq!(hero4_warehouse_to_keep().unwrap(), Vec::<u8>::new());
+
+        // A withdrawal naming nothing held takes nothing and writes nothing.
+        let response = lgt_local_major_minor_response(&takes).unwrap();
+        assert_eq!(response, [0x06, 0x00, 0x00, 0x00, 0x05, 0x04]);
+        assert_eq!(hero4_warehouse_to_keep(), None);
+        assert_eq!(lgt_local_major_minor_response(&hero_lore_frame(5, 0x04, &[0; 8])), None);
 
         // A trailing part-record is dropped rather than guessed at.
         load_hero4_warehouse(&kept[..HERO4_ITEM_RECORD - 1]);
@@ -3144,6 +3211,9 @@ mod tests {
 
         // A command pair this cannot shape a reply to. Answering it would put
         // the title through a branch meant for a different exchange.
+        // The notice a deposit sends behind itself. The title's own dispatcher
+        // takes `minor - 4`, so a `5/0x03` reply is dropped unread anyway.
+        assert_eq!(lgt_local_major_minor_response(&hero_lore_frame(5, 0x03, &[0; 36])), None);
         assert_eq!(lgt_local_major_minor_response(&hero_lore_frame(5, 0x70, &[])), None);
         assert_eq!(lgt_local_major_minor_response(&hero_lore_frame(5, 0x71, &[])), None);
         // The 창고's other minor: `0x5e3a0` takes `0x47` as well, and that one
