@@ -1938,6 +1938,25 @@ pub fn lgt_local_tagged_record_response(request: &[u8]) -> Option<Vec<u8>> {
 /// copies past them are the zeroes it cleared. What matters is the size each
 /// reader takes, which is what these answers are.
 ///
+/// 아이뮤지션2 (`00032548`) opens the same session under service 1017 and then
+/// sends opcode `0x14`, its licence check, which it will not start without:
+///
+/// ```text
+/// 00 4f 00 14 00  0c  04 28  "Emulator" ...  03  "00032548" ...
+/// ```
+///
+/// Its sender at `0x1e3b2` lays that body out as a byte, a `u16`, fifty bytes
+/// of handset model, a byte and twenty of application id - seventy-four, which
+/// is the `MC_knlAlloc(0x4a)` in front of it on the wire. The answer's reader
+/// is not guessed at: the title parses every reply in `0x1d598`, which takes
+/// the opcode out of `[3]` and jumps through the table at `0x6ca78`, and that
+/// table's entry for `0x14` is `0x1d854`. There it takes a **byte**, a
+/// **`u16`** length, and **that many bytes**, keeping them at `[ctx+0x44]`,
+/// `[ctx+0x46]` and `[ctx+0x48]` - the same three fields the request filled in,
+/// so the answer overwrites the model with whatever the licence server had to
+/// say. The byte is the verdict and the string is only kept, so the answer is
+/// the verdict and an empty string.
+///
 /// `None` for anything that is not one of those messages: it has to declare its
 /// own length, leave `[2]` and `[4]` clear, and be an opcode whose reader's
 /// shape is known.
@@ -1961,6 +1980,16 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
     /// What 슈퍼액션히어로3 sends once its session is open, and `0x48c5c` reads
     /// the answer of.
     const REPORT_OPCODE: u8 = 0x32;
+
+    /// 아이뮤지션2's licence check, which it sends the moment its session is
+    /// open and will not start without.
+    const LICENCE_OPCODE: u8 = 0x14;
+    /// Its body, laid out by the sender at `0x1e3b2`: a byte, a `u16`, fifty
+    /// bytes of handset model, a byte, and twenty of application id.
+    const LICENCE_BODY: usize = 1 + 2 + 50 + 1 + 20;
+    /// The verdict the answer's reader keeps at `[ctx+0x44]`. Zero is the one
+    /// the title carries on from.
+    const LICENCED: u8 = 0;
 
     /// `0x474a4`'s product code and quantity.
     const ORDER_OPCODE: u8 = 0x43;
@@ -1998,6 +2027,13 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
         SIGNAL_OPCODE if body.is_empty() => (SIGNAL_OPCODE, Vec::new()),
         // Whatever it carries, its answer is the one `u32` `0x48c5c` takes.
         REPORT_OPCODE if !body.is_empty() => (REPORT_OPCODE, Vec::from(0u32.to_be_bytes())),
+        // The verdict, and a string behind its length - which the title keeps
+        // but does not need, so it is answered with none.
+        LICENCE_OPCODE if body.len() == LICENCE_BODY => {
+            let mut answer = alloc::vec![LICENCED];
+            answer.extend_from_slice(&0u16.to_be_bytes());
+            (LICENCE_OPCODE, answer)
+        }
         // The product code and the quantity, and a `u32` back.
         ORDER_OPCODE if body.len() == 4 => (ORDER_OPCODE, Vec::from(ORDER.to_be_bytes())),
         // The `u16` `0x14` `0x47604` opens with, the amount, and the quantity.
@@ -8516,6 +8552,66 @@ mod tests {
             assert_eq!(u16::from_be_bytes([answer[0], answer[1]]) as usize, answer.len());
             assert_eq!((answer[2], answer[4]), (0, 0));
         }
+    }
+
+    /// 아이뮤지션2's licence check, captured off its billing socket: the length,
+    /// opcode `0x14`, and the body its sender at `0x1e3b2` lays out.
+    fn imusician_licence_request() -> Vec<u8> {
+        let mut request = vec![0x00, 0x00, 0x00, 0x14, 0x00];
+        request.push(0x0c);
+        request.extend_from_slice(&1064u16.to_be_bytes());
+        let mut model = vec![0u8; 50];
+        model[..8].copy_from_slice(b"Emulator");
+        request.extend_from_slice(&model);
+        request.push(0x03);
+        let mut application = vec![0u8; 20];
+        application[..8].copy_from_slice(b"00032548");
+        request.extend_from_slice(&application);
+
+        let whole = request.len() as u16;
+        request[0..2].copy_from_slice(&whole.to_be_bytes());
+        request
+    }
+
+    /// The licence check is answered the way `0x1d854` reads it - a verdict
+    /// byte, a `u16` length, and that many bytes - under its own opcode.
+    #[test]
+    fn a_licence_check_is_answered_with_the_verdict_its_reader_takes() {
+        let request = imusician_licence_request();
+        assert_eq!(request.len(), 79);
+
+        let answer = lgt_local_opcode_header_response(&request).unwrap();
+
+        assert_eq!(u16::from_be_bytes([answer[0], answer[1]]) as usize, answer.len());
+        assert_eq!((answer[2], answer[4]), (0, 0));
+        assert_eq!(answer[3], 0x14);
+
+        // The verdict, and a string of nothing behind its length. `0x1d854`
+        // takes three bytes and then the length's worth, so this is the whole
+        // of what it reads.
+        assert_eq!(answer[5], 0);
+        let text = u16::from_be_bytes([answer[6], answer[7]]) as usize;
+        assert_eq!(text, 0);
+        assert_eq!(answer.len(), 5 + 3 + text);
+
+        assert_eq!(response(&request), Some(answer));
+    }
+
+    /// The licence check is that one body. A request under its opcode that is
+    /// not the shape `0x1e3b2` writes is not a licence check to answer.
+    #[test]
+    fn a_licence_check_is_the_body_its_sender_writes() {
+        let mut short = imusician_licence_request();
+        short.truncate(short.len() - 1);
+        let whole = short.len() as u16;
+        short[0..2].copy_from_slice(&whole.to_be_bytes());
+        assert!(lgt_local_opcode_header_response(&short).is_none());
+
+        let mut long = imusician_licence_request();
+        long.push(0);
+        let whole = long.len() as u16;
+        long[0..2].copy_from_slice(&whole.to_be_bytes());
+        assert!(lgt_local_opcode_header_response(&long).is_none());
     }
 
     /// 던파귀검사편's authentication request is answered under the command its
