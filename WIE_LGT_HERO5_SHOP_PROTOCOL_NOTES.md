@@ -245,6 +245,68 @@ u16 개수                      (전부 리틀엔디안)
 핸들러를 읽지 않은 명령과 sub는 답하지 않는다. 추측으로 답하면 타이틀이 멈추는 대신 다른
 교환을 위한 코드로 들어간다.
 
+## 레퍼런스 — 심볼이 살아있는 안드로이드 이식판
+
+`hero5v1.08vc46.apk`의 `assets/libHeroesLore5.so`는 **스트립되지 않은 32비트 ARM ELF**로,
+게임 본체가 심볼째 들어 있다(4329개). 여기서 프로토콜 전체가 이름으로 읽힌다.
+
+| 커맨드 | 핸들러 |
+|--------|--------|
+| 0 | `NETWORK::ProcPacket_System` |
+| 1 | `NETWORK::ProcPacket_Login` |
+| 2 | `NETWORK::ProcPacket_Community` |
+| 3 | `NETWORK::ProcPacket_Mail` |
+| **4** | **`NETWORK::ProcPacket_Inventory`** (창고) |
+| 5 | `NETWORK::ProcPacket_ItemTrade` |
+| **6** | **`NETWORK::ProcPacket_Shop`** |
+| 7 | `NETWORK::ProcPacket_Notice` |
+| 8 | `NETWORK::ProcPacket_Event` |
+| 100 | `NETWORK::ProcPacket_Ranking` |
+
+읽기 헬퍼도 그대로다: `readNet8/16/32/64`, `readNetBuf`, 그리고 **`readNetItem(int, _NET_ITEM_*)`**가
+우리가 `0x333fc`로 부르던 그 함수다. `_NET_ITEM_`은 0x60바이트이고 필드 위치가
+`0`, `4`, `5`, `6`(이름), `0x20`, `0x28`, `0x30`, `0x38`, `0x3a`, `0x3c`, `0x3d`, `0x3e`,
+`0x40`, `0x42`, `0x44`, `0x45`… 로 우리가 읽어낸 순서와 정확히 같다.
+
+### 4/6의 정확한 모양
+
+`ProcPacket_Inventory` sub 6:
+
+```
+readNet32                  → 결과
+readNetBuf                 → 메시지
+결과 != 0 이면 팝업
+NetStorageItem::DeleteAll()
+readNet32                  → n
+NetStorageItem::SetSize(n)
+n번 반복:
+    readNet32              → 칸 번호
+    readNet8               → 상태
+    memset(item, 0, 0x60)
+    readNetItem(&item)
+    NetStorageItem::NewNetStorageItem(&item, 상태, 칸 번호)
+WriteData(4, 7)
+```
+
+`NewNetStorageItem`은 아이템을 `this + 칸*4 + 8`, 개수를 `this + 칸 + 0x148`,
+상태를 `this + 칸 + 0x198`에 넣는다 — WIPI판 `0x1507c`와 같은 배치다. 개수가 0 이하면
+세 자리를 전부 0으로 쓴다.
+
+### 상태 바이트 = 거래 상태
+
+`NetStorageItem::GetItemState(short)` = `this[칸 + 0x198]`이고,
+`GetItemState(char page, short i)` = `GetItemState(page*16 + i)` — **창고는 한 페이지 16칸**이다.
+
+그리고 `StateNetMenu::KeyStorage`가:
+
+```
+state = GetItemState(page, cursor)
+if state == 1: GetMenuText(0xaa) 를 띄우고 끝
+```
+
+`menu_text.dat` 170번이 **"거래중인 아이템입니다."** 다. 우리가 1을 보내서 넣은 아이템이
+전부 판매중으로 잠긴 것이다. **보관 상태는 0**이다.
+
 ## 4/1, 4/6, 4/7 — 창고관리
 
 창고 메뉴에서 창고관리를 누르면 4/6이 나가고, 답이 없으면 "Recieve"에서 멈춘다.
@@ -296,10 +358,12 @@ u16 개수                      (전부 리틀엔디안)
 만들어졌고, 4/7로 보낸 거래용 화폐 0은 **같은 구조체의 첫 워드**라 화면에 그대로 나온다
 — 그런데 격자에는 없었다. 그 바이트를 1로 바꿔도 마찬가지였다.
 
-그래서 두 번째 읽기로 갔다: `0x1507c`에 개수 0짜리 행을 위한 경로(`0x156ec`, 빈 칸을
-쓰는 자리)가 **있다**는 것은, 서버가 **모든 칸을 열거**하고 빈 칸은 개수 0으로 보낸다는
-뜻이다. 그러면 `0x1502c`가 받는 개수는 "몇 개 들었나"가 아니라 **"창고가 몇 칸인가"**가
-된다. 지금은 20칸을 전부 열거하고 든 칸만 레코드를 싣는다. 이것도 아직 확인이 필요하다.
+모든 칸을 열거하도록 바꾸자 아이템이 격자에 나타났다. 다만 레퍼런스가 말하는 원래 모양은
+`SetSize(n)` 뒤에 **n번 반복**이므로 개수는 "몇 칸인가"가 아니라 **행 수**다 — 우리가
+20칸을 열거하는 것은 빈 행 19개를 함께 보내는 것이라 그 정의와도 맞는다.
+
+그리고 나타난 아이템은 "판매중"으로 잠겨 있었다. 상태 바이트를 1로 보냈기 때문이고,
+1은 거래중이다(위 레퍼런스 절). 지금은 0을 보낸다.
 
 아직 못 본 것: 창고에서 **꺼내는** 요청. 4/2~4/5 중 하나일 텐데 핸들러를 안 읽었다.
 

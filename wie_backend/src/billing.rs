@@ -3159,12 +3159,21 @@ const HERO5_LAST_EQUIPMENT_TABLE: u8 = 10;
 /// is as long as it needs to be.
 const HERO5_WAREHOUSE_SLOTS: usize = 20;
 
-/// The state byte a 창고 slot with something in it carries.
+/// The state byte a 창고 slot carries.
 ///
 /// `0x1507c` keeps it at `list + slot + 0x198`, alongside the item pointer and
-/// the stack count, and writes zero there for a slot it was given nothing for
-/// (`0x156ec`). So zero is "empty" and this is the smallest thing that is not.
-const HERO5_SLOT_HELD: u8 = 1;
+/// the stack count. What the values mean is in the title's own later Android
+/// build, which ships unstripped: `NetStorageItem::GetItemState(short)` is that
+/// byte (`this[index + 0x198]`, and `GetItemState(char page, short i)` is
+/// `GetItemState(page * 16 + i)`, so the 창고 is sixteen slots a page), and
+/// `StateNetMenu::KeyStorage` refuses to move a slot whose state is 1, drawing
+/// menu text 170 - 거래중인 아이템입니다. Which is exactly what a deposit came
+/// back as when this went over as one.
+///
+/// Zero is what an item that is simply being held carries. It is also what
+/// `NewNetStorageItem` writes for a row it was given nothing for, but a slot is
+/// occupied by its item's count rather than by this, so the two do not collide.
+const HERO5_SLOT_HELD: u8 = 0;
 
 /// Where 영웅서기5's 창고 is kept between runs.
 pub const HERO5_WAREHOUSE_STORE: &str = "hero5_warehouse";
@@ -3760,6 +3769,10 @@ mod tests {
         assert_eq!(lgt_local_hero5_response(&ping), Some(ping));
     }
 
+    /// 영웅서기5's 창고 is one static, so the tests that put things in it take
+    /// turns rather than racing each other for what it is holding.
+    static HERO5_WAREHOUSE_TEST: spin::Mutex<()> = spin::Mutex::new(());
+
     /// The 4/1 frame the 창고 deposit capture carried: one 얇은 가죽, item table
     /// 13 row 38, and the `u32` of the title's own that follows the record.
     fn hero5_deposit_request() -> Vec<u8> {
@@ -3780,6 +3793,7 @@ mod tests {
     /// and hand it back as it took it, or every row after it has slid.
     #[test]
     fn the_warehouse_hands_back_what_it_was_deposited() {
+        let _turn = HERO5_WAREHOUSE_TEST.lock();
         load_hero5_warehouse(&[]);
         HERO5_WAREHOUSE.lock().rows.clear();
 
@@ -3806,7 +3820,8 @@ mod tests {
         assert_eq!(u32::from_be_bytes(listing[28..32].try_into().unwrap()) as usize, HERO5_WAREHOUSE_SLOTS);
         assert_eq!(&listing[32..36], 0u32.to_be_bytes());
         assert_eq!(listing[36], HERO5_SLOT_HELD);
-        assert_ne!(HERO5_SLOT_HELD, 0);
+        // 1 is 거래중, which the title will not let out of the 창고.
+        assert_ne!(HERO5_SLOT_HELD, 1);
         assert_eq!(&listing[37..56], &hero5_deposit_request()[20..39]);
         assert_eq!(&listing[56..60], 1u32.to_be_bytes());
         assert_eq!(listing[60], 0);
@@ -3839,6 +3854,7 @@ mod tests {
     /// dropped rather than half-read.
     #[test]
     fn the_warehouse_survives_being_written_out_and_read_back() {
+        let _turn = HERO5_WAREHOUSE_TEST.lock();
         HERO5_WAREHOUSE.lock().rows.clear();
         lgt_local_hero5_response(&hero5_deposit_request()).unwrap();
         lgt_local_hero5_response(&hero5_deposit_request()).unwrap();
