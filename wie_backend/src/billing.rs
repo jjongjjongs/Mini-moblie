@@ -6606,26 +6606,31 @@ pub fn lgt_local_genesis3_episode4_response(request: &[u8]) -> Option<Vec<u8>> {
 /// [6..10]  u32  the message
 /// ```
 ///
-/// The walk, as the reader at `0x1f6ac` and the one wrapping it at `0x1fcdc`
-/// take it:
+/// Behind the header goes one big-endian `u32`, and it has to be there. The
+/// title reads a message as `0x1f604` opens it and `0x1f6ac` or `0x1fcdc`
+/// finishes it, and between them that is a word taken off the payload - the
+/// verdict, zero being the value both of them carry on from. It is also what
+/// keeps the stream lined up: the reader takes the frame's declared length out
+/// of what it has and then reads the word, so an answer that declares less than
+/// it is read for leaves the count short by the difference and every frame
+/// after it starts mid-word. Answering the login with a single byte did exactly
+/// that - the count went three under, the next answer was never recognised as a
+/// frame at all, and the title stopped on "FOUND CORRUPT DATA!!!".
+///
+/// The walk, as those two readers take it:
 ///
 /// * the title sends **100**, its login - the subscriber's number and the
 ///   handset model as length-prefixed strings, then 102 and a zero byte;
-/// * **101** answers it, and `0x1f6ac` reads one byte out of it. Zero is the
-///   verdict it carries on from: it moves the session to its third state and
-///   the title draws "접속 성공". Anything else draws an error instead;
-/// * the title then sends **700**, and **701** answers it the same way - one
-///   byte, zero being good, read at `0x1fd10`;
+/// * **101** answers it. `0x1f6ac` moves the session to its third state on a
+///   zero verdict and the title draws "접속 성공"; anything else is an error it
+///   draws instead;
+/// * the title then sends **700**, and **701** answers it the same way, read at
+///   `0x1fd10`. That one ends the walk: the title reaches
+///   "SMS 수신동의가 완료되었습니다." and its step machine runs out at five,
+///   which is where 에피소드4 ends up too;
 /// * **1** is the session's own keep-alive, and `0x1efe4` answers one with an
-///   empty 1 of its own. Answering the title's makes it stay put rather than
-///   letting the link go quiet, which is what the record's own reader does.
-///
-/// This is not the whole session. The title gets its two answers and reaches
-/// "접속 성공", then runs out of walk and settles on "접속 시간 초과!" a
-/// second later, so something after 701 is still missing. It is a good deal
-/// further than the title got with nothing answering it at all, and the header
-/// is read off the title's own code rather than guessed, so the rest is
-/// additions to this rather than a different shape.
+///   empty 1 of its own. Answering the title's keeps the link from going quiet
+///   between the steps of the walk.
 ///
 /// `None` for anything that is not one of these: it has to carry the magic,
 /// declare its own length, and be a message this walk is made of.
@@ -6642,9 +6647,9 @@ pub fn lgt_local_genesis3_episode2_response(request: &[u8]) -> Option<Vec<u8>> {
     /// The step after the login, and the message that answers it.
     const STEP: u32 = 700;
     const STEP_ANSWER: u32 = 701;
-    /// The byte both answers are read for. Zero is the one the title carries
-    /// on from; every other value is an error it draws instead.
-    const GOOD: u8 = 0;
+    /// The word both answers are read for. Zero is the verdict the title
+    /// carries on from; every other value is an error it draws instead.
+    const GOOD: u32 = 0;
 
     if request.len() < HEADER || u16::from_be_bytes([request[0], request[1]]) != MAGIC {
         return None;
@@ -6656,12 +6661,15 @@ pub fn lgt_local_genesis3_episode2_response(request: &[u8]) -> Option<Vec<u8>> {
     }
 
     let message = u32::from_be_bytes([request[6], request[7], request[8], request[9]]);
-    let (answer, body): (u32, &[u8]) = match message {
-        KEEP_ALIVE => (KEEP_ALIVE, &[]),
-        LOGIN => (LOGIN_ANSWER, &[GOOD]),
-        STEP => (STEP_ANSWER, &[GOOD]),
+    let (answer, verdict) = match message {
+        KEEP_ALIVE => (KEEP_ALIVE, None),
+        LOGIN => (LOGIN_ANSWER, Some(GOOD)),
+        STEP => (STEP_ANSWER, Some(GOOD)),
         _ => return None,
     };
+
+    let body = verdict.map(u32::to_be_bytes);
+    let body = body.as_ref().map(|word| &word[..]).unwrap_or(&[]);
 
     let mut reply = Vec::with_capacity(HEADER + body.len());
     reply.extend_from_slice(&MAGIC.to_be_bytes());
@@ -9405,23 +9413,40 @@ mod tests {
     fn 에피소드2_is_told_its_login_was_good() {
         let reply = response(&genesis3_episode2_login()).unwrap();
 
-        // The magic, one byte of payload, and the message that answers a login.
+        // The magic, a word of payload, and the message that answers a login.
         assert_eq!(&reply[..2], &[0xfa, 0xcb]);
-        assert_eq!(u32::from_be_bytes([reply[2], reply[3], reply[4], reply[5]]), 1);
+        assert_eq!(u32::from_be_bytes([reply[2], reply[3], reply[4], reply[5]]), 4);
         assert_eq!(u32::from_be_bytes([reply[6], reply[7], reply[8], reply[9]]), 101);
 
-        // And the byte `0x1f6ac` reads out of it: zero is the verdict the title
+        // And the word `0x1f6ac` reads out of it: zero is the verdict the title
         // carries on from, and anything else is an error it draws instead.
-        assert_eq!(reply[10], 0);
-        assert_eq!(reply.len(), 11);
+        assert_eq!(u32::from_be_bytes([reply[10], reply[11], reply[12], reply[13]]), 0);
+        assert_eq!(reply.len(), 14);
     }
 
     #[test]
     fn 에피소드2_is_answered_the_same_way_on_the_step_after_the_login() {
-        let reply = response(&genesis3_episode2_frame(700, &[0, 0, 0, 0])).unwrap();
+        let reply = response(&genesis3_episode2_frame(700, &[0, 0, 0, 1])).unwrap();
 
         assert_eq!(u32::from_be_bytes([reply[6], reply[7], reply[8], reply[9]]), 701);
-        assert_eq!(reply[10], 0);
+        assert_eq!(u32::from_be_bytes([reply[10], reply[11], reply[12], reply[13]]), 0);
+        assert_eq!(reply.len(), 14);
+    }
+
+    /// The word is what keeps the stream lined up. The title takes an answer's
+    /// declared length out of what it has and then reads a word off it, so an
+    /// answer that declares less than it is read for leaves the count short and
+    /// every frame after it starts mid-word - which is where a one byte answer
+    /// left it, three under and stopped on "FOUND CORRUPT DATA!!!".
+    #[test]
+    fn 에피소드2s_answers_are_as_long_as_they_are_read_for() {
+        for request in [genesis3_episode2_login(), genesis3_episode2_frame(700, &[0, 0, 0, 1])] {
+            let reply = response(&request).unwrap();
+            let declared = u32::from_be_bytes([reply[2], reply[3], reply[4], reply[5]]) as usize;
+
+            assert_eq!(declared, size_of::<u32>());
+            assert_eq!(reply.len(), 10 + declared);
+        }
     }
 
     /// The session's own keep-alive, which the title answers with an empty one
