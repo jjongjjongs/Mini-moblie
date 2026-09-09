@@ -129,6 +129,16 @@ async fn handle_wipic_svc(
                 context.sp,
             );
             tracing::info!("ZERO-CALLOC stack@sp [{}]", hex(core, context.sp, 48));
+
+            // The loader keeps the resource buffer at sp+0x18 and its length at
+            // sp+0x1c. Dumping its head says whether what it is parsing is the
+            // file we were asked for.
+            let mut slot = [0u8; 8];
+            if core.read_bytes(context.sp + 0x18, &mut slot).is_ok() {
+                let buffer = u32::from_le_bytes([slot[0], slot[1], slot[2], slot[3]]);
+                let length = u32::from_le_bytes([slot[4], slot[5], slot[6], slot[7]]);
+                tracing::info!("ZERO-CALLOC buffer={buffer:#x} len={length} [{}]", hex(core, buffer, 24));
+            }
         }
     }
 
