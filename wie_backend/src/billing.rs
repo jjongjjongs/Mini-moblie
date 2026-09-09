@@ -889,34 +889,54 @@ pub fn lgt_local_fixed_block_response(request: &[u8]) -> Option<Vec<u8>> {
 /// - `0x4e544` for `0x33` reads one more `u32` behind the result, so that is the
 ///   one exchange whose answer carries a body past it.
 ///
+/// 드래곤하트2 (`0002CC04`) writes the same record on starting up, while it says
+/// 기존에 저장되어 있는 데이터가 있는지 확인중입니다 - 48 bytes, version `0x7b`,
+/// exchange `0x26`:
+///
+/// ```text
+/// "ENSLGT" 11 7b 00 26 00 23 00 "01083062925" 00 x9 "Emulator" 00 00 "103" 01
+/// ```
+///
+/// Its own `binary.mod` frames a reply exactly the way 블레이드마스터4 does:
+/// `0x24448` counts the bytes in, checks the first three against `"ENS"` once
+/// seven have arrived, reads a little-endian `u16` command and a `u16` length,
+/// and then waits for that many more before handing the body - which sits at
+/// `0x1554bdc + 0xa` and is walked by a cursor at `0x1554bdc` through readers
+/// for `s8`, `s16`, `u32` and a buffer - to the exchange's own handler.
+///
+/// So this answers any of these records rather than one title's walk: the `u16`
+/// at `[11]` is what the record says it carries past the header, which is the
+/// check that tells one of these apart from anything else opening with the
+/// magic. Only 블레이드마스터4's `0x33` is known to read past the result, so only
+/// that one, at that version, gets a word behind it.
+///
 /// `None` for anything that is not one of these records: it has to open with the
-/// magic, be the length the builder writes, carry the two bytes it fixes, name
-/// an exchange in the walk, and have the subscriber number in digits where the
-/// builder puts it.
+/// magic, carry the byte the builder fixes, say its own length where the builder
+/// puts it, and have the subscriber number in digits behind that.
 pub fn lgt_local_ens_record_response(request: &[u8]) -> Option<Vec<u8>> {
     /// What the reply is framed by, and what the request opens with.
     const REPLY_TAG: &[u8] = b"ENS";
     const REQUEST_TAG: &[u8] = b"ENSLGT";
-    /// The whole of what `0x5fbbc` writes.
-    const RECORD: usize = 67;
-    /// The two bytes the builder fixes, at `[6]` and `[7..9]`.
+    /// The byte the builder fixes at `[6]`.
     const MARK: u8 = 0x11;
-    const VERSION: u16 = 0x79;
-    /// Where the subscriber number is written, as a fixed twenty-one bytes.
+    /// Where the subscriber number is written, as a fixed twenty-one bytes -
+    /// and what `[11..13]` counts from, so it is also the header's own length.
     const SUBSCRIBER: usize = 13;
-    /// The exchanges a 하트 purchase walks, and the result that grants each.
-    const FIRST_EXCHANGE: u16 = 0x31;
-    const LAST_EXCHANGE: u16 = 0x34;
-    /// The one exchange whose handler reads a word behind the result.
+    /// 블레이드마스터4's version, and the one exchange of its walk whose handler
+    /// reads a word behind the result.
+    const BLADEMASTER4: u16 = 0x79;
     const WORD_EXCHANGE: u16 = 0x33;
     const GRANTED_RESULT: u16 = 0;
 
-    if !request.starts_with(REQUEST_TAG) || request.len() != RECORD {
+    if !request.starts_with(REQUEST_TAG) || request.len() < SUBSCRIBER + 2 {
         return None;
     }
 
     let word = |at: usize| u16::from_le_bytes([request[at], request[at + 1]]);
-    if request[6] != MARK || word(7) != VERSION {
+
+    // The record says its own length behind the header, which is what tells one
+    // of these apart from anything else that happens to open with the magic.
+    if request[6] != MARK || word(11) as usize != request.len() - SUBSCRIBER {
         return None;
     }
 
@@ -926,15 +946,12 @@ pub fn lgt_local_ens_record_response(request: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    let exchange = word(9);
-    if !(FIRST_EXCHANGE..=LAST_EXCHANGE).contains(&exchange) {
-        return None;
-    }
+    let (version, exchange) = (word(7), word(9));
 
-    // The result, and for the one exchange that reads further, the word behind
-    // it.
+    // The result, and for the one exchange this has read a handler for that
+    // reads further, the word behind it.
     let mut body = Vec::from(GRANTED_RESULT.to_le_bytes());
-    if exchange == WORD_EXCHANGE {
+    if (version, exchange) == (BLADEMASTER4, WORD_EXCHANGE) {
         body.extend_from_slice(&0u32.to_le_bytes());
     }
 
@@ -8150,10 +8167,20 @@ mod tests {
         short.pop();
         assert_eq!(lgt_local_ens_record_response(&short), None);
 
-        // An exchange outside the walk.
+        // A length that is not what the record carries.
+        let mut mislength = blade_master_4_purchase_record();
+        mislength[11] = 0x37;
+        assert_eq!(lgt_local_ens_record_response(&mislength), None);
+
+        // Another exchange of the same walk is answered under its own number,
+        // and only 0x33 carries a word behind the result.
         let mut other = blade_master_4_purchase_record();
-        other[9..11].copy_from_slice(&0x35u16.to_le_bytes());
-        assert_eq!(lgt_local_ens_record_response(&other), None);
+        other[9..11].copy_from_slice(&0x32u16.to_le_bytes());
+        let reply = lgt_local_ens_record_response(&other).unwrap();
+        assert_eq!(&reply[..3], b"ENS");
+        assert_eq!(u16::from_le_bytes(reply[3..5].try_into().unwrap()), 0x32);
+        assert_eq!(u16::from_le_bytes(reply[5..7].try_into().unwrap()) as usize, reply.len() - 7);
+        assert_eq!(reply.len(), 9);
 
         // A subscriber number that is not digits.
         let mut lettered = blade_master_4_purchase_record();
@@ -8164,6 +8191,38 @@ mod tests {
         let mut unmarked = blade_master_4_purchase_record();
         unmarked[6] = 0x12;
         assert_eq!(lgt_local_ens_record_response(&unmarked), None);
+    }
+
+    /// 드래곤하트2 writes the same record on starting up, and stalls on
+    /// 기존에 저장되어 있는 데이터가 있는지 확인중입니다 until it is answered.
+    #[test]
+    fn the_record_dragon_heart_2_starts_up_with_is_answered_too() {
+        use super::lgt_local_ens_record_response;
+
+        let mut record = Vec::from(&b"ENSLGT"[..]);
+        record.push(0x11);
+        record.extend_from_slice(&0x7bu16.to_le_bytes());
+        record.extend_from_slice(&0x26u16.to_le_bytes());
+        record.extend_from_slice(&0x23u16.to_le_bytes());
+        // The subscriber number in a fixed twenty-one bytes, then the handset
+        // in ten.
+        record.extend_from_slice(b"01083062925");
+        record.extend_from_slice(&[0; 10]);
+        record.extend_from_slice(b"Emulator");
+        record.extend_from_slice(&[0, 0]);
+        record.extend_from_slice(b"103");
+        record.push(1);
+
+        // The capture is 48 bytes and says 0x23 behind its thirteen-byte header.
+        assert_eq!(record.len(), 48);
+        assert_eq!(u16::from_le_bytes(record[11..13].try_into().unwrap()) as usize, record.len() - 13);
+
+        // "ENS", the exchange back, the body length, and a result of zero -
+        // which is the whole of what `0x24448` waits on before it dispatches.
+        let reply = lgt_local_ens_record_response(&record).unwrap();
+        assert_eq!(reply, [b'E', b'N', b'S', 0x26, 0x00, 0x02, 0x00, 0x00, 0x00]);
+
+        assert_eq!(response(&record), Some(reply));
     }
 
     #[test]
