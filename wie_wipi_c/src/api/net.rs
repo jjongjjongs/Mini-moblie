@@ -905,9 +905,13 @@ impl wie_backend::LocalConnection for LgtBillingGateway {
         };
 
         let Some(response) = wie_backend::billing::response(request) else {
-            tracing::debug!(
-                "LGT billing gateway: a {} byte request is not one this can shape a reply to",
-                request.len()
+            // Trace the frame itself, not just its length. An unanswered
+            // request is the one worth seeing: it is how a title's protocol
+            // gets read off a device log in the first place, and a bare length
+            // costs a whole capture round to turn into bytes.
+            tracing::info!(
+                "LGT billing gateway: no reply shaped for {}",
+                wie_backend::billing::bill_frame_trace(request)
             );
             return;
         };
