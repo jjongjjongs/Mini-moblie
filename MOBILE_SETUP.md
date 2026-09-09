@@ -65,7 +65,7 @@ and to the matching `rustup target add`.
 
 ## Running a game
 
-Import a `.zip` (or `.jar`/`.apk`) with "APK/ZIP 가져오기"; it is copied into
+Import a `.zip` (or `.jar`/`.apk`) with "ZIP 가져오기"; it is copied into
 app-private storage. Tapping a row starts it; long-pressing offers to get its
 saves out or to drop it from the library. The back key leaves the player.
 

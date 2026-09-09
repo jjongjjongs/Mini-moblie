@@ -336,7 +336,7 @@ public final class MainActivity extends Activity {
         Button refresh = flatButton("목록 새로고침");
         refresh.setOnClickListener(v -> showLibrary());
         actions.addView(refresh, buttonParams(0));
-        Button pick = flatButton("APK/ZIP 가져오기");
+        Button pick = flatButton("ZIP 가져오기");
         pick.setOnClickListener(v -> openPicker());
         actions.addView(pick, buttonParams(dp(10)));
         content.addView(actions, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(42)));
@@ -428,7 +428,7 @@ public final class MainActivity extends Activity {
         box.addView(et);
 
         TextView es = new TextView(this);
-        es.setText("위의 ‘APK/ZIP 가져오기’로 게임을 추가하세요.");
+        es.setText("위의 ‘ZIP 가져오기’로 게임을 추가하세요.");
         es.setTextSize(12.5f);
         es.setTextColor(LIB_MUTED);
         es.setGravity(android.view.Gravity.CENTER);
