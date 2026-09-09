@@ -6522,81 +6522,6 @@ pub fn lgt_local_oceanus_settled_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(response)
 }
 
-/// The answer that lets 창세기전3's data-server session close.
-///
-/// 창세기전3 에피소드2 (`00029B30`) and 에피소드3 (`0002E44E`) open a data
-/// server session before their first screen and wait on it. The frame they
-/// write is the same in both, and both build it through `MC_utilHtonl` /
-/// `MC_utilHtons`, so every number in it is big-endian:
-///
-/// ```text
-/// [0..2]   u16  0xfacb, the magic
-/// [2..6]   u32  the payload's length, the ten-byte header not counted
-/// [6..10]  u32  the message, 100 for the one that opens the session
-/// [10..]   the payload
-/// ```
-///
-/// 에피소드2's opening carries a length-prefixed subscriber number, a
-/// length-prefixed handset model, and two more fields - thirty-two bytes, so
-/// forty-two on the wire:
-///
-/// ```text
-/// fa cb 00 00 00 20 00 00 00 64 00 00 00 0b "01046119269"
-///                            00 00 00 08 "Emulator" 00 00 00 66 00
-/// ```
-///
-/// 에피소드3 writes the identical layout down to the last field, which is 101
-/// where 에피소드2 has 102.
-///
-/// The answer's shape is the request's, and what it has to say is read off the
-/// title's own parser - `0x1ef08` in 에피소드2, `0x2087c` in 에피소드3, the same
-/// routine compiled twice. It wants ten bytes before it will look at anything,
-/// takes the first `u16` back through `MC_utilHtons` and gives up unless it is
-/// `0xfacb`, then reads the length and the message and stops short unless the
-/// payload's length plus ten is all there. Only then does it act on the
-/// message, and it knows exactly two:
-///
-/// - `1` is a challenge: the title writes a frame straight back and stays open.
-/// - `2` sets `[ctx+0x44]`, which is the session having finished.
-///
-/// Every other message is read and dropped, which is what leaving the opening
-/// unanswered amounts to - the title sits on the socket and never reaches its
-/// first screen.
-///
-/// So the answer is the message that ends it and nothing behind it: the magic,
-/// a zero length, and `2`. Ten bytes, which is exactly the ten the parser
-/// demands before it will read a header at all.
-///
-/// `None` for anything that is not that opening - it has to carry the magic,
-/// declare a length that is the rest of the frame, and be the message the
-/// session opens with.
-pub fn lgt_local_genesis3_session_response(request: &[u8]) -> Option<Vec<u8>> {
-    /// The magic in front of every frame in this protocol.
-    const MAGIC: u16 = 0xfacb;
-    /// The magic, the length and the message.
-    const HEADER: usize = 10;
-    /// The message the session opens with, and the only one to answer.
-    const OPENING: u32 = 100;
-    /// The message that sets `[ctx+0x44]` and lets the title carry on.
-    const FINISHED: u32 = 2;
-
-    if request.len() < HEADER || u16::from_be_bytes([request[0], request[1]]) != MAGIC {
-        return None;
-    }
-
-    let field = |at: usize| u32::from_be_bytes([request[at], request[at + 1], request[at + 2], request[at + 3]]);
-    if field(2) as usize != request.len() - HEADER || field(6) != OPENING {
-        return None;
-    }
-
-    let mut response = Vec::with_capacity(HEADER);
-    response.extend_from_slice(&MAGIC.to_be_bytes());
-    response.extend_from_slice(&0u32.to_be_bytes());
-    response.extend_from_slice(&FINISHED.to_be_bytes());
-
-    Some(response)
-}
-
 /// The answer that lets 창세기전3 에피소드4's data-server session move on.
 ///
 /// 에피소드4 (`000323E0`) opens a data server session before its first screen,
@@ -6702,7 +6627,6 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_hero5_response(request))
         .or_else(|| lgt_local_oceanus_response(request))
         .or_else(|| lgt_local_oceanus_settled_response(request))
-        .or_else(|| lgt_local_genesis3_session_response(request))
         .or_else(|| lgt_local_genesis3_episode4_response(request))
 }
 
@@ -8701,71 +8625,6 @@ mod tests {
         }
     }
 
-    /// 창세기전3 에피소드2's data-server opening, captured off its socket.
-    fn genesis3_opening(model: &[u8], subscriber: &[u8], tail: u32) -> Vec<u8> {
-        let mut payload = Vec::new();
-        payload.extend_from_slice(&(subscriber.len() as u32).to_be_bytes());
-        payload.extend_from_slice(subscriber);
-        payload.extend_from_slice(&(model.len() as u32).to_be_bytes());
-        payload.extend_from_slice(model);
-        payload.extend_from_slice(&tail.to_be_bytes());
-        payload.push(0);
-
-        let mut request = Vec::new();
-        request.extend_from_slice(&0xfacbu16.to_be_bytes());
-        request.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-        request.extend_from_slice(&100u32.to_be_bytes());
-        request.extend_from_slice(&payload);
-        request
-    }
-
-    /// Both episodes open the same session, and the answer that ends it is the
-    /// magic, no payload, and the message their parser sets `[ctx+0x44]` on.
-    #[test]
-    fn the_session_that_holds_창세기전3_is_answered_with_its_ending() {
-        // 에피소드2 and 에피소드3 differ only in that last field.
-        for (subscriber, tail) in [(&b"01046119269"[..], 102u32), (&b"01077014737"[..], 101)] {
-            let request = genesis3_opening(b"Emulator", subscriber, tail);
-            assert_eq!(request.len(), 42);
-
-            let answer = lgt_local_genesis3_session_response(&request).unwrap();
-
-            // Ten bytes, which is the least the parser reads a header out of.
-            assert_eq!(answer.len(), 10);
-            assert_eq!(u16::from_be_bytes([answer[0], answer[1]]), 0xfacb);
-            assert_eq!(u32::from_be_bytes([answer[2], answer[3], answer[4], answer[5]]), 0);
-            assert_eq!(u32::from_be_bytes([answer[6], answer[7], answer[8], answer[9]]), 2);
-
-            assert_eq!(response(&request), Some(answer));
-        }
-    }
-
-    /// The opening is that frame. Anything whose header does not describe the
-    /// rest of it is not this protocol to answer.
-    #[test]
-    fn a_창세기전3_frame_has_to_describe_itself() {
-        let request = genesis3_opening(b"Emulator", b"01046119269", 102);
-
-        // A magic that is not this protocol's.
-        let mut other_magic = request.clone();
-        other_magic[0..2].copy_from_slice(&0xfacau16.to_be_bytes());
-        assert!(lgt_local_genesis3_session_response(&other_magic).is_none());
-
-        // A length that is not the rest of the frame.
-        let mut ragged = request.clone();
-        ragged[2..6].copy_from_slice(&31u32.to_be_bytes());
-        assert!(lgt_local_genesis3_session_response(&ragged).is_none());
-
-        // A message the session does not open with - the challenge the title
-        // answers itself, which is not ours to send an ending for.
-        let mut challenge = request.clone();
-        challenge[6..10].copy_from_slice(&1u32.to_be_bytes());
-        assert!(lgt_local_genesis3_session_response(&challenge).is_none());
-
-        // Shorter than the header the parser insists on.
-        assert!(lgt_local_genesis3_session_response(&request[..9]).is_none());
-    }
-
     /// 창세기전3 에피소드4's data-server opening, captured off its socket: a
     /// big-endian length and four little-endian words, then the number.
     fn genesis3_episode4_opening(subscriber: &[u8]) -> Vec<u8> {
@@ -8836,9 +8695,13 @@ mod tests {
         ragged[0..4].copy_from_slice(&39u32.to_be_bytes());
         assert!(lgt_local_genesis3_episode4_response(&ragged).is_none());
 
-        // 에피소드2's opening is a different protocol and not this one to answer.
-        assert!(lgt_local_genesis3_episode4_response(&genesis3_opening(b"Emulator", b"01046119269", 102)).is_none());
-        assert!(lgt_local_genesis3_session_response(&request).is_none());
+        // 에피소드2's opening declares its length the other way round and is
+        // not this one to answer.
+        let mut episode2 = alloc::vec![0xfa, 0xcb];
+        episode2.extend_from_slice(&32u32.to_be_bytes());
+        episode2.extend_from_slice(&100u32.to_be_bytes());
+        episode2.resize(42, 0);
+        assert!(lgt_local_genesis3_episode4_response(&episode2).is_none());
     }
 
     /// 아이뮤지션2's licence check, captured off its billing socket: the length,
