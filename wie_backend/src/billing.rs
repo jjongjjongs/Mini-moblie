@@ -6592,6 +6592,86 @@ pub fn lgt_local_genesis3_episode4_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(response)
 }
 
+/// The answers 창세기전3 에피소드2's data-server session asks for.
+///
+/// 에피소드2 (`00029B30`) opens a session before its first screen and will not
+/// start without one. Every frame either way is the same ten byte header, all
+/// of it big-endian - the title puts each field through `MC_utilHtons` and
+/// `MC_utilHtonl` itself, and patches the length in at `0x1ee98` as everything
+/// written since the header:
+///
+/// ```text
+/// [0..2]   u16  0xFACB, the magic its reader checks at 0x1ef4c
+/// [2..6]   u32  the payload's length, the ten header bytes not counted
+/// [6..10]  u32  the message
+/// ```
+///
+/// The walk, as the reader at `0x1f6ac` and the one wrapping it at `0x1fcdc`
+/// take it:
+///
+/// * the title sends **100**, its login - the subscriber's number and the
+///   handset model as length-prefixed strings, then 102 and a zero byte;
+/// * **101** answers it, and `0x1f6ac` reads one byte out of it. Zero is the
+///   verdict it carries on from: it moves the session to its third state and
+///   the title draws "접속 성공". Anything else draws an error instead;
+/// * the title then sends **700**, and **701** answers it the same way - one
+///   byte, zero being good, read at `0x1fd10`;
+/// * **1** is the session's own keep-alive, and `0x1efe4` answers one with an
+///   empty 1 of its own. Answering the title's makes it stay put rather than
+///   letting the link go quiet, which is what the record's own reader does.
+///
+/// This is not the whole session. The title gets its two answers and reaches
+/// "접속 성공", then runs out of walk and settles on "접속 시간 초과!" a
+/// second later, so something after 701 is still missing. It is a good deal
+/// further than the title got with nothing answering it at all, and the header
+/// is read off the title's own code rather than guessed, so the rest is
+/// additions to this rather than a different shape.
+///
+/// `None` for anything that is not one of these: it has to carry the magic,
+/// declare its own length, and be a message this walk is made of.
+pub fn lgt_local_genesis3_episode2_response(request: &[u8]) -> Option<Vec<u8>> {
+    /// The header, and the least a frame can be.
+    const HEADER: usize = 10;
+    /// The `u16` `0x1ef4c` compares the front of every frame against.
+    const MAGIC: u16 = 0xfacb;
+    /// The keep-alive, which is answered with itself.
+    const KEEP_ALIVE: u32 = 1;
+    /// The login, and the message that answers it.
+    const LOGIN: u32 = 100;
+    const LOGIN_ANSWER: u32 = 101;
+    /// The step after the login, and the message that answers it.
+    const STEP: u32 = 700;
+    const STEP_ANSWER: u32 = 701;
+    /// The byte both answers are read for. Zero is the one the title carries
+    /// on from; every other value is an error it draws instead.
+    const GOOD: u8 = 0;
+
+    if request.len() < HEADER || u16::from_be_bytes([request[0], request[1]]) != MAGIC {
+        return None;
+    }
+
+    let length = u32::from_be_bytes([request[2], request[3], request[4], request[5]]) as usize;
+    if length.checked_add(HEADER) != Some(request.len()) {
+        return None;
+    }
+
+    let message = u32::from_be_bytes([request[6], request[7], request[8], request[9]]);
+    let (answer, body): (u32, &[u8]) = match message {
+        KEEP_ALIVE => (KEEP_ALIVE, &[]),
+        LOGIN => (LOGIN_ANSWER, &[GOOD]),
+        STEP => (STEP_ANSWER, &[GOOD]),
+        _ => return None,
+    };
+
+    let mut reply = Vec::with_capacity(HEADER + body.len());
+    reply.extend_from_slice(&MAGIC.to_be_bytes());
+    reply.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    reply.extend_from_slice(&answer.to_be_bytes());
+    reply.extend_from_slice(body);
+
+    Some(reply)
+}
+
 /// The answer to a billing request, whichever of these protocols it is in.
 ///
 /// Tried in order of how specific each shape is: the `0xffff`-framed message,
@@ -6628,6 +6708,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_oceanus_response(request))
         .or_else(|| lgt_local_oceanus_settled_response(request))
         .or_else(|| lgt_local_genesis3_episode4_response(request))
+        .or_else(|| lgt_local_genesis3_episode2_response(request))
 }
 
 #[cfg(test)]
@@ -9293,5 +9374,85 @@ mod tests {
         let whole = request.len() as u16;
         request[0..2].copy_from_slice(&whole.to_be_bytes());
         request
+    }
+
+    /// 창세기전3 에피소드2's frame, as the title writes it: the magic, the
+    /// payload's length with the header not counted, then the message.
+    fn genesis3_episode2_frame(message: u32, body: &[u8]) -> Vec<u8> {
+        let mut frame = alloc::vec![0xfau8, 0xcb];
+        frame.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&message.to_be_bytes());
+        frame.extend_from_slice(body);
+
+        frame
+    }
+
+    /// The login the title sends before its first screen: subscriber and
+    /// handset model as length-prefixed strings, then 102 and a zero byte.
+    fn genesis3_episode2_login() -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&11u32.to_be_bytes());
+        body.extend_from_slice(b"01046119269");
+        body.extend_from_slice(&8u32.to_be_bytes());
+        body.extend_from_slice(b"Emulator");
+        body.extend_from_slice(&102u32.to_be_bytes());
+        body.push(0);
+
+        genesis3_episode2_frame(100, &body)
+    }
+
+    #[test]
+    fn 에피소드2_is_told_its_login_was_good() {
+        let reply = response(&genesis3_episode2_login()).unwrap();
+
+        // The magic, one byte of payload, and the message that answers a login.
+        assert_eq!(&reply[..2], &[0xfa, 0xcb]);
+        assert_eq!(u32::from_be_bytes([reply[2], reply[3], reply[4], reply[5]]), 1);
+        assert_eq!(u32::from_be_bytes([reply[6], reply[7], reply[8], reply[9]]), 101);
+
+        // And the byte `0x1f6ac` reads out of it: zero is the verdict the title
+        // carries on from, and anything else is an error it draws instead.
+        assert_eq!(reply[10], 0);
+        assert_eq!(reply.len(), 11);
+    }
+
+    #[test]
+    fn 에피소드2_is_answered_the_same_way_on_the_step_after_the_login() {
+        let reply = response(&genesis3_episode2_frame(700, &[0, 0, 0, 0])).unwrap();
+
+        assert_eq!(u32::from_be_bytes([reply[6], reply[7], reply[8], reply[9]]), 701);
+        assert_eq!(reply[10], 0);
+    }
+
+    /// The session's own keep-alive, which the title answers with an empty one
+    /// of its own at `0x1efe4`. Answered the same way, so the link does not go
+    /// quiet between the steps of the walk.
+    #[test]
+    fn 에피소드2s_keep_alive_is_answered_with_a_keep_alive() {
+        let reply = response(&genesis3_episode2_frame(1, &[])).unwrap();
+
+        assert_eq!(reply, genesis3_episode2_frame(1, &[]));
+        assert_eq!(reply.len(), 10);
+    }
+
+    /// A frame has to carry the magic, declare its own length, and be a message
+    /// this walk is made of.
+    #[test]
+    fn 에피소드2_answers_only_its_own_walk() {
+        // A message the walk does not contain.
+        assert!(lgt_local_genesis3_episode2_response(&genesis3_episode2_frame(102, &[0])).is_none());
+
+        // A length that is not the frame in hand.
+        let mut short = genesis3_episode2_login();
+        short.pop();
+        assert!(lgt_local_genesis3_episode2_response(&short).is_none());
+
+        // Another title's magic.
+        let mut foreign = genesis3_episode2_frame(100, &[0]);
+        foreign[0] = 0xfb;
+        assert!(lgt_local_genesis3_episode2_response(&foreign).is_none());
+
+        // And nothing to read at all.
+        assert!(lgt_local_genesis3_episode2_response(&[0xfa, 0xcb]).is_none());
     }
 }
