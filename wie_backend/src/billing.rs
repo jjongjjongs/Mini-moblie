@@ -6314,6 +6314,68 @@ pub fn lgt_local_hero5_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(response)
 }
 
+/// The answer to 오셔너스's cash purchase, whose gateway is the one it opens.
+///
+/// 오셔너스 (`0002D6C4`) confirms a CASH tab purchase behind a dialogue that
+/// says the item costs real money - "실제 현금 %d원의 추가정보이용료 …
+/// 구입하시겠습니까?" - and on 예 it dials `203.231.235.183:12343` and writes a
+/// 44-byte record behind `WPBill_Write`'s 108-byte header:
+///
+/// ```text
+/// [0..4]    "GLSN"
+/// [4..8]    u32  812, the service the title bills against
+/// [8..12]   u32  812 again
+/// [12..20]  two zero u32s
+/// [20..24]  two zero u16s
+/// [24..28]  u32  a handset value the record carries verbatim
+/// [28..44]  16 bytes taken straight off the handset's model buffer, which is
+///           its ten-byte model followed by the first six of its number
+/// ```
+///
+/// The record is little-endian: `0x1f92c` appends each field with a plain
+/// `memcpy`, and `0x1f908` reads one back the same way, so what is in memory is
+/// what is on the wire. The last field is the title's own sloppiness rather
+/// than a protocol - it appends `0x10` bytes from the model buffer at
+/// `0x150017c` and the number that follows it simply comes along.
+///
+/// `0x20708` is the builder, and it sets `[ctx+0xd18]` before it returns. That
+/// flag is what the reply parser at `0x20c70` branches on: with it set, state 4
+/// reads two `u32`s - the first into `[ctx+0x10]`, the second nowhere - and
+/// zero is the only value it accepts. Zero moves the state machine to 8 and
+/// sets `[ctx+0xd1a]`, which is the purchase having gone through; one through
+/// five raise the carrier's error dialogue, and anything above is dropped.
+///
+/// So the whole answer is two little-endian `u32`s, the first of them zero.
+pub fn lgt_local_oceanus_response(request: &[u8]) -> Option<Vec<u8>> {
+    const TAG: &[u8] = b"GLSN";
+    /// The record's whole length, header and both handset fields.
+    const PURCHASE_REQUEST: usize = 44;
+    /// The service id at `[4]`, repeated at `[8]`.
+    const SERVICE_AT: usize = 4;
+    const SERVICE_REPEAT_AT: usize = 8;
+    const SERVICE: u32 = 812;
+
+    /// The one value `[ctx+0x10]` reads as the purchase having gone through.
+    const GRANTED: u32 = 0;
+
+    if request.len() != PURCHASE_REQUEST || !request.starts_with(TAG) {
+        return None;
+    }
+
+    let field = |at: usize| u32::from_le_bytes([request[at], request[at + 1], request[at + 2], request[at + 3]]);
+    if field(SERVICE_AT) != SERVICE || field(SERVICE_REPEAT_AT) != SERVICE {
+        return None;
+    }
+
+    let mut response = Vec::with_capacity(8);
+    response.extend_from_slice(&GRANTED.to_le_bytes());
+    // The second word is read into a stack slot the parser never looks at
+    // again; it only has to be there for the read to complete.
+    response.extend_from_slice(&0u32.to_le_bytes());
+
+    Some(response)
+}
+
 /// The answer to a billing request, whichever of these protocols it is in.
 ///
 /// Tried in order of how specific each shape is: the `0xffff`-framed message,
@@ -6347,6 +6409,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_id_framed_response(request))
         .or_else(|| lgt_local_tera_response(request))
         .or_else(|| lgt_local_hero5_response(request))
+        .or_else(|| lgt_local_oceanus_response(request))
 }
 
 #[cfg(test)]
@@ -8752,6 +8815,56 @@ mod tests {
 
         // A step of the walk whose body is not the size its sender writes.
         assert!(lgt_local_opcode_header_response(&[0x00, 0x07, 0x00, 0x43, 0x00, 0x00, 0x29]).is_none());
+    }
+
+    /// The 44-byte record 오셔너스 writes when a CASH purchase is confirmed,
+    /// captured off its billing socket. The tail is the handset's own model
+    /// buffer, which is why an emulated handset's name is sitting in it.
+    fn oceanus_purchase_request() -> Vec<u8> {
+        let mut request = Vec::from(*b"GLSN");
+        request.extend_from_slice(&812u32.to_le_bytes());
+        request.extend_from_slice(&812u32.to_le_bytes());
+        request.extend_from_slice(&[0; 12]);
+        request.extend_from_slice(&[0x70, 0x60, 0xb0, 0x40]);
+        request.extend_from_slice(b"Emulator\0\0010853");
+        request
+    }
+
+    #[test]
+    fn a_cash_purchase_is_answered_with_the_word_that_grants_it() {
+        let request = oceanus_purchase_request();
+        assert_eq!(request.len(), 44);
+
+        let reply = lgt_local_oceanus_response(&request).unwrap();
+
+        // Two little-endian words, the first of them the zero `[ctx+0x10]`
+        // reads as the purchase having gone through.
+        assert_eq!(reply.len(), 8);
+        assert_eq!(u32::from_le_bytes([reply[0], reply[1], reply[2], reply[3]]), 0);
+        assert_eq!(response(&request), Some(reply));
+    }
+
+    #[test]
+    fn a_record_that_is_not_the_cash_purchase_is_left_alone() {
+        // Another title's frame of the same length.
+        let mut foreign = oceanus_purchase_request();
+        foreign[..4].copy_from_slice(b"LGT\0");
+        assert!(lgt_local_oceanus_response(&foreign).is_none());
+
+        // The right tag against a service the title does not bill.
+        let mut other_service = oceanus_purchase_request();
+        other_service[4..8].copy_from_slice(&813u32.to_le_bytes());
+        assert!(lgt_local_oceanus_response(&other_service).is_none());
+
+        // The service repeated as something else.
+        let mut mismatched = oceanus_purchase_request();
+        mismatched[8..12].copy_from_slice(&0u32.to_le_bytes());
+        assert!(lgt_local_oceanus_response(&mismatched).is_none());
+
+        // A record that is not the length the title writes.
+        let mut short = oceanus_purchase_request();
+        short.truncate(43);
+        assert!(lgt_local_oceanus_response(&short).is_none());
     }
 
     /// The hundred and three bytes 엘피스's menu opens with.
