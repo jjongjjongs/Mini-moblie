@@ -946,6 +946,38 @@ impl wie_backend::LocalConnection for LgtBillingGateway {
     }
 }
 
+/// Titles whose data server this build cannot stand in for, and which are
+/// better served by being told so than by being left waiting.
+///
+/// A mode 1 billing socket is answered in process by [`LgtBillingGateway`],
+/// which only replies to the records `wie_backend::billing::response` has been
+/// taught. A title whose records are not among them writes its request, gets
+/// nothing back, and sits on `MC_netBillRead` forever - a hang with no screen
+/// on it and no way past.
+///
+/// These titles have their own answer for a server they cannot reach, and it
+/// is a far better place to be left: 창세기전3 에피소드3 draws
+/// "네트워크 접속 실패" and carries straight on to its title screen and
+/// difficulty menu. Refusing the connect is what puts it there, because the
+/// failure is the one branch the title itself handles.
+///
+/// This is a stand-in, not a reading of the protocol. An entry here comes out
+/// again the moment `billing::response` learns to answer the title properly -
+/// a session that really opens is always better than one declined.
+///
+/// 에피소드2 (`00029B30`) is deliberately not listed. Declining its connect
+/// does not help: it faults either way, in a table indexed by a session id it
+/// never receives, so it needs the record rather than the refusal.
+const DATA_SERVERS_OUT_OF_REACH: [&str; 1] = [
+    // 창세기전3 에피소드3
+    "0002E44E",
+];
+
+/// Whether `aid` names one of [`DATA_SERVERS_OUT_OF_REACH`].
+fn data_server_is_out_of_reach(aid: &str) -> bool {
+    DATA_SERVERS_OUT_OF_REACH.contains(&aid)
+}
+
 /// Reads from whatever `socket` is connected to - the endpoint answering it in
 /// process, or the platform's own connection - with the error already mapped to
 /// the code the public API returns.
@@ -1195,6 +1227,12 @@ pub async fn socket_connect(
     }
 
     if billing_mode == 1 {
+        if data_server_is_out_of_reach(context.system().aid()) {
+            tracing::info!("{}: answering the data server connect with the line being down", context.system().aid());
+
+            return Ok(M_E_NOTCONN);
+        }
+
         let aid = alloc::string::String::from(context.system().aid());
         let subscriber = crate::api::kernel::subscriber_number(context).await;
         let current_time = context.system().platform().now().raw();
@@ -3114,6 +3152,49 @@ fn http_validate_config(context: &mut dyn WIPICContext, handle: i32) -> core::re
         None => Err(M_E_BADFD),
         Some(object) if object.connected => Err(M_E_ERROR),
         Some(_) => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod data_server_tests {
+    use super::{DATA_SERVERS_OUT_OF_REACH, data_server_is_out_of_reach};
+
+    #[test]
+    fn 에피소드3_is_told_its_data_server_is_out_of_reach() {
+        assert!(data_server_is_out_of_reach("0002E44E"));
+    }
+
+    /// Declining 에피소드2's connect buys it nothing - it faults on a session
+    /// id it never gets either way - so it stays on the gateway that at least
+    /// takes its request.
+    #[test]
+    fn 에피소드2_still_gets_a_connection() {
+        assert!(!data_server_is_out_of_reach("00029B30"));
+    }
+
+    /// Every other title keeps the in-process gateway. The list is a stand-in
+    /// for protocols not yet read, and it only ever names the titles put on it.
+    #[test]
+    fn a_title_that_is_not_listed_keeps_its_connection() {
+        for aid in ["0002D6C4", "00032548", "0002B136", ""] {
+            assert!(!data_server_is_out_of_reach(aid), "{aid} should keep its connection");
+        }
+    }
+
+    /// An application id is matched whole. A prefix of a listed one is a
+    /// different title.
+    #[test]
+    fn an_application_id_is_matched_whole() {
+        assert!(!data_server_is_out_of_reach("0002E44"));
+        assert!(!data_server_is_out_of_reach("0002E44E0"));
+    }
+
+    /// The list carries no duplicates, so removing an entry removes the title.
+    #[test]
+    fn no_title_is_listed_twice() {
+        for (index, aid) in DATA_SERVERS_OUT_OF_REACH.iter().enumerate() {
+            assert!(!DATA_SERVERS_OUT_OF_REACH[index + 1..].contains(aid), "{aid} is listed twice");
+        }
     }
 }
 
