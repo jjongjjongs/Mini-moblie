@@ -6408,11 +6408,27 @@ pub fn lgt_local_oceanus_response(request: &[u8]) -> Option<Vec<u8>> {
 /// - state 7 sets `[ctx+0xd1a]` and moves to state 8, which is the walk being
 ///   over and the purchase settled.
 ///
-/// So the whole answer is twelve zero bytes, a length, and a body of that
-/// length. The length has to be positive: `0x20e44(0)` would arm a zero-byte
-/// read, and `0x20c00` counts a read that reaches nothing as a retry and gives
-/// up after 199 of them. Four bytes is the smallest body that avoids it, and
-/// state 7 never looks at what is in them.
+/// So the whole answer is twelve bytes, a length, and a body of that length.
+/// The length has to be positive: `0x20e44(0)` would arm a zero-byte read, and
+/// `0x20c00` counts a read that reaches nothing as a retry and gives up after
+/// 199 of them. Four bytes is the smallest body that avoids it.
+///
+/// Reaching state 8 is not the end of it. The title polls its own billing
+/// context, and `0x21150` dispatches state 8 to `0x21184`, which sees
+/// `[ctx+0xd1a]` set and - `[ctx+0xd18]` having been cleared when the poll
+/// handed the purchase to `0x222b8` - calls `0x2108c` with `[ctx+0x14] + 1`,
+/// the second `u32` of the twelve plus one.
+///
+/// `0x2108c` then rereads the *last* buffer `0x20e44` filled, which is state
+/// 7's body, and takes its first `u16` as what happens next: `0xffff` is the
+/// session being over, and for any step but `0x31` or `0x36` it runs
+/// `0x20fec` and `0x20b24` - the pair that closes the carrier's progress
+/// dialogue, tears the socket down and lets the title apply what it bought.
+/// `0x3e9` is the carrier's error, and everything else starts another step.
+///
+/// So the body is that sentinel, and the second `u32` of the twelve stays zero
+/// so the step is 1 and takes the plain ending rather than `0x31`'s or
+/// `0x36`'s.
 pub fn lgt_local_oceanus_settled_response(request: &[u8]) -> Option<Vec<u8>> {
     const TAG: &[u8] = b"GLSN";
     /// The record's whole length, the builder's twelve and the caller's eight.
@@ -6421,11 +6437,15 @@ pub fn lgt_local_oceanus_settled_response(request: &[u8]) -> Option<Vec<u8>> {
     const MESSAGE_AT: usize = 4;
     const MESSAGE: u32 = 48;
 
-    /// What state 4 reads, and where in it the body length sits.
+    /// What state 4 reads, whose second `u32` is the step `0x2108c` runs and
+    /// so stays zero, and whose last `u16` is a body length and so does too.
     const WALK: usize = 12;
     /// The body state 6 asks for, kept to the smallest a zero-byte read rules
-    /// out. Nothing reads what is in it.
+    /// out.
     const BODY: u32 = 4;
+    /// The `u16` `0x2108c` rereads out of that body: the session is over, so
+    /// close the dialogue rather than start another step.
+    const OVER: u16 = 0xffff;
 
     if request.len() != SETTLED_REQUEST || !request.starts_with(TAG) {
         return None;
@@ -6443,7 +6463,8 @@ pub fn lgt_local_oceanus_settled_response(request: &[u8]) -> Option<Vec<u8>> {
 
     let mut response = alloc::vec![0u8; WALK];
     response.extend_from_slice(&BODY.to_le_bytes());
-    response.extend_from_slice(&[0; BODY as usize]);
+    response.extend_from_slice(&OVER.to_le_bytes());
+    response.resize(WALK + 4 + BODY as usize, 0);
 
     Some(response)
 }
@@ -8968,6 +8989,16 @@ mod tests {
         let body = u32::from_le_bytes([reply[12], reply[13], reply[14], reply[15]]);
         assert!(body > 0);
         assert_eq!(reply.len(), 16 + body as usize);
+
+        // The `u16` `0x2108c` rereads out of that body, which is what sends it
+        // to the close rather than to another step.
+        assert_eq!(u16::from_le_bytes([reply[16], reply[17]]), 0xffff);
+
+        // The step it runs, `[ctx+0x14] + 1`, which has to miss both the
+        // `0x31` and the `0x36` the close does not cover.
+        let step = u32::from_le_bytes([reply[4], reply[5], reply[6], reply[7]]) + 1;
+        assert_ne!(step, 0x31);
+        assert_ne!(step, 0x36);
 
         assert_eq!(response(&request), Some(reply));
     }
