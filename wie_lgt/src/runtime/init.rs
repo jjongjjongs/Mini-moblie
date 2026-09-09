@@ -4196,6 +4196,42 @@ fn symbol_value(data: &[u8], symtab_offset: usize, symtab_size: usize, symtab_en
     ))
 }
 
+/// The margin mapped either side of a writable section, and where it starts.
+///
+/// A prelinked module names its own addresses, and they are far apart:
+/// `.text` at `0x1000`, `.data` at `0x1400000`, `.bss` at `0x1500000`. On the
+/// handset those sat in an address space with a loader's own allocations packed
+/// around them, so a read that fell a little outside a section read something.
+/// Here they are all that is mapped, and such a read has nothing under it and
+/// takes the title down.
+///
+/// 창세기전3 에피소드2 is the title that showed it. Its background track's
+/// duration table is indexed from a clip id in the eight thousands - `0x5004`
+/// reads `0x1400084 + 2 * id - 0x3e82` - and the screen change after the data
+/// server's notice resumes the last track it played, which is clip zero,
+/// because none has played yet. Zero indexes `0x13fc202`, three pages under
+/// `.data`, and the title died there rather than reading a stale duration and
+/// carrying on as it did on a handset.
+///
+/// This is a stand-in for that address space, not a reading of the loader, so
+/// it is a page either side of the module's own data and nothing more: enough
+/// for an index a little out of range, small enough to still be the module's
+/// neighbourhood. Executable sections get none - `.text` starts at `0x1000`,
+/// and a page below it would map the one address a null pointer writes to.
+///
+/// A size of zero when there is nothing to map.
+fn data_margin(address: u32, size: u32) -> (u32, u32) {
+    /// A margin the emulator maps in whole pages anyway.
+    const MARGIN: u32 = 0x10000;
+    /// Never below this, so page zero stays unmapped whatever a section claims.
+    const FLOOR: u32 = MARGIN;
+
+    let start = address.saturating_sub(MARGIN).max(FLOOR);
+    let end = address.saturating_add(size).saturating_add(MARGIN);
+
+    (start, end.saturating_sub(start))
+}
+
 fn section_load_bias(section_headers: &[elf::section::SectionHeader], address: u32) -> Option<i32> {
     const SHF_ALLOC: u64 = 0x2;
 
@@ -4476,6 +4512,11 @@ fn load_executable(core: &mut ArmCore, data: &[u8]) -> Result<LoadedImage> {
             ranges.push((shdr.sh_addr as u32, shdr.sh_size as u32));
             if shdr.sh_flags & u64::from(elf::abi::SHF_WRITE) != 0 {
                 writable_ranges.push((shdr.sh_addr as u32, shdr.sh_size as u32));
+
+                let (margin, size) = data_margin(shdr.sh_addr as u32, shdr.sh_size as u32);
+                if size != 0 {
+                    core.load(&[], margin, size as usize)?;
+                }
             }
         }
     }
@@ -4489,6 +4530,45 @@ fn load_executable(core: &mut ArmCore, data: &[u8]) -> Result<LoadedImage> {
         ranges,
         writable_ranges,
     })
+}
+
+#[cfg(test)]
+mod data_margin_tests {
+    use super::data_margin;
+
+    /// A page either side of the section, so an index a little out of range
+    /// reads something rather than taking the title down. 창세기전3 에피소드2's
+    /// is `0x13fc202`, three pages under a `.data` at `0x1400000`.
+    #[test]
+    fn a_page_either_side_of_the_module_data() {
+        let (start, size) = data_margin(0x1400000, 0xaf4);
+
+        assert_eq!(start, 0x13f0000);
+        assert_eq!(size, 0x10000 + 0xaf4 + 0x10000);
+
+        // Which is what 에피소드2 reads below its table's base.
+        assert!((start..start + size).contains(&0x13fc202));
+    }
+
+    /// Page zero stays unmapped whatever a section claims, so a null pointer is
+    /// still the one address that cannot be written.
+    #[test]
+    fn page_zero_is_never_mapped() {
+        for address in [0u32, 0x1000, 0x8000, 0xffff, 0x10000] {
+            let (start, _) = data_margin(address, 0x100);
+
+            assert!(start >= 0x10000, "{address:#x} margined down to {start:#x}");
+        }
+    }
+
+    /// And nothing overflows on a section that names the top of the space.
+    #[test]
+    fn a_section_at_the_top_of_the_space_does_not_wrap() {
+        let (start, size) = data_margin(u32::MAX - 0x100, 0x100);
+
+        assert!(start < u32::MAX);
+        assert!(start.checked_add(size).is_some());
+    }
 }
 
 #[cfg(test)]
