@@ -34,6 +34,18 @@ pub struct TestPlatformState {
     db: Arc<MemoryDatabaseRepository>,
 }
 
+impl TestPlatformState {
+    /// Puts a file in the storage before anything runs over it.
+    pub fn preload_file(&self, aid: &str, path: &str, data: Vec<u8>) {
+        self.fs.preload(aid, path, data);
+    }
+
+    /// Puts a database record in the storage before anything runs over it.
+    pub fn preload_record(&self, app_id: &str, name: &str, id: RecordId, data: Vec<u8>) {
+        self.db.preload(app_id, name, id, data);
+    }
+}
+
 pub struct TestPlatform {
     screen: TestScreen,
     event_handler: Option<Box<dyn Fn(TestPlatformEvent) + Sync + Send>>,
@@ -154,6 +166,16 @@ type DatabaseStore = HashMap<DatabaseKey, HashMap<RecordId, Vec<u8>>>;
 #[derive(Default)]
 pub(crate) struct MemoryDatabaseRepository {
     store: Arc<Mutex<DatabaseStore>>,
+}
+
+impl MemoryDatabaseRepository {
+    fn preload(&self, app_id: &str, name: &str, id: RecordId, data: Vec<u8>) {
+        self.store
+            .lock()
+            .entry((app_id.to_string(), name.to_string()))
+            .or_default()
+            .insert(id, data);
+    }
 }
 
 #[async_trait::async_trait]

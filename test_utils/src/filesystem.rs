@@ -23,6 +23,15 @@ impl MemoryFilesystem {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Puts a file in before anything runs over it.
+    ///
+    /// A capture that has to start from a handset's own save - the state a
+    /// title is actually in when it misbehaves, rather than the one a script
+    /// can drive it to from nothing - seeds the storage this way.
+    pub fn preload(&self, aid: &str, path: &str, data: Vec<u8>) {
+        self.files.lock().insert((aid.to_string(), path.to_string()), data);
+    }
 }
 
 #[async_trait::async_trait]

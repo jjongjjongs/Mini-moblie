@@ -529,7 +529,7 @@ fn capture_legend_of_master() {
 /// written ~300 ticks after each press so every step's screen is visible, plus
 /// `final.ppm` at the end.
 fn run_scripted(label: &str, archive: &[u8], ticks_limit: u32, script: &[(u32, wie_backend::KeyCode)]) {
-    run_scripted_over(label, archive, ticks_limit, script, TestPlatformState::default());
+    run_scripted_over(label, archive, ticks_limit, script, saved_state());
 }
 
 /// The same run, over storage that may already hold what an earlier run wrote,
@@ -646,6 +646,62 @@ fn run_scripted_over(
     state
 }
 
+/// The storage a capture starts over, seeded from `WIE_SAVE_ZIP` when one is
+/// set and empty when none is.
+///
+/// A title only misbehaves somewhere, and driving it there from nothing costs
+/// a script for every screen in between - 엑시온2's NPCs go missing after a
+/// story sequence no key schedule is going to sit through. An exported save is
+/// the state itself, so this reads one back in: the export lays a handset's
+/// files out as `fs/<application id>/<path>` and its databases as
+/// `db/<product id>/<name>/<record id>`, which is what the importer on the
+/// handset reads too.
+fn saved_state() -> TestPlatformState {
+    let state = TestPlatformState::default();
+
+    let Ok(path) = std::env::var("WIE_SAVE_ZIP") else {
+        return state;
+    };
+
+    let save = std::fs::read(&path).expect("save archive");
+    let entries = extract_zip(&save).expect("save archive contents");
+
+    let mut files = 0;
+    let mut records = 0;
+    for (name, data) in entries {
+        // An export that carries both kinds keeps its `fs`/`db` prefixes. One
+        // that carries only files has `fs` as its single root directory, and
+        // reading the archive strips a shared root, so those entries arrive
+        // already inside it - hence the prefix being optional here. A record's
+        // own name is the last component and is always a number, which is what
+        // tells the two stripped shapes apart.
+        let parts: Vec<&str> = name.split('/').collect();
+        let (kind, rest) = match parts.as_slice() {
+            ["fs", rest @ ..] => (Some(false), rest),
+            ["db", rest @ ..] => (Some(true), rest),
+            rest => (None, rest),
+        };
+
+        let record = kind.unwrap_or(rest.len() == 3 && rest[2].parse::<u32>().is_ok());
+
+        match (record, rest) {
+            (false, [aid, path @ ..]) if !path.is_empty() => {
+                state.preload_file(aid, &path.join("/"), data);
+                files += 1;
+            }
+            (true, [pid, name, id]) => {
+                state.preload_record(pid, name, id.parse().expect("record id"), data);
+                records += 1;
+            }
+            _ => eprintln!("[save] ignoring {name}"),
+        }
+    }
+
+    eprintln!("[save] {files} files and {records} records from {path}");
+
+    state
+}
+
 /// Parses `WIE_SCRIPT` (`tick:KEY,tick:KEY,...`) into the press schedule
 /// `run_scripted` takes.
 fn script_from_env() -> Vec<(u32, wie_backend::KeyCode)> {
@@ -723,7 +779,7 @@ fn capture_scripted_archive_twice() {
         std::env::remove_var("WIE_SHOT_DIR");
     }
 
-    let mut state = TestPlatformState::default();
+    let mut state = saved_state();
     for run in 1..=runs {
         if run == runs {
             unsafe {
