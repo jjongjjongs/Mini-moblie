@@ -2829,38 +2829,63 @@ const HERO5_SHOP_ROWS: [(u32, u8, u32); 42] = [
     (45, 42, 1), // 나이트의 혼
 ];
 
-/// The 영웅서기5 items a 유물함 can draw, cheapest first.
+/// The 영웅서기5 equipment a 유물함 can draw, cheapest first.
 ///
-/// Rows of `res/c/csv/item_18.dat` with the count the catalogue's `y` gives
-/// them, ordered by the price the catalogue charges for buying that same item
-/// outright - 100 for 부활의 부적, 3000 for 하이퍼오브. The account services in
-/// that table (창고확장, 프리미엄판매권, 유료전환, 환전한도증가, the 초기화 and
-/// 혼 rows) are not in here: they are things bought for an account rather than
-/// items a box could hold.
+/// The equipment tables are `res/c/csv/item_00.dat` through `item_10.dat`, and
+/// each parses cleanly end to end as a count and then, per row, a `u16` pair, a
+/// length and a name, a `u32` of what the game charges for it, a length and a
+/// description, and twenty-one bytes more. Nine of them are 81 rows or longer -
+/// 검, 단검, 총, 창, 투구, 갑옷, 장갑, 신발 and 방패 - and their rows climb in
+/// bands of five, the same set at a rising tier. `item_04.dat` (스태프) has one
+/// row and `item_10.dat` (악세서리) seventeen, so neither is in here.
 ///
-/// (`item_18.dat` row, how many).
-const HERO5_BOX_LADDER: [(u8, u32); 21] = [
-    (23, 1),  // 부활의 부적, 100
-    (30, 1),  // 보호의 부적, 100
-    (31, 1),  // 마석, 100
-    (5, 1),   // 작은오브원석, 300
-    (8, 1),   // 고급제련석, 300
-    (24, 1),  // 오토루팅, 300
-    (26, 3),  // 환생의 서, 300
-    (27, 3),  // 장갑의 서, 300
-    (28, 3),  // 시간의 서, 300
-    (29, 3),  // 집중의 서, 300
-    (35, 3),  // 포도주, 300
-    (36, 5),  // 천사의 날개, 300
-    (9, 1),   // 달성의부적, 500
-    (10, 1),  // 안전의부적, 500
-    (11, 1),  // 역행의 기원, 500
-    (34, 20), // 엘릭서(20), 500
-    (12, 1),  // 소켓확장, 700
-    (13, 1),  // 복원의 서, 1000
-    (25, 1),  // 성장의 서, 1000
-    (6, 1),   // 오브원석, 1200
-    (7, 1),   // 하이퍼오브, 3000
+/// Rows 15, 30, 50 and 60 are one row of four of those bands, and their prices
+/// climb cleanly across every table: about 80,000 at row 15, 120,000 at 30,
+/// 250,000 at 50 and 490,000 at 60. So the ladder is those four tiers across
+/// the nine tables, tier by tier.
+///
+/// (item table, the row in it).
+const HERO5_BOX_LADDER: [(u8, u8); 36] = [
+    // 약 8만 - 네르투스 계열.
+    (0, 15),
+    (1, 15),
+    (2, 15),
+    (3, 15),
+    (5, 15),
+    (6, 15),
+    (7, 15),
+    (8, 15),
+    (9, 15),
+    // 약 12만 - 바드 계열.
+    (0, 30),
+    (1, 30),
+    (2, 30),
+    (3, 30),
+    (5, 30),
+    (6, 30),
+    (7, 30),
+    (8, 30),
+    (9, 30),
+    // 약 25만 - 드루이안 계열.
+    (0, 50),
+    (1, 50),
+    (2, 50),
+    (3, 50),
+    (5, 50),
+    (6, 50),
+    (7, 50),
+    (8, 50),
+    (9, 50),
+    // 약 49만 - 크로노스 계열.
+    (0, 60),
+    (1, 60),
+    (2, 60),
+    (3, 60),
+    (5, 60),
+    (6, 60),
+    (7, 60),
+    (8, 60),
+    (9, 60),
 ];
 
 /// Which stretch of [`HERO5_BOX_LADDER`] each 유물함 draws from.
@@ -2868,7 +2893,8 @@ const HERO5_BOX_LADDER: [(u8, u32); 21] = [
 /// The four boxes are products 18 to 21 and their descriptions are all
 /// 랜덤 아이템을 획득합니다 - the box is not what a purchase of one is for, so
 /// answering 6/3 with the box's own row put a box in the bag and nothing ever
-/// opened it. The four box classes the title builds (`0x114468` rows 15 to 18)
+/// opened it. What they hand over is equipment, which is what 영웅서기4's boxes
+/// were for as well. The four box classes the title builds (`0x114468` rows 15 to 18)
 /// carry the same three-method vtable as each other and hold no draw of their
 /// own, and the archive has no random-box table the way 영웅서기4's did, so the
 /// prize was the carrier's server's to pick and it went with the service.
@@ -2881,14 +2907,14 @@ const HERO5_BOX_LADDER: [(u8, u32); 21] = [
 ///
 /// (product id, first row of the ladder, one past the last).
 const HERO5_BOX_DRAWS: [(u32, u8, u8); 4] = [
-    // 작은 유물함, 1500.
-    (18, 0, 10),
-    // 유물함, 2000.
-    (19, 0, 17),
-    // 큰 유물함, 2500.
-    (20, 9, 21),
-    // 오래된 유물함, 3000.
-    (21, 16, 21),
+    // 작은 유물함, 1500 - the first tier.
+    (18, 0, 9),
+    // 유물함, 2000 - the first two.
+    (19, 0, 18),
+    // 큰 유물함, 2500 - the middle two.
+    (20, 9, 27),
+    // 오래된 유물함, 3000 - the top two.
+    (21, 18, 36),
 ];
 
 /// The 58 bytes of equipment an item record carries past its name.
@@ -2907,6 +2933,13 @@ const HERO5_EQUIPMENT_TAIL: usize = 58;
 /// `0x333fc` reads [`HERO5_EQUIPMENT_TAIL`] more bytes for a table at or under
 /// this one, and stops at the name for anything over it.
 const HERO5_LAST_EQUIPMENT_TABLE: u8 = 10;
+
+/// The state byte a 창고 slot with something in it carries.
+///
+/// `0x1507c` keeps it at `list + slot + 0x198`, alongside the item pointer and
+/// the stack count, and writes zero there for a slot it was given nothing for
+/// (`0x156ec`). So zero is "empty" and this is the smallest thing that is not.
+const HERO5_SLOT_HELD: u8 = 1;
 
 /// Where 영웅서기5's 창고 is kept between runs.
 pub const HERO5_WAREHOUSE_STORE: &str = "hero5_warehouse";
@@ -2997,10 +3030,19 @@ fn hero5_deposit(body: &[u8]) {
 
 /// The listing 4/6 answers with: what the 창고 is holding.
 ///
-/// A row count and then one row each: the slot it sits in, a byte `0x1507c`
-/// takes but this has no value for, and the record itself, handed back as
-/// deposited. The slot is the row's own place in the listing, which is inside
-/// the list the title just sized to the count (`0x1502c`) and nowhere else.
+/// A row count and then one row each: the slot it sits in, a state byte, and
+/// the record itself, handed back as deposited. The slot is the row's own place
+/// in the listing, which is inside the list the title just sized to the count
+/// (`0x1502c`) and nowhere else.
+///
+/// The state byte lands in the third of the list's three parallel arrays -
+/// `0x1546c` writes the item at `list + slot * 4 + 8`, the stack count at
+/// `list + slot + 0x148` and this at `list + slot + 0x198`. It goes over as
+/// [`HERO5_SLOT_HELD`] rather than zero because zero is what the title writes
+/// there itself for a slot with nothing in it (`0x156ec`, the path `0x1507c`
+/// takes when a row's count is not positive), so a zero would leave an occupied
+/// slot carrying the mark of an empty one. That is the one value in the row this
+/// has no capture of.
 ///
 /// An empty 창고 is a count of zero, which is an empty 창고 rather than a broken
 /// listing - `0x36674` compares the row it is on against the count before it
@@ -3013,7 +3055,7 @@ fn hero5_warehouse() -> Vec<u8> {
 
     for (slot, record) in held.rows.iter().enumerate() {
         listing.extend_from_slice(&(slot as u32).to_be_bytes());
-        listing.push(0);
+        listing.push(HERO5_SLOT_HELD);
         listing.extend_from_slice(record);
     }
 
@@ -3118,13 +3160,14 @@ fn hero5_delivery(product: Option<u32>) -> Vec<u8> {
     let drawn = HERO5_BOX_DRAWS
         .iter()
         .find(|(id, _, _)| Some(*id) == product)
-        .map(|&(_, from, to)| HERO5_BOX_LADDER[(from + next_box_draw(to - from)) as usize]);
+        .map(|&(_, from, to)| HERO5_BOX_LADDER[(from + next_box_draw(to - from)) as usize])
+        .map(|(table, row)| (table, row, 1));
 
-    let Some((row, many)) = drawn.or_else(|| {
+    let Some((table, row, many)) = drawn.or_else(|| {
         HERO5_SHOP_ROWS
             .iter()
             .find(|(id, _, _)| Some(*id) == product)
-            .map(|&(_, row, many)| (row, many))
+            .map(|&(_, row, many)| (HERO5_ITEM_TABLE, row, many))
     }) else {
         list.extend_from_slice(&0u32.to_be_bytes());
         return list;
@@ -3132,11 +3175,46 @@ fn hero5_delivery(product: Option<u32>) -> Vec<u8> {
 
     list.extend_from_slice(&1u32.to_be_bytes());
     list.extend_from_slice(&many.to_be_bytes());
-    list.push(HERO5_ITEM_TABLE);
+    list.push(table);
     list.push(row);
     list.extend_from_slice(&0u32.to_be_bytes());
 
+    if table <= HERO5_LAST_EQUIPMENT_TABLE {
+        list.extend_from_slice(&hero5_equipment_tail());
+    }
+
     list
+}
+
+/// The [`HERO5_EQUIPMENT_TAIL`] bytes a piece of equipment carries past its
+/// name, for a piece the item table alone describes.
+///
+/// `0x333fc` reads them in this order: three `u64`s, two `u16`s, two `u8`s,
+/// three `u16`s, eighteen `u8`s, two `u16`s. Seven of the eighteen - the first
+/// and then the fourth through ninth, which land at record `+0x40` and `+0x43`
+/// to `+0x48` - are read back as -1 meaning "whatever `0xdf88` built out of the
+/// item table" (`0x35da4`), so those are the ones that go over as `0xff`.
+///
+/// The rest are zero, which is what an item that has had nothing done to it
+/// carries: the three `u64`s in particular are stamps the title fills in itself
+/// when it finds them zero (`0x343ee` writes the clock into the item's `+0x134`
+/// and `+0x13c` on exactly that test), so zero there is the unset value rather
+/// than a wrong one.
+fn hero5_equipment_tail() -> [u8; HERO5_EQUIPMENT_TAIL] {
+    /// The byte that means "take it from the item table".
+    const FROM_THE_TABLE: u8 = 0xff;
+    /// Where the eighteen bytes start, past three `u64`s, two `u16`s, two `u8`s
+    /// and three `u16`s.
+    const BYTES_AT: usize = 24 + 4 + 2 + 6;
+    /// Which of the eighteen the title reads back as -1.
+    const DEFAULTED: [usize; 7] = [0, 3, 4, 5, 6, 7, 8];
+
+    let mut tail = [0u8; HERO5_EQUIPMENT_TAIL];
+    for at in DEFAULTED {
+        tail[BYTES_AT + at] = FROM_THE_TABLE;
+    }
+
+    tail
 }
 
 pub fn lgt_local_hero5_response(request: &[u8]) -> Option<Vec<u8>> {
@@ -3444,7 +3522,8 @@ mod tests {
         let listing = lgt_local_hero5_response(&hero5_frame(4, 6, &[])).unwrap();
         assert_eq!(u32::from_be_bytes(listing[28..32].try_into().unwrap()), 1);
         assert_eq!(&listing[32..36], 0u32.to_be_bytes());
-        assert_eq!(listing[36], 0);
+        assert_eq!(listing[36], HERO5_SLOT_HELD);
+        assert_ne!(HERO5_SLOT_HELD, 0);
         assert_eq!(&listing[37..], &hero5_deposit_request()[20..39]);
         assert_eq!(u32::from_be_bytes(listing[0..4].try_into().unwrap()) as usize, listing.len());
 
@@ -3526,62 +3605,90 @@ mod tests {
 
             assert_eq!(u32::from_be_bytes(reply[28..32].try_into().unwrap()), 1, "{id}");
             assert!(reply[32..36] != [0; 4], "{id}");
-            assert_eq!(reply[36], HERO5_ITEM_TABLE, "{id}");
             assert!(many > 0 && row <= 42, "{id}");
             assert_eq!(HERO5_SHOP_ROWS.iter().filter(|(other, _, _)| *other == id).count(), 1, "{id}");
 
             // Every product but the four boxes hands over what it says it is.
             if !HERO5_BOX_DRAWS.iter().any(|(box_id, _, _)| *box_id == id) {
                 assert_eq!(u32::from_be_bytes(reply[32..36].try_into().unwrap()), many, "{id}");
+                assert_eq!(reply[36], HERO5_ITEM_TABLE, "{id}");
                 assert_eq!(reply[37], row, "{id}");
             }
         }
     }
 
-    /// A 유물함 is bought for what is in it: the reply carries the draw, and the
-    /// box's own row never goes over.
+    /// A 유물함 is bought for what is in it: the reply carries a piece of
+    /// equipment, and the box's own row never goes over.
     #[test]
-    fn a_box_delivers_what_it_drew_and_never_the_box() {
+    fn a_box_delivers_the_equipment_it_drew_and_never_the_box() {
         for (id, from, to) in HERO5_BOX_DRAWS {
             let stretch = &HERO5_BOX_LADDER[from as usize..to as usize];
             let mut seen = Vec::new();
 
-            for _ in 0..400 {
+            for _ in 0..500 {
                 let reply = lgt_local_hero5_response(&hero5_frame(6, 3, &id.to_be_bytes())).unwrap();
 
                 assert_eq!(u32::from_be_bytes(reply[28..32].try_into().unwrap()), 1, "{id}");
-                assert_eq!(reply[36], HERO5_ITEM_TABLE, "{id}");
+                // One of it, and equipment - which is never the 유물함's own
+                // table, so a box can never draw a box.
+                assert_eq!(u32::from_be_bytes(reply[32..36].try_into().unwrap()), 1, "{id}");
+                assert!(reply[36] <= HERO5_LAST_EQUIPMENT_TABLE, "{id}");
+                assert_ne!(reply[36], HERO5_ITEM_TABLE, "{id}");
 
-                let drawn = (reply[37], u32::from_be_bytes(reply[32..36].try_into().unwrap()));
+                let drawn = (reply[36], reply[37]);
                 assert!(stretch.contains(&drawn), "{id} drew {drawn:?}");
-                // 15 to 18 are the boxes themselves.
-                assert!(!(15..=18).contains(&drawn.0), "{id} drew a box");
+
+                // An empty name and then the tail the equipment record carries.
+                assert_eq!(&reply[38..42], 0u32.to_be_bytes(), "{id}");
+                assert_eq!(&reply[42..], hero5_equipment_tail(), "{id}");
+                assert_eq!(u32::from_be_bytes(reply[0..4].try_into().unwrap()) as usize, reply.len());
 
                 if !seen.contains(&drawn) {
                     seen.push(drawn);
                 }
             }
 
-            // Uniform over the stretch, so 400 draws reach all of a stretch this
-            // short - the longest is 21.
+            // Uniform over the stretch, so 500 draws reach all of one this
+            // short - the longest is 18.
             assert_eq!(seen.len(), stretch.len(), "{id}");
         }
     }
 
-    /// The ladder is the item table's own rows, and every box's stretch is
+    /// The ladder is equipment rows and nothing else, and every box's stretch is
     /// inside it.
     #[test]
     fn every_box_draws_out_of_the_ladder_and_nowhere_else() {
-        for (row, many) in HERO5_BOX_LADDER {
-            assert!(row <= 42 && many > 0);
-            // Nothing in the ladder is a box, and nothing is in it twice.
-            assert!(!(15..=18).contains(&row));
-            assert_eq!(HERO5_BOX_LADDER.iter().filter(|(other, _)| *other == row).count(), 1, "{row}");
+        for (table, row) in HERO5_BOX_LADDER {
+            // The nine equipment tables with 81 rows or more: 스태프 has one row
+            // and 악세서리 seventeen, so neither is drawn from.
+            assert!(matches!(table, 0..=3 | 5..=9), "{table}");
+            assert!(row < 81, "{row}");
+            assert_eq!(
+                HERO5_BOX_LADDER.iter().filter(|other| **other == (table, row)).count(),
+                1,
+                "{table}/{row}"
+            );
         }
 
         for (id, from, to) in HERO5_BOX_DRAWS {
             assert!(from < to && to as usize <= HERO5_BOX_LADDER.len(), "{id}");
             assert!(HERO5_SHOP_ROWS.iter().any(|(product, _, _)| *product == id), "{id}");
+        }
+    }
+
+    /// The seven bytes the title reads back as -1 are the ones it fills from the
+    /// item table, and everything else it is handed is zero.
+    #[test]
+    fn an_equipment_tail_defers_to_the_item_table_where_the_title_lets_it() {
+        let tail = hero5_equipment_tail();
+
+        assert_eq!(tail.len(), HERO5_EQUIPMENT_TAIL);
+        assert_eq!(tail.iter().filter(|&&byte| byte == 0xff).count(), 7);
+        // Record `+0x40` and `+0x43` to `+0x48`; the record's own first six
+        // bytes are the count, the table and the row, and then the name, so the
+        // tail starts at `+0x1c`.
+        for at in [0x40, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48] {
+            assert_eq!(tail[at - 0x1c], 0xff, "{at:#x}");
         }
     }
 
