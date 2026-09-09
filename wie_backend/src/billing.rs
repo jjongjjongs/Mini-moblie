@@ -6597,6 +6597,76 @@ pub fn lgt_local_genesis3_session_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(response)
 }
 
+/// The answer that lets 창세기전3 에피소드4's data-server session move on.
+///
+/// 에피소드4 (`000323E0`) opens a data server session before its first screen,
+/// like the two episodes before it, but writes nothing they would recognise -
+/// no magic, and the only number it puts through `MC_utilHtonl` is the length
+/// in front:
+///
+/// ```text
+/// [0..4]   u32 big-endian     the whole frame's length
+/// [4..8]   u32 little-endian  the message id this exchange is tagged with
+/// [8..12]  u32 little-endian  the message, 104 for the opening
+/// [12..16] u32 little-endian  34
+/// [16..20] u32 little-endian  0
+/// [20..40] char[20]           the subscriber's number, zero-padded
+/// ```
+///
+/// The builder is the state machine at `0x291b8`, whose state 2 opens the
+/// message with an id of 1, writes the three numbers, writes the number into a
+/// twenty-byte field and sends - forty bytes, which is the `MC_utilHtonl(0x28)`
+/// the log shows in front of it.
+///
+/// What the answer has to carry is in the poll loop at `0x296c0`. For the state
+/// this opening belongs to it copies **two little-endian `u32`s** off the front
+/// of what arrived and requires the second to equal `[0x151b7b4]`, which is the
+/// id `0x29514` registered when the message was opened - 1. Only then does it
+/// hand the pair on and let the session advance; a mismatch is read and
+/// dropped, which is where leaving the frame unanswered leaves it.
+///
+/// So the answer is that id in both of the two words it reads. Which of them
+/// the title lines its buffer up on - the length is stripped or it is not -
+/// does not have to be settled to answer it, because either way the word it
+/// compares is the id.
+///
+/// Answering the opening moves the walk on, and the title's next frame is the
+/// same header with nothing behind it - a length of twelve, its own id, and
+/// message 1 - so the id is not the opening's to hardcode and comes back off
+/// whichever frame is in hand.
+///
+/// `None` for anything that is not one of that walk's frames: it has to declare
+/// its own length, carry an id, and be a message the walk is made of.
+pub fn lgt_local_genesis3_episode4_response(request: &[u8]) -> Option<Vec<u8>> {
+    /// The big-endian length, and the little-endian words behind it.
+    const HEADER: usize = 4;
+    /// The id and the message, which every frame in this walk carries.
+    const LEAST_REQUEST: usize = HEADER + 8;
+    /// The messages the walk is made of: 104 opens the session, and 1 is what
+    /// the title sends next once the opening is answered.
+    const MESSAGES: [u32; 2] = [104, 1];
+
+    if request.len() < LEAST_REQUEST || u32::from_be_bytes([request[0], request[1], request[2], request[3]]) as usize != request.len() {
+        return None;
+    }
+
+    let word = |at: usize| u32::from_le_bytes([request[at], request[at + 1], request[at + 2], request[at + 3]]);
+    let exchange = word(4);
+    if exchange == 0 || !MESSAGES.contains(&word(8)) {
+        return None;
+    }
+
+    // The id in both words: the title compares the second of the two it copies
+    // off the front of the answer, and which of them that is depends on whether
+    // its buffer starts at the length or behind it. Either way it is the id.
+    let mut response = Vec::with_capacity(LEAST_REQUEST);
+    response.extend_from_slice(&(LEAST_REQUEST as u32).to_be_bytes());
+    response.extend_from_slice(&exchange.to_le_bytes());
+    response.extend_from_slice(&exchange.to_le_bytes());
+
+    Some(response)
+}
+
 /// The answer to a billing request, whichever of these protocols it is in.
 ///
 /// Tried in order of how specific each shape is: the `0xffff`-framed message,
@@ -6633,6 +6703,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_oceanus_response(request))
         .or_else(|| lgt_local_oceanus_settled_response(request))
         .or_else(|| lgt_local_genesis3_session_response(request))
+        .or_else(|| lgt_local_genesis3_episode4_response(request))
 }
 
 #[cfg(test)]
@@ -8693,6 +8764,81 @@ mod tests {
 
         // Shorter than the header the parser insists on.
         assert!(lgt_local_genesis3_session_response(&request[..9]).is_none());
+    }
+
+    /// 창세기전3 에피소드4's data-server opening, captured off its socket: a
+    /// big-endian length and four little-endian words, then the number.
+    fn genesis3_episode4_opening(subscriber: &[u8]) -> Vec<u8> {
+        let mut request = Vec::new();
+        request.extend_from_slice(&40u32.to_be_bytes());
+        request.extend_from_slice(&1u32.to_le_bytes());
+        request.extend_from_slice(&104u32.to_le_bytes());
+        request.extend_from_slice(&34u32.to_le_bytes());
+        request.extend_from_slice(&0u32.to_le_bytes());
+        let mut number = alloc::vec![0u8; 20];
+        number[..subscriber.len()].copy_from_slice(subscriber);
+        request.extend_from_slice(&number);
+        request
+    }
+
+    /// 에피소드4's poll takes two little-endian words off the front of the
+    /// answer and wants the second to be the id it opened the message under.
+    #[test]
+    fn 에피소드4_is_answered_under_the_id_it_opened_with() {
+        let request = genesis3_episode4_opening(b"01085300848");
+        assert_eq!(request.len(), 40);
+
+        let answer = lgt_local_genesis3_episode4_response(&request).unwrap();
+
+        assert_eq!(u32::from_be_bytes([answer[0], answer[1], answer[2], answer[3]]) as usize, answer.len());
+
+        // Both words carry the id, so the one the title compares is 1 whether
+        // it lines its buffer up on the length or behind it.
+        assert_eq!(u32::from_le_bytes([answer[4], answer[5], answer[6], answer[7]]), 1);
+        assert_eq!(u32::from_le_bytes([answer[8], answer[9], answer[10], answer[11]]), 1);
+        assert_eq!(answer.len(), 12);
+
+        assert_eq!(response(&request), Some(answer));
+    }
+
+    /// Answering the opening moves the walk on, and what comes next is the
+    /// header alone under an id of its own - so the answer takes the id off the
+    /// frame in hand rather than the one the session opened with.
+    #[test]
+    fn 에피소드4_answers_the_step_after_the_opening_under_its_own_id() {
+        // Captured off the socket once the opening was answered.
+        let mut request = Vec::new();
+        request.extend_from_slice(&12u32.to_be_bytes());
+        request.extend_from_slice(&17u32.to_le_bytes());
+        request.extend_from_slice(&1u32.to_le_bytes());
+
+        let answer = lgt_local_genesis3_episode4_response(&request).unwrap();
+
+        assert_eq!(u32::from_be_bytes([answer[0], answer[1], answer[2], answer[3]]) as usize, answer.len());
+        assert_eq!(u32::from_le_bytes([answer[4], answer[5], answer[6], answer[7]]), 17);
+        assert_eq!(u32::from_le_bytes([answer[8], answer[9], answer[10], answer[11]]), 17);
+
+        assert_eq!(response(&request), Some(answer));
+    }
+
+    /// The opening is that one frame, and the episodes before it are not it.
+    #[test]
+    fn 에피소드4_answers_only_its_own_opening() {
+        let request = genesis3_episode4_opening(b"01085300848");
+
+        // A message the session does not open with.
+        let mut other_message = request.clone();
+        other_message[8..12].copy_from_slice(&105u32.to_le_bytes());
+        assert!(lgt_local_genesis3_episode4_response(&other_message).is_none());
+
+        // A length that is not the frame in hand.
+        let mut ragged = request.clone();
+        ragged[0..4].copy_from_slice(&39u32.to_be_bytes());
+        assert!(lgt_local_genesis3_episode4_response(&ragged).is_none());
+
+        // 에피소드2's opening is a different protocol and not this one to answer.
+        assert!(lgt_local_genesis3_episode4_response(&genesis3_opening(b"Emulator", b"01046119269", 102)).is_none());
+        assert!(lgt_local_genesis3_session_response(&request).is_none());
     }
 
     /// 아이뮤지션2's licence check, captured off its billing socket: the length,
