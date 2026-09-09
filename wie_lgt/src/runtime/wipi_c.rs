@@ -97,51 +97,6 @@ async fn handle_wipic_svc(
     WIPIC_SVC_COUNT[(id.0 as usize).min(WIPIC_ID_MAX - 1)].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let (_, lr) = core.read_pc_lr()?;
 
-    // TEMP-DIAG(엑시온2): 엑시온2's NPC/monster sprite loader at 0x1c6c reads
-    // its file's first byte correctly and then every byte after it as zero, so
-    // each frame buffer is asked for as zero bytes and the character has no
-    // pixels. Dump the guest's registers and stack frame at a zero-size
-    // MC_knlCalloc, which says whether the byte index (r6) survived the two
-    // import calls before it and what the loaded file actually holds.
-    if id.0 == WIPICSvcId::Calloc as u32 {
-        use core::sync::atomic::{AtomicU32, Ordering};
-        static SEEN: AtomicU32 = AtomicU32::new(0);
-
-        let context = core.save_context();
-        if context.r0 == 0 && SEEN.fetch_add(1, Ordering::Relaxed) < 8 {
-            use alloc::{format, string::String};
-            use wie_util::ByteRead;
-
-            let hex = |core: &ArmCore, at: u32, len: usize| -> String {
-                let mut bytes = vec![0u8; len];
-                match core.read_bytes(at, &mut bytes) {
-                    Ok(_) => bytes.iter().map(|b| format!("{b:02x}")).collect::<alloc::vec::Vec<_>>().join(" "),
-                    Err(_) => String::from("<unreadable>"),
-                }
-            };
-
-            tracing::info!(
-                "ZERO-CALLOC lr={lr:#x} r4={:#x} r5={:#x} r6={:#x} r7={:#x} sp={:#x}",
-                context.r4,
-                context.r5,
-                context.r6,
-                context.r7,
-                context.sp,
-            );
-            tracing::info!("ZERO-CALLOC stack@sp [{}]", hex(core, context.sp, 48));
-
-            // The loader keeps the resource buffer at sp+0x18 and its length at
-            // sp+0x1c. Dumping its head says whether what it is parsing is the
-            // file we were asked for.
-            let mut slot = [0u8; 8];
-            if core.read_bytes(context.sp + 0x18, &mut slot).is_ok() {
-                let buffer = u32::from_le_bytes([slot[0], slot[1], slot[2], slot[3]]);
-                let length = u32::from_le_bytes([slot[4], slot[5], slot[6], slot[7]]);
-                tracing::info!("ZERO-CALLOC buffer={buffer:#x} len={length} [{}]", hex(core, buffer, 24));
-            }
-        }
-    }
-
     let wipic_context = LgtWIPICContext::new(
         core.clone(),
         system.clone(),

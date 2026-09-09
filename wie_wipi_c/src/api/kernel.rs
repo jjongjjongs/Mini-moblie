@@ -327,26 +327,7 @@ pub async fn get_resource(context: &mut dyn WIPICContext, id: i32, buf: WIPICInd
         return Ok(-1);
     }
 
-    let destination = context.data_ptr(buf)?;
-    context.write_bytes(destination, &data)?;
-
-    // TEMP-DIAG(엑시온2): the NPC sprite loader parses its file's first byte
-    // correctly and every byte after it as zero. Say what this call actually
-    // delivered - which name it resolved, how many bytes came back against the
-    // buffer the title sized, and the head of those bytes - so a short read, a
-    // misresolved name and a buffer clobbered after the fact are told apart.
-    let mut echo = [0u8; 8];
-    let echoed = context.read_bytes(destination, &mut echo).is_ok();
-    tracing::info!(
-        "GETRES {name:?} -> {} bytes into {destination:#x} (cap {buf_size}) src[{}] dst[{}]",
-        data.len(),
-        data.iter().take(8).map(|b| alloc::format!("{b:02x}")).collect::<Vec<_>>().join(" "),
-        if echoed {
-            echo.iter().map(|b| alloc::format!("{b:02x}")).collect::<Vec<_>>().join(" ")
-        } else {
-            alloc::string::String::from("<unreadable>")
-        },
-    );
+    context.write_bytes(context.data_ptr(buf)?, &data)?;
 
     Ok(0)
 }
