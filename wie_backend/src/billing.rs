@@ -6419,16 +6419,25 @@ pub fn lgt_local_oceanus_response(request: &[u8]) -> Option<Vec<u8>> {
 /// handed the purchase to `0x222b8` - calls `0x2108c` with `[ctx+0x14] + 1`,
 /// the second `u32` of the twelve plus one.
 ///
-/// `0x2108c` then rereads the *last* buffer `0x20e44` filled, which is state
-/// 7's body, and takes its first `u16` as what happens next: `0xffff` is the
-/// session being over, and for any step but `0x31` or `0x36` it runs
-/// `0x20fec` and `0x20b24` - the pair that closes the carrier's progress
-/// dialogue, tears the socket down and lets the title apply what it bought.
-/// `0x3e9` is the carrier's error, and everything else starts another step.
+/// That sum is the step, and the step is the whole of it. `0x2108c` rereads
+/// the first `u16` of state 7's body only to decide whether to stop - `0xffff`
+/// runs `0x20fec` and `0x20b24`, which close the carrier's progress dialogue
+/// and tear the socket down, and `0x3e9` is the carrier's error - and
+/// otherwise hands the step to `0x21e34`, whose switch is the conversation:
+/// 2 and 4 resend the ids at `[0x1500204+0x6c]` and `+0x70`, 6 gives up, and
+/// `0x31` is `0x21a9c`, which is the purchase being applied.
 ///
-/// So the body is that sentinel, and the second `u32` of the twelve stays zero
-/// so the step is 1 and takes the plain ending rather than `0x31`'s or
-/// `0x36`'s.
+/// So the reply names the message it answers. The title sent 48, the reply
+/// carries 48, and the step is 49 - `0x21a9c`. There it rewinds two bytes and
+/// rereads that same `u16`: zero sets `[ctx+0xd19]` and takes the grant, which
+/// reads the item out of `[0x1509f08+0x150]`, hands it to `0x44020` with the
+/// kind its id resolves to, calls `0x20b24` itself to tear the socket down and
+/// raises its own completed-purchase dialogue. Anything else there walks the
+/// title back out without the item.
+///
+/// A zero second `u32` makes the step 1, which `0x21e34`'s switch does not
+/// cover, so the walk ended with the socket closed and nothing bought - the
+/// purchase went through and the item never arrived.
 pub fn lgt_local_oceanus_settled_response(request: &[u8]) -> Option<Vec<u8>> {
     const TAG: &[u8] = b"GLSN";
     /// The record's whole length, the builder's twelve and the caller's eight.
@@ -6437,15 +6446,20 @@ pub fn lgt_local_oceanus_settled_response(request: &[u8]) -> Option<Vec<u8>> {
     const MESSAGE_AT: usize = 4;
     const MESSAGE: u32 = 48;
 
-    /// What state 4 reads, whose second `u32` is the step `0x2108c` runs and
-    /// so stays zero, and whose last `u16` is a body length and so does too.
+    /// What state 4 reads: a `u32` it discards, the `u32` at `ANSWERS_AT` that
+    /// becomes the step, and two `u16`s, the last of them a body length that
+    /// stays zero so the walk takes state 6 rather than state 5.
     const WALK: usize = 12;
+    /// Where in that header the message being answered goes - the second
+    /// `u32`, which `0x21184` runs as `+ 1`.
+    const ANSWERS_AT: usize = 4;
     /// The body state 6 asks for, kept to the smallest a zero-byte read rules
     /// out.
     const BODY: u32 = 4;
-    /// The `u16` `0x2108c` rereads out of that body: the session is over, so
-    /// close the dialogue rather than start another step.
-    const OVER: u16 = 0xffff;
+    /// The `u16` `0x2108c` reads out of that body and `0x21a9c` rereads: zero
+    /// is neither the close nor the carrier's error, and it is what `0x21a9c`
+    /// takes as the purchase being good for the item.
+    const GRANTED: u16 = 0;
 
     if request.len() != SETTLED_REQUEST || !request.starts_with(TAG) {
         return None;
@@ -6462,8 +6476,11 @@ pub fn lgt_local_oceanus_settled_response(request: &[u8]) -> Option<Vec<u8>> {
     }
 
     let mut response = alloc::vec![0u8; WALK];
+    // The second `u32` is the message this answers. `0x21184` runs it as
+    // `+ 1`, so naming 48 here is what reaches `0x21a9c` and applies the item.
+    response[ANSWERS_AT..ANSWERS_AT + 4].copy_from_slice(&MESSAGE.to_le_bytes());
     response.extend_from_slice(&BODY.to_le_bytes());
-    response.extend_from_slice(&OVER.to_le_bytes());
+    response.extend_from_slice(&GRANTED.to_le_bytes());
     response.resize(WALK + 4 + BODY as usize, 0);
 
     Some(response)
@@ -8979,9 +8996,11 @@ mod tests {
 
         let reply = lgt_local_oceanus_settled_response(&request).unwrap();
 
-        // The twelve state 4 reads, whose last `u16` being zero is what sends
-        // the walk to state 6 rather than state 5.
-        assert_eq!(&reply[..12], &[0u8; 12]);
+        // The twelve state 4 reads: a discarded `u32`, the message being
+        // answered, and two `u16`s whose last being zero is what sends the
+        // walk to state 6 rather than state 5.
+        assert_eq!(&reply[..4], &[0u8; 4]);
+        assert_eq!(&reply[8..12], &[0u8; 4]);
         assert_eq!(u16::from_le_bytes([reply[10], reply[11]]), 0);
 
         // The length state 6 reads, and a body of exactly that many bytes for
@@ -8990,15 +9009,19 @@ mod tests {
         assert!(body > 0);
         assert_eq!(reply.len(), 16 + body as usize);
 
-        // The `u16` `0x2108c` rereads out of that body, which is what sends it
-        // to the close rather than to another step.
-        assert_eq!(u16::from_le_bytes([reply[16], reply[17]]), 0xffff);
-
-        // The step it runs, `[ctx+0x14] + 1`, which has to miss both the
-        // `0x31` and the `0x36` the close does not cover.
+        // The step it runs is the message it answers plus one, and 49 is
+        // `0x21a9c` - the purchase being applied. Anything else leaves the
+        // title with the charge and no item.
         let step = u32::from_le_bytes([reply[4], reply[5], reply[6], reply[7]]) + 1;
-        assert_ne!(step, 0x31);
-        assert_ne!(step, 0x36);
+        assert_eq!(step, 0x31);
+
+        // The `u16` `0x2108c` reads out of that body and `0x21a9c` rereads.
+        // Zero is the grant; `0xffff` would close the socket short of it and
+        // `0x3e9` is the carrier's error.
+        let outcome = u16::from_le_bytes([reply[16], reply[17]]);
+        assert_eq!(outcome, 0);
+        assert_ne!(outcome, 0xffff);
+        assert_ne!(outcome, 0x3e9);
 
         assert_eq!(response(&request), Some(reply));
     }
