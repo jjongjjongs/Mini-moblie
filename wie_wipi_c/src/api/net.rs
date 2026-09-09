@@ -1484,6 +1484,11 @@ pub async fn socket_write(context: &mut dyn WIPICContext, socket: i32, buffer: W
             wie_backend::billing::load_hero4_warehouse(&kept);
         }
 
+        if wie_backend::billing::hero5_warehouse_needs_loading(&data) {
+            let kept = read_billing_store(context, wie_backend::billing::HERO5_WAREHOUSE_STORE).await;
+            wie_backend::billing::load_hero5_warehouse(&kept);
+        }
+
         if billing_mode == 1 {
             if let Some(response) = lgt_local_purchase_success_response(&data) {
                 tracing::debug!(
@@ -1495,6 +1500,10 @@ pub async fn socket_write(context: &mut dyn WIPICContext, socket: i32, buffer: W
 
                 if let Some(kept) = wie_backend::billing::hero4_warehouse_to_keep() {
                     write_billing_store(context, wie_backend::billing::HERO4_WAREHOUSE_STORE, &kept).await;
+                }
+
+                if let Some(kept) = wie_backend::billing::hero5_warehouse_to_keep() {
+                    write_billing_store(context, wie_backend::billing::HERO5_WAREHOUSE_STORE, &kept).await;
                 }
 
                 // Match a successful application-level socket write. The
@@ -1520,6 +1529,10 @@ pub async fn socket_write(context: &mut dyn WIPICContext, socket: i32, buffer: W
 
         if let Some(kept) = wie_backend::billing::hero4_warehouse_to_keep() {
             write_billing_store(context, wie_backend::billing::HERO4_WAREHOUSE_STORE, &kept).await;
+        }
+
+        if let Some(kept) = wie_backend::billing::hero5_warehouse_to_keep() {
+            write_billing_store(context, wie_backend::billing::HERO5_WAREHOUSE_STORE, &kept).await;
         }
 
         return Ok(match written {

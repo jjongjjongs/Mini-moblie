@@ -2678,6 +2678,7 @@ pub fn lgt_local_tera_response(request: &[u8]) -> Option<Vec<u8>> {
 /// | 0 | 2 | nothing at all (`0x33e58` answers only sub 1) | — |
 /// | 1 | 1 | result, message, a value it keeps as value * 1000 (`0x37cec`) | 1/5, or 1/3 or 1/2 |
 /// | 1 | 3 | result, message, a second blob it keeps 15 bytes of (`0x37ef6`) | 5/1, or a greeting |
+/// | 4 | 1 | result, message (`0x362a4`) | 4/6 |
 /// | 4 | 6 | result, message, a row count and the rows (`0x365f4`) | 4/7 |
 /// | 4 | 7 | result, message, a `u32` it puts on the screen (`0x36710`) | — |
 /// | 5 | 1 | result, message (`0x360e8`) | 5/2 |
@@ -2686,9 +2687,11 @@ pub fn lgt_local_tera_response(request: &[u8]) -> Option<Vec<u8>> {
 /// | 6 | 3 | result, message, a row count and the rows (`0x35b88`) | — |
 /// | 7 | 1 | result, message, a text the title draws (`0x33b94`) | — |
 ///
-/// 4/6 and 4/7 are 창고관리: the listing of what the 창고 is holding, whose
-/// rows are the same records 6/3 delivers, and then the trade currency the 창고
-/// screen prints. 0/2 is the keep-alive `0x392b8` sends on a timer of its own
+/// 4/1, 4/6 and 4/7 are 창고관리: a deposit, the listing of what the 창고 is
+/// holding - whose rows are the same records 6/3 delivers - and then the trade
+/// currency the 창고 screen prints. A granted deposit takes the item out of the
+/// title's own bag, so what was deposited has to be kept: see
+/// [`HERO5_WAREHOUSE`]. 0/2 is the keep-alive `0x392b8` sends on a timer of its own
 /// rather than an exchange the title is waiting on, and 7/1 is what the 창고
 /// asks for once its greeting is dismissed - the one request whose builder (`0x340c8`) leaves the
 /// waiting flag at `ctx + 0xb` clear, so `0x35824` puts the "Recieve" progress
@@ -2888,6 +2891,205 @@ const HERO5_BOX_DRAWS: [(u32, u8, u8); 4] = [
     (21, 16, 21),
 ];
 
+/// The 58 bytes of equipment an item record carries past its name.
+///
+/// `0x333fc` reads three `u64`s, two `u16`s, two `u8`s, three `u16`s, eighteen
+/// `u8`s and two `u16`s more when the item table is 10 or under - the grade,
+/// the enhancement, the options and the sockets a piece of gear has and a
+/// consumable does not. Seven of those bytes are read back as -1 meaning "what
+/// the item table says" (`0x35da4` fills record `+0x40` and `+0x43` to `+0x48`
+/// out of what `0xdf88` built), so the whole tail is not something a reply has
+/// to know.
+const HERO5_EQUIPMENT_TAIL: usize = 58;
+
+/// The last item table that is equipment.
+///
+/// `0x333fc` reads [`HERO5_EQUIPMENT_TAIL`] more bytes for a table at or under
+/// this one, and stops at the name for anything over it.
+const HERO5_LAST_EQUIPMENT_TABLE: u8 = 10;
+
+/// Where 영웅서기5's 창고 is kept between runs.
+pub const HERO5_WAREHOUSE_STORE: &str = "hero5_warehouse";
+
+/// What 영웅서기5's 창고 has been given.
+///
+/// There is no account here for a 창고 to have been left on, so this is the
+/// whole of one: the item records 4/1 deposited, in the order it deposited
+/// them. A granted 4/1 has the title take the item out of its own bag
+/// (`0x362a4` calls the bag's own remove before it asks for the listing again),
+/// so a 창고 that forgot a deposit would have eaten the item.
+///
+/// Brought in from [`HERO5_WAREHOUSE_STORE`] the first time a frame needs it and
+/// written back whenever it changes.
+static HERO5_WAREHOUSE: spin::Mutex<Hero5Warehouse> = spin::Mutex::new(Hero5Warehouse::new());
+
+/// The records, and whether they have been read in and whether they still match
+/// what was written out.
+struct Hero5Warehouse {
+    rows: Vec<Vec<u8>>,
+    /// False until [`load_hero5_warehouse`] has run, whether or not anything was
+    /// kept - an empty 창고 is a 창고, and reading it in twice would lose a
+    /// deposit made between the two.
+    loaded: bool,
+    changed: bool,
+}
+
+impl Hero5Warehouse {
+    const fn new() -> Self {
+        Self {
+            rows: Vec::new(),
+            loaded: false,
+            changed: false,
+        }
+    }
+}
+
+/// How long the item record at the front of `body` is.
+///
+/// The shape `0x333fc` reads: a `u32` of how many - and nothing else at all if
+/// that is zero, which is where it gives up - then the item table and the row in
+/// it a byte each, then a length and that many bytes of name, and then
+/// [`HERO5_EQUIPMENT_TAIL`] more if the table is equipment.
+///
+/// `None` when `body` is shorter than the record it declares.
+fn hero5_record_length(body: &[u8]) -> Option<usize> {
+    const COUNT: usize = 4;
+    const TABLE_AND_ROW: usize = 2;
+    const NAME_LENGTH: usize = 4;
+
+    let count = u32::from_be_bytes(body.get(..COUNT)?.try_into().unwrap());
+    if count == 0 {
+        return Some(COUNT);
+    }
+
+    let table = *body.get(COUNT)?;
+    let at = COUNT + TABLE_AND_ROW;
+    let name = u32::from_be_bytes(body.get(at..at + NAME_LENGTH)?.try_into().unwrap()) as usize;
+
+    let mut length = at + NAME_LENGTH + name;
+    if table <= HERO5_LAST_EQUIPMENT_TABLE {
+        length += HERO5_EQUIPMENT_TAIL;
+    }
+
+    (length <= body.len()).then_some(length)
+}
+
+/// Take into the 창고 what a 4/1 deposit is handing it.
+///
+/// The frame is the item record `0x32dfc` wrote and then one `u32` of the
+/// title's own (`ctx + 0x564`, zero in every capture), so the record is what
+/// [`hero5_record_length`] measures off the front and the rest is not the 창고's
+/// business.
+///
+/// A frame this cannot measure a record out of deposits nothing rather than
+/// half a record - the listing hands these straight back, and half a record
+/// there would desynchronise every row after it.
+fn hero5_deposit(body: &[u8]) {
+    let Some(length) = hero5_record_length(body) else {
+        tracing::debug!("영웅서기5 deposited something this could not measure: {body:02x?}");
+        return;
+    };
+
+    let mut held = HERO5_WAREHOUSE.lock();
+    held.rows.push(body[..length].to_vec());
+    held.changed = true;
+}
+
+/// The listing 4/6 answers with: what the 창고 is holding.
+///
+/// A row count and then one row each: the slot it sits in, a byte `0x1507c`
+/// takes but this has no value for, and the record itself, handed back as
+/// deposited. The slot is the row's own place in the listing, which is inside
+/// the list the title just sized to the count (`0x1502c`) and nowhere else.
+///
+/// An empty 창고 is a count of zero, which is an empty 창고 rather than a broken
+/// listing - `0x36674` compares the row it is on against the count before it
+/// reads anything.
+fn hero5_warehouse() -> Vec<u8> {
+    let held = HERO5_WAREHOUSE.lock();
+
+    let mut listing = Vec::new();
+    listing.extend_from_slice(&(held.rows.len() as u32).to_be_bytes());
+
+    for (slot, record) in held.rows.iter().enumerate() {
+        listing.extend_from_slice(&(slot as u32).to_be_bytes());
+        listing.push(0);
+        listing.extend_from_slice(record);
+    }
+
+    listing
+}
+
+/// Whether this frame is one 영웅서기5's 창고 is behind, and the 창고 has not
+/// been read in yet.
+///
+/// Two: 4/1 adds to it and 4/6 answers out of it. Every other frame here, and
+/// every other title's, is none of its business.
+pub fn hero5_warehouse_needs_loading(request: &[u8]) -> bool {
+    const HEADER: usize = 20;
+    const SERVICE_AT: usize = 4;
+    const SERVICE: &[u8] = b"G1000157";
+
+    if request.len() < HEADER || u32::from_be_bytes([request[0], request[1], request[2], request[3]]) as usize != request.len() {
+        return false;
+    }
+
+    if &request[SERVICE_AT..SERVICE_AT + SERVICE.len()] != SERVICE {
+        return false;
+    }
+
+    let field = |at: usize| u32::from_be_bytes([request[at], request[at + 1], request[at + 2], request[at + 3]]);
+
+    matches!((field(12), field(16)), (4, 1) | (4, 6)) && !HERO5_WAREHOUSE.lock().loaded
+}
+
+/// Bring 영웅서기5's 창고 in from what was kept.
+///
+/// The records back to back, each behind a `u32` of its own length, as
+/// [`hero5_warehouse_to_keep`] wrote them. Anything that does not read back that
+/// way is dropped rather than half-read: a 창고 short of a row is better than a
+/// listing whose rows have slid.
+pub fn load_hero5_warehouse(kept: &[u8]) {
+    let mut held = HERO5_WAREHOUSE.lock();
+    held.loaded = true;
+
+    let mut at = 0;
+    while at + 4 <= kept.len() {
+        let length = u32::from_be_bytes(kept[at..at + 4].try_into().unwrap()) as usize;
+        at += 4;
+
+        let Some(record) = kept.get(at..at + length) else {
+            tracing::debug!("영웅서기5's kept 창고 ends inside a row");
+            held.rows.clear();
+            return;
+        };
+
+        held.rows.push(record.to_vec());
+        at += length;
+    }
+}
+
+/// What to keep of 영웅서기5's 창고, or `None` if nothing has changed.
+///
+/// Each record behind a `u32` of its own length, because the records are not all
+/// one size - a piece of equipment carries [`HERO5_EQUIPMENT_TAIL`] more than a
+/// consumable, and the name in front of that is as long as the name is.
+pub fn hero5_warehouse_to_keep() -> Option<Vec<u8>> {
+    let mut held = HERO5_WAREHOUSE.lock();
+    if !held.changed {
+        return None;
+    }
+    held.changed = false;
+
+    let mut kept = Vec::new();
+    for record in &held.rows {
+        kept.extend_from_slice(&(record.len() as u32).to_be_bytes());
+        kept.extend_from_slice(record);
+    }
+
+    Some(kept)
+}
+
 /// The list 6/3 hands the bag, for a purchase of `product`.
 ///
 /// A row count and then one row each, which `0x333fc` reads as a `u32` of how
@@ -2952,11 +3154,12 @@ pub fn lgt_local_hero5_response(request: &[u8]) -> Option<Vec<u8>> {
     /// draw, which is zero because there is no error. The rest is that step's
     /// own, and zero unless a zero there would be an answer rather than an
     /// absence.
-    const STEPS: [(u32, u32, &[u32]); 10] = [
+    const STEPS: [(u32, u32, &[u32]); 11] = [
         (0, 2, &[]),
         (1, 1, &[0, 0, HERO5_PING_SECONDS]),
         (1, 3, &[0, 0]),
-        (4, 6, &[0, 0, 0]),
+        (4, 1, &[0, 0]),
+        (4, 6, &[0, 0]),
         (4, 7, &[0, 0, 0]),
         (5, 1, &[0, 0]),
         (5, 2, &[0, 0, 0]),
@@ -3009,6 +3212,18 @@ pub fn lgt_local_hero5_response(request: &[u8]) -> Option<Vec<u8>> {
     if (command, sub) == (6, 3) {
         let product = request.get(HEADER..HEADER + 4).map(|id| u32::from_be_bytes(id.try_into().unwrap()));
         response.extend_from_slice(&hero5_delivery(product));
+    }
+
+    // A granted 4/1 is the item leaving the title's own bag, so the 창고 takes
+    // it here rather than on the listing that follows - by then the bag has
+    // already let go of it.
+    if (command, sub) == (4, 1) {
+        hero5_deposit(&request[HEADER..]);
+    }
+
+    // 4/6's last field is a row count and the rows: what the 창고 is holding.
+    if (command, sub) == (4, 6) {
+        response.extend_from_slice(&hero5_warehouse());
     }
 
     let length = response.len() as u32;
@@ -3145,10 +3360,11 @@ mod tests {
     #[test]
     fn each_step_is_answered_with_its_own_command_and_a_zero_result() {
         // The steps both flows walk: 1/1 on connecting, then the 창고's 1/3,
-        // 5/1-5/2 and 창고관리's 4/6-4/7, the shop's 6/2-6/3, the 창고's
+        // 5/1-5/2 and 창고관리's 4/1 and 4/7, the shop's 6/2-6/3, the 창고's
         // closing 7/1, and the 0/2 keep-alive that runs alongside all of it.
-        // The field counts are what each handler reads off the reply.
-        for (command, sub, fields) in [(0, 2, 0), (1, 1, 3), (4, 6, 3), (4, 7, 3), (5, 1, 2), (5, 2, 3), (6, 2, 2), (7, 1, 3)] {
+        // The field counts are what each handler reads off the reply; the two
+        // whose last field is a list of its own have tests of their own.
+        for (command, sub, fields) in [(0, 2, 0), (1, 1, 3), (4, 1, 2), (4, 7, 3), (5, 1, 2), (5, 2, 3), (6, 2, 2), (7, 1, 3)] {
             let request = hero5_frame(command, sub, &[]);
             let reply = lgt_local_hero5_response(&request).unwrap_or_else(|| panic!("{command}/{sub} unanswered"));
 
@@ -3187,6 +3403,97 @@ mod tests {
         let ping = hero5_frame(0, 2, &[]);
 
         assert_eq!(lgt_local_hero5_response(&ping), Some(ping));
+    }
+
+    /// The 4/1 frame the 창고 deposit capture carried: one 얇은 가죽, item table
+    /// 13 row 38, and the `u32` of the title's own that follows the record.
+    fn hero5_deposit_request() -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u32.to_be_bytes());
+        body.push(13);
+        body.push(38);
+        body.extend_from_slice(&9u32.to_be_bytes());
+        body.extend_from_slice(b"\xbe\xe3\xc0\xba\x20\xb0\xa1\xc1\xd7");
+        body.extend_from_slice(&0u32.to_be_bytes());
+
+        let request = hero5_frame(4, 1, &body);
+        assert_eq!(request.len(), 43);
+        request
+    }
+
+    /// A deposit is the item leaving the bag, so the 창고 has to hand it back -
+    /// and hand it back as it took it, or every row after it has slid.
+    #[test]
+    fn the_warehouse_hands_back_what_it_was_deposited() {
+        load_hero5_warehouse(&[]);
+        HERO5_WAREHOUSE.lock().rows.clear();
+
+        // Nothing deposited is an empty listing, which is a listing.
+        let empty = lgt_local_hero5_response(&hero5_frame(4, 6, &[])).unwrap();
+        assert_eq!(empty.len(), 32);
+        assert_eq!(u32::from_be_bytes(empty[28..32].try_into().unwrap()), 0);
+
+        // The deposit itself is answered with a result and a message, and
+        // nothing else - `0x362a4` reads no more than that.
+        let granted = lgt_local_hero5_response(&hero5_deposit_request()).unwrap();
+        assert_eq!(granted.len(), 28);
+        assert!(granted[20..].iter().all(|&byte| byte == 0));
+
+        // And now the listing carries it: one row, in slot zero, the record
+        // byte for byte without the `u32` that followed it.
+        let listing = lgt_local_hero5_response(&hero5_frame(4, 6, &[])).unwrap();
+        assert_eq!(u32::from_be_bytes(listing[28..32].try_into().unwrap()), 1);
+        assert_eq!(&listing[32..36], 0u32.to_be_bytes());
+        assert_eq!(listing[36], 0);
+        assert_eq!(&listing[37..], &hero5_deposit_request()[20..39]);
+        assert_eq!(u32::from_be_bytes(listing[0..4].try_into().unwrap()) as usize, listing.len());
+
+        HERO5_WAREHOUSE.lock().rows.clear();
+    }
+
+    /// A record is as long as what it declares, and equipment carries the tail
+    /// a consumable does not.
+    #[test]
+    fn a_record_is_measured_by_what_it_declares() {
+        // The captured deposit: table 13, a nine-byte name, no tail.
+        assert_eq!(hero5_record_length(&hero5_deposit_request()[20..]), Some(19));
+
+        // The same row in an equipment table carries 58 bytes more.
+        let mut gear = hero5_deposit_request()[20..].to_vec();
+        gear[4] = HERO5_LAST_EQUIPMENT_TABLE;
+        assert_eq!(hero5_record_length(&gear), None);
+        gear.resize(19 + HERO5_EQUIPMENT_TAIL, 0);
+        assert_eq!(hero5_record_length(&gear), Some(19 + HERO5_EQUIPMENT_TAIL));
+
+        // A count of zero is where `0x333fc` gives up, so that is the record.
+        assert_eq!(hero5_record_length(&[0, 0, 0, 0]), Some(4));
+        assert_eq!(hero5_record_length(&[0, 0, 0]), None);
+    }
+
+    /// What is kept reads back as what was held, and a truncated store is
+    /// dropped rather than half-read.
+    #[test]
+    fn the_warehouse_survives_being_written_out_and_read_back() {
+        HERO5_WAREHOUSE.lock().rows.clear();
+        lgt_local_hero5_response(&hero5_deposit_request()).unwrap();
+        lgt_local_hero5_response(&hero5_deposit_request()).unwrap();
+
+        let kept = hero5_warehouse_to_keep().expect("a deposit changes the 창고");
+        // Nothing more to write until something else changes.
+        assert_eq!(hero5_warehouse_to_keep(), None);
+
+        let listing = lgt_local_hero5_response(&hero5_frame(4, 6, &[])).unwrap();
+        HERO5_WAREHOUSE.lock().rows.clear();
+        load_hero5_warehouse(&kept);
+        assert_eq!(lgt_local_hero5_response(&hero5_frame(4, 6, &[])).unwrap(), listing);
+
+        // A store that ends inside a row is no 창고 at all rather than a 창고
+        // whose rows have slid.
+        HERO5_WAREHOUSE.lock().rows.clear();
+        load_hero5_warehouse(&kept[..kept.len() - 1]);
+        assert!(HERO5_WAREHOUSE.lock().rows.is_empty());
+
+        HERO5_WAREHOUSE.lock().rows.clear();
     }
 
     /// 6/3 is the purchase arriving, not a receipt for it: `0x35ea4` hands each
@@ -3329,8 +3636,10 @@ mod tests {
         unnamed[4] = b'X';
         assert_eq!(lgt_local_hero5_response(&unnamed), None);
 
-        // A command whose handler has not been read.
-        assert_eq!(lgt_local_hero5_response(&hero5_frame(4, 1, &[])), None);
+        // A sub-command of a command that is answered, but which is not - 4/2
+        // through 4/5 are 창고 steps whose handlers have not been read.
+        assert_eq!(lgt_local_hero5_response(&hero5_frame(4, 2, &[])), None);
+        assert_eq!(lgt_local_hero5_response(&hero5_frame(3, 3, &[])), None);
 
         // A sub-command of a command that is answered, but which is not.
         assert_eq!(lgt_local_hero5_response(&hero5_frame(1, 5, &[])), None);
