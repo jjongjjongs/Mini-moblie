@@ -1251,6 +1251,15 @@ fn hero4_delivery(bought: &[u8]) -> Option<Vec<u8>> {
 /// consecutive purchases are not the table in order, and it is deterministic
 /// within a run, which is what lets a test say what it does.
 fn next_box_draw(records: u8) -> u8 {
+    next_draw(records as u32) as u8
+}
+
+/// The next draw below `range`, out of the same sequence.
+///
+/// A step of a xorshift rather than a counter, so consecutive draws are not the
+/// table in order, and deterministic within a run, which is what lets a test say
+/// what it does.
+fn next_draw(range: u32) -> u32 {
     use core::sync::atomic::{AtomicU32, Ordering};
 
     /// Any non-zero seed; xorshift never leaves zero once it is out of it.
@@ -1262,7 +1271,7 @@ fn next_box_draw(records: u8) -> u8 {
     state ^= state << 5;
     STATE.store(state, Ordering::Relaxed);
 
-    (state % records as u32) as u8
+    state % range
 }
 
 /// What answers 영웅서기4 taking an item back out of its 창고.
@@ -2679,6 +2688,7 @@ pub fn lgt_local_tera_response(request: &[u8]) -> Option<Vec<u8>> {
 /// | 1 | 1 | result, message, a value it keeps as value * 1000 (`0x37cec`) | 1/5, or 1/3 or 1/2 |
 /// | 1 | 3 | result, message, a second blob it keeps 15 bytes of (`0x37ef6`) | 5/1, or a greeting |
 /// | 4 | 1 | result, message (`0x362a4`) | 4/6 |
+/// | 4 | 3 | result, message, the item being handed back | 4/6 |
 /// | 4 | 6 | result, message, a row count and the rows (`0x365f4`) | 4/7 |
 /// | 4 | 7 | result, message, a `u32` it puts on the screen (`0x36710`) | — |
 /// | 5 | 1 | result, message (`0x360e8`) | 5/2 |
@@ -2687,10 +2697,11 @@ pub fn lgt_local_tera_response(request: &[u8]) -> Option<Vec<u8>> {
 /// | 6 | 3 | result, message, a row count and the rows (`0x35b88`) | — |
 /// | 7 | 1 | result, message, a text the title draws (`0x33b94`) | — |
 ///
-/// 4/1, 4/6 and 4/7 are 창고관리: a deposit, the listing of what the 창고 is
-/// holding - whose rows are the same records 6/3 delivers - and then the trade
-/// currency the 창고 screen prints. A granted deposit takes the item out of the
-/// title's own bag, so what was deposited has to be kept: see
+/// 4/1, 4/3, 4/6 and 4/7 are 창고관리: a deposit, a withdrawal, the listing of
+/// what the 창고 is holding - whose rows are the same records 6/3 delivers - and
+/// then the trade currency the 창고 screen prints. A granted deposit takes the
+/// item out of the title's own bag and a granted withdrawal puts back whatever
+/// the answer carries, so what was deposited has to be kept: see
 /// [`HERO5_WAREHOUSE`]. 0/2 is the keep-alive `0x392b8` sends on a timer of its own
 /// rather than an exchange the title is waiting on, and 7/1 is what the 창고
 /// asks for once its greeting is dismissed - the one request whose builder (`0x340c8`) leaves the
@@ -2837,6 +2848,52 @@ const HERO5_SHOP_ROWS: [(u32, u8, u32); 42] = [
 /// in the item the title builds at `+0x14c` through `+0x160`, one for one, which
 /// is where [`hero5_equipment_tail`] takes them back out of.
 const HERO5_TABLE_STATS: usize = 21;
+
+/// The option table 영웅서기5 rolls an equipment option out of.
+///
+/// `res/c/csv/option.dat`, whose rows are an id, a factor, three cumulative
+/// odds out of 1000 - one per option slot - and two bytes of padding. The
+/// title's later Android build reads it in `ItemTable::SetItemOption(item,
+/// which)`: it walks the table rolling `Rand(0, 999)` at each row, takes the
+/// first row the roll falls under for that slot, keeps the row's id, and works
+/// the value out as `factor * 제한레벨 / 100`, scaled by `Rand(80, 120)` percent
+/// and clamped to 1..=100.
+///
+/// (option id, factor, the cumulative odds for slots 0, 1 and 2).
+const HERO5_ITEM_OPTIONS: [(u8, i8, [u16; 3]); 24] = [
+    (0, 0, [0, 0, 0]),
+    (14, 15, [100, 50, 20]),
+    (15, 15, [200, 100, 40]),
+    (16, 15, [300, 150, 60]),
+    (17, 15, [400, 200, 80]),
+    (18, 10, [578, 299, 180]),
+    (19, 50, [578, 299, 280]),
+    (20, 25, [578, 299, 330]),
+    (21, 5, [578, 300, 350]),
+    (30, 10, [628, 380, 400]),
+    (31, 20, [678, 460, 450]),
+    (32, 20, [728, 540, 500]),
+    (35, 10, [778, 620, 550]),
+    (36, 10, [828, 700, 600]),
+    (38, 10, [878, 780, 650]),
+    (39, 10, [928, 860, 700]),
+    (40, 10, [978, 940, 750]),
+    (41, 10, [978, 940, 760]),
+    (43, 30, [978, 940, 780]),
+    (45, 25, [998, 960, 830]),
+    (46, 20, [998, 960, 840]),
+    (47, 100, [998, 970, 890]),
+    (49, 10, [998, 980, 940]),
+    (108, 10, [999, 990, 990]),
+];
+
+/// How many options an equipment grade carries.
+///
+/// `ItemTable::MakeItemOption` switches on the grade at the item's own grade
+/// byte: 1 rolls slot 0, 2 rolls slots 0 and 1, and 3 rolls slot 2 - and so does
+/// anything over 4. 0 and 4 roll nothing, which is what a row of the item table
+/// is on its own, and what the first pass handed over.
+const HERO5_GRADE_OPTIONS: [(u8, usize); 4] = [(0, 0), (1, 1), (2, 2), (3, 3)];
 
 /// The four-piece sets a 영웅서기5 유물함 hands over, cheapest first.
 ///
@@ -3122,16 +3179,16 @@ const HERO5_BOX_SETS: [[(u8, u8, [u8; HERO5_TABLE_STATS]); 4]; 8] = [
 /// and the two between them span the middle - dearer is further up, which is the
 /// one thing the prices themselves say.
 ///
-/// (product id, first row of the ladder, one past the last).
-const HERO5_BOX_DRAWS: [(u32, u8, u8); 4] = [
-    // 작은 유물함, 1500 - the two cheapest armour sets.
-    (18, 0, 2),
-    // 유물함, 2000 - any armour set.
-    (19, 0, 4),
-    // 큰 유물함, 2500 - the dearer armour and any weapon set.
-    (20, 2, 8),
-    // 오래된 유물함, 3000 - the two dearest weapon sets.
-    (21, 6, 8),
+/// (product id, first set, one past the last, the grade every piece carries).
+const HERO5_BOX_DRAWS: [(u32, u8, u8, u8); 4] = [
+    // 작은 유물함, 1500 - the two cheapest armour sets, one option apiece.
+    (18, 0, 2, 1),
+    // 유물함, 2000 - any armour set, one option.
+    (19, 0, 4, 1),
+    // 큰 유물함, 2500 - the dearer armour and any weapon set, two options.
+    (20, 2, 8, 2),
+    // 오래된 유물함, 3000 - the two dearest weapon sets, three options.
+    (21, 6, 8, 3),
 ];
 
 /// The 58 bytes of equipment an item record carries past its name.
@@ -3262,6 +3319,54 @@ fn hero5_deposit(body: &[u8]) {
     held.changed = true;
 }
 
+/// Hand back out of the 창고 what a 4/3 withdrawal is asking for.
+///
+/// The request is two `u32`s: the slot and how many of it. The title's own later
+/// build writes them in `NETWORK::PacketWrite_Inventory`'s third case -
+/// `writeNet32(cursor + page * 16)` and then `writeNet32` of the count it was
+/// asked for - and reads the answer in `ProcPacket_Inventory`'s: a result, a
+/// message, and then a whole item, which goes straight to the bag through
+/// `BagItem::NewBagNetItem(&item, item.count, 1)` before it asks for the listing
+/// again. So the answer is the item leaving, and the count inside that record is
+/// what actually arrives.
+///
+/// Taking fewer than the slot holds leaves the rest behind; taking all of it
+/// empties the slot. A slot with nothing in it, or one this has no row for, is
+/// answered with a count of zero, which is where `0x333fc` gives up and what
+/// `NewBagNetItem` adds nothing for.
+fn hero5_withdraw(body: &[u8]) -> Vec<u8> {
+    const SLOT: usize = 0;
+    const HOW_MANY: usize = 4;
+
+    let field = |at: usize| body.get(at..at + 4).map(|word| u32::from_be_bytes(word.try_into().unwrap()));
+
+    let (Some(slot), Some(asked)) = (field(SLOT), field(HOW_MANY)) else {
+        tracing::debug!("영웅서기5 asked its 창고 for something this could not read: {body:02x?}");
+        return 0u32.to_be_bytes().to_vec();
+    };
+
+    let mut held = HERO5_WAREHOUSE.lock();
+    let Some(record) = held.rows.get_mut(slot as usize) else {
+        tracing::debug!("영웅서기5 asked its 창고 for slot {slot}, which it is not holding");
+        return 0u32.to_be_bytes().to_vec();
+    };
+
+    let holding = u32::from_be_bytes(record[..4].try_into().unwrap());
+    let taken = asked.min(holding);
+
+    let mut handed = record.clone();
+    handed[..4].copy_from_slice(&taken.to_be_bytes());
+
+    if taken >= holding {
+        held.rows.remove(slot as usize);
+    } else {
+        record[..4].copy_from_slice(&(holding - taken).to_be_bytes());
+    }
+    held.changed = true;
+
+    handed
+}
+
 /// The listing 4/6 answers with: what the 창고 is holding.
 ///
 /// A row count and then one row each: the slot it sits in, a state byte, and
@@ -3318,8 +3423,8 @@ fn hero5_warehouse() -> Vec<u8> {
 /// Whether this frame is one 영웅서기5's 창고 is behind, and the 창고 has not
 /// been read in yet.
 ///
-/// Two: 4/1 adds to it and 4/6 answers out of it. Every other frame here, and
-/// every other title's, is none of its business.
+/// Three: 4/1 adds to it, 4/3 takes from it and 4/6 answers out of it. Every
+/// other frame here, and every other title's, is none of its business.
 pub fn hero5_warehouse_needs_loading(request: &[u8]) -> bool {
     const HEADER: usize = 20;
     const SERVICE_AT: usize = 4;
@@ -3335,7 +3440,7 @@ pub fn hero5_warehouse_needs_loading(request: &[u8]) -> bool {
 
     let field = |at: usize| u32::from_be_bytes([request[at], request[at + 1], request[at + 2], request[at + 3]]);
 
-    matches!((field(12), field(16)), (4, 1) | (4, 6)) && !HERO5_WAREHOUSE.lock().loaded
+    matches!((field(12), field(16)), (4, 1) | (4, 3) | (4, 6)) && !HERO5_WAREHOUSE.lock().loaded
 }
 
 /// Bring 영웅서기5's 창고 in from what was kept.
@@ -3410,7 +3515,7 @@ fn hero5_delivery(product: Option<u32>) -> Vec<u8> {
 
     // A 유물함 is bought for what is in it, so it is the set that goes over
     // rather than the box - see [`HERO5_BOX_DRAWS`].
-    if let Some(&(_, from, to)) = HERO5_BOX_DRAWS.iter().find(|(id, _, _)| Some(*id) == product) {
+    if let Some(&(_, from, to, grade)) = HERO5_BOX_DRAWS.iter().find(|(id, _, _, _)| Some(*id) == product) {
         let set = &HERO5_BOX_SETS[(from + next_box_draw(to - from)) as usize];
 
         list.extend_from_slice(&(set.len() as u32).to_be_bytes());
@@ -3419,7 +3524,7 @@ fn hero5_delivery(product: Option<u32>) -> Vec<u8> {
             list.push(*table);
             list.push(*row);
             list.extend_from_slice(&0u32.to_be_bytes());
-            list.extend_from_slice(&hero5_equipment_tail(stats));
+            list.extend_from_slice(&hero5_equipment_tail(stats, grade));
         }
 
         return list;
@@ -3462,7 +3567,7 @@ fn hero5_delivery(product: Option<u32>) -> Vec<u8> {
 /// title stamps itself. `+0x161` to `+0x164` stay zero and `+0x165` to `+0x169`
 /// go over as `0xff`, because that is what `0xdf88` leaves behind after copying
 /// a table row - it clears `+0x164` and fills the five option slots with -1.
-fn hero5_equipment_tail(stats: &[u8; HERO5_TABLE_STATS]) -> [u8; HERO5_EQUIPMENT_TAIL] {
+fn hero5_equipment_tail(stats: &[u8; HERO5_TABLE_STATS], grade: u8) -> [u8; HERO5_EQUIPMENT_TAIL] {
     /// The empty option slot.
     const NO_OPTION: u8 = 0xff;
 
@@ -3500,7 +3605,68 @@ fn hero5_equipment_tail(stats: &[u8; HERO5_TABLE_STATS]) -> [u8; HERO5_EQUIPMENT
     // `+0x16a` and `+0x16c`.
     tail.extend_from_slice(&[0; 4]);
 
-    tail.try_into().expect("the tail is written field by field to its own length")
+    let mut tail: [u8; HERO5_EQUIPMENT_TAIL] = tail.try_into().expect("the tail is written field by field to its own length");
+
+    // The grade and the options it carries. The item table's own rows have
+    // neither - a row is the plain piece, which is why the first pass handed
+    // over gear with a white name and nothing under it.
+    tail[HERO5_GRADE_AT] = grade;
+
+    let options = HERO5_GRADE_OPTIONS
+        .iter()
+        .find(|(carries, _)| *carries == grade)
+        .map_or(0, |(_, many)| *many);
+
+    for which in 0..options {
+        if let Some((id, value)) = hero5_roll_option(which, stats[HERO5_STATS_LEVEL]) {
+            tail[HERO5_OPTION_AT + which * 2] = id;
+            tail[HERO5_OPTION_AT + which * 2 + 1] = value;
+        }
+    }
+
+    tail
+}
+
+/// Where the grade sits in [`HERO5_EQUIPMENT_TAIL`].
+///
+/// The fifteenth field the tail carries, past three `u64`s, two `u16`s, two
+/// bytes and three `u16`s: `writeNetItem` takes it from the item's grade byte,
+/// which is the one `ItemInfo::GetGradeColorTag` reads to colour the name.
+const HERO5_GRADE_AT: usize = 24 + 4 + 2 + 6;
+
+/// Where the three (option id, option value) pairs sit in the tail.
+///
+/// Fields eighteen to twenty-three, three fields past the grade. The four that
+/// looked out of order in `writeNetItem` are these interleaved: the ids live
+/// together in the item and so do the values, and the wire pairs them up.
+const HERO5_OPTION_AT: usize = HERO5_GRADE_AT + 3;
+
+/// Which byte of a row's [`HERO5_TABLE_STATS`] is its 제한레벨.
+///
+/// The sixteenth field, right behind the grade - and what an option's value is
+/// worked out from.
+const HERO5_STATS_LEVEL: usize = 13;
+
+/// Roll one equipment option for slot `which` on a piece of that level.
+///
+/// What `ItemTable::SetItemOption` does: walk [`HERO5_ITEM_OPTIONS`] rolling
+/// 0..=999 at each row, take the first row the roll falls under for this slot,
+/// and work the value out as `factor * level / 100`, scaled by 80..=120 percent
+/// and clamped to 1..=100. A walk that falls through every row rolls nothing,
+/// which is a piece with an empty slot rather than a broken one.
+fn hero5_roll_option(which: usize, level: u8) -> Option<(u8, u8)> {
+    for (id, factor, odds) in HERO5_ITEM_OPTIONS {
+        if u32::from(next_draw(1000)) >= u32::from(odds[which]) {
+            continue;
+        }
+
+        let value = i32::from(factor) * i32::from(level) / 100;
+        let value = value * (80 + next_draw(41) as i32) / 100;
+
+        return Some((id, value.clamp(1, 100) as u8));
+    }
+
+    None
 }
 
 pub fn lgt_local_hero5_response(request: &[u8]) -> Option<Vec<u8>> {
@@ -3518,11 +3684,12 @@ pub fn lgt_local_hero5_response(request: &[u8]) -> Option<Vec<u8>> {
     /// draw, which is zero because there is no error. The rest is that step's
     /// own, and zero unless a zero there would be an answer rather than an
     /// absence.
-    const STEPS: [(u32, u32, &[u32]); 11] = [
+    const STEPS: [(u32, u32, &[u32]); 12] = [
         (0, 2, &[]),
         (1, 1, &[0, 0, HERO5_PING_SECONDS]),
         (1, 3, &[0, 0]),
         (4, 1, &[0, 0]),
+        (4, 3, &[0, 0]),
         (4, 6, &[0, 0]),
         (4, 7, &[0, 0, 0]),
         (5, 1, &[0, 0]),
@@ -3583,6 +3750,12 @@ pub fn lgt_local_hero5_response(request: &[u8]) -> Option<Vec<u8>> {
     // already let go of it.
     if (command, sub) == (4, 1) {
         hero5_deposit(&request[HEADER..]);
+    }
+
+    // 4/3's last field is the item itself: a withdrawal hands the record back
+    // and the title puts that in the bag, so this is the item leaving the 창고.
+    if (command, sub) == (4, 3) {
+        response.extend_from_slice(&hero5_withdraw(&request[HEADER..]));
     }
 
     // 4/6's last field is a row count and the rows: what the 창고 is holding.
@@ -3907,7 +4080,7 @@ mod tests {
             assert_eq!(HERO5_SHOP_ROWS.iter().filter(|(other, _, _)| *other == id).count(), 1, "{id}");
 
             // The four 유물함 hand over a set instead - they have their own test.
-            if HERO5_BOX_DRAWS.iter().any(|(box_id, _, _)| *box_id == id) {
+            if HERO5_BOX_DRAWS.iter().any(|(box_id, _, _, _)| *box_id == id) {
                 continue;
             }
 
@@ -3924,10 +4097,11 @@ mod tests {
     /// and the box's own row never goes over.
     #[test]
     fn a_box_delivers_the_set_it_drew_and_never_the_box() {
-        for (id, from, to) in HERO5_BOX_DRAWS {
+        for (id, from, to, grade) in HERO5_BOX_DRAWS {
             let stretch = &HERO5_BOX_SETS[from as usize..to as usize];
             let mut seen = Vec::new();
 
+            let mut rolled = false;
             for _ in 0..200 {
                 let reply = lgt_local_hero5_response(&hero5_frame(6, 3, &id.to_be_bytes())).unwrap();
 
@@ -3953,7 +4127,31 @@ mod tests {
                         .flatten()
                         .find(|(other, at, _)| (*other, *at) == (table, row))
                         .unwrap_or_else(|| panic!("{id} drew {table}/{row}"));
-                    assert_eq!(&reply[at + 10..at + 10 + HERO5_EQUIPMENT_TAIL], hero5_equipment_tail(&stats.2), "{id}");
+                    let tail = &reply[at + 10..at + 10 + HERO5_EQUIPMENT_TAIL];
+
+                    // The item table's own numbers, then the grade this box
+                    // carries and the options that grade is worth.
+                    assert_eq!(&tail[..HERO5_GRADE_AT], &hero5_equipment_tail(&stats.2, 0)[..HERO5_GRADE_AT], "{id}");
+                    assert_eq!(tail[HERO5_GRADE_AT], grade, "{id}");
+                    assert_eq!(tail[HERO5_GRADE_AT + 1], stats.2[HERO5_STATS_LEVEL], "{id}");
+
+                    // The slots this grade is not worth are the plain piece's,
+                    // and the ones it is worth carry a row of the option table.
+                    let plain = hero5_equipment_tail(&stats.2, 0);
+                    let (_, wanted) = HERO5_GRADE_OPTIONS.iter().find(|(g, _)| *g == grade).unwrap();
+
+                    for which in 0..3 {
+                        let (at, was) = (HERO5_OPTION_AT + which * 2, HERO5_OPTION_AT + which * 2);
+                        let (option, value) = (tail[at], tail[at + 1]);
+
+                        if which >= *wanted {
+                            assert_eq!((option, value), (plain[was], plain[was + 1]), "{id} slot {which}");
+                        } else if (option, value) != (plain[was], plain[was + 1]) {
+                            assert!(HERO5_ITEM_OPTIONS.iter().any(|(row, _, _)| *row == option), "{option}");
+                            assert!((1..=100).contains(&value), "{value}");
+                            rolled = true;
+                        }
+                    }
 
                     drew.push((table, row));
                     at += 10 + HERO5_EQUIPMENT_TAIL;
@@ -3973,6 +4171,8 @@ mod tests {
 
             // Uniform over the stretch, so 200 draws reach all of one this short.
             assert_eq!(seen.len(), stretch.len(), "{id}");
+            // And every box's grade is worth at least one option.
+            assert!(rolled, "{id} never rolled an option");
         }
     }
 
@@ -3991,9 +4191,11 @@ mod tests {
             assert!(set[0].1 < 81);
         }
 
-        for (id, from, to) in HERO5_BOX_DRAWS {
+        for (id, from, to, grade) in HERO5_BOX_DRAWS {
             assert!(from < to && to as usize <= HERO5_BOX_SETS.len(), "{id}");
             assert!(HERO5_SHOP_ROWS.iter().any(|(product, _, _)| *product == id), "{id}");
+            // A grade worth no options would hand over the plain piece again.
+            assert!(HERO5_GRADE_OPTIONS.iter().any(|(g, many)| *g == grade && *many > 0), "{id}");
         }
     }
 
@@ -4004,7 +4206,7 @@ mod tests {
         // 드루이안워커, `item_08.dat` row 50: 물리방어 43 at `+0x152`, 마법방어
         // 43 at `+0x154`, 제한레벨 66 at `+0x159`.
         let (_, _, stats) = HERO5_BOX_SETS[2][3];
-        let tail = hero5_equipment_tail(&stats);
+        let tail = hero5_equipment_tail(&stats, 0);
 
         assert_eq!(tail.len(), HERO5_EQUIPMENT_TAIL);
         // The three stamps the title writes itself.
