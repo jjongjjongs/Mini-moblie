@@ -1246,7 +1246,8 @@ fn hero4_delivery(bought: &[u8]) -> Option<Vec<u8>> {
 /// Which record the carrier's server drew, and how it weighted them, is not
 /// something the archive knows - so draw uniformly over the stretch
 /// [`HERO4_BOX_DRAWS`] gives the box, which is inside the table and nowhere
-/// else. The sequence is a step of a xorshift rather than a counter so
+/// else. 영웅서기5's boxes are the same problem and draw with this too, over
+/// [`HERO5_BOX_LADDER`]. The sequence is a step of a xorshift rather than a counter so
 /// consecutive purchases are not the table in order, and it is deterministic
 /// within a run, which is what lets a test say what it does.
 fn next_box_draw(records: u8) -> u8 {
@@ -2677,15 +2678,19 @@ pub fn lgt_local_tera_response(request: &[u8]) -> Option<Vec<u8>> {
 /// | 0 | 2 | nothing at all (`0x33e58` answers only sub 1) | — |
 /// | 1 | 1 | result, message, a value it keeps as value * 1000 (`0x37cec`) | 1/5, or 1/3 or 1/2 |
 /// | 1 | 3 | result, message, a second blob it keeps 15 bytes of (`0x37ef6`) | 5/1, or a greeting |
+/// | 4 | 6 | result, message, a row count and the rows (`0x365f4`) | 4/7 |
+/// | 4 | 7 | result, message, a `u32` it puts on the screen (`0x36710`) | — |
 /// | 5 | 1 | result, message (`0x360e8`) | 5/2 |
 /// | 5 | 2 | result, message, a `u32` it stores (`0x36146`) | — |
 /// | 6 | 2 | result, message (`0x35b0a`) | 6/3 |
 /// | 6 | 3 | result, message, a row count and the rows (`0x35b88`) | — |
 /// | 7 | 1 | result, message, a text the title draws (`0x33b94`) | — |
 ///
-/// 0/2 is the keep-alive `0x392b8` sends on a timer of its own rather than an
-/// exchange the title is waiting on, and 7/1 is what the 창고 asks for once its
-/// greeting is dismissed - the one request whose builder (`0x340c8`) leaves the
+/// 4/6 and 4/7 are 창고관리: the listing of what the 창고 is holding, whose
+/// rows are the same records 6/3 delivers, and then the trade currency the 창고
+/// screen prints. 0/2 is the keep-alive `0x392b8` sends on a timer of its own
+/// rather than an exchange the title is waiting on, and 7/1 is what the 창고
+/// asks for once its greeting is dismissed - the one request whose builder (`0x340c8`) leaves the
 /// waiting flag at `ctx + 0xb` clear, so `0x35824` puts the "Recieve" progress
 /// dialog up and nothing but an answer takes it down again.
 ///
@@ -2821,6 +2826,68 @@ const HERO5_SHOP_ROWS: [(u32, u8, u32); 42] = [
     (45, 42, 1), // 나이트의 혼
 ];
 
+/// The 영웅서기5 items a 유물함 can draw, cheapest first.
+///
+/// Rows of `res/c/csv/item_18.dat` with the count the catalogue's `y` gives
+/// them, ordered by the price the catalogue charges for buying that same item
+/// outright - 100 for 부활의 부적, 3000 for 하이퍼오브. The account services in
+/// that table (창고확장, 프리미엄판매권, 유료전환, 환전한도증가, the 초기화 and
+/// 혼 rows) are not in here: they are things bought for an account rather than
+/// items a box could hold.
+///
+/// (`item_18.dat` row, how many).
+const HERO5_BOX_LADDER: [(u8, u32); 21] = [
+    (23, 1),  // 부활의 부적, 100
+    (30, 1),  // 보호의 부적, 100
+    (31, 1),  // 마석, 100
+    (5, 1),   // 작은오브원석, 300
+    (8, 1),   // 고급제련석, 300
+    (24, 1),  // 오토루팅, 300
+    (26, 3),  // 환생의 서, 300
+    (27, 3),  // 장갑의 서, 300
+    (28, 3),  // 시간의 서, 300
+    (29, 3),  // 집중의 서, 300
+    (35, 3),  // 포도주, 300
+    (36, 5),  // 천사의 날개, 300
+    (9, 1),   // 달성의부적, 500
+    (10, 1),  // 안전의부적, 500
+    (11, 1),  // 역행의 기원, 500
+    (34, 20), // 엘릭서(20), 500
+    (12, 1),  // 소켓확장, 700
+    (13, 1),  // 복원의 서, 1000
+    (25, 1),  // 성장의 서, 1000
+    (6, 1),   // 오브원석, 1200
+    (7, 1),   // 하이퍼오브, 3000
+];
+
+/// Which stretch of [`HERO5_BOX_LADDER`] each 유물함 draws from.
+///
+/// The four boxes are products 18 to 21 and their descriptions are all
+/// 랜덤 아이템을 획득합니다 - the box is not what a purchase of one is for, so
+/// answering 6/3 with the box's own row put a box in the bag and nothing ever
+/// opened it. The four box classes the title builds (`0x114468` rows 15 to 18)
+/// carry the same three-method vtable as each other and hold no draw of their
+/// own, and the archive has no random-box table the way 영웅서기4's did, so the
+/// prize was the carrier's server's to pick and it went with the service.
+///
+/// **How that server weighted a box is not in the archive**, exactly as it is
+/// not for [`HERO4_BOX_DRAWS`], so this follows the same shape that one does:
+/// the cheapest box draws the low end of the ladder, the dearest the high end,
+/// and the two between them span the middle - dearer is further up, which is the
+/// one thing the prices themselves say.
+///
+/// (product id, first row of the ladder, one past the last).
+const HERO5_BOX_DRAWS: [(u32, u8, u8); 4] = [
+    // 작은 유물함, 1500.
+    (18, 0, 10),
+    // 유물함, 2000.
+    (19, 0, 17),
+    // 큰 유물함, 2500.
+    (20, 9, 21),
+    // 오래된 유물함, 3000.
+    (21, 16, 21),
+];
+
 /// The list 6/3 hands the bag, for a purchase of `product`.
 ///
 /// A row count and then one row each, which `0x333fc` reads as a `u32` of how
@@ -2833,13 +2900,30 @@ const HERO5_SHOP_ROWS: [(u32, u8, u32); 42] = [
 /// the name at that row rather than by what the reply carried, and a zero-length
 /// blob reads nothing and moves the cursor nowhere.
 ///
+/// The four 유물함 are answered with what they drew rather than with the box -
+/// see [`HERO5_BOX_DRAWS`] - which is what the title's own description of them,
+/// 랜덤 아이템을 획득합니다, says a purchase of one is for.
+///
 /// A product this has no row for - and a 6/3 that names no product at all - is
 /// answered with an empty list rather than a guessed one. `0x35c1a` compares the
 /// row it is on against the count before reading anything, so an empty list is a
 /// list.
 fn hero5_delivery(product: Option<u32>) -> Vec<u8> {
     let mut list = Vec::new();
-    let Some((_, row, many)) = HERO5_SHOP_ROWS.iter().find(|(id, _, _)| Some(*id) == product) else {
+
+    // A 유물함 is bought for what is in it, so it is the draw that goes over
+    // rather than the box - see [`HERO5_BOX_DRAWS`].
+    let drawn = HERO5_BOX_DRAWS
+        .iter()
+        .find(|(id, _, _)| Some(*id) == product)
+        .map(|&(_, from, to)| HERO5_BOX_LADDER[(from + next_box_draw(to - from)) as usize]);
+
+    let Some((row, many)) = drawn.or_else(|| {
+        HERO5_SHOP_ROWS
+            .iter()
+            .find(|(id, _, _)| Some(*id) == product)
+            .map(|&(_, row, many)| (row, many))
+    }) else {
         list.extend_from_slice(&0u32.to_be_bytes());
         return list;
     };
@@ -2847,7 +2931,7 @@ fn hero5_delivery(product: Option<u32>) -> Vec<u8> {
     list.extend_from_slice(&1u32.to_be_bytes());
     list.extend_from_slice(&many.to_be_bytes());
     list.push(HERO5_ITEM_TABLE);
-    list.push(*row);
+    list.push(row);
     list.extend_from_slice(&0u32.to_be_bytes());
 
     list
@@ -2868,10 +2952,12 @@ pub fn lgt_local_hero5_response(request: &[u8]) -> Option<Vec<u8>> {
     /// draw, which is zero because there is no error. The rest is that step's
     /// own, and zero unless a zero there would be an answer rather than an
     /// absence.
-    const STEPS: [(u32, u32, &[u32]); 8] = [
+    const STEPS: [(u32, u32, &[u32]); 10] = [
         (0, 2, &[]),
         (1, 1, &[0, 0, HERO5_PING_SECONDS]),
         (1, 3, &[0, 0]),
+        (4, 6, &[0, 0, 0]),
+        (4, 7, &[0, 0, 0]),
         (5, 1, &[0, 0]),
         (5, 2, &[0, 0, 0]),
         (6, 2, &[0, 0]),
@@ -3058,11 +3144,11 @@ mod tests {
 
     #[test]
     fn each_step_is_answered_with_its_own_command_and_a_zero_result() {
-        // The steps both flows walk: 1/1 on connecting, then the 창고's 1/3 and
-        // 5/1-5/2, the shop's 6/2-6/3, the 창고's closing 7/1, and the 0/2
-        // keep-alive that runs alongside all of it. The field counts are what
-        // each handler reads off the reply.
-        for (command, sub, fields) in [(0, 2, 0), (1, 1, 3), (5, 1, 2), (5, 2, 3), (6, 2, 2), (7, 1, 3)] {
+        // The steps both flows walk: 1/1 on connecting, then the 창고's 1/3,
+        // 5/1-5/2 and 창고관리's 4/6-4/7, the shop's 6/2-6/3, the 창고's
+        // closing 7/1, and the 0/2 keep-alive that runs alongside all of it.
+        // The field counts are what each handler reads off the reply.
+        for (command, sub, fields) in [(0, 2, 0), (1, 1, 3), (4, 6, 3), (4, 7, 3), (5, 1, 2), (5, 2, 3), (6, 2, 2), (7, 1, 3)] {
             let request = hero5_frame(command, sub, &[]);
             let reply = lgt_local_hero5_response(&request).unwrap_or_else(|| panic!("{command}/{sub} unanswered"));
 
@@ -3108,7 +3194,7 @@ mod tests {
     /// for and never delivered.
     #[test]
     fn a_purchase_is_answered_with_the_item_it_bought() {
-        // The id the shop capture's own 6/2 and 6/3 carried: 엘릭서(20), which
+        // The id the first shop capture's 6/2 and 6/3 carried: 엘릭서(20), which
         // the catalogues put at row 34 of `item_18.dat`, twenty of it.
         let reply = lgt_local_hero5_response(&hero5_frame(6, 3, &4u32.to_be_bytes())).unwrap();
 
@@ -3132,10 +3218,63 @@ mod tests {
             let reply = lgt_local_hero5_response(&hero5_frame(6, 3, &id.to_be_bytes())).unwrap();
 
             assert_eq!(u32::from_be_bytes(reply[28..32].try_into().unwrap()), 1, "{id}");
-            assert_eq!(u32::from_be_bytes(reply[32..36].try_into().unwrap()), many, "{id}");
-            assert_eq!(reply[37], row, "{id}");
+            assert!(reply[32..36] != [0; 4], "{id}");
+            assert_eq!(reply[36], HERO5_ITEM_TABLE, "{id}");
             assert!(many > 0 && row <= 42, "{id}");
             assert_eq!(HERO5_SHOP_ROWS.iter().filter(|(other, _, _)| *other == id).count(), 1, "{id}");
+
+            // Every product but the four boxes hands over what it says it is.
+            if !HERO5_BOX_DRAWS.iter().any(|(box_id, _, _)| *box_id == id) {
+                assert_eq!(u32::from_be_bytes(reply[32..36].try_into().unwrap()), many, "{id}");
+                assert_eq!(reply[37], row, "{id}");
+            }
+        }
+    }
+
+    /// A 유물함 is bought for what is in it: the reply carries the draw, and the
+    /// box's own row never goes over.
+    #[test]
+    fn a_box_delivers_what_it_drew_and_never_the_box() {
+        for (id, from, to) in HERO5_BOX_DRAWS {
+            let stretch = &HERO5_BOX_LADDER[from as usize..to as usize];
+            let mut seen = Vec::new();
+
+            for _ in 0..400 {
+                let reply = lgt_local_hero5_response(&hero5_frame(6, 3, &id.to_be_bytes())).unwrap();
+
+                assert_eq!(u32::from_be_bytes(reply[28..32].try_into().unwrap()), 1, "{id}");
+                assert_eq!(reply[36], HERO5_ITEM_TABLE, "{id}");
+
+                let drawn = (reply[37], u32::from_be_bytes(reply[32..36].try_into().unwrap()));
+                assert!(stretch.contains(&drawn), "{id} drew {drawn:?}");
+                // 15 to 18 are the boxes themselves.
+                assert!(!(15..=18).contains(&drawn.0), "{id} drew a box");
+
+                if !seen.contains(&drawn) {
+                    seen.push(drawn);
+                }
+            }
+
+            // Uniform over the stretch, so 400 draws reach all of a stretch this
+            // short - the longest is 21.
+            assert_eq!(seen.len(), stretch.len(), "{id}");
+        }
+    }
+
+    /// The ladder is the item table's own rows, and every box's stretch is
+    /// inside it.
+    #[test]
+    fn every_box_draws_out_of_the_ladder_and_nowhere_else() {
+        for (row, many) in HERO5_BOX_LADDER {
+            assert!(row <= 42 && many > 0);
+            // Nothing in the ladder is a box, and nothing is in it twice.
+            assert!(!(15..=18).contains(&row));
+            assert_eq!(HERO5_BOX_LADDER.iter().filter(|(other, _)| *other == row).count(), 1, "{row}");
+        }
+
+        for (id, from, to) in HERO5_BOX_DRAWS {
+            assert!(from < to && to as usize <= HERO5_BOX_LADDER.len(), "{id}");
+            assert!(HERO5_SHOP_ROWS.iter().any(|(product, _, _)| *product == id), "{id}");
         }
     }
 
