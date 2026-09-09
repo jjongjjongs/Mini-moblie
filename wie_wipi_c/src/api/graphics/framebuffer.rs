@@ -287,7 +287,7 @@ impl DerefMut for FramebufferCanvas<'_> {
 mod test {
     use wie_util::{ByteRead, ByteWrite, WieError};
 
-    use wie_backend::canvas::{Canvas, Clip, Color};
+    use wie_backend::canvas::{Clip, Color};
 
     use crate::WIPICContext;
     use crate::context::test::TestContext;

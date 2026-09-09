@@ -11,6 +11,11 @@ use crate::{
     method::MethodBody,
 };
 
+/// Fields in the `struct tm` a DateTimeComponent exchanges with its caller.
+/// The component's own block at +0x48 is 44 bytes, two fields longer, and only
+/// these nine cross the boundary in either direction.
+const TM_FIELDS: usize = 9;
+
 const UIC_DRAW_MARKER_BASE: WIPICWord = 0xffff_f100;
 const UIC_TIMER_MARKER_TIME: WIPICWord = 0xffff_f201;
 const UIC_TIMER_MARKER_TEXT: WIPICWord = 0xffff_f202;
@@ -748,11 +753,22 @@ pub async fn set_time_mask(context: &mut dyn WIPICContext, component: WIPICWord,
 /// For a valid component, a NULL output pointer or a non-DateTime component
 /// returns the validator success value 1 without writing output.
 ///
-/// For DateTimeComponent, native copies exactly 44 bytes from component +0x48
-/// to the caller-provided tm buffer, then calls `WPUic_SetTimeStr`. The getter
-/// therefore also regenerates the component text and invokes +0xa0 only when
-/// the rendered string changes. Its final return follows the same
-/// strcmp/callback contract as `MC_uicSetTime`.
+/// For DateTimeComponent, native fills the caller-provided tm from component
+/// +0x48 and then calls `WPUic_SetTimeStr`. The getter therefore also
+/// regenerates the component text and invokes +0xa0 only when the rendered
+/// string changes. Its final return follows the same strcmp/callback contract
+/// as `MC_uicSetTime`.
+///
+/// The component reserves 44 bytes at +0x48, because the platform's own
+/// `localtime` leaves two fields past the standard nine there, but what goes
+/// back to the caller is the nine-field `struct tm` the caller declared - 36
+/// bytes. 엑시온2 gives this call a 36-byte stack slot with its own saved r4
+/// and r5 immediately above it, so handing back the component's whole 44-byte
+/// block overwrites those two saved registers with the component's trailing
+/// zeroes. The title restores them as null and then writes its globals through
+/// that null base, zeroing its own code - the NPC sprite loader's
+/// `ldr rN,[sp,#0x18]` pair among it, which leaves every NPC and monster on
+/// the map with no frames at all.
 pub async fn get_time(context: &mut dyn WIPICContext, component: WIPICWord, tm: WIPICWord) -> Result<i32> {
     tracing::debug!("MC_uicGetTime({component:#x}, {tm:#x})");
 
@@ -769,14 +785,14 @@ pub async fn get_time(context: &mut dyn WIPICContext, component: WIPICWord, tm: 
         return Ok(1);
     }
 
-    let mut tm_bytes = [0u8; 44];
+    let mut tm_bytes = [0u8; TM_FIELDS * 4];
     context.read_bytes(component + 0x48, &mut tm_bytes)?;
     context.write_bytes(tm, &tm_bytes)?;
 
     let old_text = uic_read_c_string(context, component + 0x74)?;
     let mask: WIPICWord = read_generic(context, component + 0x44)?;
 
-    let mut fields = [0i32; 9];
+    let mut fields = [0i32; TM_FIELDS];
     for (index, field) in fields.iter_mut().enumerate() {
         *field = read_generic(context, component + 0x48 + index as u32 * 4)?;
     }
@@ -1832,7 +1848,7 @@ async fn uic_datetime_finish_edit(context: &mut dyn WIPICContext, component: WIP
     Ok(1)
 }
 
-fn uic_format_datetime(mask: u32, fields: &[i32; 9]) -> alloc::vec::Vec<u8> {
+fn uic_format_datetime(mask: u32, fields: &[i32; TM_FIELDS]) -> alloc::vec::Vec<u8> {
     let sec = fields[0];
     let min = fields[1];
     let hour = fields[2];
@@ -3090,12 +3106,12 @@ mod tests {
     use crate::context::{WIPICContext, test::TestContext};
 
     use super::{
-        UIC_DRAW_MARKER_BASE, UIC_EMPTY_LABEL, UIC_TIMER_MARKER_TEXT, add_list_item, add_menu_item, configure, create, delete_text, destroy,
-        get_active_list_item, get_active_menu_item, get_class, get_class_name, get_cursor_pos, get_font, get_geometry, get_label, get_list_item,
-        get_max_text_size, get_menu_item, get_text, get_text_size, get_time, insert_text, is_instance, remove_list_item, remove_menu_item, repaint,
-        set_active_list_item, set_active_menu_item, set_bg_color, set_callback, set_cursor_pos, set_enable, set_event_handler, set_fg_color,
-        set_font, set_label, set_label_alignment, set_max_text_size, set_time, set_time_long, set_time_mask, uic_color_to_rgb565, uic_read_c_string,
-        uic_repaint_rect, uic_skip_time_separator,
+        TM_FIELDS, UIC_DRAW_MARKER_BASE, UIC_EMPTY_LABEL, UIC_TIMER_MARKER_TEXT, add_list_item, add_menu_item, configure, create, delete_text,
+        destroy, get_active_list_item, get_active_menu_item, get_class, get_class_name, get_cursor_pos, get_font, get_geometry, get_label,
+        get_list_item, get_max_text_size, get_menu_item, get_text, get_text_size, get_time, insert_text, is_instance, remove_list_item,
+        remove_menu_item, repaint, set_active_list_item, set_active_menu_item, set_bg_color, set_callback, set_cursor_pos, set_enable,
+        set_event_handler, set_fg_color, set_font, set_label, set_label_alignment, set_max_text_size, set_time, set_time_long, set_time_mask,
+        uic_color_to_rgb565, uic_read_c_string, uic_repaint_rect, uic_skip_time_separator,
     };
 
     const COMPONENT: u32 = 0x1000;
@@ -4659,11 +4675,37 @@ mod tests {
 
         assert_ne!(get_time(&mut context, COMPONENT, 0x3000).await.unwrap(), 0);
 
-        for (index, expected) in fields.iter().enumerate() {
+        for (index, expected) in fields.iter().take(TM_FIELDS).enumerate() {
             assert_eq!(read_generic::<i32, _>(&context, 0x3000 + index as u32 * 4).unwrap(), *expected);
         }
 
         assert_eq!(uic_read_c_string(&context, COMPONENT + 0x74).unwrap(), b"2024/01/02");
+    }
+
+    /// The caller's tm is nine fields long. 엑시온2 puts it in a 36-byte stack
+    /// slot with its own saved registers immediately above, so anything written
+    /// past the ninth field lands on those registers - and the title then
+    /// zeroes its own code through the null base it restores.
+    #[futures_test::test]
+    async fn lgt_uic_get_time_writes_no_further_than_the_callers_tm() {
+        let mut context = TestContext::new();
+        init_component(&mut context, 2);
+
+        write_generic(&mut context, COMPONENT + 0x44, 0u32).unwrap();
+
+        let fields = [5i32, 4, 3, 2, 0, 124, 2, 1, 0, 0x1122_3344u32 as i32, 0x5566_7788u32 as i32];
+        for (index, value) in fields.iter().enumerate() {
+            write_generic(&mut context, COMPONENT + 0x48 + index as u32 * 4, *value).unwrap();
+        }
+
+        context.write_bytes(COMPONENT + 0x74, b"old datetime\0").unwrap();
+        context.write_bytes(0x3000, &[0xaa; 44]).unwrap();
+
+        assert_ne!(get_time(&mut context, COMPONENT, 0x3000).await.unwrap(), 0);
+
+        let mut past_the_end = [0u8; 44 - TM_FIELDS * 4];
+        context.read_bytes(0x3000 + (TM_FIELDS * 4) as u32, &mut past_the_end).unwrap();
+        assert_eq!(past_the_end, [0xaa; 44 - TM_FIELDS * 4]);
     }
 
     #[futures_test::test]
