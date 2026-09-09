@@ -2852,11 +2852,16 @@ const HERO5_TABLE_STATS: usize = 21;
 /// What each 영웅서기5 유물함 draws from.
 ///
 /// The thirteenth byte of an equipment row is its grade, and the whole of
-/// `item_00.dat` through `item_10.dat` sorts by it: 0 is the plain gear the
-/// shops sell, 2 is a 장신구 with nothing on it, **3 is 레어** (252 rows, the
-/// named pieces - 스톰브링거, 팬텀아머), **4 is 전설** (81 rows, the ones with a
-/// title - 그람:궁극의힘, 라그나블로커), and **5 to 18 are the fourteen sets**
-/// `res/c/csv/set_option.dat` names, four pieces each.
+/// `item_00.dat` through `item_10.dat` sorts by it. What the numbers are called
+/// is in `menu_text.dat` 87 to 92 - 노멀, 레어, 에픽, 영웅, 전설, 세트 - and
+/// again in `common_text.dat` 215 to 219 with the colour tag the name is drawn
+/// in in front of each: `&레어|`, `}에픽|`, `` `영웅| ``, `^전설|`, `<세트|`.
+/// So the grades run 0 노멀, 1 레어, 2 에픽, 3 영웅, 4 전설, and 5 upward a set.
+///
+/// The tables hold no 레어 at all: 362 rows are 노멀, the six 에픽 are all
+/// 장신구, **252 are 영웅** (the named pieces - 스톰브링거, 팬텀아머), **81 are
+/// 전설** (the ones with a title - 그람:궁극의힘, 라그나블로커), and **5 to 18
+/// are the fourteen sets** `res/c/csv/set_option.dat` names, four pieces each.
 ///
 /// Each row carries its own options in its last six bytes as three
 /// (option, value) pairs - 팬텀의부적 is option 17 at 5, option 21 at 2 and
@@ -2980,7 +2985,7 @@ const HERO5_BOX_TRINKETS: [(u8, u8, [u8; HERO5_TABLE_STATS]); 16] = [
     ), // 장신구 카오스이어링 (lv1)
 ];
 
-const HERO5_BOX_RARE: [(u8, u8, [u8; HERO5_TABLE_STATS]); 252] = [
+const HERO5_BOX_HEROIC: [(u8, u8, [u8; HERO5_TABLE_STATS]); 252] = [
     (
         0,
         17,
@@ -5749,7 +5754,7 @@ const HERO5_BOX_SETS: [[(u8, u8, [u8; HERO5_TABLE_STATS]); 4]; 13] = [
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Hero5Pool {
     Trinket,
-    Rare,
+    Heroic,
     Legendary,
     Set,
 }
@@ -5757,8 +5762,9 @@ enum Hero5Pool {
 const HERO5_BOX_DRAWS: [(u32, Hero5Pool); 4] = [
     // 작은 유물함, 1500.
     (18, Hero5Pool::Trinket),
-    // 유물함, 2000.
-    (19, Hero5Pool::Rare),
+    // 유물함, 2000 - 영웅, the lowest grade above 노멀 the tables carry for
+    // anything that is not a 장신구.
+    (19, Hero5Pool::Heroic),
     // 큰 유물함, 2500.
     (20, Hero5Pool::Legendary),
     // 오래된 유물함, 3000.
@@ -6092,7 +6098,7 @@ fn hero5_delivery(product: Option<u32>) -> Vec<u8> {
     if let Some(&(_, pool)) = HERO5_BOX_DRAWS.iter().find(|(id, _)| Some(*id) == product) {
         let drawn: &[(u8, u8, [u8; HERO5_TABLE_STATS])] = match pool {
             Hero5Pool::Trinket => &HERO5_BOX_TRINKETS[next_draw(HERO5_BOX_TRINKETS.len() as u32) as usize..][..1],
-            Hero5Pool::Rare => &HERO5_BOX_RARE[next_draw(HERO5_BOX_RARE.len() as u32) as usize..][..1],
+            Hero5Pool::Heroic => &HERO5_BOX_HEROIC[next_draw(HERO5_BOX_HEROIC.len() as u32) as usize..][..1],
             Hero5Pool::Legendary => &HERO5_BOX_LEGENDARY[next_draw(HERO5_BOX_LEGENDARY.len() as u32) as usize..][..1],
             Hero5Pool::Set => &HERO5_BOX_SETS[next_draw(HERO5_BOX_SETS.len() as u32) as usize],
         };
@@ -6183,7 +6189,7 @@ fn hero5_equipment_tail(stats: &[u8; HERO5_TABLE_STATS]) -> [u8; HERO5_EQUIPMENT
 
 /// Which byte of a row's [`HERO5_TABLE_STATS`] is its grade.
 ///
-/// 0 is plain, 3 레어, 4 전설, and 5 to 18 are the fourteen sets - see
+/// 0 노멀, 1 레어, 2 에픽, 3 영웅, 4 전설, and 5 to 18 the fourteen sets - see
 /// [`HERO5_BOX_DRAWS`]. `ItemInfo::GetGradeColorTag` in the title's own later
 /// build is what colours a name by it.
 const HERO5_STATS_GRADE: usize = 12;
@@ -6647,7 +6653,7 @@ mod tests {
                     // The grade the box was asked for.
                     match pool {
                         Hero5Pool::Trinket => assert!((2..=4).contains(&stats[HERO5_STATS_GRADE]), "{id}"),
-                        Hero5Pool::Rare => assert_eq!(stats[HERO5_STATS_GRADE], 3, "{id}"),
+                        Hero5Pool::Heroic => assert_eq!(stats[HERO5_STATS_GRADE], 3, "{id}"),
                         Hero5Pool::Legendary => assert_eq!(stats[HERO5_STATS_GRADE], 4, "{id}"),
                         Hero5Pool::Set => assert!((5..=18).contains(&stats[HERO5_STATS_GRADE]), "{id}"),
                     }
@@ -6675,7 +6681,7 @@ mod tests {
             // Every row of the pool comes up.
             let pool_size = match pool {
                 Hero5Pool::Trinket => HERO5_BOX_TRINKETS.len(),
-                Hero5Pool::Rare => HERO5_BOX_RARE.len(),
+                Hero5Pool::Heroic => HERO5_BOX_HEROIC.len(),
                 Hero5Pool::Legendary => HERO5_BOX_LEGENDARY.len(),
                 Hero5Pool::Set => HERO5_BOX_SETS.len(),
             };
@@ -6687,7 +6693,7 @@ mod tests {
     fn hero5_pool_row(pool: Hero5Pool, table: u8, row: u8) -> Option<[u8; HERO5_TABLE_STATS]> {
         let rows: Vec<(u8, u8, [u8; HERO5_TABLE_STATS])> = match pool {
             Hero5Pool::Trinket => HERO5_BOX_TRINKETS.to_vec(),
-            Hero5Pool::Rare => HERO5_BOX_RARE.to_vec(),
+            Hero5Pool::Heroic => HERO5_BOX_HEROIC.to_vec(),
             Hero5Pool::Legendary => HERO5_BOX_LEGENDARY.to_vec(),
             Hero5Pool::Set => HERO5_BOX_SETS.iter().flatten().copied().collect(),
         };
@@ -6699,7 +6705,7 @@ mod tests {
     #[test]
     fn every_pool_is_the_grade_it_is_drawn_for() {
         assert!(HERO5_BOX_TRINKETS.iter().all(|(table, _, _)| *table == 10));
-        assert!(HERO5_BOX_RARE.iter().all(|(_, _, stats)| stats[HERO5_STATS_GRADE] == 3));
+        assert!(HERO5_BOX_HEROIC.iter().all(|(_, _, stats)| stats[HERO5_STATS_GRADE] == 3));
         assert!(HERO5_BOX_LEGENDARY.iter().all(|(_, _, stats)| stats[HERO5_STATS_GRADE] == 4));
 
         for set in HERO5_BOX_SETS {
