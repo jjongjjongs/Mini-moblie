@@ -336,11 +336,16 @@ pub async fn printk(context: &mut dyn WIPICContext, ptr_format: WIPICWord, a0: W
     tracing::debug!("MC_knlPrintk({ptr_format:#x}, {a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
 
     let format_string = read_null_terminated_string_bytes(context, ptr_format)?;
-    let format_string = encoding_rs::EUC_KR.decode(&format_string).0;
 
     let result = sprintf(context, &format_string, &[a0, a1, a2, a3])?;
 
-    context.system().platform().write_stdout(result.as_bytes());
+    // The one place the guest's bytes are read rather than handed back: this
+    // goes to a log a person reads, so its EUC-KR becomes text here. Every
+    // other caller writes the result straight back into guest memory and must
+    // not.
+    let text = encoding_rs::EUC_KR.decode(&result).0;
+
+    context.system().platform().write_stdout(text.as_bytes());
 
     Ok(())
 }
@@ -360,18 +365,16 @@ pub async fn sprintk(
     tracing::debug!("MC_knlSprintk({dest:#x}, {ptr_format:#x}, {a0}, {a1}, {a2}, {a3}, {a4}, {a5})",);
 
     let format_string = read_null_terminated_string_bytes(context, ptr_format)?;
-    let format_string = encoding_rs::EUC_KR.decode(&format_string).0;
 
     let result = sprintf(context, &format_string, &[a0, a1, a2, a3, a4, a5])?;
 
-    let result_bytes = encoding_rs::EUC_KR.encode(&result).0;
+    write_null_terminated_string_bytes(context, dest, &result)?;
 
-    write_null_terminated_string_bytes(context, dest, &result_bytes)?;
-
-    // What `sprintf` returns is what it wrote, and what it wrote is the encoded
-    // bytes - which is not the same count as the characters they came from once
-    // any of them is Korean.
-    Ok(result_bytes.len() as _)
+    // What `sprintf` returns is what it wrote, and both are the guest's own
+    // bytes: the format goes in as it was read and the result goes back as it
+    // was built, so a byte the guest passed is the byte it gets, and the count
+    // is of those.
+    Ok(result.len() as _)
 }
 
 pub async fn get_total_memory(_context: &mut dyn WIPICContext) -> Result<i32> {

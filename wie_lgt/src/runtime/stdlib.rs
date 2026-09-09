@@ -342,19 +342,18 @@ async fn printf(core: &mut ArmCore, _: &mut (), format: u32) -> Result<u32> {
 #[allow(clippy::too_many_arguments)]
 async fn sprintf(core: &mut ArmCore, _: &mut (), dest: u32, format: u32, a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32) -> Result<u32> {
     let format_bytes = read_null_terminated_string_bytes(core, format)?;
-    let format_string = encoding_rs::EUC_KR.decode(&format_bytes).0;
 
-    tracing::debug!("sprintf({dest:#x}, {:?})", format_string);
+    tracing::debug!("sprintf({dest:#x}, {:?})", alloc::string::String::from_utf8_lossy(&format_bytes));
 
     let args = [a0, a1, a2, a3, a4, a5];
-    let result = format_varargs(&format_string, &args, &mut |ptr| read_null_terminated_string_bytes(core, ptr))?;
+    let result = format_varargs(&format_bytes, &args, &mut |ptr| read_null_terminated_string_bytes(core, ptr))?;
 
-    let result_bytes = encoding_rs::EUC_KR.encode(&result).0;
-    write_null_terminated_string_bytes(core, dest, &result_bytes)?;
+    write_null_terminated_string_bytes(core, dest, &result)?;
 
-    // What C returns is what it wrote, and what it wrote is the encoded bytes -
-    // not the same count as the characters they came from once any is Korean.
-    Ok(result_bytes.len() as u32)
+    // What C returns is what it wrote, and both are the guest's own bytes - the
+    // format as it was read and the result as it was built - so the count is of
+    // those and every byte survives the round trip.
+    Ok(result.len() as u32)
 }
 
 async fn strncmp(core: &mut ArmCore, _: &mut (), ptr_str1: u32, ptr_str2: u32, size: u32) -> Result<u32> {
@@ -651,24 +650,21 @@ async fn memchr(core: &mut ArmCore, _: &mut (), ptr: u32, ch: u32, size: u32) ->
 #[allow(clippy::too_many_arguments)]
 async fn snprintf(core: &mut ArmCore, _: &mut (), dest: u32, size: u32, format: u32, a0: u32, a1: u32, a2: u32, a3: u32, a4: u32) -> Result<u32> {
     let format_bytes = read_null_terminated_string_bytes(core, format)?;
-    let format_string = encoding_rs::EUC_KR.decode(&format_bytes).0;
 
-    tracing::debug!("snprintf({dest:#x}, {size}, {:?})", format_string);
+    tracing::debug!("snprintf({dest:#x}, {size}, {:?})", alloc::string::String::from_utf8_lossy(&format_bytes));
 
     let args = [a0, a1, a2, a3, a4];
-    let result = format_varargs(&format_string, &args, &mut |ptr| read_null_terminated_string_bytes(core, ptr))?;
-
-    let result_bytes = encoding_rs::EUC_KR.encode(&result).0;
+    let result = format_varargs(&format_bytes, &args, &mut |ptr| read_null_terminated_string_bytes(core, ptr))?;
 
     if size > 0 && dest != 0 {
         let capacity = (size - 1) as usize;
-        let take = min(capacity, result_bytes.len());
-        write_null_terminated_string_bytes(core, dest, &result_bytes[..take])?;
+        let take = min(capacity, result.len());
+        write_null_terminated_string_bytes(core, dest, &result[..take])?;
     }
 
     // C returns what it would have written, in bytes, whether or not the buffer
     // held it.
-    Ok(result_bytes.len() as u32)
+    Ok(result.len() as u32)
 }
 
 #[cfg(test)]

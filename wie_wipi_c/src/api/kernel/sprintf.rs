@@ -6,7 +6,7 @@ use crate::context::WIPICContext;
 
 const MAX_WIDTH: usize = 4096;
 
-pub fn sprintf(context: &mut dyn WIPICContext, format: &str, args: &[u32]) -> Result<String> {
+pub fn sprintf(context: &mut dyn WIPICContext, format: &[u8], args: &[u32]) -> Result<Vec<u8>> {
     self::format(format, args, &mut |ptr| read_null_terminated_string_bytes(context, ptr))
 }
 
@@ -24,18 +24,28 @@ pub fn sprintf(context: &mut dyn WIPICContext, format: &str, args: &[u32]) -> Re
 /// titles build fixed-width records with them: 아니마 writes its billing request
 /// as `AM%-6d%10.10s%2.2s`, a twenty byte header it then copies out by length,
 /// and a conversion that ignored the width would leave it the wrong size.
-pub fn format(format: &str, args: &[u32], read_string: &mut dyn FnMut(u32) -> Result<Vec<u8>>) -> Result<String> {
-    let mut result = String::with_capacity(format.len());
-    let mut chars = format.chars();
+///
+/// Everything here is bytes, start to finish, and none of it goes through text.
+/// The format is the guest's own EUC-KR and so is the result, and a byte that
+/// is not a character in either of them has to come out as itself. 창세기전3
+/// 에피소드3 builds its script a byte at a time with `sprintk(dest, "%c", b)`,
+/// and half of a Korean character is one of those bytes: decoded it is a
+/// replacement character, and encoded back it is the eight bytes `&#65533;`,
+/// which is six more than the caller counted on and walks its buffer straight
+/// through the block behind it. The heap's free list is what was behind it, and
+/// the title died in its own allocator a few frames later.
+pub fn format(format: &[u8], args: &[u32], read_string: &mut dyn FnMut(u32) -> Result<Vec<u8>>) -> Result<Vec<u8>> {
+    let mut result = Vec::with_capacity(format.len());
+    let mut chars = format.iter().copied();
     let mut arg_iter = args.iter();
 
     while let Some(x) = chars.next() {
-        if x != '%' {
+        if x != b'%' {
             result.push(x);
             continue;
         }
 
-        let mut spec = String::from("%");
+        let mut spec = alloc::vec![b'%'];
         let mut conversion = Conversion::default();
         // Digits belong to the precision once a `.` has been seen, and to the
         // width before it.
@@ -45,17 +55,17 @@ pub fn format(format: &str, args: &[u32], read_string: &mut dyn FnMut(u32) -> Re
         loop {
             let Some(c) = chars.next() else {
                 // broken format: emit what we have as-is
-                result.push_str(&spec);
+                result.extend_from_slice(&spec);
                 break;
             };
             spec.push(c);
 
             match c {
-                '%' => {
-                    result.push('%');
+                b'%' => {
+                    result.push(b'%');
                     break;
                 }
-                'd' | 'u' => {
+                b'd' | b'u' => {
                     // ILP32 ABI: long is one word; only long long occupies two
                     let long = longs >= 2;
                     let raw = if long {
@@ -64,7 +74,7 @@ pub fn format(format: &str, args: &[u32], read_string: &mut dyn FnMut(u32) -> Re
                         next_arg(&mut arg_iter) as u64
                     };
 
-                    let (negative, magnitude) = if c == 'd' {
+                    let (negative, magnitude) = if c == b'd' {
                         let arg = if long { raw as i64 } else { raw as u32 as i32 as i64 };
                         (arg < 0, arg.unsigned_abs())
                     } else {
@@ -74,20 +84,20 @@ pub fn format(format: &str, args: &[u32], read_string: &mut dyn FnMut(u32) -> Re
                     conversion.push_number(&mut result, negative, &format!("{magnitude}"));
                     break;
                 }
-                's' => {
+                b's' => {
                     let ptr = next_arg(&mut arg_iter);
                     let value = if ptr == 0 { Vec::from(*b"(null)") } else { read_string(ptr)? };
 
                     conversion.push_string(&mut result, &value);
                     break;
                 }
-                'c' => {
+                b'c' => {
                     let value = next_arg(&mut arg_iter) as u8;
 
                     conversion.push_string(&mut result, &[value]);
                     break;
                 }
-                'x' => {
+                b'x' => {
                     let arg = if longs >= 2 {
                         next_arg64(&mut arg_iter)
                     } else {
@@ -97,11 +107,11 @@ pub fn format(format: &str, args: &[u32], read_string: &mut dyn FnMut(u32) -> Re
                     conversion.push_number(&mut result, false, &format!("{arg:x}"));
                     break;
                 }
-                'l' => longs += 1,
+                b'l' => longs += 1,
                 // `*` takes the field from the arguments, ahead of the value it
                 // measures. A negative width is C's other way of writing `-`,
                 // and a negative precision is no precision at all.
-                '*' => {
+                b'*' => {
                     let field = next_arg(&mut arg_iter) as i32;
 
                     if in_precision {
@@ -113,14 +123,14 @@ pub fn format(format: &str, args: &[u32], read_string: &mut dyn FnMut(u32) -> Re
                         conversion.width = Some(field as usize);
                     }
                 }
-                '-' if conversion.width.is_none() && !in_precision => conversion.left = true,
-                '0' if conversion.width.is_none() && !in_precision => conversion.zero = true,
-                '.' if !in_precision => {
+                b'-' if conversion.width.is_none() && !in_precision => conversion.left = true,
+                b'0' if conversion.width.is_none() && !in_precision => conversion.zero = true,
+                b'.' if !in_precision => {
                     in_precision = true;
                     conversion.precision = Some(0);
                 }
-                '0'..='9' => {
-                    let digit = c.to_digit(10).unwrap() as usize;
+                b'0'..=b'9' => {
+                    let digit = (c - b'0') as usize;
                     let field = if in_precision {
                         &mut conversion.precision
                     } else {
@@ -130,8 +140,8 @@ pub fn format(format: &str, args: &[u32], read_string: &mut dyn FnMut(u32) -> Re
                     *field = Some(field.unwrap_or(0).saturating_mul(10).saturating_add(digit));
                 }
                 _ => {
-                    tracing::warn!("unsupported format specifier: {spec}");
-                    result.push_str(&spec);
+                    tracing::warn!("unsupported format specifier: {}", String::from_utf8_lossy(&spec));
+                    result.extend_from_slice(&spec);
                     break;
                 }
             }
@@ -165,21 +175,22 @@ impl Conversion {
 
     /// A number, whose precision is the fewest digits to print and whose `0`
     /// flag C ignores when a precision is given.
-    fn push_number(&self, result: &mut String, negative: bool, digits: &str) {
+    fn push_number(&self, result: &mut Vec<u8>, negative: bool, digits: &str) {
+        let digits = digits.as_bytes();
         let zeros = self.precision().unwrap_or(0).saturating_sub(digits.len());
-        let sign = if negative { "-" } else { "" };
+        let sign: &[u8] = if negative { b"-" } else { b"" };
         let length = sign.len() + zeros + digits.len();
         let padding = self.width().saturating_sub(length);
 
         if self.left {
             push_body(result, sign, zeros, digits);
-            result.extend(core::iter::repeat_n(' ', padding));
+            result.extend(core::iter::repeat_n(b' ', padding));
         } else if self.zero && self.precision.is_none() {
-            result.push_str(sign);
-            result.extend(core::iter::repeat_n('0', padding));
-            push_body(result, "", zeros, digits);
+            result.extend_from_slice(sign);
+            result.extend(core::iter::repeat_n(b'0', padding));
+            push_body(result, b"", zeros, digits);
         } else {
-            result.extend(core::iter::repeat_n(' ', padding));
+            result.extend(core::iter::repeat_n(b' ', padding));
             push_body(result, sign, zeros, digits);
         }
     }
@@ -187,31 +198,32 @@ impl Conversion {
     /// A string, whose precision is the most bytes to print and whose width is
     /// counted in them too, as C counts both.
     ///
-    /// The guest's bytes are EUC-KR, which is what every caller reads and what
-    /// the result is written back as. Cutting at a precision that falls inside
-    /// a character is what C does and what the reference would have drawn; the
-    /// half character decodes to a replacement rather than being hidden, so a
-    /// caller that cuts in the wrong place can see that it did.
-    fn push_string(&self, result: &mut String, value: &[u8]) {
+    /// The bytes go through untouched. They are the guest's own EUC-KR and the
+    /// result goes back to the guest, so there is nothing for a decode to do
+    /// here but lose - see [`format`]. Cutting at a precision that falls inside
+    /// a character is what C does and what the reference would have drawn, and
+    /// the half character stays half a character rather than becoming anything
+    /// longer.
+    fn push_string(&self, result: &mut Vec<u8>, value: &[u8]) {
         let taken = self.precision().unwrap_or(value.len()).min(value.len());
         let padding = self.width().saturating_sub(taken);
 
         if !self.left {
-            result.extend(core::iter::repeat_n(' ', padding));
+            result.extend(core::iter::repeat_n(b' ', padding));
         }
 
-        result.push_str(&encoding_rs::EUC_KR.decode(&value[..taken]).0);
+        result.extend_from_slice(&value[..taken]);
 
         if self.left {
-            result.extend(core::iter::repeat_n(' ', padding));
+            result.extend(core::iter::repeat_n(b' ', padding));
         }
     }
 }
 
-fn push_body(result: &mut String, sign: &str, zeros: usize, digits: &str) {
-    result.push_str(sign);
-    result.extend(core::iter::repeat_n('0', zeros));
-    result.push_str(digits);
+fn push_body(result: &mut Vec<u8>, sign: &[u8], zeros: usize, digits: &[u8]) {
+    result.extend_from_slice(sign);
+    result.extend(core::iter::repeat_n(b'0', zeros));
+    result.extend_from_slice(digits);
 }
 
 fn next_arg<'a>(arg_iter: &mut impl Iterator<Item = &'a u32>) -> u32 {
@@ -235,8 +247,17 @@ mod test {
 
     use wie_util::Result;
 
+    /// The formatter's own result is bytes; these cases are all ASCII, so read
+    /// them back as text to keep them legible.
     fn format(format_string: &str, args: &[u32]) -> Result<String> {
-        super::format(format_string, args, &mut |_| Ok(Vec::from(*b"stub")))
+        let bytes = super::format(format_string.as_bytes(), args, &mut |_| Ok(Vec::from(*b"stub")))?;
+
+        Ok(String::from_utf8(bytes).unwrap())
+    }
+
+    /// The same for a case that reads its own strings.
+    fn format_with(format_string: &str, args: &[u32], read: &mut dyn FnMut(u32) -> Result<Vec<u8>>) -> Result<Vec<u8>> {
+        super::format(format_string.as_bytes(), args, read)
     }
 
     #[test]
@@ -357,12 +378,12 @@ mod test {
                 _ => Vec::from(*b"10"),
             })
         };
-        let header = super::format("AM%-6d%10.10s%2.2s", &[38, 1, 2], &mut read)?;
+        let header = format_with("AM%-6d%10.10s%2.2s", &[38, 1, 2], &mut read)?;
 
         // Which is what the twenty bytes have to come to. A conversion that
         // dropped the width would have made it eighteen, and the record it
         // fronts is measured by the number inside it.
-        assert_eq!(header, "AM38    191111222210");
+        assert_eq!(header, b"AM38    191111222210");
         assert_eq!(header.len(), 20);
 
         Ok(())
@@ -399,11 +420,11 @@ mod test {
         assert_eq!(line.len(), 20);
 
         let mut read = |_| Ok(line.clone());
-        assert_eq!(super::format("%.*s", &[12, 1], &mut read)?, "프론티어호에");
-        assert_eq!(super::format("%.*s", &[20, 1], &mut read)?, "프론티어호에 탔던 건");
+        assert_eq!(format_with("%.*s", &[12, 1], &mut read)?, line[..12]);
+        assert_eq!(format_with("%.*s", &[20, 1], &mut read)?, line[..]);
 
         // Past its end is the whole of it, not a read past it.
-        assert_eq!(super::format("%.*s", &[99, 1], &mut read)?, "프론티어호에 탔던 건");
+        assert_eq!(format_with("%.*s", &[99, 1], &mut read)?, line[..]);
 
         Ok(())
     }
@@ -419,12 +440,55 @@ mod test {
                 _ => Vec::from(*b"who are you? and more script behind it"),
             })
         };
-        let line = super::format("\u{7}2[%s]\u{7}0%.*s", &[1, 16, 2], &mut read)?;
+        let line = format_with("\u{7}2[%s]\u{7}0%.*s", &[1, 16, 2], &mut read)?;
 
         // Nothing of the format is left in it, and the line stops where its
         // count says rather than running on into the next one.
-        assert_eq!(line, "\u{7}2[KRISNOAH]\u{7}0who are you? and");
-        assert!(!line.contains('%'));
+        assert_eq!(line, b"\x072[KRISNOAH]\x070who are you? and");
+        assert!(!line.contains(&b'%'));
+
+        Ok(())
+    }
+
+    #[test]
+    fn a_percent_c_is_the_byte_it_was_given() -> Result<()> {
+        // 창세기전3 에피소드3 builds its script one byte at a time, and half of
+        // a Korean character is one of those bytes. It has to come out as
+        // itself: as text it is a replacement character, and encoded back it
+        // would be the eight bytes `&#65533;` - six more than the caller
+        // counted, into the block behind its buffer.
+        for byte in [0x00u8, 0x20, 0x41, 0x7f, 0x80, 0xa1, 0xbb, 0xc7, 0xfe, 0xff] {
+            let out = super::format(b"%c", &[byte as u32], &mut |_| Ok(Vec::new()))?;
+
+            assert_eq!(out, [byte], "%c of {byte:#04x}");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn a_percent_s_is_the_bytes_it_was_given() -> Result<()> {
+        // Whole or half a character, and a byte no encoding claims: the string
+        // goes back to the guest, so it goes through as it came.
+        let value: Vec<u8> = alloc::vec![0xc7, 0xd1, 0xb1, 0xdb, 0xbb, 0xff, 0x80];
+        let mut read = |_| Ok(value.clone());
+
+        assert_eq!(format_with("%s", &[1], &mut read)?, value);
+        // Cut inside a character, the half that is left stays one byte.
+        assert_eq!(format_with("%.3s", &[1], &mut read)?, value[..3]);
+
+        Ok(())
+    }
+
+    /// The format's own bytes are the guest's too, and Korean in it is not
+    /// there to be decoded and put back.
+    #[test]
+    fn the_format_carries_its_own_bytes_through() -> Result<()> {
+        // 한글 in EUC-KR, around a conversion.
+        let format: Vec<u8> = alloc::vec![0xc7, 0xd1, 0xb1, 0xdb, b'%', b'd', 0xbb, 0xf3];
+        let out = super::format(&format, &[7], &mut |_| Ok(Vec::new()))?;
+
+        assert_eq!(out, [0xc7, 0xd1, 0xb1, 0xdb, b'7', 0xbb, 0xf3]);
 
         Ok(())
     }

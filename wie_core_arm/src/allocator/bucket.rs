@@ -141,7 +141,21 @@ impl BucketAllocator {
         let index = offset / 8;
         let bit = offset % 8;
 
-        debug_assert!(header[index as usize] & (1 << bit) == 0);
+        // A guest that frees a block twice gets the second free ignored, not an
+        // abort. Freeing a free slot is setting a bit that is already set, so
+        // there is nothing to undo and nothing to corrupt; what there was, until
+        // this was a `debug_assert!`, was a debug build that died on it where a
+        // release build carried on, and a handset that carried on too.
+        //
+        // 창세기전3 is the title that showed it: its audio teardown runs
+        // `MC_mdaClipFree` down two paths and the second one frees a clip the
+        // first already did. It is worth seeing - it is a bug in something -
+        // but it is the guest's, and it is not this allocator's to stop on.
+        if header[index as usize] & (1 << bit) != 0 {
+            tracing::warn!("free of {address:#x}, which is already free");
+
+            return Ok(());
+        }
 
         header[index as usize] |= 1 << bit;
 
@@ -227,6 +241,28 @@ mod tests {
 
         // 0x1000000 (16 MB) is far too small for the full bucket layout.
         assert!(BucketAllocator::init(&mut core, 0x40000000, 0x1000000).is_err());
+    }
+
+    /// A guest that frees a block twice is not a reason to stop. The slot stays
+    /// free, the next allocation still gets it, and nothing else moves.
+    #[test]
+    fn a_second_free_of_the_same_block_changes_nothing() -> Result<()> {
+        let mut core = ArmCore::new(false, None).unwrap();
+        core.map(0x40000000, 0x8000000)?;
+        BucketAllocator::init(&mut core, 0x40000000, 0x8000000)?;
+
+        let a = BucketAllocator::alloc(&mut core, 0x40000000, 8)?;
+        let b = BucketAllocator::alloc(&mut core, 0x40000000, 8)?;
+
+        BucketAllocator::free(&mut core, 0x40000000, a, 8)?;
+        BucketAllocator::free(&mut core, 0x40000000, a, 8)?;
+
+        // The slot comes back once, to the next allocation, and the block beside
+        // it is still held.
+        assert_eq!(BucketAllocator::alloc(&mut core, 0x40000000, 8)?, a);
+        assert_ne!(BucketAllocator::alloc(&mut core, 0x40000000, 8)?, b);
+
+        Ok(())
     }
 
     #[test]
