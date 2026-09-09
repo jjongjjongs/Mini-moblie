@@ -6376,6 +6376,78 @@ pub fn lgt_local_oceanus_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(response)
 }
 
+/// The answer to the record 오셔너스 writes once its purchase is granted.
+///
+/// With the purchase answered the title writes a second, shorter record on the
+/// same socket and then waits to be told the reply has arrived - it registers a
+/// read callback with `MC_netSetReadCB` rather than polling, so a gateway that
+/// says nothing leaves it on 수신중 forever:
+///
+/// ```text
+/// [0..4]    "GLSN"
+/// [4..8]    u32  the message the record carries, 48
+/// [8..12]   two zero u16s
+/// [12..20]  the caller's own trailer
+/// ```
+///
+/// `0x2080c` builds the first twelve bytes - the tag, the message its caller
+/// passes, and the two `u16`s at `[ctx+0]` and `[ctx+2]`, the second of them
+/// being zero is what ends the record there - and the wrapper that called it
+/// appends the trailer before `0x20e8c` puts it on the wire.
+///
+/// The answer arrives in three reads, each one armed by `0x20e44(n)` with the
+/// count the state before it worked out, and the state machine walks
+/// 4 -> 6 -> 7 -> 8:
+///
+/// - state 4 reads twelve bytes: two `u32`s, then `[ctx+0]` and `[ctx+2]`.
+///   `0x20cfe` branches on `[ctx+2]`, which is a body length rather than an
+///   error: zero goes to state 6 and arms four bytes, anything else goes to
+///   state 5 and arms that many bytes and four more.
+/// - state 6 reads those four as a `u32` into `[ctx+0x18]`, moves to state 7
+///   and arms a read of exactly that many bytes.
+/// - state 7 sets `[ctx+0xd1a]` and moves to state 8, which is the walk being
+///   over and the purchase settled.
+///
+/// So the whole answer is twelve zero bytes, a length, and a body of that
+/// length. The length has to be positive: `0x20e44(0)` would arm a zero-byte
+/// read, and `0x20c00` counts a read that reaches nothing as a retry and gives
+/// up after 199 of them. Four bytes is the smallest body that avoids it, and
+/// state 7 never looks at what is in them.
+pub fn lgt_local_oceanus_settled_response(request: &[u8]) -> Option<Vec<u8>> {
+    const TAG: &[u8] = b"GLSN";
+    /// The record's whole length, the builder's twelve and the caller's eight.
+    const SETTLED_REQUEST: usize = 20;
+    /// The message id at `[4]`, which is what makes this the settlement.
+    const MESSAGE_AT: usize = 4;
+    const MESSAGE: u32 = 48;
+
+    /// What state 4 reads, and where in it the body length sits.
+    const WALK: usize = 12;
+    /// The body state 6 asks for, kept to the smallest a zero-byte read rules
+    /// out. Nothing reads what is in it.
+    const BODY: u32 = 4;
+
+    if request.len() != SETTLED_REQUEST || !request.starts_with(TAG) {
+        return None;
+    }
+
+    let message = u32::from_le_bytes([
+        request[MESSAGE_AT],
+        request[MESSAGE_AT + 1],
+        request[MESSAGE_AT + 2],
+        request[MESSAGE_AT + 3],
+    ]);
+    if message != MESSAGE {
+        return None;
+    }
+
+    let mut response = alloc::vec![0u8; WALK];
+    response.extend_from_slice(&BODY.to_le_bytes());
+    response.extend_from_slice(&[0; BODY as usize]);
+
+    Some(response)
+}
+
 /// The answer to a billing request, whichever of these protocols it is in.
 ///
 /// Tried in order of how specific each shape is: the `0xffff`-framed message,
@@ -6410,6 +6482,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_tera_response(request))
         .or_else(|| lgt_local_hero5_response(request))
         .or_else(|| lgt_local_oceanus_response(request))
+        .or_else(|| lgt_local_oceanus_settled_response(request))
 }
 
 #[cfg(test)]
@@ -8865,6 +8938,50 @@ mod tests {
         let mut short = oceanus_purchase_request();
         short.truncate(43);
         assert!(lgt_local_oceanus_response(&short).is_none());
+    }
+
+    /// The 20-byte record 오셔너스 writes once its purchase is granted,
+    /// captured off its billing socket.
+    fn oceanus_settled_request() -> Vec<u8> {
+        let mut request = Vec::from(*b"GLSN");
+        request.extend_from_slice(&48u32.to_le_bytes());
+        request.extend_from_slice(&[0; 4]);
+        request.extend_from_slice(&4u32.to_le_bytes());
+        request.extend_from_slice(&(-1154i32).to_le_bytes());
+        request
+    }
+
+    #[test]
+    fn the_record_that_settles_a_purchase_is_answered_with_the_whole_walk() {
+        let request = oceanus_settled_request();
+        assert_eq!(request.len(), 20);
+
+        let reply = lgt_local_oceanus_settled_response(&request).unwrap();
+
+        // The twelve state 4 reads, whose last `u16` being zero is what sends
+        // the walk to state 6 rather than state 5.
+        assert_eq!(&reply[..12], &[0u8; 12]);
+        assert_eq!(u16::from_le_bytes([reply[10], reply[11]]), 0);
+
+        // The length state 6 reads, and a body of exactly that many bytes for
+        // state 7 to take. Positive, or state 6 arms a read of nothing.
+        let body = u32::from_le_bytes([reply[12], reply[13], reply[14], reply[15]]);
+        assert!(body > 0);
+        assert_eq!(reply.len(), 16 + body as usize);
+
+        assert_eq!(response(&request), Some(reply));
+    }
+
+    #[test]
+    fn the_two_oceanus_records_do_not_answer_for_one_another() {
+        // The purchase is not the settlement, and neither is the reverse.
+        assert!(lgt_local_oceanus_settled_response(&oceanus_purchase_request()).is_none());
+        assert!(lgt_local_oceanus_response(&oceanus_settled_request()).is_none());
+
+        // The right tag and length against a message the title does not send.
+        let mut other_message = oceanus_settled_request();
+        other_message[4..8].copy_from_slice(&49u32.to_le_bytes());
+        assert!(lgt_local_oceanus_settled_response(&other_message).is_none());
     }
 
     /// The hundred and three bytes 엘피스's menu opens with.
