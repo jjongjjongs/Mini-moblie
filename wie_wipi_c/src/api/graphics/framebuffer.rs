@@ -133,6 +133,67 @@ impl FrameBuffer {
     /// Restaging only the pixels a primitive actually changed keeps those
     /// direct writes intact, and matches how the reference draws each primitive
     /// straight into the framebuffer rather than through a full-frame copy.
+    /// Fills a solid rectangle by writing only the rows it covers.
+    ///
+    /// The canvas path a primitive normally takes stages the whole surface:
+    /// it reads every byte of it out of guest memory, collects that into a
+    /// pixel buffer, draws, and diffs the result back row by row. That is the
+    /// right shape for a primitive whose coverage is hard to predict ahead of
+    /// the draw, and much the wrong one for a solid rectangle - 엑시온2 draws
+    /// its scene, and its minimap, as tens of thousands of 2x2 fills a frame,
+    /// and each one was paying two full 240x320 copies out and a whole-surface
+    /// comparison back for four pixels of work.
+    ///
+    /// The rectangle is clamped exactly the way the canvas clamps it, to the
+    /// reported width and height, and `MC_grpFillRect` passes the rectangle
+    /// itself as the clip so nothing else narrows it. The colour is stored
+    /// rather than composed, which is what the canvas does for a fully opaque
+    /// one - the caller checks that before coming here.
+    ///
+    /// `false` when the surface's depth is not one a colour can be packed for,
+    /// or its geometry does not fit the addressing; the caller should take the
+    /// canvas path instead. Nothing has been written when it returns `false`.
+    pub fn fill_rect_direct(&self, context: &mut dyn WIPICContext, x: i32, y: i32, w: u32, h: u32, color: Color) -> Result<bool> {
+        let pixel: Vec<u8> = match self.0.bpp {
+            16 => Rgb565Pixel::from_color(color).to_le_bytes().to_vec(),
+            32 => ArgbPixel::from_color(color).to_le_bytes().to_vec(),
+            _ => return Ok(false),
+        };
+
+        let bpp = (self.0.bpp / 8).max(1) as i64;
+        let bpl = self.0.bpl as i64;
+        if bpl <= 0 || pixel.len() as i64 != bpp {
+            return Ok(false);
+        }
+
+        let left = (x as i64).max(0);
+        let right = (x as i64 + w as i64).min(self.0.width as i64);
+        let top = (y as i64).max(0);
+        let bottom = (y as i64 + h as i64).min(self.0.height as i64);
+        if left >= right || top >= bottom {
+            return Ok(true);
+        }
+
+        // The furthest byte the loop would touch, checked before any of it is
+        // written so a surface this cannot address is refused whole rather
+        // than half filled.
+        let row_bytes = (right - left) * bpp;
+        let last = (bottom - 1) * bpl + left * bpp + row_bytes;
+        if u32::try_from(last).is_err() {
+            return Ok(false);
+        }
+
+        let row = pixel.repeat((right - left) as usize);
+        let base = context.data_ptr(self.0.buf)?;
+
+        for py in top..bottom {
+            let offset = (py * bpl + left * bpp) as u32;
+            context.write_bytes(base + offset, &row)?;
+        }
+
+        Ok(true)
+    }
+
     pub fn write_diff(&self, context: &mut dyn WIPICContext, snapshot: &[u8], drawn: &[u8]) -> Result<()> {
         let bpl = self.0.bpl as usize;
         let bpp = (self.0.bpp / 8).max(1) as usize;
@@ -226,6 +287,8 @@ impl DerefMut for FramebufferCanvas<'_> {
 mod test {
     use wie_util::{ByteRead, ByteWrite, WieError};
 
+    use wie_backend::canvas::{Canvas, Clip, Color};
+
     use crate::WIPICContext;
     use crate::context::test::TestContext;
 
@@ -272,6 +335,57 @@ mod test {
     /// When only one byte of a 16bpp pixel changes, write_diff still restages the
     /// whole pixel (both bytes), so green - which straddles the two bytes - is
     /// never left half-written.
+    #[test]
+    fn fill_rect_direct_matches_the_canvas_it_replaces() {
+        // Every rectangle worth disagreeing about: inside, hanging off each
+        // edge, straddling a corner, and entirely outside.
+        for (x, y, w, h) in [
+            (1i32, 1i32, 2u32, 2u32),
+            (-2, 1, 4, 2),
+            (6, 0, 4, 3),
+            (1, -3, 2, 5),
+            (-9, -9, 3, 3),
+            (9, 9, 2, 2),
+        ] {
+            let mut direct = TestContext::new();
+            let fb = FrameBuffer::new(&mut direct, 8, 6, 16).unwrap();
+            let base = direct.data_ptr(fb.0.buf).unwrap();
+            direct.write_bytes(base, &[0x5au8; 8 * 6 * 2]).unwrap();
+
+            let color = Color {
+                a: 0xff,
+                r: 0x12,
+                g: 0x34,
+                b: 0x56,
+            };
+            assert!(fb.fill_rect_direct(&mut direct, x, y, w, h, color).unwrap());
+
+            // The same fill through the canvas, which is what it stands in for.
+            let mut staged = TestContext::new();
+            let other = FrameBuffer::new(&mut staged, 8, 6, 16).unwrap();
+            staged.write_bytes(base, &[0x5au8; 8 * 6 * 2]).unwrap();
+            let mut canvas = other.canvas(&mut staged).unwrap();
+            let clip = Clip { x, y, width: w, height: h };
+            canvas.fill_rect(x, y, w, h, color, clip);
+            canvas.flush().unwrap();
+
+            let mut got = [0u8; 8 * 6 * 2];
+            let mut want = [0u8; 8 * 6 * 2];
+            direct.read_bytes(base, &mut got).unwrap();
+            staged.read_bytes(base, &mut want).unwrap();
+            assert_eq!(got, want, "fill ({x}, {y}, {w}, {h})");
+        }
+    }
+
+    #[test]
+    fn fill_rect_direct_refuses_a_depth_it_cannot_pack() {
+        let mut context = TestContext::new();
+        let fb = FrameBuffer::new(&mut context, 4, 2, 8).unwrap();
+
+        let color = Color { a: 0xff, r: 0, g: 0, b: 0 };
+        assert!(!fb.fill_rect_direct(&mut context, 0, 0, 4, 2, color).unwrap());
+    }
+
     #[test]
     fn write_diff_restages_whole_pixels() {
         let mut context = TestContext::new();

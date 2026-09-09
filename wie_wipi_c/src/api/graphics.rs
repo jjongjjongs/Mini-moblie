@@ -282,6 +282,20 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst_fb)?)?);
     let gctx: WIPICGraphicsContext = read_generic(context, p_gctx)?;
+    let color = context_color(&framebuffer, &gctx);
+
+    // A solid, fully opaque rectangle is just bytes, and the clip this passes
+    // is the rectangle itself, so nothing about the result needs the surface
+    // staged: write the rows it covers straight into the framebuffer. A title
+    // that draws by the pixel - 엑시온2 fills its scene and its minimap 2x2 at
+    // a time, tens of thousands of times a frame - was paying two full-surface
+    // copies out and a whole-surface diff back for each of them. A colour that
+    // is not opaque is composed with what is under it, which is the canvas
+    // path's business.
+    if color.a == 0xff && framebuffer.fill_rect_direct(context, x, y, w as _, h as _, color)? {
+        return Ok(());
+    }
+
     let mut canvas = framebuffer.canvas(context)?;
 
     let clip = Clip {
@@ -291,7 +305,6 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
         height: h as _,
     };
 
-    let color = context_color(&framebuffer, &gctx);
     canvas.fill_rect(x as _, y as _, w as _, h as _, color, clip);
     canvas.flush()?;
 
