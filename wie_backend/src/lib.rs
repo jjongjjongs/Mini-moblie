@@ -8,6 +8,7 @@ mod database;
 mod executor;
 mod local_network;
 mod platform;
+pub mod probe;
 mod screen;
 pub mod subscriber;
 mod system;

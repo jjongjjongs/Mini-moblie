@@ -90,11 +90,91 @@ impl LocalConnection for BillingGateway {
         out[..taken].copy_from_slice(&self.pending[..taken]);
         self.pending.drain(..taken);
 
+        // The title now has all of an answer that was queued whole, so what it
+        // does next is the parse. Anything waiting to be traced over that parse
+        // starts here.
+        if self.pending.is_empty() {
+            wie_backend::probe::drained();
+        }
+
         LocalRead::Data(taken)
     }
 
     fn readable(&self) -> bool {
         !self.pending.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod billing_gateway_tests {
+    use alloc::{vec, vec::Vec};
+
+    use spin::Mutex;
+
+    use wie_backend::{LocalConnection, LocalRead, probe};
+
+    use super::BillingGateway;
+
+    /// The probe and the gateway's rotating answers are both process-wide, so
+    /// two tests driving them at once would each see the other's. Hold this for
+    /// the length of any test that touches either.
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+    /// The eighteen bytes 서든어택 포켓 writes when a cash purchase is
+    /// confirmed.
+    const SUDDEN_ATTACK_PURCHASE: [u8; 18] = [
+        0x29, 0x10, 0x00, 0x00, 0x00, 0x0b, 0x30, 0x31, 0x30, 0x34, 0x36, 0x31, 0x31, 0x39, 0x32, 0x36, 0x39, 0x00,
+    ];
+
+    /// Reads a gateway out the way one of these titles does: a length first,
+    /// then the body it describes.
+    fn read_framed(gateway: &mut BillingGateway) -> Vec<u8> {
+        let mut length = [0u8; 4];
+        for byte in length.iter_mut() {
+            let mut one = [0u8; 1];
+            assert!(matches!(gateway.read(&mut one), LocalRead::Data(1)));
+            *byte = one[0];
+        }
+
+        let mut body = vec![0u8; u32::from_be_bytes(length) as usize];
+        assert!(matches!(gateway.read(&mut body), LocalRead::Data(_)));
+
+        body
+    }
+
+    #[test]
+    fn a_purchase_is_answered_with_a_body_as_long_as_its_length_says() {
+        let _guard = ONE_AT_A_TIME.lock();
+        probe::disarm();
+
+        let mut gateway = BillingGateway::armed();
+        gateway.write(&SUDDEN_ATTACK_PURCHASE);
+
+        let body = read_framed(&mut gateway);
+
+        // Everything queued was handed over, so the title is not left waiting on
+        // a length that never arrives - which is the hang this answers.
+        assert!(!gateway.readable());
+        assert!(!body.is_empty());
+    }
+
+    #[test]
+    fn the_parse_after_a_purchase_is_what_gets_traced() {
+        let _guard = ONE_AT_A_TIME.lock();
+        probe::disarm();
+
+        let mut gateway = BillingGateway::armed();
+        gateway.write(&SUDDEN_ATTACK_PURCHASE);
+
+        // Queued, not started: the title has none of the answer yet, and tracing
+        // from here would spend the trace on the wait rather than the parse.
+        assert!(!probe::is_armed());
+
+        read_framed(&mut gateway);
+
+        assert!(probe::is_armed(), "the trace did not start when the answer ran out");
+
+        probe::disarm();
     }
 }
 

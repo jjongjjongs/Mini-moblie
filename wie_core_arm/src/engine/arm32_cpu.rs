@@ -80,6 +80,12 @@ impl ArmEngine for Arm32CpuEngine {
                 crate::PC_SAMPLES[(pc >> 16) as usize].fetch_add(1, ::core::sync::atomic::Ordering::Relaxed);
             }
 
+            // A bounded instruction trace, when something has armed one. Off
+            // unless armed, which is a relaxed load of a static.
+            if wie_backend::probe::is_armed() {
+                wie_backend::probe::observe(pc);
+            }
+
             let mut arm32cpu_memory = self.mem.as_arm32cpu_memory();
 
             if !(self.cpu.step(&mut arm32cpu_memory)) {
@@ -511,5 +517,67 @@ mod tests {
         memory.map(0x10000, 0x10000);
 
         assert!(memory.write_range(0x1f500, &[12; 0x1000]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    extern crate std;
+
+    use spin::Mutex;
+
+    use wie_backend::probe;
+
+    use crate::engine::{ArmEngine, ArmRegister, MemoryPermission};
+
+    use super::Arm32CpuEngine;
+
+    /// The probe is one thing shared by the process, so two tests driving it at
+    /// once would each see the other's state.
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+    const CODE: u32 = 0x1000;
+
+    /// A Thumb loop: `sub r0, #1` then `bne` back to it. Every turn of it is one
+    /// branch, which is exactly what the probe is counting.
+    const COUNTDOWN: [u8; 4] = [
+        0x01, 0x38, // subs r0, #1
+        0xfd, 0xd1, // bne  -6  (back to the subs)
+    ];
+
+    #[test]
+    fn a_running_core_feeds_the_probe_the_branches_it_takes() {
+        let _guard = ONE_AT_A_TIME.lock();
+        probe::disarm();
+
+        let mut engine = Arm32CpuEngine::new();
+        engine.mem_map(0, 0x10000, MemoryPermission::ReadWriteExecute);
+        engine.mem_write(CODE, &COUNTDOWN).unwrap();
+        engine.reg_write(ArmRegister::R0, 8);
+        engine.reg_write(ArmRegister::PC, CODE + 1);
+
+        // Four of the loop's branches, and no more.
+        probe::arm("test", 4);
+        let _ = engine.run(0, 200);
+
+        assert!(!probe::is_armed(), "the core never reached the probe");
+
+        probe::disarm();
+    }
+
+    #[test]
+    fn a_core_running_with_no_probe_armed_records_nothing() {
+        let _guard = ONE_AT_A_TIME.lock();
+        probe::disarm();
+
+        let mut engine = Arm32CpuEngine::new();
+        engine.mem_map(0, 0x10000, MemoryPermission::ReadWriteExecute);
+        engine.mem_write(CODE, &COUNTDOWN).unwrap();
+        engine.reg_write(ArmRegister::R0, 8);
+        engine.reg_write(ArmRegister::PC, CODE + 1);
+
+        let _ = engine.run(0, 200);
+
+        assert!(!probe::is_armed());
     }
 }
