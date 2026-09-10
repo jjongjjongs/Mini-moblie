@@ -307,13 +307,21 @@ pub async fn get_resource_id(context: &mut dyn WIPICContext, ptr_name: WIPICWord
     write_null_terminated_string_bytes(context, ptr_handle, name_bytes)?;
     write_generic(context, ptr_size, size as u32)?;
 
+    tracing::debug!("  resource {name:?} is {size} bytes, handle {ptr_handle:#x}");
+
     Ok(ptr_handle as _)
 }
 
 pub async fn get_resource(context: &mut dyn WIPICContext, id: i32, buf: WIPICIndirectPtr, buf_size: WIPICWord) -> Result<i32> {
     tracing::debug!("MC_knlGetResource({id}, {:#x}, {buf_size})", buf.0);
 
+    // Both of the ways this refuses are ways a title's art quietly stops
+    // existing: it draws whatever the buffer already held, or nothing, and
+    // carries on without a word. 오셔너스 paints its own pixels into buffers it
+    // owns - it calls no blit, image or string API at all - so a resource that
+    // never arrives is invisible from every other angle. Say so here.
     if id < 0 {
+        tracing::warn!("MC_knlGetResource: {id} is not a handle get_resource_id handed out");
         return Ok(-9); // M_E_INVALID
     }
 
@@ -324,8 +332,14 @@ pub async fn get_resource(context: &mut dyn WIPICContext, id: i32, buf: WIPICInd
     let data = context.read_resource(&name).await?;
 
     if data.len() as u32 > buf_size {
+        tracing::warn!(
+            "MC_knlGetResource: {name:?} is {} bytes and was asked for into {buf_size}; refused, and the title is not told why",
+            data.len()
+        );
         return Ok(-1);
     }
+
+    tracing::debug!("  resource {name:?} read, {} bytes", data.len());
 
     context.write_bytes(context.data_ptr(buf)?, &data)?;
 
