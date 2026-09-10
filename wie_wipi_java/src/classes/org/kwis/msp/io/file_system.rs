@@ -3,7 +3,7 @@ use alloc::vec;
 use java_class_proto::JavaMethodProto;
 use java_constants::MethodAccessFlags;
 use java_runtime::classes::java::{io::File as JavaFile, lang::String, util::Vector};
-use jvm::{Array, ClassInstanceRef, Jvm, Result as JvmResult};
+use jvm::{Array, ClassInstanceRef, Jvm, Result as JvmResult, runtime::JavaLangString};
 
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 
@@ -123,17 +123,23 @@ impl FileSystem {
     }
 
     async fn is_file(jvm: &Jvm, _: &mut WieJvmContext, name: ClassInstanceRef<String>) -> JvmResult<bool> {
-        tracing::debug!("org.kwis.msp.io.FileSystem::is_file({name:?})");
-
         // A null path is not a file. The reference returns false rather than
         // dereferencing it; `new File(null)` would otherwise reach a proxy that
         // panics on the null argument. Iljimae (일지매) probes isFile(null).
         if name.is_null() {
+            tracing::debug!("org.kwis.msp.io.FileSystem::isFile(null) -> false");
             return Ok(false);
         }
 
+        // The path, not the handle. A title that answers this question and then
+        // walks off is telling us which file it wanted, and `ClassInstance(java
+        // /lang/String)` said nothing about which one that was.
+        let path = JavaLangString::to_rust_string(jvm, &name).await?;
+
         let file = jvm.new_class("java/io/File", "(Ljava/lang/String;)V", (name,)).await?;
         let is_file = jvm.invoke_virtual(&file, "isFile", "()Z", ()).await?;
+
+        tracing::debug!("org.kwis.msp.io.FileSystem::isFile({path:?}) -> {is_file}");
 
         Ok(is_file)
     }

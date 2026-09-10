@@ -847,7 +847,7 @@ pub async fn invoke(core: &mut ArmCore, jvm: &Jvm, handles: &JavaHandles, member
 
             let result: JvmResult<()> = jvm.invoke_special(&instance, class_name, "<init>", descriptor, arguments).await;
             if let Err(error) = result {
-                return Err(JvmSupport::to_wie_err(jvm, error).await);
+                return Err(thrown_or_fatal(jvm, handles, error).await);
             }
 
             writebacks.write_back(jvm, handles).await?;
@@ -860,7 +860,7 @@ pub async fn invoke(core: &mut ArmCore, jvm: &Jvm, handles: &JavaHandles, member
 
         let instance = match jvm.new_class(class_name, descriptor, arguments).await {
             Ok(instance) => instance,
-            Err(error) => return Err(JvmSupport::to_wie_err(jvm, error).await),
+            Err(error) => return Err(thrown_or_fatal(jvm, handles, error).await),
         };
 
         writebacks.write_back(jvm, handles).await?;
@@ -955,6 +955,29 @@ pub async fn invoke(core: &mut ArmCore, jvm: &Jvm, handles: &JavaHandles, member
         // higher up - rather than the fatal a stringified trace would become,
         // which ends the whole title (e.g. System.arraycopy on a null array
         // thrown from a compiled paint callback).
-        Err(JavaError::JavaException(exception)) => Err(WieError::JavaException(handles.address_of(exception)?)),
+        Err(error) => Err(thrown_or_fatal(jvm, handles, error).await),
+    }
+}
+
+/// Turns what a bridged Java call threw into something the compiled caller can
+/// still catch.
+///
+/// A guest handle is registered for the exception and it comes back as
+/// [`WieError::JavaException`], which the dispatcher routes through the
+/// compiled save-point chain - a `try`/`catch` in the compiled code - or hands
+/// to a Java catch further up. The stringified trace [`JvmSupport::to_wie_err`]
+/// produces is a fatal, and a fatal ends the title: 놈3 reads its save file by
+/// handing what it found, null and all, to `new ByteArrayInputStream(...)` and
+/// catching the `NullPointerException` that follows, and the constructor path
+/// here was the one place that still turned a throw into one of those.
+///
+/// The fatal remains for an exception no handle can be made for, because
+/// nothing in the compiled code could name it to catch it either.
+async fn thrown_or_fatal(jvm: &Jvm, handles: &JavaHandles, error: JavaError) -> WieError {
+    let JavaError::JavaException(exception) = error;
+
+    match handles.address_of(exception.clone()) {
+        Ok(address) => WieError::JavaException(address),
+        Err(_) => JvmSupport::to_wie_err(jvm, JavaError::JavaException(exception)).await,
     }
 }

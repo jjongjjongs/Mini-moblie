@@ -33,6 +33,10 @@ const CLASS_DISPATCH_TABLE: u32 = 0x0c;
 /// `{name, first dispatch slot}`.
 const METADATA_LINKED_INTERFACES: u32 = 0x14;
 
+/// How many slots a class's dispatch table has, `metadata`-relative. Mirrors
+/// `init::CLASS_DISPATCH_SLOTS`.
+const CLASS_DISPATCH_SLOTS: u32 = 0x26;
+
 /// The platform marks a method with no dispatch slot with `0xffff`; a real slot
 /// is far below that.
 const MAX_DISPATCH_SLOT: u32 = 0x1000;
@@ -1160,6 +1164,164 @@ fn runnable_slot_entry(core: &ArmCore, image_ranges: &[(u32, u32)], class: &AppC
         .then_some(entry)
 }
 
+/// What each dispatch slot an application class inherits is called.
+///
+/// A slot's name comes from whichever ancestor declared it, so the chain is
+/// walked from the class upwards and each ancestor's declarations are laid over
+/// what it inherited in turn - a nearer one wins, the way an override does.
+/// Application ancestors are read from their own method tables and the platform
+/// ancestor from the extracted metadata, because the slot numbering is one
+/// sequence across both.
+fn inherited_slot_names(
+    core: &ArmCore,
+    app_classes: &Mutex<Vec<AppClass>>,
+    image_ranges: &[(u32, u32)],
+    class: &AppClass,
+) -> Vec<(u32, String, String)> {
+    // Nearest ancestor first while walking up; laid down in reverse below.
+    let mut app_ancestors = Vec::new();
+    let mut platform_ancestors = Vec::new();
+
+    let mut name = class.superclass.clone();
+    for _ in 0..MAX_CLASS_DEPTH {
+        let Some(current) = name else { break };
+
+        if let Some(platform) = platform_class(&current) {
+            let mut walk = Some(platform);
+            while let Some(ancestor) = walk {
+                platform_ancestors.push(ancestor);
+                walk = ancestor.superclass.and_then(platform_class);
+            }
+            break;
+        }
+
+        let Some(ancestor) = app_class_by_name(core, app_classes, image_ranges, &current) else {
+            break;
+        };
+        name = ancestor.superclass.clone();
+        app_ancestors.push(ancestor);
+    }
+
+    let mut named: Vec<(u32, String, String)> = Vec::new();
+    let mut declare = |slot: u32, method: &str, descriptor: &str| {
+        if slot > MAX_DISPATCH_SLOT {
+            return;
+        }
+
+        match named.iter_mut().find(|(existing, ..)| *existing == slot) {
+            Some(row) => *row = (slot, method.to_owned(), descriptor.to_owned()),
+            None => named.push((slot, method.to_owned(), descriptor.to_owned())),
+        }
+    };
+
+    for ancestor in platform_ancestors.into_iter().rev() {
+        for method in ancestor.methods {
+            declare(method.slot, method.name, method.descriptor);
+        }
+        for method in ancestor.dispatch_methods {
+            declare(method.slot, method.name, method.descriptor);
+        }
+    }
+
+    for ancestor in app_ancestors.into_iter().rev() {
+        for method in ancestor.methods() {
+            declare(method.slot(), method.name(), method.descriptor());
+        }
+    }
+
+    named
+}
+
+/// Every inherited method an application class overrides only in its dispatch
+/// table.
+///
+/// An ahead-of-time compiled class ships a method table only when something
+/// outside it calls a method by name; a class nothing names ships none at all,
+/// and then no method of it is bridged and every call on it reaches whatever the
+/// platform left in its place. 놈3's `f extends java.io.InputStream` is that
+/// class: eight of its nineteen dispatch slots are its own, its method table is
+/// empty, and the first `read()` a `DataInputStream` wrapped around it made
+/// landed on `InputStream.read()`, which is abstract - so loading the game's
+/// menu died on `AbstractMethodError` and the byte array it should have
+/// produced arrived at `ByteArrayInputStream.<init>` as null.
+///
+/// The overrides are in the dispatch table regardless, and the table says which
+/// are the class's own: native leaves a slot zero where the class inherits it
+/// and fills it where the class declares it. So every non-zero slot that names
+/// an inherited method, and that points into the application's own image, is an
+/// override to bridge. [`dispatch_run_entry`] is the same reading of the same
+/// table for the one method that needed it first.
+fn dispatch_overrides(
+    core: &ArmCore,
+    app_classes: &Mutex<Vec<AppClass>>,
+    image_ranges: &[(u32, u32)],
+    class: &AppClass,
+) -> Vec<(String, String, u32)> {
+    let named = inherited_slot_names(core, app_classes, image_ranges, class);
+    if named.is_empty() {
+        return Vec::new();
+    }
+
+    let metadata: u32 = match read_generic(core, class.root + 8) {
+        Ok(metadata) => metadata,
+        Err(_) => return Vec::new(),
+    };
+    if metadata == 0 {
+        return Vec::new();
+    }
+
+    let vtable: u32 = match read_generic(core, metadata + CLASS_DISPATCH_TABLE) {
+        Ok(vtable) => vtable,
+        Err(_) => return Vec::new(),
+    };
+    if vtable == 0 {
+        return Vec::new();
+    }
+
+    // The table is exactly as long as the class declares; past that end is
+    // whatever follows it in the image.
+    let slots: u16 = match read_generic(core, metadata + CLASS_DISPATCH_SLOTS) {
+        Ok(slots) => slots,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut overrides = Vec::new();
+    for (slot, name, descriptor) in named {
+        if slot >= u32::from(slots) {
+            continue;
+        }
+
+        // A constructor is not dispatched through the table by the JVM, and the
+        // class's own is bridged from its method table where it has one.
+        if name == "<init>" || name == "<clinit>" {
+            continue;
+        }
+
+        // Already named in the class's own method table, which `as_proto`
+        // bridges in its own right.
+        if class.methods().any(|method| method.name() == name && method.descriptor() == descriptor) {
+            continue;
+        }
+
+        let entry: u32 = match read_generic(core, vtable + 4 + slot * 4) {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+
+        // Zero is a slot the class inherits rather than declares, and the JVM
+        // inherits it too. An entry outside the application's image is the
+        // platform's own code, which the JVM already provides.
+        if entry == 0 || !image_ranges.iter().any(|(base, size)| entry >= *base && entry < base + size) {
+            continue;
+        }
+
+        tracing::debug!("Bridged {}.{name}{descriptor} from dispatch slot {slot} @ {entry:#x}", class.name);
+        overrides.push((name, descriptor, entry));
+    }
+
+    overrides
+}
+
 fn declares_run(class: &AppClass) -> bool {
     class
         .methods()
@@ -1218,8 +1380,9 @@ pub async fn bridge_class_chain(
             let inherits_card_paint = inherits_compiled_card_paint(core, app_classes, image_ranges, class.superclass.as_deref(), 0);
 
             let dispatch_run = dispatch_run_entry(core, app_classes, image_ranges, &class);
+            let overrides = dispatch_overrides(core, app_classes, image_ranges, &class);
 
-            compiled_class::as_proto(&class, inherits_card_paint, dispatch_run)
+            compiled_class::as_proto(&class, inherits_card_paint, dispatch_run, overrides)
         };
 
         if !compiled_class::register(jvm, &context, &class_name, proto).await {
@@ -1361,7 +1524,13 @@ mod tests {
     use wie_core_arm::{Allocator, ArmCore};
     use wie_util::{ByteWrite, read_generic, write_generic};
 
-    use super::{array_element_descriptor, write_continuation_slot};
+    use alloc::{borrow::ToOwned, vec, vec::Vec};
+
+    use spin::Mutex;
+
+    use crate::runtime::java::app_classes::AppClass;
+
+    use super::{array_element_descriptor, dispatch_overrides, write_continuation_slot};
 
     #[test]
     fn atype_maps_to_its_element_descriptor() {
@@ -1392,5 +1561,93 @@ mod tests {
 
         assert_eq!(first, 262);
         assert_eq!(continuation, 263);
+    }
+
+    /// A class extending `java.io.InputStream` with nothing in its method
+    /// table, laid out the way native lays one out: metadata one block before
+    /// the root, the dispatch table it points at, and a slot count.
+    ///
+    /// `slots` fills the table; zero means the class inherits that slot.
+    fn a_class_over_an_input_stream(core: &mut ArmCore, slots: &[u32]) -> AppClass {
+        const METADATA_SIZE: u32 = 0x40;
+
+        let block = Allocator::alloc(core, METADATA_SIZE + 0x40).unwrap();
+        core.write_bytes(block, &vec![0; (METADATA_SIZE + 0x40) as usize]).unwrap();
+
+        let vtable = Allocator::alloc(core, (slots.len() as u32 + 1) * 4).unwrap();
+        core.write_bytes(vtable, &vec![0; (slots.len() + 1) * 4]).unwrap();
+        for (slot, entry) in slots.iter().enumerate() {
+            write_generic(core, vtable + 4 + slot as u32 * 4, *entry).unwrap();
+        }
+
+        let root = block + METADATA_SIZE;
+        write_generic(core, root + 8, block).unwrap();
+        write_generic(core, block + super::CLASS_DISPATCH_TABLE, vtable).unwrap();
+        write_generic(core, block + super::CLASS_DISPATCH_SLOTS, slots.len() as u16).unwrap();
+
+        AppClass {
+            root,
+            get_class: 0,
+            get_raw_class: 0,
+            name: "f".to_owned(),
+            superclass: Some("java/io/InputStream".to_owned()),
+            interfaces: Vec::new(),
+            members: Vec::new(),
+            instance_words: 0,
+        }
+    }
+
+    #[test]
+    fn a_class_with_no_method_table_is_bridged_from_its_dispatch_table() {
+        let mut core = ArmCore::new(false, None).unwrap();
+        Allocator::init(&mut core).unwrap();
+
+        // Nineteen slots, as `java.io.InputStream` has. Slot 10 is `read()I`,
+        // the one 놈3's `f` overrides and the one a `DataInputStream` wrapped
+        // around it calls first.
+        let mut slots = [0u32; 19];
+        slots[10] = 0x1365d;
+
+        let class = a_class_over_an_input_stream(&mut core, &slots);
+        let app_classes = Mutex::new(Vec::new());
+
+        let overrides = dispatch_overrides(&core, &app_classes, &[(0x1000, 0x9_0000)], &class);
+
+        assert_eq!(overrides, vec![("read".to_owned(), "()I".to_owned(), 0x1365d)]);
+    }
+
+    #[test]
+    fn a_slot_the_class_did_not_declare_is_left_to_the_platform() {
+        let mut core = ArmCore::new(false, None).unwrap();
+        Allocator::init(&mut core).unwrap();
+
+        // Zero is a slot native left inherited, and an entry outside the
+        // application's image is the platform's own code - the JVM has both
+        // already, and bridging either would put compiled code where there is
+        // none.
+        let mut slots = [0u32; 19];
+        slots[11] = 0x0014_f08c;
+
+        let class = a_class_over_an_input_stream(&mut core, &slots);
+        let app_classes = Mutex::new(Vec::new());
+
+        assert!(dispatch_overrides(&core, &app_classes, &[(0x1000, 0x9_0000)], &class).is_empty());
+    }
+
+    #[test]
+    fn a_constructor_is_never_taken_from_a_dispatch_table() {
+        let mut core = ArmCore::new(false, None).unwrap();
+        Allocator::init(&mut core).unwrap();
+
+        // `InputStream.<init>()V` sits at slot zero of its table. A constructor
+        // is not dispatched through one, and the class's own is bridged from
+        // its method table where it has one.
+        let mut slots = [0u32; 19];
+        slots[0] = 0x1_3000;
+
+        let class = a_class_over_an_input_stream(&mut core, &slots);
+        let app_classes = Mutex::new(Vec::new());
+
+        assert!(dispatch_overrides(&core, &app_classes, &[(0x1000, 0x9_0000)], &class).is_empty());
     }
 }

@@ -168,7 +168,12 @@ fn expected_words(descriptor: &str, takes_receiver: bool) -> Option<u32> {
 /// `name` and `parent` are leaked because [`JavaClassProto`] holds them for the
 /// life of the program; an application registers a bounded set of classes once
 /// per run.
-pub fn as_proto(class: &AppClass, inherits_card_paint: bool, dispatch_run: Option<u32>) -> JavaClassProto<CompiledContext> {
+pub fn as_proto(
+    class: &AppClass,
+    inherits_card_paint: bool,
+    dispatch_run: Option<u32>,
+    dispatch_overrides: Vec<(String, String, u32)>,
+) -> JavaClassProto<CompiledContext> {
     let name: &'static str = String::leak(class.name.clone());
     let parent: &'static str = String::leak(class.superclass.clone().unwrap_or_else(|| "java/lang/Object".to_owned()));
 
@@ -315,6 +320,31 @@ pub fn as_proto(class: &AppClass, inherits_card_paint: bool, dispatch_run: Optio
                 paint.descriptor()
             );
         }
+    }
+
+    // Inherited methods the class overrides only in its dispatch table. Added
+    // last, and never over a method already bridged above, so every reading of
+    // the method table - and the two named overrides before this - keeps
+    // whatever it decided.
+    for (name, descriptor, entry) in dispatch_overrides {
+        if methods.iter().any(|method| method.name == name && method.descriptor == descriptor) {
+            continue;
+        }
+
+        let body = CompiledMethod {
+            class_name: class.name.clone(),
+            name,
+            descriptor,
+            entry,
+            takes_receiver: true,
+        };
+
+        methods.push(JavaMethodProto {
+            name: body.name.clone(),
+            descriptor: body.descriptor.clone(),
+            access_flags: MethodAccessFlags::empty(),
+            body: Box::new(body) as Box<dyn MethodBody<JavaError, CompiledContext>>,
+        });
     }
 
     let mut interface_names = class.interfaces.clone();
