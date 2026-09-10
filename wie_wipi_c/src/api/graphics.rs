@@ -64,6 +64,13 @@ pub async fn get_screen_framebuffer(context: &mut dyn WIPICContext, a0: WIPICWor
         return Ok(WIPICIndirectPtr(framebuffer_ptr));
     }
 
+    // A title asking for the screen it has not been given yet is a title
+    // starting, and the surfaces [`trace_offscreen_surfaces`] knows about
+    // belong to the one before it. They live in a static, so nothing else
+    // forgets them; left behind, they name allocations this title now owns for
+    // something else.
+    OFFSCREEN_SURFACES.lock().clear();
+
     let (width, height) = {
         let platform = context.system().platform();
         let screen = platform.screen();
@@ -1040,6 +1047,20 @@ fn surface_thumbnail(canvas: &dyn Image) -> Vec<String> {
         .collect()
 }
 
+/// Whether what is at a registered surface's address is still that surface.
+///
+/// The registry is a static and outlives a game, so a pointer left in it by the
+/// title before names an allocation this one now owns for something else. Read
+/// back as a framebuffer, that reaches a depth nothing supports and takes the
+/// emulator down with it - which is how this diagnostic came to crash a game
+/// that was run after a game that had used one.
+///
+/// A surface that no longer says the size it was registered at, in a depth
+/// there is a pixel format for, is not that surface any more.
+fn still_the_surface(raw: &WIPICFramebuffer, width: i32, height: i32) -> bool {
+    raw.width as i32 == width && raw.height as i32 == height && matches!(raw.bpp, 16 | 32)
+}
+
 /// Reports what is on each off-screen surface, every so often.
 ///
 /// Some titles never hand their art back through this API: 오셔너스 takes the
@@ -1058,6 +1079,7 @@ fn trace_offscreen_surfaces(context: &mut dyn WIPICContext) {
     }
 
     let surfaces = OFFSCREEN_SURFACES.lock().clone();
+    let mut stale = Vec::new();
 
     for (memory, w, h) in surfaces {
         // A diagnostic never gets in the way of the frame it is describing, so
@@ -1065,9 +1087,15 @@ fn trace_offscreen_surfaces(context: &mut dyn WIPICContext) {
         let Ok(data_ptr) = context.data_ptr(WIPICIndirectPtr(memory)) else {
             continue;
         };
-        let Ok(raw) = read_generic(context, data_ptr) else {
+        let Ok(raw): Result<WIPICFramebuffer> = read_generic(context, data_ptr) else {
             continue;
         };
+
+        if !still_the_surface(&raw, w, h) {
+            stale.push(memory);
+            continue;
+        }
+
         let Ok(canvas) = FrameBuffer(raw).image(context) else {
             continue;
         };
@@ -1086,6 +1114,10 @@ fn trace_offscreen_surfaces(context: &mut dyn WIPICContext) {
         for line in surface_thumbnail(&*canvas) {
             tracing::info!("OFFSCREEN {memory:#x} |{line}|");
         }
+    }
+
+    if !stale.is_empty() {
+        OFFSCREEN_SURFACES.lock().retain(|(memory, _, _)| !stale.contains(memory));
     }
 }
 
@@ -1738,6 +1770,32 @@ mod tests {
         }
 
         VecImageBuffer::<ArgbPixel>::from_raw(width, height, raw)
+    }
+
+    /// A framebuffer as the guest stores one.
+    fn described(width: u32, height: u32, bpp: u32) -> wipi_types::wipic::WIPICFramebuffer {
+        wipi_types::wipic::WIPICFramebuffer {
+            width,
+            height,
+            bpl: width * (bpp / 8),
+            bpp,
+            buf: super::WIPICIndirectPtr(0x1000),
+        }
+    }
+
+    #[test]
+    fn a_surface_that_stopped_being_one_is_not_read_as_one() {
+        // What a live 60x60 surface looks like.
+        assert!(super::still_the_surface(&described(60, 60, 16), 60, 60));
+        assert!(super::still_the_surface(&described(60, 60, 32), 60, 60));
+
+        // And what the allocation looks like once another title has it: zeroed,
+        // or holding something whose depth has no pixel format, or the wrong
+        // size for what was registered. Reading any of these as a framebuffer
+        // is what crashed a game run after one that had used a surface.
+        assert!(!super::still_the_surface(&described(0, 0, 0), 60, 60));
+        assert!(!super::still_the_surface(&described(60, 60, 8), 60, 60));
+        assert!(!super::still_the_surface(&described(61, 60, 16), 60, 60));
     }
 
     #[test]
