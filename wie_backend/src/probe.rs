@@ -110,6 +110,104 @@ pub fn drained() {
     arm(&label, count);
 }
 
+/// A program counter to start a trace at, or zero for none. See [`watch`].
+static WATCH_PC: AtomicU32 = AtomicU32::new(0);
+
+/// How many times [`WATCH_PC`] has been reached.
+static WATCH_HITS: AtomicU32 = AtomicU32::new(0);
+
+/// Branches to record from [`WATCH_PC`].
+static WATCH_BRANCHES: AtomicU32 = AtomicU32::new(0);
+
+/// What [`WATCH_PC`] is, for the log.
+static WATCH_LABEL: Mutex<Option<String>> = Mutex::new(None);
+
+/// Times a watched address is traced from before it stops being interesting.
+///
+/// A draw routine runs every frame. The first few passes say what the rest
+/// would, and a trace per frame would bury the log.
+const WATCH_TRACE_LIMIT: u32 = 3;
+
+/// Starts a trace whenever the core reaches `pc`.
+///
+/// The other way in - [`arm_when_drained`] - hangs a trace off an answer this
+/// emulator gave, which only works where the title asked it something. A screen
+/// that draws wrongly asks nothing. This hangs one off an address instead, so a
+/// routine read out of the title's own `binary.mod` can be watched directly.
+///
+/// **A watch that never fires is itself the answer.** A routine suspected of
+/// bailing early may not be reached at all, and the two look identical from
+/// outside; a log with no trace in it says which.
+///
+/// Compiled blocks are entered at their first instruction, so an address that
+/// starts a function is seen whichever engine is running. One in the middle of
+/// a block is only seen by the interpreter.
+pub fn watch(pc: u32, label: &str, branches: u32) {
+    WATCH_PC.store(pc, Ordering::Relaxed);
+    WATCH_HITS.store(0, Ordering::Relaxed);
+    WATCH_BRANCHES.store(branches, Ordering::Relaxed);
+    *WATCH_LABEL.lock() = Some(String::from(label));
+
+    tracing::info!("probe: watching {pc:#x} for {label}");
+}
+
+/// Whether an address is being watched. One relaxed load, called per
+/// instruction while no trace is running.
+#[inline(always)]
+pub fn is_watching() -> bool {
+    WATCH_PC.load(Ordering::Relaxed) != 0
+}
+
+/// Starts a trace if `pc` is the watched address.
+///
+/// Call once per instruction under [`is_watching`], and only while no trace is
+/// running - a trace that reaches the address again should carry on rather than
+/// restart.
+pub fn reached(pc: u32) {
+    if WATCH_PC.load(Ordering::Relaxed) != pc {
+        return;
+    }
+
+    let hits = WATCH_HITS.fetch_add(1, Ordering::Relaxed);
+    if hits >= WATCH_TRACE_LIMIT {
+        // Reached again, and said what it had to say. Stop looking, so the
+        // per-instruction check goes back to costing nothing.
+        WATCH_PC.store(0, Ordering::Relaxed);
+        tracing::info!("probe: {pc:#x} was reached {} times; no longer watching", hits + 1);
+        return;
+    }
+
+    let label = WATCH_LABEL.lock().clone().unwrap_or_default();
+    arm(&alloc::format!("{label} #{}", hits + 1), WATCH_BRANCHES.load(Ordering::Relaxed));
+}
+
+/// Addresses worth a trace, per title, while a question is open about one.
+///
+/// A routine read out of a title's own `binary.mod` is a guess until a run says
+/// it is reached; watching it turns the guess into a line in a log, or into the
+/// absence of one, which answers just as well.
+///
+/// Each entry is a diagnostic, not a fix, and comes out when its question is
+/// settled.
+const WATCHED: [(&str, u32, &str, u32); 1] = [
+    // 오셔너스's CASH shop draws no grid: the composed frame shows the town map
+    // where the panel should be, so nothing drew it rather than something
+    // covering it. `0x3a364` is the routine, and it opens on a gate -
+    // `ldrb r3, [r5, #9]; cmp r3, #0; beq 0x3a730` over `0x1509f08` - that
+    // skips the whole draw. Whether it is reached, and which way that compare
+    // goes, is what a trace from here says.
+    ("0002D6C4", 0x3a364, "오셔너스 CASH 그리기", 30_000),
+];
+
+/// Starts watching whatever [`WATCHED`] lists for `aid`, if anything.
+pub fn watch_for_title(aid: &str) {
+    let Some((_, pc, label, branches)) = WATCHED.iter().find(|(title, ..)| *title == aid) else {
+        return;
+    };
+
+    watch(*pc, label, *branches);
+}
+
 /// Stops any trace, running or queued, and forgets what it had recorded.
 ///
 /// The probe is one thing shared by the process. A caller that has finished
@@ -119,6 +217,9 @@ pub fn disarm() {
     REMAINING.store(0, Ordering::Relaxed);
     LAST.store(0, Ordering::Relaxed);
     UNANSWERED_TRACES.store(0, Ordering::Relaxed);
+    WATCH_PC.store(0, Ordering::Relaxed);
+    WATCH_HITS.store(0, Ordering::Relaxed);
+    *WATCH_LABEL.lock() = None;
     PENDING.lock().clear();
     *LABEL.lock() = None;
     *WHEN_DRAINED.lock() = None;
@@ -391,6 +492,57 @@ mod tests {
         assert!(WHEN_DRAINED.lock().is_none(), "the log would fill with traces of one loop");
 
         disarm();
+    }
+
+    #[test]
+    fn a_watched_address_starts_a_trace_when_it_is_reached() {
+        let _guard = ONE_AT_A_TIME.lock();
+        disarm();
+
+        watch(0x3a364, "test", 100);
+        assert!(is_watching());
+        assert!(!is_armed());
+
+        // Somewhere else first: a watch is for one address, not for any.
+        reached(0x1000);
+        assert!(!is_armed());
+
+        reached(0x3a364);
+        assert!(is_armed());
+
+        disarm();
+    }
+
+    #[test]
+    fn a_watched_address_stops_being_watched_once_it_has_spoken() {
+        let _guard = ONE_AT_A_TIME.lock();
+        disarm();
+
+        // A draw routine runs every frame; the first few passes say what the
+        // rest would.
+        watch(0x3a364, "test", 100);
+        for _ in 0..WATCH_TRACE_LIMIT {
+            REMAINING.store(0, Ordering::Relaxed);
+            reached(0x3a364);
+            assert!(is_armed());
+        }
+
+        REMAINING.store(0, Ordering::Relaxed);
+        reached(0x3a364);
+        assert!(!is_armed());
+        assert!(!is_watching(), "the per-instruction check should cost nothing again");
+
+        disarm();
+    }
+
+    #[test]
+    fn a_title_with_no_question_open_is_not_watched() {
+        let _guard = ONE_AT_A_TIME.lock();
+        disarm();
+
+        watch_for_title("00000000");
+
+        assert!(!is_watching());
     }
 
     #[test]

@@ -812,9 +812,12 @@ impl ArmEngine for JitEngine {
             // interpreter instead - one instruction per turn of this loop, which
             // is what the trace needs. It is off unless armed, which is a
             // relaxed load of a static.
-            let tracing = wie_backend::probe::is_armed();
+            let mut tracing = wie_backend::probe::is_armed();
             if tracing {
                 wie_backend::probe::observe(pc);
+            } else if wie_backend::probe::is_watching() {
+                wie_backend::probe::reached(pc);
+                tracing = wie_backend::probe::is_armed();
             }
 
             let thumb = self.ctx.cpsr & (1 << 5) != 0;

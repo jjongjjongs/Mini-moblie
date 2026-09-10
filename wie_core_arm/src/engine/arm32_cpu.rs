@@ -80,10 +80,13 @@ impl ArmEngine for Arm32CpuEngine {
                 crate::PC_SAMPLES[(pc >> 16) as usize].fetch_add(1, ::core::sync::atomic::Ordering::Relaxed);
             }
 
-            // A bounded instruction trace, when something has armed one. Off
-            // unless armed, which is a relaxed load of a static.
+            // A bounded instruction trace, when something has armed one, or
+            // when this is the address something is waiting to see. Off unless
+            // one of those, which is a relaxed load of a static.
             if wie_backend::probe::is_armed() {
                 wie_backend::probe::observe(pc);
+            } else if wie_backend::probe::is_watching() {
+                wie_backend::probe::reached(pc);
             }
 
             let mut arm32cpu_memory = self.mem.as_arm32cpu_memory();

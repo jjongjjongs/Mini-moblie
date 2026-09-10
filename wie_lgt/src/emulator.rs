@@ -44,6 +44,11 @@ impl LgtEmulator {
 
         tracing::info!("Loading app {}, pid {}, mclass {}", app_info.aid, app_info.pid, app_info.mclass);
 
+        // A title with an open question about one of its own routines gets that
+        // routine watched, so a run says whether it is reached and where it
+        // goes. Nothing is watched for a title with no question open.
+        wie_backend::probe::watch_for_title(&app_info.aid);
+
         let jar_filename = Self::find_jar(&files, &app_info.aid)?;
 
         Self::load(
