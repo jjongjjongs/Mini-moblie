@@ -511,6 +511,14 @@ pub fn observe(pc: u32) {
     drop(pending);
 
     tracing::info!("{line}");
+
+    // Say where it stopped. A trace that runs out mid-way and says nothing
+    // reads exactly like a title that stopped branching, which is the wrong
+    // conclusion to leave lying around.
+    if left == 1 {
+        let label = LABEL.lock().clone().unwrap_or_default();
+        tracing::info!("probe: {label} recorded all it was given and stopped here");
+    }
 }
 
 /// Writes out a partly filled batch, so the tail of a trace is not lost.

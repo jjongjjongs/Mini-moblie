@@ -66,6 +66,19 @@ const DEFAULT_LOG_DIRECTIVE: &str = "debug,wie_lgt=trace,wie_lgt::hot=warn,wie_l
 ///   nothing in it was about the game.
 const COLLECT_LOG_DIRECTIVE: &str = "trace,arm32_cpu=warn,jni=warn";
 
+/// Branches a window records before it stops recording them.
+///
+/// Enough for tens of seconds of a screen that is misbehaving, and bounded so a
+/// window left open does not fill the log with the paint loop and push the
+/// beginning out. When it runs out the log carries on without it, and the trace
+/// says so.
+///
+/// The cost while it runs is that the compiled engines cannot report what their
+/// blocks did, so they decline them and interpret - the game runs slower inside
+/// a window than outside one. That is the trade: a window that is harder to
+/// play through, against a question that would otherwise need another build.
+const COLLECT_TRACE_BRANCHES: u32 = 1_000_000;
+
 /// Lets the player swap the log filter at runtime, so capturing a module's
 /// debug/trace detail no longer means editing the default above and rebuilding.
 static RELOAD_HANDLE: OnceLock<reload::Handle<EnvFilter, Registry>> = OnceLock::new();
@@ -171,6 +184,13 @@ pub fn start_collecting() -> core::result::Result<(), String> {
     // has been put back and the header would otherwise describe the wrong one.
     tracing::info!("log collection started under {}", filter());
 
+    // And where the emulated code goes, which is the half of the picture the
+    // log never had. Recording every branch was unaffordable while a capture
+    // ran for a whole session; over a window it is not, and it is what stops a
+    // question needing an address guessed in advance - which is the guess that
+    // has been costing builds.
+    wie_backend::probe::arm("수집 구간", COLLECT_TRACE_BRANCHES);
+
     widened
 }
 
@@ -188,6 +208,7 @@ pub fn stop_collecting() -> core::result::Result<(), String> {
 
     tracing::info!("log collection stopped");
 
+    wie_backend::probe::disarm();
     *collecting() = false;
 
     // Closed regardless of whether the filter goes back, for the same reason
@@ -473,6 +494,22 @@ mod tests {
         let log = snapshot();
         assert!(log.contains("inside"), "the window's own lines are missing");
         assert!(!log.contains("before"), "the window kept what came before it");
+
+        reset();
+    }
+
+    #[test]
+    fn a_window_records_where_the_code_went_without_being_asked() {
+        let _guard = ONE_AT_A_TIME.lock().unwrap_or_else(|x| x.into_inner());
+        wie_backend::probe::disarm();
+
+        let _ = start_collecting();
+        // Guessing an address in advance is what has been costing builds, so a
+        // window arms the trace by itself.
+        assert!(wie_backend::probe::is_armed(), "a window should trace without being told where");
+
+        let _ = stop_collecting();
+        assert!(!wie_backend::probe::is_armed(), "the trace should end with the window");
 
         reset();
     }

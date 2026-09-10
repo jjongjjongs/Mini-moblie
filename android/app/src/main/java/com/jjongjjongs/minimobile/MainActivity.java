@@ -736,47 +736,6 @@ public final class MainActivity extends Activity {
         });
     }
 
-    /**
-     * Lets the person say what the probe should watch while the app runs.
-     *
-     * <p>The log filter covers everything the emulator says about itself; this
-     * covers what it does not say - where the emulated code went and what it
-     * wrote - and taking it as text here is what stops a question about a new
-     * title, or a new address in an old one, from needing its own build.
-     */
-    private void showProbeWatchDialog() {
-        EditText input = new EditText(this);
-        input.setText(NativeBridge.nativeProbeWatches());
-        input.setSingleLine(true);
-        input.setSelection(input.getText().length());
-
-        int pad = dp(16);
-        FrameLayout wrap = new FrameLayout(this);
-        wrap.setPadding(pad, pad / 2, pad, 0);
-        wrap.addView(input);
-
-        new AlertDialog.Builder(this)
-                .setTitle("프로브 감시")
-                .setMessage("게임 코드의 어느 주소를 지켜볼지 정합니다.\n"
-                        + "pc:3a376 - 그 주소에 닿으면 분기 추적\n"
-                        + "pc:3a376/50000 - 분기 수 지정\n"
-                        + "w:1518700 - 그 주소에 쓰는 순간을 기록\n"
-                        + "쉼표로 여러 개, 비우면 모두 해제")
-                .setView(wrap)
-                .setPositiveButton("적용", (dialog, which) -> {
-                    String error = NativeBridge.nativeSetProbeWatches(input.getText().toString().trim());
-                    Toast.makeText(this,
-                            error.isEmpty() ? "감시 적용됨: " + NativeBridge.nativeProbeWatches() : "감시 오류: " + error,
-                            Toast.LENGTH_LONG).show();
-                })
-                .setNeutralButton("모두 해제", (dialog, which) -> {
-                    NativeBridge.nativeSetProbeWatches("");
-                    Toast.makeText(this, "감시 해제됨", Toast.LENGTH_SHORT).show();
-                })
-                .setNegativeButton("취소", null)
-                .show();
-    }
-
     /** Dims whichever of the two buttons is not the one to press next. */
     private void showCollectState() {
         if (collectButton == null || stopButton == null) {
@@ -789,39 +748,57 @@ public final class MainActivity extends Activity {
     }
 
     /**
-     * Lets the person change the {@code tracing} log filter while the app runs,
-     * so capturing a module's debug/trace detail no longer needs a new APK.
-     * Reached by long-pressing the log button.
+     * The settings a collection window does not decide for itself.
+     *
+     * <p>Pressing 수집 needs no setup: the window turns every log area on and
+     * records the branches the emulated code takes, which is what a question
+     * about an unfamiliar title needs and what used to be guessed in advance
+     * and compiled in. Two things are left. A write watch needs an address,
+     * because recording every store is the one thing a window cannot afford.
+     * And the filter here is the one the always-on capture runs under between
+     * windows - the one a crash auto-save is written from.
      */
-    private void showLogFilterDialog() {
-        EditText input = new EditText(this);
-        input.setText(NativeBridge.nativeLogFilter());
-        input.setSingleLine(true);
-        input.setSelection(input.getText().length());
-
+    private void showDiagnosticsDialog() {
+        LinearLayout fields = new LinearLayout(this);
+        fields.setOrientation(LinearLayout.VERTICAL);
         int pad = dp(16);
-        FrameLayout wrap = new FrameLayout(this);
-        wrap.setPadding(pad, pad / 2, pad, 0);
-        wrap.addView(input);
+        fields.setPadding(pad, pad / 2, pad, 0);
+
+        TextView watchLabel = new TextView(this);
+        watchLabel.setText("프로브 감시  (w:1518700 - 그 주소에 쓰는 순간을 기록, 쉼표로 여러 개)");
+        watchLabel.setTextSize(12f);
+        fields.addView(watchLabel);
+
+        EditText watches = new EditText(this);
+        watches.setText(NativeBridge.nativeProbeWatches());
+        watches.setSingleLine(true);
+        fields.addView(watches);
+
+        TextView filterLabel = new TextView(this);
+        filterLabel.setText("\n기본 로그 필터  (수집 중에는 쓰이지 않음)");
+        filterLabel.setTextSize(12f);
+        fields.addView(filterLabel);
+
+        EditText filter = new EditText(this);
+        filter.setText(NativeBridge.nativeLogFilter());
+        filter.setSingleLine(true);
+        fields.addView(filter);
 
         new AlertDialog.Builder(this)
-                .setTitle("로그 필터")
-                .setMessage("RUST_LOG 형식으로 무엇을 로그에 담을지 정합니다.\n예: wie_lgt=trace,wie_wipi_c=debug")
-                .setView(wrap)
+                .setTitle("진단 설정")
+                .setView(fields)
                 .setPositiveButton("적용", (dialog, which) -> {
-                    String directive = input.getText().toString().trim();
-                    String error = NativeBridge.nativeSetLogFilter(directive);
-                    Toast.makeText(this,
-                            error.isEmpty() ? "로그 필터 적용됨" : "필터 오류: " + error,
-                            Toast.LENGTH_LONG).show();
+                    String watchError = NativeBridge.nativeSetProbeWatches(watches.getText().toString().trim());
+                    String filterError = NativeBridge.nativeSetLogFilter(filter.getText().toString().trim());
+
+                    String problem = !watchError.isEmpty() ? "감시 오류: " + watchError
+                            : !filterError.isEmpty() ? "필터 오류: " + filterError : "";
+                    Toast.makeText(this, problem.isEmpty() ? "적용됨" : problem, Toast.LENGTH_LONG).show();
                 })
                 .setNeutralButton("기본값", (dialog, which) -> {
-                    // An empty directive tells the native side to restore its
-                    // built-in default, so the value lives in one place.
-                    String error = NativeBridge.nativeSetLogFilter("");
-                    Toast.makeText(this,
-                            error.isEmpty() ? "기본 로그 필터로 되돌림" : "필터 오류: " + error,
-                            Toast.LENGTH_LONG).show();
+                    NativeBridge.nativeSetProbeWatches("");
+                    NativeBridge.nativeSetLogFilter("");
+                    Toast.makeText(this, "기본값으로 되돌림", Toast.LENGTH_SHORT).show();
                 })
                 .setNegativeButton("취소", null)
                 .show();
@@ -1167,9 +1144,13 @@ public final class MainActivity extends Activity {
         // build with its own instrumentation in it.
         collectButton = navyButton("수집");
         collectButton.setOnClickListener(v -> startLogCollect());
-        // Long-press to change what the log captures, without a rebuild.
+        // Long-press for the rest of it. Collecting itself needs nothing set:
+        // a window records every area and where the code went. What is left
+        // here is the one question a window cannot answer by itself - which
+        // address to report writes to - and the filter the always-on capture
+        // runs under between windows.
         collectButton.setOnLongClickListener(v -> {
-            showLogFilterDialog();
+            showDiagnosticsDialog();
             return true;
         });
         LinearLayout.LayoutParams collectParams = new LinearLayout.LayoutParams(dp(48), dp(34));
@@ -1178,11 +1159,6 @@ public final class MainActivity extends Activity {
 
         stopButton = navyButton("종료");
         stopButton.setOnClickListener(v -> stopLogCollectAndSave());
-        // Long-press to say what the probe should watch, without a rebuild.
-        stopButton.setOnLongClickListener(v -> {
-            showProbeWatchDialog();
-            return true;
-        });
         LinearLayout.LayoutParams stopParams = new LinearLayout.LayoutParams(dp(48), dp(34));
         stopParams.rightMargin = dp(8);
         bar.addView(stopButton, stopParams);
