@@ -33,10 +33,10 @@ use super::{
         compiled_class, get_java_interface_method,
         handles::JavaHandles,
         interface::{
-            ArrayClassInfo, ArrayClasses, DISPATCH_TABLE_SLOTS, JAVA_DIAG_SVC_BASE, JAVA_INTERFACE_METHOD_SVC_BASE, JAVA_METHOD_SVC_LIMIT,
-            JAVA_RESERVED_SLOT_SVC_BASE, JAVA_STATIC_METHOD_SVC_BASE, JAVA_UNKNOWN_SLOT_SVC_BASE, JAVA_VIRTUAL_METHOD_SVC_BASE, REFERENCE_SIZE,
-            bridge_class_chain, java_load_classes, java_resolve_one, primitive_element_size, resolve_main_class_arguments, run_main_class,
-            vm_get_constant_string, vm_instantiate_array,
+            ArrayClassInfo, ArrayClasses, CLASS_DATA_STATICS_AT, DISPATCH_TABLE_SLOTS, JAVA_DIAG_SVC_BASE, JAVA_INTERFACE_METHOD_SVC_BASE,
+            JAVA_METHOD_SVC_LIMIT, JAVA_RESERVED_SLOT_SVC_BASE, JAVA_STATIC_METHOD_SVC_BASE, JAVA_UNKNOWN_SLOT_SVC_BASE,
+            JAVA_VIRTUAL_METHOD_SVC_BASE, REFERENCE_SIZE, bridge_class_chain, java_load_classes, java_resolve_one, primitive_element_size,
+            resolve_main_class_arguments, run_main_class, vm_get_constant_string, vm_instantiate_array,
         },
         method_bridge::{self, JavaReturn, ResolvedMember},
         platform_metadata::platform_class,
@@ -1146,6 +1146,8 @@ async fn handle_init_svc(core: &mut ArmCore, context: &mut InitSvcContext, id: S
             )
             .await?;
 
+            seed_platform_statics(core, context, &table).await?;
+
             // `vm_resolve_lists` resolves the references made to the imported
             // platform classes, whose ranges the class table declares. The
             // application's own classes append their own virtual-method
@@ -1788,6 +1790,7 @@ async fn handle_init_svc(core: &mut ArmCore, context: &mut InitSvcContext, id: S
                 {
                     Ok(table) => {
                         tracing::warn!("LGT slot 0x14: loaded {} class(es) as the class table", table.classes.len());
+                        seed_platform_statics(core, context, &table).await?;
                         *context.imported_classes.lock() = Some(table);
                     }
                     Err(error) => tracing::warn!("LGT slot 0x14: class-table load failed: {error:?}"),
@@ -3129,6 +3132,63 @@ fn synthetic_platform_vtable(core: &mut ArmCore, context: &InitSvcContext, class
     context.java_handles.set_dispatch_table(class_name, vtable);
 
     Ok(vtable)
+}
+
+/// Fills in the static fields a platform class is born with.
+///
+/// Compiled code reads a platform class's statics straight out of its class
+/// data block - `[class_object + 8] + 20 + slot * 4` - so a field the platform
+/// hands over already set has to be written there. Nothing else does: the
+/// JVM-side class has its own `out` and `err`, and they never crossed into the
+/// guest's view of the same class.
+///
+/// 훼밀리마트타이쿤 is the title that showed it. Its loading routine prints as
+/// it goes; `System.out` read back as zero, and `0x71430` threw a null pointer
+/// exception through the middle of the load. The title catches it and starts
+/// the load again, and again - a retry loop that never finishes loading and
+/// never gives the thread up, which is why the screen stayed on the publisher's
+/// splash.
+///
+/// Only `java/lang/System` has such fields among the classes modelled here. The
+/// loop is over each class's own field table, so a class that gains one is
+/// covered by the metadata rather than by another branch here.
+async fn seed_platform_statics(core: &mut ArmCore, context: &mut InitSvcContext, table: &ClassTable) -> Result<()> {
+    /// `ACC_STATIC`, as the field table records it.
+    const STATIC: u32 = 0x8;
+
+    for (index, class) in table.classes.iter().enumerate() {
+        let Some(platform) = platform_class(&class.name) else { continue };
+        let Some(&class_object) = table.class_objects.get(index) else { continue };
+
+        let data: u32 = read_generic(core, class_object + 8)?;
+
+        // Only the reference-typed ones: a static `int` is a value the class's
+        // own initialiser writes, not a handle to hand over, and reading one as
+        // an object is not a question the JVM answers.
+        let seedable = platform
+            .fields
+            .iter()
+            .filter(|field| field.flags & STATIC != 0 && matches!(field.descriptor.as_bytes().first(), Some(b'L' | b'[')));
+
+        for field in seedable {
+            let value = match context.jvm.get_static_field(&class.name, field.name, field.descriptor).await {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::debug!("{}.{} is not there to seed: {error:?}", class.name, field.name);
+                    continue;
+                }
+            };
+
+            let Some(value) = value else { continue };
+            let handle = context.java_handles.address_of(value)?;
+
+            write_generic(core, data + CLASS_DATA_STATICS_AT + field.slot * 4, handle)?;
+
+            tracing::debug!("seeded {}.{} (slot {}) with {handle:#x}", class.name, field.name, field.slot);
+        }
+    }
+
+    Ok(())
 }
 
 fn class_identity_name(context: &InitSvcContext, root: u32) -> Option<String> {

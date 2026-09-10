@@ -403,6 +403,33 @@ pub async fn java_load_classes(
     Ok(table)
 }
 
+/// Where a class data block's static words start, past its header. The same
+/// offset `vm_activate_class` lays out, and what compiled code adds to
+/// `[class_object + 8]` to reach a static field.
+pub const CLASS_DATA_STATICS_AT: u32 = 20;
+
+/// How many static words a platform class's data block needs.
+///
+/// Read off the class's own field table so a class that gains a static is
+/// covered by naming it there; zero for an application class, whose statics
+/// come from its own activation instead.
+fn platform_static_slots(name: &str) -> u32 {
+    /// `ACC_STATIC`, as the field table records it.
+    const STATIC: u32 = 0x8;
+
+    platform_class(name)
+        .map(|class| {
+            class
+                .fields
+                .iter()
+                .filter(|field| field.flags & STATIC != 0)
+                .map(|field| field.slot + 1)
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0)
+}
+
 /// Builds, per class, the dispatch table an instance points at and the token
 /// its first reserved static row hands back.
 ///
@@ -472,8 +499,16 @@ fn build_dispatch_tables(core: &mut ArmCore, handles: &JavaHandles, table: &mut 
         let root = table.class_roots[index as usize];
         let vtable = table.vtables[index as usize];
 
-        let data = Allocator::alloc(core, 12)?;
-        core.write_bytes(data, &[0; 12])?;
+        // The block is also where the class's statics live: compiled code reads
+        // one as `[class_object + 8] + CLASS_DATA_STATICS_AT + slot * 4`, the
+        // same shape `vm_activate_class` allocates. Twelve bytes was short of
+        // even the header, so every such read landed outside the allocation -
+        // 훼밀리마트타이쿤 read `System.out` from there and got a zero.
+        let statics = platform_static_slots(&table.classes[index as usize].name);
+        let data_size = CLASS_DATA_STATICS_AT + statics * 4;
+
+        let data = Allocator::alloc(core, data_size)?;
+        core.write_bytes(data, &vec![0; data_size as usize])?;
         write_generic(core, data + 8, root)?;
 
         let class_object = Allocator::alloc(core, 12)?;
