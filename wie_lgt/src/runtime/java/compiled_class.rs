@@ -27,6 +27,7 @@ use super::{
     app_classes::{AppClass, AppMember},
     class_table::{is_wide, split_descriptor},
     handles::JavaHandles,
+    method_bridge::{materialize_primitive_array_result, store_primitive_array_from_guest},
 };
 
 #[derive(Clone)]
@@ -98,7 +99,19 @@ impl MethodBody<JavaError, CompiledContext> for CompiledMethod {
         };
 
         let mut words = Vec::with_capacity(args.len() + 1);
+        let mut arrays = Vec::new();
         for value in args.into_vec() {
+            // An array argument the guest never allocated - a JVM array the
+            // platform made, or one a bridged call copied - has no guest block
+            // behind its handle, and the compiled code reads its length off
+            // that block for every bounds check it makes. Mirror it in before
+            // the call and read it back after: a method handed an array fills
+            // it rather than returning it.
+            let array = match &value {
+                JavaValue::Object(Some(instance)) if instance.class_definition().name().starts_with('[') => true,
+                _ => false,
+            };
+
             let Some(word) = Self::to_word(&context.handles, value) else {
                 return Err(jvm
                     .exception(
@@ -107,6 +120,21 @@ impl MethodBody<JavaError, CompiledContext> for CompiledMethod {
                     )
                     .await);
             };
+
+            if array && let Some(handle) = word.first().copied() {
+                match materialize_primitive_array_result(jvm, &context.handles, handle).await {
+                    Ok(Some(mirrored)) => arrays.push(mirrored),
+                    Ok(None) => {}
+                    Err(error) => {
+                        return Err(jvm
+                            .exception(
+                                "net/wie/WieError",
+                                &format!("Cannot mirror an array for compiled {}.{}: {error}", self.class_name, self.name),
+                            )
+                            .await);
+                    }
+                }
+            }
 
             words.extend(word);
         }
@@ -125,6 +153,21 @@ impl MethodBody<JavaError, CompiledContext> for CompiledMethod {
         let frame = context.save_points.enter_frame(&context.core);
         let outcome = context.core.run_function(self.entry, &words).await;
         context.save_points.leave_frame(&mut context.core, frame);
+
+        // Whatever the call wrote into a mirrored array is in the guest block
+        // and nowhere else. Read it back however the call ended: a method that
+        // threw part way through still filled what it filled, and the caller's
+        // catch is entitled to see it.
+        for array in &arrays {
+            if let Err(error) = store_primitive_array_from_guest(jvm, &context.handles, array).await {
+                return Err(jvm
+                    .exception(
+                        "net/wie/WieError",
+                        &format!("Cannot read an array back from compiled {}.{}: {error}", self.class_name, self.name),
+                    )
+                    .await);
+            }
+        }
 
         let result: u32 = match outcome {
             Ok(result) => result,

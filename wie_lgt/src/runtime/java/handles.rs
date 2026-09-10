@@ -860,11 +860,11 @@ mod tests {
     use alloc::collections::BTreeSet;
 
     use wie_core_arm::{Allocator, ArmCore};
-    use wie_util::{read_generic, write_generic};
+    use wie_util::{ByteWrite, read_generic, write_generic};
 
     use crate::runtime::savepoint::SavePointState;
 
-    use super::{INSTANCE_FIELDS_OFFSET, JavaHandles};
+    use super::{ARRAY_HEADER_SIZE, INSTANCE_FIELDS_OFFSET, JavaHandles};
 
     /// A save point is a jmp_buf a longjmp will restore, so a handle sitting in
     /// its block is still a live reference - even though nothing else names it.
@@ -985,6 +985,38 @@ mod tests {
         handles.materialize_array_block(handle, 3, &[4, 0, 5, 0, 6, 0]).unwrap();
         assert_eq!(read_generic::<u32, _>(&core, handle + INSTANCE_FIELDS_OFFSET).unwrap(), array_block);
         assert_eq!(handles.read_char_array(handle).unwrap(), [4u16, 5, 6]);
+    }
+
+    /// What tells a bridge crossing whether the compiled code filled an array
+    /// it was handed: the block reads back exactly as it was mirrored when the
+    /// call left it alone, and differs the moment the guest writes a byte.
+    ///
+    /// A compiled method often fills its array through a platform call instead -
+    /// `System.arraycopy` into it - which reaches the JVM array and leaves the
+    /// block untouched, and copying an untouched block back over the JVM array
+    /// would undo exactly that. So the comparison has to be exact in both
+    /// directions.
+    #[test]
+    fn a_mirrored_block_reads_back_unchanged_until_the_guest_writes_it() {
+        let mut core = ArmCore::new(false, None).unwrap();
+        Allocator::init(&mut core).unwrap();
+
+        let handles = JavaHandles::new(core.clone());
+        let handle = handles.allocate_instance(0).unwrap();
+
+        let mirrored = [0x0eu8, 0x00, 0x5b, 0xc4, 0xc3, 0xb7];
+        handles.materialize_array_block(handle, mirrored.len() as u32, &mirrored).unwrap();
+
+        assert_eq!(handles.read_array_bytes(handle, 1).unwrap(), mirrored);
+
+        // One byte written where the compiled code would write it is enough to
+        // tell the two cases apart.
+        let block: u32 = read_generic(&core, handle + INSTANCE_FIELDS_OFFSET).unwrap();
+        core.write_bytes(block + ARRAY_HEADER_SIZE + 2, &[0xff]).unwrap();
+
+        let after = handles.read_array_bytes(handle, 1).unwrap();
+        assert_ne!(after, mirrored);
+        assert_eq!(after, [0x0e, 0x00, 0xff, 0xc4, 0xc3, 0xb7]);
     }
 
     #[test]

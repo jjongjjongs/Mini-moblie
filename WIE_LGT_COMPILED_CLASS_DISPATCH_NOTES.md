@@ -123,3 +123,100 @@ java.lang.NullPointerException: buf is null
 | 디스패치 브리지만 | `read()`는 되지만 null 은 그대로 → **패닉** |
 | + null 검사 | NPE 는 나지만 fatal 로 바뀜 → `r.run` 스레드 사망, 0 프레임 |
 | + 예외 라우팅 | 게임이 NPE 를 잡고 진행 — 타이틀 화면 → 게임플레이 |
+
+---
+
+# 컴파일된 메서드에 배열을 넘길 때
+
+## 문제
+
+`f.read(byte[], int, int)`이 브리지되자마자 `IndexOutOfBoundsException`이
+났다. 놈3의 `GameCanvas.loadMenu()`가 그것을 잡고, 메뉴 233줄이 전부 빈
+문자열이 된다.
+
+```
+Calling compiled f.read([BII)I at 0x1383d
+→ java.lang.IndexOutOfBoundsException
+GameCanvas.loadMenu() : java.lang.IndexOutOfBoundsException
+```
+
+원인은 로그 바로 윗줄에 있었다.
+
+```
+[B declares no dispatch table; using the fallback
+```
+
+`JavaHandles::insert`가 붙여준 것은 **일반 인스턴스 핸들**이다. `+0x08`이
+가리키는 것은 플랫폼 필드 한 줄에 한 워드짜리 필드 블록이지, 배열 블록이
+아니다. 그런데 `allocate_array`의 주석이 말하듯 —
+
+> The count is read straight off that block for every bounds check the
+> compiled code makes — `ldr r3, [r0]; cmp index, r3`
+
+— 컴파일된 코드는 배열 길이를 그 블록의 첫 워드에서 읽는다. 필드 블록의
+첫 워드는 길이가 아니므로 모든 접근이 범위를 벗어난다.
+
+리턴값에는 이미 처방이 있었다 (`materialize_primitive_array_result`).
+**인자에는 없었다.** 이제 컴파일된 호출 직전에 원시 배열 인자를 게스트
+블록으로 미러링한다.
+
+## 그런데 되받아쓰면 안 된다
+
+미러링만 하면 `IndexOutOfBounds`는 사라지지만 읽어온 바이트가 전부 0이 된다.
+컴파일된 `read`가 버퍼를 채우는 방법이 그 이유다.
+
+```
+System.arraycopy(this.buf, pos, b, off, len)
+```
+
+`b`는 이미 JVM 배열로 등록되어 있으므로 (`handles.get`이 찾는다) arraycopy는
+**JVM 배열 자체**에 쓴다. 게스트 블록은 건드리지 않는다. 호출이 끝나고
+게스트 블록(그대로 0)을 JVM 배열에 되받아쓰면, 방금 arraycopy가 한 일을
+정확히 지운다.
+
+그래서 되받아쓰기는 **게스트가 실제로 쓴 경우에만** 한다. 미러링할 때 넣은
+바이트를 그대로 들고 있다가 호출 후 블록과 비교해서, 같으면 JVM 배열이
+가진 것을 그대로 둔다.
+
+| | 컴파일 코드가 직접 씀 | arraycopy 로 채움 |
+|---|---|---|
+| 게스트 블록 | 새 데이터 | 미러링한 그대로 |
+| JVM 배열 | 낡음 | 새 데이터 |
+| 되받아쓰기 | 한다 | **안 한다** |
+
+## 놈3에서 달라진 것
+
+`m.stxt`(233줄, 6854바이트)가 제대로 읽힌다. 길이는 원래도 맞았다 —
+`readByte()`로 읽는 u16 길이 접두사는 한 바이트씩 오는 경로라 무사했고,
+본문만 `read(byte[],off,len)`으로 와서 0이 되었다. 그래서 게임은 길이만
+맞는 NUL 문자열 233개를 들고 있었다.
+
+```
+String.trim this="\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"   ← 고치기 전
+String.trim this="[컬러스킨 구입]"                    ← 고친 뒤
+```
+
+화면으로는 타이틀의 GAMEVIL 로고, 메뉴 항목, `[조작방법]` 본문이 돌아왔다.
+
+## 아직 남은 것
+
+`[조작방법]` 화면에서 어떤 키를 눌러도 넘어가지 않는다. 키는 도착한다 —
+`r.keyNotify(1, -5)`가 불리고 `true`를 돌려준다 — 이전 화면들(이용안내 →
+타이틀 → 메뉴 → 조작방법)은 전부 같은 키로 넘어갔다. 키패드의 모든 키를
+차례로, 한 번에 300틱씩 눌러도 화면이 한 픽셀도 바뀌지 않는다. 게임 스레드는
+`Thread.sleep(100)` 루프를 돌며 다시 그리기만 한다.
+
+## 화면 아래 24행
+
+게임이 스스로 비워 둔 자리다. 시작할 때 이렇게 묻는다.
+
+```
+AnnunciatorComponent.getHeight() -> 24
+Card.getHeight()
+AnnunciatorComponent.getHeight() -> 24
+```
+
+그리고 320 − 24 = 296 을 자기 화면 높이로 삼아 그 안에 배치한다 —
+`[조작방법]` 상자는 y 28..268, 296 안에서 위아래 28씩. 240x320 프레임버퍼의
+남는 24행은 실기라면 핸드셋의 상태 표시줄이 차지하는 자리이고, 우리는 그것을
+그리지 않으니 검게 남는다.

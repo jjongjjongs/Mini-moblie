@@ -599,6 +599,11 @@ fn run_scripted_over(
     let frame_dump = std::env::var("WIE_FDUMP_DIR").ok();
     let frame_dump_every: u32 = std::env::var("WIE_FDUMP_EVERY").ok().and_then(|x| x.parse().ok()).unwrap_or(25);
 
+    // How long each scripted press is held. A title that polls a key-state flag
+    // once a game loop rather than acting on the event can miss a press shorter
+    // than its own loop, so the hold has to be settable.
+    let hold: u32 = std::env::var("WIE_HOLD").ok().and_then(|x| x.parse().ok()).unwrap_or(20);
+
     let mut ticks = 0u32;
     while !exited.load(Ordering::SeqCst) && ticks < ticks_limit {
         if ticks % 40 == 0 {
@@ -616,7 +621,7 @@ fn run_scripted_over(
                 eprintln!("[{label}] step {step}: press {key:?} at tick {ticks}");
                 emulator.handle_event(Event::Keydown(key));
             }
-            if ticks == at + 20 {
+            if ticks == at + hold {
                 emulator.handle_event(Event::Keyup(key));
             }
             if let Some(dir) = &shot_dir {

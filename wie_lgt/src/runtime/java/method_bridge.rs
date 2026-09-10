@@ -740,18 +740,18 @@ fn marshal_return(handles: &JavaHandles, value: JavaValue) -> Result<JavaReturn>
 /// compiled code reading its elements directly (as the LGT text word-wrapper
 /// does with `String.toCharArray()`) would see an empty array. Copy the JVM
 /// contents into a proper guest block so a direct read matches the JVM side.
-async fn materialize_primitive_array_result(jvm: &Jvm, handles: &JavaHandles, handle: u32) -> Result<()> {
+pub(super) async fn materialize_primitive_array_result(jvm: &Jvm, handles: &JavaHandles, handle: u32) -> Result<Option<MirroredArray>> {
     if handle == 0 {
-        return Ok(());
+        return Ok(None);
     }
 
     let Some(instance) = handles.get(handle) else {
-        return Ok(());
+        return Ok(None);
     };
 
     let name = instance.class_definition().name();
     let Some(element) = name.strip_prefix('[') else {
-        return Ok(());
+        return Ok(None);
     };
 
     let length = match jvm.array_length(&instance).await {
@@ -781,10 +781,88 @@ async fn materialize_primitive_array_result(jvm: &Jvm, handles: &JavaHandles, ha
         b'F' => load_le!(f32, |value: &f32| value.to_le_bytes()),
         b'J' => load_le!(i64, |value: &i64| value.to_le_bytes()),
         b'D' => load_le!(f64, |value: &f64| value.to_le_bytes()),
-        _ => return Ok(()),
+        _ => return Ok(None),
     };
 
-    handles.materialize_array_block(handle, length, &bytes)
+    handles.materialize_array_block(handle, length, &bytes)?;
+
+    Ok(Some(MirroredArray {
+        handle,
+        element: element.as_bytes()[0],
+        count: length as usize,
+        mirrored: bytes,
+    }))
+}
+
+/// A JVM array whose elements were copied into a guest block, and the copy that
+/// was written there.
+pub(super) struct MirroredArray {
+    pub handle: u32,
+    /// The element's JVM descriptor byte.
+    pub element: u8,
+    pub count: usize,
+    /// The bytes [`materialize_primitive_array_result`] laid down. What the
+    /// guest block holds afterwards is the guest's own doing.
+    mirrored: Vec<u8>,
+}
+
+/// The reverse: copies a mirrored array's guest elements back into the JVM
+/// array they were mirrored from, if the guest wrote them.
+///
+/// A compiled method handed an array does not return it - it fills it, the way
+/// `InputStream.read(byte[], int, int)` does - so what the call wrote lands in
+/// the guest block and nowhere else, and without this the JVM array the caller
+/// holds still reads as it did before the call.
+///
+/// The guard matters as much as the copy. A compiled method often fills its
+/// array by calling back into the platform - `System.arraycopy` into it is how
+/// 놈3's stream reads - and that call reaches the JVM array itself, leaving the
+/// guest block untouched. Writing an unchanged block back over it would undo
+/// exactly the work the call did, so a block the guest did not touch is left
+/// alone and the JVM array keeps what the platform put in it.
+pub(super) async fn store_primitive_array_from_guest(jvm: &Jvm, handles: &JavaHandles, array: &MirroredArray) -> Result<()> {
+    let MirroredArray {
+        handle,
+        element,
+        count,
+        mirrored,
+    } = array;
+
+    let Some(mut instance) = handles.get(*handle) else {
+        return Ok(());
+    };
+
+    macro_rules! store_le {
+        ($ty:ty, $width:literal) => {{
+            let bytes = handles.read_array_bytes(*handle, $width)?;
+            if bytes == *mirrored {
+                return Ok(());
+            }
+
+            let values: Vec<$ty> = bytes
+                .chunks_exact($width)
+                .take(*count)
+                .map(|chunk| <$ty>::from_le_bytes(chunk.try_into().unwrap()))
+                .collect();
+
+            if let Err(error) = jvm.store_array(&mut instance, 0, values).await {
+                return Err(JvmSupport::to_wie_err(jvm, error).await);
+            }
+        }};
+    }
+
+    match element {
+        b'C' => store_le!(u16, 2),
+        b'B' | b'Z' => store_le!(i8, 1),
+        b'S' => store_le!(i16, 2),
+        b'I' => store_le!(i32, 4),
+        b'F' => store_le!(f32, 4),
+        b'J' => store_le!(i64, 8),
+        b'D' => store_le!(f64, 8),
+        _ => return Ok(()),
+    }
+
+    Ok(())
 }
 
 /// Invokes an imported method and returns the word to put in `r0`.
@@ -944,7 +1022,7 @@ pub async fn invoke(core: &mut ArmCore, jvm: &Jvm, handles: &JavaHandles, member
             }
 
             let result = marshal_return(handles, value)?;
-            materialize_primitive_array_result(jvm, handles, result.low).await?;
+            let _ = materialize_primitive_array_result(jvm, handles, result.low).await?;
 
             Ok(result)
         }
