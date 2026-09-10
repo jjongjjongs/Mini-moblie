@@ -110,23 +110,38 @@ pub fn drained() {
     arm(&label, count);
 }
 
-/// A program counter to start a trace at, or zero for none. See [`watch`].
-static WATCH_PC: AtomicU32 = AtomicU32::new(0);
+/// Program counters a trace can be started at, or zero for a free slot. Kept as
+/// plain atomics because the core reads them once per instruction; everything
+/// else about a watch lives in [`WATCHES`], which is only touched on a hit.
+static WATCH_PCS: [AtomicU32; WATCH_SLOTS] = [const { AtomicU32::new(0) }; WATCH_SLOTS];
 
-/// How many times [`WATCH_PC`] has been reached.
-static WATCH_HITS: AtomicU32 = AtomicU32::new(0);
+/// How many of [`WATCH_PCS`] are set. The one load the core makes when no trace
+/// is running.
+static WATCH_LIVE: AtomicU32 = AtomicU32::new(0);
 
-/// Branches to record from [`WATCH_PC`].
-static WATCH_BRANCHES: AtomicU32 = AtomicU32::new(0);
+/// What each watched address is and how much to record from it.
+static WATCHES: Mutex<[Option<Watch>; WATCH_SLOTS]> = Mutex::new([const { None }; WATCH_SLOTS]);
 
-/// What [`WATCH_PC`] is, for the log.
-static WATCH_LABEL: Mutex<Option<String>> = Mutex::new(None);
+/// Addresses that can be watched at once.
+///
+/// A question usually needs two: the routine suspected of bailing, and the one
+/// that should have set up what it bails on. More than a handful and the
+/// per-instruction scan stops being free.
+const WATCH_SLOTS: usize = 4;
 
 /// Times a watched address is traced from before it stops being interesting.
 ///
 /// A draw routine runs every frame. The first few passes say what the rest
 /// would, and a trace per frame would bury the log.
 const WATCH_TRACE_LIMIT: u32 = 3;
+
+/// One watched address.
+#[derive(Clone)]
+struct Watch {
+    label: String,
+    branches: u32,
+    hits: u32,
+}
 
 /// Starts a trace whenever the core reaches `pc`.
 ///
@@ -137,48 +152,74 @@ const WATCH_TRACE_LIMIT: u32 = 3;
 ///
 /// **A watch that never fires is itself the answer.** A routine suspected of
 /// bailing early may not be reached at all, and the two look identical from
-/// outside; a log with no trace in it says which.
+/// outside; a log with no trace in it says which. That is why these come in
+/// twos - one address alone cannot tell "not reached" from "reached and
+/// declined somewhere earlier".
 ///
 /// Compiled blocks are entered at their first instruction, so an address that
-/// starts a function is seen whichever engine is running. One in the middle of
-/// a block is only seen by the interpreter.
+/// starts a function or is a branch target is seen whichever engine is running.
+/// One in the middle of a straight run is only seen by the interpreter.
 pub fn watch(pc: u32, label: &str, branches: u32) {
-    WATCH_PC.store(pc, Ordering::Relaxed);
-    WATCH_HITS.store(0, Ordering::Relaxed);
-    WATCH_BRANCHES.store(branches, Ordering::Relaxed);
-    *WATCH_LABEL.lock() = Some(String::from(label));
+    let mut watches = WATCHES.lock();
+
+    let Some(slot) = watches.iter().position(Option::is_none) else {
+        tracing::warn!("probe: no room to watch {pc:#x} for {label}");
+        return;
+    };
+
+    watches[slot] = Some(Watch {
+        label: String::from(label),
+        branches,
+        hits: 0,
+    });
+    drop(watches);
+
+    WATCH_PCS[slot].store(pc, Ordering::Relaxed);
+    WATCH_LIVE.fetch_add(1, Ordering::Relaxed);
 
     tracing::info!("probe: watching {pc:#x} for {label}");
 }
 
-/// Whether an address is being watched. One relaxed load, called per
+/// Whether any address is being watched. One relaxed load, called per
 /// instruction while no trace is running.
 #[inline(always)]
 pub fn is_watching() -> bool {
-    WATCH_PC.load(Ordering::Relaxed) != 0
+    WATCH_LIVE.load(Ordering::Relaxed) != 0
 }
 
-/// Starts a trace if `pc` is the watched address.
+/// Starts a trace if `pc` is one of the watched addresses.
 ///
 /// Call once per instruction under [`is_watching`], and only while no trace is
-/// running - a trace that reaches the address again should carry on rather than
-/// restart.
+/// running - a trace that reaches a watched address again should carry on
+/// rather than restart.
 pub fn reached(pc: u32) {
-    if WATCH_PC.load(Ordering::Relaxed) != pc {
+    let Some(slot) = WATCH_PCS.iter().position(|watched| watched.load(Ordering::Relaxed) == pc) else {
+        return;
+    };
+
+    let mut watches = WATCHES.lock();
+    let Some(watch) = watches[slot].as_mut() else {
+        return;
+    };
+
+    watch.hits += 1;
+    let (hits, label, branches) = (watch.hits, watch.label.clone(), watch.branches);
+
+    if hits > WATCH_TRACE_LIMIT {
+        // Reached again, and said what it had to say. Give the slot up, so the
+        // per-instruction scan shortens and eventually costs nothing.
+        watches[slot] = None;
+        drop(watches);
+
+        WATCH_PCS[slot].store(0, Ordering::Relaxed);
+        WATCH_LIVE.fetch_sub(1, Ordering::Relaxed);
+
+        tracing::info!("probe: {pc:#x} was reached {hits} times; no longer watching it");
         return;
     }
+    drop(watches);
 
-    let hits = WATCH_HITS.fetch_add(1, Ordering::Relaxed);
-    if hits >= WATCH_TRACE_LIMIT {
-        // Reached again, and said what it had to say. Stop looking, so the
-        // per-instruction check goes back to costing nothing.
-        WATCH_PC.store(0, Ordering::Relaxed);
-        tracing::info!("probe: {pc:#x} was reached {} times; no longer watching", hits + 1);
-        return;
-    }
-
-    let label = WATCH_LABEL.lock().clone().unwrap_or_default();
-    arm(&alloc::format!("{label} #{}", hits + 1), WATCH_BRANCHES.load(Ordering::Relaxed));
+    arm(&alloc::format!("{label} #{hits}"), branches);
 }
 
 /// Addresses worth a trace, per title, while a question is open about one.
@@ -189,23 +230,31 @@ pub fn reached(pc: u32) {
 ///
 /// Each entry is a diagnostic, not a fix, and comes out when its question is
 /// settled.
-const WATCHED: [(&str, u32, &str, u32); 1] = [
-    // 오셔너스's CASH shop draws no grid: the composed frame shows the town map
-    // where the panel should be, so nothing drew it rather than something
-    // covering it. `0x3a364` is the routine, and it opens on a gate -
-    // `ldrb r3, [r5, #9]; cmp r3, #0; beq 0x3a730` over `0x1509f08` - that
-    // skips the whole draw. Whether it is reached, and which way that compare
-    // goes, is what a trace from here says.
-    ("0002D6C4", 0x3a364, "오셔너스 CASH 그리기", 30_000),
+const WATCHED: [(&str, u32, &str, u32); 2] = [
+    // 오셔너스's CASH panel draws nothing: the composed frame shows the town map
+    // where it should be. Both its draw (`0x3a364`) and its input handler
+    // (`0x35d6c`) open on the same gate - a byte at `0x1509f08 + 9` that says
+    // the panel is open - and a trace from the draw showed that gate closed
+    // (`3a374>3a730`, the branch taken when the byte is zero).
+    //
+    // The byte is set inside the handler, on the path it takes when the panel
+    // is *not* open: `0x35f34` matches the key that opens it and reaches
+    // `0x35f6e`, which switches on `0x1509f08 + 1` and, for one case, asks
+    // `0x47ac8` first and puts up a message instead of opening when it answers
+    // non-zero.
+    //
+    // So watch both ends. The handler says whether it runs at all and which key
+    // it saw; the open path says which case it took and what came back. Either
+    // one silent is as much of an answer as either one traced.
+    ("0002D6C4", 0x35d6c, "오셔너스 CASH 입력", 20_000),
+    ("0002D6C4", 0x35f6e, "오셔너스 CASH 열기", 20_000),
 ];
 
 /// Starts watching whatever [`WATCHED`] lists for `aid`, if anything.
 pub fn watch_for_title(aid: &str) {
-    let Some((_, pc, label, branches)) = WATCHED.iter().find(|(title, ..)| *title == aid) else {
-        return;
-    };
-
-    watch(*pc, label, *branches);
+    for (_, pc, label, branches) in WATCHED.iter().filter(|(title, ..)| *title == aid) {
+        watch(*pc, label, *branches);
+    }
 }
 
 /// Stops any trace, running or queued, and forgets what it had recorded.
@@ -217,9 +266,11 @@ pub fn disarm() {
     REMAINING.store(0, Ordering::Relaxed);
     LAST.store(0, Ordering::Relaxed);
     UNANSWERED_TRACES.store(0, Ordering::Relaxed);
-    WATCH_PC.store(0, Ordering::Relaxed);
-    WATCH_HITS.store(0, Ordering::Relaxed);
-    *WATCH_LABEL.lock() = None;
+    for pc in &WATCH_PCS {
+        pc.store(0, Ordering::Relaxed);
+    }
+    WATCH_LIVE.store(0, Ordering::Relaxed);
+    *WATCHES.lock() = [const { None }; WATCH_SLOTS];
     PENDING.lock().clear();
     *LABEL.lock() = None;
     *WHEN_DRAINED.lock() = None;
@@ -508,6 +559,49 @@ mod tests {
         assert!(!is_armed());
 
         reached(0x3a364);
+        assert!(is_armed());
+
+        disarm();
+    }
+
+    #[test]
+    fn two_addresses_can_be_watched_at_once() {
+        let _guard = ONE_AT_A_TIME.lock();
+        disarm();
+
+        // One address alone cannot tell "never reached" from "reached and
+        // declined earlier"; the pair is what answers that.
+        watch(0x35d6c, "handler", 100);
+        watch(0x35f6e, "open", 100);
+
+        reached(0x35f6e);
+        assert!(is_armed());
+        assert_eq!(LABEL.lock().clone().unwrap(), "open #1");
+
+        REMAINING.store(0, Ordering::Relaxed);
+        reached(0x35d6c);
+        assert_eq!(LABEL.lock().clone().unwrap(), "handler #1");
+
+        disarm();
+    }
+
+    #[test]
+    fn one_watched_address_giving_up_leaves_the_other_watching() {
+        let _guard = ONE_AT_A_TIME.lock();
+        disarm();
+
+        watch(0x35d6c, "handler", 100);
+        watch(0x35f6e, "open", 100);
+
+        for _ in 0..WATCH_TRACE_LIMIT + 1 {
+            REMAINING.store(0, Ordering::Relaxed);
+            reached(0x35d6c);
+        }
+
+        assert!(is_watching(), "the second address should still be watched");
+
+        REMAINING.store(0, Ordering::Relaxed);
+        reached(0x35f6e);
         assert!(is_armed());
 
         disarm();
