@@ -6754,6 +6754,86 @@ const SUDDEN_ATTACK_MEDALS: u16 = 0x3c10;
 /// Bytes in 서든어택 포켓's answer, after the length that describes them.
 const SUDDEN_ATTACK_BODY: usize = 64;
 
+/// What 놈ZERO's authentication is answered with.
+///
+/// 놈ZERO (`0002AC84`, a WIPI-C `Clet`) writes seventy-one bytes through
+/// `MC_netBillWrite` before it will start, and waits on `MC_netBillRead` for a
+/// reply that never came - the gateway had nothing shaped for it, so the title
+/// sat on its authentication screen.
+///
+/// The request declares its own length and carries what the handset is:
+///
+/// ```text
+/// [0..2]   u16 LE - 71, the frame's own length
+/// [2]      6      - the command
+/// [3]      1      - its sub-command
+/// [4..32]  the subscriber number, NUL-padded
+/// [32..48] the handset model, NUL-padded ("Emulator" here)
+/// [48..58] the platform version, NUL-padded ("1.0.0" here)
+/// [58..62] u32 LE 21873
+/// [62..64] u16 LE 1
+/// [64..66] u16 LE 96
+/// [66]     0
+/// [67..69] ff ff
+/// [69..71] u16 LE 31
+/// ```
+///
+/// **The reply's framing is settled**, read off the title's own receive at
+/// `0x44fac`: it takes a four byte header first - `0x44f98` returns that 4 -
+/// and then as many more bytes as `0x44f9c` derives from it,
+///
+/// ```asm
+/// 44f9c  ldr  r3, [r0, #0x40]
+/// 44f9e  ldr  r3, [r3]
+/// 44fa0  ldrb r0, [r3, #1]
+/// 44fa2  ldrb r2, [r3]
+/// 44fa4  lsls r0, r0, #8
+/// 44fa6  orrs r0, r2      ; the u16 at [0..2]
+/// 44fa8  subs r0, #4      ; less the header it has already
+/// ```
+///
+/// so a reply is a `u16` little-endian total length, two more header bytes, and
+/// a body - the same shape the request has.
+///
+/// **The body is not settled.** What reads it is reached through the
+/// connection's own table (`[[r6] + 0xc]`), built at run time, so the archive
+/// does not say what it wants. This answers with the command echoed and a body
+/// of zeros, which is what a granted answer looks like in every one of these
+/// protocols that has been read; the branch trace a collection window records
+/// says where that lands, and this is meant to be corrected by it rather than
+/// left as a guess.
+fn lgt_local_nomzero_response(request: &[u8]) -> Option<Vec<u8>> {
+    const FRAME: usize = 71;
+    const COMMAND: u8 = 6;
+    const SUB: u8 = 1;
+
+    if request.len() != FRAME || u16::from_le_bytes([request[0], request[1]]) as usize != FRAME {
+        return None;
+    }
+
+    if request[2] != COMMAND || request[3] != SUB {
+        return None;
+    }
+
+    let body = [0u8; NOMZERO_BODY];
+
+    let mut reply = Vec::with_capacity(NOMZERO_HEADER + body.len());
+    reply.extend_from_slice(&((NOMZERO_HEADER + body.len()) as u16).to_le_bytes());
+    reply.push(COMMAND);
+    reply.push(SUB);
+    reply.extend_from_slice(&body);
+
+    Some(reply)
+}
+
+/// Bytes of 놈ZERO's reply that come before its body: the `u16` length the
+/// title reads first, and the command pair after it.
+const NOMZERO_HEADER: usize = 4;
+
+/// Bytes of body in that reply. Provisional - see
+/// [`lgt_local_nomzero_response`].
+const NOMZERO_BODY: usize = 4;
+
 /// The answer to a billing request, whichever of these protocols it is in.
 ///
 /// Tried in order of how specific each shape is: the `0xffff`-framed message,
@@ -6792,6 +6872,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_genesis3_episode4_response(request))
         .or_else(|| lgt_local_genesis3_episode2_response(request))
         .or_else(|| lgt_local_sudden_attack_response(request))
+        .or_else(|| lgt_local_nomzero_response(request))
 }
 
 #[cfg(test)]
@@ -6859,6 +6940,54 @@ mod tests {
         // The right command in a frame that is not eighteen bytes.
         assert!(lgt_local_sudden_attack_response(&SUDDEN_ATTACK_PURCHASE_FRAME[..17]).is_none());
         assert!(lgt_local_sudden_attack_response(&SUDDEN_ATTACK_PURCHASE_FRAME[..4]).is_none());
+    }
+
+    /// The 71 bytes 놈ZERO writes before it will start, captured off its socket.
+    fn nomzero_auth() -> Vec<u8> {
+        let mut request = vec![0u8; 71];
+        request[..2].copy_from_slice(&71u16.to_le_bytes());
+        request[2] = 6;
+        request[3] = 1;
+        request[4..15].copy_from_slice(b"01041228783");
+        request[32..40].copy_from_slice(b"Emulator");
+        request[48..53].copy_from_slice(b"1.0.0");
+        request[58..62].copy_from_slice(&21873u32.to_le_bytes());
+        request[62..64].copy_from_slice(&1u16.to_le_bytes());
+        request[64..66].copy_from_slice(&96u16.to_le_bytes());
+        request[67..69].copy_from_slice(&[0xff, 0xff]);
+        request[69..71].copy_from_slice(&31u16.to_le_bytes());
+
+        request
+    }
+
+    #[test]
+    fn 놈zero_is_answered_in_the_shape_its_receive_reads() {
+        let reply = response(&nomzero_auth()).unwrap();
+
+        // `0x44f98` takes four bytes first and `0x44f9c` reads the u16 at [0..2]
+        // as the whole frame, less those four. A length that did not describe
+        // the reply would leave it waiting on bytes that never come.
+        assert_eq!(u16::from_le_bytes([reply[0], reply[1]]) as usize, reply.len());
+        assert!(reply.len() > NOMZERO_HEADER);
+
+        // Its own command back, which is what these protocols answer with.
+        assert_eq!((reply[2], reply[3]), (6, 1));
+    }
+
+    #[test]
+    fn 놈zero_answers_only_its_own_frame() {
+        // A frame whose length field disagrees with the frame.
+        let mut wrong_length = nomzero_auth();
+        wrong_length[0] = 70;
+        assert!(lgt_local_nomzero_response(&wrong_length).is_none());
+
+        // The right length and a command that is not the authentication.
+        let mut other_command = nomzero_auth();
+        other_command[2] = 7;
+        assert!(lgt_local_nomzero_response(&other_command).is_none());
+
+        // Not seventy-one bytes at all.
+        assert!(lgt_local_nomzero_response(&nomzero_auth()[..70]).is_none());
     }
 
     /// The 36-byte record 짜요짜요타이쿤4 opens with, captured off its socket.
