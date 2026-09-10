@@ -78,6 +78,13 @@ impl LocalConnection for BillingGateway {
             }
         );
 
+        if response.is_none() {
+            // Nobody knows this request, so what the title does with the ez-i
+            // stand-in it gets instead is the only account of the protocol
+            // there is. Record it.
+            wie_backend::probe::over_an_unanswered_request(&wie_backend::billing::bill_frame_trace(bytes));
+        }
+
         self.pending = response.unwrap_or_else(|| BILLING_RESPONSE.to_vec());
     }
 

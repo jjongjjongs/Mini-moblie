@@ -118,9 +118,49 @@ pub fn drained() {
 pub fn disarm() {
     REMAINING.store(0, Ordering::Relaxed);
     LAST.store(0, Ordering::Relaxed);
+    UNANSWERED_TRACES.store(0, Ordering::Relaxed);
     PENDING.lock().clear();
     *LABEL.lock() = None;
     *WHEN_DRAINED.lock() = None;
+}
+
+/// Traces started by [`over_an_unanswered_request`] so far.
+static UNANSWERED_TRACES: AtomicU32 = AtomicU32::new(0);
+
+/// How many of those one run is worth.
+///
+/// A title that gets nothing it recognises usually asks again, and often in a
+/// loop; the first few attempts say everything the later ones would, and a
+/// trace per attempt would bury the log it is written to.
+const UNANSWERED_TRACE_LIMIT: u32 = 4;
+
+/// Branches to record over an unanswered request's parse.
+///
+/// Enough to carry the read out of the stream, the walk over whatever came
+/// back, and the branch that gives up on it.
+const UNANSWERED_TRACE_BRANCHES: u32 = 30_000;
+
+/// Queues a trace over what a title does with an answer nobody shaped for it.
+///
+/// A request no matcher knows is where a title's protocol goes unread, and the
+/// stand-in it gets instead is one it was never going to accept. What it does
+/// next - which field it reads, which compare it fails, which screen it settles
+/// on - is the whole of what a later matcher has to be built from, and none of
+/// it is in an ordinary log.
+///
+/// So arm one here rather than waiting for someone to wire a probe up per
+/// title: the first unanswered request of a run carries its own trace, and
+/// reading a handset log is enough to start. Bounded to
+/// [`UNANSWERED_TRACE_LIMIT`] traces a run, because a title that is not
+/// answered tends to ask again.
+pub fn over_an_unanswered_request(what: &str) {
+    let started = UNANSWERED_TRACES.fetch_add(1, Ordering::Relaxed);
+    if started >= UNANSWERED_TRACE_LIMIT {
+        UNANSWERED_TRACES.store(UNANSWERED_TRACE_LIMIT, Ordering::Relaxed);
+        return;
+    }
+
+    arm_when_drained(&format!("답이 없는 요청: {what}"), UNANSWERED_TRACE_BRANCHES);
 }
 
 /// Whether the core should be recording. One relaxed load, called per
@@ -315,6 +355,40 @@ mod tests {
 
         drained();
         assert!(is_armed());
+
+        disarm();
+    }
+
+    #[test]
+    fn an_unanswered_request_traces_what_the_title_does_with_the_stand_in() {
+        let _guard = ONE_AT_A_TIME.lock();
+        disarm();
+
+        over_an_unanswered_request("a frame nobody knows");
+
+        // Queued, not started: the title has none of the stand-in yet.
+        assert!(!is_armed());
+        drained();
+        assert!(is_armed());
+
+        disarm();
+    }
+
+    #[test]
+    fn a_title_that_keeps_asking_stops_being_traced() {
+        let _guard = ONE_AT_A_TIME.lock();
+        disarm();
+
+        // A title answered by nobody asks again, often in a loop. The first few
+        // attempts say what the later ones would.
+        for _ in 0..UNANSWERED_TRACE_LIMIT {
+            over_an_unanswered_request("again");
+            assert!(WHEN_DRAINED.lock().is_some());
+            *WHEN_DRAINED.lock() = None;
+        }
+
+        over_an_unanswered_request("and again");
+        assert!(WHEN_DRAINED.lock().is_none(), "the log would fill with traces of one loop");
 
         disarm();
     }

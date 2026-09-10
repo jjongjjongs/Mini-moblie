@@ -938,6 +938,13 @@ impl wie_backend::LocalConnection for LgtBillingGateway {
         out[..taken].copy_from_slice(&self.pending[..taken]);
         self.pending.drain(..taken);
 
+        // The title now has all of an answer that was queued whole, so what it
+        // does next is the parse. Anything waiting to be traced over that parse
+        // starts here.
+        if self.pending.is_empty() {
+            wie_backend::probe::drained();
+        }
+
         wie_backend::LocalRead::Data(taken)
     }
 
