@@ -16,8 +16,6 @@
 
 use alloc::{format, string::String, vec, vec::Vec};
 
-use core::sync::atomic::{AtomicU32, Ordering};
-
 /// The seven-byte granted frame this protocol's answers are: the `0xffff`
 /// marker, the length, the message type, and a zero status.
 const GRANTED_FRAME_SIZE: usize = 7;
@@ -6682,16 +6680,15 @@ pub fn lgt_local_genesis3_episode2_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(reply)
 }
 
-/// What 서든어택 포켓's cash shop is answered with, while its parse is being read.
+/// What 서든어택 포켓's cash shop is answered with.
 ///
 /// 서든어택 포켓 (`0002AC6E`) opens `BillSocket://121.78.119.73:18009` around a
 /// cash purchase and writes eighteen bytes: a big-endian `u16` command and a
-/// sixteen byte payload. Two commands turn up, one after the other, and a
-/// handset capture has both:
+/// sixteen byte payload. Two commands turn up, one after the other:
 ///
 /// ```text
-/// 29 10 | 00 00 00 0b | "01046119269" 00      the purchase
-/// 3c 10 | 00 00 00 32 | 00 00 00 32 | 00 00 00 32 | 00 00 00 28
+/// 29 10 | 00 00 00 0b | "01046119269" 00                            the purchase
+/// 3c 10 | 00 00 00 32 | 00 00 00 32 | 00 00 00 32 | 00 00 00 28     the medals held
 /// ```
 ///
 /// The second is four big-endian `u32`s - 50, 50, 50, 40 - which are the four
@@ -6702,46 +6699,44 @@ pub fn lgt_local_genesis3_episode2_response(request: &[u8]) -> Option<Vec<u8>> {
 /// more. Answered with the ez-i SDK's own twenty-byte reply - which is what
 /// they got before this, the chain having nothing that knew either command -
 /// it read `0c 00 01 00` as a length of 201326848 and waited on a reply that
-/// size. That is the stop the handset shows: the purchase's own exchange now
-/// gets a length it can read, and the shop still goes nowhere because this
-/// second one does not.
+/// size, which the handset showed as 캐쉬아이템 구매중입니다 and then as a 예
+/// button that did nothing.
 ///
-/// The framing is settled. **The bodies are not**: nothing here has read the
-/// title's parse yet, so what the bytes after the length have to say is a
-/// question rather than an answer, and this does not pretend otherwise. It
-/// frames a body of [`SUDDEN_ATTACK_PROBE_BODY`] bytes, fills it differently on
-/// each round - see [`sudden_attack_probe_body`] - and arms the instruction
-/// probe over the parse that follows.
+/// What the body has to say is one thing: **nothing went wrong.** The shop is a
+/// state machine dispatched at `0x5bbdc`, and its waiting state hands the reply
+/// to a parser and then reads one field back:
 ///
-/// One command is traced per round, alternating, because the probe is one thing
-/// and these two exchanges are milliseconds apart: tracing both would have the
-/// second cut the first short. Four purchases on a handset therefore carry two
-/// traces of each command, under two body shapes each.
+/// ```asm
+/// 5d344  bx  ip                  ; the reply parser
+/// 5d348  ldr r6, [r4, #8]        ; the shop's fields
+/// 5d350  ldr sl, [r6, r3, lsl #2]
+/// 5d354  cmp sl, #0
+/// 5d358  bne 0x5d7a4             ; anything but zero is a failure
+/// ```
 ///
-/// This is scaffolding. It should be replaced by the replies the traces say the
-/// title wants, and the probe with it.
+/// Zero falls through to state 13, which draws 구매 성공 and grants the item;
+/// anything else is state 14, 구매 실패하였습니다. So a body of zeros is the
+/// granted answer, and a handset run settled it: answered zero, the shop drew
+/// 구매 성공, and the medal report that followed carried `00 00 00 96` where it
+/// had carried `00 00 00 32` - 화랑메달 50 to 150, the hundred the item is. The
+/// three non-zero bodies tried alongside it each drew 구매 실패하였습니다.
+///
+/// The body's length is not something the title tells us; sixty-four bytes is
+/// what that run proved a parse it satisfies, and the parser reads its verdict
+/// off the front rather than counting to the end.
 fn lgt_local_sudden_attack_response(request: &[u8]) -> Option<Vec<u8>> {
     if request.len() != SUDDEN_ATTACK_FRAME {
         return None;
     }
 
     let command = u16::from_be_bytes([request[0], request[1]]);
-    let (round, what) = match command {
-        SUDDEN_ATTACK_PURCHASE => (SUDDEN_ATTACK_PURCHASES.fetch_add(1, Ordering::Relaxed), "구매"),
-        SUDDEN_ATTACK_MEDALS => (SUDDEN_ATTACK_MEDAL_REPORTS.fetch_add(1, Ordering::Relaxed), "메달"),
-        _ => return None,
-    };
-
-    let body = sudden_attack_probe_body(round, what);
-
-    let mut reply = Vec::with_capacity(4 + body.len());
-    reply.extend_from_slice(&(body.len() as u32).to_be_bytes());
-    reply.extend_from_slice(&body);
-
-    // The purchase on even rounds, the medal report on odd ones.
-    if (round % 2 == 0) == (command == SUDDEN_ATTACK_PURCHASE) {
-        crate::probe::arm_when_drained(&format!("서든어택 포켓 {what} 응답 파싱"), SUDDEN_ATTACK_PROBE_BRANCHES);
+    if command != SUDDEN_ATTACK_PURCHASE && command != SUDDEN_ATTACK_MEDALS {
+        return None;
     }
+
+    let mut reply = Vec::with_capacity(4 + SUDDEN_ATTACK_BODY);
+    reply.extend_from_slice(&(SUDDEN_ATTACK_BODY as u32).to_be_bytes());
+    reply.resize(4 + SUDDEN_ATTACK_BODY, 0);
 
     Some(reply)
 }
@@ -6756,65 +6751,8 @@ const SUDDEN_ATTACK_PURCHASE: u16 = 0x2910;
 /// 서든어택 포켓 reporting the four medal counts the player holds.
 const SUDDEN_ATTACK_MEDALS: u16 = 0x3c10;
 
-/// Bytes in each of 서든어택 포켓's probe bodies.
-///
-/// Wide enough that a header the parse walks off the end of would be the
-/// parse's own doing rather than ours, and narrow enough to stay readable in a
-/// trace.
-const SUDDEN_ATTACK_PROBE_BODY: usize = 64;
-
-/// How much of the parse after one of 서든어택 포켓's replies to record.
-///
-/// Counted in branches, not instructions. Enough to carry the read out of the
-/// stream, the walk over the body and the branch that picks a verdict, and to
-/// run some way into the redraw that follows either way - which is where a
-/// trace stops being about the parse.
-const SUDDEN_ATTACK_PROBE_BRANCHES: u32 = 30_000;
-
-/// Which of 서든어택 포켓's probe bodies to answer a purchase with. Counts them.
-static SUDDEN_ATTACK_PURCHASES: AtomicU32 = AtomicU32::new(0);
-
-/// The same, for the medal report that follows a purchase.
-static SUDDEN_ATTACK_MEDAL_REPORTS: AtomicU32 = AtomicU32::new(0);
-
-/// A different body on each round, so one handset run says which shapes the
-/// parse walks further into.
-///
-/// The four are the guesses worth spending a round on, in the order they are
-/// worth it:
-///
-/// 1. zero. A header the title reads a command or a status out of takes its
-///    "nothing" branch, and the trace shows where it decided that.
-/// 2. the request's command, raised by one - the reply convention the same
-///    vendor's 훼밀리마트타이쿤 uses, where a reply carries `request + 1`.
-/// 3. the request's command, echoed.
-/// 4. each byte its own offset, so a field the parse reads is identifiable by
-///    the value that reaches it.
-fn sudden_attack_probe_body(round: u32, what: &str) -> Vec<u8> {
-    let mut body = vec![0u8; SUDDEN_ATTACK_PROBE_BODY];
-
-    let shape = match round % 4 {
-        0 => "zero",
-        1 => {
-            body[..2].copy_from_slice(&(SUDDEN_ATTACK_PURCHASE + 1).to_be_bytes());
-            "the command raised by one"
-        }
-        2 => {
-            body[..2].copy_from_slice(&SUDDEN_ATTACK_PURCHASE.to_be_bytes());
-            "the command echoed"
-        }
-        _ => {
-            for (offset, byte) in body.iter_mut().enumerate() {
-                *byte = offset as u8;
-            }
-            "each byte its own offset"
-        }
-    };
-
-    tracing::info!("서든어택 포켓: {what} {}, answering with a body of {shape}", round + 1);
-
-    body
-}
+/// Bytes in 서든어택 포켓's answer, after the length that describes them.
+const SUDDEN_ATTACK_BODY: usize = 64;
 
 /// The answer to a billing request, whichever of these protocols it is in.
 ///
@@ -6898,24 +6836,16 @@ mod tests {
             // issues next is one this can satisfy. The 201326848 it asked for
             // before was the ez-i answer's first four bytes read as one.
             assert_eq!(framed_length(&reply), reply.len() - 4);
-            assert_eq!(framed_length(&reply), SUDDEN_ATTACK_PROBE_BODY);
         }
     }
 
     #[test]
-    fn 서든어택s_rounds_are_answered_a_different_way_each_time() {
-        // Four rounds, four shapes - which is what makes one handset run worth
-        // four traces. The counter is process-wide, so this reads a run of four
-        // from wherever it happens to start.
-        let bodies: Vec<Vec<u8>> = (0..4).map(|_| response(&SUDDEN_ATTACK_PURCHASE_FRAME).unwrap()[4..].to_vec()).collect();
+    fn 서든어택s_purchase_is_answered_the_way_it_reads_as_granted() {
+        let reply = response(&SUDDEN_ATTACK_PURCHASE_FRAME).unwrap();
 
-        for (index, body) in bodies.iter().enumerate() {
-            assert_eq!(body.len(), SUDDEN_ATTACK_PROBE_BODY);
-
-            for other in &bodies[index + 1..] {
-                assert_ne!(body, other, "two rounds were answered the same way");
-            }
-        }
+        // `0x5d354` compares the field its parser filled against zero and takes
+        // 구매 실패하였습니다 for anything else, so the whole body is zero.
+        assert!(reply[4..].iter().all(|&byte| byte == 0));
     }
 
     #[test]

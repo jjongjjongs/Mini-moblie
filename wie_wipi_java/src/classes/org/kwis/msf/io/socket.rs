@@ -111,13 +111,13 @@ mod billing_gateway_tests {
 
     use spin::Mutex;
 
-    use wie_backend::{LocalConnection, LocalRead, probe};
+    use wie_backend::{LocalConnection, LocalRead};
 
     use super::BillingGateway;
 
-    /// The probe and the gateway's rotating answers are both process-wide, so
-    /// two tests driving them at once would each see the other's. Hold this for
-    /// the length of any test that touches either.
+    /// These drive one gateway each, but the answers they check are the
+    /// title's whole protocol; holding this keeps a failure readable as one
+    /// test's rather than two interleaved.
     static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
     /// The eighteen bytes 서든어택 포켓 writes when a cash purchase is
@@ -150,7 +150,6 @@ mod billing_gateway_tests {
     #[test]
     fn both_of_a_purchases_exchanges_are_answered_in_full() {
         let _guard = ONE_AT_A_TIME.lock();
-        probe::disarm();
 
         // The shop stops on whichever of the two goes unanswered, so both have
         // to come back whole.
@@ -164,38 +163,19 @@ mod billing_gateway_tests {
             // waiting on a length that never arrives.
             assert!(!gateway.readable());
             assert!(!body.is_empty());
-
-            probe::disarm();
         }
     }
 
     #[test]
-    fn the_parse_after_a_purchase_is_what_gets_traced() {
+    fn a_purchase_is_answered_the_way_it_reads_as_granted() {
         let _guard = ONE_AT_A_TIME.lock();
 
-        // Only one of the two exchanges is traced per round, and which one
-        // alternates, so two rounds are what it takes to see a purchase traced
-        // wherever the process-wide count happens to stand.
-        let mut traced = false;
+        let mut gateway = BillingGateway::armed();
+        gateway.write(&SUDDEN_ATTACK_PURCHASE);
 
-        for _ in 0..2 {
-            probe::disarm();
-
-            let mut gateway = BillingGateway::armed();
-            gateway.write(&SUDDEN_ATTACK_PURCHASE);
-
-            // Queued at most, never started: the title has none of the answer
-            // yet, and tracing from here would spend the trace on the wait
-            // rather than the parse.
-            assert!(!probe::is_armed());
-
-            read_framed(&mut gateway);
-            traced |= probe::is_armed();
-        }
-
-        assert!(traced, "the trace did not start when the answer ran out");
-
-        probe::disarm();
+        // Zero is what its parser has to leave behind for the shop to draw
+        // 구매 성공 rather than 구매 실패하였습니다.
+        assert!(read_framed(&mut gateway).iter().all(|&byte| byte == 0));
     }
 }
 
