@@ -736,6 +736,47 @@ public final class MainActivity extends Activity {
         });
     }
 
+    /**
+     * Lets the person say what the probe should watch while the app runs.
+     *
+     * <p>The log filter covers everything the emulator says about itself; this
+     * covers what it does not say - where the emulated code went and what it
+     * wrote - and taking it as text here is what stops a question about a new
+     * title, or a new address in an old one, from needing its own build.
+     */
+    private void showProbeWatchDialog() {
+        EditText input = new EditText(this);
+        input.setText(NativeBridge.nativeProbeWatches());
+        input.setSingleLine(true);
+        input.setSelection(input.getText().length());
+
+        int pad = dp(16);
+        FrameLayout wrap = new FrameLayout(this);
+        wrap.setPadding(pad, pad / 2, pad, 0);
+        wrap.addView(input);
+
+        new AlertDialog.Builder(this)
+                .setTitle("프로브 감시")
+                .setMessage("게임 코드의 어느 주소를 지켜볼지 정합니다.\n"
+                        + "pc:3a376 - 그 주소에 닿으면 분기 추적\n"
+                        + "pc:3a376/50000 - 분기 수 지정\n"
+                        + "w:1518700 - 그 주소에 쓰는 순간을 기록\n"
+                        + "쉼표로 여러 개, 비우면 모두 해제")
+                .setView(wrap)
+                .setPositiveButton("적용", (dialog, which) -> {
+                    String error = NativeBridge.nativeSetProbeWatches(input.getText().toString().trim());
+                    Toast.makeText(this,
+                            error.isEmpty() ? "감시 적용됨: " + NativeBridge.nativeProbeWatches() : "감시 오류: " + error,
+                            Toast.LENGTH_LONG).show();
+                })
+                .setNeutralButton("모두 해제", (dialog, which) -> {
+                    NativeBridge.nativeSetProbeWatches("");
+                    Toast.makeText(this, "감시 해제됨", Toast.LENGTH_SHORT).show();
+                })
+                .setNegativeButton("취소", null)
+                .show();
+    }
+
     /** Dims whichever of the two buttons is not the one to press next. */
     private void showCollectState() {
         if (collectButton == null || stopButton == null) {
@@ -1137,6 +1178,11 @@ public final class MainActivity extends Activity {
 
         stopButton = navyButton("종료");
         stopButton.setOnClickListener(v -> stopLogCollectAndSave());
+        // Long-press to say what the probe should watch, without a rebuild.
+        stopButton.setOnLongClickListener(v -> {
+            showProbeWatchDialog();
+            return true;
+        });
         LinearLayout.LayoutParams stopParams = new LinearLayout.LayoutParams(dp(48), dp(34));
         stopParams.rightMargin = dp(8);
         bar.addView(stopButton, stopParams);

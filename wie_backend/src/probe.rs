@@ -222,41 +222,183 @@ pub fn reached(pc: u32) {
     arm(&alloc::format!("{label} #{hits}"), branches);
 }
 
-/// Addresses worth a trace, per title, while a question is open about one.
-///
-/// A routine read out of a title's own `binary.mod` is a guess until a run says
-/// it is reached; watching it turns the guess into a line in a log, or into the
-/// absence of one, which answers just as well.
-///
-/// Each entry is a diagnostic, not a fix, and comes out when its question is
-/// settled.
-const WATCHED: [(&str, u32, &str, u32); 2] = [
-    // 오셔너스's CASH panel draws no item grid. Its draw is `0x3a364` and its
-    // input handler `0x35d6c`, both gated on a byte at `0x1509f08 + 9` that
-    // says the panel is open.
-    //
-    // The handler has answered: it runs, key -5 reaches `0x35f6e`, case 2 asks
-    // `0x47ac8`, that returns zero, and the flag goes up. The panel opens.
-    //
-    // Watching the draw's own entry answered nothing, and could not have: it
-    // runs every frame from the moment the title starts, so the three passes
-    // were spent long before anyone reached the shop, and all three of course
-    // found the panel closed. Watch what the gate lets through instead -
-    // `0x3a376` is only reached with the flag up - so the passes are spent on
-    // the screen in question. `0x3a4ba` is the arm its mode 2 takes, which is
-    // the mode the shop runs in.
-    ("0002D6C4", 0x3a376, "오셔너스 CASH 그리기(열린 뒤)", 30_000),
-    ("0002D6C4", 0x3a4ba, "오셔너스 CASH 모드2", 30_000),
-];
+/// Addresses whose next write should be reported, with what wrote it.
+static WRITE_WATCHES: Mutex<Vec<WriteWatch>> = Mutex::new(Vec::new());
 
-/// Starts watching whatever [`WATCHED`] lists for `aid`, if anything.
-pub fn watch_for_title(aid: &str) {
-    for (_, pc, label, branches) in WATCHED.iter().filter(|(title, ..)| *title == aid) {
-        watch(*pc, label, *branches);
+/// Whether any address is write-watched. The one load the memory path makes.
+static WRITE_LIVE: AtomicU32 = AtomicU32::new(0);
+
+/// Where the core is, published each instruction while a write watch is live so
+/// a write can say what wrote it.
+static WRITING_PC: AtomicU32 = AtomicU32::new(0);
+
+/// Writes reported per address before it stops being interesting. A value that
+/// is rewritten every frame would otherwise fill the log with the same line.
+const WRITE_REPORT_LIMIT: u32 = 8;
+
+/// One write-watched address.
+struct WriteWatch {
+    address: u32,
+    label: String,
+    reports: u32,
+}
+
+/// Reports the next few writes to `address`, and what the core was executing
+/// when each happened.
+///
+/// The question this answers - "who set this, and to what" - is the one that
+/// static reading is worst at. A value can be written through a pointer that
+/// arrived in a register from three calls away, and no scan of the instruction
+/// stream finds that; the write itself is unmissable.
+///
+/// **Silence is an answer here too**, and often the useful one: a field the
+/// title reads and nothing ever writes is a field whose code path never runs.
+pub fn watch_write(address: u32, label: &str) {
+    let mut watches = WRITE_WATCHES.lock();
+
+    if watches.iter().any(|watch| watch.address == address) {
+        return;
+    }
+
+    watches.push(WriteWatch {
+        address,
+        label: String::from(label),
+        reports: 0,
+    });
+    let live = watches.len();
+    drop(watches);
+
+    WRITE_LIVE.store(live as u32, Ordering::Relaxed);
+
+    tracing::info!("probe: watching writes to {address:#x} for {label}");
+}
+
+/// Whether any address is write-watched. One relaxed load, called on the memory
+/// path and once per instruction.
+#[inline(always)]
+pub fn is_write_watching() -> bool {
+    WRITE_LIVE.load(Ordering::Relaxed) != 0
+}
+
+/// Records where the core is, so a write can name what made it.
+///
+/// Call once per instruction under [`is_write_watching`].
+#[inline(always)]
+pub fn at(pc: u32) {
+    WRITING_PC.store(pc, Ordering::Relaxed);
+}
+
+/// Reports a write of `value` (`width` bytes) at `address`, if it is watched.
+///
+/// Call from the memory path under [`is_write_watching`]. A write of any width
+/// that touches a watched address counts, so a byte store into the middle of a
+/// watched word is not missed.
+pub fn wrote(address: u32, width: u32, value: u32) {
+    let mut watches = WRITE_WATCHES.lock();
+
+    let Some(watch) = watches
+        .iter_mut()
+        .find(|watch| watch.address >= address && watch.address < address.saturating_add(width))
+    else {
+        return;
+    };
+
+    watch.reports += 1;
+    if watch.reports > WRITE_REPORT_LIMIT {
+        return;
+    }
+
+    let (target, label, reports) = (watch.address, watch.label.clone(), watch.reports);
+    let last = reports == WRITE_REPORT_LIMIT;
+    drop(watches);
+
+    let pc = WRITING_PC.load(Ordering::Relaxed);
+    tracing::info!("probe: {target:#x} written {value:#x} ({width} bytes at {address:#x}) from {pc:#x} - {label} #{reports}");
+
+    if last {
+        tracing::info!("probe: {target:#x} has been written {reports} times; no longer reporting it");
     }
 }
 
-/// Stops any trace, running or queued, and forgets what it had recorded.
+/// Reads a watch specification and arms what it names.
+///
+/// The whole point of taking this as text at runtime is that a new question
+/// stops needing a new build: any address in any title can be watched from the
+/// handset, the same way the log filter can be changed there.
+///
+/// Comma-separated, each entry one of:
+///
+/// ```text
+/// pc:3a376        trace from this address, for the default number of branches
+/// pc:3a376/50000  the same, for that many branches
+/// w:1518700       report the next writes to this address
+/// ```
+///
+/// Addresses are hexadecimal, with or without `0x`. An empty specification
+/// clears every watch. Returns the reason an entry was rejected.
+pub fn set_watches(spec: &str) -> Result<(), String> {
+    clear_watches();
+
+    for entry in spec.split(',').map(str::trim).filter(|entry| !entry.is_empty()) {
+        let (kind, rest) = entry
+            .split_once(':')
+            .ok_or_else(|| alloc::format!("{entry:?} is not `pc:<addr>` or `w:<addr>`"))?;
+
+        let (address, branches) = match rest.split_once('/') {
+            Some((address, branches)) => (
+                address,
+                Some(
+                    branches
+                        .parse::<u32>()
+                        .map_err(|_| alloc::format!("{branches:?} is not a number of branches"))?,
+                ),
+            ),
+            None => (rest, None),
+        };
+
+        let address = address.trim().trim_start_matches("0x");
+        let address = u32::from_str_radix(address, 16).map_err(|_| alloc::format!("{address:?} is not a hexadecimal address"))?;
+
+        match kind.trim() {
+            "pc" => watch(address, entry, branches.unwrap_or(DEFAULT_WATCH_BRANCHES)),
+            "w" => watch_write(address, entry),
+            other => return Err(alloc::format!("{other:?} is not `pc` or `w`")),
+        }
+    }
+
+    Ok(())
+}
+
+/// Branches recorded from a `pc:` watch that does not say how many.
+const DEFAULT_WATCH_BRANCHES: u32 = 30_000;
+
+/// Forgets every watch, leaving the per-instruction checks costing nothing.
+pub fn clear_watches() {
+    for pc in &WATCH_PCS {
+        pc.store(0, Ordering::Relaxed);
+    }
+    WATCH_LIVE.store(0, Ordering::Relaxed);
+    *WATCHES.lock() = [const { None }; WATCH_SLOTS];
+
+    WRITE_WATCHES.lock().clear();
+    WRITE_LIVE.store(0, Ordering::Relaxed);
+}
+
+/// What is being watched, for the UI to show.
+pub fn watches() -> String {
+    let mut parts: Vec<String> = WATCHES
+        .lock()
+        .iter()
+        .flatten()
+        .map(|watch| alloc::format!("pc:{}", watch.label))
+        .collect();
+
+    parts.extend(WRITE_WATCHES.lock().iter().map(|watch| alloc::format!("w:{:x}", watch.address)));
+
+    parts.join(",")
+}
+
+/// Stops any trace, running or queued, and forgets what it had recorded./// Stops any trace, running or queued, and forgets what it had recorded.
 ///
 /// The probe is one thing shared by the process. A caller that has finished
 /// with it - or a test that must not leave one armed behind it - puts it back
@@ -629,13 +771,71 @@ mod tests {
     }
 
     #[test]
-    fn a_title_with_no_question_open_is_not_watched() {
+    fn a_specification_arms_what_it_names() {
         let _guard = ONE_AT_A_TIME.lock();
         disarm();
 
-        watch_for_title("00000000");
+        set_watches("pc:3a376/500, w:0x1518700").unwrap();
+
+        assert!(is_watching());
+        assert!(is_write_watching());
+        assert_eq!(watches(), "pc:pc:3a376/500,w:1518700");
+
+        // Reaching the address starts a trace of the length it asked for.
+        reached(0x3a376);
+        assert!(is_armed());
+
+        disarm();
+    }
+
+    #[test]
+    fn an_empty_specification_clears_everything() {
+        let _guard = ONE_AT_A_TIME.lock();
+        disarm();
+
+        set_watches("pc:3a376,w:1518700").unwrap();
+        set_watches("").unwrap();
 
         assert!(!is_watching());
+        assert!(!is_write_watching());
+
+        disarm();
+    }
+
+    #[test]
+    fn a_specification_that_makes_no_sense_says_so_and_arms_nothing() {
+        let _guard = ONE_AT_A_TIME.lock();
+        disarm();
+
+        for bad in ["3a376", "pc 3a376", "x:1000", "pc:zzz", "pc:1000/many"] {
+            assert!(set_watches(bad).is_err(), "{bad:?} was accepted");
+            assert!(!is_watching(), "{bad:?} armed something");
+            assert!(!is_write_watching(), "{bad:?} armed something");
+        }
+
+        disarm();
+    }
+
+    #[test]
+    fn a_watched_write_is_reported_whatever_width_touches_it() {
+        let _guard = ONE_AT_A_TIME.lock();
+        disarm();
+
+        watch_write(0x1518702, "test");
+
+        // A byte store into the middle of the watched word still counts, which
+        // is the case a naive equality check would miss.
+        at(0x1234);
+        wrote(0x1518700, 4, 7);
+
+        let reports = WRITE_WATCHES.lock()[0].reports;
+        assert_eq!(reports, 1);
+
+        // A write that does not reach it does not.
+        wrote(0x1518710, 4, 7);
+        assert_eq!(WRITE_WATCHES.lock()[0].reports, 1);
+
+        disarm();
     }
 
     #[test]

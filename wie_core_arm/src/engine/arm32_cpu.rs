@@ -89,6 +89,11 @@ impl ArmEngine for Arm32CpuEngine {
                 wie_backend::probe::reached(pc);
             }
 
+            // So a watched write can name the instruction that made it.
+            if wie_backend::probe::is_write_watching() {
+                wie_backend::probe::at(pc);
+            }
+
             let mut arm32cpu_memory = self.mem.as_arm32cpu_memory();
 
             if !(self.cpu.step(&mut arm32cpu_memory)) {
@@ -409,6 +414,12 @@ impl Memory for Arm32CpuMemory<'_> {
 
     #[inline(always)]
     fn w8(&mut self, addr: u32, val: u8) {
+        // A watched address says what wrote it and from where. Off unless
+        // something armed one, which is a relaxed load of a static.
+        if wie_backend::probe::is_write_watching() {
+            wie_backend::probe::wrote(addr, 1, u32::from(val));
+        }
+
         let offset = addr & PAGE_MASK;
 
         let page = self.get_page(addr);
@@ -423,6 +434,12 @@ impl Memory for Arm32CpuMemory<'_> {
 
     #[inline(always)]
     fn w16(&mut self, addr: u32, val: u16) {
+        // A watched address says what wrote it and from where. Off unless
+        // something armed one, which is a relaxed load of a static.
+        if wie_backend::probe::is_write_watching() {
+            wie_backend::probe::wrote(addr, 2, u32::from(val));
+        }
+
         let offset = addr & PAGE_MASK;
 
         let page = self.get_page(addr);
@@ -438,6 +455,12 @@ impl Memory for Arm32CpuMemory<'_> {
 
     #[inline(always)]
     fn w32(&mut self, addr: u32, val: u32) {
+        // A watched address says what wrote it and from where. Off unless
+        // something armed one, which is a relaxed load of a static.
+        if wie_backend::probe::is_write_watching() {
+            wie_backend::probe::wrote(addr, 4, val);
+        }
+
         let offset = addr & PAGE_MASK;
 
         let page = self.get_page(addr);

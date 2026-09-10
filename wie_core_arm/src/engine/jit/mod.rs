@@ -812,12 +812,23 @@ impl ArmEngine for JitEngine {
             // interpreter instead - one instruction per turn of this loop, which
             // is what the trace needs. It is off unless armed, which is a
             // relaxed load of a static.
-            let mut tracing = wie_backend::probe::is_armed();
-            if tracing {
+            // The probe needs to see one instruction at a time, and a compiled
+            // block runs a whole run of them without passing through anything
+            // that could report on them - neither the branches it took nor the
+            // writes it made. So while it is watching anything, this declines
+            // its blocks and interprets.
+            let mut interpret = wie_backend::probe::is_armed();
+            if interpret {
                 wie_backend::probe::observe(pc);
             } else if wie_backend::probe::is_watching() {
                 wie_backend::probe::reached(pc);
-                tracing = wie_backend::probe::is_armed();
+                interpret = wie_backend::probe::is_armed();
+            }
+
+            if wie_backend::probe::is_write_watching() {
+                // So a watched write can name the instruction that made it.
+                wie_backend::probe::at(pc);
+                interpret = true;
             }
 
             let thumb = self.ctx.cpsr & (1 << 5) != 0;
@@ -827,7 +838,7 @@ impl ArmEngine for JitEngine {
                 // here is not compilable, run the interpreter until it reaches one
                 // (or Thumb, or a stop), syncing once around that batch instead of
                 // per instruction.
-                let arm_jit = !tracing && self.ensure_arm_block(pc);
+                let arm_jit = !interpret && self.ensure_arm_block(pc);
                 let end_in_block = arm_jit && {
                     let b = self.arm_cache[Self::slot_index(pc)].block.as_ref().unwrap();
                     end > pc && end < b.end_pc
@@ -860,7 +871,7 @@ impl ArmEngine for JitEngine {
                 // compiled block). `yield_to_jit` is off in the end-in-block case
                 // so a single step makes progress instead of bouncing back to the
                 // JIT it just declined.
-                let yield_to_jit = !end_in_block && !tracing;
+                let yield_to_jit = !end_in_block && !interpret;
                 self.store_back(mode);
                 let outcome: Option<Result<EngineRunResult>> = loop {
                     let apc = self.cpu.reg_get(Mode::User, reg::PC);
@@ -919,7 +930,7 @@ impl ArmEngine for JitEngine {
             // `end` mid-block: fall back to single-stepping so we stop exactly at
             // it. In normal control flow `end` is a return sentinel reached only
             // at block starts, so this is the rare path.
-            let can_jit = !tracing && thumb && self.ensure_block(pc) && {
+            let can_jit = !interpret && thumb && self.ensure_block(pc) && {
                 let b = self.cache[Self::slot_index(pc)].block.as_ref().unwrap();
                 !(end > pc && end < b.end_pc)
             };

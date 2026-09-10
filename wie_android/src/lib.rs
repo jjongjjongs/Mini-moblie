@@ -396,6 +396,47 @@ pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativ
     guard_string(&env, logging::filter)
 }
 
+/// `nativeProbeWatches() -> String`
+///
+/// What the probe is watching, so the UI can show and edit it.
+///
+/// # Safety
+/// Called by the JVM with a valid `env` reference.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativeProbeWatches(env: JNIEnv, _class: JClass) -> jstring {
+    logging::init();
+
+    guard_string(&env, wie_backend::probe::watches)
+}
+
+/// `nativeSetProbeWatches(String spec) -> String`
+///
+/// Arms what the specification names - `pc:<addr>` to trace from an address,
+/// `w:<addr>` to report writes to one - so a question about any title can be
+/// asked from the handset instead of from a new build. Returns an empty string
+/// on success, otherwise why the specification was rejected.
+///
+/// # Safety
+/// Called by the JVM with valid `env` and `spec` references.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativeSetProbeWatches(
+    mut env: JNIEnv,
+    _class: JClass,
+    spec: JString,
+) -> jstring {
+    logging::init();
+
+    let spec: String = match env.get_string(&spec) {
+        Ok(value) => value.into(),
+        Err(error) => return to_java_string(&env, &format!("감시 지정을 읽을 수 없습니다: {error}")),
+    };
+
+    guard_string(&env, || match wie_backend::probe::set_watches(spec.trim()) {
+        Ok(()) => String::new(),
+        Err(reason) => reason,
+    })
+}
+
 /// `nativeStartLogCollect() -> String`
 ///
 /// Opens a collection window: throws away what is held, turns every area on,

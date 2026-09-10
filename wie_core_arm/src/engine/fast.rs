@@ -691,18 +691,29 @@ impl ArmEngine for FastCpuEngine {
             // path instead - one instruction per turn of this loop, which is
             // what the trace needs. It is off unless armed, which is a relaxed
             // load of a static.
-            let mut tracing = wie_backend::probe::is_armed();
-            if tracing {
+            // The probe needs to see one instruction at a time, and a compiled
+            // block runs a whole run of them without passing through anything
+            // that could report on them - neither the branches it took nor the
+            // writes it made. So while it is watching anything, this declines
+            // its blocks and interprets.
+            let mut interpret = wie_backend::probe::is_armed();
+            if interpret {
                 wie_backend::probe::observe(pc);
             } else if wie_backend::probe::is_watching() {
                 wie_backend::probe::reached(pc);
-                tracing = wie_backend::probe::is_armed();
+                interpret = wie_backend::probe::is_armed();
+            }
+
+            if wie_backend::probe::is_write_watching() {
+                // So a watched write can name the instruction that made it.
+                wie_backend::probe::at(pc);
+                interpret = true;
             }
 
             // Thumb only in the fast path: an ARM-mode PC (T bit clear) falls
             // back for its whole run of instructions.
             let thumb = cpsr & (1 << 5) != 0;
-            let has_block = !tracing && thumb && self.ensure_block(pc);
+            let has_block = !interpret && thumb && self.ensure_block(pc);
 
             if has_block {
                 crate::PC_SAMPLES[(pc >> 16) as usize].fetch_add(1, ::core::sync::atomic::Ordering::Relaxed);

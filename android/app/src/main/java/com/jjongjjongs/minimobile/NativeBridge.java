@@ -113,6 +113,21 @@ final class NativeBridge {
      */
     static native String nativeSetLogFilter(String directive);
 
+    /** What the probe is watching now, in the syntax {@link #nativeSetProbeWatches} takes. */
+    static native String nativeProbeWatches();
+
+    /**
+     * Arms the probe from a specification typed on the handset, so a question
+     * about any title stops needing a build of its own.
+     *
+     * <p>Comma-separated: {@code pc:<hex>} traces branches from an address
+     * (optionally {@code /<count>}), {@code w:<hex>} reports writes to one. An
+     * empty specification clears every watch.
+     *
+     * @return empty on success, otherwise why it was rejected
+     */
+    static native String nativeSetProbeWatches(String spec);
+
     /**
      * Opens a log collection window: throws away what is held, turns every area
      * on, and records from here until {@link #nativeStopLogCollect()}.
