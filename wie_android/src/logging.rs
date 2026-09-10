@@ -11,7 +11,10 @@
 use std::{
     collections::VecDeque,
     io,
-    sync::{LazyLock, Mutex, Once, OnceLock},
+    sync::{
+        LazyLock, Mutex, Once, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use tracing_subscriber::{EnvFilter, Registry, prelude::*, reload};
@@ -177,6 +180,9 @@ pub fn set_filter(directive: &str) -> core::result::Result<(), String> {
 pub fn start_collecting() -> core::result::Result<(), String> {
     let widened = set_filter(COLLECT_LOG_DIRECTIVE);
 
+    CAP_LINES.store(COLLECT_MAX_LINES, Ordering::Relaxed);
+    CAP_BYTES.store(COLLECT_MAX_BYTES, Ordering::Relaxed);
+
     reset();
     *collecting() = true;
 
@@ -211,6 +217,12 @@ pub fn stop_collecting() -> core::result::Result<(), String> {
     wie_backend::probe::disarm();
     *collecting() = false;
 
+    // Back to the always-on bounds, which are what the crash auto-save is
+    // written from. What the window collected is left as it stands - the caller
+    // saves it next, and raising the bounds cannot drop any of it.
+    CAP_LINES.store(MAX_LINES, Ordering::Relaxed);
+    CAP_BYTES.store(MAX_BYTES, Ordering::Relaxed);
+
     // Closed regardless of whether the filter goes back, for the same reason
     // the window opens regardless of whether it widened.
     set_filter("")
@@ -225,11 +237,29 @@ fn collecting() -> std::sync::MutexGuard<'static, bool> {
     COLLECTING.lock().unwrap_or_else(|x| x.into_inner())
 }
 
-/// Lines kept, and bytes. A run that overruns either drops its oldest, which
-/// is the right end to lose: a title that fails at startup fits whole, and one
-/// that hangs is diagnosed from where it stopped.
+/// Lines kept, and bytes, for the always-on capture. A run that overruns either
+/// drops its oldest, which is the right end to lose: a title that fails at
+/// startup fits whole, and one that hangs is diagnosed from where it stopped.
 const MAX_LINES: usize = 300_000;
 const MAX_BYTES: usize = 48 << 20;
+
+/// The same, while a window is open.
+///
+/// Held far lower, because a window is where the memory goes: every area at
+/// trace, plus the branches the emulated code takes. At the always-on bounds
+/// that is upwards of sixty megabytes of `String` on a handset that is also
+/// running a game, and the phone is entitled to end the process over it.
+///
+/// The window loses only its own beginning, which is the half it can afford to:
+/// a window is opened for something at its end. 놈ZERO's authentication landed
+/// on line 93,831 of 99,671, and is inside this.
+const COLLECT_MAX_LINES: usize = 80_000;
+const COLLECT_MAX_BYTES: usize = 12 << 20;
+
+/// Lines the record is currently allowed, and bytes. Swapped by
+/// [`start_collecting`] and [`stop_collecting`].
+static CAP_LINES: AtomicUsize = AtomicUsize::new(MAX_LINES);
+static CAP_BYTES: AtomicUsize = AtomicUsize::new(MAX_BYTES);
 
 #[derive(Default)]
 struct Record {
@@ -244,7 +274,9 @@ impl Record {
         self.bytes += line.len() + 1;
         self.lines.push_back(line);
 
-        while self.lines.len() > MAX_LINES || self.bytes > MAX_BYTES {
+        let (max_lines, max_bytes) = (CAP_LINES.load(Ordering::Relaxed), CAP_BYTES.load(Ordering::Relaxed));
+
+        while self.lines.len() > max_lines || self.bytes > max_bytes {
             let Some(oldest) = self.lines.pop_front() else {
                 break;
             };
@@ -414,6 +446,7 @@ mod logcat {
 #[cfg(test)]
 mod tests {
     use std::io::Write as _;
+    use std::sync::atomic::Ordering;
 
     use super::{DEFAULT_LOG_DIRECTIVE, MAX_LINES, collecting_now, make_writer, reset, snapshot, start_collecting, stop_collecting};
 
@@ -494,6 +527,38 @@ mod tests {
         let log = snapshot();
         assert!(log.contains("inside"), "the window's own lines are missing");
         assert!(!log.contains("before"), "the window kept what came before it");
+
+        reset();
+    }
+
+    #[test]
+    fn a_window_is_held_to_tighter_bounds_than_the_capture_around_it() {
+        let _guard = ONE_AT_A_TIME.lock().unwrap_or_else(|x| x.into_inner());
+        wie_backend::probe::disarm();
+
+        assert_eq!(super::CAP_LINES.load(Ordering::Relaxed), MAX_LINES);
+
+        let _ = start_collecting();
+        // A window is every area at trace plus the branches the code takes, and
+        // that is where the memory goes.
+        assert_eq!(super::CAP_LINES.load(Ordering::Relaxed), super::COLLECT_MAX_LINES);
+        assert!(super::COLLECT_MAX_LINES < MAX_LINES);
+
+        let mut writer = make_writer();
+        for index in 0..super::COLLECT_MAX_LINES + 40 {
+            writer.write_all(format!("line {index}\n").as_bytes()).unwrap();
+        }
+
+        let log = snapshot();
+        assert!(log.starts_with("[4"), "the window kept more than its bound: {}", &log[..48]);
+        assert!(
+            log.contains(&format!("line {}", super::COLLECT_MAX_LINES + 39)),
+            "the newest line is missing"
+        );
+
+        let _ = stop_collecting();
+        // Back to the bounds the crash auto-save is written from.
+        assert_eq!(super::CAP_LINES.load(Ordering::Relaxed), MAX_LINES);
 
         reset();
     }
