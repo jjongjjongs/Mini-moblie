@@ -231,23 +231,22 @@ pub fn reached(pc: u32) {
 /// Each entry is a diagnostic, not a fix, and comes out when its question is
 /// settled.
 const WATCHED: [(&str, u32, &str, u32); 2] = [
-    // 오셔너스's CASH panel draws nothing: the composed frame shows the town map
-    // where it should be. Both its draw (`0x3a364`) and its input handler
-    // (`0x35d6c`) open on the same gate - a byte at `0x1509f08 + 9` that says
-    // the panel is open - and a trace from the draw showed that gate closed
-    // (`3a374>3a730`, the branch taken when the byte is zero).
+    // 오셔너스's CASH panel draws no item grid. Its draw is `0x3a364` and its
+    // input handler `0x35d6c`, both gated on a byte at `0x1509f08 + 9` that
+    // says the panel is open.
     //
-    // The byte is set inside the handler, on the path it takes when the panel
-    // is *not* open: `0x35f34` matches the key that opens it and reaches
-    // `0x35f6e`, which switches on `0x1509f08 + 1` and, for one case, asks
-    // `0x47ac8` first and puts up a message instead of opening when it answers
-    // non-zero.
+    // The handler has answered: it runs, key -5 reaches `0x35f6e`, case 2 asks
+    // `0x47ac8`, that returns zero, and the flag goes up. The panel opens.
     //
-    // So watch both ends. The handler says whether it runs at all and which key
-    // it saw; the open path says which case it took and what came back. Either
-    // one silent is as much of an answer as either one traced.
-    ("0002D6C4", 0x35d6c, "오셔너스 CASH 입력", 20_000),
-    ("0002D6C4", 0x35f6e, "오셔너스 CASH 열기", 20_000),
+    // Watching the draw's own entry answered nothing, and could not have: it
+    // runs every frame from the moment the title starts, so the three passes
+    // were spent long before anyone reached the shop, and all three of course
+    // found the panel closed. Watch what the gate lets through instead -
+    // `0x3a376` is only reached with the flag up - so the passes are spent on
+    // the screen in question. `0x3a4ba` is the arm its mode 2 takes, which is
+    // the mode the shop runs in.
+    ("0002D6C4", 0x3a376, "오셔너스 CASH 그리기(열린 뒤)", 30_000),
+    ("0002D6C4", 0x3a4ba, "오셔너스 CASH 모드2", 30_000),
 ];
 
 /// Starts watching whatever [`WATCHED`] lists for `aid`, if anything.
