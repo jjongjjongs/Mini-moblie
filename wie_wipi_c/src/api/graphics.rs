@@ -743,6 +743,15 @@ pub async fn flush_lcd(
             src_canvas.width(),
             src_canvas.height(),
         );
+
+        // And the frame itself, on the rounds the off-screen surfaces are drawn
+        // on. This is the one picture a reader can hold a screenshot against,
+        // which is what says whether a surface reached the screen.
+        if FLUSHES.load(Ordering::Relaxed) % OFFSCREEN_TRACE_EVERY == 0 {
+            for line in surface_thumbnail(&*src_canvas) {
+                tracing::info!("FRAME |{line}|");
+            }
+        }
     }
 
     let platform = context.system().platform();
@@ -973,9 +982,11 @@ fn surface_content(canvas: &dyn Image) -> (usize, u32) {
 /// shade more often than they differ in being lit at all.
 const THUMBNAIL_RAMP: [u8; 10] = *b" .:-=+*#%@";
 
-/// Widest a thumbnail gets, in characters. Rows are half this at most, since a
-/// character cell is about twice as tall as it is wide.
-const THUMBNAIL_COLUMNS: u32 = 32;
+/// Widest a thumbnail gets, in characters.
+const THUMBNAIL_COLUMNS: u32 = 48;
+
+/// Tallest a thumbnail gets, in rows.
+const THUMBNAIL_ROWS: u32 = 48;
 
 /// Draws a surface small enough to read in a log.
 ///
@@ -990,8 +1001,11 @@ fn surface_thumbnail(canvas: &dyn Image) -> Vec<String> {
         return Vec::new();
     }
 
+    // A character cell is about twice as tall as it is wide, so a thumbnail
+    // that kept one row per column would squash a portrait surface flat - which
+    // is what a 240x320 screen is. Take the rows from the surface's own shape.
     let columns = THUMBNAIL_COLUMNS.min(width);
-    let rows = (THUMBNAIL_COLUMNS / 2).min(height).max(1);
+    let rows = (columns * height / width / 2).clamp(1, THUMBNAIL_ROWS.min(height));
 
     // One pass over the pixels, accumulating into the cell each falls in, so a
     // thumbnail costs the read it already does rather than a read per cell.
@@ -1753,6 +1767,17 @@ mod tests {
 
         assert_eq!(lines[0].chars().next(), Some('@'));
         assert!(lines.last().unwrap().chars().all(|c| c == ' '));
+    }
+
+    #[test]
+    fn a_thumbnail_keeps_the_shape_of_what_it_draws() {
+        // A 240x320 screen is taller than it is wide, and a thumbnail that gave
+        // it as many rows as a landscape one would squash it flat - which is
+        // what makes a panel unreadable in a log.
+        let portrait = surface_thumbnail(&surface_with(240, 320, 0, 0)).len();
+        let landscape = surface_thumbnail(&surface_with(320, 240, 0, 0)).len();
+
+        assert!(portrait > landscape, "{portrait} rows for a portrait, {landscape} for a landscape");
     }
 
     #[test]
