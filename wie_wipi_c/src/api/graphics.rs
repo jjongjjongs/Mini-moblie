@@ -4,6 +4,7 @@ mod grp_context;
 mod image;
 
 use core::mem::size_of;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use alloc::{string::String, vec, vec::Vec};
 
@@ -734,26 +735,13 @@ pub async fn flush_lcd(
     // but is not reaching the display". Logged at info so it survives a normal
     // capture without turning on the per-primitive flood.
     {
-        use alloc::collections::BTreeSet;
+        let (colours, non_black) = surface_content(&*src_canvas);
 
-        let mut colours: BTreeSet<u32> = BTreeSet::new();
-        let mut non_black: u32 = 0;
-        for colour in src_canvas.colors() {
-            let packed = ((colour.r as u32) << 16) | ((colour.g as u32) << 8) | colour.b as u32;
-            if packed != 0 {
-                non_black += 1;
-            }
-            if colours.len() <= 512 {
-                colours.insert(packed);
-            }
-        }
         tracing::info!(
-            "FRAME flush fb={:#x} {}x{} region=({x},{y},{w},{h}) colours={} non_black={}",
+            "FRAME flush fb={:#x} {}x{} region=({x},{y},{w},{h}) colours={colours} non_black={non_black}",
             framebuffer.0.buf.0,
             src_canvas.width(),
             src_canvas.height(),
-            colours.len(),
-            non_black,
         );
     }
 
@@ -761,6 +749,12 @@ pub async fn flush_lcd(
     let screen = platform.screen();
 
     screen.paint(&*src_canvas);
+
+    // What is on the surfaces the title drew into but never handed back. After
+    // the paint, so the frame is on its way before this reads anything, and the
+    // canvas it borrowed is done with.
+    drop(src_canvas);
+    trace_offscreen_surfaces(context);
 
     Ok(())
 }
@@ -934,6 +928,83 @@ fn new_screen_surface(context: &mut dyn WIPICContext, width: u32, height: u32) -
     Ok(framebuffer)
 }
 
+/// The off-screen surfaces a title has asked for and not destroyed, so a flush
+/// can say what is on them. See [`trace_offscreen_surfaces`].
+static OFFSCREEN_SURFACES: spin::Mutex<Vec<(WIPICWord, i32, i32)>> = spin::Mutex::new(Vec::new());
+
+/// Flushes between one round of off-screen fingerprints and the next.
+///
+/// A fingerprint reads every pixel of every surface, which is more work than a
+/// frame; a screen worth looking at holds still for many frames, so sampling
+/// says the same thing for a fraction of the cost.
+const OFFSCREEN_TRACE_EVERY: u32 = 30;
+
+/// Flushes so far, for [`OFFSCREEN_TRACE_EVERY`].
+static FLUSHES: AtomicU32 = AtomicU32::new(0);
+
+/// How much is on a surface: how many of its pixels are not black, and how many
+/// distinct colours they are.
+///
+/// Enough to tell a surface that was drawn on from one that was not, which is
+/// the question a missing sprite asks. Counting colours stops at 512 - past
+/// that the answer is "a picture" either way.
+fn surface_content(canvas: &dyn Image) -> (usize, u32) {
+    use alloc::collections::BTreeSet;
+
+    let mut colours: BTreeSet<u32> = BTreeSet::new();
+    let mut non_black: u32 = 0;
+
+    for colour in canvas.colors() {
+        let packed = ((colour.r as u32) << 16) | ((colour.g as u32) << 8) | colour.b as u32;
+        if packed != 0 {
+            non_black += 1;
+        }
+        if colours.len() <= 512 {
+            colours.insert(packed);
+        }
+    }
+
+    (colours.len(), non_black)
+}
+
+/// Reports what is on each off-screen surface, every so often.
+///
+/// Some titles never hand their art back through this API: 오셔너스 takes the
+/// pointer out of a surface and writes pixels into it itself, calling no blit,
+/// image or string call at all, and composes the screen the same way. A log of
+/// the calls it makes therefore says nothing about what it drew, and a sprite
+/// that fails to appear looks identical to one that was never asked for.
+///
+/// These lines are the missing half. A surface that stays black was never drawn
+/// on, which puts the fault in the title's own decision to draw; one that holds
+/// a picture the screen does not show puts it in how the title got it there.
+fn trace_offscreen_surfaces(context: &mut dyn WIPICContext) {
+    let flushes = FLUSHES.fetch_add(1, Ordering::Relaxed);
+    if flushes % OFFSCREEN_TRACE_EVERY != 0 {
+        return;
+    }
+
+    let surfaces = OFFSCREEN_SURFACES.lock().clone();
+
+    for (memory, w, h) in surfaces {
+        // A diagnostic never gets in the way of the frame it is describing, so
+        // a surface that cannot be read is passed over rather than reported.
+        let Ok(data_ptr) = context.data_ptr(WIPICIndirectPtr(memory)) else {
+            continue;
+        };
+        let Ok(raw) = read_generic(context, data_ptr) else {
+            continue;
+        };
+        let Ok(canvas) = FrameBuffer(raw).image(context) else {
+            continue;
+        };
+
+        let (colours, non_black) = surface_content(&*canvas);
+
+        tracing::info!("OFFSCREEN {memory:#x} {w}x{h} colours={colours} non_black={non_black}");
+    }
+}
+
 pub async fn create_offscreen_framebuffer(context: &mut dyn WIPICContext, w: i32, h: i32) -> Result<WIPICIndirectPtr> {
     tracing::debug!("MC_grpCreateOffScreenFrameBuffer({w}, {h})");
 
@@ -942,11 +1013,15 @@ pub async fn create_offscreen_framebuffer(context: &mut dyn WIPICContext, w: i32
     let memory = context.alloc(size_of::<WIPICFramebuffer>() as WIPICWord)?;
     write_generic(context, context.data_ptr(memory)?, framebuffer.0)?;
 
+    OFFSCREEN_SURFACES.lock().push((memory.0, w, h));
+
     Ok(memory)
 }
 
 pub async fn destroy_offscreen_framebuffer(context: &mut dyn WIPICContext, framebuffer: WIPICIndirectPtr) -> Result<()> {
     tracing::debug!("MC_grpDestroyOffScreenFrameBuffer({:#x})", framebuffer.0);
+
+    OFFSCREEN_SURFACES.lock().retain(|(memory, _, _)| *memory != framebuffer.0);
 
     context.free(framebuffer)?;
 
@@ -1565,9 +1640,39 @@ pub async fn get_framebuffer_bpp(_context: &mut dyn WIPICContext, framebuffer: W
 mod tests {
     use wie_util::{read_generic, write_generic};
 
+    use wie_backend::canvas::{ArgbPixel, Image, VecImageBuffer};
+
     use super::WIPICGraphicsContextIdx as Idx;
-    use super::{destination_stride, get_context, init_context, set_context};
+    use super::{destination_stride, get_context, init_context, set_context, surface_content};
     use crate::context::test::TestContext;
+
+    /// A surface with `drawn` pixels of one colour on it and the rest black.
+    fn surface_with(width: u32, height: u32, drawn: u32, colour: u32) -> impl Image {
+        let mut raw: alloc::vec::Vec<u32> = alloc::vec![0xff00_0000; (width * height) as usize];
+        for pixel in raw.iter_mut().take(drawn as usize) {
+            *pixel = 0xff00_0000 | colour;
+        }
+
+        VecImageBuffer::<ArgbPixel>::from_raw(width, height, raw)
+    }
+
+    #[test]
+    fn a_surface_nothing_drew_on_reads_as_empty() {
+        let (colours, non_black) = surface_content(&surface_with(60, 60, 0, 0));
+
+        // One colour - black - and nothing lit. This is what a sprite that was
+        // never drawn looks like, and it is the whole point of the line.
+        assert_eq!(non_black, 0);
+        assert_eq!(colours, 1);
+    }
+
+    #[test]
+    fn a_surface_something_drew_on_says_how_much() {
+        let (colours, non_black) = surface_content(&surface_with(60, 60, 900, 0x3366ff));
+
+        assert_eq!(non_black, 900);
+        assert_eq!(colours, 2);
+    }
 
     /// A clet saves the drawing state with `MC_grpGetContext` and later restores
     /// it with `MC_grpSetContext`, so a get has to report back exactly what a set
