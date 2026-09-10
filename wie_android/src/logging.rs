@@ -69,18 +69,25 @@ const DEFAULT_LOG_DIRECTIVE: &str = "debug,wie_lgt=trace,wie_lgt::hot=warn,wie_l
 ///   nothing in it was about the game.
 const COLLECT_LOG_DIRECTIVE: &str = "trace,arm32_cpu=warn,jni=warn";
 
-/// Branches a window records before it stops recording them.
+/// Branches a window records: as many as it takes.
 ///
-/// Enough for tens of seconds of a screen that is misbehaving, and bounded so a
-/// window left open does not fill the log with the paint loop and push the
-/// beginning out. When it runs out the log carries on without it, and the trace
-/// says so.
+/// A budget here was the wrong instrument. Spent from the moment the window
+/// opens, it covers the loading screen and nothing after: 놈ZERO authenticates
+/// ten seconds in, and a million branches ran out eight seconds before the
+/// exchange the window was collected for, twice.
+///
+/// The record the trace is written to is already bounded and already drops its
+/// oldest, so letting the trace run keeps its most recent - the same end a
+/// window is opened for - and keeps it interleaved with the rest of the log,
+/// which is what lets a line be read against the branches that followed it. A
+/// second buffer in front of it would only have decided that proportion sooner,
+/// and spent memory to do it.
 ///
 /// The cost while it runs is that the compiled engines cannot report what their
 /// blocks did, so they decline them and interpret - the game runs slower inside
 /// a window than outside one. That is the trade: a window that is harder to
 /// play through, against a question that would otherwise need another build.
-const COLLECT_TRACE_BRANCHES: u32 = 1_000_000;
+const COLLECT_TRACE_BRANCHES: u32 = u32::MAX;
 
 /// Lets the player swap the log filter at runtime, so capturing a module's
 /// debug/trace detail no longer means editing the default above and rebuilding.
@@ -560,6 +567,24 @@ mod tests {
         // Back to the bounds the crash auto-save is written from.
         assert_eq!(super::CAP_LINES.load(Ordering::Relaxed), MAX_LINES);
 
+        reset();
+    }
+
+    #[test]
+    fn a_windows_trace_does_not_run_out_before_the_window_does() {
+        let _guard = ONE_AT_A_TIME.lock().unwrap_or_else(|x| x.into_inner());
+        wie_backend::probe::disarm();
+
+        // A budget spent from the moment the window opens covers the loading
+        // screen and stops; what the window was opened for is later than that.
+        let _ = start_collecting();
+
+        for step in 0..2_000_000u32 {
+            wie_backend::probe::observe(0x1000 + step * 0x100);
+        }
+        assert!(wie_backend::probe::is_armed(), "the trace stopped while the window was still open");
+
+        let _ = stop_collecting();
         reset();
     }
 
