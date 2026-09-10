@@ -143,6 +143,10 @@ public final class MainActivity extends Activity {
     private GameView gameView;
     private KeypadView keypad;
     private TextView playerStatus;
+    /** The two halves of what used to be one log button. See {@link #startLogCollect()}. */
+    private Button collectButton;
+
+    private Button stopButton;
     private String currentGameName;
     /** The game the player is showing, kept so a rotation can relay it out. */
     private File currentGame;
@@ -694,17 +698,53 @@ public final class MainActivity extends Activity {
     }
 
     /**
-     * Saves the running game's log to Downloads.
+     * Opens a log collection window.
      *
-     * <p>It covers this run only - the native side starts the log over when a
-     * game starts - and can be taken while the game is still going, which is
+     * <p>Throws away what is held and turns every area on, so the file that
+     * comes out of {@link #stopLogCollectAndSave()} covers exactly the stretch
+     * of play between the two presses - and covers all of it, whatever part of
+     * the emulator the question turns out to be about.
+     */
+    private void startLogCollect() {
+        String error = NativeBridge.nativeStartLogCollect();
+        showCollectState();
+
+        Toast.makeText(this,
+                error.isEmpty() ? "로그 수집 시작 - 문제를 재현한 뒤 종료를 누르세요" : "수집 시작 실패: " + error,
+                Toast.LENGTH_LONG).show();
+    }
+
+    /**
+     * Closes the window and saves what it caught to Downloads.
+     *
+     * <p>Also the way to save without having collected: pressed on its own it
+     * writes the running game's log as the single log button used to, which is
      * what a title that hangs rather than stops needs.
      */
-    private void saveLog() {
+    private void stopLogCollectAndSave() {
+        String error = NativeBridge.nativeStopLogCollect();
+        showCollectState();
+
+        if (!error.isEmpty()) {
+            Toast.makeText(this, "수집 종료 실패: " + error, Toast.LENGTH_LONG).show();
+            return;
+        }
+
         withDownloadPermission(() -> {
             Toast.makeText(this, "로그를 저장하는 중...", Toast.LENGTH_SHORT).show();
             emulatorThread.execute(() -> writeLogToDownloads(null, true));
         });
+    }
+
+    /** Dims whichever of the two buttons is not the one to press next. */
+    private void showCollectState() {
+        if (collectButton == null || stopButton == null) {
+            return;
+        }
+
+        boolean collecting = NativeBridge.nativeLogCollecting() != 0;
+        collectButton.setAlpha(collecting ? 0.45f : 1f);
+        stopButton.setAlpha(collecting ? 1f : 0.45f);
     }
 
     /**
@@ -1079,16 +1119,29 @@ public final class MainActivity extends Activity {
         playerStatus.setEllipsize(android.text.TextUtils.TruncateAt.END);
         bar.addView(playerStatus, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f));
 
-        Button log = navyButton("로그");
-        log.setOnClickListener(v -> saveLog());
+        // Collecting is two presses rather than one save, because what makes a
+        // log worth reading is knowing where it starts. Between them every area
+        // is captured at trace, which no single default filter can afford over a
+        // whole run - and that is what stops each new question needing its own
+        // build with its own instrumentation in it.
+        collectButton = navyButton("수집");
+        collectButton.setOnClickListener(v -> startLogCollect());
         // Long-press to change what the log captures, without a rebuild.
-        log.setOnLongClickListener(v -> {
+        collectButton.setOnLongClickListener(v -> {
             showLogFilterDialog();
             return true;
         });
-        LinearLayout.LayoutParams logParams = new LinearLayout.LayoutParams(dp(56), dp(34));
-        logParams.rightMargin = dp(8);
-        bar.addView(log, logParams);
+        LinearLayout.LayoutParams collectParams = new LinearLayout.LayoutParams(dp(48), dp(34));
+        collectParams.rightMargin = dp(6);
+        bar.addView(collectButton, collectParams);
+
+        stopButton = navyButton("종료");
+        stopButton.setOnClickListener(v -> stopLogCollectAndSave());
+        LinearLayout.LayoutParams stopParams = new LinearLayout.LayoutParams(dp(48), dp(34));
+        stopParams.rightMargin = dp(8);
+        bar.addView(stopButton, stopParams);
+
+        showCollectState();
 
         Button rotate = navyButton(landscapeMode ? "세로" : "가로");
         rotate.setOnClickListener(v -> toggleOrientation());

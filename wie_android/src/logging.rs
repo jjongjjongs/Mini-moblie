@@ -2,8 +2,11 @@
 //! diagnostics `wie_cli` prints to stderr - and keeps a copy, so a phone with
 //! no `adb` attached can still hand the log over.
 //!
-//! The copy is what the player's log button saves. It is cleared when a game
-//! starts, so what comes out is that one run and not the whole session.
+//! The copy is what the player's log buttons save. It is cleared when a game
+//! starts, so what comes out is that one run and not the whole session, and
+//! [`start_collecting`] narrows it further to one stretch of play with every
+//! area turned on - which is what keeps a new question from needing a new
+//! build with new instrumentation in it.
 
 use std::{
     collections::VecDeque,
@@ -45,9 +48,27 @@ static INIT: Once = Once::new();
 /// `wie_lgt::hot=trace`), overrides this entirely.
 const DEFAULT_LOG_DIRECTIVE: &str = "debug,wie_lgt=trace,wie_lgt::hot=warn,wie_lgt::runtime::wipi_c=debug,wie_ktf=trace,wie_j2me=trace,wie_skt=trace,wie_core_arm=info,wie_wipi_c::api::graphics=debug,wie_wipi_java::classes::org::kwis::msp::lcdui::graphics=info,wie_midp::classes::javax::microedition::lcdui::graphics=info,java_runtime=info,java_runtime::classes::java::lang::system=debug,arm32_cpu=warn";
 
+/// What a collection window captures: everything, everywhere.
+///
+/// The default above is careful because the capture it feeds is unbounded in
+/// time and bounded in size, so a flood at the wrong level scrolls the moment
+/// that matters out of it. A window with an end does not have that problem, so
+/// it does not need the care: whatever area a question turns out to be about is
+/// already in the file, and nobody has to guess in advance and rebuild.
+///
+/// The one thing held back is `arm32_cpu`, whose trace is a line per emulated
+/// instruction - millions a second, which is not a log anyone reads and would
+/// fill the window before a finger left the button. What the core did is what
+/// `wie_backend::probe` is for.
+const COLLECT_LOG_DIRECTIVE: &str = "trace,arm32_cpu=warn";
+
 /// Lets the player swap the log filter at runtime, so capturing a module's
 /// debug/trace detail no longer means editing the default above and rebuilding.
 static RELOAD_HANDLE: OnceLock<reload::Handle<EnvFilter, Registry>> = OnceLock::new();
+
+/// Whether a collection window is open, so the UI can show which button to
+/// offer and a second press does not start over.
+static COLLECTING: Mutex<bool> = Mutex::new(false);
 
 /// The directive the filter is currently running, so the UI can show it.
 static CURRENT_DIRECTIVE: Mutex<String> = Mutex::new(String::new());
@@ -122,6 +143,61 @@ pub fn set_filter(directive: &str) -> core::result::Result<(), String> {
 
     *current_directive() = directive.to_owned();
     Ok(())
+}
+
+/// Opens a collection window: throws away what is held, turns everything on,
+/// and starts recording from here.
+///
+/// The pair to [`stop_collecting`]. Between them the log is one bounded stretch
+/// of play with nothing filtered out of it, which is what lets one run answer a
+/// question about an area nobody had thought to instrument.
+///
+/// The window opens either way; widening the filter is what can fail, and the
+/// reason comes back so it can be shown. A window recorded under the old filter
+/// is still a window, and the bounded stretch is the half of this that matters;
+/// refusing to start because the filter would not widen would take that away
+/// too, and quietly.
+pub fn start_collecting() -> core::result::Result<(), String> {
+    let widened = set_filter(COLLECT_LOG_DIRECTIVE);
+
+    reset();
+    *collecting() = true;
+
+    // Named in the log itself, because by the time the file is read the filter
+    // has been put back and the header would otherwise describe the wrong one.
+    tracing::info!("log collection started under {}", filter());
+
+    widened
+}
+
+/// Closes the window and puts the filter back where it was.
+///
+/// The log is left as it stands: the caller saves it, and what it saves is what
+/// happened between the two presses.
+pub fn stop_collecting() -> core::result::Result<(), String> {
+    // Pressed without a window open, this is the plain save the single log
+    // button used to be, and putting the filter back would throw away one the
+    // player had set by hand. Only a window this opened gets closed.
+    if !*collecting() {
+        return Ok(());
+    }
+
+    tracing::info!("log collection stopped");
+
+    *collecting() = false;
+
+    // Closed regardless of whether the filter goes back, for the same reason
+    // the window opens regardless of whether it widened.
+    set_filter("")
+}
+
+/// Whether a collection window is open.
+pub fn collecting_now() -> bool {
+    *collecting()
+}
+
+fn collecting() -> std::sync::MutexGuard<'static, bool> {
+    COLLECTING.lock().unwrap_or_else(|x| x.into_inner())
 }
 
 /// Lines kept, and bytes. A run that overruns either drops its oldest, which
@@ -314,7 +390,17 @@ mod logcat {
 mod tests {
     use std::io::Write as _;
 
-    use super::{DEFAULT_LOG_DIRECTIVE, MAX_LINES, make_writer, reset, snapshot};
+    use super::{DEFAULT_LOG_DIRECTIVE, MAX_LINES, collecting_now, make_writer, reset, snapshot, start_collecting, stop_collecting};
+
+    #[test]
+    fn collect_log_directive_parses() {
+        // A malformed directive would be refused at the moment the player
+        // pressed collect, leaving them recording under the old filter and
+        // finding out only when the file arrived without what they needed.
+        tracing_subscriber::EnvFilter::builder()
+            .parse(super::COLLECT_LOG_DIRECTIVE)
+            .expect("collect log directive must be valid");
+    }
 
     #[test]
     fn default_log_directive_parses() {
@@ -325,9 +411,13 @@ mod tests {
             .expect("default log directive must be valid");
     }
 
-    /// The tests share one global record, so they run as one.
+    /// The record is one thing shared by the process, so two tests writing to
+    /// it at once would each see the other's lines.
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn the_log_is_kept_and_bounded() {
+        let _guard = ONE_AT_A_TIME.lock().unwrap_or_else(|x| x.into_inner());
         reset();
         assert_eq!(snapshot(), "");
 
@@ -352,6 +442,33 @@ mod tests {
         assert!(log.starts_with("[50 earlier lines dropped"), "{}", &log[..64]);
         assert!(log.contains(&format!("line {}", MAX_LINES + 49)), "the newest line is missing");
         assert!(!log.contains("line 0\n"), "the oldest line was kept");
+
+        reset();
+    }
+
+    #[test]
+    fn a_window_covers_what_happened_inside_it() {
+        let _guard = ONE_AT_A_TIME.lock().unwrap_or_else(|x| x.into_inner());
+        reset();
+
+        let mut writer = make_writer();
+        writer.write_all(b"before\n").unwrap();
+
+        assert!(!collecting_now());
+        // The subscriber is not installed in this test binary, so the filter
+        // swap has nowhere to go; what is being checked is the record, which is
+        // where the window shows up.
+        let _ = start_collecting();
+        assert!(collecting_now());
+
+        writer.write_all(b"inside\n").unwrap();
+
+        let _ = stop_collecting();
+        assert!(!collecting_now());
+
+        let log = snapshot();
+        assert!(log.contains("inside"), "the window's own lines are missing");
+        assert!(!log.contains("before"), "the window kept what came before it");
 
         reset();
     }

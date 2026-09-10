@@ -396,6 +396,55 @@ pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativ
     guard_string(&env, logging::filter)
 }
 
+/// `nativeStartLogCollect() -> String`
+///
+/// Opens a collection window: throws away what is held, turns every area on,
+/// and records from here until `nativeStopLogCollect`. Returns an empty string
+/// on success, otherwise the reason it could not start.
+///
+/// # Safety
+/// Called by the JVM with a valid `env` reference.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativeStartLogCollect(env: JNIEnv, _class: JClass) -> jstring {
+    logging::init();
+
+    guard_string(&env, || match logging::start_collecting() {
+        Ok(()) => String::new(),
+        Err(reason) => reason,
+    })
+}
+
+/// `nativeStopLogCollect() -> String`
+///
+/// Closes the window and puts the filter back. The log is left as it stands for
+/// the caller to save, so what it saves is what happened between the presses.
+///
+/// # Safety
+/// Called by the JVM with a valid `env` reference.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativeStopLogCollect(env: JNIEnv, _class: JClass) -> jstring {
+    logging::init();
+
+    guard_string(&env, || match logging::stop_collecting() {
+        Ok(()) => String::new(),
+        Err(reason) => reason,
+    })
+}
+
+/// `nativeLogCollecting() -> int`
+///
+/// Whether a collection window is open, so the buttons can show which of them
+/// is the one to press.
+///
+/// # Safety
+/// Called by the JVM with a valid `env` reference.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativeLogCollecting(_env: JNIEnv, _class: JClass) -> jint {
+    logging::init();
+
+    jint::from(logging::collecting_now())
+}
+
 /// `nativeSetLogFilter(String directive) -> String`
 ///
 /// Swaps the live log filter without a rebuild, so capturing a module's

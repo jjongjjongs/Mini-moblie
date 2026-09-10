@@ -113,6 +113,30 @@ final class NativeBridge {
      */
     static native String nativeSetLogFilter(String directive);
 
+    /**
+     * Opens a log collection window: throws away what is held, turns every area
+     * on, and records from here until {@link #nativeStopLogCollect()}.
+     *
+     * <p>The always-on capture the crash auto-save reads is the same one, so a
+     * game that dies inside a window still leaves its log behind - the window's
+     * log, which is the more useful of the two.
+     *
+     * @return empty on success, otherwise why it could not start
+     */
+    static native String nativeStartLogCollect();
+
+    /**
+     * Closes the window and puts the filter back. The log is left as it stands
+     * for {@link #nativeLog()} to read, so what gets saved is what happened
+     * between the two presses.
+     *
+     * @return empty on success, otherwise why it could not stop
+     */
+    static native String nativeStopLogCollect();
+
+    /** Whether a collection window is open. */
+    static native int nativeLogCollecting();
+
     /** Version of the native library. */
     static native String nativeVersion();
 }
