@@ -187,8 +187,7 @@ pub fn set_filter(directive: &str) -> core::result::Result<(), String> {
 pub fn start_collecting() -> core::result::Result<(), String> {
     let widened = set_filter(COLLECT_LOG_DIRECTIVE);
 
-    CAP_LINES.store(COLLECT_MAX_LINES, Ordering::Relaxed);
-    CAP_BYTES.store(COLLECT_MAX_BYTES, Ordering::Relaxed);
+    set_bounds(COLLECT_MAX_LINES, COLLECT_MAX_BYTES);
 
     reset();
     *collecting() = true;
@@ -227,8 +226,7 @@ pub fn stop_collecting() -> core::result::Result<(), String> {
     // Back to the always-on bounds, which are what the crash auto-save is
     // written from. What the window collected is left as it stands - the caller
     // saves it next, and raising the bounds cannot drop any of it.
-    CAP_LINES.store(MAX_LINES, Ordering::Relaxed);
-    CAP_BYTES.store(MAX_BYTES, Ordering::Relaxed);
+    set_bounds(MAX_LINES, MAX_BYTES);
 
     // Closed regardless of whether the filter goes back, for the same reason
     // the window opens regardless of whether it widened.
@@ -263,25 +261,64 @@ const MAX_BYTES: usize = 48 << 20;
 const COLLECT_MAX_LINES: usize = 80_000;
 const COLLECT_MAX_BYTES: usize = 12 << 20;
 
-/// Lines the record is currently allowed, and bytes. Swapped by
-/// [`start_collecting`] and [`stop_collecting`].
-static CAP_LINES: AtomicUsize = AtomicUsize::new(MAX_LINES);
-static CAP_BYTES: AtomicUsize = AtomicUsize::new(MAX_BYTES);
+/// The share of the bounds the branch trace is allowed, in percent.
+///
+/// The trace and the rest of the log are both worth keeping and they arrive at
+/// wildly different rates: three windows captured off a handset came back
+/// 99.8% branch trace, 50,650 lines of it against 117 of everything else, and
+/// the half a million lines that went over the bound were the half the window
+/// had been opened to read. One bound shared first-come cannot hold both - the
+/// denser one decides the proportion, and it decides it at 500:1.
+///
+/// So each gets its own, and each keeps its own most recent. The trace still
+/// runs to the end of the window and still loses only its beginning; what
+/// changes is that losing it no longer costs the log the minutes around it.
+/// Sized so the trace keeps roughly what it kept before - it was already
+/// getting about a second of the bound - and the log gets back the rest.
+const TRACE_SHARE_PERCENT: usize = 60;
 
+/// How a branch-trace line is told apart from any other, which is by the target
+/// the format layer prints it under.
+///
+/// The record is fed formatted lines - by the time one arrives its event is
+/// gone - so the target has to be read back out of the text. It sits between
+/// the span list and the message, spaced exactly as written here.
+const TRACE_TARGET: &str = " wie_backend::probe: ";
+
+/// Lines the record is currently allowed, and bytes, for everything that is not
+/// the branch trace. Swapped by [`start_collecting`] and [`stop_collecting`].
+static CAP_LINES: AtomicUsize = AtomicUsize::new(MAX_LINES - MAX_LINES * TRACE_SHARE_PERCENT / 100);
+static CAP_BYTES: AtomicUsize = AtomicUsize::new(MAX_BYTES - MAX_BYTES * TRACE_SHARE_PERCENT / 100);
+
+/// The same, for the branch trace.
+static TRACE_CAP_LINES: AtomicUsize = AtomicUsize::new(MAX_LINES * TRACE_SHARE_PERCENT / 100);
+static TRACE_CAP_BYTES: AtomicUsize = AtomicUsize::new(MAX_BYTES * TRACE_SHARE_PERCENT / 100);
+
+/// Sets both budgets from one total, giving the branch trace its share.
+fn set_bounds(max_lines: usize, max_bytes: usize) {
+    let trace_lines = max_lines * TRACE_SHARE_PERCENT / 100;
+    let trace_bytes = max_bytes * TRACE_SHARE_PERCENT / 100;
+
+    TRACE_CAP_LINES.store(trace_lines, Ordering::Relaxed);
+    TRACE_CAP_BYTES.store(trace_bytes, Ordering::Relaxed);
+    CAP_LINES.store(max_lines - trace_lines, Ordering::Relaxed);
+    CAP_BYTES.store(max_bytes - trace_bytes, Ordering::Relaxed);
+}
+
+/// One bounded queue of lines: what it holds, what it has had to drop, and how
+/// much of the bound it is using.
 #[derive(Default)]
-struct Record {
+struct Lines {
     lines: VecDeque<String>,
     bytes: usize,
     /// Lines dropped to stay inside the bounds, so the snapshot can say so.
     dropped: usize,
 }
 
-impl Record {
-    fn push(&mut self, line: String) {
+impl Lines {
+    fn push(&mut self, line: String, max_lines: usize, max_bytes: usize) {
         self.bytes += line.len() + 1;
         self.lines.push_back(line);
-
-        let (max_lines, max_bytes) = (CAP_LINES.load(Ordering::Relaxed), CAP_BYTES.load(Ordering::Relaxed));
 
         while self.lines.len() > max_lines || self.bytes > max_bytes {
             let Some(oldest) = self.lines.pop_front() else {
@@ -291,6 +328,33 @@ impl Record {
             self.dropped += 1;
         }
     }
+}
+
+#[derive(Default)]
+struct Record {
+    log: Lines,
+    /// The branch trace, held to its own share of the bounds so it cannot
+    /// evict the log around it. Merged back by time in [`snapshot`], so what
+    /// is read is still one interleaved run.
+    trace: Lines,
+}
+
+impl Record {
+    fn push(&mut self, line: String) {
+        if line.contains(TRACE_TARGET) {
+            self.trace
+                .push(line, TRACE_CAP_LINES.load(Ordering::Relaxed), TRACE_CAP_BYTES.load(Ordering::Relaxed));
+        } else {
+            self.log.push(line, CAP_LINES.load(Ordering::Relaxed), CAP_BYTES.load(Ordering::Relaxed));
+        }
+    }
+}
+
+/// The timestamp a line is ordered by: the leading field the format layer
+/// writes. A line without one orders by its own text, which is only the header
+/// lines nothing else is interleaved with.
+fn line_time(line: &str) -> &str {
+    line.split_once(char::is_whitespace).map_or(line, |(time, _)| time)
 }
 
 static RECORD: LazyLock<Mutex<Record>> = LazyLock::new(|| Mutex::new(Record::default()));
@@ -304,15 +368,50 @@ pub fn reset() {
     *record() = Record::default();
 }
 
-/// Everything logged since the last [`reset`].
+/// Everything logged since the last [`reset`], the branch trace merged back
+/// into the rest by time.
+///
+/// The two are held apart only so that neither can crowd the other out of its
+/// bounds; read back they are one run, and a line is worth reading against the
+/// branches that followed it.
 pub fn snapshot() -> String {
     let record = record();
 
-    let mut out = String::with_capacity(record.bytes + 128);
-    if record.dropped > 0 {
-        out.push_str(&format!("[{} earlier lines dropped to stay inside the log's bounds]\n", record.dropped));
+    let mut out = String::with_capacity(record.log.bytes + record.trace.bytes + 256);
+
+    // Each queue says what it had to drop, because the two ends mean different
+    // things: the log's beginning going means the window ran long, the trace's
+    // going means the emulated code branched harder than a window can hold.
+    if record.log.dropped > 0 {
+        out.push_str(&format!(
+            "[{} earlier lines dropped to stay inside the log's bounds]\n",
+            record.log.dropped
+        ));
     }
-    for line in &record.lines {
+    if record.trace.dropped > 0 {
+        out.push_str(&format!(
+            "[{} earlier branch-trace lines dropped to stay inside the trace's own bounds]\n",
+            record.trace.dropped
+        ));
+    }
+
+    let mut log = record.log.lines.iter().peekable();
+    let mut trace = record.trace.lines.iter().peekable();
+    loop {
+        let next = match (log.peek(), trace.peek()) {
+            (Some(left), Some(right)) => {
+                if line_time(left) <= line_time(right) {
+                    log.next()
+                } else {
+                    trace.next()
+                }
+            }
+            (Some(_), None) => log.next(),
+            (None, Some(_)) => trace.next(),
+            (None, None) => break,
+        };
+
+        let Some(line) = next else { break };
         out.push_str(line);
         out.push('\n');
     }
@@ -499,13 +598,16 @@ mod tests {
         assert!(snapshot().contains("unfinished"));
 
         reset();
-        for index in 0..MAX_LINES + 50 {
+        // Everything that is not the branch trace is bounded by its own share
+        // of the capture, and loses its oldest first.
+        let cap = super::CAP_LINES.load(Ordering::Relaxed);
+        for index in 0..cap + 50 {
             writer.write_all(format!("line {index}\n").as_bytes()).unwrap();
         }
 
         let log = snapshot();
         assert!(log.starts_with("[50 earlier lines dropped"), "{}", &log[..64]);
-        assert!(log.contains(&format!("line {}", MAX_LINES + 49)), "the newest line is missing");
+        assert!(log.contains(&format!("line {}", cap + 49)), "the newest line is missing");
         assert!(!log.contains("line 0\n"), "the oldest line was kept");
 
         reset();
@@ -543,29 +645,93 @@ mod tests {
         let _guard = ONE_AT_A_TIME.lock().unwrap_or_else(|x| x.into_inner());
         wie_backend::probe::disarm();
 
-        assert_eq!(super::CAP_LINES.load(Ordering::Relaxed), MAX_LINES);
+        // Both budgets together are the bound; each holds its own share of it.
+        let outside = super::CAP_LINES.load(Ordering::Relaxed) + super::TRACE_CAP_LINES.load(Ordering::Relaxed);
+        assert_eq!(outside, MAX_LINES);
 
         let _ = start_collecting();
         // A window is every area at trace plus the branches the code takes, and
         // that is where the memory goes.
-        assert_eq!(super::CAP_LINES.load(Ordering::Relaxed), super::COLLECT_MAX_LINES);
+        let inside = super::CAP_LINES.load(Ordering::Relaxed) + super::TRACE_CAP_LINES.load(Ordering::Relaxed);
+        assert_eq!(inside, super::COLLECT_MAX_LINES);
         assert!(super::COLLECT_MAX_LINES < MAX_LINES);
 
+        let cap = super::CAP_LINES.load(Ordering::Relaxed);
         let mut writer = make_writer();
-        for index in 0..super::COLLECT_MAX_LINES + 40 {
+        for index in 0..cap + 40 {
             writer.write_all(format!("line {index}\n").as_bytes()).unwrap();
         }
 
         let log = snapshot();
         assert!(log.starts_with("[4"), "the window kept more than its bound: {}", &log[..48]);
-        assert!(
-            log.contains(&format!("line {}", super::COLLECT_MAX_LINES + 39)),
-            "the newest line is missing"
-        );
+        assert!(log.contains(&format!("line {}", cap + 39)), "the newest line is missing");
 
         let _ = stop_collecting();
         // Back to the bounds the crash auto-save is written from.
-        assert_eq!(super::CAP_LINES.load(Ordering::Relaxed), MAX_LINES);
+        let outside = super::CAP_LINES.load(Ordering::Relaxed) + super::TRACE_CAP_LINES.load(Ordering::Relaxed);
+        assert_eq!(outside, MAX_LINES);
+
+        reset();
+    }
+
+    /// The branch trace arrives hundreds of times faster than everything else -
+    /// three windows off a handset came back 99.8% trace - so sharing one bound
+    /// first-come let it evict the whole log around it. Each holding its own
+    /// share is what stops that.
+    #[test]
+    fn a_flood_of_branches_does_not_evict_the_log_around_it() {
+        let _guard = ONE_AT_A_TIME.lock().unwrap_or_else(|x| x.into_inner());
+        wie_backend::probe::disarm();
+        reset();
+
+        let _ = start_collecting();
+        let trace_cap = super::TRACE_CAP_LINES.load(Ordering::Relaxed);
+
+        let mut writer = make_writer();
+        writer
+            .write_all(b"2000-01-01T00:00:00.000000Z  INFO the line the window was opened for\n")
+            .unwrap();
+
+        // Enough trace to have swallowed the bound whole under one budget.
+        for index in 0..trace_cap * 2 {
+            writer
+                .write_all(format!("2000-01-01T00:00:01.{index:06}Z  INFO{} branches {index}\n", super::TRACE_TARGET).as_bytes())
+                .unwrap();
+        }
+
+        let log = snapshot();
+        assert!(log.contains("the line the window was opened for"), "the trace evicted the log around it");
+        assert!(
+            log.contains(&format!("branches {}", trace_cap * 2 - 1)),
+            "the trace lost its own most recent"
+        );
+        assert!(!log.contains("branches 0 "), "the trace kept more than its share");
+
+        let _ = stop_collecting();
+        reset();
+    }
+
+    /// Held apart only so neither crowds the other out; read back, one run.
+    #[test]
+    fn the_trace_reads_back_interleaved_with_the_log() {
+        let _guard = ONE_AT_A_TIME.lock().unwrap_or_else(|x| x.into_inner());
+        wie_backend::probe::disarm();
+        reset();
+
+        let mut writer = make_writer();
+        for (time, line) in [
+            ("00.000000", "first".to_owned()),
+            ("01.000000", format!("{}branch", super::TRACE_TARGET)),
+            ("02.000000", "second".to_owned()),
+            ("03.000000", format!("{}branch again", super::TRACE_TARGET)),
+            ("04.000000", "third".to_owned()),
+        ] {
+            writer.write_all(format!("2000-01-01T00:00:{time}Z  INFO {line}\n").as_bytes()).unwrap();
+        }
+
+        let log = snapshot();
+        let times: Vec<&str> = log.lines().filter_map(|line| line.get(17..19)).collect();
+        assert_eq!(times, ["00", "01", "02", "03", "04"], "the merge did not put the run back in order");
 
         reset();
     }
