@@ -6795,44 +6795,116 @@ const SUDDEN_ATTACK_BODY: usize = 64;
 /// so a reply is a `u16` little-endian total length, two more header bytes, and
 /// a body - the same shape the request has.
 ///
-/// **The body is not settled.** What reads it is reached through the
-/// connection's own table (`[[r6] + 0xc]`), built at run time, so the archive
-/// does not say what it wants. This answers with the command echoed and a body
-/// of zeros, which is what a granted answer looks like in every one of these
-/// protocols that has been read; the branch trace a collection window records
-/// says where that lands, and this is meant to be corrected by it rather than
-/// left as a guess.
+/// **The command is not echoed.** The two header bytes after the length are a
+/// command id, read big-endian out of `[2..4]`, and the title dispatches on it
+/// at `0x422b8` against four values and no others:
+///
+/// ```asm
+/// 422cc  ldrsb r5, [r0, r5]   ; body[0], the status - negative is a refusal
+/// 422d0  bge   #0x422e8
+/// 422e8  ldrb  r3, [r0, #3]
+/// 422ea  ldrb  r2, [r0, #2]
+/// 422ec  lsls  r0, r3, #8
+/// 422ee  ldr   r3, [pc, #0x78]  ; 0x103
+/// 422f0  orrs  r0, r2
+/// 422f2  cmp   r0, r3
+/// 422f4  beq   #0x42310
+/// ...                            ; 0x101, 0x107 -> 0x42310, 0x201 -> 0x42354
+/// 4230e  b     #0x42362          ; anything else is dropped where it stands
+/// ```
+///
+/// Echoing the request's own `0x106` fell off that end: the frame was read,
+/// accepted as a success, and then discarded without ever reaching a handler,
+/// which is exactly what the title looked like from outside - a request
+/// answered, and an authentication screen that never moved.
+///
+/// A reply's id is its request's plus one. The two the title sends are
+/// [`NOMZERO_AUTHENTICATE`] from state 4 (`0x424b8`, `r1 = 0x83 << 1`) and
+/// [`NOMZERO_PURCHASE`] from state 7 (`0x4250c`, `r1 = 0x80 << 2`), and the
+/// four ids it accepts are their answers.
+///
+/// **The body is settled too**, by what `0x42310` does with it:
+///
+/// ```asm
+/// 42310  ldr   r5, [r1, #8]     ; the body
+/// 42316  adds  r1, r5, #1
+/// 4231a  bl    #0x41738         ; saves body[1..0x29] to "audio.adt"
+/// 42322  beq   #0x4234c
+/// 42326  adds  r3, #0x29
+/// 42328  ldrb  r3, [r3]         ; body[0x29]
+/// 42332  cmp   r3, #0
+/// 42334  bne   #0x42340
+/// 4233c  movs  r3, #0xc         ; zero  - ask the player to buy (state 12)
+/// 42346  movs  r3, #9           ; other - say so and go in (state 9)
+/// ```
+///
+/// so the body is forty-two bytes: a status, forty that are only ever written
+/// through to the title's own cache file, and a flag. `0x41738` does not read
+/// the forty - it writes them out and answers whether the file took them - and
+/// the two fields the cache is later checked on (`0x416e0`) are filled from the
+/// session rather than from us, so zeros there cost nothing.
+///
+/// The flag is answered non-zero: state 9 shows what it has to show and returns
+/// 2 from the tick, which is what `0xbd54` takes as "go in". Zero would instead
+/// raise the purchase prompt, and that only leads back to the same place by way
+/// of a second exchange.
 fn lgt_local_nomzero_response(request: &[u8]) -> Option<Vec<u8>> {
-    const FRAME: usize = 71;
-    const COMMAND: u8 = 6;
-    const SUB: u8 = 1;
-
-    if request.len() != FRAME || u16::from_le_bytes([request[0], request[1]]) as usize != FRAME {
+    if request.len() < NOMZERO_HEADER || u16::from_le_bytes([request[0], request[1]]) as usize != request.len() {
         return None;
     }
 
-    if request[2] != COMMAND || request[3] != SUB {
-        return None;
-    }
+    // The id the title dispatches on, the way `0x422e8` assembles it.
+    let command = u16::from_be_bytes([request[3], request[2]]);
 
-    let body = [0u8; NOMZERO_BODY];
+    let mut body = match command {
+        NOMZERO_AUTHENTICATE if request.len() == NOMZERO_AUTHENTICATE_FRAME => {
+            let mut body = vec![0u8; NOMZERO_AUTH_BODY];
+            // Not zero, so the title says the player is already entitled and
+            // goes in, rather than raising a prompt to buy.
+            body[NOMZERO_ENTITLED] = 1;
+            body
+        }
+        // 0x42354 only moves the state on; it never looks at what came with it.
+        NOMZERO_PURCHASE => vec![0u8; NOMZERO_ACK_BODY],
+        _ => return None,
+    };
+
+    // A reply's id is its request's plus one.
+    let answer = command + 1;
 
     let mut reply = Vec::with_capacity(NOMZERO_HEADER + body.len());
     reply.extend_from_slice(&((NOMZERO_HEADER + body.len()) as u16).to_le_bytes());
-    reply.push(COMMAND);
-    reply.push(SUB);
-    reply.extend_from_slice(&body);
+    reply.push(answer as u8);
+    reply.push((answer >> 8) as u8);
+    reply.append(&mut body);
 
     Some(reply)
 }
 
 /// Bytes of 놈ZERO's reply that come before its body: the `u16` length the
-/// title reads first, and the command pair after it.
+/// title reads first, and the command id after it.
 const NOMZERO_HEADER: usize = 4;
 
-/// Bytes of body in that reply. Provisional - see
-/// [`lgt_local_nomzero_response`].
-const NOMZERO_BODY: usize = 4;
+/// 놈ZERO asking whether the player may play, sent from state 4.
+const NOMZERO_AUTHENTICATE: u16 = 0x0106;
+
+/// Bytes in that request, which is the same every time it is sent.
+const NOMZERO_AUTHENTICATE_FRAME: usize = 71;
+
+/// 놈ZERO asking to be charged, sent from state 7 once a player accepts the
+/// prompt. Reachable only through the answer this does not give.
+const NOMZERO_PURCHASE: u16 = 0x0200;
+
+/// Bytes of body in the answer to [`NOMZERO_AUTHENTICATE`]: a status, forty
+/// that go to the title's cache file, and the flag below.
+const NOMZERO_AUTH_BODY: usize = 0x2a;
+
+/// Where in that body the title reads whether the player is already entitled.
+const NOMZERO_ENTITLED: usize = 0x29;
+
+/// Bytes of body in the answer to [`NOMZERO_PURCHASE`]. Only the status at
+/// `[0]` is read, and only for its sign.
+const NOMZERO_ACK_BODY: usize = 4;
 
 /// The answer to a billing request, whichever of these protocols it is in.
 ///
@@ -6960,6 +7032,12 @@ mod tests {
         request
     }
 
+    /// The command id the title dispatches on, the way `0x422e8` reads it: the
+    /// two header bytes after the length, big end last.
+    fn nomzero_command(frame: &[u8]) -> u16 {
+        u16::from_be_bytes([frame[3], frame[2]])
+    }
+
     #[test]
     fn 놈zero_is_answered_in_the_shape_its_receive_reads() {
         let reply = response(&nomzero_auth()).unwrap();
@@ -6969,25 +7047,64 @@ mod tests {
         // the reply would leave it waiting on bytes that never come.
         assert_eq!(u16::from_le_bytes([reply[0], reply[1]]) as usize, reply.len());
         assert!(reply.len() > NOMZERO_HEADER);
-
-        // Its own command back, which is what these protocols answer with.
-        assert_eq!((reply[2], reply[3]), (6, 1));
     }
 
     #[test]
-    fn 놈zero_answers_only_its_own_frame() {
+    fn 놈zeros_answer_carries_an_id_its_dispatch_knows() {
+        let reply = response(&nomzero_auth()).unwrap();
+
+        // The request's own id back was the whole of why the title never moved:
+        // `0x422b8` compares against 0x101, 0x103, 0x107 and 0x201, and drops
+        // what matches none of them without telling anyone. 0x106 matched none.
+        assert_ne!(nomzero_command(&reply), nomzero_command(&nomzero_auth()));
+        assert!([0x101, 0x103, 0x107, 0x201].contains(&nomzero_command(&reply)));
+    }
+
+    #[test]
+    fn 놈zero_is_told_the_player_is_already_entitled() {
+        let reply = response(&nomzero_auth()).unwrap();
+        let body = &reply[NOMZERO_HEADER..];
+
+        // `0x422cc` reads the status signed and takes anything negative for a
+        // refusal, and `0x42328` needs a body long enough to hold the flag.
+        assert_eq!(body.len(), NOMZERO_AUTH_BODY);
+        assert!((body[0] as i8) >= 0);
+
+        // Zero there raises the purchase prompt instead of going in.
+        assert_ne!(body[NOMZERO_ENTITLED], 0);
+    }
+
+    #[test]
+    fn 놈zeros_purchase_is_acknowledged_too() {
+        // Only reachable if the prompt is ever raised, but `0x42354` moves the
+        // state on when it arrives and stops where it stands when it does not.
+        let mut purchase = vec![0u8; 16];
+        purchase[..2].copy_from_slice(&16u16.to_le_bytes());
+        purchase[2] = 0x00;
+        purchase[3] = 0x02;
+
+        let reply = response(&purchase).unwrap();
+        assert_eq!(nomzero_command(&reply), 0x201);
+        assert!((reply[NOMZERO_HEADER] as i8) >= 0);
+    }
+
+    #[test]
+    fn 놈zero_answers_only_its_own_frames() {
         // A frame whose length field disagrees with the frame.
         let mut wrong_length = nomzero_auth();
         wrong_length[0] = 70;
         assert!(lgt_local_nomzero_response(&wrong_length).is_none());
 
-        // The right length and a command that is not the authentication.
+        // The right length and a command that is neither of the two it sends.
         let mut other_command = nomzero_auth();
         other_command[2] = 7;
         assert!(lgt_local_nomzero_response(&other_command).is_none());
 
-        // Not seventy-one bytes at all.
-        assert!(lgt_local_nomzero_response(&nomzero_auth()[..70]).is_none());
+        // Its authentication is one fixed size, so a frame that is not that
+        // size is not it however its header reads.
+        let mut short = nomzero_auth()[..70].to_vec();
+        short[..2].copy_from_slice(&70u16.to_le_bytes());
+        assert!(lgt_local_nomzero_response(&short).is_none());
     }
 
     /// The 36-byte record 짜요짜요타이쿤4 opens with, captured off its socket.
