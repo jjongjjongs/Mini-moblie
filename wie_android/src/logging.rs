@@ -56,11 +56,15 @@ const DEFAULT_LOG_DIRECTIVE: &str = "debug,wie_lgt=trace,wie_lgt::hot=warn,wie_l
 /// it does not need the care: whatever area a question turns out to be about is
 /// already in the file, and nobody has to guess in advance and rebuild.
 ///
-/// The one thing held back is `arm32_cpu`, whose trace is a line per emulated
-/// instruction - millions a second, which is not a log anyone reads and would
-/// fill the window before a finger left the button. What the core did is what
-/// `wie_backend::probe` is for.
-const COLLECT_LOG_DIRECTIVE: &str = "trace,arm32_cpu=warn";
+/// Two things are held back, both for the same reason - they are not about the
+/// emulated title and they crowd out what is:
+///
+/// - `arm32_cpu`, whose trace is a line per emulated instruction, millions a
+///   second. What the core did is what `wie_backend::probe` is for.
+/// - `jni`, which narrates its own binding layer - a line per `NewStringUTF`
+///   and the like. The first window taken with this filter was 47% that, and
+///   nothing in it was about the game.
+const COLLECT_LOG_DIRECTIVE: &str = "trace,arm32_cpu=warn,jni=warn";
 
 /// Lets the player swap the log filter at runtime, so capturing a module's
 /// debug/trace detail no longer means editing the default above and rebuilding.
