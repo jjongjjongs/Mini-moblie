@@ -967,6 +967,65 @@ fn surface_content(canvas: &dyn Image) -> (usize, u32) {
     (colours.len(), non_black)
 }
 
+/// Characters a thumbnail cell can be, darkest first.
+///
+/// A ramp rather than a threshold: an icon and the panel it sits on differ in
+/// shade more often than they differ in being lit at all.
+const THUMBNAIL_RAMP: [u8; 10] = *b" .:-=+*#%@";
+
+/// Widest a thumbnail gets, in characters. Rows are half this at most, since a
+/// character cell is about twice as tall as it is wide.
+const THUMBNAIL_COLUMNS: u32 = 32;
+
+/// Draws a surface small enough to read in a log.
+///
+/// A count of lit pixels says a surface was drawn on; it does not say what was
+/// drawn, and "an icon" and "the panel behind where an icon should be" both
+/// come back as a few thousand lit pixels. This is the difference, at the only
+/// resolution a log can carry: each cell is the mean brightness of the block it
+/// stands for, mapped through [`THUMBNAIL_RAMP`].
+fn surface_thumbnail(canvas: &dyn Image) -> Vec<String> {
+    let (width, height) = (canvas.width(), canvas.height());
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+
+    let columns = THUMBNAIL_COLUMNS.min(width);
+    let rows = (THUMBNAIL_COLUMNS / 2).min(height).max(1);
+
+    // One pass over the pixels, accumulating into the cell each falls in, so a
+    // thumbnail costs the read it already does rather than a read per cell.
+    let mut sums = vec![0u64; (columns * rows) as usize];
+    let mut counts = vec![0u32; (columns * rows) as usize];
+
+    for (index, colour) in canvas.colors().into_iter().enumerate() {
+        let index = index as u32;
+        let (x, y) = (index % width, index / width);
+        let cell = (y * rows / height) * columns + (x * columns / width);
+
+        let Some(sum) = sums.get_mut(cell as usize) else {
+            continue;
+        };
+        // Rounded to the eye rather than to the spec: green reads brightest.
+        *sum += (colour.r as u64 * 2 + colour.g as u64 * 5 + colour.b as u64) / 8;
+        counts[cell as usize] += 1;
+    }
+
+    (0..rows)
+        .map(|row| {
+            (0..columns)
+                .map(|column| {
+                    let cell = (row * columns + column) as usize;
+                    let mean = if counts[cell] == 0 { 0 } else { sums[cell] / counts[cell] as u64 };
+                    let step = (mean * (THUMBNAIL_RAMP.len() as u64 - 1) / 255).min(THUMBNAIL_RAMP.len() as u64 - 1);
+
+                    THUMBNAIL_RAMP[step as usize] as char
+                })
+                .collect()
+        })
+        .collect()
+}
+
 /// Reports what is on each off-screen surface, every so often.
 ///
 /// Some titles never hand their art back through this API: 오셔너스 takes the
@@ -1002,6 +1061,17 @@ fn trace_offscreen_surfaces(context: &mut dyn WIPICContext) {
         let (colours, non_black) = surface_content(&*canvas);
 
         tracing::info!("OFFSCREEN {memory:#x} {w}x{h} colours={colours} non_black={non_black}");
+
+        // And what it is, not just how much of it there is. A surface nothing
+        // drew on has already said so in the line above; drawing its emptiness
+        // as sixteen rows of spaces would only crowd out the ones that matter.
+        if non_black == 0 {
+            continue;
+        }
+
+        for line in surface_thumbnail(&*canvas) {
+            tracing::info!("OFFSCREEN {memory:#x} |{line}|");
+        }
     }
 }
 
@@ -1643,7 +1713,7 @@ mod tests {
     use wie_backend::canvas::{ArgbPixel, Image, VecImageBuffer};
 
     use super::WIPICGraphicsContextIdx as Idx;
-    use super::{destination_stride, get_context, init_context, set_context, surface_content};
+    use super::{destination_stride, get_context, init_context, set_context, surface_content, surface_thumbnail};
     use crate::context::test::TestContext;
 
     /// A surface with `drawn` pixels of one colour on it and the rest black.
@@ -1664,6 +1734,34 @@ mod tests {
         // never drawn looks like, and it is the whole point of the line.
         assert_eq!(non_black, 0);
         assert_eq!(colours, 1);
+    }
+
+    #[test]
+    fn a_thumbnail_of_an_empty_surface_is_blank() {
+        let lines = surface_thumbnail(&surface_with(60, 60, 0, 0));
+
+        assert!(!lines.is_empty());
+        assert!(lines.iter().all(|line| line.chars().all(|c| c == ' ')));
+    }
+
+    #[test]
+    fn a_thumbnail_shows_where_the_lit_pixels_are() {
+        // The top third of a surface lit white, the rest black: the top rows
+        // read bright and the bottom rows blank. This is the whole job - an
+        // icon that was drawn looks different from a panel that was not.
+        let lines = surface_thumbnail(&surface_with(60, 60, 60 * 20, 0xffffff));
+
+        assert_eq!(lines[0].chars().next(), Some('@'));
+        assert!(lines.last().unwrap().chars().all(|c| c == ' '));
+    }
+
+    #[test]
+    fn a_thumbnail_never_gets_wider_than_it_can_be_read_at() {
+        for (width, height) in [(60, 60), (240, 320), (8, 4)] {
+            for line in surface_thumbnail(&surface_with(width, height, 0, 0)) {
+                assert!(line.chars().count() <= super::THUMBNAIL_COLUMNS as usize);
+            }
+        }
     }
 
     #[test]
