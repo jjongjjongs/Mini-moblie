@@ -126,6 +126,11 @@ mod billing_gateway_tests {
         0x29, 0x10, 0x00, 0x00, 0x00, 0x0b, 0x30, 0x31, 0x30, 0x34, 0x36, 0x31, 0x31, 0x39, 0x32, 0x36, 0x39, 0x00,
     ];
 
+    /// The medal report that follows it.
+    const SUDDEN_ATTACK_MEDALS: [u8; 18] = [
+        0x3c, 0x10, 0x00, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00, 0x28,
+    ];
+
     /// Reads a gateway out the way one of these titles does: a length first,
     /// then the body it describes.
     fn read_framed(gateway: &mut BillingGateway) -> Vec<u8> {
@@ -143,36 +148,52 @@ mod billing_gateway_tests {
     }
 
     #[test]
-    fn a_purchase_is_answered_with_a_body_as_long_as_its_length_says() {
+    fn both_of_a_purchases_exchanges_are_answered_in_full() {
         let _guard = ONE_AT_A_TIME.lock();
         probe::disarm();
 
-        let mut gateway = BillingGateway::armed();
-        gateway.write(&SUDDEN_ATTACK_PURCHASE);
+        // The shop stops on whichever of the two goes unanswered, so both have
+        // to come back whole.
+        for frame in [SUDDEN_ATTACK_PURCHASE, SUDDEN_ATTACK_MEDALS] {
+            let mut gateway = BillingGateway::armed();
+            gateway.write(&frame);
 
-        let body = read_framed(&mut gateway);
+            let body = read_framed(&mut gateway);
 
-        // Everything queued was handed over, so the title is not left waiting on
-        // a length that never arrives - which is the hang this answers.
-        assert!(!gateway.readable());
-        assert!(!body.is_empty());
+            // Everything queued was handed over, so the title is not left
+            // waiting on a length that never arrives.
+            assert!(!gateway.readable());
+            assert!(!body.is_empty());
+
+            probe::disarm();
+        }
     }
 
     #[test]
     fn the_parse_after_a_purchase_is_what_gets_traced() {
         let _guard = ONE_AT_A_TIME.lock();
-        probe::disarm();
 
-        let mut gateway = BillingGateway::armed();
-        gateway.write(&SUDDEN_ATTACK_PURCHASE);
+        // Only one of the two exchanges is traced per round, and which one
+        // alternates, so two rounds are what it takes to see a purchase traced
+        // wherever the process-wide count happens to stand.
+        let mut traced = false;
 
-        // Queued, not started: the title has none of the answer yet, and tracing
-        // from here would spend the trace on the wait rather than the parse.
-        assert!(!probe::is_armed());
+        for _ in 0..2 {
+            probe::disarm();
 
-        read_framed(&mut gateway);
+            let mut gateway = BillingGateway::armed();
+            gateway.write(&SUDDEN_ATTACK_PURCHASE);
 
-        assert!(probe::is_armed(), "the trace did not start when the answer ran out");
+            // Queued at most, never started: the title has none of the answer
+            // yet, and tracing from here would spend the trace on the wait
+            // rather than the parse.
+            assert!(!probe::is_armed());
+
+            read_framed(&mut gateway);
+            traced |= probe::is_armed();
+        }
+
+        assert!(traced, "the trace did not start when the answer ran out");
 
         probe::disarm();
     }

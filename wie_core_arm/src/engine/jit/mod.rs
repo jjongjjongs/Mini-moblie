@@ -806,6 +806,17 @@ impl ArmEngine for JitEngine {
                 break Ok(EngineRunResult::CountExhausted);
             }
 
+            // A bounded instruction trace, when something has armed one. A
+            // compiled block runs a whole run of instructions as native code and
+            // cannot report the ones inside it, so an armed probe takes the
+            // interpreter instead - one instruction per turn of this loop, which
+            // is what the trace needs. It is off unless armed, which is a
+            // relaxed load of a static.
+            let tracing = wie_backend::probe::is_armed();
+            if tracing {
+                wie_backend::probe::observe(pc);
+            }
+
             let thumb = self.ctx.cpsr & (1 << 5) != 0;
 
             if !thumb {
@@ -813,7 +824,7 @@ impl ArmEngine for JitEngine {
                 // here is not compilable, run the interpreter until it reaches one
                 // (or Thumb, or a stop), syncing once around that batch instead of
                 // per instruction.
-                let arm_jit = self.ensure_arm_block(pc);
+                let arm_jit = !tracing && self.ensure_arm_block(pc);
                 let end_in_block = arm_jit && {
                     let b = self.arm_cache[Self::slot_index(pc)].block.as_ref().unwrap();
                     end > pc && end < b.end_pc
@@ -846,7 +857,7 @@ impl ArmEngine for JitEngine {
                 // compiled block). `yield_to_jit` is off in the end-in-block case
                 // so a single step makes progress instead of bouncing back to the
                 // JIT it just declined.
-                let yield_to_jit = !end_in_block;
+                let yield_to_jit = !end_in_block && !tracing;
                 self.store_back(mode);
                 let outcome: Option<Result<EngineRunResult>> = loop {
                     let apc = self.cpu.reg_get(Mode::User, reg::PC);
@@ -905,7 +916,7 @@ impl ArmEngine for JitEngine {
             // `end` mid-block: fall back to single-stepping so we stop exactly at
             // it. In normal control flow `end` is a return sentinel reached only
             // at block starts, so this is the rare path.
-            let can_jit = thumb && self.ensure_block(pc) && {
+            let can_jit = !tracing && thumb && self.ensure_block(pc) && {
                 let b = self.cache[Self::slot_index(pc)].block.as_ref().unwrap();
                 !(end > pc && end < b.end_pc)
             };

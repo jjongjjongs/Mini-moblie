@@ -95,9 +95,19 @@ pub fn arm_when_drained(label: &str, count: u32) {
 pub fn drained() {
     let queued = WHEN_DRAINED.lock().take();
 
-    if let Some((label, count)) = queued {
-        arm(&label, count);
+    let Some((label, count)) = queued else {
+        return;
+    };
+
+    // A trace already running is one someone is waiting on the whole of.
+    // Replacing it here would leave two half-traces where a caller asked for
+    // one, so the newcomer gives way.
+    if is_armed() {
+        tracing::info!("probe: {label} was not traced; a trace was already running");
+        return;
     }
+
+    arm(&label, count);
 }
 
 /// Stops any trace, running or queued, and forgets what it had recorded.
@@ -276,6 +286,22 @@ mod tests {
         assert!(is_armed());
         observe(0x3000);
         assert!(!is_armed());
+
+        disarm();
+    }
+
+    #[test]
+    fn a_trace_queued_while_one_is_running_gives_way() {
+        let _guard = ONE_AT_A_TIME.lock();
+        disarm();
+
+        arm("first", 5);
+        arm_when_drained("second", 5);
+        drained();
+
+        // Still the first one's trace, and the second is not waiting behind it.
+        assert_eq!(LABEL.lock().clone().unwrap(), "first");
+        assert!(WHEN_DRAINED.lock().is_none());
 
         disarm();
     }
