@@ -1075,11 +1075,17 @@ pub fn lgt_local_big_endian_record_response(request: &[u8]) -> Option<Vec<u8>> {
     // Nothing calls them, because they are the tail of `0x27308` - the handler
     // for 10000, which is the item shop itself.
     //
-    // 10000 is the only index in that table the shop owns, so it is what both
-    // of the shop's requests are answered with. Its handler reads a sub-code
-    // out of the body and takes the item-list path when that is none of the
-    // four purchase kinds, and the body is zeroed, so a zeroed body asks for
-    // the list rather than for a grant.
+    // 10000 is the only index in that table the shop owns, and answering it is
+    // enough on its own, because the purchase's terms never travel in the
+    // reply. The title writes them into its own state before it sends: at
+    // `0x15302` the amount goes to `+0x878`, and at `0x15328` the kind goes to
+    // `+0x880` as a literal `0x515` - 1301. Its handler at `0x27308` switches
+    // on that same `+0x880` and reads that same `+0x878` back out, so what a
+    // reply decides is only which handler runs, not what it charges.
+    //
+    // 1301 is the arm at `0x27338`, which debits the amount and jumps to the
+    // tail with nothing drawn. The tail reads a status the reply does carry,
+    // and zero is the arm it treats as granted - which the body already is.
     let answer = if command == 1000 || command == 10000 { 10000 } else { command + 1 };
 
     let mut response = vec![0u8; HEADER + BODY + TAIL];
