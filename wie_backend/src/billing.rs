@@ -7057,6 +7057,83 @@ pub fn lgt_local_supersoccer_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(response)
 }
 
+/// 디스트로이어's 정식사용자 인증.
+///
+/// 디스트로이어 (`00030A1A`) sets `BILL_GW_IP` to `wipigw.ez-i.co.kr:20000`,
+/// resolves it, and writes one frame before its 인증을 진행중입니다. spinner:
+///
+/// ```text
+/// 01 | 37 | 0b 00 "01020663410" | 03 00 "LGT" | 05 00 "WIPIC"
+///         | 0c 00 <디스트로이어, EUC-KR> | 05 00 "1.0.0"
+///         | 0d 00 "62LN 20101020" | 08 00 "Emulator"
+///         | 02 | 00 | 08 00 "00030A1A" | 05 00 "BASIC" | 00
+/// ```
+///
+/// The first two bytes are the framing, not payload. `binary.mod`'s reader at
+/// `0x6abe0` takes a signed byte as the number of messages that follow, then
+/// per message a signed byte id which it turns into `id - 1` and runs through a
+/// sixty-entry jump table at `0x93128`. Entry `0x36` - id `0x37` - is the one
+/// this title's builder at `0x67c0c` writes and then arms with
+/// `set_expected(0x37)`.
+///
+/// That handler, at `0x67b18`, reads **one signed byte** and nothing else, and
+/// hands it to the dispatcher at `0x67848`, which stores it and moves the
+/// network state from 2 to 3. The 인증 screen at `0x11700` then reads it back
+/// through `get_result` and decides:
+///
+/// ```asm
+/// 11708  bl   get_result          ; (s16) of the byte the reply carried
+/// 11710  cmp  r0, #0
+/// 11712  beq  0x11718              ; 사용자인증에 성공하였습니다.
+/// 11714  cmp  r0, #2
+/// 11716  bne  0x1171e              ; 사용자인증에 실패하였습니다.
+/// ```
+///
+/// So zero and two are the two verdicts it carries on from, and anything else
+/// is the failure screen. Unanswered it retries every five seconds and gives up
+/// after five - which is the spinner that never ends, since nothing here knew
+/// the frame.
+///
+/// The reply is therefore the same three-byte shape the request opens with: one
+/// message, id `0x37`, and the verdict byte.
+fn lgt_local_destroyer_response(request: &[u8]) -> Option<Vec<u8>> {
+    // The framing bytes and the first field's own length.
+    if request.len() < 4 {
+        return None;
+    }
+
+    if request[0] != DESTROYER_MESSAGE_COUNT || request[1] != DESTROYER_AUTHENTICATE {
+        return None;
+    }
+
+    // The subscriber number leads the payload; its length has to fit what
+    // arrived, or this is some other title's frame that opens the same way.
+    let length = u16::from_le_bytes([request[2], request[3]]) as usize;
+    if request.len() < 4 + length {
+        return None;
+    }
+
+    // And the platform it names is what tells the frame apart for certain.
+    if !request.windows(DESTROYER_PLATFORM.len()).any(|window| window == DESTROYER_PLATFORM) {
+        return None;
+    }
+
+    Some(vec![DESTROYER_MESSAGE_COUNT, DESTROYER_AUTHENTICATE, DESTROYER_GRANTED])
+}
+
+/// One message in the frame, which is all 인증 ever sends or expects.
+const DESTROYER_MESSAGE_COUNT: u8 = 1;
+
+/// The 정식사용자 인증 message id, both ways.
+const DESTROYER_AUTHENTICATE: u8 = 0x37;
+
+/// The verdict `0x11710` falls through on. Two passes as well; zero is the
+/// plainer of the two.
+const DESTROYER_GRANTED: u8 = 0;
+
+/// The platform name the ez-i request carries, third field in.
+const DESTROYER_PLATFORM: &[u8] = b"WIPIC";
+
 pub fn response(request: &[u8]) -> Option<Vec<u8>> {
     lgt_local_granted_response(request)
         .or_else(|| lgt_local_cash_response(request))
@@ -7086,6 +7163,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_genesis3_episode2_response(request))
         .or_else(|| lgt_local_sudden_attack_response(request))
         .or_else(|| lgt_local_nomzero_response(request))
+        .or_else(|| lgt_local_destroyer_response(request))
 }
 
 #[cfg(test)]
@@ -7093,6 +7171,44 @@ mod tests {
     use alloc::{vec, vec::Vec};
 
     use super::*;
+
+    /// 디스트로이어's 인증 frame, captured off its billing socket.
+    const DESTROYER_AUTH: [u8; 93] = [
+        0x01, 0x37, // one message, the 인증 id
+        0x0b, 0x00, 0x30, 0x31, 0x30, 0x32, 0x30, 0x36, 0x36, 0x33, 0x34, 0x31, 0x30, // the subscriber
+        0x03, 0x00, 0x4c, 0x47, 0x54, // "LGT"
+        0x05, 0x00, 0x57, 0x49, 0x50, 0x49, 0x43, // "WIPIC"
+        0x0c, 0x00, 0xb5, 0xf0, 0xbd, 0xba, 0xc6, 0xae, 0xb7, 0xce, 0xc0, 0xcc, 0xbe, 0xee, // 디스트로이어
+        0x05, 0x00, 0x31, 0x2e, 0x30, 0x2e, 0x30, // "1.0.0"
+        0x0d, 0x00, 0x36, 0x32, 0x4c, 0x4e, 0x20, 0x32, 0x30, 0x31, 0x30, 0x31, 0x30, 0x32, 0x30, // "62LN 20101020"
+        0x08, 0x00, 0x45, 0x6d, 0x75, 0x6c, 0x61, 0x74, 0x6f, 0x72, // "Emulator"
+        0x02, 0x00, // a constant and a flag
+        0x08, 0x00, 0x30, 0x30, 0x30, 0x33, 0x30, 0x41, 0x31, 0x41, // the aid
+        0x05, 0x00, 0x42, 0x41, 0x53, 0x49, 0x43, // "BASIC"
+        0x00,
+    ];
+
+    /// One message, the same id, and a verdict `0x11710` carries on from.
+    #[test]
+    fn 디스트로이어s_인증_is_answered_with_the_verdict_its_screen_reads() {
+        let reply = response(&DESTROYER_AUTH).expect("the 인증 frame is answered");
+
+        assert_eq!(reply, vec![0x01, 0x37, 0x00]);
+        // `0x11710` takes zero or two and draws the failure screen on anything
+        // else, so the verdict has to be one of the two.
+        assert!(reply[2] == 0 || reply[2] == 2);
+    }
+
+    /// The framing bytes alone are not enough to claim a frame: another title's
+    /// message that opens the same way keeps falling through the chain.
+    #[test]
+    fn a_frame_without_디스트로이어s_platform_is_not_claimed() {
+        let mut other = DESTROYER_AUTH;
+        other[22..27].copy_from_slice(b"XXXXX");
+
+        assert_eq!(lgt_local_destroyer_response(&other), None);
+        assert_eq!(lgt_local_destroyer_response(&DESTROYER_AUTH[..3]), None);
+    }
 
     /// 슈퍼사커's two purchase frames, captured off its socket.
     const SUPERSOCCER_PURCHASE: [u8; 21] = [
