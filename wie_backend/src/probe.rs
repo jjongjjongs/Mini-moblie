@@ -53,6 +53,14 @@ static WHEN_DRAINED: Mutex<Option<(String, u32)>> = Mutex::new(None);
 /// width of a terminal.
 const BATCH: usize = 12;
 
+/// How far back an edge is looked for before it counts as a new one.
+///
+/// A loop closes within its own length, so this is what a loop may be and still
+/// be counted rather than written out over and over. Past it an edge is taken
+/// as somewhere the title has arrived afresh, which is what keeps a parse
+/// reading in the order it happened.
+const CYCLE: usize = 8;
+
 /// One place the core jumped from and to, and how many times in a row it made
 /// that same jump - which is what a loop looks like from here.
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -486,11 +494,17 @@ pub fn observe(pc: u32) {
 
     let mut pending = PENDING.lock();
 
-    // A loop is this same edge over and over. Count it rather than writing a
-    // line per turn.
-    if let Some(previous) = pending.last_mut()
-        && previous.from == last
-        && previous.to == pc
+    // A loop is the same few edges over and over, and only the tightest of them
+    // is the same edge twice in a row: a loop with a branch in it alternates
+    // between two edges and a longer one cycles through several, so counting
+    // only the last would write a line per turn of exactly the loops worth
+    // collapsing. Look back over the batch instead - far enough to close a
+    // cycle, near enough to leave a parse's own order intact.
+    if let Some(previous) = pending
+        .iter_mut()
+        .rev()
+        .take(CYCLE)
+        .find(|previous| previous.from == last && previous.to == pc)
     {
         previous.times += 1;
         return;
@@ -569,6 +583,50 @@ mod tests {
 
         let pending = PENDING.lock().clone();
         trace_line(&pending)
+    }
+
+    /// The loop one 레전드오브마스터2 capture spent itself in: two edges taken
+    /// in turn, which counting only the last edge wrote out over and over -
+    /// thirty thousand lines of it, with three lines of network underneath.
+    #[test]
+    fn a_loop_that_alternates_is_counted_rather_than_written_out() {
+        let _guard = ONE_AT_A_TIME.lock();
+        disarm();
+        arm("test", 64);
+
+        let mut path = Vec::new();
+        for _ in 0..8 {
+            path.extend_from_slice(&[0x4a96c, 0x4a8de]);
+        }
+
+        let line = trace_of(&path);
+
+        // Two edges carrying their counts, however many turns the loop took.
+        assert_eq!(line.matches('>').count(), 2, "{line}");
+        assert!(line.contains("4a96c>4a8de*8"), "{line}");
+        assert!(line.contains("4a8de>4a96c*7"), "{line}");
+    }
+
+    /// Only as far back as a loop can close, so a parse that comes back to an
+    /// address much later still reads in the order it happened.
+    #[test]
+    fn an_edge_taken_again_long_after_is_its_own_entry() {
+        let _guard = ONE_AT_A_TIME.lock();
+        disarm();
+        arm("test", 64);
+
+        // The edge, then more separating it than a loop is looked for over,
+        // then the edge again - all inside one batch so nothing is written out
+        // before it can be counted.
+        let mut path = alloc::vec![0x1000, 0x2000];
+        for step in 0..CYCLE {
+            path.push(0x3000 + (step as u32) * 0x1000);
+        }
+        path.extend_from_slice(&[0x1000, 0x2000]);
+
+        let line = trace_of(&path);
+
+        assert_eq!(line.matches("1000>2000").count(), 2, "{line}");
     }
 
     #[test]
