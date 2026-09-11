@@ -30,7 +30,7 @@ pub use self::{
     },
     quirks::{TitlePlatform, TitleQuirks, title_quirks},
     screen::Screen,
-    system::{Event, FilesystemOverlay, KeyCode, System},
+    system::{Event, FilesystemOverlay, InputMethodOutput, KeyCode, System},
     task_runner::{DefaultTaskRunner, TaskRunner},
     time::Instant,
 };
