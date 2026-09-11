@@ -694,12 +694,17 @@ fn reroot_archive(files: BTreeMap<String, Vec<u8>>) -> BTreeMap<String, Vec<u8>>
 /// 296-row picture in the height it is told it has and then adds the strip
 /// unconditionally - so without the strip its splash sits 36 rows low behind a
 /// blank band and its copyright line falls off the bottom edge. 나는 마왕이다 2
-/// and 프로야구 2010 blit from the panel's first row instead and are right
-/// without one, as reference captures of all of them confirm.
+/// 알바타이쿤2 (`0002D4D0`) is another: every screen it draws lands 24 rows
+/// down - its publisher splash, its menu and its HUD alike - so the row above
+/// the HUD keeps the street behind it and the bottom of each screen is cut.
+/// The offset is the strip exactly: the HUD's own `001` sits on row 28 without
+/// one and row 4 with. 나는 마왕이다 2 and 프로야구 2010 blit from the panel's
+/// first row instead and are right without one, as reference captures of all of
+/// them confirm.
 ///
 /// Keyed on the descriptor's aid, so nothing else is touched.
 fn title_expects_annunciator(aid: &str) -> bool {
-    matches!(aid.to_ascii_uppercase().as_str(), "0002787C" | "0002CB6A" | "0002A52B")
+    matches!(aid.to_ascii_uppercase().as_str(), "0002787C" | "0002CB6A" | "0002A52B" | "0002D4D0")
 }
 
 #[cfg(test)]
@@ -711,6 +716,7 @@ mod annunciator_tests {
         assert!(title_expects_annunciator("0002787C"));
         assert!(title_expects_annunciator("0002cb6a"));
         assert!(title_expects_annunciator("0002A52B"));
+        assert!(title_expects_annunciator("0002d4d0"));
     }
 
     #[test]
