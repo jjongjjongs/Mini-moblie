@@ -332,6 +332,10 @@ asks for.
 | `0x201`| `_export_table_bankon_lib` | -                             |
 | `0x203`| `_export_table_vm`      | the INI native interface         |
 
+The two tables this runtime reads most are dumped beside this document:
+`lgt-cldc-table-0x64.txt` and `lgt-wipic-table-0x1fb.txt`. Look an import index
+up there before working one out from what an application does with it.
+
 So every import index has a name. Several of the ones this runtime had worked
 out by watching what applications did with them were wrong:
 

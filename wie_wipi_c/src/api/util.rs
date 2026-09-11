@@ -1,4 +1,4 @@
-use wie_util::{Result, read_null_terminated_string_bytes};
+use wie_util::{ByteWrite, Result, read_null_terminated_string_bytes};
 
 use wipi_types::wipic::WIPICWord;
 
@@ -95,17 +95,91 @@ pub async fn inet_addr_int(context: &mut dyn WIPICContext, address: WIPICWord) -
     Ok(u32::from_le_bytes(octets) as _)
 }
 
+/// `MC_utilInetAddrStr` (0x389) @ native 0x1b9f78 - the printable form of an
+/// address `MC_utilInetAddrInt` produced.
+///
+/// Native is four masked bytes handed to `sprintf` with `"%d.%d.%d.%d"`, taken
+/// from the low byte up - the same little-endian order `inet_addr_int` builds,
+/// so the two round-trip.
+///
+/// A null buffer is native's early return: it writes nothing and leaves `r0`
+/// holding the address it was given. Otherwise `r0` is whatever `sprintf`
+/// returns, which is the character count.
+///
+/// 디스트로이어 is the title that needs it. Its authentication resolves
+/// `wipigw.ez-i.co.kr` through `MC_netGetHostAddr` and then asks for the
+/// address as text to open the billing connection with; the import was not
+/// mapped at all, so the call was a fatal-error stub answering zero and the
+/// title never got past authentication.
+pub async fn inet_addr_str(context: &mut dyn WIPICContext, address: WIPICWord, out: WIPICWord) -> Result<WIPICWord> {
+    tracing::debug!("MC_utilInetAddrStr({address:#x}, {out:#x})");
+
+    if out == 0 {
+        return Ok(address);
+    }
+
+    let octets = address.to_le_bytes();
+    let text = alloc::format!("{}.{}.{}.{}\0", octets[0], octets[1], octets[2], octets[3]);
+
+    context.write_bytes(out, text.as_bytes())?;
+
+    Ok(text.len() as WIPICWord - 1)
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::boxed::Box;
 
     use test_utils::TestPlatform;
     use wie_backend::{DefaultTaskRunner, System};
-    use wie_util::ByteWrite;
+    use wie_util::{ByteRead, ByteWrite};
 
     use crate::context::test::TestContext;
 
-    use super::{htonl, htons, inet_addr_int, ntohl, ntohs};
+    use super::{htonl, htons, inet_addr_int, inet_addr_str, ntohl, ntohs};
+
+    /// The address 디스트로이어 resolves for `wipigw.ez-i.co.kr` and asks for
+    /// as text, printed the way native prints it: low byte first.
+    #[futures_test::test]
+    async fn lgt_inet_addr_str_prints_native_byte_order() {
+        let system = System::new(Box::new(TestPlatform::new()), "test-pid", "test-aid", DefaultTaskRunner);
+        let mut context = TestContext::with_system(system);
+
+        let written = inet_addr_str(&mut context, 0x32cb_73d3, 0x1000).await.unwrap();
+
+        let mut buffer = [0u8; 16];
+        context.read_bytes(0x1000, &mut buffer).unwrap();
+
+        assert_eq!(&buffer[..15], b"211.115.203.50\0");
+        assert_eq!(written, 14);
+    }
+
+    /// Native returns before writing anything when handed no buffer, leaving
+    /// the address it was given in `r0`.
+    #[futures_test::test]
+    async fn lgt_inet_addr_str_writes_nothing_without_a_buffer() {
+        let system = System::new(Box::new(TestPlatform::new()), "test-pid", "test-aid", DefaultTaskRunner);
+        let mut context = TestContext::with_system(system);
+
+        assert_eq!(inet_addr_str(&mut context, 0x0403_0201, 0).await.unwrap(), 0x0403_0201);
+    }
+
+    /// The pair round-trips: what `inet_addr_int` builds, `inet_addr_str`
+    /// prints back.
+    #[futures_test::test]
+    async fn lgt_inet_addr_str_round_trips_inet_addr_int() {
+        let system = System::new(Box::new(TestPlatform::new()), "test-pid", "test-aid", DefaultTaskRunner);
+        let mut context = TestContext::with_system(system);
+
+        context.write_bytes(0x1000, b"1.2.3.4\0").unwrap();
+        let address = inet_addr_int(&mut context, 0x1000).await.unwrap();
+
+        inet_addr_str(&mut context, address, 0x2000).await.unwrap();
+
+        let mut buffer = [0u8; 8];
+        context.read_bytes(0x2000, &mut buffer).unwrap();
+        assert_eq!(&buffer, b"1.2.3.4\0");
+    }
 
     #[futures_test::test]
     async fn lgt_inet_addr_int_matches_native_byte_order() {
