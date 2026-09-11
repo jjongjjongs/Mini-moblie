@@ -887,11 +887,17 @@ fn lgt_bill_read_reject_tag(tag: [u8; 4]) -> bool {
 struct LgtBillingGateway {
     /// What is left of the answer to hand back.
     pending: Vec<u8>,
+    /// Whether an answer has been queued that no read has been turned away
+    /// from yet. See [`LgtBillingGateway::read`].
+    settling: bool,
 }
 
 impl LgtBillingGateway {
     fn new() -> Self {
-        Self { pending: Vec::new() }
+        Self {
+            pending: Vec::new(),
+            settling: false,
+        }
     }
 }
 
@@ -927,10 +933,31 @@ impl wie_backend::LocalConnection for LgtBillingGateway {
 
         self.pending.extend_from_slice(&header);
         self.pending.extend_from_slice(&response);
+        self.settling = true;
     }
 
     fn read(&mut self, out: &mut [u8]) -> wie_backend::LocalRead {
         if self.pending.is_empty() {
+            return wie_backend::LocalRead::Pending;
+        }
+
+        // An answer that is ready the instant the request leaves is not one a
+        // network could have given, and a title written against a network can
+        // tell. 레전드오브마스터2 sends from 0x3a448 and tries to receive in the
+        // same breath at 0x3a334, before its caller has set the state that
+        // waits for a reply - over a wire that read finds nothing, and the
+        // reply arrives later into the state machine that is by then ready for
+        // it. Answered in the call that sent it, that opportunistic read takes
+        // the reply instead, the header is parsed into a state its caller
+        // overwrites a few instructions later, and the shop waits on
+        // DATA전송중 for an answer it has already had.
+        //
+        // So the first read after an answer is queued is turned away, the way
+        // the wire would have turned it away. The answer keeps: nothing is
+        // dropped, and the next read - the one the title's own machine makes -
+        // gets all of it.
+        if self.settling {
+            self.settling = false;
             return wie_backend::LocalRead::Pending;
         }
 
@@ -3620,6 +3647,10 @@ mod network_state_tests {
         frame.extend_from_slice(&[0xff, 0xff, 0x00, 0x06, 0x00, 0x68]);
         gateway.write(&frame);
 
+        // The read the sending call makes for itself finds nothing, the way it
+        // would over a wire.
+        assert_eq!(gateway.read(&mut [0u8; 8]), LocalRead::Pending);
+
         // The 56-byte response header first, carrying the payload length.
         let mut header = [0u8; LGT_BILL_READ_HEADER_SIZE];
         assert_eq!(gateway.read(&mut header), LocalRead::Data(LGT_BILL_READ_HEADER_SIZE));
@@ -3639,6 +3670,43 @@ mod network_state_tests {
 
         // And nothing more until the next request.
         assert_eq!(gateway.read(&mut [0u8; 8]), LocalRead::Pending);
+    }
+
+    /// 레전드오브마스터2 sends at 0x3a448 and tries to receive in the same
+    /// breath at 0x3a334, before its caller has set the state that waits for a
+    /// reply. Answered in that same call it takes the reply there, parses the
+    /// header into a state 0x3a450 overwrites a few instructions later, and
+    /// waits on DATA전송중 for an answer it has already had.
+    #[test]
+    fn the_read_the_sending_call_makes_for_itself_finds_nothing() {
+        use super::{LGT_BILL_HEADER_SIZE, LGT_BILL_READ_HEADER_SIZE, LgtBillingGateway};
+        use wie_backend::{LocalConnection, LocalRead};
+
+        let mut gateway = LgtBillingGateway::new();
+
+        let mut frame = alloc::vec![0u8; LGT_BILL_HEADER_SIZE];
+        frame.extend_from_slice(&[0xff, 0xff, 0x00, 0x06, 0x00, 0x68]);
+        gateway.write(&frame);
+
+        assert_eq!(
+            gateway.read(&mut [0u8; 8]),
+            LocalRead::Pending,
+            "an answer cannot arrive before the request has left"
+        );
+
+        // Turned away, not dropped: the title's own machine gets all of it.
+        let mut header = [0u8; LGT_BILL_READ_HEADER_SIZE];
+        assert_eq!(gateway.read(&mut header), LocalRead::Data(LGT_BILL_READ_HEADER_SIZE));
+
+        let mut payload = [0u8; 7];
+        assert_eq!(gateway.read(&mut payload), LocalRead::Data(7));
+        assert_eq!(payload, [0xff, 0xff, 0x00, 0x07, 0x00, 0x69, 0x00]);
+
+        // And only the first read after a request is turned away - a second
+        // request settles on its own.
+        gateway.write(&frame);
+        assert_eq!(gateway.read(&mut [0u8; 8]), LocalRead::Pending);
+        assert_eq!(gateway.read(&mut [0u8; 8]), LocalRead::Data(8));
     }
 
     #[test]
@@ -4222,6 +4290,10 @@ mod network_state_tests {
             lgt_bill_write_public_result(LGT_BILL_HEADER_SIZE + request.len())
         );
 
+        // The read a sending call makes for itself finds nothing, the way it
+        // would over a wire; the answer keeps for the read after it.
+        assert_eq!(socket_read(&mut context, socket, RESPONSE, 32).await.unwrap(), M_E_WOULDBLOCK);
+
         // `WPBill_Read` assembles the 56-byte header and then hands back the
         // payload behind it, which is the granted answer to what was asked.
         let read = socket_read(&mut context, socket, RESPONSE, 32).await.unwrap();
@@ -4265,6 +4337,10 @@ mod network_state_tests {
         let descriptor = state.lock().local_descriptor(socket).unwrap();
         assert!(context.system().local_network().readable(descriptor));
 
+        // The read a sending call makes for itself finds nothing, the way it
+        // would over a wire; the answer keeps for the read after it.
+        assert_eq!(socket_read(&mut context, socket, RESPONSE, 2).await.unwrap(), M_E_WOULDBLOCK);
+
         // The title reads its two length bytes first, exactly as its own state
         // machine does, and then the body they count.
         assert_eq!(socket_read(&mut context, socket, RESPONSE, 2).await.unwrap(), 2);
@@ -4299,6 +4375,8 @@ mod network_state_tests {
         let request = [0xff, 0xff, 0x00, 0x06, 0x00, 0x20];
         context.write_bytes(REQUEST, &request).unwrap();
         socket_write(&mut context, socket, REQUEST, request.len() as i32).await.unwrap();
+
+        assert_eq!(socket_read(&mut context, socket, RESPONSE, 4).await.unwrap(), M_E_WOULDBLOCK);
 
         // Four of the seven payload bytes, which is all the caller asked for.
         assert_eq!(socket_read(&mut context, socket, RESPONSE, 4).await.unwrap(), 4);
@@ -4576,6 +4654,10 @@ mod network_state_tests {
             context.write_bytes(REQUEST, &request).unwrap();
             socket_write(&mut context, socket, REQUEST, request.len() as i32).await.unwrap();
         }
+
+        // Only the read that follows a request is turned away, however many
+        // requests went out before it.
+        assert_eq!(socket_read(&mut context, socket, RESPONSE, 32).await.unwrap(), M_E_WOULDBLOCK);
 
         // Each answer keeps its own 56-byte header, so the second parses as
         // cleanly as the first rather than being read as the first's payload.
