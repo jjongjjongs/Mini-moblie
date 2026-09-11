@@ -7134,6 +7134,77 @@ const DESTROYER_GRANTED: u8 = 0;
 /// The platform name the ez-i request carries, third field in.
 const DESTROYER_PLATFORM: &[u8] = b"WIPIC";
 
+/// 알바타이쿤2's 최초 인증.
+///
+/// 알바타이쿤2 (`0002D4D0`) writes one record before its
+/// 최초 게임실행 시 서버접속을 통한 인증 notice can clear:
+///
+/// ```text
+/// 00 00 00 28 | "IR\t01799998888\talba2\t1.0.2\t4730084\tWIPIC"
+/// ```
+///
+/// A big-endian `u32` length and then a tab-separated ASCII record, built
+/// from the format string at `0xbfeb4` - `"IR\t%s\t%s\t%s\t4730084\tWIPIC"` -
+/// with the subscriber, the title's own name and its version filled in. Its
+/// siblings in the same table are `SG`, `GG`, `AP`, `SM` and the `CASH`/`CREG`
+/// records, so `IR` is one command of a family the title speaks.
+///
+/// What the answer has to say is: nothing. `binary.mod` dispatches a reply on
+/// the request type it is answering - a jump table at `0xb6e5c` indexed by
+/// `type - 0x11` - and the builder at `0x226da` shows `IR` is type `0x1f`,
+/// whose entry is `0x22bf8`:
+///
+/// ```asm
+/// 22bf8  movs r3, #4
+/// 22bfa  ldr  r0, [pc]        ; 정상적으로 인증처리 되었습니다. 감사합니다
+/// 22c04  bl   0x17920         ; put it on the screen
+/// ```
+///
+/// It reads nothing out of the reply. Every other command in the table
+/// compares the record against a token first (`SGOK`, `GGOK`, `APOK`, `SMOK`);
+/// this one does not, so the only thing missing was a reply at all - without
+/// one the title sits on its notice and the gateway logged the record
+/// unanswered.
+///
+/// Answered in the shape the request itself uses, and with the token this
+/// family would carry.
+fn lgt_local_albatycoon2_response(request: &[u8]) -> Option<Vec<u8>> {
+    let record = request.get(ALBATYCOON2_LENGTH_SIZE..)?;
+
+    if u32::from_be_bytes([request[0], request[1], request[2], request[3]]) as usize != record.len() {
+        return None;
+    }
+
+    if !record.starts_with(ALBATYCOON2_AUTHENTICATE) {
+        return None;
+    }
+
+    // The platform the record names, as in every other title's frame here: the
+    // command alone is two letters and would claim too much.
+    if !record.windows(ALBATYCOON2_PLATFORM.len()).any(|window| window == ALBATYCOON2_PLATFORM) {
+        return None;
+    }
+
+    let mut reply = Vec::with_capacity(ALBATYCOON2_LENGTH_SIZE + ALBATYCOON2_GRANTED.len());
+    reply.extend_from_slice(&(ALBATYCOON2_GRANTED.len() as u32).to_be_bytes());
+    reply.extend_from_slice(ALBATYCOON2_GRANTED);
+
+    Some(reply)
+}
+
+/// The big-endian `u32` in front of every record this title sends.
+const ALBATYCOON2_LENGTH_SIZE: usize = 4;
+
+/// The 인증 command, with the separator its record uses.
+const ALBATYCOON2_AUTHENTICATE: &[u8] = b"IR\t";
+
+/// The platform field the record carries, last of the six.
+const ALBATYCOON2_PLATFORM: &[u8] = b"\tWIPIC";
+
+/// What the reply says. The `0x1f` handler reads none of it; this is the token
+/// its siblings (`SGOK`, `GGOK`, `APOK`, `SMOK`) are shaped like.
+const ALBATYCOON2_GRANTED: &[u8] = b"IROK";
+
 pub fn response(request: &[u8]) -> Option<Vec<u8>> {
     lgt_local_granted_response(request)
         .or_else(|| lgt_local_cash_response(request))
@@ -7164,6 +7235,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_sudden_attack_response(request))
         .or_else(|| lgt_local_nomzero_response(request))
         .or_else(|| lgt_local_destroyer_response(request))
+        .or_else(|| lgt_local_albatycoon2_response(request))
 }
 
 #[cfg(test)]
@@ -7171,6 +7243,42 @@ mod tests {
     use alloc::{vec, vec::Vec};
 
     use super::*;
+
+    /// 알바타이쿤2's 인증 record, captured off its billing socket.
+    const ALBATYCOON2_AUTH: [u8; 44] = [
+        0x00, 0x00, 0x00, 0x28, // the record's length, big end first
+        0x49, 0x52, 0x09, // "IR" and a tab
+        0x30, 0x31, 0x37, 0x39, 0x39, 0x39, 0x39, 0x38, 0x38, 0x38, 0x38, 0x09, // the subscriber
+        0x61, 0x6c, 0x62, 0x61, 0x32, 0x09, // "alba2"
+        0x31, 0x2e, 0x30, 0x2e, 0x32, 0x09, // "1.0.2"
+        0x34, 0x37, 0x33, 0x30, 0x30, 0x38, 0x34, 0x09, // the service id
+        0x57, 0x49, 0x50, 0x49, 0x43, // "WIPIC"
+    ];
+
+    /// The record is answered in its own framing, and the `0x1f` handler reads
+    /// none of the body - what it needed was a reply at all.
+    #[test]
+    fn 알바타이쿤2s_인증_is_answered_in_its_own_framing() {
+        let reply = response(&ALBATYCOON2_AUTH).expect("the 인증 record is answered");
+
+        assert_eq!(u32::from_be_bytes([reply[0], reply[1], reply[2], reply[3]]) as usize, reply.len() - 4);
+        assert_eq!(&reply[4..], b"IROK");
+    }
+
+    /// A record whose length word disagrees with what arrived, or that names
+    /// another platform, keeps falling through the chain.
+    #[test]
+    fn a_record_that_is_not_알바타이쿤2s_is_not_claimed() {
+        let mut short = ALBATYCOON2_AUTH;
+        short[3] = 0x27;
+        assert_eq!(lgt_local_albatycoon2_response(&short), None);
+
+        let mut other = ALBATYCOON2_AUTH;
+        other[39..44].copy_from_slice(b"XXXXX");
+        assert_eq!(lgt_local_albatycoon2_response(&other), None);
+
+        assert_eq!(lgt_local_albatycoon2_response(&ALBATYCOON2_AUTH[..4]), None);
+    }
 
     /// 디스트로이어's 인증 frame, captured off its billing socket.
     const DESTROYER_AUTH: [u8; 93] = [
