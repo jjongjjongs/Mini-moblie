@@ -1007,6 +1007,21 @@ pub fn lgt_local_ens_record_response(request: &[u8]) -> Option<Vec<u8>> {
 /// with every other command's handler, and a body only as long as its shortest
 /// reader would put a longer one out of bounds.
 ///
+/// 레전드오브마스터2 (`000308FF`) reaches the same `BILL_GW_IP`,
+/// `211.189.18.116`, and opening its shop writes a record of the same shape
+/// under a command of its own:
+///
+/// ```text
+/// 00 2d  03 e8  00 ... 00  64 00 00 00  01 00 00 00  00 ... 00
+/// ```
+///
+/// Forty-five bytes that declare forty-five, and `0x03e8` - one thousand
+/// exactly. Which went unanswered while the bound below was read off the
+/// request rather than the answer: the thread drops a reply at or under a
+/// thousand, and a reply is the request's command plus one, so a request of
+/// exactly a thousand is answered as `0x03e9` and dispatches. Only a request
+/// below that can no longer be answered without costing the title its socket.
+///
 /// `None` for anything that is not one of these records: the declared length has
 /// to be the record in hand, and the command has to be one a title sends - the
 /// even ones - rather than one it is sent.
@@ -1032,7 +1047,9 @@ pub fn lgt_local_big_endian_record_response(request: &[u8]) -> Option<Vec<u8>> {
     // A title's own commands are the even ones; the odd are what it is answered
     // with. Answering an odd command would be answering an answer.
     let command = u16::from_be_bytes([request[2], request[3]]);
-    if command <= LEAST_COMMAND || command % 2 != 0 {
+    // The bound belongs to the answer the title reads, which is this plus one -
+    // a request of exactly the bound is answered above it and dispatches.
+    if command + 1 <= LEAST_COMMAND || command % 2 != 0 {
         return None;
     }
 
@@ -7966,6 +7983,34 @@ mod tests {
 
         // And the same answer every time.
         assert_eq!(lgt_local_big_endian_record_response(&request), Some(response));
+    }
+
+    /// 레전드오브마스터2's shop opens on a record of the same shape under a
+    /// command of exactly a thousand, which the bound used to turn away.
+    #[test]
+    fn a_record_at_the_bound_is_answered_above_it() {
+        use super::lgt_local_big_endian_record_response;
+
+        let mut request = [0u8; 45];
+        request[0..2].copy_from_slice(&45u16.to_be_bytes());
+        request[2..4].copy_from_slice(&1000u16.to_be_bytes());
+        request[26..30].copy_from_slice(&100u32.to_le_bytes());
+        request[30..34].copy_from_slice(&1u32.to_le_bytes());
+
+        let response = lgt_local_big_endian_record_response(&request).expect("the shop record is answered");
+
+        // Above the bound, so the read state dispatches it rather than dropping
+        // the connection.
+        let command = i16::from_be_bytes([response[2], response[3]]);
+        assert!(command > 1000);
+        assert_eq!(command, 1001);
+        assert_eq!(response[4] as i8, 0);
+
+        // A request below the bound is still turned away: its answer would be
+        // dropped, and answering it would only cost the title its socket.
+        let mut below = request;
+        below[2..4].copy_from_slice(&998u16.to_be_bytes());
+        assert_eq!(lgt_local_big_endian_record_response(&below), None);
     }
 
     #[test]
