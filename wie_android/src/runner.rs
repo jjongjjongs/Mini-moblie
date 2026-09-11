@@ -120,7 +120,9 @@ impl Runner {
         // to exist before there is an emulator to ask about it. Give the archive
         // the chance to name its own panel first; almost none do, and those fall
         // back to the default.
-        let (width, height) = LgtEmulator::screen_size(&data).unwrap_or((SCREEN_WIDTH, SCREEN_HEIGHT));
+        let (width, height) = LgtEmulator::screen_size(&data)
+            .or_else(|| SktEmulator::screen_size(&data))
+            .unwrap_or((SCREEN_WIDTH, SCREEN_HEIGHT));
         if (width, height) != (SCREEN_WIDTH, SCREEN_HEIGHT) {
             tracing::info!("archive names its own panel: {width}x{height}");
         }

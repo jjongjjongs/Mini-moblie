@@ -10,7 +10,7 @@ use alloc::{
 
 use jvm::{Result as JvmResult, runtime::JavaLangString};
 
-use wie_backend::{DefaultTaskRunner, Emulator, Event, Platform, System};
+use wie_backend::{DefaultTaskRunner, Emulator, Event, Platform, System, TitlePlatform, extract_zip, title_quirks};
 use wie_jvm_support::{JvmSupport, RustJavaJvmImplementation};
 use wie_util::{Result, WieError};
 
@@ -47,6 +47,21 @@ impl SktEmulator {
 
     pub fn loadable_jar(jar: &[u8]) -> bool {
         jar.starts_with(b"\x20\x00\x00\x00\x00\x00\x00\x00")
+    }
+
+    /// The panel this archive's title was drawn for, when that is not the one
+    /// a host would pick by default.
+    ///
+    /// A host has to size its screen before there is an emulator to ask, so
+    /// this reads the archive's own `.msd` and answers from the quirk table.
+    /// `None` means the title has nothing to say and the host's own default
+    /// stands, which is every SK-VM title until one is shown to need
+    /// otherwise.
+    pub fn screen_size(archive: &[u8]) -> Option<(u32, u32)> {
+        let files = extract_zip(archive).ok()?;
+        let (filename, data) = files.iter().find(|x| x.0.ends_with(".msd"))?;
+
+        title_quirks(TitlePlatform::Skt, &SktMsd::parse(filename, data).id).screen_size
     }
 
     fn load(

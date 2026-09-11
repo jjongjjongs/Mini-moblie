@@ -4,7 +4,7 @@ use alloc::{borrow::ToOwned, boxed::Box, collections::BTreeMap, format, string::
 
 use jvm::runtime::{JavaIoInputStream, JavaLangClassLoader};
 
-use wie_backend::{Emulator, Event, Options, Platform, System, TaskRunner, extract_zip};
+use wie_backend::{Emulator, Event, Options, Platform, System, TaskRunner, TitlePlatform, extract_zip, title_quirks};
 use wie_core_arm::{Allocator, ArmCore, EXECUTED_INSTRUCTIONS, PC_SAMPLES};
 use wie_jvm_support::{JvmSupport, RustJavaJvmImplementation};
 use wie_util::{Result, WieError, write_generic};
@@ -592,11 +592,7 @@ fn apply_gamevil_baseball_auth_patch(aid: &str, binary_mod: &mut [u8]) {
 /// Keyed by aid so nothing else is touched, and returning `None` for everything
 /// else leaves every other title on the host's default.
 fn native_screen_size(aid: &str) -> Option<(u32, u32)> {
-    match aid.to_ascii_uppercase().as_str() {
-        // 미니게임 히어로즈2 터치
-        "00030F5B" => Some((240, 400)),
-        _ => None,
-    }
+    title_quirks(TitlePlatform::Lgt, aid).screen_size
 }
 
 fn is_incompatible_bundled_save(aid: &str, filename: &str) -> bool {
@@ -704,7 +700,7 @@ fn reroot_archive(files: BTreeMap<String, Vec<u8>>) -> BTreeMap<String, Vec<u8>>
 ///
 /// Keyed on the descriptor's aid, so nothing else is touched.
 fn title_expects_annunciator(aid: &str) -> bool {
-    matches!(aid.to_ascii_uppercase().as_str(), "0002787C" | "0002CB6A" | "0002A52B" | "0002D4D0")
+    title_quirks(TitlePlatform::Lgt, aid).expects_annunciator
 }
 
 #[cfg(test)]

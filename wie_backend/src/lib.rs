@@ -9,6 +9,7 @@ mod executor;
 mod local_network;
 mod platform;
 pub mod probe;
+mod quirks;
 mod screen;
 pub mod subscriber;
 mod system;
@@ -27,6 +28,7 @@ pub use self::{
         Filesystem, FilesystemMkdirError, FilesystemRenameError, FilesystemRmDirError, FilesystemSetModeError, Network, NetworkError, NetworkEvent,
         NetworkPoll, Platform,
     },
+    quirks::{TitlePlatform, TitleQuirks, title_quirks},
     screen::Screen,
     system::{Event, FilesystemOverlay, KeyCode, System},
     task_runner::{DefaultTaskRunner, TaskRunner},
