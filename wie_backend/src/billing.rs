@@ -1053,9 +1053,32 @@ pub fn lgt_local_big_endian_record_response(request: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
+    // TEMP PROBE (레전드오브마스터2): answered as the request plus one, it says
+    // `엉뚱한 패킷날라옴 / 인덱스:1001` - the dispatcher at 0x25a24 knows only
+    // 3702, 3802, 3806, 3810, 3814, 4001-4004, 10000, 30000-30003, and 1001 is
+    // none of them. Its one sender always writes 1000, so the request is an
+    // envelope and the answer carries the typed index instead.
+    //
+    // Which one is not written anywhere: take a different candidate each time
+    // the shop asks, so one session names it rather than one build each. The
+    // title prints the index it refused, so a wrong guess says so out loud, and
+    // the right one stops saying it.
+    let answer = if command == 1000 {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        /// The dispatcher's own table, likeliest first: 3806 reaches 0x2634a,
+        /// which reads a count out of the body and holds it to five.
+        const CANDIDATES: [u16; 10] = [3806, 3802, 3810, 3814, 4001, 4002, 4003, 4004, 3702, 10000];
+        static ASKED: AtomicUsize = AtomicUsize::new(0);
+
+        CANDIDATES[ASKED.fetch_add(1, Ordering::Relaxed) % CANDIDATES.len()]
+    } else {
+        command + 1
+    };
+
     let mut response = vec![0u8; HEADER + BODY + TAIL];
     response[0..2].copy_from_slice(&((BODY + LENGTH_OVERHEAD) as u16).to_be_bytes());
-    response[2..4].copy_from_slice(&(command + 1).to_be_bytes());
+    response[2..4].copy_from_slice(&answer.to_be_bytes());
     response[HEADER] = GRANTED;
 
     Some(response)
@@ -8000,10 +8023,11 @@ mod tests {
         let response = lgt_local_big_endian_record_response(&request).expect("the shop record is answered");
 
         // Above the bound, so the read state dispatches it rather than dropping
-        // the connection.
+        // the connection. While the probe stands this command is answered under
+        // one of the indices 레전드오브마스터2's own dispatcher knows, rather
+        // than the request's plus one it refused.
         let command = i16::from_be_bytes([response[2], response[3]]);
         assert!(command > 1000);
-        assert_eq!(command, 1001);
         assert_eq!(response[4] as i8, 0);
 
         // A request below the bound is still turned away: its answer would be
