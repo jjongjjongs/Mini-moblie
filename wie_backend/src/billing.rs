@@ -1053,40 +1053,26 @@ pub fn lgt_local_big_endian_record_response(request: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    // 레전드오브마스터2 answers its shop under the item shop's own index.
+    // 레전드오브마스터2 is answered at the request plus one, like the rest.
     //
-    // The dispatcher at `0x25a24` is a comparison chain, and every arm of it
-    // ends in a handler that prints one fixed line. Five of those arms are the
-    // carrier's refusals, which is what the 30000s are:
+    // Answering its shop with the item shop's own index, 10000, was a
+    // regression, and its own log says so: 215 draws of DATA전송중 and not one
+    // of 엉뚱한 패킷날라옴. The title accepted every one of those replies and
+    // stayed exactly where it was.
     //
-    // ```text
-    // 30000 -> 0x27fa0   일일 사용금액 초과입니다.
-    // 30001 -> 0x27fe6   고객님은 월 구매한도로 인해 ...
-    // 30002 -> 0x28038   총 사용금액 초과입니다.
-    // 30003 -> 0x28074   LGT임직원은 사용이 불가함을 ...
-    // 30004 -> 0x280c6   펌웨어 업그레이드 이후 사용하세요.
-    // ```
+    // Where it was is screen 8. The screen number lives in `0x1501dac` and
+    // indexes a table at `0x5678c`; entry 8 is the network tick and entry 14
+    // is the draw that puts up `[아이템샵]` and its list. The tick acts on the
+    // socket state at `0x15050f0` - 2 sends, 4 dispatches, 5 gives up - and on
+    // 3 it does nothing at all. The receive path sets 3 again after every
+    // reply it handles, so a reply that dispatches cleanly is a reply that
+    // leaves the title waiting.
     //
-    // So the index is not a sequence number and never was - it names the
-    // outcome, and answering a purchase with one of those is answering it
-    // "declined". 구입완료! and 구입실패! share their literal pool with the
-    // refusals because they are the same *function*, not the same command:
-    // they sit at `0x27ea2` and `0x27ebc`, which no arm of the chain calls.
-    // Nothing calls them, because they are the tail of `0x27308` - the handler
-    // for 10000, which is the item shop itself.
-    //
-    // 10000 is the only index in that table the shop owns, and answering it is
-    // enough on its own, because the purchase's terms never travel in the
-    // reply. The title writes them into its own state before it sends: at
-    // `0x15302` the amount goes to `+0x878`, and at `0x15328` the kind goes to
-    // `+0x880` as a literal `0x515` - 1301. Its handler at `0x27308` switches
-    // on that same `+0x880` and reads that same `+0x878` back out, so what a
-    // reply decides is only which handler runs, not what it charges.
-    //
-    // 1301 is the arm at `0x27338`, which debits the amount and jumps to the
-    // tail with nothing drawn. The tail reads a status the reply does carry,
-    // and zero is the arm it treats as granted - which the body already is.
-    let answer = if command == 1000 || command == 10000 { 10000 } else { command + 1 };
+    // The plus-one does not dispatch, and that is what moves it: the unmatched
+    // arm at `0x25ac4` draws its three lines at y = -32, above the screen and
+    // out of sight, and the path on from it is the one that writes 14. Nothing
+    // else in the binary writes 14.
+    let answer = command + 1;
 
     let mut response = vec![0u8; HEADER + BODY + TAIL];
     response[0..2].copy_from_slice(&((BODY + LENGTH_OVERHEAD) as u16).to_be_bytes());
