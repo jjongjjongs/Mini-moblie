@@ -1053,26 +1053,37 @@ pub fn lgt_local_big_endian_record_response(request: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    // 레전드오브마스터2 is answered at the request plus one, like the rest.
+    // 레전드오브마스터2's shop is answered at the request plus two.
     //
-    // Answering its shop with the item shop's own index, 10000, was a
-    // regression, and its own log says so: 215 draws of DATA전송중 and not one
-    // of 엉뚱한 패킷날라옴. The title accepted every one of those replies and
-    // stayed exactly where it was.
+    // Its dispatcher is a comparison chain at `0x25758`, and every command in
+    // it ends in `02` or `04` where a request ends in `00`. 1001 is not in it
+    // at all, which is what `엉뚱한 패킷날라옴 / 인덱스:1001` was saying, and
+    // 1002 is, three instructions in:
     //
-    // Where it was is screen 8. The screen number lives in `0x1501dac` and
-    // indexes a table at `0x5678c`; entry 8 is the network tick and entry 14
-    // is the draw that puts up `[아이템샵]` and its list. The tick acts on the
-    // socket state at `0x15050f0` - 2 sends, 4 dispatches, 5 gives up - and on
-    // 3 it does nothing at all. The receive path sets 3 again after every
-    // reply it handles, so a reply that dispatches cleanly is a reply that
-    // leaves the title waiting.
+    // ```text
+    // 0x2579a  subs r3, #0x64      ; 0x44e - 0x64 = 0x3ea = 1002
+    // 0x2579c  cmp  r2, r3
+    // 0x2579e  bne  0x257a2
+    // 0x257a0  b    0x25b10
+    // ```
     //
-    // The plus-one does not dispatch, and that is what moves it: the unmatched
-    // arm at `0x25ac4` draws its three lines at y = -32, above the screen and
-    // out of sight, and the path on from it is the one that writes 14. Nothing
-    // else in the binary writes 14.
-    let answer = command + 1;
+    // `0x25b10` is the block that writes 14 to `0x1501dac` - the screen that
+    // draws `[아이템샵]` and its list, and the only place in the binary that
+    // writes it. It is guarded on `r1`, which the caller left holding the mode
+    // byte from `+0x835`, and the shop's own request carries that mode as zero
+    // in its twenty-sixth body byte.
+    //
+    // Only this title's shop request is moved. Its record is the 45-byte one
+    // under command 1000; 영웅서기5 speaks a 55-byte record and reads its own
+    // reply at the request plus one, so everything else is left alone.
+    const LOM2_SHOP_COMMAND: u16 = 1000;
+    const LOM2_SHOP_RECORD: usize = 45;
+
+    let answer = if command == LOM2_SHOP_COMMAND && request.len() == LOM2_SHOP_RECORD {
+        command + 2
+    } else {
+        command + 1
+    };
 
     let mut response = vec![0u8; HEADER + BODY + TAIL];
     response[0..2].copy_from_slice(&((BODY + LENGTH_OVERHEAD) as u16).to_be_bytes());
