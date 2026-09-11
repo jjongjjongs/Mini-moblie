@@ -1,5 +1,8 @@
 use alloc::{borrow::ToOwned, boxed::Box, collections::BTreeSet, string::String, sync::Arc, vec::Vec};
-use core::cmp::min;
+use core::{
+    cmp::min,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use hashbrown::HashMap;
 use spin::Mutex;
@@ -83,6 +86,9 @@ pub struct FilesystemOverlay {
     platform: Arc<Box<dyn Platform>>,
     virtual_files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     aid: Arc<str>,
+    /// Whether a read may fall back to a packaged entry whose name differs
+    /// only in case. Off unless the platform layer turns it on.
+    case_insensitive_reads: Arc<AtomicBool>,
 }
 
 impl FilesystemOverlay {
@@ -91,7 +97,59 @@ impl FilesystemOverlay {
             platform,
             virtual_files: Arc::new(Mutex::new(HashMap::new())),
             aid: Arc::from(aid),
+            case_insensitive_reads: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Lets reads fall back to a packaged entry whose name differs from the
+    /// requested one only in ASCII case.
+    ///
+    /// Off by default, and deliberately opt-in per platform: it can only turn
+    /// a lookup that finds nothing into one that finds something, but that is
+    /// still a behaviour change, and the platforms that do not need it should
+    /// not have to carry it. SK-VM titles are the ones that do - the reference
+    /// emulator resolves their archive entries case-insensitively
+    /// (`aram-core/loader/skvm.findCaseInsensitive`), because the titles ship
+    /// `Data/Map01.dat` and ask for `data/map01.dat`.
+    pub fn enable_case_insensitive_reads(&self) {
+        self.case_insensitive_reads.store(true, Ordering::Relaxed);
+    }
+
+    /// Resolves a normalized path to the key a read should actually use.
+    ///
+    /// Returns the path unchanged unless case-insensitive reads are on, the
+    /// exact path is in neither layer, and exactly one packaged entry differs
+    /// from it only in case. Two entries that differ only in case are left
+    /// alone rather than guessed between.
+    async fn resolve_read(&self, normalized: String) -> String {
+        if !self.case_insensitive_reads.load(Ordering::Relaxed) {
+            return normalized;
+        }
+
+        {
+            let files = self.virtual_files.lock();
+            if files.contains_key(&normalized) {
+                return normalized;
+            }
+        }
+
+        if self.platform.filesystem().exists(&self.aid, &normalized).await {
+            return normalized;
+        }
+
+        let files = self.virtual_files.lock();
+        let mut matched = None;
+        for key in files.keys() {
+            if !key.eq_ignore_ascii_case(&normalized) {
+                continue;
+            }
+            if matched.is_some() {
+                return normalized;
+            }
+            matched = Some(key.clone());
+        }
+
+        matched.unwrap_or(normalized)
     }
 
     pub fn add_virtual(&self, path: &str, data: Vec<u8>) {
@@ -107,6 +165,7 @@ impl FilesystemOverlay {
         if self.platform.filesystem().exists(&self.aid, &normalized).await {
             return true;
         }
+        let normalized = self.resolve_read(normalized).await;
         self.virtual_files.lock().contains_key(&normalized)
     }
 
@@ -116,6 +175,7 @@ impl FilesystemOverlay {
         if let Some(size) = self.platform.filesystem().size(&self.aid, &normalized).await {
             return Some(size);
         }
+        let normalized = self.resolve_read(normalized).await;
         self.virtual_files.lock().get(&normalized).map(|d| d.len())
     }
 
@@ -127,6 +187,7 @@ impl FilesystemOverlay {
             return plat_fs.read(&self.aid, &normalized, offset, count, buf).await;
         }
 
+        let normalized = self.resolve_read(normalized).await;
         let files = self.virtual_files.lock();
         let data = files.get(&normalized)?;
         if offset >= data.len() {
@@ -180,7 +241,12 @@ impl FilesystemOverlay {
             return;
         }
 
-        let packaged = self.virtual_files.lock().get(normalized).cloned();
+        // A case-insensitive read resolves to the packaged entry, so the copy
+        // that backs the first write has to find the same one - otherwise the
+        // write creates an empty file and the packaged bytes stop being
+        // reachable under the name the title uses.
+        let source = self.resolve_read(normalized.to_owned()).await;
+        let packaged = self.virtual_files.lock().get(&source).cloned();
         if let Some(packaged) = packaged
             && !packaged.is_empty()
         {
@@ -709,6 +775,95 @@ mod tests {
         assert_eq!(fs.read("a", 0, 3, &mut buf).await, Some(3));
         assert_eq!(buf, [1, 2, 3]);
         assert_eq!(fs.size("b").await, Some(0));
+    }
+
+    /// Off by default: a platform that has not asked for it sees a miss, the
+    /// way LGT and KTF titles have always seen one.
+    #[futures_test::test]
+    async fn a_differently_cased_packaged_name_is_not_found_by_default() {
+        let fs = setup();
+        fs.add_virtual("Data/Map01.dat", vec![1, 2, 3]);
+
+        assert!(!fs.exists("data/map01.dat").await);
+        assert_eq!(fs.size("data/map01.dat").await, None);
+
+        let mut buf = [0u8; 3];
+        assert_eq!(fs.read("data/map01.dat", 0, 3, &mut buf).await, None);
+    }
+
+    /// SK-VM titles ask for archive entries in a case the archive does not
+    /// use. The reference emulator resolves those case-insensitively.
+    #[futures_test::test]
+    async fn an_opted_in_platform_finds_a_differently_cased_packaged_name() {
+        let fs = setup();
+        fs.enable_case_insensitive_reads();
+        fs.add_virtual("Data/Map01.dat", vec![1, 2, 3]);
+
+        assert!(fs.exists("data/map01.dat").await);
+        assert_eq!(fs.size("DATA/MAP01.DAT").await, Some(3));
+
+        let mut buf = [0u8; 3];
+        assert_eq!(fs.read("data/Map01.DAT", 0, 3, &mut buf).await, Some(3));
+        assert_eq!(buf, [1, 2, 3]);
+    }
+
+    /// An exact name still wins, so a packaged pair that differs only in case
+    /// keeps resolving to the one that was asked for.
+    #[futures_test::test]
+    async fn an_exact_packaged_name_wins_over_a_differently_cased_one() {
+        let fs = setup();
+        fs.enable_case_insensitive_reads();
+        fs.add_virtual("a.dat", vec![1]);
+        fs.add_virtual("A.DAT", vec![2]);
+
+        let mut buf = [0u8; 1];
+        assert_eq!(fs.read("a.dat", 0, 1, &mut buf).await, Some(1));
+        assert_eq!(buf, [1]);
+        assert_eq!(fs.read("A.DAT", 0, 1, &mut buf).await, Some(1));
+        assert_eq!(buf, [2]);
+    }
+
+    /// Two packaged entries that differ only in case give no answer worth
+    /// guessing at, so the miss stands rather than one of them being picked.
+    #[futures_test::test]
+    async fn an_ambiguous_case_fold_is_left_as_a_miss() {
+        let fs = setup();
+        fs.enable_case_insensitive_reads();
+        fs.add_virtual("save.dat", vec![1]);
+        fs.add_virtual("SAVE.dat", vec![2]);
+
+        assert!(!fs.exists("Save.DAT").await);
+    }
+
+    /// A write to the name the title uses must still start from the packaged
+    /// bytes it has been reading, not from an empty file.
+    #[futures_test::test]
+    async fn a_write_under_a_differently_cased_name_starts_from_the_packaged_bytes() {
+        let fs = setup();
+        fs.enable_case_insensitive_reads();
+        fs.add_virtual("Save.dat", vec![0xAA, 0xBB, 0xCC, 0xDD]);
+
+        fs.write("save.dat", 0, &[1, 2]).await;
+
+        assert_eq!(fs.size("save.dat").await, Some(4));
+        let mut buf = [0u8; 4];
+        assert_eq!(fs.read("save.dat", 0, 4, &mut buf).await, Some(4));
+        assert_eq!(buf, [1, 2, 0xCC, 0xDD]);
+    }
+
+    /// Once written, the writable layer answers - the packaged entry under the
+    /// other spelling must not shadow it back.
+    #[futures_test::test]
+    async fn a_written_file_wins_over_a_differently_cased_packaged_one() {
+        let fs = setup();
+        fs.enable_case_insensitive_reads();
+        fs.add_virtual("Cfg.dat", vec![0xAA]);
+
+        fs.write("cfg.dat", 0, &[7]).await;
+
+        let mut buf = [0u8; 1];
+        assert_eq!(fs.read("cfg.dat", 0, 1, &mut buf).await, Some(1));
+        assert_eq!(buf, [7]);
     }
 
     #[futures_test::test]
