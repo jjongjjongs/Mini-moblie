@@ -143,21 +143,6 @@ impl LgtEmulator {
         // loads, so drop the one a previous run in this process installed.
         wie_wipi_c::api::graphics::clear_bios_font();
 
-        // TEMP PROBE (레전드오브마스터2): its shop opens, its record is
-        // answered and read, and it stays on DATA전송중. The first attempt at
-        // this returned nothing because a log window armed a trace of its own
-        // and a watch is only looked for while nothing is armed; windows no
-        // longer do that, so these can fire.
-        //
-        //   pc:3a1fc   the receive callback the read returns into. It reads up
-        //              to the buffer's whole 0x800, keeps getShort(buf, 2) as
-        //              the command at session+0x822, and moves the state on.
-        //   w:15050f0  that state. Every write is reported with its value, so
-        //              3 -> 4 -> whatever follows is in the log.
-        if aid.eq_ignore_ascii_case("000308FF") {
-            let _ = wie_backend::probe::set_watches("pc:3a1fc,w:15050f0");
-        }
-
         const ANNUNCIATOR_ROWS: u32 = 24;
         let annunciator = options.annunciator.unwrap_or_else(|| title_expects_annunciator(aid));
         write_generic(
