@@ -146,10 +146,31 @@ impl Canvas {
         Ok(())
     }
 
+    /// Force what is already pending to be serviced - and nothing more.
+    ///
+    /// This used to go through `repaint()` with an empty rectangle, which
+    /// `mark_dirty` reads as a request for the whole canvas: every call marked
+    /// the entire screen dirty instead of servicing the region the title had
+    /// asked for. 액션퍼즐패밀리1 calls this between draws, so its screen was
+    /// repainted out from under it seventy times in a single capture, which is
+    /// what the flicker was.
+    ///
+    /// So the pending region is passed straight to the display, leaving the
+    /// title's own request exactly as it left it.
     async fn service_repaints(jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<()> {
-        tracing::warn!("stub javax.microedition.lcdui.Canvas::serviceRepaints({this:?})");
+        tracing::debug!("javax.microedition.lcdui.Canvas::serviceRepaints({this:?})");
 
-        jvm.invoke_virtual(&this, "repaint", "(IIII)V", (0, 0, 0, 0)).await
+        let display: ClassInstanceRef<Display> = jvm.get_field(&this, "currentDisplay", "Ljavax/microedition/lcdui/Display;").await?;
+        if display.is_null() {
+            return Ok(());
+        }
+
+        let x: i32 = jvm.get_field(&this, "__wieDirtyX", "I").await?;
+        let y: i32 = jvm.get_field(&this, "__wieDirtyY", "I").await?;
+        let width: i32 = jvm.get_field(&this, "__wieDirtyWidth", "I").await?;
+        let height: i32 = jvm.get_field(&this, "__wieDirtyHeight", "I").await?;
+
+        jvm.invoke_virtual(&display, "repaint", "(IIII)V", (x, y, width, height)).await
     }
 
     async fn get_game_action(_: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, key: i32) -> JvmResult<i32> {
