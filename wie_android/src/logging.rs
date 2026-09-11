@@ -53,21 +53,31 @@ const DEFAULT_LOG_DIRECTIVE: &str = "debug,wie_lgt=trace,wie_lgt::hot=warn,wie_l
 
 /// What a collection window captures: everything, everywhere.
 ///
-/// The default above is careful because the capture it feeds is unbounded in
-/// time and bounded in size, so a flood at the wrong level scrolls the moment
-/// that matters out of it. A window with an end does not have that problem, so
-/// it does not need the care: whatever area a question turns out to be about is
-/// already in the file, and nobody has to guess in advance and rebuild.
+/// The window has an end, so it can afford to be far wider than the default -
+/// but it is still bounded in *size*, and an end does not protect it from a
+/// flood. 액션퍼즐패밀리1 settles into a spin lock that yields through
+/// `vm_thread_reschedule` 4.7 million times a second; under a bare `trace` the
+/// window filled in about seven milliseconds and threw away 311,687 lines,
+/// leaving a capture in which every line was the spin and nothing said what the
+/// title was waiting on.
 ///
-/// Two things are held back, both for the same reason - they are not about the
-/// emulated title and they crowd out what is:
+/// So the same few floods the default holds back are held back here too. They
+/// are not about the emulated title, and they crowd out what is:
 ///
 /// - `arm32_cpu`, whose trace is a line per emulated instruction, millions a
 ///   second. What the core did is what `wie_backend::probe` is for.
 /// - `jni`, which narrates its own binding layer - a line per `NewStringUTF`
 ///   and the like. The first window taken with this filter was 47% that, and
 ///   nothing in it was about the game.
-const COLLECT_LOG_DIRECTIVE: &str = "trace,arm32_cpu=warn,jni=warn";
+/// - `wie_lgt::hot`, the LGT paint-loop housekeeping - `vm_thread_reschedule`,
+///   `vm_activate_class`, `vm_check_stack_overflow` and the per-call invoke
+///   echo. Nothing there is logged above debug, so `info` keeps the faults and
+///   drops the flood.
+/// - `wie_core_arm::function`, a line per call into a registered native
+///   function, which on a spinning title tracks the spin one for one.
+///
+/// Everything else still arrives at trace, which is the point of the window.
+const COLLECT_LOG_DIRECTIVE: &str = "trace,arm32_cpu=warn,jni=warn,wie_lgt::hot=info,wie_core_arm::function=debug";
 
 /// Lets the player swap the log filter at runtime, so capturing a module's
 /// debug/trace detail no longer means editing the default above and rebuilding.
@@ -552,6 +562,18 @@ mod tests {
         tracing_subscriber::EnvFilter::builder()
             .parse(super::COLLECT_LOG_DIRECTIVE)
             .expect("collect log directive must be valid");
+    }
+
+    /// The window is bounded in size, so the floods that can fill it in
+    /// milliseconds have to be held back even though the window has an end.
+    #[test]
+    fn collect_log_directive_holds_back_the_known_floods() {
+        for flood in ["arm32_cpu=", "jni=", "wie_lgt::hot=", "wie_core_arm::function="] {
+            assert!(super::COLLECT_LOG_DIRECTIVE.contains(flood), "{flood} is not held back");
+        }
+
+        // Still a trace window everywhere else, which is what it is for.
+        assert!(super::COLLECT_LOG_DIRECTIVE.starts_with("trace,"));
     }
 
     #[test]
