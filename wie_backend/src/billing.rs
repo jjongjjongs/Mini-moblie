@@ -1040,7 +1040,11 @@ pub fn lgt_local_big_endian_record_response(request: &[u8]) -> Option<Vec<u8>> {
     /// Below this the title drops the connection rather than dispatching.
     const LEAST_COMMAND: u16 = 1000;
 
-    if request.len() < HEADER + 2 || u16::from_be_bytes([request[0], request[1]]) as usize != request.len() {
+    // A frame is a length and a command, and the body is optional: 레전드오브
+    // 마스터2's second request is `00 04 04 b0` and nothing else, which its own
+    // builder at `0x3a2a8` writes as body-plus-four. Holding out for six
+    // dropped it on the floor, unanswered.
+    if request.len() < HEADER || u16::from_be_bytes([request[0], request[1]]) as usize != request.len() {
         return None;
     }
 
@@ -1053,12 +1057,12 @@ pub fn lgt_local_big_endian_record_response(request: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    // 레전드오브마스터2's shop is answered at the request plus two.
+    // 레전드오브마스터2 is answered at the request plus two.
     //
     // Its dispatcher is a comparison chain at `0x25758`, and every command in
     // it ends in `02` or `04` where a request ends in `00`. 1001 is not in it
     // at all, which is what `엉뚱한 패킷날라옴 / 인덱스:1001` was saying, and
-    // 1002 is, three instructions in:
+    // 1002 is, three comparisons in:
     //
     // ```text
     // 0x2579a  subs r3, #0x64      ; 0x44e - 0x64 = 0x3ea = 1002
@@ -1067,23 +1071,22 @@ pub fn lgt_local_big_endian_record_response(request: &[u8]) -> Option<Vec<u8>> {
     // 0x257a0  b    0x25b10
     // ```
     //
-    // `0x25b10` is the block that writes 14 to `0x1501dac` - the screen that
-    // draws `[아이템샵]` and its list, and the only place in the binary that
-    // writes it. It is guarded on `r1`, which the caller left holding the mode
-    // byte from `+0x835`, and the shop's own request carries that mode as zero
-    // in its twenty-sixth body byte.
+    // `0x25b10` writes 14 to `0x1501dac` - the screen that draws `[아이템샵]`
+    // and its list, and the only place in the binary that writes it. Its guard
+    // is `r1 == 0`, and the caller at `0x24f3e` leaves r1 holding the mode byte
+    // from `+0x835`, which the shop's request carries as zero.
     //
-    // Only this title's shop request is moved. Its record is the 45-byte one
-    // under command 1000; 영웅서기5 speaks a 55-byte record and reads its own
-    // reply at the request plus one, so everything else is left alone.
-    const LOM2_SHOP_COMMAND: u16 = 1000;
-    const LOM2_SHOP_RECORD: usize = 45;
+    // Answered that way it asks the next thing, 1200, and 1202 is the arm that
+    // takes a count off the reply, allocates four bytes an entry and fills the
+    // list (`0x27270`-`0x27282`). So the exchange walks: the round hundreds are
+    // what this title asks under, and two past them is where it is answered.
+    //
+    // 영웅서기5 shares this gateway but not that shape - it asks under `0x0836`
+    // and reads its reply at `0x0837` - so the rule is drawn where the two
+    // differ rather than off a list of commands seen so far.
+    const LOM2_REQUEST_STEP: u16 = 100;
 
-    let answer = if command == LOM2_SHOP_COMMAND && request.len() == LOM2_SHOP_RECORD {
-        command + 2
-    } else {
-        command + 1
-    };
+    let answer = if command % LOM2_REQUEST_STEP == 0 { command + 2 } else { command + 1 };
 
     let mut response = vec![0u8; HEADER + BODY + TAIL];
     response[0..2].copy_from_slice(&((BODY + LENGTH_OVERHEAD) as u16).to_be_bytes());
@@ -8031,13 +8034,28 @@ mod tests {
 
         let response = lgt_local_big_endian_record_response(&request).expect("the shop record is answered");
 
-        // Above the bound, so the read state dispatches it rather than dropping
-        // the connection. While the probe stands this command is answered under
-        // one of the indices 레전드오브마스터2's own dispatcher knows, rather
-        // than the request's plus one it refused.
-        let command = i16::from_be_bytes([response[2], response[3]]);
-        assert!(command > 1000);
+        // 1002, which the dispatcher at 0x25758 reaches three comparisons in
+        // and which branches to the block that writes the item shop's screen.
+        // The plus-one, 1001, is not in that chain at all - it is what drew
+        // `엉뚱한 패킷날라옴 / 인덱스:1001`.
+        assert_eq!(u16::from_be_bytes([response[2], response[3]]), 1002);
         assert_eq!(response[4] as i8, 0);
+
+        // Answered that way the title asks the next thing, a frame with no body
+        // at all, and that is answered the same way: 1202 is the arm that takes
+        // a count off the reply and allocates the list behind it.
+        let mut bodyless = [0u8; 4];
+        bodyless[0..2].copy_from_slice(&4u16.to_be_bytes());
+        bodyless[2..4].copy_from_slice(&1200u16.to_be_bytes());
+
+        let next = lgt_local_big_endian_record_response(&bodyless).expect("a frame with no body is still a frame");
+        assert_eq!(u16::from_be_bytes([next[2], next[3]]), 1202);
+
+        // 영웅서기5 shares the gateway and not the shape: it asks under 0x0836
+        // and reads its reply at 0x0837, so the plus-two must not reach it.
+        let hero5 = legend_of_master_purchase_request();
+        let hero5_response = lgt_local_big_endian_record_response(&hero5).expect("영웅서기5's record is answered");
+        assert_eq!(u16::from_be_bytes([hero5_response[2], hero5_response[3]]), 0x0837);
 
         // A request below the bound is still turned away: its answer would be
         // dropped, and answering it would only cost the title its socket.
