@@ -6919,9 +6919,98 @@ const NOMZERO_ACK_BODY: usize = 4;
 /// is the record in hand as a `u16` one end first is thousands the other way
 /// round, and a `u32` that is the record in hand has the command in its high
 /// half read as a `u16`.
+/// 게임빌2010슈퍼사커's purchase, answered the way its own reader reads it.
+///
+/// The title buys G포인트 over a billing socket and, unanswered, sits on
+/// `접속중 입니다` until it gives up with `에러가 발생했습니다 [에러코드: -1]`.
+/// Two frames carry the purchase, both `[u16 LE length][u16 LE command]` with
+/// the reply's command one above the request's:
+///
+/// ```text
+/// 15 00 06 01  0b 43 00 00  "010419325556" 00  00   the purchase
+/// 0c 00 04 01  0b 43 00 00  00 00 00 00              what follows it
+/// ```
+///
+/// Its own receiver is not the one its certificate exchange uses. `0x7c9a0`
+/// reads the byte behind the header as a **signed status and requires it above
+/// zero** - `0x7c9da` takes anything at or below it to `OnError`, which is
+/// where the `-1` on screen comes from - where the certificate's receiver
+/// (`0x83844`) only refuses a negative one. A reply that satisfies the one is
+/// refused by the other, which is why these need answering here rather than by
+/// the 제노니아 packet matcher that was claiming them.
+///
+/// Each command's reader then takes a fixed body, and a reply that comes up
+/// short leaves it reading whatever was in the buffer already:
+///
+/// - `0x0107` (`0x7cae6`) takes sixteen bytes, then a `u16`. `0x8020` keeps the
+///   sixteen as a string and the `u16` beside it.
+/// - `0x0105` (`0x7cb9a`) allocates two hundred bytes and copies that many. Its
+///   first field is the NUL-terminated EUC-KR line the title shows in the
+///   dialog that ends the purchase, which is what `구매가 완료되었습니다` is
+///   doing here.
+///
+/// What the service granted went with the service: the balance the shop shows
+/// is `[[0x1400054] + 0x1134]`, and nothing in either reply reaches it - the
+/// title credits it on a `0x0301` it is not sent here. So this takes the
+/// purchase off the error and says so, and leaves the balance where it was.
+///
+/// `None` for anything that is not one of those two: the length has to be the
+/// frame in hand, the command one of the two, and the frame has to carry this
+/// title's own id where both of them carry it.
+pub fn lgt_local_supersoccer_response(request: &[u8]) -> Option<Vec<u8>> {
+    /// Little end first, like the rest of this title's fields.
+    const TITLE_ID: u32 = 0x0000_430b;
+    const TITLE_ID_OFFSET: usize = 4;
+
+    /// Above zero, which is what `0x7c9da` wants.
+    const GRANTED: u8 = 1;
+
+    const PURCHASE_REQUEST: u16 = 0x0106;
+    const PURCHASE_SIZE: usize = 21;
+    /// Sixteen bytes and a `u16`.
+    const PURCHASE_BODY: usize = 18;
+
+    const SETTLE_REQUEST: u16 = 0x0104;
+    const SETTLE_SIZE: usize = 12;
+    const SETTLE_BODY: usize = 200;
+
+    /// 구매가 완료되었습니다. in EUC-KR, which is the encoding the title draws.
+    const DONE: &[u8] = b"\xb1\xb8\xb8\xc5\xb0\xa1 \xbf\xcf\xb7\xe1\xb5\xc7\xbe\xfa\xbd\xc0\xb4\xcf\xb4\xd9.";
+
+    if request.len() < TITLE_ID_OFFSET + 4 || u16::from_le_bytes([request[0], request[1]]) as usize != request.len() {
+        return None;
+    }
+
+    let id = u32::from_le_bytes([request[4], request[5], request[6], request[7]]);
+    if id != TITLE_ID {
+        return None;
+    }
+
+    let (answer, body) = match (u16::from_le_bytes([request[2], request[3]]), request.len()) {
+        (PURCHASE_REQUEST, PURCHASE_SIZE) => (PURCHASE_REQUEST + 1, PURCHASE_BODY),
+        (SETTLE_REQUEST, SETTLE_SIZE) => (SETTLE_REQUEST + 1, SETTLE_BODY),
+        _ => return None,
+    };
+
+    let length = 4 + 1 + body;
+    let mut response = vec![0u8; length];
+    response[0..2].copy_from_slice(&(length as u16).to_le_bytes());
+    response[2..4].copy_from_slice(&answer.to_le_bytes());
+    response[4] = GRANTED;
+
+    if answer == SETTLE_REQUEST + 1 {
+        response[5..5 + DONE.len()].copy_from_slice(DONE);
+    }
+
+    Some(response)
+}
+
 pub fn response(request: &[u8]) -> Option<Vec<u8>> {
     lgt_local_granted_response(request)
         .or_else(|| lgt_local_cash_response(request))
+        // Before the 제노니아 packet matcher, which claims these by their length
+        // and answers with a status this title's purchase receiver refuses.
+        .or_else(|| lgt_local_supersoccer_response(request))
         .or_else(|| lgt_local_gamevil_packet_response(request))
         .or_else(|| lgt_local_subscriber_record_response(request))
         .or_else(|| lgt_local_command_tag_response(request))
@@ -6952,6 +7041,58 @@ mod tests {
     use alloc::{vec, vec::Vec};
 
     use super::*;
+
+    /// 슈퍼사커's two purchase frames, captured off its socket.
+    const SUPERSOCCER_PURCHASE: [u8; 21] = [
+        0x15, 0x00, // u16 LE length
+        0x06, 0x01, // u16 LE command
+        0x0b, 0x43, 0x00, 0x00, // the title's own id
+        0x30, 0x31, 0x30, 0x34, 0x31, 0x39, 0x33, 0x32, 0x35, 0x35, 0x36, 0x00, // the subscriber
+        0x00,
+    ];
+
+    const SUPERSOCCER_SETTLE: [u8; 12] = [0x0c, 0x00, 0x04, 0x01, 0x0b, 0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+
+    /// Both readers take a fixed body and a status above zero; the 제노니아
+    /// matcher that was claiming these gave them thirty-two bytes and a zero,
+    /// which is the `에러코드: -1` the shop was ending on.
+    #[test]
+    fn 슈퍼사커s_purchase_is_answered_at_the_length_its_reader_takes() {
+        let purchase = response(&SUPERSOCCER_PURCHASE).expect("the purchase is answered");
+        assert_eq!(u16::from_le_bytes([purchase[0], purchase[1]]) as usize, purchase.len());
+        assert_eq!(u16::from_le_bytes([purchase[2], purchase[3]]), 0x0107);
+        assert!(purchase[4] as i8 > 0, "0x7c9da refuses a status at or below zero");
+        // Sixteen bytes and a u16 behind the status.
+        assert_eq!(purchase.len(), 4 + 1 + 18);
+
+        let settle = response(&SUPERSOCCER_SETTLE).expect("what follows it is answered");
+        assert_eq!(u16::from_le_bytes([settle[0], settle[1]]) as usize, settle.len());
+        assert_eq!(u16::from_le_bytes([settle[2], settle[3]]), 0x0105);
+        assert!(settle[4] as i8 > 0);
+        assert_eq!(settle.len(), 4 + 1 + 200);
+
+        // Its first field is the line the closing dialog shows, in the EUC-KR
+        // the title draws rather than in UTF-8.
+        let line = &settle[5..];
+        let line = &line[..line.iter().position(|&x| x == 0).expect("the line is terminated")];
+        assert_eq!(
+            line,
+            b"\xb1\xb8\xb8\xc5\xb0\xa1 \xbf\xcf\xb7\xe1\xb5\xc7\xbe\xfa\xbd\xc0\xb4\xcf\xb4\xd9."
+        );
+    }
+
+    /// Keyed on the title's own id where both frames carry it, so the matcher
+    /// cannot claim another title's frame of the same length.
+    #[test]
+    fn a_frame_without_슈퍼사커s_id_is_left_alone() {
+        let mut other = SUPERSOCCER_PURCHASE;
+        other[4] = 0x0c;
+        assert!(lgt_local_supersoccer_response(&other).is_none());
+
+        let mut short = SUPERSOCCER_SETTLE;
+        short[0] = 0x0d;
+        assert!(lgt_local_supersoccer_response(&short).is_none());
+    }
 
     /// The eighteen bytes 서든어택 포켓 writes when a cash purchase is
     /// confirmed, captured off its socket.
