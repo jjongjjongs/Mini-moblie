@@ -1685,8 +1685,29 @@ pub async fn post_event(context: &mut dyn WIPICContext, id: i32, r#type: i32, pa
 }
 
 // it's not documented api, but lgt apps gets pointer via api call
+/// What the reference's framebuffer getters answer for a handle of zero.
+///
+/// `wipic_get_frame_pointer` (@0x1ad7b0), `_width` (@0x1aaea4), `_height`
+/// (@0x1aacd8) and `_bpl` (@0x1ac044) all open by testing the handle and
+/// returning before they touch it - `cmp r0, #0` / `mvneq r0, #0` in two of
+/// them, `subs`/`subeq r0, r0, #1` in the others. Every one of them hands back
+/// minus one.
+///
+/// A title reaches them with zero. These getters sit in a direct-blit inner
+/// loop, called with whatever register happens to be live rather than with a
+/// framebuffer, which is the same reason `get_framebuffer_bpp` ignores its
+/// argument outright. 열혈택시 does it while loading its images and, with the
+/// handle dereferenced instead, the read of address zero failed the whole VM
+/// rather than the one call - `net.wie.WieError: Invalid memory access;
+/// address: 0` before its first frame.
+pub const NO_FRAMEBUFFER: i32 = -1;
+
 pub async fn get_framebuffer_pointer(context: &mut dyn WIPICContext, framebuffer: WIPICIndirectPtr) -> Result<WIPICWord> {
     tracing::debug!("MC_GRP_GET_FRAME_BUFFER_POINTER({:#x})", framebuffer.0);
+
+    if framebuffer.0 == 0 {
+        return Ok(NO_FRAMEBUFFER as WIPICWord);
+    }
 
     let handle = framebuffer;
     let framebuffer: WIPICFramebuffer = read_generic(context, context.data_ptr(handle)?)?;
@@ -1715,6 +1736,10 @@ where
 pub async fn get_framebuffer_width(context: &mut dyn WIPICContext, framebuffer: WIPICIndirectPtr) -> Result<i32> {
     tracing::debug!("MC_GRP_GET_FRAME_BUFFER_WIDTH({:#x})", framebuffer.0);
 
+    if framebuffer.0 == 0 {
+        return Ok(NO_FRAMEBUFFER);
+    }
+
     let framebuffer: WIPICFramebuffer = read_generic(context, context.data_ptr(framebuffer)?)?;
 
     Ok(framebuffer.width as _)
@@ -1723,6 +1748,10 @@ pub async fn get_framebuffer_width(context: &mut dyn WIPICContext, framebuffer: 
 pub async fn get_framebuffer_height(context: &mut dyn WIPICContext, framebuffer: WIPICIndirectPtr) -> Result<i32> {
     tracing::debug!("MC_GRP_GET_FRAME_BUFFER_HEIGHT({:#x})", framebuffer.0);
 
+    if framebuffer.0 == 0 {
+        return Ok(NO_FRAMEBUFFER);
+    }
+
     let framebuffer: WIPICFramebuffer = read_generic(context, context.data_ptr(framebuffer)?)?;
 
     Ok(framebuffer.height as _)
@@ -1730,6 +1759,10 @@ pub async fn get_framebuffer_height(context: &mut dyn WIPICContext, framebuffer:
 
 pub async fn get_framebuffer_bpl(context: &mut dyn WIPICContext, framebuffer: WIPICIndirectPtr) -> Result<i32> {
     tracing::debug!("MC_GRP_GET_FRAME_BUFFER_BPL({:#x})", framebuffer.0);
+
+    if framebuffer.0 == 0 {
+        return Ok(NO_FRAMEBUFFER);
+    }
 
     let framebuffer: WIPICFramebuffer = read_generic(context, context.data_ptr(framebuffer)?)?;
 
@@ -1781,6 +1814,30 @@ mod tests {
             bpp,
             buf: super::WIPICIndirectPtr(0x1000),
         }
+    }
+
+    /// The reference's getters test the handle before they touch it and hand
+    /// back minus one, so a title that calls them with zero - 열혈택시 does,
+    /// out of its image loader - gets an answer instead of a dead VM.
+    #[futures_test::test]
+    async fn a_null_framebuffer_is_answered_the_way_the_reference_answers_it() {
+        use alloc::boxed::Box;
+        use test_utils::TestPlatform;
+        use wie_backend::{DefaultTaskRunner, System};
+
+        use crate::context::test::TestContext;
+
+        let system = System::new(Box::new(TestPlatform::new()), "test-pid", "test-aid", DefaultTaskRunner);
+        let mut context = TestContext::with_system(system);
+        let null = super::WIPICIndirectPtr(0);
+
+        assert_eq!(super::get_framebuffer_width(&mut context, null).await.unwrap(), super::NO_FRAMEBUFFER);
+        assert_eq!(super::get_framebuffer_height(&mut context, null).await.unwrap(), super::NO_FRAMEBUFFER);
+        assert_eq!(super::get_framebuffer_bpl(&mut context, null).await.unwrap(), super::NO_FRAMEBUFFER);
+        assert_eq!(
+            super::get_framebuffer_pointer(&mut context, null).await.unwrap(),
+            super::NO_FRAMEBUFFER as u32
+        );
     }
 
     #[test]

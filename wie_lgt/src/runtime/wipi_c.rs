@@ -434,21 +434,36 @@ pub(crate) fn try_fast_wipic_getter(core: &mut ArmCore) -> Result<bool> {
         // MC_grpGetFrameBufferPointer/Width/Height: read the field the
         // generic handler returns from the WIPICFramebuffer. The handle is
         // the struct's guest address (data_ptr is identity), so read it
-        // directly — including the generic path's null-handle behavior.
+        // directly — the null handle answered the same way the generic path
+        // and the reference answer it, before anything is dereferenced.
         ID_GET_FRAMEBUFFER_POINTER => {
             let handle = core.read_param(0)?;
-            let framebuffer: WIPICFramebuffer = read_generic(core, handle)?;
-            // The screen framebuffer's pointer starts at the status strip, the
-            // same as the generic handler reports it.
-            framebuffer.buf.0 - graphics::screen_pointer_lead(core, handle, framebuffer.bpl)
+            if handle == 0 {
+                graphics::NO_FRAMEBUFFER as u32
+            } else {
+                let framebuffer: WIPICFramebuffer = read_generic(core, handle)?;
+                // The screen framebuffer's pointer starts at the status strip, the
+                // same as the generic handler reports it.
+                framebuffer.buf.0 - graphics::screen_pointer_lead(core, handle, framebuffer.bpl)
+            }
         }
         ID_GET_FRAMEBUFFER_WIDTH => {
-            let framebuffer: WIPICFramebuffer = read_generic(core, core.read_param(0)?)?;
-            framebuffer.width
+            let handle = core.read_param(0)?;
+            if handle == 0 {
+                graphics::NO_FRAMEBUFFER as u32
+            } else {
+                let framebuffer: WIPICFramebuffer = read_generic(core, handle)?;
+                framebuffer.width
+            }
         }
         ID_GET_FRAMEBUFFER_HEIGHT => {
-            let framebuffer: WIPICFramebuffer = read_generic(core, core.read_param(0)?)?;
-            framebuffer.height
+            let handle = core.read_param(0)?;
+            if handle == 0 {
+                graphics::NO_FRAMEBUFFER as u32
+            } else {
+                let framebuffer: WIPICFramebuffer = read_generic(core, handle)?;
+                framebuffer.height
+            }
         }
         // MC_grpGetFrameBufferBpp ignores its argument and reports the
         // display depth from a global, exactly as the vendor does; titles
