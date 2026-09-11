@@ -1052,11 +1052,29 @@ pub fn decode_image(data: &[u8]) -> Result<Box<dyn Image>> {
         return decode_ecnx(data);
     }
 
-    let image = ImageReader::new(Cursor::new(&data))
+    let decoded = ImageReader::new(Cursor::new(&data))
         .with_guessed_format()
         .map_err(|x| WieError::FatalError(x.to_string()))?
-        .decode()
-        .map_err(|x| WieError::FatalError(x.to_string()))?;
+        .decode();
+
+    // A handset's PNG decoder did not check chunk CRCs, so a title could patch
+    // a palette where it lay and leave the checksum on the bytes it replaced.
+    // 액션퍼즐패밀리1 does exactly that, and strict decoding turns three of its
+    // images into nothing - which it then draws, and the null takes an
+    // exception out through its key handler, past the line that releases the
+    // handler's own lock. The next key release waits on that lock forever.
+    let image = match decoded {
+        Ok(image) => image,
+        Err(error) => {
+            let repaired = png_with_repaired_crcs(&data).ok_or_else(|| WieError::FatalError(error.to_string()))?;
+
+            ImageReader::new(Cursor::new(&repaired))
+                .with_guessed_format()
+                .map_err(|x| WieError::FatalError(x.to_string()))?
+                .decode()
+                .map_err(|_| WieError::FatalError(error.to_string()))?
+        }
+    };
     let mut rgba = image.into_rgba8();
 
     if rgba.width() <= 15 && rgba.height() <= 15 && png_is_single_index0_tile(data) {
@@ -1072,6 +1090,54 @@ pub fn decode_image(data: &[u8]) -> Result<Box<dyn Image>> {
         rgba.height(),
         pod_collect_to_vec(&data),
     )) as Box<_>)
+}
+
+/// The same PNG with every chunk CRC recomputed, or `None` if it is not a PNG or
+/// every CRC was already right.
+///
+/// Only reached once a strict decode has already refused the bytes, so a sound
+/// image never takes this path. Nothing but the four checksum bytes of a chunk
+/// is touched: a length that does not fit stops the walk and leaves the rest as
+/// it was, so a genuinely truncated file still fails.
+fn png_with_repaired_crcs(data: &[u8]) -> Option<Vec<u8>> {
+    /// `\x89PNG\r\n\x1a\n`.
+    const SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    /// A chunk is a length, a type, its data and a CRC; all but the data are
+    /// four bytes each.
+    const FIELD: usize = 4;
+
+    if !data.starts_with(&SIGNATURE) {
+        return None;
+    }
+
+    let mut repaired = data.to_vec();
+    let mut at = SIGNATURE.len();
+    let mut repaired_any = false;
+
+    while let Some(header) = repaired.get(at..at + FIELD * 2) {
+        let length = u32::from_be_bytes(header[..FIELD].try_into().unwrap()) as usize;
+        // The CRC covers the type and the data, not the length ahead of them.
+        let covered = at + FIELD;
+        let Some(crc_at) = covered.checked_add(FIELD).and_then(|x| x.checked_add(length)) else {
+            break;
+        };
+        if crc_at + FIELD > repaired.len() {
+            break;
+        }
+
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&repaired[covered..crc_at]);
+        let computed = hasher.finalize().to_be_bytes();
+
+        if repaired[crc_at..crc_at + FIELD] != computed {
+            repaired[crc_at..crc_at + FIELD].copy_from_slice(&computed);
+            repaired_any = true;
+        }
+
+        at = crc_at + FIELD;
+    }
+
+    repaired_any.then_some(repaired)
 }
 
 /// A tiny degenerate indexed PNG - one whose palette holds a single entry and
@@ -1129,12 +1195,86 @@ pub fn string_width_px(string: &str, px_height: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use alloc::vec;
+    use alloc::vec::Vec;
 
     use wie_util::Result;
 
     use crate::canvas::{Clip, Image, ImageBufferCanvas};
 
-    use super::{ArgbPixel, Canvas, Color, Rgb332Pixel, TextAlignment, VecImageBuffer};
+    use super::{ArgbPixel, Canvas, Color, Rgb332Pixel, TextAlignment, VecImageBuffer, decode_image, png_with_repaired_crcs};
+
+    /// A 1x1 indexed PNG, which is the smallest thing that has a palette to
+    /// patch.
+    fn indexed_png() -> Vec<u8> {
+        fn chunk(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+            let mut out = (body.len() as u32).to_be_bytes().to_vec();
+            out.extend_from_slice(kind);
+            out.extend_from_slice(body);
+
+            let mut hasher = crc32fast::Hasher::new();
+            hasher.update(&out[4..]);
+            out.extend_from_slice(&hasher.finalize().to_be_bytes());
+
+            out
+        }
+
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        // 1x1, bit depth 8, colour type 3 (indexed).
+        png.extend(chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 3, 0, 0, 0]));
+        png.extend(chunk(b"PLTE", &[0x12, 0x34, 0x56]));
+        // One scanline: a zero filter byte and the single index.
+        png.extend(chunk(b"IDAT", &miniz_oxide::deflate::compress_to_vec_zlib(&[0, 0], 6)));
+        png.extend(chunk(b"IEND", &[]));
+
+        png
+    }
+
+    /// The offset of a chunk's four CRC bytes, found by walking from the
+    /// signature the way the repair does.
+    fn crc_offset_of(png: &[u8], kind: &[u8; 4]) -> usize {
+        let mut at = 8;
+        loop {
+            let length = u32::from_be_bytes(png[at..at + 4].try_into().unwrap()) as usize;
+            if &png[at + 4..at + 8] == kind {
+                return at + 8 + length;
+            }
+            at = at + 12 + length;
+        }
+    }
+
+    #[test]
+    fn a_sound_png_is_left_exactly_as_it_is() {
+        // The repair only ever runs behind a decode that already failed, but a
+        // file whose checksums are right must come back untouched even so.
+        assert_eq!(png_with_repaired_crcs(&indexed_png()), None);
+        assert_eq!(png_with_repaired_crcs(b"not a png at all"), None);
+    }
+
+    /// 액션퍼즐패밀리1 patches a palette where it lies and leaves the chunk's CRC
+    /// on the bytes it replaced. The handset never checked, so the image drew;
+    /// strict decoding turns it into nothing, and the title then draws the null.
+    #[test]
+    fn a_palette_patched_without_its_checksum_still_decodes() {
+        let sound = indexed_png();
+        let mut patched = sound.clone();
+        let at = crc_offset_of(&patched, b"PLTE");
+        patched[at] ^= 0xff;
+
+        assert!(decode_image(&patched).is_ok(), "a stale PLTE checksum must not lose the image");
+
+        // Repaired back to exactly the bytes a correct encoder would have written.
+        assert_eq!(png_with_repaired_crcs(&patched).as_deref(), Some(sound.as_slice()));
+    }
+
+    #[test]
+    fn a_truncated_png_is_still_refused() {
+        // The walk stops at a chunk that does not fit rather than reaching past
+        // it, so a genuinely damaged file fails as it should.
+        let sound = indexed_png();
+        let truncated = &sound[..sound.len() - 6];
+
+        assert!(decode_image(truncated).is_err());
+    }
 
     /// A shape drawn in a colour that is not fully opaque is composed with what
     /// is under it, which is what a title asking for a translucent panel gets.
