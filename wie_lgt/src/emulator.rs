@@ -689,13 +689,17 @@ fn reroot_archive(files: BTreeMap<String, Vec<u8>>) -> BTreeMap<String, Vec<u8>>
 /// and its level readout falls off the bottom edge. 액션퍼즐패밀리3 (`0002CB6A`)
 /// is written the same way: without the strip its menu, its dialog backgrounds
 /// and the banner across the bottom of every screen sit a strip low, leaving a
-/// blank band above them and cutting the banner in half. 나는 마왕이다 2 and
-/// 프로야구 2010 blit from the panel's first row instead and are right without
-/// one, as reference captures of all of them confirm.
+/// blank band above them and cutting the banner in half. 지크2 (`0002A52B`)
+/// places every screen at `max(0, (height - 296) / 2) + 24` - it centres a
+/// 296-row picture in the height it is told it has and then adds the strip
+/// unconditionally - so without the strip its splash sits 36 rows low behind a
+/// blank band and its copyright line falls off the bottom edge. 나는 마왕이다 2
+/// and 프로야구 2010 blit from the panel's first row instead and are right
+/// without one, as reference captures of all of them confirm.
 ///
 /// Keyed on the descriptor's aid, so nothing else is touched.
 fn title_expects_annunciator(aid: &str) -> bool {
-    matches!(aid.to_ascii_uppercase().as_str(), "0002787C" | "0002CB6A")
+    matches!(aid.to_ascii_uppercase().as_str(), "0002787C" | "0002CB6A" | "0002A52B")
 }
 
 #[cfg(test)]
@@ -706,6 +710,7 @@ mod annunciator_tests {
     fn names_the_titles_that_skip_the_strip_themselves() {
         assert!(title_expects_annunciator("0002787C"));
         assert!(title_expects_annunciator("0002cb6a"));
+        assert!(title_expects_annunciator("0002A52B"));
     }
 
     #[test]
