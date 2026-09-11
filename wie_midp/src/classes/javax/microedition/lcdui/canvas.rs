@@ -146,17 +146,16 @@ impl Canvas {
         Ok(())
     }
 
-    /// Force what is already pending to be serviced - and nothing more.
+    /// Service what is already pending, and block until it is done.
     ///
-    /// This used to go through `repaint()` with an empty rectangle, which
-    /// `mark_dirty` reads as a request for the whole canvas: every call marked
-    /// the entire screen dirty instead of servicing the region the title had
-    /// asked for. 액션퍼즐패밀리1 calls this between draws, so its screen was
-    /// repainted out from under it seventy times in a single capture, which is
-    /// what the flicker was.
-    ///
-    /// So the pending region is passed straight to the display, leaving the
-    /// title's own request exactly as it left it.
+    /// 액션퍼즐패밀리1 draws a frame, calls `repaint(0, 0, 240, 320)` and then
+    /// this, which is the ordinary MIDP idiom for "and put it on the screen
+    /// before I go on". Two things were wrong with answering it by asking for
+    /// another repaint: the request went through `repaint()` with an empty
+    /// rectangle, which `mark_dirty` reads as a demand for the whole canvas, so
+    /// the region the title asked for was thrown away; and it returned without
+    /// painting, so the title ran ahead of the display and drew its next frame
+    /// over one that had never been shown. That is what the flicker was.
     async fn service_repaints(jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<()> {
         tracing::debug!("javax.microedition.lcdui.Canvas::serviceRepaints({this:?})");
 
@@ -165,12 +164,18 @@ impl Canvas {
             return Ok(());
         }
 
-        let x: i32 = jvm.get_field(&this, "__wieDirtyX", "I").await?;
-        let y: i32 = jvm.get_field(&this, "__wieDirtyY", "I").await?;
-        let width: i32 = jvm.get_field(&this, "__wieDirtyWidth", "I").await?;
-        let height: i32 = jvm.get_field(&this, "__wieDirtyHeight", "I").await?;
+        // Painting here and now is what "service" means: the title draws a
+        // frame, asks for it, and carries on only once it is on the screen.
+        // Returning without painting let it run ahead of the display, drawing
+        // the next frame over one that had not been shown yet.
+        let painting: bool = jvm.get_field(&display, "__wiePainting", "Z").await?;
+        if painting {
+            // Called from inside a paint. Servicing it here would re-enter that
+            // paint, so the pending request is left for the one already running.
+            return Ok(());
+        }
 
-        jvm.invoke_virtual(&display, "repaint", "(IIII)V", (x, y, width, height)).await
+        jvm.invoke_virtual(&display, "handlePaintEvent", "()V", ()).await
     }
 
     async fn get_game_action(_: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, key: i32) -> JvmResult<i32> {
