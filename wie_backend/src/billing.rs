@@ -1053,21 +1053,6 @@ pub fn lgt_local_big_endian_record_response(request: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    // TEMP PROBE (레전드오브마스터2, command 1000): a longer body whose every
-    // byte carries its own offset, so whatever the shop draws says which offset
-    // it read. The status byte stays granted. Revert once the layout is known.
-    if command == 1000 {
-        const PROBE_BODY: usize = 0x80;
-        let mut response = vec![0u8; HEADER + PROBE_BODY + TAIL];
-        response[0..2].copy_from_slice(&((PROBE_BODY + LENGTH_OVERHEAD) as u16).to_be_bytes());
-        response[2..4].copy_from_slice(&(command + 1).to_be_bytes());
-        response[HEADER] = GRANTED;
-        for offset in HEADER + 1..HEADER + PROBE_BODY {
-            response[offset] = offset as u8;
-        }
-        return Some(response);
-    }
-
     let mut response = vec![0u8; HEADER + BODY + TAIL];
     response[0..2].copy_from_slice(&((BODY + LENGTH_OVERHEAD) as u16).to_be_bytes());
     response[2..4].copy_from_slice(&(command + 1).to_be_bytes());
@@ -8020,8 +8005,6 @@ mod tests {
         assert!(command > 1000);
         assert_eq!(command, 1001);
         assert_eq!(response[4] as i8, 0);
-        // While the probe stands, this command's body carries its own offsets.
-        assert_eq!(response[5], 5);
 
         // A request below the bound is still turned away: its answer would be
         // dropped, and answering it would only cost the title its socket.
