@@ -608,6 +608,9 @@ pub enum StdlibSvcId {
     Stricmp = 0x422,
     Strnicmp = 0x423,
     Atexit = 0x424,
+    Malloc = 0x426,
+    Realloc = 0x427,
+    Free = 0x428,
     Snprintf = 0x429,
 }
 
@@ -666,6 +669,9 @@ impl TryFrom<SvcId> for StdlibSvcId {
             0x422 => Self::Stricmp,
             0x423 => Self::Strnicmp,
             0x424 => Self::Atexit,
+            0x426 => Self::Malloc,
+            0x427 => Self::Realloc,
+            0x428 => Self::Free,
             0x429 => Self::Snprintf,
             _ => return Err(wie_util::WieError::FatalError(alloc::format!("Unknown stdlib svc id: {:#x}", value.0))),
         })

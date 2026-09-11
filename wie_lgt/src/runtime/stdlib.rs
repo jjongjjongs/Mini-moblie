@@ -22,6 +22,87 @@ pub(crate) static STDLIB_SVC_COUNT: [core::sync::atomic::AtomicU64; STDLIB_ID_MA
 /// zero an unimplemented import returned, which froze everything random.
 static RAND_STATE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
 
+/// `dlib_malloc` (kernel `0x426`), which the reference implements as a bare
+/// `b dmemory_alloc` - the same allocator `MC_knlAlloc` and `MC_knlCalloc`
+/// reach, so a block from one is freeable by the other. That matters here:
+/// this runtime's `MC_knlAlloc` keeps the block's size in a word in front of
+/// what it hands back, and `MC_knlFree` reads it there, so `malloc` has to lay
+/// its blocks out the same way or a title that mixes the two drives the
+/// allocator with a garbage size. 열혈택시 does mix them.
+///
+/// A request this cannot satisfy is answered with null, the way C's own
+/// `malloc` answers one, rather than ending the run.
+fn c_malloc(core: &mut ArmCore, size: u32) -> Result<u32> {
+    // A zero-size request still has to come back as a freeable, non-null
+    // pointer; `MC_knlCalloc` reserves a minimal block for the same reason.
+    let size = size.max(1);
+
+    let Ok(address) = Allocator::alloc(core, size + HEAP_BLOCK_HEADER) else {
+        return Ok(0);
+    };
+    write_generic(core, address, size)?;
+
+    Ok(address + HEAP_BLOCK_HEADER)
+}
+
+/// `dlib_free` (kernel `0x428`), `b dmemory_free` on the reference.
+///
+/// Null is a no-op, and so is a pointer outside the guest heap: a title that
+/// reads an uninitialised field as a handle and frees it passes whatever the
+/// field held, which the reference's zeroed heap makes a `free(NULL)`. Same
+/// guards `MC_knlFree` carries, for the same reason.
+fn c_free(core: &mut ArmCore, address: u32) -> Result<()> {
+    if address < HEAP_BLOCK_HEADER {
+        return Ok(());
+    }
+
+    let base = address - HEAP_BLOCK_HEADER;
+    let size: u32 = match read_generic(core, base) {
+        Ok(size) => size,
+        Err(_) => return Ok(()),
+    };
+
+    let _ = Allocator::free(core, base, size + HEAP_BLOCK_HEADER);
+
+    Ok(())
+}
+
+/// `dlib_realloc` (kernel `0x427`), `b dmemory_realloc` on the reference.
+///
+/// C's own contract: a null address is a `malloc`, and the old contents are
+/// carried over as far as the smaller of the two sizes. The old block is
+/// released only once the new one is in hand, so a failed growth leaves the
+/// caller's pointer intact.
+fn c_realloc(core: &mut ArmCore, address: u32, size: u32) -> Result<u32> {
+    if address == 0 {
+        return c_malloc(core, size);
+    }
+
+    let resized = c_malloc(core, size)?;
+    if resized == 0 {
+        return Ok(0);
+    }
+
+    // What the old block holds, from the header in front of it.
+    let previous: u32 = read_generic(core, address - HEAP_BLOCK_HEADER).unwrap_or(0);
+    let carried = previous.min(size) as usize;
+
+    if carried != 0 {
+        let mut data = alloc::vec![0u8; carried];
+
+        core.read_bytes(address, &mut data)?;
+        core.write_bytes(resized, &data)?;
+    }
+
+    c_free(core, address)?;
+
+    Ok(resized)
+}
+
+/// The word `MC_knlAlloc` keeps a block's size in, in front of what it hands
+/// back. See [`c_malloc`].
+const HEAP_BLOCK_HEADER: u32 = size_of::<u32>() as u32;
+
 fn c_rand() -> u32 {
     use core::sync::atomic::Ordering::Relaxed;
 
@@ -178,6 +259,29 @@ pub fn register_stdlib_svc_handler(core: &mut ArmCore, system: &System, save_poi
             x if x == StdlibSvcId::Time as u32 => EmulatedFunction::call(&time, core, &mut context.system).await?.write(core, lr),
             x if x == StdlibSvcId::Localtime as u32 => EmulatedFunction::call(&localtime, core, &mut ()).await?.write(core, lr),
             x if x == StdlibSvcId::Atexit as u32 => EmulatedFunction::call(&atexit, core, &mut ()).await?.write(core, lr),
+            x if x == StdlibSvcId::Malloc as u32 => {
+                let size = core.read_param(0)?;
+                let address = c_malloc(core, size)?;
+
+                tracing::debug!("malloc({size:#x}) -> {address:#x}");
+                address.write(core, lr)
+            }
+            x if x == StdlibSvcId::Realloc as u32 => {
+                let address = core.read_param(0)?;
+                let size = core.read_param(1)?;
+                let resized = c_realloc(core, address, size)?;
+
+                tracing::debug!("realloc({address:#x}, {size:#x}) -> {resized:#x}");
+                resized.write(core, lr)
+            }
+            x if x == StdlibSvcId::Free as u32 => {
+                let address = core.read_param(0)?;
+                tracing::debug!("free({address:#x})");
+
+                c_free(core, address)?;
+
+                0u32.write(core, lr)
+            }
             // An unrecognised import is reported and returns zero, the way
             // unknown WIPI-C and Java imports already do. Ending the run
             // instead hides everything the application would have done next,
