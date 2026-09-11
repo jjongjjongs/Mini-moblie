@@ -30,3 +30,4 @@ wie_skt = { path = "../wie_skt" }
 
 [dev-dependencies]
 smaf_player = { path = "../third_party/smaf_player" }
+zip = { version = "^8.6", features = ["deflate"], default-features = false }

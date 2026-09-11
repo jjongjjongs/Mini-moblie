@@ -3504,6 +3504,7 @@ dependencies = [
  "wie_lgt",
  "wie_skt",
  "wie_util",
+ "zip",
 ]
 
 [[package]]

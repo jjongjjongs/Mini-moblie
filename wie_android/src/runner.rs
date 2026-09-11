@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     fmt::Write as _,
     path::PathBuf,
     sync::Mutex,
@@ -55,6 +55,32 @@ fn key_code(index: i32) -> Option<KeyCode> {
 /// games would share one.
 fn content_id(data: &[u8]) -> String {
     format!("{:x}", md5::compute(data))
+}
+
+/// The jar a download package carries, when the package is only a wrapper.
+///
+/// Some titles arrive as a zip holding one jar and its three icons rather than
+/// as a handset archive: 액션퍼즐패밀리1 is `WEBSYNC1.jar` plus `big.png`,
+/// `middle.png` and `small.png`, with no `app_info` between them. With no
+/// descriptor no archive format claims it, and the jar branch is then handed
+/// the wrapper instead of the jar - so `binary.mod`, one level down, is never
+/// seen and a WIPI title is taken for a MIDlet.
+///
+/// `None` unless the archive holds exactly one jar, which keeps a jar that
+/// happens to carry another jar as a resource on its own path.
+fn packaged_jar(files: &BTreeMap<String, Vec<u8>>) -> Option<Vec<u8>> {
+    let mut jars = files.iter().filter(|(name, _)| {
+        name.rsplit('/')
+            .next()
+            .is_some_and(|name| name.len() > 4 && name[name.len() - 4..].eq_ignore_ascii_case(".jar"))
+    });
+
+    let (_, jar) = jars.next()?;
+    if jars.next().is_some() {
+        return None;
+    }
+
+    extract_zip(jar).ok().map(|_| jar.clone())
 }
 
 struct Instance {
@@ -268,9 +294,11 @@ fn build_emulator(platform: Box<AndroidPlatform>, data: &[u8], options: Options)
             .map_err(|x| format!("SKT 아카이브를 실행할 수 없습니다: {x}"));
     }
 
-    let id = content_id(data);
+    // A package that is only a wrapper around one jar is opened to the jar,
+    // so the formats below read the entries the title actually ships.
+    let jar = packaged_jar(&files).unwrap_or_else(|| data.to_vec());
+    let id = content_id(&jar);
     let jar_filename = format!("{id}.jar");
-    let jar = data.to_vec();
 
     if KtfEmulator::loadable_jar(&jar) {
         KtfEmulator::from_jar(platform, &jar_filename, jar, &id, &id, None, options)
@@ -380,17 +408,18 @@ pub fn inspect(data: &[u8]) -> String {
         }
     };
 
+    let jar = packaged_jar(&files).unwrap_or_else(|| data.to_vec());
     let format = if KtfEmulator::loadable_archive(&files) {
         "KTF archive"
     } else if LgtEmulator::loadable_archive(&files) {
         "LGT archive"
     } else if SktEmulator::loadable_archive(&files) {
         "SKT archive"
-    } else if KtfEmulator::loadable_jar(data) {
+    } else if KtfEmulator::loadable_jar(&jar) {
         "KTF jar"
-    } else if LgtEmulator::loadable_jar(data) {
+    } else if LgtEmulator::loadable_jar(&jar) {
         "LGT jar"
-    } else if SktEmulator::loadable_jar(data) {
+    } else if SktEmulator::loadable_jar(&jar) {
         "SKT jar"
     } else {
         "J2ME jar (assumed)"
@@ -426,7 +455,73 @@ pub fn inspect(data: &[u8]) -> String {
 mod tests {
     use wie_backend::KeyCode;
 
-    use super::{content_id, extract_zip, inspect, key_code, save_ids};
+    use super::{content_id, extract_zip, inspect, key_code, packaged_jar, save_ids};
+
+    /// A stored zip of the given entries, which is all these tests need.
+    fn zip_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write as _;
+
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for (name, body) in entries {
+            writer.start_file(*name, options).unwrap();
+            writer.write_all(body).unwrap();
+        }
+
+        writer.finish().unwrap().into_inner()
+    }
+
+    /// 액션퍼즐패밀리1's shape: one jar and its icons, and no descriptor at all.
+    fn packaged_wipi_title() -> (Vec<u8>, Vec<u8>) {
+        let jar = zip_of(&[
+            ("binary.mod", b"\x00\x00\xa0\xe1"),
+            ("META-INF/MANIFEST.MF", b"MIDlet-1: Midlet,/sicon.png,Midlet\n"),
+        ]);
+        let package = zip_of(&[
+            ("WEBSYNC1.jar", &jar),
+            ("big.png", b"big"),
+            ("middle.png", b"mid"),
+            ("small.png", b"small"),
+        ]);
+
+        (package, jar)
+    }
+
+    #[test]
+    fn a_package_holding_one_jar_is_opened_to_it() {
+        let (package, jar) = packaged_wipi_title();
+
+        assert_eq!(packaged_jar(&extract_zip(&package).unwrap()).as_deref(), Some(jar.as_slice()));
+    }
+
+    #[test]
+    fn a_wipi_title_packaged_as_a_jar_is_not_taken_for_a_midlet() {
+        let (package, _) = packaged_wipi_title();
+        let report = inspect(&package);
+
+        // Its manifest names a MIDlet and it ships no classes at all, so read as
+        // one it has nothing to load. The binary.mod a level down is what says
+        // otherwise.
+        assert!(report.contains("format: LGT jar"), "{report}");
+    }
+
+    /// 액션퍼즐패밀리1 itself, as it was handed over: `WEBSYNC1.jar` and three
+    /// icons, a MIDlet manifest inside the jar and `binary.mod` beside it.
+    #[test]
+    fn the_real_package_reads_as_a_wipi_title() {
+        let report = inspect(include_bytes!("../../test_data/action_puzzle_family_1.zip"));
+
+        assert!(report.contains("format: LGT jar"), "{report}");
+    }
+
+    #[test]
+    fn a_jar_carrying_another_jar_is_left_alone() {
+        // Only a package of exactly one jar is opened; a title shipping a jar as
+        // a resource keeps its own identity.
+        let package = zip_of(&[("a.jar", b"not a zip"), ("b.jar", b"nor this")]);
+
+        assert_eq!(packaged_jar(&extract_zip(&package).unwrap()), None);
+    }
 
     #[test]
     fn key_indexes_match_the_java_keypad() {
