@@ -3731,6 +3731,7 @@ dependencies = [
  "bitflags 2.13.1",
  "bytemuck",
  "dyn-clone",
+ "encoding_rs",
  "java_class_proto",
  "java_constants",
  "java_runtime",
@@ -3741,6 +3742,7 @@ dependencies = [
  "wie_backend",
  "wie_jvm_support",
  "wie_midp",
+ "wie_util",
 ]
 
 [[package]]
