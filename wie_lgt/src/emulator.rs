@@ -143,14 +143,6 @@ impl LgtEmulator {
         // loads, so drop the one a previous run in this process installed.
         wie_wipi_c::api::graphics::clear_bios_font();
 
-        // TEMP PROBE (레전드오브마스터2): its shop sits on DATA전송중 after the
-        // answer is read. Trace the receive callback the read returns into, and
-        // report every write to the state its network machine turns on, so the
-        // log says where it stops rather than leaving it to be guessed at.
-        if aid.eq_ignore_ascii_case("000308FF") {
-            let _ = wie_backend::probe::set_watches("pc:3a1fc/40000,w:15050f0");
-        }
-
         const ANNUNCIATOR_ROWS: u32 = 24;
         let annunciator = options.annunciator.unwrap_or_else(|| title_expects_annunciator(aid));
         write_generic(
