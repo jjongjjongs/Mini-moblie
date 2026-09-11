@@ -3266,6 +3266,86 @@ fn class_identity_bridge_name(name: &str) -> Option<&str> {
     }
 }
 
+/// Caches the application class at `root` if nothing can name it yet.
+///
+/// `vm_register_classes` hands over the classes the application declares, and
+/// only those are cached. A class it leaves out still appears as the identity
+/// of an object that reaches this runtime, and the lazy parse is what gives it
+/// a name - the same path `vm_instantiate` takes for a class only the main Jlet
+/// references.
+fn register_class_identity(core: &ArmCore, context: &InitSvcContext, root: u32) {
+    if root == 0 || class_identity_name(context, root).is_some() {
+        return;
+    }
+
+    // An array class carries no metadata of its own: it names a dimension count
+    // and an element class, and it is the element that has to be registered
+    // before the array can be named.
+    let element = context.array_classes.lock().get(&root).map(|array| array.element_class);
+    if let Some(element) = element {
+        register_class_identity(core, context, element);
+        return;
+    }
+
+    match app_classes::parse_class_root(core, root) {
+        Ok(parsed) => {
+            tracing::debug!("LGT class root {root:#x} is {}, which nothing had registered", parsed.name);
+            context.app_classes.lock().push(parsed);
+        }
+        Err(error) => tracing::debug!("LGT class root {root:#x} does not parse: {error:?}"),
+    }
+}
+
+/// The class a guest object belongs to, taken from the identity its dispatch
+/// table carries.
+fn object_class_name(core: &ArmCore, context: &InitSvcContext, object: u32) -> Option<String> {
+    let root = object_class_root(core, object).ok()?;
+
+    register_class_identity(core, context, root);
+
+    class_identity_name(context, root)
+}
+
+/// The `java/lang/Class` for a guest object's class, as a handle the compiled
+/// code can hold.
+///
+/// `None` when the object names no class this runtime can resolve, which leaves
+/// the caller to answer as it did before.
+async fn object_class(core: &mut ArmCore, context: &mut InitSvcContext, object: u32) -> Result<Option<u32>> {
+    let Some(name) = object_class_name(core, context, object) else {
+        tracing::debug!("LGT getClass on {object:#x} names a class this runtime cannot identify");
+        return Ok(None);
+    };
+
+    // An application class lives only in the AOT image until it is bridged into
+    // RustJava, and bridging it is what gives `resolve_class` something to find.
+    // For an array that is its element class, which is what the array's own
+    // definition is built over.
+    if let Some(class_name) = class_identity_bridge_name(&name) {
+        bridge_class_chain(
+            &context.jvm,
+            core,
+            &context.java_handles,
+            &context.save_points,
+            &context.app_classes,
+            &context.image_ranges,
+            class_name,
+        )
+        .await;
+    }
+
+    let class = match context.jvm.resolve_class(&name).await {
+        Ok(class) => class.java_class(),
+        Err(error) => {
+            let error = wie_jvm_support::JvmSupport::to_wie_err(&context.jvm, error).await;
+            tracing::warn!("LGT getClass on {object:#x} could not resolve {name}: {error}");
+            return Ok(None);
+        }
+    };
+
+    Ok(Some(context.java_handles.address_of(class)?))
+}
+
 fn object_class_root(core: &ArmCore, object: u32) -> Result<u32> {
     let vtable: u32 = read_generic(core, object)?;
     if vtable == 0 {
@@ -3957,6 +4037,18 @@ async fn call_unknown_slot(core: &mut ArmCore, context: &mut InitSvcContext, cla
         // JVM side to call these on.
         if context.java_handles.get(this).is_some() {
             return invoke_object_self_method(core, context, &member, this).await;
+        }
+
+        // `getClass` still has an answer for such an object: its own header
+        // names its class. Returning null instead is the one reply here that no
+        // caller can carry on from - `getClass().getResourceAsStream(path)` is
+        // how a title opens a file out of its own jar, and the compiled code
+        // null-checks the receiver, so a null class throws NullPointerException
+        // and the load never happens.
+        if *name == "getClass"
+            && let Some(class) = object_class(core, context, this).await?
+        {
+            return Ok(class.into());
         }
 
         tracing::debug!("LGT java/lang/Object.{name}{descriptor} on {this:#x}, which has no instance");
