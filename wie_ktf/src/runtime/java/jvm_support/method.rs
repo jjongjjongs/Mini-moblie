@@ -305,10 +305,17 @@ impl JavaMethod {
                     let restore_context: u32 = read_generic(core, exception_handler.ptr_functions + 4)?;
                     let contexts_base = current_java_exception_handler + 24;
 
+                    // Name what was caught and what caught it: a resume that
+                    // lands in the wrong handler and a resume that lands in
+                    // the right one look identical without this.
                     tracing::debug!(
-                        "Java exception handler found: {:#x}, method: {:#x}",
+                        "Java exception handler found: {:#x}, method: {:#x}, catches {}, pc {:#x} in [{:#x}, {:#x})",
                         entry.target,
-                        exception_handler.ptr_method
+                        exception_handler.ptr_method,
+                        if entry.ptr_class == 0 { "any".into() } else { class.name()? },
+                        exception_handler.current_pc,
+                        entry.from_pc,
+                        entry.to_pc
                     );
 
                     return Err(WieError::JavaExceptionUnwind {

@@ -32,6 +32,8 @@ impl JavaArrayClassInstance {
         let length_address = class_instance.field_address(0)?;
         write_generic(core, length_address, count as u32)?;
 
+        tracing::trace!("Instantiated array {} of {count} at {:#x}", array_class.class.name()?, class_instance.ptr_raw);
+
         Ok(Self::from_raw(class_instance.ptr_raw, core))
     }
 
