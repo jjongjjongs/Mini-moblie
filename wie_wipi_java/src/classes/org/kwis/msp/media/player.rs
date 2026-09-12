@@ -74,6 +74,15 @@ impl Player {
     async fn play_clip(jvm: &Jvm, _: &mut WieJvmContext, clip: ClassInstanceRef<Clip>, repeat: bool) -> JvmResult<bool> {
         tracing::debug!("org.kwis.msp.media.Player::play({clip:?}, {repeat})");
 
+        // Titles call these with a clip slot they have not filled - a sound
+        // that failed to load, or a "stop whatever is playing" call made before
+        // anything was. They shipped on handsets doing it, so the platform
+        // tolerates it; answering that nothing played is that answer, and it is
+        // what the `BaseClip` overloads below already do.
+        if clip.is_null() {
+            return Ok(false);
+        }
+
         let alloc_result: i32 = jvm.invoke_virtual(&clip, "allocPlayer", "()I", ()).await?;
         if alloc_result != 0 {
             return Err(jvm.exception("org/kwis/msp/media/MediaUnavailableException", "").await);
@@ -90,6 +99,12 @@ impl Player {
 
     async fn stop_clip(jvm: &Jvm, _: &mut WieJvmContext, clip: ClassInstanceRef<Clip>) -> JvmResult<bool> {
         tracing::debug!("org.kwis.msp.media.Player::stop({clip:?})");
+
+        // As in `play` above: 레나크사가 stops a clip it never set, and a
+        // deref here took the whole emulator down rather than the title.
+        if clip.is_null() {
+            return Ok(false);
+        }
 
         let result: i32 = jvm.invoke_virtual(&clip, "mediaStop", "()I", ()).await?;
 

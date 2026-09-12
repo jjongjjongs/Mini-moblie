@@ -1,0 +1,269 @@
+//! A headless probe for KTF archives.
+//!
+//! KTF had no way to run a real title without a window, so a title that dies on
+//! its first frame could only be diagnosed by guesswork. This runs an archive
+//! the way `wie_cli` would, counts the frames it paints, and reports the error
+//! it stopped on.
+//!
+//! It is driven by the environment so any archive can be pointed at it without
+//! touching the tree:
+//!
+//! - `WIE_KTF_ARCHIVE` - path to the archive to run. Unset, the probe is a
+//!   no-op, which is what keeps it out of the way of an ordinary `cargo test`.
+//! - `WIE_TICKS` - how many ticks to run (default 20000).
+//! - `WIE_SHOT` - where to write the last painted frame, as a binary PPM.
+//! - `WIE_KEY`/`WIE_PRESS_TICK` - one key press, to get past a title's notice.
+
+use std::{
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::Duration,
+};
+
+use test_utils::{TestPlatform, TestPlatformEvent};
+use wie_backend::{
+    AudioSink, DatabaseRepository, Emulator, Event, Filesystem, Instant, KeyCode, Options, Platform, Screen, canvas::Image, extract_zip,
+};
+use wie_ktf::KtfEmulator;
+use wie_util::Result;
+
+#[derive(Default)]
+struct Captured {
+    frames: u32,
+    width: u32,
+    height: u32,
+    /// How many distinct colours the last frame held - a blank screen is one.
+    last_colors: usize,
+    last_pixels: Vec<u8>,
+}
+
+#[derive(Default, Clone)]
+struct CaptureScreen {
+    captured: Arc<Mutex<Captured>>,
+}
+
+impl Screen for CaptureScreen {
+    fn request_redraw(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn paint(&self, image: &dyn Image) {
+        let mut captured = self.captured.lock().unwrap();
+
+        captured.frames += 1;
+        captured.width = image.width();
+        captured.height = image.height();
+
+        let mut colors = std::collections::BTreeSet::new();
+        let mut pixels = Vec::with_capacity((image.width() * image.height() * 3) as usize);
+        for color in image.colors() {
+            colors.insert(((color.r as u32) << 16) | ((color.g as u32) << 8) | color.b as u32);
+            pixels.push(color.r);
+            pixels.push(color.g);
+            pixels.push(color.b);
+        }
+
+        captured.last_colors = colors.len();
+        captured.last_pixels = pixels;
+    }
+
+    fn width(&self) -> u32 {
+        self.captured.lock().unwrap().width.max(240)
+    }
+
+    fn height(&self) -> u32 {
+        self.captured.lock().unwrap().height.max(320)
+    }
+}
+
+struct CapturePlatform {
+    inner: TestPlatform,
+    screen: CaptureScreen,
+    /// A clock the probe advances itself: a title that waits on the wall clock
+    /// never gets anywhere on a clock that does not move.
+    clock: Arc<AtomicU64>,
+}
+
+impl Platform for CapturePlatform {
+    fn screen(&self) -> &dyn Screen {
+        &self.screen
+    }
+
+    fn now(&self) -> Instant {
+        Instant::from_epoch_millis(self.clock.fetch_add(1, Ordering::SeqCst))
+    }
+
+    fn database_repository(&self) -> &dyn DatabaseRepository {
+        self.inner.database_repository()
+    }
+
+    fn filesystem(&self) -> &dyn Filesystem {
+        self.inner.filesystem()
+    }
+
+    fn audio_sink(&self) -> Box<dyn AudioSink> {
+        self.inner.audio_sink()
+    }
+
+    fn system_information(&self, key: &str) -> Option<String> {
+        self.inner.system_information(key)
+    }
+
+    fn open_url(&self, url: &str) -> bool {
+        self.inner.open_url(url)
+    }
+
+    fn write_stdout(&self, buf: &[u8]) {
+        self.inner.write_stdout(buf)
+    }
+
+    fn write_stderr(&self, buf: &[u8]) {
+        self.inner.write_stderr(buf)
+    }
+
+    fn exit(&self) {
+        self.inner.exit()
+    }
+
+    fn vibrate(&self, duration_ms: u64, intensity: u8) {
+        self.inner.vibrate(duration_ms, intensity)
+    }
+
+    fn set_backlight_mode(&self, mode: u8) {
+        self.inner.set_backlight_mode(mode)
+    }
+}
+
+/// Maps a `WIE_KEY` name to a key code, so a probe can target any key.
+fn key_by_name(name: &str) -> Option<KeyCode> {
+    Some(match name.to_ascii_uppercase().as_str() {
+        "OK" | "FIRE" => KeyCode::OK,
+        "UP" => KeyCode::UP,
+        "DOWN" => KeyCode::DOWN,
+        "LEFT" => KeyCode::LEFT,
+        "RIGHT" => KeyCode::RIGHT,
+        "LSK" | "LEFT_SOFT_KEY" => KeyCode::LEFT_SOFT_KEY,
+        "RSK" | "RIGHT_SOFT_KEY" => KeyCode::RIGHT_SOFT_KEY,
+        "CLEAR" => KeyCode::CLEAR,
+        "NUM0" => KeyCode::NUM0,
+        "NUM1" => KeyCode::NUM1,
+        "NUM2" => KeyCode::NUM2,
+        "NUM3" => KeyCode::NUM3,
+        "NUM4" => KeyCode::NUM4,
+        "NUM5" => KeyCode::NUM5,
+        "NUM6" => KeyCode::NUM6,
+        "NUM7" => KeyCode::NUM7,
+        "NUM8" => KeyCode::NUM8,
+        "NUM9" => KeyCode::NUM9,
+        "HASH" | "POUND" => KeyCode::HASH,
+        "STAR" => KeyCode::STAR,
+        _ => return None,
+    })
+}
+
+#[test]
+fn ktf_archive_probe() {
+    let Ok(path) = std::env::var("WIE_KTF_ARCHIVE") else {
+        eprintln!("WIE_KTF_ARCHIVE unset; nothing to probe");
+        return;
+    };
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .try_init();
+
+    let ticks_limit: u32 = std::env::var("WIE_TICKS").ok().and_then(|x| x.parse().ok()).unwrap_or(20000);
+    let archive = std::fs::read(&path).expect("archive");
+
+    let exited = Arc::new(AtomicBool::new(false));
+    let exited_clone = exited.clone();
+    let screen = CaptureScreen::default();
+
+    let platform = Box::new(CapturePlatform {
+        inner: TestPlatform::with_event_handler(move |event| match event {
+            TestPlatformEvent::Stdout(buf) => eprint!("[stdout] {}", String::from_utf8_lossy(&buf)),
+            TestPlatformEvent::OpenUrl(url) => eprintln!("[open-url] {url}"),
+            TestPlatformEvent::Exit => exited_clone.store(true, Ordering::SeqCst),
+        }),
+        screen: screen.clone(),
+        clock: Arc::new(AtomicU64::new(0)),
+    });
+
+    let files = extract_zip(&archive).expect("extract");
+    eprintln!(
+        "[probe] {path}: {} entries, loadable={}",
+        files.len(),
+        KtfEmulator::loadable_archive(&files)
+    );
+
+    let options = Options {
+        enable_gdbserver: false,
+        profile: None,
+        annunciator: None,
+    };
+
+    let mut emulator = match KtfEmulator::from_archive(platform, files, options) {
+        Ok(emulator) => emulator,
+        Err(error) => {
+            eprintln!("[probe] LOAD FAILED: {error:?}");
+            return;
+        }
+    };
+
+    // `request_redraw` only asks; the host is what paints. `wie_cli` turns the
+    // request into a window redraw, so a probe that never feeds one back sees
+    // a title paint nothing however well it runs.
+    let probe_key = std::env::var("WIE_KEY").ok().and_then(|name| key_by_name(&name));
+    let press_tick: u32 = std::env::var("WIE_PRESS_TICK").ok().and_then(|x| x.parse().ok()).unwrap_or(u32::MAX);
+
+    let mut ticks = 0;
+    let mut stopped = None;
+    while ticks < ticks_limit && !exited.load(Ordering::SeqCst) {
+        if ticks % 40 == 0 {
+            emulator.handle_event(Event::Redraw);
+        }
+        if let Some(key) = probe_key {
+            if ticks == press_tick {
+                emulator.handle_event(Event::Keydown(key));
+            }
+            if ticks == press_tick.saturating_add(20) {
+                emulator.handle_event(Event::Keyup(key));
+            }
+        }
+
+        if let Err(error) = emulator.tick() {
+            stopped = Some(error);
+            break;
+        }
+        ticks += 1;
+    }
+
+    let captured = screen.captured.lock().unwrap();
+    eprintln!(
+        "[probe] ticks={ticks} frames={} size={}x{} colors_in_last_frame={} exited={}",
+        captured.frames,
+        captured.width,
+        captured.height,
+        captured.last_colors,
+        exited.load(Ordering::SeqCst),
+    );
+    match &stopped {
+        Some(error) => eprintln!("[probe] STOPPED: {error:?}"),
+        None => eprintln!("[probe] ran to the tick limit without stopping"),
+    }
+
+    if let Ok(shot) = std::env::var("WIE_SHOT")
+        && !captured.last_pixels.is_empty()
+    {
+        let mut ppm = format!("P6\n{} {}\n255\n", captured.width, captured.height).into_bytes();
+        ppm.extend_from_slice(&captured.last_pixels);
+        std::fs::write(&shot, ppm).expect("shot");
+        eprintln!("[probe] wrote {shot}");
+    }
+
+    // Keep the probe from being mistaken for a passing assertion.
+    let _ = Duration::from_secs(0);
+}

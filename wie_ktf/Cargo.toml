@@ -34,3 +34,4 @@ wie_wipi_java = { workspace = true }
 
 [dev-dependencies]
 test_utils = { workspace = true }
+tracing-subscriber = { version = "^0.3", features = ["env-filter"] }

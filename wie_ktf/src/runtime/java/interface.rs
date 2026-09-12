@@ -35,8 +35,8 @@ async fn handle_java_interface_svc(core: &mut ArmCore, jvm: &mut Jvm, id: SvcId)
         JavaSvcId::GetField => EmulatedFunction::call(&get_field, core, &mut ()).await?.write(core, lr),
         JavaSvcId::JbUnk4 => EmulatedFunction::call(&jb_unk4, core, &mut ()).await?.write(core, lr),
         JavaSvcId::JbUnk5 => EmulatedFunction::call(&jb_unk5, core, &mut ()).await?.write(core, lr),
-        JavaSvcId::JbUnk7 => EmulatedFunction::call(&jb_unk7, core, &mut ()).await?.write(core, lr),
-        JavaSvcId::JbUnk8 => EmulatedFunction::call(&jb_unk8, core, &mut ()).await?.write(core, lr),
+        JavaSvcId::JbUnk7 => EmulatedFunction::call(&jb_monitor_enter, core, jvm).await?.write(core, lr),
+        JavaSvcId::JbUnk8 => EmulatedFunction::call(&jb_monitor_exit, core, jvm).await?.write(core, lr),
         JavaSvcId::RegisterClass => EmulatedFunction::call(&register_class, core, jvm).await?.write(core, lr),
         JavaSvcId::RegisterJavaString => EmulatedFunction::call(&register_java_string, core, jvm).await?.write(core, lr),
         JavaSvcId::CallNative => EmulatedFunction::call(&call_native, core, &mut ()).await?.write(core, lr),
@@ -262,14 +262,53 @@ async fn jb_unk5(_: &mut ArmCore, _: &mut (), a0: u32, a1: u32) -> Result<u32> {
     Ok(0)
 }
 
-async fn jb_unk7(_: &mut ArmCore, _: &mut (), a0: u32) -> Result<u32> {
-    tracing::warn!("stub jb_unk7({a0:#x})");
+/// The two halves of `synchronized`, as the KTF compiler emits them.
+///
+/// A KTF title is compiled ahead of time to ARM, so the `monitorenter` and
+/// `monitorexit` bytecodes come back out as this pair of one-argument calls
+/// around the region they guard - including the one an exception handler makes
+/// on the way out of a block it is unwinding.
+///
+/// Both were stubs that did nothing, so the JVM never recorded that anything
+/// owned a monitor. The first title to `wait` inside a `synchronized` block was
+/// then told it did not own the monitor it had just entered: 드래곤하트 dies on
+/// its first frame that way, and 레나크사가 catches the same exception and
+/// retries forever.
+///
+/// The monitor is keyed by the instance's address, which is what the JVM uses
+/// for identity, so a second call about the same object finds the same monitor.
+async fn jb_monitor_enter(core: &mut ArmCore, jvm: &mut Jvm, ptr_instance: u32) -> Result<u32> {
+    tracing::trace!("jb_monitor_enter({ptr_instance:#x})");
+
+    // Entering on null is the title's own bug and the JVM has nothing to lock;
+    // say so rather than taking the emulator down over it.
+    if ptr_instance == 0 {
+        tracing::warn!("monitorenter on null");
+
+        return Ok(0);
+    }
+
+    let instance: Box<dyn jvm::ClassInstance> = Box::new(JavaClassInstance::from_raw(ptr_instance, core));
+    if let Err(x) = jvm.monitor_enter(&instance).await {
+        return Err(JvmSupport::to_wie_err(jvm, x).await);
+    }
 
     Ok(0)
 }
 
-async fn jb_unk8(_: &mut ArmCore, _: &mut (), a0: u32) -> Result<u32> {
-    tracing::warn!("stub jb_unk8({a0:#x})");
+async fn jb_monitor_exit(core: &mut ArmCore, jvm: &mut Jvm, ptr_instance: u32) -> Result<u32> {
+    tracing::trace!("jb_monitor_exit({ptr_instance:#x})");
+
+    if ptr_instance == 0 {
+        tracing::warn!("monitorexit on null");
+
+        return Ok(0);
+    }
+
+    let instance: Box<dyn jvm::ClassInstance> = Box::new(JavaClassInstance::from_raw(ptr_instance, core));
+    if let Err(x) = jvm.monitor_exit(&instance).await {
+        return Err(JvmSupport::to_wie_err(jvm, x).await);
+    }
 
     Ok(0)
 }
