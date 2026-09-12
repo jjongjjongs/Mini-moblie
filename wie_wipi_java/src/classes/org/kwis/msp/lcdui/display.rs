@@ -501,20 +501,41 @@ impl Display {
         Ok(())
     }
 
+    /// The screen is a colour one, and saying otherwise was a placeholder
+    /// nobody had decided.
+    ///
+    /// Every framebuffer this runtime paints into is [`Rgb565Pixel`] or ARGB -
+    /// there is no monochrome path at all - so a title asking this and being
+    /// told `false` was being told something untrue about the handset it is
+    /// running on. A title that believes it reaches for its monochrome assets,
+    /// or drops colour work it would otherwise do, and nothing says why.
+    ///
+    /// [`Rgb565Pixel`]: wie_backend::canvas::Rgb565Pixel
     async fn is_color(_: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<bool> {
-        tracing::warn!("stub org.kwis.msp.lcdui.Display::isColor({this:?})");
+        tracing::debug!("org.kwis.msp.lcdui.Display::isColor({this:?}) -> true");
 
-        Ok(false)
+        Ok(true)
     }
 
+    /// How many colours that screen has: 16-bit, so 65,536.
+    ///
+    /// The placeholder answered 0, which is not a number of colours any handset
+    /// has and is the one answer a title must not divide by or compare against.
     async fn num_colors(_: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<i32> {
-        tracing::warn!("stub org.kwis.msp.lcdui.Display::numColors({this:?})");
+        tracing::debug!("org.kwis.msp.lcdui.Display::numColors({this:?}) -> 65536");
 
-        Ok(0)
+        Ok(65536)
     }
 
+    /// No pointer reaches the guest, so this stays `false`.
+    ///
+    /// The Android frontend draws its own keypad and turns a touch into a key,
+    /// and nothing anywhere pushes a pointer event at a card. Answering `true`
+    /// would invite a title to wait for a touch that never arrives - which is
+    /// the mistake, in this exact pair of methods, that another player recorded
+    /// making and had to undo.
     async fn has_pointer_events(_: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<bool> {
-        tracing::warn!("stub org.kwis.msp.lcdui.Display::hasPointerEvents({this:?})");
+        tracing::debug!("org.kwis.msp.lcdui.Display::hasPointerEvents({this:?}) -> false");
 
         Ok(false)
     }
@@ -525,8 +546,17 @@ impl Display {
         Ok(false)
     }
 
+    /// Whether a held key repeats itself, which on the frontend that ships it
+    /// does not.
+    ///
+    /// `wie_android` pushes only `Keydown` and `Keyup`; `wie_cli` is the one
+    /// that also pushes `Keyrepeat`. Answering `true` would be right for the
+    /// development frontend and wrong for the handset, and a title told `true`
+    /// stops running its own repeat - so it keeps the answer the shipping
+    /// frontend can back. A title that wants a held key to repeat polls
+    /// `getKeyState`, which works on both.
     async fn has_repeat_events(_: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<bool> {
-        tracing::warn!("stub org.kwis.msp.lcdui.Display::hasRepeatEvents({this:?})");
+        tracing::debug!("org.kwis.msp.lcdui.Display::hasRepeatEvents({this:?}) -> false");
 
         Ok(false)
     }
