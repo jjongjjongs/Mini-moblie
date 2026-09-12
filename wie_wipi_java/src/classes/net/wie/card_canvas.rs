@@ -296,6 +296,19 @@ impl CardCanvas {
         Ok(())
     }
 
+    /// What `Card.keyNotify` answers, and what the stack does with it.
+    ///
+    /// `true` means the card took the key, and the cards under it never see it.
+    /// The platform's own cards say so: `ProxyCard.keyNotify` hands back what
+    /// `ContainerComponent.processEvent` answered, which is `true` exactly when
+    /// the focused component handled the key, and the base `Card.keyNotify`
+    /// answers `false` because a card that overrides nothing handles nothing.
+    ///
+    /// This used to stop on `false` instead, which reads the answer backwards
+    /// and cost 드래곤하트 its keypad: naming a character pushes
+    /// `TextComponent$ModeViewer` - the 13x7 input-mode indicator - over the
+    /// text box's own card, and the indicator, which handles no keys and never
+    /// meant to, swallowed every one of them.
     async fn key_pressed(jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>, key_code: i32) -> JvmResult<()> {
         tracing::debug!("net.wie.CardCanvas::keyPressed({this:?}, {key_code})");
 
@@ -306,9 +319,9 @@ impl CardCanvas {
 
         for i in (0..length).rev() {
             let card = jvm.invoke_virtual(&cards, "elementAt", "(I)Ljava/lang/Object;", (i,)).await?;
-            let propagate: bool = jvm.invoke_virtual(&card, "keyNotify", "(II)Z", (KEY_PRESSED, key_code)).await?;
+            let handled: bool = jvm.invoke_virtual(&card, "keyNotify", "(II)Z", (KEY_PRESSED, key_code)).await?;
 
-            if !propagate {
+            if handled {
                 break;
             }
         }
@@ -326,9 +339,9 @@ impl CardCanvas {
 
         for i in (0..length).rev() {
             let card = jvm.invoke_virtual(&cards, "elementAt", "(I)Ljava/lang/Object;", (i,)).await?;
-            let propagate: bool = jvm.invoke_virtual(&card, "keyNotify", "(II)Z", (KEY_REPEATED, key_code)).await?;
+            let handled: bool = jvm.invoke_virtual(&card, "keyNotify", "(II)Z", (KEY_REPEATED, key_code)).await?;
 
-            if !propagate {
+            if handled {
                 break;
             }
         }
@@ -346,9 +359,9 @@ impl CardCanvas {
 
         for i in (0..length).rev() {
             let card = jvm.invoke_virtual(&cards, "elementAt", "(I)Ljava/lang/Object;", (i,)).await?;
-            let propagate: bool = jvm.invoke_virtual(&card, "keyNotify", "(II)Z", (KEY_RELEASED, key_code)).await?;
+            let handled: bool = jvm.invoke_virtual(&card, "keyNotify", "(II)Z", (KEY_RELEASED, key_code)).await?;
 
-            if !propagate {
+            if handled {
                 break;
             }
         }

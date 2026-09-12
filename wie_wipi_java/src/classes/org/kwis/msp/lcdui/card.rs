@@ -431,6 +431,10 @@ mod test {
                     JavaFieldProto::new("hideCount", "I", Default::default()),
                     JavaFieldProto::new("keyCount", "I", Default::default()),
                     JavaFieldProto::new("notifyCount", "I", Default::default()),
+                    /// Whether this card takes the key, the way a card with a
+                    /// focused text box does, or lets it fall through, the way
+                    /// the input-mode indicator does.
+                    JavaFieldProto::new("takesKeys", "Z", Default::default()),
                 ],
                 access_flags: Default::default(),
             }
@@ -509,7 +513,8 @@ mod test {
         async fn key_notify(jvm: &Jvm, _: &mut WieJvmContext, mut this: ClassInstanceRef<Self>, _: i32, _: i32) -> JvmResult<bool> {
             let count: i32 = jvm.get_field(&this, "keyCount", "I").await?;
             jvm.put_field(&mut this, "keyCount", "I", count + 1).await?;
-            Ok(false)
+
+            jvm.get_field(&this, "takesKeys", "Z").await
         }
 
         async fn notify_event(jvm: &Jvm, _: &mut WieJvmContext, mut this: ClassInstanceRef<Self>, _: i32, _: i32, _: i32) -> JvmResult<()> {
@@ -683,12 +688,23 @@ mod test {
                 let _: () = jvm
                     .invoke_virtual(&canvas, "pushCard", "(Lorg/kwis/msp/lcdui/Card;)V", (second.clone(),))
                     .await?;
+                // A card that takes no key lets the one under it have it. This
+                // is the stack a title makes when it names a character: the
+                // input-mode indicator sits over the text box's own card and
+                // handles nothing, and the text box must still be typed into.
                 let _: () = jvm.invoke_virtual(&canvas, "keyPressed", "(I)V", (42,)).await?;
                 let _: () = jvm.invoke_virtual(&canvas, "handleNotifyEvent", "(III)V", (1, 2, 3)).await?;
-                assert_eq!(jvm.get_field::<i32>(&first, "keyCount", "I").await?, 0);
-                assert_eq!(jvm.get_field::<i32>(&first, "notifyCount", "I").await?, 0);
                 assert_eq!(jvm.get_field::<i32>(&second, "keyCount", "I").await?, 1);
+                assert_eq!(jvm.get_field::<i32>(&first, "keyCount", "I").await?, 1);
+                assert_eq!(jvm.get_field::<i32>(&first, "notifyCount", "I").await?, 0);
                 assert_eq!(jvm.get_field::<i32>(&second, "notifyCount", "I").await?, 1);
+
+                // And one that takes it keeps it to itself.
+                jvm.put_field(&mut second.clone(), "takesKeys", "Z", true).await?;
+                let _: () = jvm.invoke_virtual(&canvas, "keyPressed", "(I)V", (42,)).await?;
+                assert_eq!(jvm.get_field::<i32>(&second, "keyCount", "I").await?, 2);
+                assert_eq!(jvm.get_field::<i32>(&first, "keyCount", "I").await?, 1);
+                jvm.put_field(&mut second.clone(), "takesKeys", "Z", false).await?;
                 let popped: ClassInstanceRef<TestCard> = jvm.invoke_virtual(&canvas, "popCard", "()Lorg/kwis/msp/lcdui/Card;", ()).await?;
                 assert!(
                     jvm.invoke_virtual::<_, bool>(&popped, "equals", "(Ljava/lang/Object;)Z", (second.clone(),))

@@ -17,8 +17,17 @@
 //!   by commas, e.g. `1500:OK,3000:OK,4500:NUM1`. Each press is held 20 ticks.
 //! - `WIE_SHOT_DIR` - a frame written ~400 ticks after each scripted press, so
 //!   every step of the walk is visible rather than only where it ended.
+//! - `WIE_SCRIPT2` - launch the archive twice over one handset's storage,
+//!   `WIE_SCRIPT` driving the first launch and this the second. A title that
+//!   installs itself on its first run and asks to be started again needs this
+//!   to be reachable at all: 드래곤하트 paints
+//!   `게임이 설치 되었습니다. 다시 실행해 주세요.` and goes no further, whatever
+//!   it is sent. Only the second launch is captured.
+//! - `WIE_TICKS2` - the second launch's tick budget, when it needs a different
+//!   one from the first (default: the same).
 
 use std::{
+    collections::BTreeMap,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -26,7 +35,7 @@ use std::{
     time::Duration,
 };
 
-use test_utils::{TestPlatform, TestPlatformEvent};
+use test_utils::{TestPlatform, TestPlatformEvent, TestPlatformState};
 use wie_backend::{
     AudioSink, DatabaseRepository, Emulator, Event, Filesystem, Instant, KeyCode, Options, Platform, Screen, canvas::Image, extract_zip,
 };
@@ -208,13 +217,73 @@ fn ktf_archive_probe() {
 
     let ticks_limit: u32 = std::env::var("WIE_TICKS").ok().and_then(|x| x.parse().ok()).unwrap_or(20000);
     let archive = std::fs::read(&path).expect("archive");
+    let files = extract_zip(&archive).expect("extract");
+    eprintln!(
+        "[probe] {path}: {} entries, loadable={}",
+        files.len(),
+        KtfEmulator::loadable_archive(&files)
+    );
 
+    let mut script = parse_script(std::env::var("WIE_SCRIPT").ok().as_deref());
+    if let Some(key) = std::env::var("WIE_KEY").ok().and_then(|name| key_by_name(&name))
+        && let Some(tick) = std::env::var("WIE_PRESS_TICK").ok().and_then(|x| x.parse().ok())
+    {
+        script.push((tick, key));
+    }
+    script.sort_by_key(|(tick, _)| *tick);
+
+    // One handset's storage, so a title that installs itself on its first run
+    // finds what it wrote when it is started again.
+    let state = TestPlatformState::default();
+    let second = std::env::var("WIE_SCRIPT2").ok();
+
+    if let Some(second) = second {
+        eprintln!("[probe] first launch");
+        run_once(&files, &state, &script, ticks_limit, None, None);
+
+        let mut second_script = parse_script(Some(second.as_str()));
+        second_script.sort_by_key(|(tick, _)| *tick);
+        let second_ticks: u32 = std::env::var("WIE_TICKS2").ok().and_then(|x| x.parse().ok()).unwrap_or(ticks_limit);
+
+        eprintln!("[probe] second launch");
+        run_once(
+            &files,
+            &state,
+            &second_script,
+            second_ticks,
+            std::env::var("WIE_SHOT_DIR").ok().as_deref(),
+            std::env::var("WIE_SHOT").ok().as_deref(),
+        );
+
+        return;
+    }
+
+    run_once(
+        &files,
+        &state,
+        &script,
+        ticks_limit,
+        std::env::var("WIE_SHOT_DIR").ok().as_deref(),
+        std::env::var("WIE_SHOT").ok().as_deref(),
+    );
+}
+
+/// Runs the archive once over `state`, which is the handset's storage and
+/// outlives the launch.
+fn run_once(
+    files: &BTreeMap<String, Vec<u8>>,
+    state: &TestPlatformState,
+    script: &[(u32, KeyCode)],
+    ticks_limit: u32,
+    shot_dir: Option<&str>,
+    shot: Option<&str>,
+) {
     let exited = Arc::new(AtomicBool::new(false));
     let exited_clone = exited.clone();
     let screen = CaptureScreen::default();
 
     let platform = Box::new(CapturePlatform {
-        inner: TestPlatform::with_event_handler(move |event| match event {
+        inner: TestPlatform::with_state_and_event_handler(state.clone(), move |event| match event {
             TestPlatformEvent::Stdout(buf) => eprint!("[stdout] {}", String::from_utf8_lossy(&buf)),
             TestPlatformEvent::OpenUrl(url) => eprintln!("[open-url] {url}"),
             TestPlatformEvent::Exit => exited_clone.store(true, Ordering::SeqCst),
@@ -223,20 +292,13 @@ fn ktf_archive_probe() {
         clock: Arc::new(AtomicU64::new(0)),
     });
 
-    let files = extract_zip(&archive).expect("extract");
-    eprintln!(
-        "[probe] {path}: {} entries, loadable={}",
-        files.len(),
-        KtfEmulator::loadable_archive(&files)
-    );
-
     let options = Options {
         enable_gdbserver: false,
         profile: None,
         annunciator: None,
     };
 
-    let mut emulator = match KtfEmulator::from_archive(platform, files, options) {
+    let mut emulator = match KtfEmulator::from_archive(platform, files.clone(), options) {
         Ok(emulator) => emulator,
         Err(error) => {
             eprintln!("[probe] LOAD FAILED: {error:?}");
@@ -247,16 +309,6 @@ fn ktf_archive_probe() {
     // `request_redraw` only asks; the host is what paints. `wie_cli` turns the
     // request into a window redraw, so a probe that never feeds one back sees
     // a title paint nothing however well it runs.
-    let mut script = parse_script(std::env::var("WIE_SCRIPT").ok().as_deref());
-    if let Some(key) = std::env::var("WIE_KEY").ok().and_then(|name| key_by_name(&name))
-        && let Some(tick) = std::env::var("WIE_PRESS_TICK").ok().and_then(|x| x.parse().ok())
-    {
-        script.push((tick, key));
-    }
-    script.sort_by_key(|(tick, _)| *tick);
-
-    let shot_dir = std::env::var("WIE_SHOT_DIR").ok();
-
     let mut ticks = 0;
     let mut stopped = None;
     while ticks < ticks_limit && !exited.load(Ordering::SeqCst) {
@@ -272,7 +324,7 @@ fn ktf_archive_probe() {
                 emulator.handle_event(Event::Keyup(*key));
             }
             // Far enough past the press that the screen it opened has settled.
-            if let Some(dir) = &shot_dir
+            if let Some(dir) = shot_dir
                 && ticks == tick.saturating_add(400)
             {
                 write_ppm(&format!("{dir}/step_{step}.ppm"), &screen);
@@ -300,12 +352,12 @@ fn ktf_archive_probe() {
         None => eprintln!("[probe] ran to the tick limit without stopping"),
     }
 
-    if let Ok(shot) = std::env::var("WIE_SHOT")
+    if let Some(shot) = shot
         && !captured.last_pixels.is_empty()
     {
         let mut ppm = format!("P6\n{} {}\n255\n", captured.width, captured.height).into_bytes();
         ppm.extend_from_slice(&captured.last_pixels);
-        std::fs::write(&shot, ppm).expect("shot");
+        std::fs::write(shot, ppm).expect("shot");
         eprintln!("[probe] wrote {shot}");
     }
 
