@@ -11,12 +11,7 @@ use wie_core_arm::{Allocator, ArmCore, HEAP_BASE, HEAP_SIZE};
 use wie_util::{ByteRead, ByteWrite, Result, WieError, read_generic, write_generic};
 use wie_wipi_c::{
     WIPICContext, WIPICMethodBody,
-    api::{
-        filesystem::SharedFilesystemState,
-        net::SharedNetworkState,
-        serial::SharedSerialState,
-        shared_buf::{SharedSharedBufState, new_state as new_shared_buf_state},
-    },
+    api::{filesystem::SharedFilesystemState, net::SharedNetworkState, serial::SharedSerialState, shared_buf::SharedSharedBufState},
 };
 
 // mostly same as ktf's one, can we merge those?
@@ -48,7 +43,7 @@ impl LgtWIPICContext {
             network_state,
             serial_state,
             filesystem_state,
-            shared_buf_state: new_shared_buf_state(),
+            shared_buf_state,
         }
     }
 }

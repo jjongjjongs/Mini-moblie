@@ -1,4 +1,4 @@
-use wie_util::{ByteWrite, Result, read_null_terminated_string_bytes};
+use wie_util::{Result, read_null_terminated_string_bytes};
 
 use wipi_types::wipic::WIPICWord;
 

@@ -11,12 +11,7 @@ use wie_core_arm::{Allocator, ArmCore};
 use wie_util::{ByteRead, ByteWrite, Result, read_generic, write_generic};
 use wie_wipi_c::{
     WIPICContext, WIPICMethodBody,
-    api::{
-        filesystem::SharedFilesystemState,
-        net::SharedNetworkState,
-        serial::SharedSerialState,
-        shared_buf::{SharedSharedBufState, new_state as new_shared_buf_state},
-    },
+    api::{filesystem::SharedFilesystemState, net::SharedNetworkState, serial::SharedSerialState, shared_buf::SharedSharedBufState},
 };
 
 #[derive(Clone)]
@@ -47,7 +42,7 @@ impl KtfWIPICContext {
             network_state,
             serial_state,
             filesystem_state,
-            shared_buf_state: new_shared_buf_state(),
+            shared_buf_state,
         }
     }
 }

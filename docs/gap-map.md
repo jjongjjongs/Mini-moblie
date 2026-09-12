@@ -48,7 +48,7 @@ KTF title's heap growing is what the reference does too.
 
 | area | count | what a call does today |
 |---|---|---|
-| KTF WIPI-C table slots | 99 | `WieError::Unimplemented` - kills the title |
+| KTF WIPI-C table slots | 89 | `WieError::Unimplemented` - kills the title |
 | `wie_wipi_c` stubs | 17 | logs and answers benignly |
 | WIPI-Java stubs | 53 | logs and answers benignly |
 | SK-VM / SKT stubs | 20 | logs and answers benignly |
@@ -73,18 +73,31 @@ Five more graphics calls turned out to be the same case and are wired too:
 `MC_grpGetContext`, `MC_grpGetUnicodeStringWidth`, `MC_grpDecodeNextImage`,
 `MC_grpFillPolygon`, `MC_grpDrawPolygon`.
 
-Two of the remaining families have since been written and wired:
-`MC_knlCreateSharedBuf` and its four companions (`wie_wipi_c/src/api/shared_buf.rs`)
-and the three `MC_miscGetLedCount`/`SetLed`/`GetLed` calls, which answer that
-this handset has no LEDs.
+Three of the remaining families have since been written and wired:
+`MC_knlCreateSharedBuf` and its four companions (`wie_wipi_c/src/api/shared_buf.rs`),
+the three `MC_miscGetLedCount`/`SetLed`/`GetLed` calls, which answer that this
+handset has no LEDs, and the ten program-control calls below.
 
-That leaves 22 non-OEM names with no implementation:
+**Kernel program control** (`MC_knlExecute`, `MC_knlMExecute`, `MC_knlLoad`,
+`MC_knlMLoad`, `MC_knlProgramStop`, `MC_knlGetExecNames`,
+`MC_knlGetProgramInfo`, `MC_knlGetParentProgramID`, `MC_knlGetAppManagerID`,
+`MC_knlGetAccessLevel`) starts and stops sibling programs, which this runtime
+cannot do: one title is loaded and nothing can install or start another. So they
+answer the world as it is - one program, id 1, no parent and no application
+manager - and say "no such program" to everything else, without touching the
+buffers they are handed, since no title we have pins their shapes down.
+`MC_knlProgramStop` on the title's own id is the exception that does something:
+it is a request to quit, and is honoured like `MC_knlExit`.
 
-- **Kernel program control** (`MC_knlExecute`, `MC_knlMExecute`, `MC_knlLoad`,
-  `MC_knlMLoad`, `MC_knlProgramStop`, `MC_knlGetExecNames`,
-  `MC_knlGetProgramInfo`, `MC_knlGetParentProgramID`, `MC_knlGetAppManagerID`,
-  `MC_knlGetAccessLevel`) - starting and stopping sibling programs, which this
-  runtime cannot do. Answering "no such program" faithfully is the job.
+`MC_knlGetAccessLevel` is the one where a wrong answer could have a title refuse
+itself work, so it reports what the title's own `__adf__` declares in `SLvl`
+(`00142F9C` in 투스워즈, `00142F1C` in 드래곤하트) rather than a level nobody
+wrote down. The reference does not implement this family at all - no
+`knlExecute`, `knlLoad`, `ProgramStop` or `AccessLevel` symbol appears in its KTF
+package - which is the measure of how rarely a title reaches it.
+
+That leaves 12 non-OEM names with no implementation:
+
 - **Input method** (`MC_imHandleInput`, `MC_imSetCurrentMode`,
   `MC_imGetCurrentMode`, `MC_imGetSupportModeCount`, `MC_imGetSupportedModes`).
   LGT has all five, but privately and in a shape that will not port as it

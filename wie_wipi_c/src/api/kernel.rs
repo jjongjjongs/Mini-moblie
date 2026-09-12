@@ -2,7 +2,9 @@ mod sprintf;
 
 use alloc::{
     boxed::Box,
+    format,
     string::{String, ToString},
+    vec,
     vec::Vec,
 };
 use core::iter;
@@ -11,7 +13,9 @@ use bytemuck::{Pod, Zeroable};
 
 use wipi_types::wipic::{WIPICIndirectPtr, WIPICWord};
 
-use wie_util::{Result, WieError, read_generic, read_null_terminated_string_bytes, write_generic, write_null_terminated_string_bytes};
+use wie_util::{
+    Result, WieError, descriptor_value, read_generic, read_null_terminated_string_bytes, write_generic, write_null_terminated_string_bytes,
+};
 
 use crate::{WIPICResult, context::WIPICContext, method::MethodBody};
 
@@ -415,10 +419,14 @@ pub async fn exit(context: &mut dyn WIPICContext, code: i32) -> Result<()> {
     Ok(())
 }
 
+/// `MC_knlGetCurProgramID` - the id of the program asking.
+///
+/// One program runs here and its id is 1; see [`CURRENT_PROGRAM_ID`] for what
+/// the rest of the program-control family makes of that.
 pub async fn get_cur_program_id(_context: &mut dyn WIPICContext) -> Result<WIPICWord> {
-    tracing::warn!("stub MC_knlGetCurProgramID()");
+    tracing::debug!("MC_knlGetCurProgramID() -> {CURRENT_PROGRAM_ID}");
 
-    Ok(1)
+    Ok(CURRENT_PROGRAM_ID)
 }
 
 pub async fn get_program_name(context: &mut dyn WIPICContext, name_buf: WIPICWord, buf_size: i32) -> Result<i32> {
@@ -437,15 +445,215 @@ pub async fn get_program_name(context: &mut dyn WIPICContext, name_buf: WIPICWor
     Ok(0)
 }
 
+/// The one program there is.
+///
+/// A handset runs a suite of programs and gives each one an id. This runtime
+/// loads a single title and can neither install nor start another, so every
+/// program-control call below answers against a world with exactly one program
+/// in it - the one calling - and that program's id is 1, which is what
+/// `MC_knlGetCurProgramID` has always reported here.
+const CURRENT_PROGRAM_ID: WIPICWord = 1;
+
+/// The name a program-control call was handed, for the log.
+///
+/// No title we have calls any of these, so their exact shapes are not pinned
+/// down by anything, and the first word may not be a string pointer at all. An
+/// unreadable one is reported as a number rather than turned into an error: a
+/// guess about a call's shape must not be able to kill a title that was only
+/// asking a question.
+fn program_name_for_log(context: &mut dyn WIPICContext, ptr_name: WIPICWord) -> String {
+    if ptr_name == 0 {
+        return "(null)".to_string();
+    }
+
+    match read_null_terminated_string_bytes(context, ptr_name) {
+        Ok(bytes) => encoding_rs::EUC_KR.decode(&bytes).0.into_owned(),
+        Err(_) => format!("{ptr_name:#x}"),
+    }
+}
+
+/// `MC_knlExecute` - start another program and hand it the screen.
+///
+/// There is no other program to start, so this says so. A title that gets here
+/// is offering something outside itself - its suite's other games, a manual, the
+/// operator's download page - and reads the failure as "not installed", which is
+/// the truth.
+///
+/// Logged at info: it explains a menu item that does nothing, which is otherwise
+/// invisible.
+pub async fn execute(context: &mut dyn WIPICContext, ptr_name: WIPICWord) -> Result<i32> {
+    let name = program_name_for_log(context, ptr_name);
+    tracing::info!("MC_knlExecute({name:?}) -> -12, nothing else is installed");
+
+    Ok(-12) // M_E_NOENT
+}
+
+/// `MC_knlMExecute` - the same, for a program named by its own manager.
+pub async fn mexecute(context: &mut dyn WIPICContext, ptr_name: WIPICWord) -> Result<i32> {
+    let name = program_name_for_log(context, ptr_name);
+    tracing::info!("MC_knlMExecute({name:?}) -> -12, nothing else is installed");
+
+    Ok(-12) // M_E_NOENT
+}
+
+/// `MC_knlLoad` - bring another program's code in without running it.
+///
+/// Loading is how a title reaches a shared library sitting beside it on the
+/// handset. Nothing sits beside this one.
+pub async fn load(context: &mut dyn WIPICContext, ptr_name: WIPICWord) -> Result<i32> {
+    let name = program_name_for_log(context, ptr_name);
+    tracing::info!("MC_knlLoad({name:?}) -> -12, nothing else is installed");
+
+    Ok(-12) // M_E_NOENT
+}
+
+/// `MC_knlMLoad` - the same, for a program named by its own manager.
+pub async fn mload(context: &mut dyn WIPICContext, ptr_name: WIPICWord) -> Result<i32> {
+    let name = program_name_for_log(context, ptr_name);
+    tracing::info!("MC_knlMLoad({name:?}) -> -12, nothing else is installed");
+
+    Ok(-12) // M_E_NOENT
+}
+
+/// `MC_knlProgramStop` - stop a running program.
+///
+/// The only running program is the title itself, so asking to stop id 1 is
+/// asking to quit, and that is honoured exactly as `MC_knlExit` is. Any other id
+/// names a program that is not running, and gets told so.
+pub async fn program_stop(context: &mut dyn WIPICContext, program_id: WIPICWord) -> Result<i32> {
+    if program_id != CURRENT_PROGRAM_ID {
+        tracing::info!("MC_knlProgramStop({program_id}) -> -12, no such program is running");
+
+        return Ok(-12); // M_E_NOENT
+    }
+
+    tracing::info!("MC_knlProgramStop({program_id}) - the title asked to stop itself");
+
+    context.system().platform().exit();
+
+    Ok(0)
+}
+
+/// `MC_knlGetExecNames` - list the programs that can be started.
+///
+/// None can, so there is no list to write. This refuses without touching the
+/// buffer it was given: a title that checks the result finds nothing to show,
+/// and one that does not check reads whatever it had there, not something this
+/// invented.
+pub async fn get_exec_names(_context: &mut dyn WIPICContext) -> Result<i32> {
+    tracing::info!("MC_knlGetExecNames() -> -12, nothing else is installed");
+
+    Ok(-12) // M_E_NOENT
+}
+
+/// `MC_knlGetProgramInfo` - the handset's record of an installed program.
+///
+/// That record lives in the handset's program database, which this runtime does
+/// not have: it knows the title's own descriptor and nothing about anything
+/// else. The layout of the struct a caller passes is not established by any
+/// title we have either, so this refuses rather than filling one in from a
+/// guess.
+pub async fn get_program_info(_context: &mut dyn WIPICContext) -> Result<i32> {
+    tracing::info!("MC_knlGetProgramInfo() -> -12, there is no program database to read");
+
+    Ok(-12) // M_E_NOENT
+}
+
+/// `MC_knlGetParentProgramID` - who launched this program.
+///
+/// Nobody did: a title starts at the top here rather than from a menu program,
+/// so there is no parent, which is 0. LGT answers the same.
+pub async fn get_parent_program_id(_context: &mut dyn WIPICContext) -> Result<WIPICWord> {
+    tracing::debug!("MC_knlGetParentProgramID() -> 0, nothing launched this");
+
+    Ok(0)
+}
+
+/// `MC_knlGetAppManagerID` - the id of the handset's application manager.
+///
+/// There is no application manager; the title is the only program. A caller
+/// usually wants this to hand to `MC_knlExecute` to get back to the menu, which
+/// answers that there is nothing to go back to.
+pub async fn get_app_manager_id(_context: &mut dyn WIPICContext) -> Result<WIPICWord> {
+    tracing::debug!("MC_knlGetAppManagerID() -> 0, there is no application manager");
+
+    Ok(0)
+}
+
+/// The security level the title's own descriptor declares, if it declares one.
+///
+/// KTF archives carry `__adf__`, and its `SLvl` line is the level the handset
+/// stored for this program - `SLvl:00142F9C` in 투스워즈, `00142F1C` in
+/// 드래곤하트. It is written as eight hex digits and reads as a mask, the two
+/// values above differing in one bit. Reading it back is the one answer here
+/// that comes from the title rather than from us.
+///
+/// Read through the filesystem rather than as a resource, because `__adf__` sits
+/// beside the jar in the archive rather than inside it. LGT titles have no such
+/// file and so declare nothing.
+async fn declared_access_level(context: &mut dyn WIPICContext) -> Option<u32> {
+    let data = {
+        let filesystem = context.system().filesystem();
+
+        let size = filesystem.size("__adf__").await?;
+        let mut data = vec![0u8; size];
+        filesystem.read("__adf__", 0, size, &mut data).await?;
+
+        data
+    };
+
+    for line in data.split(|x| *x == b'\n') {
+        if let Some(value) = line.strip_prefix(b"SLvl:") {
+            return u32::from_str_radix(&descriptor_value(value), 16).ok();
+        }
+    }
+
+    None
+}
+
+/// `MC_knlGetAccessLevel` - how much a program is trusted.
+///
+/// Answered for the calling program whatever it asks about, because it is the
+/// only program: an id it could have got from anywhere else names something that
+/// does not exist here. That also keeps the answer right if the call turns out
+/// to take no argument at all, which nothing we have settles.
+///
+/// The level is the one the title's own descriptor declares. What a title does
+/// with it is not established by anything here - no title we have calls this -
+/// so the risk of the alternative decided it: a made-up level could be lower
+/// than a title's own expectation and have it refuse itself work this runtime
+/// would have done. The declared value cannot be, because it is what the handset
+/// the title shipped for reported.
+pub async fn get_access_level(context: &mut dyn WIPICContext) -> Result<i32> {
+    match declared_access_level(context).await {
+        Some(level) => {
+            tracing::info!("MC_knlGetAccessLevel() -> {level:#010x}, as declared by SLvl");
+
+            Ok(level as i32)
+        }
+        None => {
+            tracing::warn!("MC_knlGetAccessLevel() -> -12, this archive declares no security level");
+
+            Ok(-12) // M_E_NOENT
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
-    use alloc::{boxed::Box, string::String};
+    use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
+    use core::sync::atomic::{AtomicBool, Ordering};
 
+    use test_utils::{TestPlatform, TestPlatformEvent};
+    use wie_backend::{DefaultTaskRunner, System};
     use wie_util::{ByteRead, ByteWrite, Result, read_null_terminated_string_bytes, write_null_terminated_string_bytes};
 
     use crate::{WIPICContext, context::test::TestContext, method::MethodImpl};
 
-    use super::{alloc, calloc, free, get_resource, get_resource_id, get_system_property, sprintk};
+    use super::{
+        alloc, calloc, execute, free, get_access_level, get_app_manager_id, get_exec_names, get_parent_program_id, get_program_info, get_resource,
+        get_resource_id, get_system_property, load, mexecute, mload, program_stop, sprintk,
+    };
 
     #[futures_test::test]
     async fn test_sprintk() -> Result<()> {
@@ -609,5 +817,103 @@ mod test {
         assert_eq!(u32::from_le_bytes(result), 0);
 
         Ok(())
+    }
+
+    /// Every way a title can ask for another program is answered "no such
+    /// program", because there is not one.
+    #[futures_test::test]
+    async fn nothing_else_is_installed() {
+        let mut context = program_control_context(None);
+        let name = context.alloc_raw(16).unwrap();
+        write_null_terminated_string_bytes(&mut context, name, b"01032A4F").unwrap();
+
+        assert_eq!(execute(&mut context, name).await.unwrap(), -12);
+        assert_eq!(mexecute(&mut context, name).await.unwrap(), -12);
+        assert_eq!(load(&mut context, name).await.unwrap(), -12);
+        assert_eq!(mload(&mut context, name).await.unwrap(), -12);
+        assert_eq!(get_exec_names(&mut context).await.unwrap(), -12);
+        assert_eq!(get_program_info(&mut context).await.unwrap(), -12);
+    }
+
+    /// Nothing launched the title and there is no manager to go back to.
+    #[futures_test::test]
+    async fn there_is_no_parent_and_no_manager() {
+        let mut context = program_control_context(None);
+
+        assert_eq!(get_parent_program_id(&mut context).await.unwrap(), 0);
+        assert_eq!(get_app_manager_id(&mut context).await.unwrap(), 0);
+    }
+
+    /// A name pointer that is not a name must not be able to kill the call: the
+    /// shapes of these are not settled by any title, so a wrong first word is a
+    /// thing that can happen, and it is a log detail either way.
+    #[futures_test::test]
+    async fn an_unreadable_name_is_still_answered() {
+        let mut context = program_control_context(None);
+
+        assert_eq!(execute(&mut context, 0).await.unwrap(), -12);
+        assert_eq!(execute(&mut context, 0xdead_beef).await.unwrap(), -12);
+    }
+
+    /// Stopping the only program that runs is quitting, and is honoured.
+    #[futures_test::test]
+    async fn stopping_the_title_quits_it() {
+        let exited = Arc::new(AtomicBool::new(false));
+        let mut context = program_control_context(Some(exited.clone()));
+
+        assert_eq!(program_stop(&mut context, 1).await.unwrap(), 0);
+        assert!(exited.load(Ordering::Relaxed));
+    }
+
+    /// Stopping anything else stops nothing: an id that is not the title's names
+    /// a program that is not running.
+    #[futures_test::test]
+    async fn stopping_anything_else_stops_nothing() {
+        let exited = Arc::new(AtomicBool::new(false));
+        let mut context = program_control_context(Some(exited.clone()));
+
+        assert_eq!(program_stop(&mut context, 7).await.unwrap(), -12);
+        assert!(!exited.load(Ordering::Relaxed));
+    }
+
+    /// The access level is the one the title's own `__adf__` declares - here
+    /// 투스워즈's, read back as the hex it is written in.
+    #[futures_test::test]
+    async fn the_access_level_is_the_declared_one() {
+        let mut context = program_control_context(None);
+        context.system().filesystem().add_virtual(
+            "__adf__",
+            b"PID:PD005966\nAID:010100D2\nSLvl:00142F9C\nSLvl2:00000183\nMClass:MoApp\n".to_vec(),
+        );
+
+        assert_eq!(get_access_level(&mut context).await.unwrap(), 0x0014_2f9c);
+    }
+
+    /// An archive that declares no level is said to declare none, rather than
+    /// answered with a number nobody wrote down.
+    #[futures_test::test]
+    async fn an_archive_without_a_declaration_has_no_level() {
+        let mut context = program_control_context(None);
+        context.system().filesystem().add_virtual("__adf__", b"AID:010100D2\n".to_vec());
+
+        assert_eq!(get_access_level(&mut context).await.unwrap(), -12);
+
+        // And neither does one with no descriptor at all, which is every LGT
+        // archive.
+        let mut context = program_control_context(None);
+        assert_eq!(get_access_level(&mut context).await.unwrap(), -12);
+    }
+
+    /// A context whose platform records whether the title was asked to quit.
+    fn program_control_context(exited: Option<Arc<AtomicBool>>) -> TestContext {
+        let platform = TestPlatform::with_event_handler(move |event| {
+            if let TestPlatformEvent::Exit = event
+                && let Some(exited) = &exited
+            {
+                exited.store(true, Ordering::Relaxed);
+            }
+        });
+
+        TestContext::with_system(System::new(Box::new(platform), "test-pid", "test-aid", DefaultTaskRunner))
     }
 }
