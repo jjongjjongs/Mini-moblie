@@ -9,7 +9,7 @@ use wie_core_arm::ArmCore;
 use wie_util::{Result, WieError};
 use wie_wipi_c::{
     MethodImpl, WIPICContext, WIPICMethodBody,
-    api::{database, graphics, kernel, media, misc, net, uic, util},
+    api::{database, graphics, kernel, media, misc, net, shared_buf, uic, util},
 };
 
 use crate::runtime::{
@@ -184,9 +184,9 @@ pub fn get_util_method_table() -> Vec<WIPICMethodBody> {
 pub fn get_misc_method_table() -> Vec<WIPICMethodBody> {
     vec![
         misc::back_light.into_body(),
-        gen_stub(1, "MC_miscSetLed"),
-        gen_stub(2, "MC_miscGetLed"),
-        gen_stub(3, "MC_miscGetLedCount"),
+        misc::set_led.into_body(),
+        misc::get_led.into_body(),
+        misc::get_led_count.into_body(),
         gen_stub(4, "OEMC_miscGetCompassData"),
     ]
 }
@@ -377,11 +377,11 @@ pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPIC
             WIPICKernelMethodId::GetProgramInfo => Some(gen_stub(12, "MC_knlGetProgramInfo")),
             WIPICKernelMethodId::GetAccessLevel => Some(gen_stub(13, "MC_knlGetAccessLevel")),
             WIPICKernelMethodId::GetProgramName => Some(kernel::get_program_name.into_body()),
-            WIPICKernelMethodId::CreateSharedBuf => Some(gen_stub(15, "MC_knlCreateSharedBuf")),
-            WIPICKernelMethodId::DestroySharedBuf => Some(gen_stub(16, "MC_knlDestroySharedBuf")),
-            WIPICKernelMethodId::GetSharedBuf => Some(gen_stub(17, "MC_knlGetSharedBuf")),
-            WIPICKernelMethodId::GetSharedBufSize => Some(gen_stub(18, "MC_knlGetSharedBufSize")),
-            WIPICKernelMethodId::ResizeSharedBuf => Some(gen_stub(19, "MC_knlResizeSharedBuf")),
+            WIPICKernelMethodId::CreateSharedBuf => Some(shared_buf::create_shared_buf.into_body()),
+            WIPICKernelMethodId::DestroySharedBuf => Some(shared_buf::destroy_shared_buf.into_body()),
+            WIPICKernelMethodId::GetSharedBuf => Some(shared_buf::get_shared_buf.into_body()),
+            WIPICKernelMethodId::GetSharedBufSize => Some(shared_buf::get_shared_buf_size.into_body()),
+            WIPICKernelMethodId::ResizeSharedBuf => Some(shared_buf::resize_shared_buf.into_body()),
             WIPICKernelMethodId::Alloc => Some(kernel::alloc.into_body()),
             WIPICKernelMethodId::Calloc => Some(kernel::calloc.into_body()),
             WIPICKernelMethodId::Free => Some(kernel::free.into_body()),
@@ -438,7 +438,7 @@ pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPIC
             WIPICGraphicsMethodId::CreateOffscreenFramebuffer => Some(graphics::create_offscreen_framebuffer.into_body()),
             WIPICGraphicsMethodId::InitContext => Some(graphics::init_context.into_body()),
             WIPICGraphicsMethodId::SetContext => Some(graphics::set_context.into_body()),
-            WIPICGraphicsMethodId::GetContext => Some(gen_stub(7, "MC_grpGetContext")),
+            WIPICGraphicsMethodId::GetContext => Some(graphics::get_context.into_body()),
             WIPICGraphicsMethodId::PutPixel => Some(graphics::put_pixel.into_body()),
             WIPICGraphicsMethodId::DrawLine => Some(graphics::draw_line.into_body()),
             WIPICGraphicsMethodId::DrawRect => Some(graphics::draw_rect.into_body()),
@@ -462,10 +462,10 @@ pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPIC
             WIPICGraphicsMethodId::GetFontAscent => Some(graphics::get_font_ascent.into_body()),
             WIPICGraphicsMethodId::GetFontDescent => Some(graphics::get_font_descent.into_body()),
             WIPICGraphicsMethodId::GetStringWidth => Some(graphics::get_string_width.into_body()),
-            WIPICGraphicsMethodId::GetUnicodeStringWidth => Some(gen_stub(31, "MC_grpGetUnicodeStringWidth")),
+            WIPICGraphicsMethodId::GetUnicodeStringWidth => Some(graphics::get_unicode_string_width.into_body()),
             WIPICGraphicsMethodId::CreateImage => Some(graphics::create_image.into_body()),
             WIPICGraphicsMethodId::DestroyImage => Some(graphics::destroy_image.into_body()),
-            WIPICGraphicsMethodId::DecodeNextImage => Some(gen_stub(34, "MC_grpDecodeNextImage")),
+            WIPICGraphicsMethodId::DecodeNextImage => Some(graphics::decode_next_image.into_body()),
             WIPICGraphicsMethodId::EncodeImage => Some(gen_stub(35, "MC_grpEncodeImage")),
             WIPICGraphicsMethodId::PostEvent => Some(graphics::post_event.into_body()),
             WIPICGraphicsMethodId::HandleInput => Some(gen_stub(37, "MC_imHandleInput")),
@@ -473,8 +473,8 @@ pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPIC
             WIPICGraphicsMethodId::GetCurrentMode => Some(gen_stub(39, "MC_imGetCurrentMode")),
             WIPICGraphicsMethodId::GetSupportModeCount => Some(gen_stub(40, "MC_imGetSupportModeCount")),
             WIPICGraphicsMethodId::GetSupportedModes => Some(gen_stub(41, "MC_imGetSupportedModes")),
-            WIPICGraphicsMethodId::FillPolygon => Some(gen_stub(42, "MC_grpFillPolygon")),
-            WIPICGraphicsMethodId::DrawPolygon => Some(gen_stub(43, "MC_grpDrawPolygon")),
+            WIPICGraphicsMethodId::FillPolygon => Some(graphics::fill_polygon.into_body()),
+            WIPICGraphicsMethodId::DrawPolygon => Some(graphics::draw_polygon.into_body()),
             WIPICGraphicsMethodId::ShowAnnunciator => Some(gen_stub(44, "OEMC_grpShowAnnunciator")),
             WIPICGraphicsMethodId::GetAnnunciatorInfo => Some(gen_stub(45, "OEMC_grpGetAnnunciatorInfo")),
             WIPICGraphicsMethodId::SetAnnunciatorIcon => Some(gen_stub(46, "OEMC_grp  SetAnnunciatorIcon")),

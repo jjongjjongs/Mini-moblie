@@ -13,7 +13,7 @@ use wie_jvm_support::JvmSupport;
 use wie_util::{Result, read_generic, write_generic, write_null_terminated_string_bytes};
 use wie_wipi_c::{
     MethodImpl, WIPICContext, WIPICMethodBody, WIPICResult,
-    api::{database, filesystem, graphics, kernel, media, misc, net, phone, serial, system, uic, util},
+    api::{database, filesystem, graphics, kernel, media, misc, net, phone, serial, shared_buf, system, uic, util},
 };
 
 use context::LgtWIPICContext;
@@ -81,12 +81,13 @@ struct CMethodProxy {
 
 async fn handle_wipic_svc(
     core: &mut ArmCore,
-    (system, jvm, network_state, serial_state, filesystem_state): &mut (
+    (system, jvm, network_state, serial_state, filesystem_state, shared_buf_state): &mut (
         System,
         Jvm,
         net::SharedNetworkState,
         serial::SharedSerialState,
         filesystem::SharedFilesystemState,
+        shared_buf::SharedSharedBufState,
     ),
     id: SvcId,
 ) -> Result<()> {
@@ -104,6 +105,7 @@ async fn handle_wipic_svc(
         network_state.clone(),
         serial_state.clone(),
         filesystem_state.clone(),
+        shared_buf_state.clone(),
     );
     // An unimplemented WIPI-C function is reported and skipped rather than
     // ending the run. Stopping on the first one hides everything a title does
@@ -389,6 +391,7 @@ pub fn register_wipic_svc_handler(core: &mut ArmCore, system: &System, jvm: &Jvm
             net::new_state(),
             serial::new_state(),
             filesystem::new_state(),
+            shared_buf::new_state(),
         ),
     )?;
     // The synchronous fast path for the hottest WIPI-C getters is installed by

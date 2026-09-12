@@ -7,6 +7,7 @@ pub mod misc;
 pub mod net;
 pub mod phone;
 pub mod serial;
+pub mod shared_buf;
 pub mod system;
 pub mod uic;
 pub mod util;

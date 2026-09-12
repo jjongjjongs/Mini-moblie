@@ -48,7 +48,7 @@ KTF title's heap growing is what the reference does too.
 
 | area | count | what a call does today |
 |---|---|---|
-| KTF WIPI-C table slots | 112 | `WieError::Unimplemented` - kills the title |
+| KTF WIPI-C table slots | 99 | `WieError::Unimplemented` - kills the title |
 | `wie_wipi_c` stubs | 17 | logs and answers benignly |
 | WIPI-Java stubs | 53 | logs and answers benignly |
 | SK-VM / SKT stubs | 20 | logs and answers benignly |
@@ -67,14 +67,38 @@ already carried the name of the function it should call, e.g.
 | net | 35 | 3 | 30 |
 | uic | 43 | 10 | 43 |
 | util | 6 | 1 | 6 |
+| graphics | 44 | 32 | 37 |
 
-That leaves 112 aborting slots, of which 35 name a non-OEM API we do not
-implement anywhere: the shared-buffer and program-control halves of the kernel
-(`MC_knlCreateSharedBuf`, `MC_knlExecute`, `MC_knlLoad`, ...), five database
-queries, seven graphics calls (`MC_grpDrawPolygon`, `MC_grpDrawUnicodeString`,
-`MC_grpEncodeImage`, ...), the five-call input-method family (`MC_imHandleInput`
-and friends - LGT has its own), and the three LED calls. The rest are OEM
-extensions (`OEMC_knl*`, `OEMC_grp*`, `MC_mdaUnk*`).
+Five more graphics calls turned out to be the same case and are wired too:
+`MC_grpGetContext`, `MC_grpGetUnicodeStringWidth`, `MC_grpDecodeNextImage`,
+`MC_grpFillPolygon`, `MC_grpDrawPolygon`.
+
+Two of the remaining families have since been written and wired:
+`MC_knlCreateSharedBuf` and its four companions (`wie_wipi_c/src/api/shared_buf.rs`)
+and the three `MC_miscGetLedCount`/`SetLed`/`GetLed` calls, which answer that
+this handset has no LEDs.
+
+That leaves 22 non-OEM names with no implementation:
+
+- **Kernel program control** (`MC_knlExecute`, `MC_knlMExecute`, `MC_knlLoad`,
+  `MC_knlMLoad`, `MC_knlProgramStop`, `MC_knlGetExecNames`,
+  `MC_knlGetProgramInfo`, `MC_knlGetParentProgramID`, `MC_knlGetAppManagerID`,
+  `MC_knlGetAccessLevel`) - starting and stopping sibling programs, which this
+  runtime cannot do. Answering "no such program" faithfully is the job.
+- **Input method** (`MC_imHandleInput`, `MC_imSetCurrentMode`,
+  `MC_imGetCurrentMode`, `MC_imGetSupportModeCount`, `MC_imGetSupportedModes`).
+  LGT has all five, but privately and in a shape that will not port as it
+  stands: two of them take `(a0, a1, a2, a3)`, which is LGT scaffolding for
+  arguments its native was not read closely enough to name. Lifting that into
+  KTF would be asserting an ABI nobody has checked.
+- **Database** (`MC_dbGetAccessMode`, `MC_dbGetNumberOfRecords`,
+  `MC_dbGetRecordSize`, `MC_dbSortRecords`, `MC_dbListDataBase`). Four exist as
+  `*_lgt` variants, but those carry LGT native's own answers - a 123-byte name
+  limit, `-9`/`-22` error codes - so wiring them to KTF would assert KTF native
+  agrees.
+- **Graphics** (`MC_grpDrawUnicodeString`, `MC_grpEncodeImage`) - real work.
+
+The rest are OEM extensions (`OEMC_knl*`, `OEMC_grp*`, `MC_mdaUnk*`).
 
 The reference implements the same APIs - its shared WIPI runtime dispatches
 `dispatchUIC`, `dispatchNetwork` and `dispatchUtility` by index - so these are
