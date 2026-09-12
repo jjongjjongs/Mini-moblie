@@ -11,6 +11,7 @@ use java_runtime::classes::java::util::Vector;
 use jvm::{ClassInstanceRef, Jvm, runtime::JavaLangString};
 use wipi_types::ktf::{InitParam2, java::WIPIJBInterface};
 
+use wie_backend::YieldFuture;
 use wie_core_arm::{Allocator, ArmCore, EmulatedFunction, ResultWriter, SvcId};
 use wie_jvm_support::JvmSupport;
 use wie_util::{ByteRead, Result, WieError, read_generic, read_null_terminated_string_bytes, write_generic};
@@ -309,6 +310,21 @@ async fn jb_monitor_exit(core: &mut ArmCore, jvm: &mut Jvm, ptr_instance: u32) -
     if let Err(x) = jvm.monitor_exit(&instance).await {
         return Err(JvmSupport::to_wie_err(jvm, x).await);
     }
+
+    // Give whoever was waiting on this monitor a turn before carrying on.
+    //
+    // Releasing a monitor wakes a waiter, but waking only marks its task
+    // runnable - on a cooperative executor it cannot actually run until the
+    // thread that released yields. 지크's game loop holds its lock across a
+    // `Thread.sleep(20)` and retakes it the instant it lets go, with nothing
+    // between the release and the next acquire that would yield, so the paint
+    // thread was woken and then beaten to the lock every single time and the
+    // screen stopped updating.
+    //
+    // A handset has two threads and a preemptive scheduler, so releasing a
+    // lock is a point where the waiting thread gets to run. This is that
+    // point.
+    YieldFuture::new().await;
 
     Ok(0)
 }
