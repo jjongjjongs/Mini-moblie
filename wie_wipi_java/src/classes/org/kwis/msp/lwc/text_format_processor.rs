@@ -423,7 +423,17 @@ impl TextFormatProcessor {
         visual_line: i32,
         draw_caret: bool,
     ) -> JvmResult<()> {
-        let _: () = jvm.invoke_virtual(&graphics, "reset", "()V", ()).await?;
+        // Native paintChar_v0 @ 0x247198 opens by selecting its own face -
+        // `g.setFont(this.font)`, vtable +0xa4 with the field at +0x24 - not by
+        // resetting the context. Resetting is what this used to do, and it put
+        // the origin back to the card's: the caller translates into the
+        // component before painting (TextBoxComponent.paintContent translates by
+        // 3,2), so a reset here would have drawn every character at the top-left
+        // of the card instead of inside the box.
+        let font: ClassInstanceRef<()> = jvm.get_field(&this, "__wieFont", "Lorg/kwis/msp/lcdui/Font;").await?;
+        let _: () = jvm
+            .invoke_virtual(&graphics, "setFont", "(Lorg/kwis/msp/lcdui/Font;)V", (font.clone(),))
+            .await?;
 
         let width: i32 = jvm.get_field(&this, "__wieWidth", "I").await?;
         let data: ClassInstanceRef<Array<JavaChar>> = jvm.get_field(&this, "__wieData", "[C").await?;
@@ -432,8 +442,6 @@ impl TextFormatProcessor {
         let font_height: i32 = jvm.get_field(&this, "__wieFontHeight", "I").await?;
         let current: i32 = jvm.get_field(&this, "__wieCurrent", "I").await?;
         let constraints: i32 = jvm.get_field(&this, "__wieConstraints", "I").await?;
-
-        let font: ClassInstanceRef<()> = jvm.get_field(&this, "__wieFont", "Lorg/kwis/msp/lcdui/Font;").await?;
 
         if width <= 0 || data.is_null() || data_length == 0 {
             if draw_caret {

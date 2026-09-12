@@ -6,7 +6,7 @@ use jvm::{ClassInstanceRef, Jvm, Result as JvmResult, runtime::JavaLangString};
 
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 
-use crate::classes::org::kwis::msp::lwc::TextComponent;
+use crate::classes::org::kwis::msp::{lcdui::Graphics, lwc::TextComponent};
 
 // class org.kwis.msp.lwc.TextBoxComponent
 pub struct TextBoxComponent;
@@ -26,6 +26,12 @@ impl TextBoxComponent {
                     Default::default(),
                 ),
                 JavaMethodProto::new("keyNotify", "(II)Z", Self::key_notify, Default::default()),
+                JavaMethodProto::new(
+                    "paintContent",
+                    "(Lorg/kwis/msp/lcdui/Graphics;)V",
+                    Self::paint_content,
+                    Default::default(),
+                ),
                 JavaMethodProto::new("focusNotify", "(Z)V", Self::focus_notify, Default::default()),
                 JavaMethodProto::new("setMaxLength", "(I)V", Self::set_max_length, Default::default()),
                 JavaMethodProto::new("setFont", "(Lorg/kwis/msp/lcdui/Font;)V", Self::set_font, Default::default()),
@@ -51,6 +57,127 @@ impl TextBoxComponent {
             ],
             access_flags: Default::default(),
         }
+    }
+
+    /// The colours `org.kwis.msp.lwc.Decorator` builds in its `<clinit>`
+    /// (@0x21ddd0), each one `getColorFromRGB(r, g, b)` = `r<<16 | g<<8 | b`.
+    /// Only the three this component reaches are named here.
+    ///
+    /// Decorator itself is not implemented; nothing else needs it yet, and a
+    /// class with nine colour statics and no behaviour would be storage for
+    /// three numbers.
+    const DECORATOR_BORDER: i32 = 0x0064_64d2; // +0x44, rgb(100, 100, 210)
+    const DECORATOR_FILL: i32 = 0x00ff_ffff; // +0x4c, rgb(255, 255, 255)
+    const DECORATOR_FOCUSED_BORDER: i32 = 0x00d2_0000; // +0x50, rgb(210, 0, 0)
+    const DECORATOR_TEXT: i32 = 0x0000_0000; // +0x54, rgb(0, 0, 0)
+
+    /// How wide the box draws.
+    ///
+    /// Native clamps to the parent's width rather than to its own, so a field
+    /// laid out wider than the form it sits in stops at the form's edge instead
+    /// of painting over what is beside it. With no parent it clamps to 100,
+    /// which is the width native assumes when there is nothing to ask.
+    async fn painted_width(jvm: &Jvm, this: &ClassInstanceRef<TextBoxComponent>) -> JvmResult<i32> {
+        let x: i32 = jvm.get_field(this, "x", "I").await?;
+        let width: i32 = jvm.get_field(this, "w", "I").await?;
+
+        let parent: ClassInstanceRef<()> = jvm.get_field(this, "parent", "Lorg/kwis/msp/lwc/ContainerComponent;").await?;
+
+        let limit: i32 = if parent.is_null() {
+            100
+        } else {
+            jvm.get_field(&parent, "w", "I").await?
+        };
+
+        Ok(if x.wrapping_add(width) <= limit { width } else { limit })
+    }
+
+    /// `TextBoxComponent.paintContent(Graphics)` - the box, its border and the
+    /// text in it.
+    ///
+    /// Native paintContent_v0 @ 0x2345e8, read out of the platform's own
+    /// `liblgt_system.so`:
+    ///
+    /// - a background of `bg`, or Decorator's white when `bg` is -2, filled as a
+    ///   3x3 rounded rect. `bg` of -1 means the component has no background and
+    ///   nothing is filled;
+    /// - a rounded border one pixel inside the box, red while the field has
+    ///   focus and blue-grey when it does not;
+    /// - `translate(3, 2)` into the text area, the foreground colour (black when
+    ///   the component has none), and the formatter paints the characters and
+    ///   the caret - the caret only while focused;
+    /// - `translate(-3, -2)` back out, because the caller's origin is the
+    ///   component's and native leaves it as it found it.
+    ///
+    /// Until now this drew nothing at all: `Component.paintContent` fills a
+    /// background and returns, so a title's text box was invisible and typing
+    /// into it looked like the keypad was dead.
+    async fn paint_content(
+        jvm: &Jvm,
+        _: &mut WieJvmContext,
+        this: ClassInstanceRef<TextBoxComponent>,
+        graphics: ClassInstanceRef<Graphics>,
+    ) -> JvmResult<()> {
+        if graphics.is_null() {
+            return Err(jvm.exception("java/lang/NullPointerException", "").await);
+        }
+
+        let background: i32 = jvm.get_field(&this, "bg", "I").await?;
+
+        if background >= 0 {
+            let _: () = jvm.invoke_virtual(&graphics, "setColor", "(I)V", (background,)).await?;
+        } else if background == -2 {
+            let _: () = jvm.invoke_virtual(&graphics, "setColor", "(I)V", (Self::DECORATOR_FILL,)).await?;
+        }
+
+        let height: i32 = jvm.get_field(&this, "h", "I").await?;
+
+        if background != -1 {
+            let width = Self::painted_width(jvm, &this).await?;
+
+            let _: () = jvm
+                .invoke_virtual(&graphics, "fillRoundRect", "(IIIIII)V", (0, 0, width, height, 3, 3))
+                .await?;
+        }
+
+        let focused: bool = jvm.invoke_virtual(&this, "hasFocus", "()Z", ()).await?;
+
+        let border = if focused {
+            Self::DECORATOR_FOCUSED_BORDER
+        } else {
+            Self::DECORATOR_BORDER
+        };
+        let _: () = jvm.invoke_virtual(&graphics, "setColor", "(I)V", (border,)).await?;
+
+        let width = Self::painted_width(jvm, &this).await?;
+        let _: () = jvm
+            .invoke_virtual(
+                &graphics,
+                "drawRoundRect",
+                "(IIIIII)V",
+                (0, 0, width.wrapping_sub(1), height.wrapping_sub(1), 3, 3),
+            )
+            .await?;
+
+        let _: () = jvm.invoke_virtual(&graphics, "translate", "(II)V", (3, 2)).await?;
+
+        let foreground: i32 = jvm.get_field(&this, "fg", "I").await?;
+        let foreground = if foreground < 0 { Self::DECORATOR_TEXT } else { foreground };
+        let _: () = jvm.invoke_virtual(&graphics, "setColor", "(I)V", (foreground,)).await?;
+
+        let formatter: ClassInstanceRef<()> = jvm
+            .get_field(&this, "__wieTextFormatter", "Lorg/kwis/msp/lwc/TextFormatProcessor;")
+            .await?;
+
+        if formatter.is_null() {
+            return Err(jvm.exception("java/lang/NullPointerException", "").await);
+        }
+
+        let _: () = jvm
+            .invoke_virtual(&formatter, "paintChar", "(Lorg/kwis/msp/lcdui/Graphics;Z)V", (graphics.clone(), focused))
+            .await?;
+
+        jvm.invoke_virtual(&graphics, "translate", "(II)V", (-3, -2)).await
     }
 
     async fn insert(
