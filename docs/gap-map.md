@@ -48,7 +48,7 @@ KTF title's heap growing is what the reference does too.
 
 | area | count | what a call does today |
 |---|---|---|
-| KTF WIPI-C table slots | 89 | `WieError::Unimplemented` - kills the title |
+| KTF WIPI-C table slots | 84 | `WieError::Unimplemented` - kills the title |
 | `wie_wipi_c` stubs | 17 | logs and answers benignly |
 | WIPI-Java stubs | 53 | logs and answers benignly |
 | SK-VM / SKT stubs | 20 | logs and answers benignly |
@@ -96,14 +96,24 @@ wrote down. The reference does not implement this family at all - no
 `knlExecute`, `knlLoad`, `ProgramStop` or `AccessLevel` symbol appears in its KTF
 package - which is the measure of how rarely a title reaches it.
 
-That leaves 12 non-OEM names with no implementation:
+**Input method** (`MC_imHandleInput`, `MC_imSetCurrentMode`,
+`MC_imGetCurrentMode`, `MC_imGetSupportModeCount`, `MC_imGetSupportedModes`) is
+now shared in `wie_wipi_c/src/api/im.rs` and wired into both platforms. An
+earlier note here said LGT's versions would not port because two of them take
+`(a0, a1, a2, a3)` - that was wrong, and reading them settled it: those four
+words are LGT's dispatch scaffolding and native reads none of them, so the calls
+are nullary, which is a shape, not an unknown. The other three were already
+pinned down - `MC_imHandleInput` takes `(key, event, output0, output0_len,
+output1, output1_len)` - and LGT native implements the standard calls rather
+than anything of its own.
 
-- **Input method** (`MC_imHandleInput`, `MC_imSetCurrentMode`,
-  `MC_imGetCurrentMode`, `MC_imGetSupportModeCount`, `MC_imGetSupportedModes`).
-  LGT has all five, but privately and in a shape that will not port as it
-  stands: two of them take `(a0, a1, a2, a3)`, which is LGT scaffolding for
-  arguments its native was not read closely enough to name. Lifting that into
-  KTF would be asserting an ABI nobody has checked.
+The four modes (`EN/S`, `EN/L`, `N123`, `KO`) are confirmed twice over: the
+reference's string table carries exactly `EN/S\0EN/L\0N123\0KO\0` beside its
+`setCurrentMode(I)Z`, and the shared UIC text component KTF already runs cycles
+modes modulo 4.
+
+That leaves 7 non-OEM names with no implementation:
+
 - **Database** (`MC_dbGetAccessMode`, `MC_dbGetNumberOfRecords`,
   `MC_dbGetRecordSize`, `MC_dbSortRecords`, `MC_dbListDataBase`). Four exist as
   `*_lgt` variants, but those carry LGT native's own answers - a 123-byte name

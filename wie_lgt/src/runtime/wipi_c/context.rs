@@ -11,7 +11,9 @@ use wie_core_arm::{Allocator, ArmCore, HEAP_BASE, HEAP_SIZE};
 use wie_util::{ByteRead, ByteWrite, Result, WieError, read_generic, write_generic};
 use wie_wipi_c::{
     WIPICContext, WIPICMethodBody,
-    api::{filesystem::SharedFilesystemState, net::SharedNetworkState, serial::SharedSerialState, shared_buf::SharedSharedBufState},
+    api::{
+        filesystem::SharedFilesystemState, im::SharedImState, net::SharedNetworkState, serial::SharedSerialState, shared_buf::SharedSharedBufState,
+    },
 };
 
 // mostly same as ktf's one, can we merge those?
@@ -24,6 +26,7 @@ pub struct LgtWIPICContext {
     serial_state: SharedSerialState,
     filesystem_state: SharedFilesystemState,
     shared_buf_state: SharedSharedBufState,
+    im_state: SharedImState,
 }
 
 impl LgtWIPICContext {
@@ -35,6 +38,7 @@ impl LgtWIPICContext {
         serial_state: SharedSerialState,
         filesystem_state: SharedFilesystemState,
         shared_buf_state: SharedSharedBufState,
+        im_state: SharedImState,
     ) -> Self {
         Self {
             core,
@@ -44,6 +48,7 @@ impl LgtWIPICContext {
             serial_state,
             filesystem_state,
             shared_buf_state,
+            im_state,
         }
     }
 }
@@ -125,6 +130,10 @@ impl WIPICContext for LgtWIPICContext {
 
     fn shared_buf_state(&self) -> SharedSharedBufState {
         self.shared_buf_state.clone()
+    }
+
+    fn im_state(&self) -> SharedImState {
+        self.im_state.clone()
     }
 
     async fn call_function(&mut self, address: WIPICWord, args: &[WIPICWord]) -> Result<WIPICWord> {

@@ -13,7 +13,7 @@ use wie_jvm_support::JvmSupport;
 use wie_util::{Result, read_generic, write_generic, write_null_terminated_string_bytes};
 use wie_wipi_c::{
     MethodImpl, WIPICContext, WIPICMethodBody, WIPICResult,
-    api::{database, filesystem, graphics, kernel, media, misc, net, phone, serial, shared_buf, system, uic, util},
+    api::{database, filesystem, graphics, im, kernel, media, misc, net, phone, serial, shared_buf, system, uic, util},
 };
 
 use context::LgtWIPICContext;
@@ -22,7 +22,6 @@ use crate::runtime::java::classes::net::wie::{CletWrapper, CletWrapperCard, Clet
 use crate::runtime::{SVC_CATEGORY_WIPIC, svc_ids::WIPICSvcId};
 
 const TIME_VALUE_PTR: u32 = 0x7fff1004;
-const IME_SUPPORTED_MODES_PTR: u32 = 0x7fff1008;
 
 /// Per-WIPI-C-function call counts (indexed by the raw svc id), so the perf
 /// meter can name which API dominates the ~half-million calls per second.
@@ -81,13 +80,14 @@ struct CMethodProxy {
 
 async fn handle_wipic_svc(
     core: &mut ArmCore,
-    (system, jvm, network_state, serial_state, filesystem_state, shared_buf_state): &mut (
+    (system, jvm, network_state, serial_state, filesystem_state, shared_buf_state, im_state): &mut (
         System,
         Jvm,
         net::SharedNetworkState,
         serial::SharedSerialState,
         filesystem::SharedFilesystemState,
         shared_buf::SharedSharedBufState,
+        im::SharedImState,
     ),
     id: SvcId,
 ) -> Result<()> {
@@ -106,6 +106,7 @@ async fn handle_wipic_svc(
         serial_state.clone(),
         filesystem_state.clone(),
         shared_buf_state.clone(),
+        im_state.clone(),
     );
     // An unimplemented WIPI-C function is reported and skipped rather than
     // ending the run. Stopping on the first one hides everything a title does
@@ -201,11 +202,11 @@ async fn handle_wipic_svc(
         WIPICSvcId::DestroyImage => graphics::destroy_image.into_body(),
         WIPICSvcId::DecodeNextImage => graphics::decode_next_image.into_body(),
         WIPICSvcId::PostEvent => graphics::post_event.into_body(),
-        WIPICSvcId::ImGetSupportModeCount => im_get_support_mode_count.into_body(),
-        WIPICSvcId::ImGetSupportedModes => im_get_supported_modes.into_body(),
-        WIPICSvcId::ImSetCurrentMode => im_set_current_mode.into_body(),
-        WIPICSvcId::ImGetCurrentMode => im_get_current_mode.into_body(),
-        WIPICSvcId::ImHandleInput => im_handle_input.into_body(),
+        WIPICSvcId::ImGetSupportModeCount => im::get_support_mode_count.into_body(),
+        WIPICSvcId::ImGetSupportedModes => im::get_supported_modes.into_body(),
+        WIPICSvcId::ImSetCurrentMode => im::set_current_mode.into_body(),
+        WIPICSvcId::ImGetCurrentMode => im::get_current_mode.into_body(),
+        WIPICSvcId::ImHandleInput => im::handle_input.into_body(),
         WIPICSvcId::UicCreateApplicationContext => uic::create_application_context.into_body(),
         WIPICSvcId::UicGetClass => uic::get_class.into_body(),
         WIPICSvcId::UicCreate => uic::create.into_body(),
@@ -392,6 +393,7 @@ pub fn register_wipic_svc_handler(core: &mut ArmCore, system: &System, jvm: &Jvm
             serial::new_state(),
             filesystem::new_state(),
             shared_buf::new_state(),
+            im::new_state(),
         ),
     )?;
     // The synchronous fast path for the hottest WIPI-C getters is installed by
@@ -538,60 +540,6 @@ async fn unk2(context: &mut dyn WIPICContext) -> Result<u32> {
     Ok(result)
 }
 
-/// `MC_imGetSurpportModeCount` (vendor export 300).
-///
-/// The native LGT runtime registers four DIME modes:
-/// EN/S, EN/L, N123, KO.
-async fn im_get_support_mode_count(_context: &mut dyn WIPICContext, a0: u32, a1: u32, a2: u32, a3: u32) -> Result<u32> {
-    tracing::debug!("MC_imGetSurpportModeCount({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
-
-    Ok(4)
-}
-
-/// `MC_imGetSupportedModes` (vendor export 301).
-///
-/// Native LGT returns a persistent `char **` table containing:
-/// EN/S, EN/L, N123, KO.
-async fn im_get_supported_modes(context: &mut dyn WIPICContext, a0: u32, a1: u32, a2: u32, a3: u32) -> Result<u32> {
-    tracing::debug!("MC_imGetSupportedModes({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
-
-    let existing: u32 = read_generic(context, IME_SUPPORTED_MODES_PTR)?;
-    if existing != 0 {
-        return Ok(existing);
-    }
-
-    // Four 32-bit pointers followed by the four NUL-terminated mode strings.
-    const TABLE_SIZE: u32 = 4 * 4;
-    const EN_S: &[u8] = b"EN/S";
-    const EN_L: &[u8] = b"EN/L";
-    const N123: &[u8] = b"N123";
-    const KO: &[u8] = b"KO";
-
-    let total_size = TABLE_SIZE + (EN_S.len() + 1) as u32 + (EN_L.len() + 1) as u32 + (N123.len() + 1) as u32 + (KO.len() + 1) as u32;
-
-    let memory = context.alloc(total_size)?;
-    let table = context.data_ptr(memory)?;
-
-    let en_s = table + TABLE_SIZE;
-    let en_l = en_s + (EN_S.len() + 1) as u32;
-    let n123 = en_l + (EN_L.len() + 1) as u32;
-    let ko = n123 + (N123.len() + 1) as u32;
-
-    write_null_terminated_string_bytes(context, en_s, EN_S)?;
-    write_null_terminated_string_bytes(context, en_l, EN_L)?;
-    write_null_terminated_string_bytes(context, n123, N123)?;
-    write_null_terminated_string_bytes(context, ko, KO)?;
-
-    write_generic(context, table, en_s)?;
-    write_generic(context, table + 4, en_l)?;
-    write_generic(context, table + 8, n123)?;
-    write_generic(context, table + 12, ko)?;
-
-    write_generic(context, IME_SUPPORTED_MODES_PTR, table)?;
-
-    Ok(table)
-}
-
 /// `MC_mdaSetVolume` (service 0x4c0), the handset's overall media volume.
 ///
 /// The names of these media services come from the reference firmware's own
@@ -714,97 +662,6 @@ async fn fs_available(context: &mut dyn WIPICContext, _a0: u32, _a1: u32, _a2: u
     let available = clamp_native_fs_space(available);
     tracing::debug!("MC_fsAvailable() -> {available}");
     Ok(available)
-}
-
-/// `MC_imGetCurrentMode` (vendor export 303).
-///
-/// Native DIME returns the index of the currently selected supported mode.
-async fn im_get_current_mode(context: &mut dyn WIPICContext, a0: u32, a1: u32, a2: u32, a3: u32) -> Result<u32> {
-    tracing::debug!("MC_imGetCurrentMode({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
-
-    Ok(context.system().current_input_mode())
-}
-
-/// Normalize the public `MC_imHandleInput` key to the signed byte seen by
-/// `MH_IMAhandleInput`.
-///
-/// The native 35..57 jump table is identity. `ime_handle` then:
-/// - maps signed -3 to -16,
-/// - preserves '*', '#', digits, and values in its accepted unsigned range,
-/// - maps other out-of-range values to -99,
-/// - finally forwards only the low byte to the provider.
-fn im_provider_key(key: u32) -> i8 {
-    let signed = key as i32;
-
-    let normalized = if signed == -3 {
-        -16i32
-    } else if signed == 42 || signed == 35 || (48..=57).contains(&signed) {
-        signed
-    } else {
-        let range_value = key.wrapping_sub(32);
-        if range_value > 65_499 { -99 } else { signed }
-    };
-
-    normalized as u8 as i8
-}
-
-/// `MC_imHandleInput` (vendor export 304 / WIPI-C service 0x130).
-///
-/// Native maps WIPI events 502/503/504 to DIME 1/2/3. `ime_handle` then maps
-/// those to provider events 2/3/4, while `MH_IMAhandleInput` accepts only
-/// provider events 2 and 4. Therefore 502 and 504 are processed and 503 is
-/// ignored without touching the caller's output buffers.
-async fn im_handle_input(
-    context: &mut dyn WIPICContext,
-    key: u32,
-    event: u32,
-    output0: u32,
-    output0_len: u32,
-    output1: u32,
-    output1_len: u32,
-) -> Result<u32> {
-    tracing::debug!("MC_imHandleInput({key:#x}, {event:#x}, {output0:#x}, {output0_len:#x}, {output1:#x}, {output1_len:#x})");
-
-    let provider_event = match event {
-        502 => 2,
-        504 => 4,
-        _ => return Ok(0),
-    };
-
-    context.write_bytes(output0, &[0])?;
-    write_generic(context, output0_len, 0u32)?;
-    context.write_bytes(output1, &[0])?;
-    write_generic(context, output1_len, 0u32)?;
-
-    let output = context.system().handle_input_method(im_provider_key(key), provider_event);
-
-    if output.output0_len != 0 {
-        context.write_bytes(output0, &output.output0[..output.output0_len])?;
-    }
-    write_generic(context, output0_len, output.output0_len as u32)?;
-
-    if output.output1_len != 0 {
-        context.write_bytes(output1, &output.output1[..output.output1_len])?;
-    }
-    write_generic(context, output1_len, output.output1_len as u32)?;
-
-    Ok(if output.handled { 1 } else { 0 })
-}
-
-/// `MC_imSetCurrentMode` (vendor export 302).
-///
-/// Native DIME accepts supported-mode indices 0..3. A valid mode becomes the
-/// current mode and returns 1; an unsupported index returns 0.
-async fn im_set_current_mode(context: &mut dyn WIPICContext, mode: u32, a1: u32, a2: u32, a3: u32) -> Result<u32> {
-    tracing::debug!("MC_imSetCurrentMode({mode:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
-
-    if mode >= 4 {
-        return Ok(0);
-    }
-
-    context.system().set_current_input_mode(mode);
-
-    Ok(1)
 }
 
 async fn time_now(context: &mut dyn WIPICContext, component_class: u32) -> Result<u32> {
@@ -977,44 +834,4 @@ async fn mda_set_water_mark(_context: &mut dyn WIPICContext, a0: u32, a1: u32, a
     tracing::warn!("stub MC_mdaSetWaterMark({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
 
     Ok(0)
-}
-
-#[cfg(test)]
-mod im_handle_input_tests {
-    use super::im_provider_key;
-
-    #[test]
-    fn im_provider_key_matches_native() {
-        // Native MC_imHandleInput 35..57 jump table is identity.
-        for key in 35u32..=57 {
-            assert_eq!(im_provider_key(key), key as u8 as i8);
-        }
-
-        // ime_handle special signed key.
-        assert_eq!(im_provider_key((-3i32) as u32), -16);
-
-        // Other directly supplied signed negative WIPI keys are rejected to
-        // provider flush key -99.
-        for key in [-16i32, -7, -4, -2, -1, -99] {
-            assert_eq!(im_provider_key(key as u32), -99);
-        }
-
-        // UIC masks special keys before calling the public API. These values
-        // survive ime_handle and become signed again at the provider boundary.
-        assert_eq!(im_provider_key(157), -99);
-        assert_eq!(im_provider_key(240), -16);
-        assert_eq!(im_provider_key(249), -7);
-        assert_eq!(im_provider_key(252), -4);
-        assert_eq!(im_provider_key(253), -3);
-        assert_eq!(im_provider_key(254), -2);
-        assert_eq!(im_provider_key(255), -1);
-
-        // Accepted printable/range values remain their low byte.
-        for key in [32u32, 34, 35, 36, 42, 47, 48, 57, 58, 240, 255] {
-            assert_eq!(im_provider_key(key), key as u8 as i8);
-        }
-
-        assert_eq!(im_provider_key(0), -99);
-        assert_eq!(im_provider_key(31), -99);
-    }
 }

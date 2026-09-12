@@ -11,7 +11,9 @@ use wie_core_arm::{Allocator, ArmCore};
 use wie_util::{ByteRead, ByteWrite, Result, read_generic, write_generic};
 use wie_wipi_c::{
     WIPICContext, WIPICMethodBody,
-    api::{filesystem::SharedFilesystemState, net::SharedNetworkState, serial::SharedSerialState, shared_buf::SharedSharedBufState},
+    api::{
+        filesystem::SharedFilesystemState, im::SharedImState, net::SharedNetworkState, serial::SharedSerialState, shared_buf::SharedSharedBufState,
+    },
 };
 
 #[derive(Clone)]
@@ -23,6 +25,7 @@ pub struct KtfWIPICContext {
     serial_state: SharedSerialState,
     filesystem_state: SharedFilesystemState,
     shared_buf_state: SharedSharedBufState,
+    im_state: SharedImState,
 }
 
 impl KtfWIPICContext {
@@ -34,6 +37,7 @@ impl KtfWIPICContext {
         serial_state: SharedSerialState,
         filesystem_state: SharedFilesystemState,
         shared_buf_state: SharedSharedBufState,
+        im_state: SharedImState,
     ) -> Self {
         Self {
             core,
@@ -43,6 +47,7 @@ impl KtfWIPICContext {
             serial_state,
             filesystem_state,
             shared_buf_state,
+            im_state,
         }
     }
 }
@@ -106,6 +111,10 @@ impl WIPICContext for KtfWIPICContext {
 
     fn shared_buf_state(&self) -> SharedSharedBufState {
         self.shared_buf_state.clone()
+    }
+
+    fn im_state(&self) -> SharedImState {
+        self.im_state.clone()
     }
 
     async fn call_function(&mut self, address: WIPICWord, args: &[WIPICWord]) -> Result<WIPICWord> {

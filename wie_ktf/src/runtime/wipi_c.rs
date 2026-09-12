@@ -6,7 +6,7 @@ use wie_core_arm::{ArmCore, EmulatedFunction, EmulatedFunctionParam, ResultWrite
 use wie_util::{Result, WieError};
 use wie_wipi_c::{
     WIPICMethodBody, WIPICResult,
-    api::{filesystem, net, serial, shared_buf},
+    api::{filesystem, im, net, serial, shared_buf},
 };
 
 use crate::runtime::SVC_CATEGORY_WIPIC;
@@ -60,13 +60,14 @@ impl EmulatedFunction<(), WIPICMethodResult, ()> for CMethodProxy {
 
 async fn handle_wipic_svc(
     core: &mut ArmCore,
-    (system, jvm, network_state, serial_state, filesystem_state, shared_buf_state): &mut (
+    (system, jvm, network_state, serial_state, filesystem_state, shared_buf_state, im_state): &mut (
         System,
         Jvm,
         net::SharedNetworkState,
         serial::SharedSerialState,
         filesystem::SharedFilesystemState,
         shared_buf::SharedSharedBufState,
+        im::SharedImState,
     ),
     id: SvcId,
 ) -> Result<()> {
@@ -84,6 +85,7 @@ async fn handle_wipic_svc(
                 serial_state.clone(),
                 filesystem_state.clone(),
                 shared_buf_state.clone(),
+                im_state.clone(),
             ),
         )
         .await?
@@ -103,6 +105,7 @@ async fn handle_wipic_svc(
                 serial_state.clone(),
                 filesystem_state.clone(),
                 shared_buf_state.clone(),
+                im_state.clone(),
             ),
             body,
         },
@@ -124,6 +127,7 @@ pub fn register_wipic_svc_handler(core: &mut ArmCore, system: &System, jvm: &Jvm
             serial::new_state(),
             filesystem::new_state(),
             shared_buf::new_state(),
+            im::new_state(),
         ),
     )
 }

@@ -1,6 +1,7 @@
 pub mod database;
 pub mod filesystem;
 pub mod graphics;
+pub mod im;
 pub mod kernel;
 pub mod media;
 pub mod misc;

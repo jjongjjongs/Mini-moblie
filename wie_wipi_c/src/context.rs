@@ -7,7 +7,9 @@ use wie_util::{ByteRead, ByteWrite, Result};
 
 use crate::{
     WIPICMethodBody,
-    api::{filesystem::SharedFilesystemState, net::SharedNetworkState, serial::SharedSerialState, shared_buf::SharedSharedBufState},
+    api::{
+        filesystem::SharedFilesystemState, im::SharedImState, net::SharedNetworkState, serial::SharedSerialState, shared_buf::SharedSharedBufState,
+    },
     method::{ParamConverter, ResultConverter},
 };
 
@@ -26,6 +28,7 @@ pub trait WIPICContext: ByteRead + ByteWrite + Send + Sync {
     fn serial_state(&self) -> SharedSerialState;
     fn filesystem_state(&self) -> SharedFilesystemState;
     fn shared_buf_state(&self) -> SharedSharedBufState;
+    fn im_state(&self) -> SharedImState;
     fn spawn(&mut self, callback: WIPICMethodBody) -> Result<()>;
     async fn get_resource_size(&self, name: &str) -> Result<Option<usize>>;
     async fn read_resource(&self, name: &str) -> Result<Vec<u8>>;
@@ -99,6 +102,7 @@ pub mod test {
     use super::{WIPICContext, WIPICMethodBody};
     use crate::api::{
         filesystem::{SharedFilesystemState, new_state as new_filesystem_state},
+        im::{SharedImState, new_state as new_im_state},
         net::{SharedNetworkState, new_state as new_network_state},
         serial::{SharedSerialState, new_state as new_serial_state},
         shared_buf::{SharedSharedBufState, new_state as new_shared_buf_state},
@@ -120,6 +124,7 @@ pub mod test {
         serial_state: SharedSerialState,
         filesystem_state: SharedFilesystemState,
         shared_buf_state: SharedSharedBufState,
+        im_state: SharedImState,
         /// Bodies handed to `spawn`, kept rather than run: a test that drives an
         /// API which defers work can then say the deferral happened without an
         /// executor to run it on.
@@ -140,6 +145,7 @@ pub mod test {
                 serial_state: new_serial_state(),
                 filesystem_state: new_filesystem_state(),
                 shared_buf_state: new_shared_buf_state(),
+                im_state: new_im_state(),
                 spawned: Vec::new(),
             }
         }
@@ -156,6 +162,7 @@ pub mod test {
                 serial_state: new_serial_state(),
                 filesystem_state: new_filesystem_state(),
                 shared_buf_state: new_shared_buf_state(),
+                im_state: new_im_state(),
                 spawned: Vec::new(),
             }
         }
@@ -237,6 +244,10 @@ pub mod test {
 
         fn shared_buf_state(&self) -> SharedSharedBufState {
             self.shared_buf_state.clone()
+        }
+
+        fn im_state(&self) -> SharedImState {
+            self.im_state.clone()
         }
 
         fn spawn(&mut self, callback: WIPICMethodBody) -> Result<()> {
