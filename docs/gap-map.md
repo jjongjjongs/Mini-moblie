@@ -191,3 +191,59 @@ CPU: `wipix-cpu-native-branch-exchange`, `wipix-cpu-read-only-leaf-traps`,
 `wipix-native-playback-speed-audio`, `wipix-android-digital-triggers`,
 `wipix-input-execution-isolation`, `wipix-android-audio-read-chunks` - their
 frontend, their audio backend, the ebiten engine.
+
+## Measured against another implementation's source
+
+`wfeature` (MIT) is a Go runtime covering the same three platforms, and unlike
+the binaries above it ships its source, its tests, and ~8,000 lines of written
+findings. Everything below is a comparison that was run, not a reading.
+
+**Its KTF LWC is mostly stubs** - `Component.getWidth`/`getHeight` answer zero,
+`ContainerComponent.layout`/`validate` do nothing - because it routes text entry
+to the host's own keyboard instead of drawing a widget. Ours is the fuller one.
+It is the better reference for the platform *outside* the toolkit.
+
+| compared | result |
+|---|---|
+| KTF class surface | no gap. Its `apiscan` reads the client image's name pool; ported and run over our five archives, each names 43-65 platform classes and the only one unpublished here is `PluginJlet`, which every archive names and none extends. |
+| WIPI Java surface | no gap. All 36 reference classes are published and every reference method resolves. `Clip.setBuffer` was moved to `BaseClip` and made return `Z` independently on both sides. |
+| C runtime hooks | no gap. memcpy/memset/strcpy/strlen are recognised in the image and replaced with native stubs on both sides; ours is `wie_core_arm/src/binary_patches`, applied over the whole KTF image. |
+| a container answering zero children | not ours. Their adds and reads kept two types in one field; ours reads and writes `children`/`childCount` one way. |
+| a card forwarding a key to its own text field | not ours. `TextComponent.keyNotify` already runs the key through the input method. |
+| `Display` capability answers | **gap, fixed** - `isColor` and `numColors` were placeholders answering `false` and `0`. |
+| multi-tap commit delay | **gap, fixed** - we had none, so the same letter twice could not be typed. |
+| a frame loop asking for no frame period | **measured, not applicable** - see below. |
+
+### A floor on the wait after a frame, and why it is not here
+
+A title can put its whole frame loop on a guest thread - repaint,
+serviceRepaints, sleep, round again - and ask for a sleep of nothing. Answered
+literally, the loop redraws as fast as the executor allows and every redraw but
+the last is thrown away. Their fix marks the thread that published a frame and
+raises only that thread's next wait to a frame period; one of their archives was
+publishing 4,807 frames for each one collected, and the fix took sixty rounds
+from 2m 6.6s to 1.2s.
+
+The mechanism is real and we have no equivalent. It was written, measured and
+removed again, because on this corpus it changes nothing. Instrumenting
+`System::sleep` over Bigi 미궁 - our slowest title at ~10ms a tick, and the only
+one that drives its own frame loop - counted 232 frames published and 10,183
+sleeps in 2,000 ticks:
+
+| wait | follows a frame | count |
+|---|---|---|
+| 1ms | no | 8,908 |
+| 16ms | no | 822 |
+| 80ms | **yes** | 182 |
+| 16ms | **yes** | 50 |
+
+Every wait that follows a frame already asks for 16ms or more, so the floor
+never fires; the waits that dominate the run do not follow a frame, and their
+rule deliberately leaves those alone - a loader sleeping between chunks has
+drawn nothing, and flooring it would cost it a frame per chunk. Adding the floor
+would have put a lock on a path taken ten thousand times per two thousand ticks
+to change nothing.
+
+**What the same measurement did turn up** is that Bigi 미궁 asks for `sleep(1)`
+8,908 times in 2,000 ticks - four and a half times a tick, from a task that
+never draws. That is its own question and nothing to do with frame pacing.
