@@ -95,9 +95,16 @@ impl ClassInstance for JavaClassInstance {
     /// Freeing it on the JVM's word corrupts live state, measurably: 투스워즈
     /// loses the byte array behind a resource it is decoding and dies a few
     /// frames later reading a length that has become another block's
-    /// bookkeeping. Nothing is reclaimed until a collector that also looks at
-    /// the guest exists, so a KTF title's heap only grows - which costs memory,
-    /// where the alternative costs correctness.
+    /// bookkeeping.
+    ///
+    /// Nothing reclaims them instead, so a KTF title's heap only grows. That is
+    /// also what the reference emulator does, which is worth saying because it
+    /// makes this a design rather than a debt: its KTF runtime builds its Java
+    /// objects in guest memory the same way and has no collector for them at
+    /// all - the only `collectGarbage` in the whole binary belongs to its
+    /// SK-VM, and there is no free, destroy or reclaim of a KTF Java object
+    /// anywhere in it. Its one root-visitor for KTF covers strings, for state
+    /// snapshots.
     fn destroy(self: Box<Self>) {}
 
     fn identity(&self) -> usize {
