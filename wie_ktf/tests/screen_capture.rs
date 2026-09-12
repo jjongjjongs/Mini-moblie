@@ -13,6 +13,10 @@
 //! - `WIE_TICKS` - how many ticks to run (default 20000).
 //! - `WIE_SHOT` - where to write the last painted frame, as a binary PPM.
 //! - `WIE_KEY`/`WIE_PRESS_TICK` - one key press, to get past a title's notice.
+//! - `WIE_SCRIPT` - a walk into the title instead: `tick:KEY` pairs separated
+//!   by commas, e.g. `1500:OK,3000:OK,4500:NUM1`. Each press is held 20 ticks.
+//! - `WIE_SHOT_DIR` - a frame written ~400 ticks after each scripted press, so
+//!   every step of the walk is visible rather than only where it ended.
 
 use std::{
     sync::{
@@ -163,6 +167,33 @@ fn key_by_name(name: &str) -> Option<KeyCode> {
     })
 }
 
+/// Parses `WIE_SCRIPT`: `tick:KEY` pairs separated by commas.
+fn parse_script(script: Option<&str>) -> Vec<(u32, KeyCode)> {
+    let Some(script) = script else {
+        return Vec::new();
+    };
+
+    script
+        .split(',')
+        .filter_map(|step| {
+            let (tick, key) = step.trim().split_once(':')?;
+
+            Some((tick.trim().parse().ok()?, key_by_name(key.trim())?))
+        })
+        .collect()
+}
+
+fn write_ppm(path: &str, screen: &CaptureScreen) {
+    let captured = screen.captured.lock().unwrap();
+    if captured.last_pixels.is_empty() {
+        return;
+    }
+
+    let mut ppm = format!("P6\n{} {}\n255\n", captured.width, captured.height).into_bytes();
+    ppm.extend_from_slice(&captured.last_pixels);
+    let _ = std::fs::write(path, ppm);
+}
+
 #[test]
 fn ktf_archive_probe() {
     let Ok(path) = std::env::var("WIE_KTF_ARCHIVE") else {
@@ -216,8 +247,15 @@ fn ktf_archive_probe() {
     // `request_redraw` only asks; the host is what paints. `wie_cli` turns the
     // request into a window redraw, so a probe that never feeds one back sees
     // a title paint nothing however well it runs.
-    let probe_key = std::env::var("WIE_KEY").ok().and_then(|name| key_by_name(&name));
-    let press_tick: u32 = std::env::var("WIE_PRESS_TICK").ok().and_then(|x| x.parse().ok()).unwrap_or(u32::MAX);
+    let mut script = parse_script(std::env::var("WIE_SCRIPT").ok().as_deref());
+    if let Some(key) = std::env::var("WIE_KEY").ok().and_then(|name| key_by_name(&name))
+        && let Some(tick) = std::env::var("WIE_PRESS_TICK").ok().and_then(|x| x.parse().ok())
+    {
+        script.push((tick, key));
+    }
+    script.sort_by_key(|(tick, _)| *tick);
+
+    let shot_dir = std::env::var("WIE_SHOT_DIR").ok();
 
     let mut ticks = 0;
     let mut stopped = None;
@@ -225,12 +263,19 @@ fn ktf_archive_probe() {
         if ticks % 40 == 0 {
             emulator.handle_event(Event::Redraw);
         }
-        if let Some(key) = probe_key {
-            if ticks == press_tick {
-                emulator.handle_event(Event::Keydown(key));
+        for (step, (tick, key)) in script.iter().enumerate() {
+            if ticks == *tick {
+                eprintln!("[probe] step {step}: pressing {key:?} at tick {ticks}");
+                emulator.handle_event(Event::Keydown(*key));
             }
-            if ticks == press_tick.saturating_add(20) {
-                emulator.handle_event(Event::Keyup(key));
+            if ticks == tick.saturating_add(20) {
+                emulator.handle_event(Event::Keyup(*key));
+            }
+            // Far enough past the press that the screen it opened has settled.
+            if let Some(dir) = &shot_dir
+                && ticks == tick.saturating_add(400)
+            {
+                write_ppm(&format!("{dir}/step_{step}.ppm"), &screen);
             }
         }
 
