@@ -149,7 +149,15 @@ impl System {
         self.input_method.write().set_composition_size(size);
     }
 
+    /// Feeds a keypress to the handset's input method.
+    ///
+    /// The guest clock goes with it: multi-tap finishes a character when the
+    /// same key is left alone long enough, and measuring that on guest time
+    /// rather than the host's keeps a frontend that runs ticks in batches
+    /// typing the same text as one running live.
     pub fn handle_input_method(&self, key: i8, event: u32) -> InputMethodOutput {
-        self.input_method.write().handle_input(key, event)
+        let now = self.platform().now();
+
+        self.input_method.write().handle_input(key, event, now)
     }
 }

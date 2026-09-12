@@ -2,6 +2,16 @@ use alloc::vec::Vec;
 
 use encoding_rs::EUC_KR;
 
+use crate::time::Instant;
+
+/// How long the same key waits before the next press starts a new character
+/// instead of cycling the one in progress.
+///
+/// A handset had this, and without it the same letter twice in a row cannot be
+/// typed at all: every press of the key just advances the cycle. 900ms is what
+/// another WIPI runtime measured and shipped.
+const COMMIT_DELAY_MS: u64 = 900;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct KoreanState {
     cho: Option<u8>,
@@ -20,6 +30,9 @@ pub struct InputMethod {
     eng_key: Option<i8>,
     eng_index: usize,
     eng_char: Option<u8>,
+    /// When the last multi-tap key was pressed, so the same key pressed again
+    /// after [`COMMIT_DELAY`] starts a new character instead of cycling.
+    eng_last_press: Option<Instant>,
 
     ko_cho: Option<u8>,
     ko_jung: Option<u8>,
@@ -85,20 +98,41 @@ impl InputMethod {
         self.ko_undo.clear();
     }
 
-    pub fn handle_input(&mut self, key: i8, event: u32) -> InputMethodOutput {
+    pub fn handle_input(&mut self, key: i8, event: u32, now: Instant) -> InputMethodOutput {
         if !matches!(event, 2 | 4) {
             return InputMethodOutput::default();
         }
 
         match self.current_mode {
-            0 | 1 => self.handle_english(key),
+            0 | 1 => self.handle_english(key, now),
             2 => Self::handle_numeric(key),
             3 => self.handle_korean(key),
             _ => InputMethodOutput::default(),
         }
     }
 
-    fn handle_english(&mut self, key: i8) -> InputMethodOutput {
+    /// Presses a key with no guest time passing, which is what every case
+    /// written before the commit delay existed meant: the same key pressed
+    /// again cycles.
+    #[cfg(test)]
+    fn press(&mut self, key: i8, event: u32) -> InputMethodOutput {
+        self.handle_input(key, event, Instant::from_epoch_millis(0))
+    }
+
+    /// Whether the multi-tap character in progress has been left alone long
+    /// enough to be finished.
+    ///
+    /// Measured on the guest clock rather than the host's, so a frontend that
+    /// runs a batch of ticks at once types the same text as one running live.
+    fn commit_delay_elapsed(&self, now: Instant) -> bool {
+        let Some(last) = self.eng_last_press else {
+            return true;
+        };
+
+        now.raw().saturating_sub(last.raw()) >= COMMIT_DELAY_MS
+    }
+
+    fn handle_english(&mut self, key: i8, now: Instant) -> InputMethodOutput {
         if key == -99 {
             let Some(current) = self.eng_char.take() else {
                 return InputMethodOutput::default();
@@ -106,6 +140,7 @@ impl InputMethod {
 
             self.eng_key = None;
             self.eng_index = 0;
+            self.eng_last_press = None;
 
             let mut output = InputMethodOutput::default();
             output.output0[0] = current;
@@ -183,7 +218,13 @@ impl InputMethod {
             ..InputMethodOutput::default()
         };
 
-        if self.eng_key == Some(key) {
+        // The same key cycles only while the last press is still recent. Once
+        // the delay has run out the character it was building is finished and
+        // this press starts the next one, which is what makes two of the same
+        // letter in a row typable at all.
+        let still_cycling = self.eng_key == Some(key) && !self.commit_delay_elapsed(now);
+
+        if still_cycling {
             self.eng_index = (self.eng_index + 1) % chars.len();
         } else {
             if let Some(previous) = self.eng_char {
@@ -194,6 +235,8 @@ impl InputMethod {
             self.eng_key = Some(key);
             self.eng_index = 0;
         }
+
+        self.eng_last_press = Some(now);
 
         let current = chars[self.eng_index];
         self.eng_char = Some(current);
@@ -914,16 +957,88 @@ mod tests {
         input.set_current_mode(2);
 
         for key in [b'0', b'1', b'9', b'*', b'#'] {
-            let output = input.handle_input(key as i8, 2);
+            let output = input.press(key as i8, 2);
             assert!(output.handled);
             assert_eq!(output.output0_len, 1);
             assert_eq!(output.output0[0], key);
             assert_eq!(output.output1_len, 0);
         }
 
-        assert!(!input.handle_input(-99, 2).handled);
-        assert!(!input.handle_input(b'A' as i8, 2).handled);
-        assert!(!input.handle_input(b'1' as i8, 3).handled);
+        assert!(!input.press(-99, 2).handled);
+        assert!(!input.press(b'A' as i8, 2).handled);
+        assert!(!input.press(b'1' as i8, 3).handled);
+    }
+}
+
+#[cfg(test)]
+mod commit_delay_tests {
+    use super::{COMMIT_DELAY_MS, InputMethod};
+    use crate::time::Instant;
+
+    fn at(ms: u64) -> Instant {
+        Instant::from_epoch_millis(ms)
+    }
+
+    /// The same key pressed again after the delay finishes the character it was
+    /// building and starts the next one. Without this there is no way to type
+    /// two of the same letter in a row - every press just advances the cycle.
+    #[test]
+    fn the_same_key_twice_slowly_types_the_letter_twice() {
+        let mut input = InputMethod::new();
+        input.set_current_mode(0);
+
+        let first = input.handle_input(b'7' as i8, 2, at(0));
+        assert_eq!(&first.output1[..first.output1_len], b"p");
+        assert_eq!(first.output0_len, 0);
+
+        let second = input.handle_input(b'7' as i8, 2, at(COMMIT_DELAY_MS));
+        // The first `p` is finished and handed over, and a second one starts.
+        assert_eq!(&second.output0[..second.output0_len], b"p");
+        assert_eq!(&second.output1[..second.output1_len], b"p");
+    }
+
+    /// Inside the delay it is still one character being cycled, which is what
+    /// multi-tap is.
+    #[test]
+    fn the_same_key_twice_quickly_cycles_one_character() {
+        let mut input = InputMethod::new();
+        input.set_current_mode(0);
+
+        input.handle_input(b'7' as i8, 2, at(0));
+        let second = input.handle_input(b'7' as i8, 2, at(COMMIT_DELAY_MS - 1));
+
+        assert_eq!(second.output0_len, 0);
+        assert_eq!(&second.output1[..second.output1_len], b"q");
+    }
+
+    /// A different key finishes the character however little time has passed,
+    /// which is the behaviour that was there before the delay was.
+    #[test]
+    fn a_different_key_still_commits_at_once() {
+        let mut input = InputMethod::new();
+        input.set_current_mode(0);
+
+        input.handle_input(b'7' as i8, 2, at(0));
+        let second = input.handle_input(b'2' as i8, 2, at(1));
+
+        assert_eq!(&second.output0[..second.output0_len], b"p");
+        assert_eq!(&second.output1[..second.output1_len], b"a");
+    }
+
+    /// A flush ends the character and the delay with it, so the next press of
+    /// the same key starts clean rather than carrying the old cycle.
+    #[test]
+    fn a_flush_clears_the_pending_press() {
+        let mut input = InputMethod::new();
+        input.set_current_mode(0);
+
+        input.handle_input(b'7' as i8, 2, at(0));
+        let flushed = input.handle_input(-99, 2, at(1));
+        assert_eq!(&flushed.output0[..flushed.output0_len], b"p");
+
+        let next = input.handle_input(b'7' as i8, 2, at(2));
+        assert_eq!(next.output0_len, 0);
+        assert_eq!(&next.output1[..next.output1_len], b"p");
     }
 }
 
@@ -937,34 +1052,34 @@ mod english_tests {
 
         input.set_current_mode(0);
 
-        let a = input.handle_input(b'2' as i8, 2);
+        let a = input.press(b'2' as i8, 2);
         assert!(a.handled);
         assert_eq!(&a.output1[..a.output1_len], b"a");
         assert_eq!(a.output0_len, 0);
 
-        let b = input.handle_input(b'2' as i8, 2);
+        let b = input.press(b'2' as i8, 2);
         assert!(b.handled);
         assert_eq!(&b.output1[..b.output1_len], b"b");
         assert_eq!(b.output0_len, 0);
 
-        let c = input.handle_input(b'2' as i8, 2);
+        let c = input.press(b'2' as i8, 2);
         assert_eq!(&c.output1[..c.output1_len], b"c");
 
-        let a_again = input.handle_input(b'2' as i8, 2);
+        let a_again = input.press(b'2' as i8, 2);
         assert_eq!(&a_again.output1[..a_again.output1_len], b"a");
 
-        let d = input.handle_input(b'3' as i8, 2);
+        let d = input.press(b'3' as i8, 2);
         assert!(d.handled);
         assert_eq!(&d.output0[..d.output0_len], b"a");
         assert_eq!(&d.output1[..d.output1_len], b"d");
 
-        let flush = input.handle_input(-99, 2);
+        let flush = input.press(-99, 2);
         assert!(!flush.handled);
         assert_eq!(&flush.output0[..flush.output0_len], b"d");
         assert_eq!(flush.output1_len, 0);
 
         input.set_current_mode(1);
-        let upper = input.handle_input(b'7' as i8, 2);
+        let upper = input.press(b'7' as i8, 2);
         assert!(upper.handled);
         assert_eq!(&upper.output1[..upper.output1_len], b"P");
     }
@@ -979,19 +1094,19 @@ mod korean_input_tests {
         let mut input = InputMethod::new();
         input.set_current_mode(3);
 
-        let giyeok = input.handle_input(b'1' as i8, 2);
+        let giyeok = input.press(b'1' as i8, 2);
         assert!(giyeok.handled);
         assert_eq!(&giyeok.output1[..giyeok.output1_len], &[0xa4, 0xa1]);
 
-        let ga = input.handle_input(b'3' as i8, 2);
+        let ga = input.press(b'3' as i8, 2);
         assert!(ga.handled);
         assert_eq!(&ga.output1[..ga.output1_len], &[0xb0, 0xa1]);
 
-        let gak = input.handle_input(b'1' as i8, 2);
+        let gak = input.press(b'1' as i8, 2);
         assert!(gak.handled);
         assert_eq!(&gak.output1[..gak.output1_len], &[0xb0, 0xa2]);
 
-        let split = input.handle_input(b'3' as i8, 2);
+        let split = input.press(b'3' as i8, 2);
         assert!(split.handled);
         assert_eq!(&split.output0[..split.output0_len], &[0xb0, 0xa1]);
         assert_eq!(&split.output1[..split.output1_len], &[0xb0, 0xa1]);
@@ -1002,8 +1117,8 @@ mod korean_input_tests {
         let mut input = InputMethod::new();
         input.set_current_mode(3);
 
-        input.handle_input(b'1' as i8, 2);
-        let ssang = input.handle_input(b'#' as i8, 2);
+        input.press(b'1' as i8, 2);
+        let ssang = input.press(b'#' as i8, 2);
         assert!(ssang.handled);
         assert_eq!(&ssang.output1[..ssang.output1_len], &[0xa4, 0xa2]);
     }
@@ -1013,10 +1128,10 @@ mod korean_input_tests {
         let mut input = InputMethod::new();
         input.set_current_mode(3);
 
-        input.handle_input(b'1' as i8, 2);
-        input.handle_input(b'3' as i8, 2);
+        input.press(b'1' as i8, 2);
+        input.press(b'3' as i8, 2);
 
-        let flush = input.handle_input(-99, 2);
+        let flush = input.press(-99, 2);
         assert!(!flush.handled);
         assert_eq!(&flush.output0[..flush.output0_len], &[0xb0, 0xa1]);
         assert_eq!(flush.output1_len, 0);
@@ -1027,10 +1142,10 @@ mod korean_input_tests {
         let mut input = InputMethod::new();
         input.set_current_mode(3);
 
-        let giyeok = input.handle_input(b'1' as i8, 2);
+        let giyeok = input.press(b'1' as i8, 2);
         assert_eq!(&giyeok.output1[..giyeok.output1_len], &[0xa4, 0xa1]);
 
-        let clear = input.handle_input(-16, 2);
+        let clear = input.press(-16, 2);
         assert!(clear.handled);
         assert_eq!(clear.output0_len, 0);
         assert_eq!(clear.output1_len, 0);
@@ -1041,12 +1156,12 @@ mod korean_input_tests {
         let mut input = InputMethod::new();
         input.set_current_mode(3);
 
-        input.handle_input(b'1' as i8, 2);
-        input.handle_input(b'3' as i8, 2);
-        let gak = input.handle_input(b'1' as i8, 2);
+        input.press(b'1' as i8, 2);
+        input.press(b'3' as i8, 2);
+        let gak = input.press(b'1' as i8, 2);
         assert_eq!(&gak.output1[..gak.output1_len], &[0xb0, 0xa2]);
 
-        let clear = input.handle_input(-16, 2);
+        let clear = input.press(-16, 2);
         assert!(clear.handled);
         assert_eq!(clear.output0_len, 0);
         assert_eq!(&clear.output1[..clear.output1_len], &[0xb0, 0xa1]);
@@ -1057,15 +1172,15 @@ mod korean_input_tests {
         let mut input = InputMethod::new();
         input.set_current_mode(3);
 
-        input.handle_input(b'1' as i8, 2); // ㄱ
-        input.handle_input(b'3' as i8, 2); // 가
-        input.handle_input(b'1' as i8, 2); // 각
+        input.press(b'1' as i8, 2); // ㄱ
+        input.press(b'3' as i8, 2); // 가
+        input.press(b'1' as i8, 2); // 각
 
-        let split = input.handle_input(b'3' as i8, 2);
+        let split = input.press(b'3' as i8, 2);
         assert_eq!(&split.output0[..split.output0_len], &[0xb0, 0xa1]);
         assert_eq!(&split.output1[..split.output1_len], &[0xb0, 0xa1]);
 
-        let clear = input.handle_input(-16, 2);
+        let clear = input.press(-16, 2);
         assert!(clear.handled);
         assert_eq!(clear.output0_len, 0);
         assert_eq!(&clear.output1[..clear.output1_len], &[0xa4, 0xa1]);
@@ -1076,11 +1191,11 @@ mod korean_input_tests {
         let mut input = InputMethod::new();
         input.set_current_mode(3);
 
-        input.handle_input(b'1' as i8, 2);
-        let next = input.handle_input(b'2' as i8, 2);
+        input.press(b'1' as i8, 2);
+        let next = input.press(b'2' as i8, 2);
         assert_ne!(next.output0_len, 0);
 
-        let clear = input.handle_input(-16, 2);
+        let clear = input.press(-16, 2);
         assert!(clear.handled);
         assert_eq!(clear.output0_len, 0);
         assert_eq!(clear.output1_len, 0);
