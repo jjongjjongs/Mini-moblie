@@ -48,31 +48,33 @@ KTF title's heap growing is what the reference does too.
 
 | area | count | what a call does today |
 |---|---|---|
-| KTF WIPI-C table slots | 168 | `WieError::Unimplemented` - kills the title |
+| KTF WIPI-C table slots | 112 | `WieError::Unimplemented` - kills the title |
 | `wie_wipi_c` stubs | 17 | logs and answers benignly |
 | WIPI-Java stubs | 53 | logs and answers benignly |
 | SK-VM / SKT stubs | 20 | logs and answers benignly |
 
 The KTF row is the serious one, because those abort rather than answer.
 
-### KTF: 65 of the 168 are already implemented
+### KTF: 65 were already implemented, and are now wired
 
-`wie_wipi_c` implements these and LGT wires them; KTF's table does not.
+`wie_wipi_c` implemented these and LGT wired them; KTF's table did not, so a
+title calling one died on the call. Wiring was mechanical - each aborting slot
+already carried the name of the function it should call, e.g.
+`gen_stub(3, "MC_netSocketConnect")` beside `net::socket_connect`.
 
-| module | implemented | KTF wires | LGT wires |
+| module | implemented | KTF wired | KTF wires now |
 |---|---|---|---|
-| net | 35 | 3 | 33 |
+| net | 35 | 3 | 30 |
 | uic | 43 | 10 | 43 |
-| database | 29 | 9 | 13 |
-| media | 25 | 14 | 15 |
-| graphics | 44 | 32 | 44 |
 | util | 6 | 1 | 6 |
-| kernel | 18 | 18 | 17 |
 
-Wiring them is mechanical: each aborting slot already carries the name of the
-function it should call, e.g. `gen_stub(3, "MC_netSocketConnect")` next to
-`net::socket_connect`. The remaining 103 are OEM extensions (`OEMC_knl*` 19,
-`OEMC_grp*` 16, `MC_mdaUnk*` 13) with no implementation anywhere.
+That leaves 112 aborting slots, of which 35 name a non-OEM API we do not
+implement anywhere: the shared-buffer and program-control halves of the kernel
+(`MC_knlCreateSharedBuf`, `MC_knlExecute`, `MC_knlLoad`, ...), five database
+queries, seven graphics calls (`MC_grpDrawPolygon`, `MC_grpDrawUnicodeString`,
+`MC_grpEncodeImage`, ...), the five-call input-method family (`MC_imHandleInput`
+and friends - LGT has its own), and the three LED calls. The rest are OEM
+extensions (`OEMC_knl*`, `OEMC_grp*`, `MC_mdaUnk*`).
 
 The reference implements the same APIs - its shared WIPI runtime dispatches
 `dispatchUIC`, `dispatchNetwork` and `dispatchUtility` by index - so these are
