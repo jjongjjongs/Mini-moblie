@@ -39,6 +39,9 @@ struct DatabaseHandle {
     buffer_ptr: u32,
     buffer_len: u32,
     buffer_capacity: u32,
+    /// The mode `MC_dbOpenDataBase` was called with, kept so
+    /// `MC_dbGetAccessMode` can report what the title itself asked for.
+    mode: u32,
 }
 
 const MIN_BUFFER_CAPACITY: u32 = 64;
@@ -196,6 +199,7 @@ pub async fn open_database(context: &mut dyn WIPICContext, ptr_name: WIPICWord, 
         buffer_ptr: 0,
         buffer_len: 0,
         buffer_capacity: 0,
+        mode: mode as u32,
     };
     handle.name[..name_bytes.len()].copy_from_slice(name_bytes);
 
@@ -1660,6 +1664,148 @@ pub async fn exists_database_ktf(context: &mut dyn WIPICContext, name_ptr: WIPIC
 /// Returns `Ok(None)` for any pointer that's obviously not a handle —
 /// out-of-range, missing the magic sentinel — so callers can return
 /// `M_E_INVALIDHANDLE` instead of panicking on garbage input.
+/// KTF `MC_dbGetNumberOfRecords(handle)`.
+///
+/// The count is the one `MC_dbListRecords` would list, so a title that asks how
+/// many there are and then asks for them gets two answers that agree. KTF's
+/// database is a single stream record, so in practice this is 1 once anything
+/// has been written and 0 before that.
+pub async fn get_number_of_records_ktf(context: &mut dyn WIPICContext, db_id: i32) -> Result<i32> {
+    tracing::debug!("MC_dbGetNumberOfRecords({db_id:#x}) [KTF]");
+
+    let Some(db) = get_database_from_db_id(context, db_id).await? else {
+        return Ok(-25); // M_E_INVALIDHANDLE
+    };
+
+    Ok(db.get_record_ids().await.len() as i32)
+}
+
+/// KTF `MC_dbGetRecordSize(handle)`.
+///
+/// KTF's database is one record read and written as a byte stream, so its size
+/// is how many bytes that stream holds. The handle's mirror is the answer rather
+/// than the stored record because the two are kept equal - `stream_write` writes
+/// through on every call - and the mirror is what a read would return.
+pub async fn get_record_size_ktf(context: &mut dyn WIPICContext, db_id: i32) -> Result<i32> {
+    tracing::debug!("MC_dbGetRecordSize({db_id:#x}) [KTF]");
+
+    let Some(handle) = load_handle(context, db_id)? else {
+        return Ok(-25); // M_E_INVALIDHANDLE
+    };
+
+    Ok(handle.buffer_len as i32)
+}
+
+/// KTF `MC_dbGetAccessMode`.
+///
+/// Takes either an open handle or a database name, the way KTF's slot 6 does:
+/// both arrive as one word through the same SVC argument, and a handle is
+/// recognised by the magic this runtime writes at the front of it. Nothing we
+/// have says which of the two KTF passes here - LGT's native takes the name -
+/// so both are answered rather than one guessed at.
+///
+/// A handle reports the mode its `MC_dbOpenDataBase` asked for, which is what
+/// the title itself chose. A name reports 1 when a database of that name exists,
+/// the same collapsed single-namespace answer the LGT path gives, and -12 when
+/// it does not.
+pub async fn get_access_mode_ktf(context: &mut dyn WIPICContext, arg: WIPICWord) -> Result<i32> {
+    tracing::debug!("MC_dbGetAccessMode({arg:#x}) [KTF]");
+
+    if arg == 0 {
+        return Ok(-9); // M_E_INVALID
+    }
+
+    if let Some(handle) = load_handle(context, arg as i32)? {
+        return Ok(handle.mode as i32);
+    }
+
+    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, arg)?) else {
+        return Ok(-22);
+    };
+
+    if read_packaged_database(context, &name).await?.is_some() {
+        return Ok(1);
+    }
+
+    let system = context.system();
+    let pid = system.pid().to_owned();
+
+    if system.platform().database_repository().exists(&name, &pid).await {
+        Ok(1)
+    } else {
+        Ok(-12) // M_E_NOENT
+    }
+}
+
+/// KTF `MC_dbSortRecords(handle, ...)`.
+///
+/// Reorders the records of a database. KTF's database holds one stream record,
+/// and one record is already in order, so this succeeds without calling the
+/// comparator it was handed - which is the same result sorting would reach, not
+/// a stand-in for it. A database that somehow holds more says so in the log,
+/// because then the answer would be a claim rather than a fact.
+///
+/// Only the handle is read. The comparator and whatever else follows it are left
+/// alone, so nothing here depends on an argument shape no title we have pins
+/// down.
+pub async fn sort_records_ktf(context: &mut dyn WIPICContext, db_id: i32) -> Result<i32> {
+    tracing::debug!("MC_dbSortRecords({db_id:#x}) [KTF]");
+
+    let Some(db) = get_database_from_db_id(context, db_id).await? else {
+        return Ok(-25); // M_E_INVALIDHANDLE
+    };
+
+    let count = db.get_record_ids().await.len();
+    if count > 1 {
+        tracing::warn!("MC_dbSortRecords: {count} records left in the order they are in");
+    }
+
+    Ok(0)
+}
+
+/// KTF `MC_dbListDataBase(output, capacity)`.
+///
+/// Writes the databases this title has, as NUL-terminated names with one more
+/// NUL after the last, and answers how many there were. A buffer that cannot
+/// hold them is refused with `M_E_SHORTBUF` and left untouched, so a title that
+/// sizes its buffer from the failure and asks again gets the whole list.
+pub async fn list_databases_ktf(context: &mut dyn WIPICContext, output: WIPICWord, capacity: i32) -> Result<i32> {
+    tracing::debug!("MC_dbListDataBase({output:#x}, {capacity}) [KTF]");
+
+    if output == 0 || capacity <= 0 {
+        return Ok(-9); // M_E_INVALID
+    }
+
+    let system = context.system();
+    let pid = system.pid().to_owned();
+    let mut names = system.platform().database_repository().list(&pid).await;
+
+    // The repository's order is whatever its backing store iterates in, which
+    // differs between a map and a host filesystem. A title that lists twice
+    // should see the same list both times.
+    names.sort();
+    names.dedup();
+
+    let required: usize = names.iter().map(|name| name.as_bytes().len() + 1).sum::<usize>() + 1;
+    if required > capacity as usize {
+        tracing::debug!("MC_dbListDataBase: {} names need {required} bytes, was given {capacity}", names.len());
+
+        return Ok(-18); // M_E_SHORTBUF
+    }
+
+    let mut cursor = 0u32;
+    for name in &names {
+        let bytes = name.as_bytes();
+        context.write_bytes(output.wrapping_add(cursor), bytes)?;
+        cursor = cursor.wrapping_add(bytes.len() as u32);
+        context.write_bytes(output.wrapping_add(cursor), &[0])?;
+        cursor = cursor.wrapping_add(1);
+    }
+    context.write_bytes(output.wrapping_add(cursor), &[0])?;
+
+    Ok(names.len() as i32)
+}
+
 fn load_handle(context: &mut dyn WIPICContext, db_id: i32) -> Result<Option<DatabaseHandle>> {
     if db_id < 0x10000 {
         return Ok(None);
@@ -1707,10 +1853,11 @@ mod tests {
     use crate::context::test::TestContext;
 
     use super::{
-        LgtDatabaseMetadata, close_database_lgt, delete_database, delete_database_lgt, delete_record_lgt, exists_database, get_access_mode_lgt,
-        get_number_of_records_lgt, get_record_size_lgt, insert_record_lgt, list_databases_lgt, list_record_info, list_records_lgt, load_handle,
-        load_lgt_metadata, open_database, open_database_lgt, open_db_for_handle, select_record, select_record_lgt, sort_records_lgt,
-        store_lgt_metadata, stream_read, stream_write, update_record, update_record_lgt,
+        LgtDatabaseMetadata, close_database_lgt, delete_database, delete_database_lgt, delete_record_lgt, exists_database, get_access_mode_ktf,
+        get_access_mode_lgt, get_number_of_records_ktf, get_number_of_records_lgt, get_record_size_ktf, get_record_size_lgt, insert_record_lgt,
+        list_databases_ktf, list_databases_lgt, list_record, list_record_info, list_records_lgt, load_handle, load_lgt_metadata, open_database,
+        open_database_lgt, open_db_for_handle, select_record, select_record_lgt, sort_records_ktf, sort_records_lgt, store_lgt_metadata, stream_read,
+        stream_write, update_record, update_record_lgt,
     };
 
     #[futures_test::test]
@@ -2611,6 +2758,106 @@ mod tests {
         let mut data = [0; 9];
         context.read_bytes(0x2000, &mut data).unwrap();
         assert_eq!(&data, b"seed-data");
+    }
+
+    /// KTF's stream database counts as one record once it holds anything, and
+    /// the count agrees with the record list a title would read next.
+    #[futures_test::test]
+    async fn ktf_counts_the_records_it_would_list() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"save\0").unwrap();
+
+        let db_id = open_database(&mut context, 0x1000, 4, 0).await.unwrap();
+        assert!(db_id > 0);
+        assert_eq!(get_number_of_records_ktf(&mut context, db_id).await.unwrap(), 0);
+
+        context.write_bytes(0x2000, b"12345678").unwrap();
+        assert_eq!(stream_write(&mut context, db_id, 0x2000, 8).await.unwrap(), 8);
+
+        assert_eq!(get_number_of_records_ktf(&mut context, db_id).await.unwrap(), 1);
+        assert_eq!(list_record(&mut context, db_id, 0x3000, 64).await.unwrap(), 1);
+    }
+
+    /// The record size is how many bytes the stream holds, and it grows with
+    /// what is written.
+    #[futures_test::test]
+    async fn ktf_reports_the_size_of_the_stream() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"save\0").unwrap();
+
+        let db_id = open_database(&mut context, 0x1000, 4, 0).await.unwrap();
+        assert_eq!(get_record_size_ktf(&mut context, db_id).await.unwrap(), 0);
+
+        context.write_bytes(0x2000, b"12345678").unwrap();
+        stream_write(&mut context, db_id, 0x2000, 8).await.unwrap();
+
+        assert_eq!(get_record_size_ktf(&mut context, db_id).await.unwrap(), 8);
+    }
+
+    /// A handle that is not one is refused rather than read as a struct.
+    #[futures_test::test]
+    async fn ktf_refuses_a_word_that_is_not_a_handle() {
+        let mut context = database_test_context();
+
+        assert_eq!(get_number_of_records_ktf(&mut context, 0x2000).await.unwrap(), -25);
+        assert_eq!(get_record_size_ktf(&mut context, 0x2000).await.unwrap(), -25);
+        assert_eq!(sort_records_ktf(&mut context, 0x2000).await.unwrap(), -25);
+    }
+
+    /// The access mode answers both shapes: a handle reports what the title
+    /// opened it with, a name reports whether such a database is there.
+    #[futures_test::test]
+    async fn ktf_access_mode_answers_a_handle_and_a_name() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"save\0").unwrap();
+
+        let db_id = open_database(&mut context, 0x1000, 4, 0).await.unwrap();
+        assert_eq!(get_access_mode_ktf(&mut context, db_id as u32).await.unwrap(), 4);
+
+        // The same name, now that the database exists, and one that does not.
+        assert_eq!(get_access_mode_ktf(&mut context, 0x1000).await.unwrap(), 1);
+
+        context.write_bytes(0x1100, b"nothing\0").unwrap();
+        assert_eq!(get_access_mode_ktf(&mut context, 0x1100).await.unwrap(), -12);
+
+        assert_eq!(get_access_mode_ktf(&mut context, 0).await.unwrap(), -9);
+    }
+
+    /// Sorting one record succeeds without a comparator, because one record is
+    /// already sorted.
+    #[futures_test::test]
+    async fn ktf_sorting_one_record_succeeds() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"save\0").unwrap();
+
+        let db_id = open_database(&mut context, 0x1000, 4, 0).await.unwrap();
+        context.write_bytes(0x2000, b"12345678").unwrap();
+        stream_write(&mut context, db_id, 0x2000, 8).await.unwrap();
+
+        assert_eq!(sort_records_ktf(&mut context, db_id).await.unwrap(), 0);
+        assert_eq!(get_record_size_ktf(&mut context, db_id).await.unwrap(), 8);
+    }
+
+    /// The database list is names and terminators, counted, and a buffer too
+    /// small is refused rather than half-filled.
+    #[futures_test::test]
+    async fn ktf_lists_the_databases_it_has() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"alpha\0").unwrap();
+        open_database(&mut context, 0x1000, 4, 0).await.unwrap();
+        context.write_bytes(0x1100, b"beta\0").unwrap();
+        open_database(&mut context, 0x1100, 4, 0).await.unwrap();
+
+        // "alpha\0beta\0\0" is 12 bytes; one less is refused.
+        assert_eq!(list_databases_ktf(&mut context, 0x3000, 11).await.unwrap(), -18);
+
+        assert_eq!(list_databases_ktf(&mut context, 0x3000, 12).await.unwrap(), 2);
+        let mut listed = [0u8; 12];
+        context.read_bytes(0x3000, &mut listed).unwrap();
+        assert_eq!(&listed, b"alpha\0beta\0\0");
+
+        assert_eq!(list_databases_ktf(&mut context, 0, 12).await.unwrap(), -9);
+        assert_eq!(list_databases_ktf(&mut context, 0x3000, 0).await.unwrap(), -9);
     }
 
     fn database_test_context() -> TestContext {

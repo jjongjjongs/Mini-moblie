@@ -48,7 +48,7 @@ KTF title's heap growing is what the reference does too.
 
 | area | count | what a call does today |
 |---|---|---|
-| KTF WIPI-C table slots | 84 | `WieError::Unimplemented` - kills the title |
+| KTF WIPI-C table slots | 77 | `WieError::Unimplemented` - kills the title |
 | `wie_wipi_c` stubs | 17 | logs and answers benignly |
 | WIPI-Java stubs | 53 | logs and answers benignly |
 | SK-VM / SKT stubs | 20 | logs and answers benignly |
@@ -112,16 +112,39 @@ reference's string table carries exactly `EN/S\0EN/L\0N123\0KO\0` beside its
 `setCurrentMode(I)Z`, and the shared UIC text component KTF already runs cycles
 modes modulo 4.
 
-That leaves 7 non-OEM names with no implementation:
+**Database** (`MC_dbGetAccessMode`, `MC_dbGetNumberOfRecords`,
+`MC_dbGetRecordSize`, `MC_dbSortRecords`, `MC_dbListDataBase`) has `*_lgt`
+variants, but they read LGT's own `.idx`-equivalent metadata, which a KTF
+database does not have - they would answer -1 for every KTF handle. So these are
+`*_ktf` variants written against KTF's own model, which is one record read and
+written as a byte stream: the record count is the one `MC_dbListRecords` would
+list, the record size is how many bytes that stream holds, and sorting one record
+succeeds without a comparator because one record is already sorted.
+`MC_dbGetAccessMode` takes either an open handle or a name - both arrive as one
+word, and a handle is recognised by the magic this runtime writes at the front of
+it, the same trick KTF's slot 6 already needed - so neither reading of the ABI
+has to be guessed at.
 
-- **Database** (`MC_dbGetAccessMode`, `MC_dbGetNumberOfRecords`,
-  `MC_dbGetRecordSize`, `MC_dbSortRecords`, `MC_dbListDataBase`). Four exist as
-  `*_lgt` variants, but those carry LGT native's own answers - a 123-byte name
-  limit, `-9`/`-22` error codes - so wiring them to KTF would assert KTF native
-  agrees.
-- **Graphics** (`MC_grpDrawUnicodeString`, `MC_grpEncodeImage`) - real work.
+**Graphics** (`MC_grpDrawUnicodeString`, `MC_grpEncodeImage`) was the real work
+of the four groups. The first is `MC_grpDrawString` reading UCS-2 instead of
+EUC-KR; both now share one drawing path, and `MC_grpGetUnicodeStringWidth` was
+already there to measure with.
 
-The rest are OEM extensions (`OEMC_knl*`, `OEMC_grp*`, `MC_mdaUnk*`).
+`MC_grpEncodeImage`'s contract came out of the reference emulator's
+`ktf.ktfWIPICGraphicsEncodeImage`, disassembled: six arguments
+`(src, x, y, w, h, out_len)`; `*out_len` cleared before anything else and written
+again only on success; `x`/`y` not negative, `w`/`h` positive, and `x + w` /
+`y + h` inside the framebuffer; `image/bmp` as the encoding; empty or past 32 MiB
+refused; and on success a freshly allocated guest buffer whose address is the
+return value. The BMP is 24-bit bottom-up BGR by the same rules as
+`org.kwis.msp.lcdui.Graphics.encodeImage`, which was derived from the same native
+encoder - so a title that saves a screenshot through either door gets the same
+file.
+
+What is left in KTF's table is OEM extensions (`OEMC_knl*`, `OEMC_grp*`) and
+slots whose names nobody has recovered - `MC_knlReserved2..13`, `MC_dbUnk13..15`,
+`MC_mdaUnk*`. Every standard call in it that has a name is answered; the rest
+cannot be written until a title reaches one and says what it wanted.
 
 The reference implements the same APIs - its shared WIPI runtime dispatches
 `dispatchUIC`, `dispatchNetwork` and `dispatchUtility` by index - so these are

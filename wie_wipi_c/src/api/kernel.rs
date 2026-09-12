@@ -641,7 +641,7 @@ pub async fn get_access_level(context: &mut dyn WIPICContext) -> Result<i32> {
 
 #[cfg(test)]
 mod test {
-    use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
+    use alloc::{boxed::Box, string::String, sync::Arc};
     use core::sync::atomic::{AtomicBool, Ordering};
 
     use test_utils::{TestPlatform, TestPlatformEvent};

@@ -190,7 +190,7 @@ mod tests {
 
     use wipi_types::wipic::WIPICWord;
 
-    use crate::{WIPICContext, context::test::TestContext};
+    use crate::context::test::TestContext;
 
     use super::{get_current_mode, get_support_mode_count, get_supported_modes, handle_input, provider_key, set_current_mode};
 

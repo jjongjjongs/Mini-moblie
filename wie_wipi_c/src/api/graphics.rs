@@ -1401,6 +1401,37 @@ pub async fn draw_string(
     tracing::debug!("MC_grpDrawString({:#x}, {x}, {y}, {ptr_string:#x}, {length}, {pgc:#x})", dst.0);
 
     let string = read_wipi_string(context, ptr_string, length)?;
+
+    draw_text(context, dst, x, y, &string, pgc).await
+}
+
+/// `MC_grpDrawUnicodeString(dst, x, y, ustr, len, pgc)` - the UCS-2 counterpart
+/// to `MC_grpDrawString`.
+///
+/// The same text in the same face; only how the title spells it differs.
+/// `MC_grpGetUnicodeStringWidth` already measures these, so a title that lays
+/// out Unicode text and then draws it now gets both halves.
+pub async fn draw_unicode_string(
+    context: &mut dyn WIPICContext,
+    dst: WIPICIndirectPtr,
+    x: i32,
+    y: i32,
+    ptr_string: WIPICWord,
+    length: i32,
+    pgc: WIPICWord,
+) -> Result<()> {
+    tracing::debug!("MC_grpDrawUnicodeString({:#x}, {x}, {y}, {ptr_string:#x}, {length}, {pgc:#x})", dst.0);
+
+    let string = read_wipi_unicode_string(context, ptr_string, length)?;
+
+    draw_text(context, dst, x, y, &string, pgc).await
+}
+
+/// Draws text into a framebuffer in the face the graphics context selected.
+///
+/// Shared by the byte-string and the UCS-2 call, which differ only in how the
+/// characters were spelled in guest memory.
+async fn draw_text(context: &mut dyn WIPICContext, dst: WIPICIndirectPtr, x: i32, y: i32, string: &str, pgc: WIPICWord) -> Result<()> {
     if string.is_empty() {
         return Ok(());
     }
@@ -1423,7 +1454,7 @@ pub async fn draw_string(
     // size for is drawn - and measured - in that size.
     if let Some(face) = bitmap_font::face_for_height(gctx.font) {
         let mut canvas = framebuffer.canvas(context)?;
-        draw_bitmap_string(&mut **canvas, &face, &string, x, y, color, clip);
+        draw_bitmap_string(&mut **canvas, &face, string, x, y, color, clip);
         canvas.flush()?;
 
         return Ok(());
@@ -1434,7 +1465,7 @@ pub async fn draw_string(
     let baseline = font_ascent_px(font_height);
 
     let mut canvas = framebuffer.canvas(context)?;
-    canvas.draw_text(&string, x, y, font_height, baseline, TextAlignment::Left, color, clip);
+    canvas.draw_text(string, x, y, font_height, baseline, TextAlignment::Left, color, clip);
 
     // `flush` writes back only the glyph pixels themselves (see write_diff), so
     // a background the title blitted straight into this buffer shows through the
@@ -1442,6 +1473,137 @@ pub async fn draw_string(
     canvas.flush()?;
 
     Ok(())
+}
+
+/// The largest encoding the reference will hand back, and the same limit here.
+const MAX_ENCODED_IMAGE_BYTES: usize = 0x0200_0000;
+
+/// `MC_grpEncodeImage(src, x, y, w, h, out_len)` - a rectangle of a framebuffer
+/// as an image file.
+///
+/// Answers the address of a freshly allocated guest buffer holding the encoded
+/// bytes and writes their length through `out_len`, or 0 when it cannot, in
+/// which case the length it already cleared stays 0. The buffer is the title's
+/// to free.
+///
+/// The contract is the reference emulator's, read out of
+/// `ktf.ktfWIPICGraphicsEncodeImage`: six arguments; `*out_len` is cleared
+/// before anything else and only written again on success; `x` and `y` must not
+/// be negative, `w` and `h` must be positive, and `x + w` / `y + h` must stay
+/// inside the framebuffer; the encoding is `image/bmp`; and an empty result, or
+/// one past 32 MiB, is refused.
+///
+/// The BMP itself is 24-bit bottom-up BGR with rows padded to four bytes,
+/// written by the same rules as `org.kwis.msp.lcdui.Graphics.encodeImage`, which
+/// was derived from the same native encoder - so a title that saves a screenshot
+/// through either door gets the same file.
+pub async fn encode_image(
+    context: &mut dyn WIPICContext,
+    src: WIPICIndirectPtr,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    out_len: WIPICWord,
+) -> Result<WIPICIndirectPtr> {
+    tracing::debug!("MC_grpEncodeImage({:#x}, {x}, {y}, {width}, {height}, {out_len:#x})", src.0);
+
+    // Cleared first, so a caller that only reads the length sees 0 on every
+    // failure below without this having to remember to write it again.
+    if out_len != 0 {
+        write_generic(context, out_len, 0u32)?;
+    }
+
+    if src.0 == 0 {
+        return Ok(WIPICIndirectPtr(0));
+    }
+
+    let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(src)?)?);
+
+    if x < 0 || y < 0 || width <= 0 || height <= 0 {
+        return Ok(WIPICIndirectPtr(0));
+    }
+
+    let right = (x as i64) + width as i64;
+    let bottom = (y as i64) + height as i64;
+    if right > framebuffer.0.width as i64 || bottom > framebuffer.0.height as i64 {
+        return Ok(WIPICIndirectPtr(0));
+    }
+
+    // `image` has no answer for anything but 16- and 32-bit pixels, and a title
+    // asking about a framebuffer it built some other way should be told no
+    // rather than bringing the run down.
+    if framebuffer.0.bpp != 16 && framebuffer.0.bpp != 32 {
+        tracing::warn!("MC_grpEncodeImage: nothing to encode from a {}-bit framebuffer", framebuffer.0.bpp);
+
+        return Ok(WIPICIndirectPtr(0));
+    }
+
+    let encoded = encode_bmp(&*framebuffer.image(context)?, x, y, width as usize, height as usize);
+    if encoded.is_empty() || encoded.len() > MAX_ENCODED_IMAGE_BYTES {
+        return Ok(WIPICIndirectPtr(0));
+    }
+
+    let memory = context.alloc(encoded.len() as WIPICWord)?;
+    let address = context.data_ptr(memory)?;
+    context.write_bytes(address, &encoded)?;
+
+    if out_len != 0 {
+        write_generic(context, out_len, encoded.len() as u32)?;
+    }
+
+    tracing::debug!("MC_grpEncodeImage -> {address:#x}, {} bytes", encoded.len());
+
+    Ok(memory)
+}
+
+/// A rectangle of an image as a 24-bit BMP file.
+///
+/// Bottom-up with four-byte row padding, and the 16-bit source channels widened
+/// by masking rather than by replicating their low bits - which is what the
+/// native encoder does, and what the WIPI-Java `encodeImage` here already did.
+fn encode_bmp(image: &dyn Image, x: i32, y: i32, width: usize, height: usize) -> Vec<u8> {
+    let row_stride = (width * 3 + 3) & !3;
+    let image_size = row_stride * height;
+    let file_size = image_size + 54;
+
+    let mut out = vec![0u8; file_size];
+
+    // BITMAPFILEHEADER
+    out[0] = b'B';
+    out[1] = b'M';
+    out[2..6].copy_from_slice(&(file_size as u32).to_le_bytes());
+    out[10..14].copy_from_slice(&54u32.to_le_bytes());
+
+    // BITMAPINFOHEADER
+    out[14..18].copy_from_slice(&40u32.to_le_bytes());
+    out[18..22].copy_from_slice(&(width as i32).to_le_bytes());
+    out[22..26].copy_from_slice(&(height as i32).to_le_bytes());
+    out[26..28].copy_from_slice(&1u16.to_le_bytes());
+    out[28..30].copy_from_slice(&24u16.to_le_bytes());
+    out[30..34].copy_from_slice(&0u32.to_le_bytes());
+    out[34..38].copy_from_slice(&(image_size as u32).to_le_bytes());
+
+    for output_row in 0..height {
+        let source_y = y + (height - 1 - output_row) as i32;
+        let destination_row = 54 + output_row * row_stride;
+
+        for column in 0..width {
+            let source_x = x + column as i32;
+            if source_x < 0 || source_y < 0 || source_x as u32 >= image.width() || source_y as u32 >= image.height() {
+                continue;
+            }
+
+            let pixel = image.get_pixel(source_x, source_y);
+
+            let destination = destination_row + column * 3;
+            out[destination] = pixel.b & 0xf8;
+            out[destination + 1] = pixel.g & 0xfc;
+            out[destination + 2] = pixel.r & 0xf8;
+        }
+    }
+
+    out
 }
 
 pub async fn repaint(context: &mut dyn WIPICContext, lcd: i32, x: i32, y: i32, width: i32, height: i32) -> Result<()> {
@@ -1793,7 +1955,121 @@ mod tests {
 
     use super::WIPICGraphicsContextIdx as Idx;
     use super::{destination_stride, get_context, init_context, set_context, surface_content, surface_thumbnail};
-    use crate::context::test::TestContext;
+    use crate::context::{WIPICContext, test::TestContext};
+
+    /// A framebuffer of `pixels` (ARGB, row-major) as the guest holds one: the
+    /// indirect pointer a WIPI-C call is handed.
+    async fn framebuffer_of(context: &mut TestContext, width: u32, height: u32, pixels: &[u32]) -> super::WIPICIndirectPtr {
+        let image = VecImageBuffer::<ArgbPixel>::from_raw(width, height, pixels.to_vec());
+        let framebuffer = super::FrameBuffer::from_image(context, &image).unwrap();
+
+        let handle = context.alloc(core::mem::size_of::<wipi_types::wipic::WIPICFramebuffer>() as u32).unwrap();
+        let address = context.data_ptr(handle).unwrap();
+        write_generic(context, address, framebuffer.0).unwrap();
+
+        handle
+    }
+
+    fn test_context() -> TestContext {
+        use alloc::boxed::Box;
+        use test_utils::TestPlatform;
+        use wie_backend::{DefaultTaskRunner, System};
+
+        TestContext::with_system(System::new(Box::new(TestPlatform::new()), "test-pid", "test-aid", DefaultTaskRunner))
+    }
+
+    /// The encoding is a 24-bit bottom-up BMP of the rectangle asked for, and
+    /// the length comes back through the pointer beside it.
+    #[futures_test::test]
+    async fn an_encoded_image_is_a_bottom_up_bmp() {
+        let mut context = test_context();
+
+        // Two rows: white on top, red underneath.
+        let framebuffer = framebuffer_of(&mut context, 2, 2, &[0xffff_ffff, 0xffff_ffff, 0xfff8_0000, 0xfff8_0000]).await;
+
+        let encoded_buffer = super::encode_image(&mut context, framebuffer, 0, 0, 2, 2, 0x100).await.unwrap();
+        assert_ne!(encoded_buffer.0, 0);
+
+        let length: u32 = read_generic(&context, 0x100).unwrap();
+        // 54-byte header, rows of 2 pixels padded from 6 to 8 bytes.
+        assert_eq!(length, 54 + 8 * 2);
+
+        let mut encoded = alloc::vec![0u8; length as usize];
+        let data = context.data_ptr(encoded_buffer).unwrap();
+        wie_util::ByteRead::read_bytes(&context, data, &mut encoded).unwrap();
+
+        assert_eq!(&encoded[..2], b"BM");
+        assert_eq!(u32::from_le_bytes(encoded[10..14].try_into().unwrap()), 54);
+        assert_eq!(i32::from_le_bytes(encoded[18..22].try_into().unwrap()), 2);
+        assert_eq!(i32::from_le_bytes(encoded[22..26].try_into().unwrap()), 2);
+        assert_eq!(u16::from_le_bytes(encoded[28..30].try_into().unwrap()), 24);
+
+        // Bottom-up: the first stored row is the red one, written BGR.
+        assert_eq!(&encoded[54..60], &[0x00, 0x00, 0xf8, 0x00, 0x00, 0xf8]);
+        // And the last is the white one.
+        assert_eq!(&encoded[62..68], &[0xf8, 0xfc, 0xf8, 0xf8, 0xfc, 0xf8]);
+    }
+
+    /// Every way the reference refuses answers 0 and leaves the length at 0,
+    /// so a caller that only reads the length is not told a size it cannot
+    /// trust.
+    #[futures_test::test]
+    async fn a_rectangle_that_does_not_fit_is_refused() {
+        let mut context = test_context();
+        let framebuffer = framebuffer_of(&mut context, 2, 2, &[0xffff_ffff; 4]).await;
+
+        for (x, y, width, height) in [(-1, 0, 2, 2), (0, -1, 2, 2), (0, 0, 0, 2), (0, 0, 2, 0), (1, 0, 2, 2), (0, 1, 2, 2)] {
+            write_generic(&mut context, 0x100, 0xffff_ffffu32).unwrap();
+
+            assert_eq!(
+                super::encode_image(&mut context, framebuffer, x, y, width, height, 0x100)
+                    .await
+                    .unwrap()
+                    .0,
+                0
+            );
+
+            let length: u32 = read_generic(&context, 0x100).unwrap();
+            assert_eq!(length, 0, "{x},{y} {width}x{height}");
+        }
+    }
+
+    /// The same text spelled either way paints the same pixels, so a title that
+    /// lays out Unicode gets what the byte-string call would have given it.
+    #[futures_test::test]
+    async fn unicode_text_paints_what_the_byte_string_call_paints() {
+        let mut context = test_context();
+
+        let pgc = 0x200;
+        init_context(&mut context, pgc).await.unwrap();
+
+        let byte_string = 0x300;
+        wie_util::ByteWrite::write_bytes(&mut context, byte_string, b"Hi\0").unwrap();
+        let unicode_string = 0x400;
+        wie_util::ByteWrite::write_bytes(&mut context, unicode_string, &[b'H', 0, b'i', 0, 0, 0]).unwrap();
+
+        let drawn_as_bytes = framebuffer_of(&mut context, 32, 16, &[0xff00_0000; 32 * 16]).await;
+        super::draw_string(&mut context, drawn_as_bytes, 0, 0, byte_string, -1, pgc)
+            .await
+            .unwrap();
+
+        let drawn_as_unicode = framebuffer_of(&mut context, 32, 16, &[0xff00_0000; 32 * 16]).await;
+        super::draw_unicode_string(&mut context, drawn_as_unicode, 0, 0, unicode_string, -1, pgc)
+            .await
+            .unwrap();
+
+        let from_bytes = super::FrameBuffer(read_generic(&context, context.data_ptr(drawn_as_bytes).unwrap()).unwrap())
+            .data(&context)
+            .unwrap();
+        let from_unicode = super::FrameBuffer(read_generic(&context, context.data_ptr(drawn_as_unicode).unwrap()).unwrap())
+            .data(&context)
+            .unwrap();
+
+        assert_eq!(from_bytes, from_unicode);
+        // And something was actually drawn, so the comparison is not of two
+        // empty buffers.
+        assert!(from_bytes.iter().any(|&byte| byte != 0));
+    }
 
     /// A surface with `drawn` pixels of one colour on it and the rest black.
     fn surface_with(width: u32, height: u32, drawn: u32, colour: u32) -> impl Image {
