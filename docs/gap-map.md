@@ -1022,3 +1022,51 @@ than by counting, and this table has it at `0x200` inside a contiguous `MC_db*`
 block from the firmware. Nothing here maps anything near `0x44c`, and adding a
 slot on another platform's numbering is the guess this document keeps refusing;
 if a local title calls it, the report above is what will say so.
+
+## The authentication documents, and what they say about our own open title
+
+Their LGT authentication is the opposite design to ours and says so plainly: **no
+dial, socket or application response is fabricated.** Instead a module is
+recognised by the shape of its own code - connected reader, writer, cipher and
+gate instruction contracts, with resolved literal pointers, and "the filename or
+record length alone never selects this adapter" - and then the *save view* it
+reads back is adjusted, in memory, for that one module. Of 109 local LGT modules
+their scan selects exactly one per adapter and leaves the other 108 alone.
+
+Ours answers the protocol instead: `billing.rs` serves the authentication request
+and the purchase messages a title sends, which is why the shop protocols in this
+repository were reverse-engineered title by title. Neither approach is wrong -
+theirs fabricates nothing and needs a per-module recognition, ours needs no
+recognition and answers anything that speaks the protocol.
+
+**Two of their concrete artefacts were checked here.** The socket slots a dial
+needs, `0x25a` and the `0x7d0` variant, are both served here and distinguished by
+name; theirs resolve and return a failure. Their 58-byte certificate cipher -
+seed `0x21c3`, the recurrence `state * 0x343fd + 0x269ec3`, each byte XORed with
+bits 16-23, subscriber at bytes 40-51 - has no equivalent here, and no local
+archive has presented a record of that shape, so it is written down rather than
+built.
+
+### 게임빌2010슈퍼사커 is not an authentication failure
+
+The one title left open in this repository under "purchase/authentication" was
+measured against this, and the heading was wrong.
+
+- **It never dials.** Zero billing messages and zero socket calls over 3,000
+  ticks. Nothing our local network could answer would reach it.
+- **It runs.** It probes for its save files, writes `SC_option.dat` (2,312 bytes)
+  and `SC_network.dat` (872 bytes), draws its 이용안내 notice, and walks several
+  screens - any key advances one, and every key advances the same one.
+- **It stalls on its own consent dialog.** `<고객정보 활용동의>`, thirteen colours,
+  a scrollbar whose thumb stays at the top. Six presses reach it and no number of
+  further presses moves it.
+- **Input is not the problem.** Ten presses produce twenty `keyNotify` calls - a
+  press and a release each - so the keys reach the guest.
+- **It is not a widget.** Zero `MC_uic*` calls: the title draws that dialog
+  itself.
+- **It is not a first-run case either.** Two launches over one save tree end on
+  the same frame count and the same signature.
+
+So the wall is inside the title's own consent handling, and what that handler is
+waiting for is not yet known. Finding it means reading the module rather than the
+trace - the same method their rounds kept returning to.
