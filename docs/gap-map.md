@@ -1406,3 +1406,41 @@ buffer starts black. Whether the platform's starts otherwise is not established.
 
 Also in the image, for whenever this title gets far enough to need it:
 `UAFT BillSocket://222.231.31.45:22013!BillSocket://210.222.17.233:17004`.
+
+#### 격투가, third pass: both experiments negative
+
+**The reference's frame sequence.** Under `-play -speed 20` it flushes four
+times in 2,000 ticks: tick 1 is the flat white fill, and ticks 574, 1182 and
+1786 are all 18 colours - the splash logo, drawn from the *second* paint on and
+identical each time. Its diagnostic pairs that exactly: `Card.repaint()` 4,
+`Card.serviceRepaints()` 4, `GamePlay.paint` 4, `flush lcd` 4. Every paint there
+is one the guest asked for.
+
+Ours does not pair. The guest calls `Card.repaint()` twice and
+`Card.serviceRepaints()` once; the paints after that are the host's own, from
+the event queue, and there are dozens of them. So the guest asks for one draw
+pass and then stops asking, while we keep painting an empty card over it.
+
+**The font handle is not the cause.** `MC_grpGetFont` returning the size flag,
+the way the reference does, instead of the pixel height of the face we picked:
+no change, still one colour. Reverted.
+
+**The pixel probe is not the cause.** Forcing the one
+`getPixels(0, 0, 1, 1, buf, 0, 4)` to answer `0xff` instead of the zeros a black
+frame buffer gives: no change, still one colour. Reverted. The reference does
+not clear its buffers either - `newWIPICFramebufferRecord` hands back whatever
+the arena held - so there was never a deliberate initial colour to match.
+
+Two claims from the previous pass need correcting. `serviceRepaints` does *not*
+take its `__wiePainting` early return here - the call at that point goes on to
+`handlePaintEvent` and paints, so re-entrancy is not what silences it. And the
+"first paint contains the whole resource load" reading was drawn from line order
+in a log with several threads interleaved: the load runs on the guest's own
+thread while the untagged thread sits in that paint, which is not the same claim
+and does not support it.
+
+What is left, and what the next pass needs, is the condition inside
+`GamePlay.paint` itself. Everything reachable by comparing call counts, call
+order and bridge return values between the two runtimes has now been compared;
+the answer is in the guest's own branch, which means disassembling that method
+rather than watching what it calls.
