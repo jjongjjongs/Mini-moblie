@@ -277,3 +277,36 @@ has already destroyed, where the handle decodes as whatever the arena reissued
 the span to, has no symptom on this corpus; noted rather than chased, and the
 reference's answer if one turns up is to draw nothing for an address
 `MC_knlFree` handed back and keep failing for a handle nothing ever issued.
+
+### The standard library, and why four titles is not the size of a defect
+
+A hand-played sweep of their corpus reported four titles stopping on a class
+library member the link could not find: `Boolean`'s constructor,
+`StringBuffer.append(char[],int,int)`, `String.replace(char,char)` and
+`ByteArrayInputStream`'s protected `buf`. Their point generalises past the four -
+the standard library is what every title links against, so a member missing from
+it is missing for all of them, and which four stopped is which four happened to
+be played far enough.
+
+**All four are present and declared here.** Three of theirs had working bodies
+and no declaration naming them - reachable by native dispatch and invisible to
+compiled code - and eleven were in that state. That state cannot arise in this
+runtime: `JavaMethodProto::new` takes the name, the descriptor and the body
+together, so a body without a declaration is not expressible. The field is
+declared too, and `Boolean.TRUE`, `Boolean.FALSE` and `new Boolean(true)` all
+resolve here, so the class-registration re-entrancy their boxed flag needed - a
+static initializer instantiating the class being built - is not ours either.
+
+**A whole-corpus boot sweep says no title dies on a member.** All 148 local
+uploads were run at 400 ticks, KTF first and LGT for what KTF would not load: 78
+boot and draw a frame, none reports an unresolved method or field, and none stops
+or fails to load. Of the rest, 61 are not game archives at all - logs, source
+bundles, Android platform-tools - and one is real and neither platform's:
+액션퍼즐패밀리 by 컴투스, a MIDP-1.0 MIDlet with no WIPI class in it, which the
+two WIPI probes correctly refuse.
+
+Two caveats on that number, both theirs and both worth keeping. **A boot sweep
+presses nothing**, so it cannot reach a member a title only names a dozen key
+presses in - which is exactly where their four were found. And the MIDlet above
+is a gap of a different kind: `wie_j2me` exists and has no headless probe, so
+that path has no corpus evidence behind it at all.
