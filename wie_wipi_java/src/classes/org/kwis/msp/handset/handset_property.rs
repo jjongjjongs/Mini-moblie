@@ -61,7 +61,7 @@ impl HandsetProperty {
         Ok(0)
     }
 
-    async fn get_system_property(jvm: &Jvm, _: &mut WieJvmContext, name: ClassInstanceRef<String>) -> JvmResult<ClassInstanceRef<String>> {
+    async fn get_system_property(jvm: &Jvm, context: &mut WieJvmContext, name: ClassInstanceRef<String>) -> JvmResult<ClassInstanceRef<String>> {
         let name = JavaLangString::to_rust_string(jvm, &name).await?;
 
         // The subscriber number is recovered from the archive, the same way and
@@ -88,16 +88,16 @@ impl HandsetProperty {
             "VOLUMELEVEL" => "5",
             "DS_LOCK" => "0",
             "PHONENUMBER" => {
-                recovered = Self::subscriber_number(jvm).await;
+                recovered = Self::subscriber_number(jvm, context).await;
                 recovered.as_str()
             }
             // MIN carries the same number, except where the archive's own
             // certificate names one - the WIPI-C side answers from the same
             // certificate, so the two paths still agree.
             "MIN" => {
-                recovered = match Self::handset_identity(jvm).await {
+                recovered = match Self::handset_identity(jvm, context).await {
                     Some(identity) => identity.min,
-                    None => Self::subscriber_number(jvm).await,
+                    None => Self::subscriber_number(jvm, context).await,
                 };
                 recovered.as_str()
             }
@@ -114,29 +114,44 @@ impl HandsetProperty {
     }
 
     /// The subscriber number the archive names, or the shared fallback.
-    async fn subscriber_number(jvm: &Jvm) -> RustString {
-        let cert = Self::resource(jvm, "cert.c2s").await;
-        let certification = Self::resource(jvm, "certification").await;
-        let app_info = Self::resource(jvm, "app_info").await;
+    async fn subscriber_number(jvm: &Jvm, context: &mut WieJvmContext) -> RustString {
+        let cert = Self::resource(jvm, context, "cert.c2s").await;
+        let certification = Self::resource(jvm, context, "certification").await;
+        let app_info = Self::resource(jvm, context, "app_info").await;
 
         subscriber::subscriber_number(cert.as_deref(), certification.as_deref(), app_info.as_deref())
     }
 
     /// The handset identity the archive's own-key `cert.c2s` was issued for, or
     /// `None` when it has no such certificate.
-    async fn handset_identity(jvm: &Jvm) -> Option<subscriber::HandsetIdentity> {
-        subscriber::identity_from_cert(&Self::resource(jvm, "cert.c2s").await?)
+    async fn handset_identity(jvm: &Jvm, context: &mut WieJvmContext) -> Option<subscriber::HandsetIdentity> {
+        subscriber::identity_from_cert(&Self::resource(jvm, context, "cert.c2s").await?)
     }
 
     /// One of the archive's own files, or `None` when it has no such file.
     ///
-    /// Read through the class loader, which is where these archives' files are:
-    /// the WIPI-C side reaches them the same way.
-    async fn resource(jvm: &Jvm, name: &str) -> Option<Vec<u8>> {
-        let class_loader = jvm.current_class_loader().await.ok()?;
-        let stream = JavaLangClassLoader::get_resource_as_stream(jvm, &class_loader, name).await.ok()??;
+    /// Both places an archive can put one are searched, in the order the WIPI-C
+    /// side searches them: the class loader, which is where the files inside
+    /// the `.jar` are, and then the virtual filesystem, which is where an
+    /// emulator mounts the files that sit beside the jar - a KTF archive's
+    /// `P/cert.c2s` among them. Looking in only the first is what would let
+    /// this path and `MC_knlGetSystemProperty` answer a title two different
+    /// numbers for the handset it is running on.
+    async fn resource(jvm: &Jvm, context: &mut WieJvmContext, name: &str) -> Option<Vec<u8>> {
+        if let Ok(class_loader) = jvm.current_class_loader().await
+            && let Ok(Some(stream)) = JavaLangClassLoader::get_resource_as_stream(jvm, &class_loader, name).await
+            && let Ok(data) = JavaIoInputStream::read_until_end(jvm, &stream).await
+        {
+            return Some(data);
+        }
 
-        JavaIoInputStream::read_until_end(jvm, &stream).await.ok()
+        let filesystem = context.system().filesystem();
+        let size = filesystem.size(name).await?;
+        let mut data = vec![0; size];
+        let read = filesystem.read(name, 0, size, &mut data).await?;
+        data.truncate(read);
+
+        Some(data)
     }
 
     async fn set_system_property(_: &Jvm, _: &mut WieJvmContext, id: ClassInstanceRef<String>, value: ClassInstanceRef<String>) -> JvmResult<bool> {
@@ -148,11 +163,11 @@ impl HandsetProperty {
 
 #[cfg(test)]
 mod test {
-    use alloc::boxed::Box;
+    use alloc::{boxed::Box, vec};
 
     use java_runtime::classes::java::lang::String;
     use jvm::{ClassInstanceRef, runtime::JavaLangString};
-    use test_utils::run_jvm_test;
+    use test_utils::{run_jvm_test, run_jvm_test_with_files};
     use wie_util::Result;
 
     use crate::get_protos;
@@ -198,6 +213,43 @@ mod test {
                 .await?;
 
             assert!(!result);
+            Ok(())
+        })
+    }
+
+    /// A KTF archive keeps its `cert.c2s` beside the `.jar`, under `P/`, which
+    /// an emulator mounts in the virtual filesystem with that prefix stripped -
+    /// so the class loader cannot see it and only the filesystem can. The
+    /// WIPI-C side has always looked in both places; this one looked only at
+    /// the class loader, and answered the shared fallback for a title whose
+    /// certificate names a different handset. A title that reads its number
+    /// here and through `MC_knlGetSystemProperty` would then be told two.
+    ///
+    /// The certificate below is the 23-byte KTF layout - eight-character
+    /// application id, the number padded to twelve, and the three-byte trailer -
+    /// sealed with the same table and cipher the LGT one uses.
+    #[test]
+    fn a_certificate_beside_the_jar_still_names_the_handset() -> Result<()> {
+        const KTF_CERT: [u8; 23] = [
+            0x10, 0x91, 0xd6, 0xd3, 0xfc, 0xa8, 0x95, 0x26, 0x56, 0xe5, 0x8a, 0x6d, 0xac, 0x53, 0xe6, 0x85, 0x1b, 0x48, 0xd7, 0x61, 0xe0, 0x11, 0x2d,
+        ];
+
+        run_jvm_test_with_files(Box::new([get_protos().into()]), &[("cert.c2s", KTF_CERT.to_vec())], |jvm| async move {
+            for property in ["PHONENUMBER", "MIN"] {
+                let name: ClassInstanceRef<String> = JavaLangString::from_rust_string(&jvm, property).await?.into();
+                let value: ClassInstanceRef<String> = jvm
+                    .invoke_static(
+                        "org/kwis/msp/handset/HandsetProperty",
+                        "getSystemProperty",
+                        "(Ljava/lang/String;)Ljava/lang/String;",
+                        (name,),
+                    )
+                    .await?;
+
+                let value = JavaLangString::to_rust_string(&jvm, &value.into()).await?;
+                assert_eq!(value, "01012345678", "{property} should name the handset the certificate was issued to");
+            }
+
             Ok(())
         })
     }

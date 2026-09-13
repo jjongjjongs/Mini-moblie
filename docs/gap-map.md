@@ -1107,3 +1107,115 @@ and an LGT or SKT title has no business resolving it, and its number is read bac
 through `HandsetProperty.getSystemProperty("MIN")` rather than recovered a second
 time - one recovery, one answer. Only those two members are served; anything else
 asked of it fails by name, which is the evidence the next round would need.
+
+### One certificate reader for both carriers, and a key it was throwing away
+
+Reading the reference's KTF certificate code to see what "succeed" would have to
+mean on that platform turned up something better than a port: its KTF cipher
+table is byte-for-byte the LGT one this repository already had.
+
+```
+ktf len 256 lgt len 256 identical: True
+```
+
+Same 256-byte table, same `(table[(i + salt) & 0xff] + key[(i + salt) % len]) ^ byte`
+cipher, same `<8-byte application id><subscriber number><three-byte trailer>`
+layout. It is one publisher's SDK and both carriers' titles carry it; only the
+number field's width differs - twelve bytes on KTF against thirteen on LGT, so
+the file is 23 bytes there and 24 here, both holding an eleven-digit number with
+the rest as padding. `subscriber::from_cert` therefore already
+serves KTF - and it needs to, because a KTF title checks its certificate exactly
+the way an LGT one does:
+
+```
+key = handset_number()                       /* the twelve-byte MIN */
+if (!decrypt(data, length - 3, key)) fail
+if (strcmp(plaintext + 0, application_id)) fail
+if (strcmp(plaintext + 8, key)) fail
+```
+
+The reference answers this by **minting** a certificate: it generates one sealed
+with the session's number and keeps it in an in-memory save store that shadows
+the packaged file. This repository answers it by **reading** the number the
+packaged certificate was issued for and reporting that. The title's check then
+passes because it is true - nothing is rewritten, no branch is turned around,
+and the archive is untouched.
+
+Three certificates built with the reference's own encoder (its tests build
+theirs the same way; no archive here packages a KTF certificate to dump) went
+through our reader, and one of the three came back `None`. That was our bug, not
+a KTF quirk. The solver resolves the key one dependency cycle at a time, and it
+required each cycle to have exactly one digit-consistent solution. The ten-digit
+certificate has a cycle with two:
+
+```
+cycle [0, 8, 6, 4, 2] solutions [b'06421', b'17530']
+cycle [1, 9, 7, 5, 3] solutions [b'17531']
+```
+
+Neither is wrong on its own; what tells them apart is the pair of checks the
+title itself applies - the decrypted checksum and the tail-equals-key identity -
+and those are applied to the whole key, after the cycles are combined. So the
+ambiguous cycle was never a dead end, and refusing it discarded a number that
+was fully determined.
+
+`collect_keys` now keeps every cycle's candidates and walks the combinations,
+letting the final verification decide, with `MAX_CANDIDATE_KEYS` capping how far
+a blob may be searched. All four vectors now recover uniquely - the three KTF
+ones and the real 이노티아 연대기 2 certificate that was already here:
+
+| certificate | recovered |
+|---|---|
+| KTF, eleven digits, salt 17 | `01012345678` |
+| KTF, eleven digits, salt 0 | `01046119269` |
+| KTF, ten digits, salt 200 | `0111234567` |
+| LGT 이노티아 연대기 2 (real) | `01046119269` |
+
+The module is renamed `lgt_cert` to `cert_c2s`, since naming it after one
+carrier was what hid the fact that it serves both.
+
+Nothing needed wiring: `wie_ktf::emulator` already strips the archive's `P/`
+prefix into the same virtual filesystem `wie_lgt` uses, so a KTF archive's
+`P/cert.c2s` resolves as `cert.c2s` through the same reader both identity paths
+already call. The one KTF mechanism left unserved is the reference's
+`ktf-subscriber-fallback` - a number embedded in the executable, reached through
+a 64-byte `prefs` record - which no archive here carries and which would need a
+real one to recognise.
+
+### Two ways to ask where a title's own files are, and only one was looking
+
+Serving the certificate is no use if the reader cannot reach it, and on KTF it
+could not. An archive can keep a file in two places - inside the `.jar`, where
+the class loader finds it, and beside the jar under `P/`, which
+`KtfEmulator::load` mounts in the virtual filesystem with the prefix stripped.
+`cert.c2s` is in the second.
+
+`wie_lgt`'s `read_resource` has always looked in both. `wie_ktf`'s looked only
+at the class loader, and then unwrapped what a missing resource answers with:
+
+```rust
+let stream = JavaLangClassLoader::get_resource_as_stream(&self.jvm, &class_loader, name)
+    .await
+    .unwrap()
+    .unwrap();     // <- None for anything the jar does not hold
+```
+
+So a KTF title asking for `PHONENUMBER` did not merely get the wrong number: the
+second unwrap took the emulator down, and `certification` and `app_info` - which
+no KTF archive holds at all - would have done the same. It now searches both and
+reports a missing resource instead of panicking, which is what the LGT side does.
+
+The WIPI-Java side had the quieter half of the same blind spot.
+`HandsetProperty.getSystemProperty` asked only the class loader, so a
+certificate beside the jar was invisible to it and it answered the shared
+fallback - while `MC_knlGetSystemProperty`, reading the same archive, answered
+the certificate's number. Two identity readers, two numbers, which is the exact
+failure this whole area exists to prevent. It now searches both, in the same
+order.
+
+Held to the measurement rather than to the reasoning: reverting the Java change
+alone makes the new test report `01046119269`, the shared fallback, where the
+certificate names `01012345678`.
+
+Not a KTF-only fix. Any LGT archive whose `cert.c2s` sits beside the jar rather
+than inside it was being read through the WIPI-C path and missed by the Java one.

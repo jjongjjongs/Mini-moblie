@@ -1,26 +1,37 @@
-//! Recovery of the LGT ez-i subscriber phone number a title's `cert.c2s` was
-//! issued for.
+//! Recovery of the subscriber phone number a title's `cert.c2s` was issued for.
 //!
-//! LGT ez-i titles authenticate at start-up by reading the subscriber phone
-//! number via `MC_knlGetSystemProperty("PHONENUMBER")` and using it as the key
+//! One publisher's SDK seals this file, and both carriers' titles carry it: the
+//! 256-byte table and the `(table + key) ^ byte` cipher below are the same
+//! bytes on LGT and on KTF, and only the width of the number field differs -
+//! thirteen bytes on LGT against twelve on KTF, so the file is 24 bytes there
+//! and 23 here. One reader serves both.
+//!
+//! A title authenticates at start-up by reading the subscriber phone number -
+//! `MC_knlGetSystemProperty("PHONENUMBER")` on the WIPI-C side,
+//! `HandsetProperty.getSystemProperty` on the Java one - and using it as the key
 //! that decrypts `cert.c2s`. The certificate plaintext is
 //! `<8-byte app id><phone number><checksums>`, so the phone number is both the
 //! key and part of the plaintext. The title decrypts with whatever number the
 //! platform reports and rejects the result (error 3100) unless the recovered
-//! bytes are self-consistent — so the number the emulator returns must match
+//! bytes are self-consistent - so the number the emulator returns must match
 //! the one the certificate was issued for.
+//!
+//! That is the whole approach: report the number the certificate names, and the
+//! title's own check passes because it is true, with nothing rewritten and no
+//! branch turned around.
 //!
 //! Because the plaintext repeats the key (the decrypted tail equals the key)
 //! and the leading app id is a fixed 8-byte field, the number can be recovered
 //! from `cert.c2s` alone, without knowing it in advance: this lets the emulator
 //! serve the correct number per title instead of a hardcoded guess. The
-//! recovery is deliberately conservative — it returns a number only when
+//! recovery is deliberately conservative - it returns a number only when
 //! exactly one candidate satisfies every check the title itself would apply,
 //! and otherwise reports `None` so the caller can fall back.
 
 use alloc::{string::String, vec, vec::Vec};
 
-/// S-box of the LGT ez-i `cert.c2s` stream cipher (a fixed SDK constant).
+/// S-box of the `cert.c2s` stream cipher (a fixed SDK constant, and the same
+/// 256 bytes on both carriers).
 #[rustfmt::skip]
 const SBOX: [u8; 256] = [
     0x8c, 0x0d, 0xae, 0x4f, 0xe8, 0x81, 0xd2, 0x53, 0x10, 0x35, 0xd6, 0x77, 0x64, 0xa5, 0x96, 0x2b,
@@ -43,6 +54,11 @@ const SBOX: [u8; 256] = [
 
 /// Leading app-id field length in the decrypted certificate.
 const APP_ID_LEN: usize = 8;
+/// How many whole-key candidates one key length may be searched for. Ambiguous
+/// cycles multiply, so a blob that offers more combinations than this is
+/// refused rather than searched.
+const MAX_CANDIDATE_KEYS: usize = 10_000;
+
 /// Plausible subscriber-number lengths to consider.
 const MIN_KEY_LEN: usize = 5;
 const MAX_KEY_LEN: usize = 15;
@@ -93,19 +109,21 @@ pub fn recover_phone_number(cert: &[u8]) -> Option<String> {
     }
 }
 
-/// Append every valid key of length `key_len` (usually zero or one) to `found`.
+/// Append every key of length `key_len` the certificate's own checks accept.
 ///
 /// The decrypted tail equals the key, giving `key[j]` in terms of another key
-/// digit; those relations form cycles that can be solved digit by digit. Each
-/// solved key is then held to the same two checks the title applies: the
-/// decrypted checksum and the tail-equals-key identity.
+/// digit; those relations form cycles that can be solved digit by digit. A
+/// cycle can have more than one digit-consistent solution - the ten-digit
+/// certificates have one with two - so each cycle's candidates are all kept and
+/// their combinations tried. What settles a combination is the pair of checks
+/// the title itself applies: the decrypted checksum and the tail-equals-key
+/// identity. Refusing an ambiguous cycle outright, which is what this used to
+/// do, discarded numbers those two checks pick out on their own.
 fn collect_keys(cert: &[u8], off: usize, length: usize, key_len: usize, found: &mut Vec<Vec<u8>>) {
     // nxt[j] is the key index that key digit j depends on.
     let nxt: Vec<usize> = (0..key_len).map(|j| (APP_ID_LEN + j + off) % key_len).collect();
 
-    // Solve each dependency cycle independently and assemble the full key. A
-    // cycle with no single digit-consistent solution means no key of this length.
-    let mut key = vec![0u8; key_len];
+    let mut cycles: Vec<Vec<usize>> = Vec::new();
     let mut visited = vec![false; key_len];
     for start in 0..key_len {
         if visited[start] {
@@ -118,33 +136,67 @@ fn collect_keys(cert: &[u8], off: usize, length: usize, key_len: usize, found: &
             cycle.push(x);
             x = nxt[x];
         }
-        let sol = match solve_cycle(cert, off, key_len, &cycle) {
-            Some(sol) => sol,
-            None => return,
-        };
-        for (pos, val) in cycle.iter().zip(sol) {
-            key[*pos] = val;
-        }
+        cycles.push(cycle);
     }
 
-    // Final verification: exactly what the title checks.
-    let mut cs2 = 0u32;
-    let mut dec_tail = Vec::with_capacity(key_len);
-    for i in 0..length {
-        let d = decrypt_byte(cert, &key, off, i);
-        cs2 = (cs2 + d as u32) & 0xff;
-        if (APP_ID_LEN..APP_ID_LEN + key_len).contains(&i) {
-            dec_tail.push(d);
+    let mut candidates = Vec::with_capacity(cycles.len());
+    let mut combinations = 1usize;
+    for cycle in &cycles {
+        let solutions = solve_cycle(cert, off, key_len, cycle);
+        // A cycle no digit can satisfy means no key of this length at all.
+        if solutions.is_empty() {
+            return;
         }
+        combinations = match combinations.checked_mul(solutions.len()) {
+            Some(product) if product <= MAX_CANDIDATE_KEYS => product,
+            _ => return,
+        };
+        candidates.push(solutions);
     }
-    if cs2 as u8 == cert[length + 2] && dec_tail == key && !found.contains(&key) {
-        found.push(key);
+
+    // Walk the combinations as an odometer over the per-cycle candidate lists.
+    let mut choice = vec![0usize; cycles.len()];
+    loop {
+        let mut key = vec![0u8; key_len];
+        for ((cycle, solutions), &at) in cycles.iter().zip(&candidates).zip(&choice) {
+            for (pos, val) in cycle.iter().zip(&solutions[at]) {
+                key[*pos] = *val;
+            }
+        }
+
+        // Final verification: exactly what the title checks.
+        let mut cs2 = 0u32;
+        let mut dec_tail = Vec::with_capacity(key_len);
+        for i in 0..length {
+            let d = decrypt_byte(cert, &key, off, i);
+            cs2 = (cs2 + d as u32) & 0xff;
+            if (APP_ID_LEN..APP_ID_LEN + key_len).contains(&i) {
+                dec_tail.push(d);
+            }
+        }
+        if cs2 as u8 == cert[length + 2] && dec_tail == key && !found.contains(&key) {
+            found.push(key);
+        }
+
+        let mut at = choice.len();
+        loop {
+            if at == 0 {
+                return;
+            }
+            at -= 1;
+            choice[at] += 1;
+            if choice[at] < candidates[at].len() {
+                break;
+            }
+            choice[at] = 0;
+        }
     }
 }
 
-/// Return the unique all-digit assignment for `cycle`, or `None`. `cycle` lists
-/// key indices in dependency order (`nxt[cycle[t]] == cycle[t + 1]`, wrapping).
-fn solve_cycle(cert: &[u8], off: usize, key_len: usize, cycle: &[usize]) -> Option<Vec<u8>> {
+/// Every all-digit assignment for `cycle`, which is usually one and is
+/// occasionally two. `cycle` lists key indices in dependency order
+/// (`nxt[cycle[t]] == cycle[t + 1]`, wrapping).
+fn solve_cycle(cert: &[u8], off: usize, key_len: usize, cycle: &[usize]) -> Vec<Vec<u8>> {
     let k = cycle.len();
     let mut solutions: Vec<Vec<u8>> = Vec::new();
 
@@ -180,10 +232,7 @@ fn solve_cycle(cert: &[u8], off: usize, key_len: usize, cycle: &[usize]) -> Opti
         }
     }
 
-    match solutions.len() {
-        1 => solutions.pop(),
-        _ => None,
-    }
+    solutions
 }
 
 #[cfg(test)]
@@ -213,5 +262,36 @@ mod test {
         let mut cert = INOTIA2_CERT;
         cert[23] ^= 0xff; // break the decrypted checksum
         assert_eq!(recover_phone_number(&cert), None);
+    }
+
+    /// The KTF `cert.c2s` is the same publisher's scheme with a wider number
+    /// field: 23 bytes, an eight-character application id and the subscriber
+    /// number padded out to twelve, sealed with the same table and the same
+    /// `(table + key) ^ byte` cipher. Its numbers come back through this reader
+    /// unchanged, so a KTF title is told the handset its certificate was issued
+    /// to and its own check passes without the archive being touched.
+    ///
+    /// Built with the cipher rather than dumped from a handset: no KTF archive
+    /// here packages one, and the table and layout are what a real title's own
+    /// reader was disassembled into.
+    #[test]
+    fn a_ktf_certificate_is_the_same_scheme_and_reads_the_same_way() {
+        // 8-character AID, an eleven-digit number, salt 17.
+        const ELEVEN: [u8; 23] = [
+            0x10, 0x91, 0xd6, 0xd3, 0xfc, 0xa8, 0x95, 0x26, 0x56, 0xe5, 0x8a, 0x6d, 0xac, 0x53, 0xe6, 0x85, 0x1b, 0x48, 0xd7, 0x61, 0xe0, 0x11, 0x2d,
+        ];
+        assert_eq!(recover_phone_number(&ELEVEN).as_deref(), Some("01012345678"));
+
+        // Salt zero, so the keystream starts at the head of the table.
+        const ZERO_SALT: [u8; 23] = [
+            0x8c, 0x0f, 0xee, 0xb0, 0x5f, 0x87, 0x34, 0xc8, 0x72, 0x5a, 0x3f, 0x93, 0xa3, 0xe4, 0xfb, 0x58, 0x57, 0x78, 0xee, 0x91, 0xe1, 0x00, 0xec,
+        ];
+        assert_eq!(recover_phone_number(&ZERO_SALT).as_deref(), Some("01046119269"));
+
+        // A ten-digit number, so two of the twelve bytes are padding.
+        const TEN: [u8; 23] = [
+            0x92, 0x59, 0x61, 0x11, 0x10, 0xfe, 0x6c, 0x74, 0x12, 0x0b, 0x2d, 0x83, 0xa5, 0x07, 0x56, 0x7d, 0xa8, 0xad, 0x20, 0x6c, 0x78, 0xc8, 0x96,
+        ];
+        assert_eq!(recover_phone_number(&TEN).as_deref(), Some("0111234567"));
     }
 }

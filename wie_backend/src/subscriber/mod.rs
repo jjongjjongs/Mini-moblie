@@ -1,6 +1,6 @@
 //! The subscriber phone number a title is told it is running on.
 //!
-//! LGT titles use it as more than a number: it is the key that decrypts their
+//! Titles use it as more than a number: it is the key that decrypts their
 //! `cert.c2s`, and several check it against a certificate of their own before
 //! they will start. Reporting the wrong one is what a title sees as a pirated
 //! copy, so it is recovered from the archive rather than invented - and both
@@ -8,12 +8,12 @@
 //! `HandsetProperty.getSystemProperty` one have to answer the same thing, or a
 //! title that reads it through both disagrees with itself.
 
+mod cert_c2s;
 mod fixed_key_cert;
-mod lgt_cert;
 
 pub use self::{
+    cert_c2s::recover_phone_number as from_cert,
     fixed_key_cert::{HandsetIdentity, recover_identity as identity_from_cert},
-    lgt_cert::recover_phone_number as from_cert,
 };
 
 use alloc::{
