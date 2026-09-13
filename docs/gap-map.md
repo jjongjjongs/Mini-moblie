@@ -1444,3 +1444,79 @@ What is left, and what the next pass needs, is the condition inside
 order and bridge return values between the two runtimes has now been compared;
 the answer is in the guest's own branch, which means disassembling that method
 rather than watching what it calls.
+
+#### 격투가, fourth pass: `GamePlay.paint` is a guard, and it reads a suspend flag
+
+Logging the AOT method entry address (`raw.fn_body` below `0x7000_0000`, which is
+where our own host stubs live) names the guest's own methods and where they are:
+
+```
+8 AOTENTRY paint     0x109035
+1 AOTENTRY startApp  0x1091a1
+1 AOTENTRY run       0x109fc5
+1 AOTENTRY run       0x108c35
+1 AOTENTRY <init>    0x109179
+1 AOTENTRY <clinit>  0x109e89
+```
+
+`GamePlay.paint` is at `0x109034`, and it is forty bytes of branching that draws
+nothing itself:
+
+```
+r0 = cp[A];  bl 0x1347a4;  cmp r0, #0;  beq 0x109078   ; A == 0 -> the setup arm
+0x109050: r0 = cp[B]; bl 0x1347a4; cmp r0,#0; bne return
+0x109062: r0 = cp[C]; bl 0x1347a4; cmp r0,#0; bne return
+0x10906e: r0 = cp[D]; bl 0x135bd8; return               ; the only call that can draw
+0x109078: r0 = cp[E]; r1 = graphics; bl 0x1349b8        ; then cp[F] = result; fall through
+```
+
+`0x1347a4` is the AOT's lazy constant-pool resolver: it tests bit 0 of the cell,
+splits the word into a class index (high 16) and a member index (low 15), indexes
+a `0x1c`-byte class table and a `0x10`-byte member table, caches the resolved
+pointer back over the cell, and returns the value. So the shape is
+
+```
+if (flagA == 0) { flagF = something(graphics); }
+if (flagB != 0) return;
+if (flagC != 0) return;
+draw();
+```
+
+**paint draws only when two flags are both zero, and ours never are** - which is
+exactly the "sets up a Graphics and then draws nothing" we had been staring at
+from the outside.
+
+Dumping the *relocated* image (`wie_ktf_dump` runs the image's own entry, so the
+literal pools hold real addresses; the raw file holds unrelocated offsets, which
+is why decoding it directly gave noise) and following the member table gives the
+names, stored as `<descriptor>+<name>`:
+
+```
+member  0  LRecvThread;+recvThread
+member  4  Z+initAnn
+member  9  Z+isSuspended
+member 10  Z+isSuspendedReturn
+member 19  Ljava/lang/String;+SOCKET_FREE_URL
+```
+
+`isSuspended` and `isSuspendedReturn` are the guards. The title refuses to paint
+while it believes it is suspended.
+
+One caveat on this decode, because it matters for what to do next: the cluster of
+names is clearly right - they are plausible neighbours and they read cleanly -
+but the cell-to-member mapping is not fully validated. `D`, the call that should
+be the draw, decodes to `SOCKET_FREE_URL`, a String field, which a `bl` cannot
+be calling; so at least one index is off by a step and the exact pairing of cell
+to flag needs confirming before anything is built on it.
+
+What this changes: the question is no longer "what does paint read" but "what
+sets `isSuspended` in our runtime and not in the reference's". Neither runtime
+models title suspension at all - there is no suspend or resume anywhere in
+`wie_wipi_java`, `wie_midp`, `wie_ktf`, and the reference's only uses of the word
+are about its own guest threads - so this is the game's own state machine, and
+the next step is finding the guest code that writes those two fields.
+
+The company the names keep is worth noting too: `recvThread` and
+`SOCKET_FREE_URL` beside the suspend flags put this class on the networking side,
+which fits the `BillSocket://` endpoints in the image. Neither runtime sees this
+title make a single network call, so it has not got that far in either.
