@@ -775,3 +775,32 @@ guest-paint side cannot be reached without building a concrete subclass and a
 display for it, and the suppression side needs the event queue driven by hand. What
 the change is really claimed to do is distinguish the two shapes, and the frame
 counts above do that in a way a field-write assertion would not.
+
+### The probe now says how much guest time a run covered
+
+The clock change is only useful if a run says what it measured, so the summary
+line carries `guest_ms` beside its tick count. Across the local KTF archives at
+500 ticks:
+
+| archive | guest_ms | ms a tick |
+|---|---:|---:|
+| k1 | 4,045 | 8.09 |
+| k2 | 4,555 | 9.11 |
+| k3 | 4,514 | 9.03 |
+| k4 | 4,011 | 8.02 |
+| k5 | 4,055 | 8.11 |
+
+Every one of them sits on the eight-millisecond floor with a little more where the
+guest executed longer than that, which is the design working. **It also settles the
+conversion a script needs**: 900ms of guest time - the input method's commit delay -
+is a little over a hundred ticks, so pressing the same key at tick 200 and tick 400
+starts a second character while pressing it at 200 and 260 walks the multi-tap ring.
+
+**What that does and does not verify.** The delay's behaviour is pinned by four unit
+tests against an explicit clock, and what the probe could not show before was
+whether a real run's guest clock moves far enough for the delay to be reachable at
+all - on the old clock a millisecond cost a clock read, so a title that never asked
+the time never got there. It moves. An end-to-end run that types into a title's own
+text field would be the next thing, and it needs a fixture: the one local archive
+with a text field is a first-run installer that has to be run twice to reach it, and
+reading its text back means reading pixels.

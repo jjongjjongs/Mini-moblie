@@ -16,6 +16,13 @@
 //!   guest time. It also costs what that time costs - a title that computes
 //!   through its whole tick pays for every instruction - so the counts worth
 //!   using here are much smaller than they were.
+//!
+//!   Every run reports the guest time it covered as `guest_ms`, which is the
+//!   conversion a script needs. Measured across the local archives a tick is
+//!   8.0 to 9.1 milliseconds, so a delay a title measures in guest time - the
+//!   input method's 900ms commit, say - is a little over a hundred ticks: press
+//!   the same key at tick 200 and tick 400 and the second press starts a new
+//!   character, at tick 200 and 260 and it walks the multi-tap ring.
 //! - `WIE_SHOT` - where to write the last painted frame, as a binary PPM.
 //! - `WIE_KEY`/`WIE_PRESS_TICK` - one key press, to get past a title's notice.
 //! - `WIE_SCRIPT` - a walk into the title instead: `tick:KEY` pairs separated
@@ -409,7 +416,8 @@ fn run_once(
 
     let captured = screen.captured.lock().unwrap();
     eprintln!(
-        "[probe] ticks={ticks} frames={} size={}x{} colors_in_last_frame={} exited={}",
+        "[probe] ticks={ticks} guest_ms={} frames={} size={}x{} colors_in_last_frame={} exited={}",
+        tick_clock.now_ms(),
         captured.frames,
         captured.width,
         captured.height,
