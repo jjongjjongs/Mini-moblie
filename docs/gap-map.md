@@ -1319,3 +1319,51 @@ The five KTF archives already in the corpus are unchanged at 505, 17, 13, 6 and
 
 던전앤파이터 격투가 is unchanged by this - still one colour - so its wall is a
 different one.
+
+### 격투가: the guest's paint fills the screen white and returns
+
+The `MC_dbExists` fix does nothing for this one, so its wall is elsewhere. Run
+against the reference the two agree on almost everything measurable.
+
+Identical on both sides: the sixteen Java methods the guest resolves (`fillRect`,
+`setColor`, `getPixels`, `repaint`, `serviceRepaints`, `show`, `pushCard`,
+`getWidth`, `getHeight`, `getDefaultDisplay`, `currentTimeMillis`, `sleep`,
+`start` and three constructors); 16,896 `MC_grpGetPixelFromRGB`; 307
+`MC_knlCalloc`; 22 `MC_knlGetResourceID` and 22 `MC_knlGetResource`; 17
+`MC_knlGetFreeMemory`; 6 `MC_knlFree`; 4 `MC_grpGetFont`; one screen frame
+buffer, one off-screen frame buffer at 240×296, one `MC_grpInitContext`, one
+`MC_grpRepaint`, one `option.txt` opened. The guest loads its 22 resources,
+decodes a palette, and starts its music.
+
+Where they part is inside the card's paint. Ours does exactly this and returns:
+
+```
+setColor(255, 255, 255)
+Display::getWidth  -> 240
+Display::getHeight -> 320
+fillRect(0, 0, 240, 320)
+```
+
+The reference's same paint goes on to call `MC_grpSetContext` 14 times,
+`MC_grpPutPixel` 6, `MC_grpFillRect` 3, `MC_grpGetFontHeight` 3 and
+`MC_grpGetStringWidth` 3. We call none of those - zero, not fewer. Our frame is
+pure white across all 76,800 pixels; the reference's is the same white with its
+splash logo on it.
+
+So the paint is entered, the background is filled, and the guest then decides
+there is nothing more to draw. What it decides that on is still open. Two
+differences are in the frame and neither is yet shown to be the cause:
+
+- `MC_grpGetFont` hands back different handles. The reference returns the size
+  flag it was asked for (`MC_GRP_FT_SIZE_SMALL` = 8, `LARGE` = 16, and its own
+  face height for `MEDIUM` = 0); we return the pixel height of the face we
+  picked (10, 14, 12). The reference decouples handle from metric deliberately -
+  its comment records a title whose menu was sliced when `GetFontHeight` echoed
+  the handle. The guest never reaches `GetFontHeight` here, so this is a
+  divergence in the vicinity, not a demonstrated cause.
+- The guest opens a 240×296 off-screen frame buffer while our `Display.getHeight`
+  answers 320, and fills 0,0,240,320 into it.
+
+Neither the reference CLI nor this runtime gets past the splash on this archive
+under the probe clock; the reference only draws the logo under `-play`, four
+flushes in 2,000 ticks.
