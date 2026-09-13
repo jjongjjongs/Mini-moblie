@@ -293,7 +293,9 @@ pub fn register_stdlib_svc_handler(core: &mut ArmCore, system: &System, save_poi
                 let a2 = core.read_param(2)?;
                 let a3 = core.read_param(3)?;
 
-                tracing::warn!("Unknown LGT stdlib import {index:#x}(a0={a0:#x}, a1={a1:#x}, a2={a2:#x}, a3={a3:#x})");
+                // With the caller's address: a slot is named by what its caller
+                // does with it, and that is a handful of instructions at `lr`.
+                tracing::warn!("Unknown LGT stdlib import {index:#x}(a0={a0:#x}, a1={a1:#x}, a2={a2:#x}, a3={a3:#x}) from {lr:#x}");
 
                 0u32.write(core, lr)
             }

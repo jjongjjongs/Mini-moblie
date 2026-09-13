@@ -999,8 +999,11 @@ into the frame above - a `va_list` on this ABI - and the numbering says the same
 because `sprintf`, `sscanf` and `vsprintf` are the three of `<stdio.h>` a handset
 keeps once the `FILE *` ones are dropped. Counting those off `sprintf` at `0x3f7`
 puts `atof` and `atoi` at `0x3fa` and `0x3fb` - **and `0x3fb` is where this table
-already had `atoi`, arrived at independently.** An unmapped stdlib slot here is a
-fatal error, so a title reaching this one stops dead.
+already had `atoi`, arrived at independently.** An unmapped stdlib slot here is not fatal - it
+is reported with its arguments and answers zero, because ending the run hides
+everything the title would have done next - so what a title calling this one got
+was an empty destination, which is the same silent nothing our own `sprintf`
+comment records a HUD getting before that slot was served.
 
 It is served now, on `sprintf`'s own renderer with the arguments read as a cursor
 through guest memory instead of from registers and the stack. The walk has no
@@ -1009,3 +1012,13 @@ the reads stop, which is a bound that cannot fault. `0x3f8` and `0x3fa` are
 `sscanf` and `atof` by the same counting and stay unimplemented, because nothing
 has presented a call site for either and a slot named only by arithmetic is a
 guess.
+
+**And the unknown-import report now carries the caller's address.** A slot is
+named by what its caller does with it, and that is a handful of instructions at
+`lr` - so the next wall of this kind is a disassembly away rather than a
+re-run with a breakpoint. `MC_dbListDataBases` is the one slot of theirs left
+unmatched: they place it at `0x44c`, named by the format its caller walks rather
+than by counting, and this table has it at `0x200` inside a contiguous `MC_db*`
+block from the firmware. Nothing here maps anything near `0x44c`, and adding a
+slot on another platform's numbering is the guess this document keeps refusing;
+if a local title calls it, the report above is what will say so.
