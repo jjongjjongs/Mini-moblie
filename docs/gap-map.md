@@ -1520,3 +1520,69 @@ The company the names keep is worth noting too: `recvThread` and
 `SOCKET_FREE_URL` beside the suspend flags put this class on the networking side,
 which fits the `BillSocket://` endpoints in the image. Neither runtime sees this
 title make a single network call, so it has not got that far in either.
+
+#### 격투가, fifth pass: paint is not where the drawing is, and the suspend guard was a false lead
+
+Two things from the fourth pass were wrong, and measuring settled both in
+minutes. Reading the guest's own statics is what settled them: the constant-pool
+resolver at `0x1347a4` ends
+
+```
+0x134808  ldr r3, [r4]        ; the resolved field record
+0x13480a  ldr r0, [r3, #0xc]  ; the value
+```
+
+so a static's value lives at the field record's `+0xc`, and those are at fixed
+addresses. Logging the three at every entry to `paint`:
+
+```
+PAINTGUARD initAnn=0 isSuspended=0 isSuspendedReturn=0
+PAINTGUARD initAnn=1 isSuspended=0 isSuspendedReturn=0
+... eight times, never anything else
+```
+
+**The guards pass.** `isSuspended` and `isSuspendedReturn` are zero on every
+paint, so paint reaches its final call every time. The suspend hypothesis is
+dead, and the title is not refusing to draw because it thinks it is suspended.
+
+What that final call is, resolved properly this time: methods and classes share
+one `0x1c`-byte descriptor table at `0x15c524` (the field table at `0x15cb38` is
+separate, which is why the fourth pass's `D` came out as a field name). Entry 2
+is `paint(Lorg/kwis/msp/lcdui/Graphics;)V` at `0x109035` - which confirms the
+decode - and entry 19 is `paintClet()V`, whose body the descriptor names at
+`+8`: `0x105b8d`.
+
+That body, in full:
+
+```
+0x105b8c  push {lr} … ; sl = GOT
+0x105b9c  ldr  r3, [r3]      ; an object
+0x105ba0  adds r2, #0xf8
+0x105ba2  ldrb r3, [r2]      ; a byte flag at +0xf8
+0x105ba6  beq  0x105bac
+0x105baa  strb r3, [r2]      ; clear it
+0x105bb0  pop  {pc}
+```
+
+`paintClet` clears one byte and returns. So `GamePlay.paint` draws nothing, and
+neither does what it calls: **the whole method is an acknowledgement, not a
+renderer.** That is why five passes of comparing what happens during paint never
+converged - the drawing was never there to find.
+
+It fits what the reference's own counts said all along and we misread: its
+`MC_grpSetContext` 14, `MC_grpPutPixel` 6, `MC_grpFillRect` 3,
+`MC_grpGetFontHeight` 3 and `MC_grpGetStringWidth` 3 are made from the game's own
+loop thread, and its 1,696 `memcpy` hooks are that thread blitting straight into
+the frame buffer it was handed. Paint only acknowledges the frame afterwards.
+
+So the open question is the one from the third pass, now properly aimed: the
+game's loop thread draws, and here that thread spends its life in a twelve-second
+heartbeat - 11,033 ms of sleep against 967 ms of work - without ever drawing.
+What it is waiting for is the remaining question, and `recvThread`,
+`SOCKET_FREE_URL` and the `BillSocket://` endpoints are the company that field
+keeps.
+
+Reusable from this pass, for any KTF title: logging `raw.fn_body` below
+`0x7000_0000` names the guest's own AOT methods and their addresses; the
+descriptor table at the `0x1347a4`/`0x133bcc` literals gives names for both
+methods and fields; and a static's live value is its field record `+0xc`.
