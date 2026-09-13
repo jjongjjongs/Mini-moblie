@@ -846,3 +846,48 @@ with a byte pitch, which is what makes them different methods from
 `getRGBPixels` rather than a spelling of them. And both halves of a 64-bit answer
 already come back: a Long or Double return sends two result words, and one-word
 returns leave r1 as the callee had it.
+
+### No clip rectangle at all, and three answers we already had
+
+Their seventh round is five titles fixed by reading the title's own code rather
+than the trace, and one of the five is ours.
+
+**A null clip array clears the clip.** `MC_grpSetContext` read sixteen bytes at
+the address it was handed, and a title's own clip setter hands it zero: the
+routine works out the rectangle it wants, compares it against the surface's width
+and height, and when the two are equal - the whole surface - calls this with the
+array argument zeroed instead of with an array. Reading address zero for that is
+this side inventing a requirement the caller never had. What it asked for is the
+clip a context carries before anyone sets one, which here is the whole plane
+`(0,0)-(0x7fff,0x7fff)` that `MC_grpInitContext` plants from the firmware's own
+defaults - so that constant is now named and both places use it.
+
+**Three of the other four are already answered here.** `printStackTrace` is not a
+no-op: it goes to `System.err` like any other line. `new String(byte[], charset)`
+cannot disagree with its ranged form, because it *is* the ranged form - it
+delegates - where theirs accepted UTF-8 only and threw for everything else, which
+a title decoding its own `EUC_KR` record caught, printed, and then painted an
+empty screen behind for four hundred ticks. And both charset constructors are
+declared as well as bodied.
+
+**The fourth is a real divergence and it is not ours to change here.** An
+`MC_GrpImage` should *name* its framebuffer in word zero rather than inline it: a
+title that reads an image through the handset's own macros follows the image
+handle to its record, reads word zero as a framebuffer handle, follows that, and
+switches on the depth field with `(bpp << 24) >> 27`. `WIPICImage` here inlines
+`img` and `mask` by value, so word zero is the width and such a title would
+dereference it - theirs dereferenced 74. The record lives in the external
+`wipi_types` crate, so fixing it means a change there plus every surface read on
+this side, and no local archive has presented the symptom. Their decision rule is
+the part worth keeping if it is ever done: **which of the two a handle is gets
+decided by whether its first word is an allocation this platform issued**, so a
+width and a handle can never be confused.
+
+**And one gap with no local demand.** `com/ktf/kfc`, the vendor's own toolkit, is
+five classes - a form, a form with a menu bar, a message box, a text field and the
+listener that hears it change - and none of them is published here. None of the
+five local KTF archives names it either, so it stays unbuilt. Their method for
+sizing it is worth more than the list: an AOT module stores every name and
+descriptor it links against verbatim, so scanning the module's string pool answers
+the whole demand as a set in one pass, rather than as a sequence where answering
+one member moves the failure to the next.

@@ -92,6 +92,13 @@ pub async fn get_screen_framebuffer(context: &mut dyn WIPICContext, a0: WIPICWor
     Ok(memory)
 }
 
+/// The clip a context carries when nobody has given it one: the whole plane.
+///
+/// `MC_grpInitContext` (@0x1abc0c) plants this rather than zeroing, and it is
+/// therefore also what a caller means by handing `MC_grpSetContext` no rectangle
+/// at all.
+const WHOLE_PLANE_CLIP: [u32; 4] = [0, 0, 0x7fff, 0x7fff];
+
 pub async fn init_context(context: &mut dyn WIPICContext, p_grp_ctx: WIPICWord) -> Result<()> {
     tracing::debug!("MC_grpInitContext({p_grp_ctx:#x})");
 
@@ -106,7 +113,7 @@ pub async fn init_context(context: &mut dyn WIPICContext, p_grp_ctx: WIPICWord) 
     //   font   = MC_grpGetFont(0,0,0)  (the 12px default face)
     // Everything else (fg, transparent, pixelop, style, offset) stays zero.
     let grp_ctx = WIPICGraphicsContext {
-        clip: [0, 0, 0x7fff, 0x7fff],
+        clip: WHOLE_PLANE_CLIP,
         bgpxl: 0x00ff_ffff,
         alpha: 0xff,
         param1: 0xff,
@@ -130,11 +137,23 @@ pub async fn set_context(context: &mut dyn WIPICContext, p_grp_ctx: WIPICWord, o
             // degenerate rectangle back and every later blit clipped to nothing
             // (MapleStory 도적편's sprites vanished). The reference stores the
             // bottom-right corner decremented; GetContext re-adds the 1.
-            let x1: u32 = read_generic(context, pv)?;
-            let y1: u32 = read_generic(context, pv + 4)?;
-            let x2: u32 = read_generic(context, pv + 8)?;
-            let y2: u32 = read_generic(context, pv + 12)?;
-            grp_ctx.clip = [x1, y1, x2.wrapping_sub(1), y2.wrapping_sub(1)];
+            //
+            // No rectangle at all clears the clip rather than faulting. A title's
+            // own clip setter works out the rectangle it wants, compares it against
+            // the surface's width and height, and when the two are equal - the
+            // whole surface - calls this with the array argument zeroed instead of
+            // with an array. Reading sixteen bytes at address zero for that is this
+            // side inventing a requirement the caller never had: what it asked for
+            // is the clip a context has before anyone sets one.
+            if pv == 0 {
+                grp_ctx.clip = WHOLE_PLANE_CLIP;
+            } else {
+                let x1: u32 = read_generic(context, pv)?;
+                let y1: u32 = read_generic(context, pv + 4)?;
+                let x2: u32 = read_generic(context, pv + 8)?;
+                let y2: u32 = read_generic(context, pv + 12)?;
+                grp_ctx.clip = [x1, y1, x2.wrapping_sub(1), y2.wrapping_sub(1)];
+            }
         }
         WIPICGraphicsContextIdx::FgPixelIdx => {
             grp_ctx.fgpxl = pv as _;
@@ -2251,6 +2270,35 @@ mod tests {
     /// opaque alpha, param1, the 12px font) rather than zeroing the block, and a
     /// game that never sets those fields draws against them. Reading each one
     /// straight back through GetContext proves the port matches the firmware.
+
+    /// A title's own clip setter hands this no rectangle when the one it wants is
+    /// the whole surface, and no rectangle means the clip a context has before
+    /// anyone sets one - not sixteen bytes read at address zero.
+    #[futures_test::test]
+    async fn no_clip_rectangle_clears_the_clip() {
+        const CTX: u32 = 0x1000;
+        const RECT: u32 = 0x1800;
+        const OUT: u32 = 0x2000;
+
+        let mut context = TestContext::new();
+        init_context(&mut context, CTX).await.unwrap();
+
+        // Narrow it first, so the clear below has something to undo.
+        for (i, v) in [10u32, 20, 30, 40].into_iter().enumerate() {
+            write_generic(&mut context, RECT + (i as u32) * 4, v).unwrap();
+        }
+        set_context(&mut context, CTX, Idx::ClipIdx, RECT).await.unwrap();
+        get_context(&mut context, CTX, Idx::ClipIdx, OUT).await.unwrap();
+        assert_eq!(read_generic::<u32, _>(&context, OUT).unwrap(), 10);
+
+        set_context(&mut context, CTX, Idx::ClipIdx, 0).await.unwrap();
+
+        get_context(&mut context, CTX, Idx::ClipIdx, OUT).await.unwrap();
+        assert_eq!(read_generic::<u32, _>(&context, OUT).unwrap(), 0);
+        assert_eq!(read_generic::<u32, _>(&context, OUT + 4).unwrap(), 0);
+        assert_eq!(read_generic::<u32, _>(&context, OUT + 8).unwrap(), 0x8000);
+        assert_eq!(read_generic::<u32, _>(&context, OUT + 12).unwrap(), 0x8000);
+    }
     #[futures_test::test]
     async fn init_context_plants_the_reference_defaults() {
         const CTX: u32 = 0x1000;
