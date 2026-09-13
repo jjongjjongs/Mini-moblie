@@ -1586,3 +1586,53 @@ Reusable from this pass, for any KTF title: logging `raw.fn_body` below
 `0x7000_0000` names the guest's own AOT methods and their addresses; the
 descriptor table at the `0x1347a4`/`0x133bcc` literals gives names for both
 methods and fields; and a static's live value is its field record `+0xc`.
+
+#### 격투가, sixth pass: it is an online title, parked at `netState = -1` with no socket
+
+Naming the guest's classes finishes the picture. The descriptor table's class
+records point (through two indirections) at their names:
+
+```
+dnff        - startApp, <init>, <clinit>
+GamePlay    - paint @0x109035, run @0x108c35
+RecvThread  - run @0x109fc5
+```
+
+`GamePlay.run` is the loop that draws, and it is a network state machine. Its
+first arm waits on the two flags the previous pass measured as zero, so it falls
+straight through to:
+
+```
+if (now - stored > 60000) { stored = now; … }   ; a sixty-second keep-alive
+if (socket != null) goto …                      ; org/kwis/msf/io/Socket socket
+netSetStateClet(netState)
+if (netState == 3) goto …
+```
+
+Reading those two statics live, on every paint, for the whole run:
+
+```
+NETSTATE socket=0x0 netState=4294967295 annun=0x48432378
+… identical every time
+```
+
+**`socket` is null and `netState` is -1.** The class's other fields say what that
+means: `sendData`, `recvData`, `recvLen`, `SOCKET_URL`, `SOCKET_FREE_URL`,
+`NS_CONNECTING`, `NS_CONNFAILED`, `recvThread`. 던전앤파이터 격투가 is an online
+game, its main loop is gated on a connection, and here it never leaves the state
+before connecting. That is why nothing is ever drawn: the screens it would draw
+are on the far side of that connection.
+
+`org/kwis/msf/io/Socket` is implemented in this runtime, so the missing piece is
+not the class - it is whatever should move `netState` off -1 and open the socket
+in the first place. The `BillSocket://222.231.31.45:22013!BillSocket://210.222.17.233:17004`
+pair in the image, `SOCKET_FREE_URL` beside `SOCKET_URL`, and the title's KTF
+authentication are the places to look, and the endpoints are long dead, so
+whatever is done here will be a local stand-in rather than a connection.
+
+This also settles the comparison that started the investigation: the reference
+draws its splash logo and no more, from a state before any of this, and stops
+there for the same reason we do. Neither runtime makes a single network call on
+this title. The difference in what reaches the screen is a smaller question than
+it looked, and the title does not "run" in the reference either in any sense
+beyond that splash.
