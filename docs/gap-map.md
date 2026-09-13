@@ -491,3 +491,44 @@ straight to the card stack. Here the push lands as `Event::Notify`, the event
 queue turns it into `NotifyEvent`, and `Display.handleNotifyEvent` dispatches it,
 so a middleware routine compiled to
 `MC_grpPostEvent(MC_knlGetCurProgramID(), ...)` gets its own message back.
+
+### A void call that was writing a register
+
+Their third round is three archives whose guest-memory faults were one defect,
+in a function the specification says returns nothing. `MC_knlFree` is declared
+`void`, so what it leaves in `r0` is not part of its contract - and that is
+exactly why putting a value there is a decision. A middleware shared by three of
+their archives ends an initialization step by freeing the buffer it loaded a font
+through, with the free in tail position and nothing after it; the caller tests
+`r0` for zero and reads zero as failure. Writing zero turned "the font loaded"
+into "the font failed", the initializer returned early, and the title's first
+`paint` faulted on a word that early return never filled - **six calls and one
+early return from the cause.**
+
+Ours answered the pointer it had just freed. That is non-zero, so it escapes that
+particular reading, but it is still overwriting a register a void call has no
+business touching, and a caller whose own value was live in `r0` across a tail
+free would have got the pointer instead. It writes nothing now. The machinery was
+already there: `ResultConverter<()>` produces no result words and
+`write_return_value` leaves `r0` alone when there are none, so the fix is the
+signature. The test asserts the call produces no result word at all, for a real
+block and for null.
+
+The neighbouring calls were swept and left alone: `close`, `delete` and `set`
+shapes in this API return `M_Int32` status codes that titles do check, so only the
+one the specification calls `void` changed.
+
+**Two more of that round are already ours.** `MC_knlGetResource` refuses a handle
+with the sign bit set - a title that does not check what `MC_knlGetResourceID`
+answered hands the error code back as the handle, and reading `-12` as an address
+faults the guest instead of failing the call its own error path is waiting for.
+Ours has refused that since before this comparison. The bug they found behind
+theirs was Go's `&` and `<<` sharing a precedence level, so `handle&1<<31` parsed
+as `(handle&1)<<31` and the guard had never rejected anything; Rust gives `&`
+lower precedence than `<<`, so the same expression means what it reads as here.
+
+And their note on what they did **not** do is worth keeping: three of their titles
+stop on a reference the JVM has no object for, and binding a synthetic `Object` so
+the call proceeds moved all three walls rather than removing them. Fabricating an
+object for an arbitrary word is the same wrong-answer-silently shape this document
+keeps refusing.

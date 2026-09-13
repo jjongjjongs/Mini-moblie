@@ -255,16 +255,32 @@ pub async fn calloc(context: &mut dyn WIPICContext, size: WIPICWord) -> Result<W
     Ok(memory)
 }
 
-pub async fn free(context: &mut dyn WIPICContext, memory: WIPICIndirectPtr) -> Result<WIPICIndirectPtr> {
+/// `MC_knlFree` - give a block back.
+///
+/// **Declared `void`, so what is left in `r0` is not part of the contract and
+/// this does not write it.** No correct caller reads a void call's return
+/// register, which is exactly why putting a value there is a decision rather
+/// than an implementation detail: a compiler is free to put the free in tail
+/// position, and then whatever this leaves in `r0` is what the caller's own
+/// caller reads. The reference had a middleware, shared by three archives, end
+/// an initialization step with a free in tail position and test `r0` for zero as
+/// failure - so writing zero there turned "the font loaded" into "the font
+/// failed", the initializer returned early, and the title faulted in its first
+/// paint on a word the early return never filled, six calls away from the cause.
+///
+/// This used to answer the pointer it had just freed, which is non-zero and so
+/// escapes that particular reading, but is still this platform overwriting a
+/// register a void call has no business touching.
+pub async fn free(context: &mut dyn WIPICContext, memory: WIPICIndirectPtr) -> Result<()> {
     tracing::debug!("MC_knlFree({:#x})", memory.0);
 
     if memory.0 == 0 {
-        return Ok(memory);
+        return Ok(());
     }
 
     context.free(memory)?;
 
-    Ok(memory)
+    Ok(())
 }
 
 /// What this platform has handed out as resource ids.
@@ -699,6 +715,23 @@ mod test {
         get_resource_id, get_system_property, load, mexecute, mload, program_stop, sprintk,
     };
 
+    /// `MC_knlFree` is declared `void`, so the register a caller reads after it
+    /// has to be the one the caller left there. A compiler may put the free in
+    /// tail position, and then whatever this writes is what the caller's caller
+    /// tests.
+    #[futures_test::test]
+    async fn freeing_a_block_leaves_the_return_register_alone() {
+        let mut context = TestContext::new();
+        let memory = context.alloc(16).unwrap();
+
+        let freed = free.into_body().call(&mut context, Box::new([memory.0])).await.unwrap();
+        assert!(freed.results.is_empty(), "a void call must not write r0");
+
+        // The null free returns early, and by the same rule.
+        let nothing = free.into_body().call(&mut context, Box::new([0])).await.unwrap();
+        assert!(nothing.results.is_empty(), "a void call must not write r0");
+    }
+
     #[futures_test::test]
     async fn test_sprintk() -> Result<()> {
         let mut context = TestContext::new();
@@ -788,7 +821,9 @@ mod test {
         let zero = calloc(&mut context, 0).await.unwrap();
         assert_ne!(zero.0, 0);
         free(&mut context, zero).await.unwrap();
-        assert_eq!(free(&mut context, wipi_types::wipic::WIPICIndirectPtr(0)).await.unwrap().0, 0);
+        // Freeing null is accepted rather than refused. There is no return
+        // value to check: the call is void.
+        free(&mut context, wipi_types::wipic::WIPICIndirectPtr(0)).await.unwrap();
 
         Ok(())
     }
