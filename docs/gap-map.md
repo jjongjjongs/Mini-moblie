@@ -1219,3 +1219,56 @@ certificate names `01012345678`.
 
 Not a KTF-only fix. Any LGT archive whose `cert.c2s` sits beside the jar rather
 than inside it was being read through the WIPI-C path and missed by the Java one.
+
+### Two 던전앤파이터 titles, two different blanks
+
+Both are KTF archives, both reach the tick limit without stopping, and both end
+on a one-colour frame. That is where the similarity ends.
+
+Measured with the probe at 2,000 ticks, and against logs collected on a handset
+build of the same two titles.
+
+**던파거너편 (`010209E1`, `MClass:Clet`) - it finishes starting up and then
+stops being a program.**
+
+Start-up completes and does real work: `MC_dbExists("option.txt")` and
+`MC_dbExists("coupon.txt")` both answer 0 (a first run), it opens and reads both
+anyway - four bytes then fifty-two out of `coupon.txt` - reads `PHONEMODEL`,
+takes a screen frame buffer and creates an off-screen one, adds a Jlet event
+listener and pushes its card.
+
+Then it constructs two `java.lang.Thread`s and **starts neither**. There is no
+`Thread::start` and no `Thread::run` anywhere in the run. Its entire Java method
+vocabulary for the whole session is `pushCard`, `getDisplay`,
+`addJletEventListener` and the four clip getters: it never looks up `repaint`,
+`serviceRepaints`, or any drawing method at all. Nothing is ever painted, so the
+one colour is not a lost frame - no frame was ever attempted.
+
+Input is not the problem, which is worth stating because it is the usual
+suspect. `CardCanvas.keyPressed(148)` reaches `Clet$CletCard.keyNotify(1, -5)`,
+the guest runs through `java_jump_native(0x1131e5, …)` and answers `true` -
+handled. Twenty key events over the handset log, all handled, nothing drawn.
+Steady state is the event queue's own idle spin.
+
+**던전앤파이터 격투가 (`0103BF27`, `MClass:dnff`) - it is alive and drawing
+nothing.**
+
+This one starts threads (two `start`, one `run`), resolves the vocabulary the
+other never asked for - `repaint`, `serviceRepaints`, `fillRect`, `setColor`,
+`getPixels(IIII[BII)V` - and loads `Graphics` and `Font`. Its own printk repeats
+`js_commonResInvokeNativeClinit(1425140)` / `(1425144)`, its resource
+native-class-initialiser invoker, in a loop, with `Thread.sleep(10546)` and
+`Thread.sleep(500)` between rounds.
+
+Its steady state is a churn: instantiate `javax/microedition/lcdui/Font`,
+`org/kwis/msp/lcdui/Font` and `org/kwis/msp/lcdui/Graphics`, call
+`java_jump_native(0x105b8d, …)`, destroy them all, repeat. Over the handset log
+it made 12,818 `MC_grpGetPixelFromRGB` calls - it converts an entire palette -
+and issued exactly one `fillRect` and nothing else. So it has a frame loop and
+a colour table and draws nothing with either.
+
+**One thing they share, and it is not the cause.** Both warn
+`Unknown WIPICX_incMemInterface`: they ask `get_interface` for an extension this
+runtime does not serve and are handed null. So do all five KTF archives already
+in this corpus, and those render 505, 17, 13, 6 and 122 colours respectively. A
+null there is not what stops these two.
