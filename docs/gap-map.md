@@ -310,3 +310,50 @@ presses nothing**, so it cannot reach a member a title only names a dozen key
 presses in - which is exactly where their four were found. And the MIDlet above
 is a gap of a different kind: `wie_j2me` exists and has no headless probe, so
 that path has no corpus evidence behind it at all.
+
+### A throw that only the innermost frame could catch
+
+Their thirteenth round is about what happens to an exception nothing catches,
+and answering it for this runtime turned up something larger than the question.
+
+KTF's AOT scheme gives every protected call a handler record on the guest stack,
+linked to the record of the frame it is nested inside through `ptr_old_handler`.
+**Nothing here read that field.** `handle_exception` took the head of the chain,
+searched that one method's table, and ended the run if no entry matched - so a
+throw that no `try` in the innermost frame covered could never reach the `try` in
+the frame that called it. Every nested try in the corpus was one frame deep by
+accident of what has been played.
+
+The search now walks outward, and the record that catches becomes the innermost
+one, because the frames it unwound past are gone and the next throw must not
+search them. A cycle, an unaligned record and a chain past 256 deep are each
+named rather than followed. Nothing changes for a throw the head already catches
+- the loop finds it on its first pass, exactly as before - so the only runs this
+can move are ones that used to die.
+
+Their per-match writes are not ours to make: they write the record's label, the
+caught object and the chain head themselves, where this runtime hands
+`context_base` and `target` to the guest's own restore function out of
+`ptr_functions`, which does the rest. The head is the one of the three that has
+to be written from outside, and only because an outer match pops records that a
+head-only search never had to.
+
+**Two of their conclusions we already match.** The range test is half-open here
+too, and their disassembly is what says that is right rather than an off-by-one:
+every entry's target is the first label past its own range, so a throw carrying
+`to` is a throw from after the try, and an inclusive bound would run a catch for
+an exception raised outside it. And a failed search now reports the whole chain
+it looked at - each record's method, the label it carried, and every entry's
+range and target - because "no handler" means either the title has no catch for
+this or it has one this platform did not match, and only the chain tells those
+apart.
+
+**What is deliberately not ported is the absorption.** They let an uncaught
+exception end the callback rather than the session, on the grounds that a host
+callback is less than a thread and the title's own `try` is on its own thread.
+The argument is sound and their guards are careful - only a guest exception, and
+counted rather than swallowed. It is held here because every defect this document
+records was found by a title dying loudly: the line-pitch bug two sections up
+surfaces as `ArrayIndexOutOfBoundsException`, which absorption would have turned
+into a picture that quietly did not draw. It goes in when a local title needs it,
+not before.

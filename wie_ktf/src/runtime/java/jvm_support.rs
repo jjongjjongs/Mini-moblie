@@ -203,6 +203,21 @@ impl KtfJvmSupport {
 
         Ok(exception_context.current_java_exception_handler)
     }
+
+    /// Makes `handler` the innermost handler record.
+    ///
+    /// A throw caught in the frame that is already innermost leaves the head
+    /// where it was, but one caught further out has to pop the records it
+    /// unwound past - otherwise the next throw searches a frame that has
+    /// already gone.
+    pub fn set_current_java_exception_handler(core: &mut ArmCore, handler: u32) -> Result<()> {
+        let context_data: KtfJvmSupportContext = read_generic(core, SUPPORT_CONTEXT_BASE)?;
+        let mut exception_context: KtfJvmExceptionContext = read_generic(core, context_data.ptr_jvm_exception_context)?;
+
+        exception_context.current_java_exception_handler = handler;
+
+        write_generic(core, context_data.ptr_jvm_exception_context, exception_context)
+    }
 }
 
 #[cfg(test)]
@@ -210,13 +225,16 @@ mod test {
     use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
     use core::sync::atomic::{AtomicBool, Ordering};
 
+    use core::mem::size_of;
+
     use jvm::{Jvm, runtime::JavaLangString};
+    use wipi_types::ktf::java::{JavaExceptionHandler, JavaMethodDefinition, JavaMethodExceptionTableEntry};
 
     use wie_backend::{DefaultTaskRunner, System};
     use wie_core_arm::{Allocator, ArmCore};
-    use wie_util::Result;
+    use wie_util::{Result, WieError, write_generic};
 
-    use super::{JavaArrayClassInstance, KtfJvmSupport};
+    use super::{JavaArrayClassInstance, KtfJvmSupport, method::JavaMethod};
 
     use test_utils::TestPlatform;
 
@@ -232,6 +250,107 @@ mod test {
         let (jvm, _) = KtfJvmSupport::init(&mut core, system, None).await?;
 
         Ok((jvm, core))
+    }
+
+    /// A throw that no `try` in the innermost frame covers belongs to whichever
+    /// frame further out does cover it. Each protected call links its record to
+    /// the one it is nested inside, and searching only the head means only the
+    /// innermost `try` can ever catch.
+    #[test]
+    fn a_throw_is_caught_by_an_enclosing_frame() -> Result<()> {
+        let mut system = System::new(Box::new(TestPlatform::new()), "", "", DefaultTaskRunner);
+
+        let done = Arc::new(AtomicBool::new(false));
+        let done_clone = done.clone();
+        let mut system_clone = system.clone();
+
+        system.spawn(async move || {
+            let (jvm, mut core) = init_jvm(&mut system_clone).await?;
+
+            // One entry, one pointer to it, one method record naming both.
+            let mut build_method = |from_pc: u32, to_pc: u32, target: u32| -> Result<u32> {
+                let entry = Allocator::alloc(&mut core, size_of::<JavaMethodExceptionTableEntry>() as _)?;
+                write_generic(
+                    &mut core,
+                    entry,
+                    JavaMethodExceptionTableEntry {
+                        from_pc,
+                        to_pc,
+                        target,
+                        ptr_class: 0, // catch any
+                    },
+                )?;
+
+                let table = Allocator::alloc(&mut core, 4)?;
+                write_generic(&mut core, table, entry)?;
+
+                let method = Allocator::alloc(&mut core, size_of::<JavaMethodDefinition>() as _)?;
+                let mut definition: JavaMethodDefinition = bytemuck::Zeroable::zeroed();
+                definition.fn_body_native_or_exception_table = table.into();
+                definition.exception_table_count = 1;
+                write_generic(&mut core, method, definition)?;
+
+                Ok(method)
+            };
+
+            let inner_method = build_method(0x10, 0x20, 0x20)?;
+            let outer_method = build_method(0x200, 0x300, 0x2a0)?;
+
+            // The restore function the unwind resumes through, read from
+            // `ptr_functions + 4`.
+            let functions = Allocator::alloc(&mut core, 8)?;
+            write_generic(&mut core, functions, 0u32)?;
+            write_generic(&mut core, functions + 4, 0xdead_beefu32)?;
+
+            let mut build_handler = |ptr_method: u32, current_pc: u32, ptr_old_handler: u32| -> Result<u32> {
+                let handler = Allocator::alloc(&mut core, size_of::<JavaExceptionHandler>() as _)?;
+                let mut record: JavaExceptionHandler = bytemuck::Zeroable::zeroed();
+                record.ptr_method = ptr_method;
+                record.ptr_old_handler = ptr_old_handler;
+                record.current_pc = current_pc;
+                record.ptr_functions = functions;
+                write_generic(&mut core, handler, record)?;
+
+                Ok(handler)
+            };
+
+            // 0x250 is inside the outer frame's range and nowhere near the
+            // inner frame's, so only the enclosing frame can catch.
+            let outer = build_handler(outer_method, 0x250, 0)?;
+            let inner = build_handler(inner_method, 0x100, outer)?;
+
+            KtfJvmSupport::set_current_java_exception_handler(&mut core, inner)?;
+
+            let exception = jvm.new_class("java/lang/Exception", "()V", ()).await.unwrap();
+            let result = JavaMethod::handle_exception(&mut core, &jvm, exception).await;
+
+            match result {
+                Err(WieError::JavaExceptionUnwind {
+                    context_base,
+                    target,
+                    next_pc,
+                }) => {
+                    assert_eq!(target, 0x2a0, "caught by the enclosing frame");
+                    assert_eq!(context_base, outer + 24, "the enclosing frame's saved context");
+                    assert_eq!(next_pc, 0xdead_beef);
+                }
+                Err(other) => panic!("expected an unwind into the enclosing frame, got {other:?}"),
+                Ok(_) => panic!("expected an unwind into the enclosing frame, got a return"),
+            }
+
+            // The frames it unwound past are gone.
+            assert_eq!(KtfJvmSupport::current_java_exception_handler(&mut core)?, outer);
+
+            done_clone.store(true, Ordering::SeqCst);
+
+            Ok(())
+        });
+
+        while !done.load(Ordering::SeqCst) {
+            system.tick()?;
+        }
+
+        Ok(())
     }
 
     /// The JVM's collector cannot see what the guest holds, so a KTF object it

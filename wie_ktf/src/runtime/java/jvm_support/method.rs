@@ -20,7 +20,12 @@ use wipi_types::ktf::java::{
     JavaMethodExceptionTableEntry as RawJavaMethodExceptionTableEntry,
 };
 
-use alloc::sync::Arc;
+use alloc::{format, sync::Arc};
+use core::fmt::Write as _;
+
+/// How far out a throw looks for a catch before the chain is called corrupt
+/// rather than deep.
+const MAX_EXCEPTION_HANDLERS: usize = 256;
 use wie_core_arm::{
     Allocator, ArmCore, EmulatedFunction, EmulatedFunctionParam, RUN_FUNCTION_LR, RegisteredFunction, RegisteredFunctionHolder, ResultWriter,
 };
@@ -287,45 +292,107 @@ impl JavaMethod {
     pub async fn handle_exception(core: &mut ArmCore, jvm: &Jvm, exception: Box<dyn ClassInstance>) -> Result<JavaMethodResult> {
         tracing::warn!("Java exception thrown: {exception:?}");
 
-        let current_java_exception_handler = KtfJvmSupport::current_java_exception_handler(core)?;
+        let mut handler_address = KtfJvmSupport::current_java_exception_handler(core)?;
 
-        if current_java_exception_handler == 0 {
-            return Err(JvmSupport::to_wie_err(jvm, JavaError::JavaException(exception)).await);
-        }
+        // What the search looked at, kept for the case where it finds nothing.
+        // "No handler" ends a run and has two very different causes - the title
+        // has no catch for this, or it has one this platform did not match - and
+        // only the chain itself tells them apart.
+        let mut searched = String::new();
+        let mut visited = Vec::new();
 
-        let exception_handler: RawJavaExceptionHandler = read_generic(core, current_java_exception_handler)?;
-
-        let method = JavaMethod::from_raw(exception_handler.ptr_method, core);
-        let exception_table = method.exception_table()?;
-
-        for entry in exception_table {
-            if entry.from_pc <= exception_handler.current_pc && exception_handler.current_pc < entry.to_pc {
-                let class = JavaClassDefinition::from_raw(entry.ptr_class, core);
-                if entry.ptr_class == 0 || jvm.is_instance(&*exception, &class.name()?) {
-                    let restore_context: u32 = read_generic(core, exception_handler.ptr_functions + 4)?;
-                    let contexts_base = current_java_exception_handler + 24;
-
-                    // Name what was caught and what caught it: a resume that
-                    // lands in the wrong handler and a resume that lands in
-                    // the right one look identical without this.
-                    tracing::debug!(
-                        "Java exception handler found: {:#x}, method: {:#x}, catches {}, pc {:#x} in [{:#x}, {:#x})",
-                        entry.target,
-                        exception_handler.ptr_method,
-                        if entry.ptr_class == 0 { "any".into() } else { class.name()? },
-                        exception_handler.current_pc,
-                        entry.from_pc,
-                        entry.to_pc
-                    );
-
-                    return Err(WieError::JavaExceptionUnwind {
-                        context_base: contexts_base,
-                        target: entry.target,
-                        next_pc: restore_context,
-                    });
-                }
+        // Each protected call pushes a record and links it to the one it is
+        // nested inside, so a throw that no `try` in the innermost frame covers
+        // belongs to whichever frame further out does cover it. Walking only the
+        // head - which is what this did - means only the innermost `try` in a
+        // call chain can ever catch anything.
+        while handler_address != 0 {
+            if visited.len() >= MAX_EXCEPTION_HANDLERS {
+                return Err(WieError::FatalError(format!(
+                    "Java exception handler chain exceeds {MAX_EXCEPTION_HANDLERS} records"
+                )));
             }
+            if handler_address % 4 != 0 {
+                return Err(WieError::FatalError(format!(
+                    "Java exception handler address {handler_address:#x} is not word-aligned"
+                )));
+            }
+            if visited.contains(&handler_address) {
+                return Err(WieError::FatalError(format!(
+                    "Java exception handler chain cycles at {handler_address:#x}"
+                )));
+            }
+            visited.push(handler_address);
+
+            let exception_handler: RawJavaExceptionHandler = read_generic(core, handler_address)?;
+            let method = JavaMethod::from_raw(exception_handler.ptr_method, core);
+            let exception_table = method.exception_table()?;
+
+            let _ = write!(
+                searched,
+                " [{}] method={:#x} label={:#x} entries={}",
+                visited.len() - 1,
+                exception_handler.ptr_method,
+                exception_handler.current_pc,
+                exception_table.len()
+            );
+
+            for entry in exception_table {
+                let _ = write!(searched, " [{:#x},{:#x})->{:#x}", entry.from_pc, entry.to_pc, entry.target);
+
+                // The range is half-open, and that is not an off-by-one: every
+                // entry's target is the first label past its own range, so a
+                // throw carrying `to` is a throw from after the try.
+                if entry.from_pc > exception_handler.current_pc || exception_handler.current_pc >= entry.to_pc {
+                    continue;
+                }
+
+                let caught = if entry.ptr_class == 0 {
+                    "any".into()
+                } else {
+                    let class = JavaClassDefinition::from_raw(entry.ptr_class, core);
+                    let name = class.name()?;
+                    if !jvm.is_instance(&*exception, &name) {
+                        continue;
+                    }
+                    name
+                };
+
+                let restore_context: u32 = read_generic(core, exception_handler.ptr_functions + 4)?;
+                let contexts_base = handler_address + 24;
+
+                // Name what was caught and what caught it: a resume that lands
+                // in the wrong handler and a resume that lands in the right one
+                // look identical without this.
+                tracing::debug!(
+                    "Java exception handler found: {:#x}, method: {:#x}, catches {}, pc {:#x} in [{:#x}, {:#x}), {} records out",
+                    entry.target,
+                    exception_handler.ptr_method,
+                    caught,
+                    exception_handler.current_pc,
+                    entry.from_pc,
+                    entry.to_pc,
+                    visited.len() - 1
+                );
+
+                // The records this unwound past are gone, so the frame that
+                // caught it is the innermost one from here on.
+                KtfJvmSupport::set_current_java_exception_handler(core, handler_address)?;
+
+                return Err(WieError::JavaExceptionUnwind {
+                    context_base: contexts_base,
+                    target: entry.target,
+                    next_pc: restore_context,
+                });
+            }
+
+            handler_address = exception_handler.ptr_old_handler;
         }
+
+        tracing::warn!(
+            "No Java exception handler for {exception:?}, chain:{}",
+            if searched.is_empty() { " none" } else { &searched }
+        );
 
         Err(JvmSupport::to_wie_err(jvm, JavaError::JavaException(exception)).await)
     }
