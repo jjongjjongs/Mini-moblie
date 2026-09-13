@@ -1742,3 +1742,46 @@ so it wants deciding rather than patching around. The cheap alternatives (paint
 the WIPI surface whenever it has content, or composite it under the MIDP canvas
 on each host paint) would both blank or flicker titles that draw only through
 Java, whose WIPI surface is empty.
+
+#### Unifying the two surfaces: what it actually costs
+
+The existing runtime already has half of this idea. `net.wie.CardCanvas::pushCard`
+calls `Display.disablePaint()` when the pushed card is a `net/wie/CletWrapperCard`,
+with the comment: *"A clet draws straight to the LCD framebuffer through the
+WIPI-C graphics API and flushes it itself, so the MIDP layer must not also flush
+its own (empty) screen image over the top - that repaints the clet's frame to
+black."* That is exactly the failure 격투가 shows.
+
+It does not catch 격투가 because that title is a **hybrid**: its card is a plain
+`org/kwis/msp/lcdui/Card` subclass (`GamePlay`), not a `CletWrapperCard`, so the
+MIDP layer keeps painting its white screen image over the engine's frame - and
+the engine never calls `MC_grpFlushLcd` either, so widening the `CletWrapperCard`
+test alone would leave nothing on screen at all.
+
+Two routes to one buffer, and both are larger than they look:
+
+**Route 1 - the WIPI Java graphics draw into the guest frame buffer.** This is
+what the reference does: its `org.kwis.msp.lcdui.Graphics` reads and writes
+`state.target.pixels`, the same guest memory the C API draws into. Here,
+`org/kwis/msp/lcdui/Graphics` is 2,086 lines and 44 of its 52 methods delegate to
+`javax.microedition.lcdui.Graphics`. Most of the drawing already exists against
+the frame buffer in `wie_wipi_c` (`MC_grpFillRect`, `MC_grpDrawImage`,
+`MC_grpDrawString` …), so the work is re-pointing rather than reimplementing -
+but `wie_wipi_java` does not depend on `wie_wipi_c`, so it needs that edge or the
+primitives moved somewhere both can see.
+
+**Route 2 - the MIDP screen image and the screen frame buffer share storage.**
+Fewer lines, but it runs into the same wall from the other side: `wie_midp` does
+not depend on `wie_wipi_c` either, and guest memory is only reachable through a
+`WIPICContext`, which exists for the duration of a WIPI call and not at the point
+where MIDP presents. So it needs a seam in `wie_backend` - the one crate both
+share - and that seam has to be able to read live guest memory.
+
+Neither is a patch. Both change how every KTF and LGT title reaches the screen,
+so either needs the whole corpus re-measured: 49 LGT archives and 5 KTF, plus the
+two 던전앤파이터 titles.
+
+What was tried and rejected along the way: presenting the screen surface from
+`MC_grpRepaint` (the title calls it once, at start-up, long before the engine
+draws), and widening the `CletWrapperCard` test (the engine never flushes, so
+disabling the MIDP paint leaves an empty screen).
