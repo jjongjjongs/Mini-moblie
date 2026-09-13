@@ -1688,3 +1688,57 @@ progress, while the reference's runs it enough to walk through three splash
 screens. The next thing to measure is what `GamePlay.run`'s loop does on the
 iteration where it stops advancing - the branch after `netGetStateClet`, which
 switches on 1, 2, 3 and 99 - rather than anything about the network.
+
+#### 격투가, eighth pass: the engine draws the splash, and we present a different surface
+
+Logging every engine native and its return - the `*Clet` bodies reached through
+`java_jump_native` - gives the loop in one view:
+
+```
+CLET initLCDClet     -> 1513556   (0x171854, the LCD context)
+CLET netSetStateClet -> -1
+CLET calcClet        -> 11036
+CLET startClet       -> 0
+CLET netGetStateClet -> 0
+CLET netSetStateClet -> -1
+CLET calcClet        -> 11036
+CLET netGetStateClet -> 0
+```
+
+`calcClet` returns 11036 - the delay it wants before its next tick - which is
+where the eleven-second sleeps come from. `netGetStateClet` answers 0, not one of
+the 1/2/3/99 the loop switches on, so the loop waits out the delay and ticks
+again. Nothing here is stuck.
+
+Reading the WIPI screen surface at each tick settles it:
+
+```
+CLET calcClet -> 11036   screen=240x320 colours=67 nonzero=67
+CLET calcClet -> 11036   screen=240x320 colours=22 nonzero=70785
+```
+
+**After the second tick the screen surface holds a drawn frame.** Pulling those
+pixels out and rebuilding them as an image gives the 프리스타일 splash logo -
+the same screen the reference shows at that point. The engine works. Our display
+shows one flat white pixel value throughout.
+
+So the cause is not timing, not the network, not the guest at all: **the C engine
+draws into the WIPI screen frame buffer, and this runtime presents a different
+surface.** Java's `Graphics` draws into the MIDP canvas and that is what reaches
+the display; `MC_grpFlushLcd` is the only thing that presents the WIPI surface,
+and this title never calls it. Neither does the reference's guest - it does not
+have to, because there the two are one buffer: its
+`runtimeGraphicsTransferPixels` reads and writes `state.target.pixels`, the same
+guest memory the C API draws into.
+
+Presenting the screen surface from `MC_grpRepaint` does not fix it and was
+reverted: the title calls `MC_grpRepaint` once, at start-up, long before the
+engine draws anything.
+
+The real fix is that the WIPI screen frame buffer and the MIDP canvas should be
+one surface, as they are on the handset and in the reference. That is an
+architectural change - every KTF and LGT title draws through one or the other -
+so it wants deciding rather than patching around. The cheap alternatives (paint
+the WIPI surface whenever it has content, or composite it under the MIDP canvas
+on each host paint) would both blank or flicker titles that draw only through
+Java, whose WIPI surface is empty.
