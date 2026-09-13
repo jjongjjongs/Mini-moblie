@@ -973,3 +973,39 @@ holds. Recorded rather than started.
 run that finishes its ticks without an error and lights no pixel is not a pass. The
 probe here reports `colors_in_last_frame` for exactly that reason, so the same
 tightening is available whenever a sweep is read.
+
+## The LGT sweep
+
+`lgt.md` is their largest document and covers the platform 141 of our 148 local
+uploads go through, so it was read next. **The first eight findings checked are
+all already answered here**, several of them better, which is the opposite
+balance to the KTF sweep and matches where this project's work has gone.
+
+| their finding | here |
+|---|---|
+| a Java title's picture wiped by a re-read of guest memory before a blit | cannot happen: LGT Java drawing never touches a guest framebuffer, so the two paths share no surface |
+| `MC_grpFlushLcd` ignoring its second argument and always publishing the LCD | we read the framebuffer it names and publish that one |
+| the host's frame taken from the framebuffer at the moment it asks, not from the last flush | we paint at the flush, so what the host shows is what the flush put there |
+| `MC_grpGetStringWidth` measuring the whole string whatever `len` said | `-1` is NUL-terminated and `len >= 0` is exactly that many, documented as such |
+| a null `System.out` stopping a title inside its own `println` | `out` and `err` are put in place by `System`'s initializer |
+| `strlen` bounded as a name at 4096 bytes | unbounded, scanning past the allocation the way C's does |
+| `srand`/`rand` at `0x404`/`0x403`, `malloc` at `0x426` | all present; `malloc` comes from the firmware's own `b dmemory_alloc` rather than a call site, shares the allocator and block layout `MC_knlAlloc` uses so a mixed free works - 열혈택시 mixes them - and `dlib_free` at `0x428` is here too |
+| a grant to a worker whose goroutine has returned blocking for ever | a Go channel shape with no equivalent here |
+
+**One gap, and its slot number was already half-confirmed by our own table.**
+`0x3f9` is `vsprintf`, and the reference names it twice: its call site hands a
+destination, a format assembled on the caller's own stack, and a third pointer
+into the frame above - a `va_list` on this ABI - and the numbering says the same,
+because `sprintf`, `sscanf` and `vsprintf` are the three of `<stdio.h>` a handset
+keeps once the `FILE *` ones are dropped. Counting those off `sprintf` at `0x3f7`
+puts `atof` and `atoi` at `0x3fa` and `0x3fb` - **and `0x3fb` is where this table
+already had `atoi`, arrived at independently.** An unmapped stdlib slot here is a
+fatal error, so a title reaching this one stops dead.
+
+It is served now, on `sprintf`'s own renderer with the arguments read as a cursor
+through guest memory instead of from registers and the stack. The walk has no
+count and no terminator to go by - it is the caller's frame - so it stops where
+the reads stop, which is a bound that cannot fault. `0x3f8` and `0x3fa` are
+`sscanf` and `atof` by the same counting and stay unimplemented, because nothing
+has presented a call site for either and a slot named only by arithmetic is a
+guess.

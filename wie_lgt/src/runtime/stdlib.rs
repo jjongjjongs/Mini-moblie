@@ -220,6 +220,7 @@ pub fn register_stdlib_svc_handler(core: &mut ArmCore, system: &System, save_poi
         match id.0 {
             x if x == StdlibSvcId::Printf as u32 => EmulatedFunction::call(&printf, core, &mut ()).await?.write(core, lr),
             x if x == StdlibSvcId::Sprintf as u32 => EmulatedFunction::call(&sprintf, core, &mut ()).await?.write(core, lr),
+            x if x == StdlibSvcId::Vsprintf as u32 => EmulatedFunction::call(&vsprintf, core, &mut ()).await?.write(core, lr),
             x if x == StdlibSvcId::Atoi as u32 => EmulatedFunction::call(&atoi, core, &mut ()).await?.write(core, lr),
             x if x == StdlibSvcId::Atol as u32 => EmulatedFunction::call(&atoi, core, &mut ()).await?.write(core, lr),
             x if x == StdlibSvcId::Strtol as u32 => EmulatedFunction::call(&strtol, core, &mut ()).await?.write(core, lr),
@@ -457,6 +458,62 @@ async fn sprintf(core: &mut ArmCore, _: &mut (), dest: u32, format: u32, a0: u32
     // What C returns is what it wrote, and both are the guest's own bytes - the
     // format as it was read and the result as it was built - so the count is of
     // those and every byte survives the round trip.
+    Ok(result.len() as u32)
+}
+
+/// How far a `va_list` is followed before the format engine is left to stop on
+/// its own.
+///
+/// The list is the caller's own frame, so there is no count in it and no
+/// terminator; what bounds the walk is that a read which fails is the end of
+/// what the caller set up rather than a failure of the call.
+const VA_LIST_MAX_WORDS: u32 = 16;
+
+/// `vsprintf(dest, format, va_list)` - kernel slot `0x3f9`.
+///
+/// The slot is named twice over. Its call site hands it a destination, a format
+/// it has just assembled on its own stack, and a third pointer into the frame
+/// above, which is what a `va_list` is on this ABI. And the numbering agrees:
+/// `sprintf`, `sscanf` and `vsprintf` are the three of `<stdio.h>` a handset
+/// keeps once the ones taking a `FILE *` are dropped, so counting those off
+/// `sprintf` at `0x3f7` puts `atof` and `atoi` at `0x3fa` and `0x3fb` - and
+/// `0x3fb` is where this table already had `atoi`, from the other direction.
+///
+/// The renderer is `sprintf`'s. What changes is where the arguments come from: a
+/// cursor through guest memory rather than registers and then the stack.
+///
+/// `0x3f8` and `0x3fa` are `sscanf` and `atof` by that same counting, and stay
+/// unimplemented because nothing has presented a call site for either.
+async fn vsprintf(core: &mut ArmCore, _: &mut (), dest: u32, format: u32, va_list: u32) -> Result<u32> {
+    vsprintf_into(core, dest, format, va_list)
+}
+
+/// The whole of `vsprintf`, which reads and writes guest memory and awaits
+/// nothing - the `async` above is the shape the dispatch table wants, and this
+/// is the shape a test can reach.
+fn vsprintf_into(core: &mut ArmCore, dest: u32, format: u32, va_list: u32) -> Result<u32> {
+    let format_bytes = read_null_terminated_string_bytes(core, format)?;
+
+    tracing::debug!(
+        "vsprintf({dest:#x}, {:?}, {va_list:#x})",
+        alloc::string::String::from_utf8_lossy(&format_bytes)
+    );
+
+    let mut args = alloc::vec::Vec::new();
+    if va_list != 0 {
+        for index in 0..VA_LIST_MAX_WORDS {
+            let Ok(word): Result<u32> = read_generic(core, va_list + index * 4) else {
+                break;
+            };
+
+            args.push(word);
+        }
+    }
+
+    let result = format_varargs(&format_bytes, &args, &mut |ptr| read_null_terminated_string_bytes(core, ptr))?;
+
+    write_null_terminated_string_bytes(core, dest, &result)?;
+
     Ok(result.len() as u32)
 }
 
@@ -796,5 +853,40 @@ mod tests {
         assert_eq!(c_atoi(b""), 0);
         assert_eq!(c_atoi(b"abc"), 0);
         assert_eq!(c_atoi(b"-"), 0);
+    }
+
+    /// A `va_list` is the caller's frame, so the arguments are words in guest
+    /// memory and there is nothing in the list saying how many. The walk stops
+    /// where the reads stop, and the format engine stops where it runs out.
+    #[test]
+    fn vsprintf_reads_its_arguments_out_of_the_frame() -> wie_util::Result<()> {
+        use wie_core_arm::{Allocator, ArmCore};
+        use wie_util::{write_generic, write_null_terminated_string_bytes};
+
+        let mut core = ArmCore::new(false, None)?;
+        Allocator::init(&mut core)?;
+
+        let format = Allocator::alloc(&mut core, 32)?;
+        write_null_terminated_string_bytes(&mut core, format, b"%s has %d")?;
+
+        let name = Allocator::alloc(&mut core, 8)?;
+        write_null_terminated_string_bytes(&mut core, name, b"HP")?;
+
+        let va_list = Allocator::alloc(&mut core, 8)?;
+        write_generic(&mut core, va_list, name)?;
+        write_generic(&mut core, va_list + 4, 42u32)?;
+
+        let dest = Allocator::alloc(&mut core, 64)?;
+        let written = super::vsprintf_into(&mut core, dest, format, va_list)?;
+
+        let result = wie_util::read_null_terminated_string_bytes(&core, dest)?;
+        assert_eq!(result, b"HP has 42");
+        assert_eq!(written as usize, result.len());
+
+        // A list with nothing behind it formats what it can rather than faulting.
+        let empty = super::vsprintf_into(&mut core, dest, format, 0)?;
+        assert!(empty > 0);
+
+        Ok(())
     }
 }
