@@ -646,3 +646,42 @@ column, sprites that move in multiples. Our own "Y축 전경 지터 (더블이�
 investigation closed against the reference without a shipped change; if that
 symptom returns, a Host paint running beside a guest-driven one is the cause to
 check first.
+
+### Measuring the stand-down against this corpus, and what the harness cannot say
+
+The section above left the Host-paint stand-down unported because its eight-round
+window is a constant measured against another corpus. So it was measured against
+this one: `Card.serviceRepaints` and the repaint event were each logged with the
+guest clock, over 8,000 probe ticks per archive.
+
+| archive | guest paints | host paints | gap p50 | p99 | max |
+|---|---:|---:|---:|---:|---:|
+| k1, k3, k5 | 0 | 200 | - | - | - |
+| k2 | 2 | 200 | 2 | 2 | 2 |
+| k4 (Bigi 미궁) | 259 | 200 | 80 | 87 | 99 |
+
+**Both of their shapes are here, and cleanly apart.** k4 drives its own screen -
+259 paints, one every 31 ticks against the probe's host paint every 40 - and k1,
+k3 and k5 never call it at all. k2 is the third shape and the important one: it
+calls twice, two clock units apart, and then never again, drawing the rest of its
+run from a Host paint it does not ask for. **That is exactly the title their naive
+version froze.** Standing the Host paint down for good on the first
+`serviceRepaints` would take k2 from 200 painted frames to 2. So if this is ever
+ported, the expiry is not a refinement, it is the part that keeps a local archive
+alive.
+
+**What this harness cannot give is the number.** `CapturePlatform::now()` advances
+one millisecond per *call*, so k4's "80" is eighty clock reads between paints
+rather than eighty milliseconds of anything, and the probe's own host paint every
+40 ticks is a probe constant rather than a refresh rate. The window has to be
+long enough that a driving title never loses its Host paint and short enough that
+a load screen gets it back, and both halves of that are ratios between a title's
+real frame period and a real display's refresh - neither of which exists in a run
+where the clock moves because the guest looked at it.
+
+So the measurement settles the shape and not the constant: **the stand-down needs
+an expiry, this corpus proves it, and the value needs a run on a real clock.** The
+same limit already sits behind the multi-tap commit delay, which the probe also
+cannot exercise - making the probe's clock advance with ticks rather than with
+reads would unblock both, at the cost of new frame-signature baselines for every
+archive.
