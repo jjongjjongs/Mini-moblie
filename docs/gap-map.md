@@ -443,3 +443,51 @@ later in a register nothing traces back.
 the repository's own order - the test above saw `[1, 3, 2]` - and a title that
 indexes the list by position cares. Nothing here establishes what native's order
 was, so the test sorts before comparing and the behaviour is left alone.
+
+### Two ceilings we do not have, and three calls we already serve
+
+**Their fifteenth round is two limits this runtime does not impose.** They cap
+the guest workers a round will grant and the steps a Host service call may spend,
+and two titles reached both by playing normally: one starts a thread per sound
+effect and had 253 started, 189 retired, 64 alive and the sixty-fifth stack
+refused, because a round that retired a worker still spent its grant on it; the
+other busy-waits inside a timer callback by polling `MC_knlCurrentTime` in a
+counted delay loop, and 5.2 seconds of that is 828 million steps against an
+allowance of 500 million.
+
+Neither can happen here, for different reasons in each case. There is no step
+allowance at all, so nothing charges a guest for waiting. And a thread's stack is
+`ThreadState`'s to hold: it takes 1MB from a reuse pool and gives it back in
+`Drop`, so a thread that finished returns its stack without anything having to
+notice that it finished. The pool's cap bounds how many stacks are kept for
+reuse, not how many a title may have.
+
+Their other half does not reach us either. A Host that steps ticks holds its
+session clock still for the length of a service call, so a guest busy-waiting on
+the clock never sees its wait end - which is why their free renewal is
+conditional on the clock having moved. Time here is read from the platform on
+each call rather than from a clock the Host holds, so the wait ends in a probe
+(a millisecond per read) and on a real frontend (the wall) alike.
+
+**What we lack is the diagnostic, not the ceiling.** The executor yields only at
+an SVC that awaits (`core.rs`), so a guest loop that never reaches one freezes
+this runtime with nothing said - the same freeze a handset has, since a callback
+there has no scheduler to yield to either, but without the three-second failure
+their allowance turns it into. Worth having if a local title ever presents one;
+not worth inventing a number for before then.
+
+**Their sixteenth round is three WIPI-C calls they did not serve, and we serve
+all three.** `MC_knlGetCurProgramID` answers a stable non-zero id - theirs is
+derived from the archive's identifier so two archives never collide, ours is the
+constant 1, which is the same thing for a runtime that runs one archive at a
+time. `MC_fsRename` is served, and a leading separator is already trimmed to one
+key by `normalize_guest_path`, so `/lo.dsk` and `lo.dsk` are one file here rather
+than the two that lost their title's save.
+
+And `MC_grpPostEvent` has the reader their version was missing. Theirs queued the
+message a title sends itself into a queue nothing drained - the guest's own
+`getNextEvent` loop reads its own queue, and everything the Host originates goes
+straight to the card stack. Here the push lands as `Event::Notify`, the event
+queue turns it into `NotifyEvent`, and `Display.handleNotifyEvent` dispatches it,
+so a middleware routine compiled to
+`MC_grpPostEvent(MC_knlGetCurProgramID(), ...)` gets its own message back.
