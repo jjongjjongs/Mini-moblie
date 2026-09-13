@@ -7,7 +7,7 @@ use jvm::{ClassInstanceRef, Jvm, Result as JvmResult};
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 
 use crate::classes::{
-    javax::microedition::lcdui::{Display, Graphics},
+    javax::microedition::lcdui::{Display, Graphics, display::HOST_PAINT_STAND_DOWN_MS},
     net::wie::{KeyboardEventType, MIDPKeyCode},
 };
 
@@ -156,7 +156,7 @@ impl Canvas {
     /// the region the title asked for was thrown away; and it returned without
     /// painting, so the title ran ahead of the display and drew its next frame
     /// over one that had never been shown. That is what the flicker was.
-    async fn service_repaints(jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<()> {
+    async fn service_repaints(jvm: &Jvm, context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<()> {
         tracing::debug!("javax.microedition.lcdui.Canvas::serviceRepaints({this:?})");
 
         let display: ClassInstanceRef<Display> = jvm.get_field(&this, "currentDisplay", "Ljavax/microedition/lcdui/Display;").await?;
@@ -175,7 +175,12 @@ impl Canvas {
             return Ok(());
         }
 
-        jvm.invoke_virtual(&display, "handlePaintEvent", "()V", ()).await
+        let _: () = jvm.invoke_virtual(&display, "handlePaintEvent", "()V", ()).await?;
+
+        // The guest is painting its own frames, so the host's paint stands down
+        // for a while - beside this one it would be a step the title did not take.
+        let until = context.system().platform().now().raw() + HOST_PAINT_STAND_DOWN_MS;
+        jvm.put_field(&mut display.clone(), "__wieStandDownUntil", "J", until as i64).await
     }
 
     async fn get_game_action(_: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, key: i32) -> JvmResult<i32> {

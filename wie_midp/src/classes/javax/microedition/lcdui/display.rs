@@ -15,6 +15,35 @@ use crate::classes::javax::microedition::{
 // class javax.microedition.lcdui.Display
 pub struct Display;
 
+/// How long a host paint stands down after the guest paints a frame of its own.
+///
+/// A title can drive its own frame loop - `repaint` to ask, `serviceRepaints` to
+/// enter `paint` - and a frame loop that lives inside `paint` advances the world
+/// once per entry. A host paint arriving beside it is therefore not a wasted draw
+/// but a second step the title did not take: the reference has a scrolling title
+/// whose world moved three times per step, laying the same column of terrain down
+/// at three offsets, and everything that looked like the cause - the blit argument
+/// order, the overlapping snapshot, the palette transparency, the tile decode, the
+/// anchor - turned out to be correct.
+///
+/// 200ms is measured against this corpus. Bigi 미궁 drives its own screen at a very
+/// steady 12.5 frames a second, and 81ms is the worst gap between two of its
+/// paints, so this is about two and a half times the longest wait a driving title
+/// asks for.
+///
+/// **Guest time rather than a count of host paints**, which is what the reference
+/// bounds it by, because a count means something different on every frontend: the
+/// probe's host paint arrives every 40 ticks and a display's every 16, so eight of
+/// them is a fifth of a second in one place and two and a half seconds in the
+/// other. A duration reads the same everywhere.
+///
+/// **The expiry is the half that matters.** Standing down for good on the first
+/// `serviceRepaints` looks simpler and is wrong: one local archive paints twice,
+/// 22ms apart, and then draws the whole rest of its run from a host paint it never
+/// asks for. Counting the calls does not separate the two shapes either - a load
+/// screen and a frame loop both call it.
+pub(crate) const HOST_PAINT_STAND_DOWN_MS: u64 = 200;
+
 impl Display {
     pub fn as_proto() -> WieJavaClassProto {
         WieJavaClassProto {
@@ -65,6 +94,7 @@ impl Display {
                 // a pending repaint by painting here and now without a title
                 // that calls it from inside its own paint recursing.
                 JavaFieldProto::new("__wiePainting", "Z", Default::default()),
+                JavaFieldProto::new("__wieStandDownUntil", "J", Default::default()),
             ],
             access_flags: Default::default(),
         }

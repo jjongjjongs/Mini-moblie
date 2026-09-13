@@ -738,3 +738,40 @@ ticks k1 draws 13 frames, k2 15, k3 13, k4 63, k5 13, and k1/k3/k5's 13 is exact
 the probe's own every-40-ticks paint. The LGT probe is untouched, so 메이플2007,
 디스트로이어 and 엑시온2 keep the signatures this document has been checking
 against all along.
+
+### The stand-down, ported with the number this corpus gave
+
+With the probe's clock on the guest's execution the window could be measured, so
+the Host paint now stands down for **200ms of guest time** after a frame the guest
+painted, and comes back on its own.
+
+**Guest time rather than a count of host paints**, which is what the reference
+bounds it by. A count means something different on every frontend: the probe's
+host paint arrives every 40 ticks and a 60Hz display's every 16, so eight of them
+is a fifth of a second in one place and two and a half seconds in the other. A
+duration reads the same in both, and it is the thing the measurement measured -
+Bigi 미궁's worst gap between its own paints is 81ms, so 200 is about two and a
+half times the longest wait a driving title asks for.
+
+**What it did, at 500 ticks an archive:**
+
+| archive | before | after | |
+|---|---:|---:|---|
+| k4 (Bigi 미궁) | 63 | **51** | 12 of its 13 host paints gone; its own 50 untouched |
+| k2 | 15 | **15** | nothing lost |
+| k1, k3, k5 | 13 | 13 | never drive their own screen |
+
+k4 is the point: it was being painted 63 times for the 50 frames it asked for, and
+a frame loop inside `paint` advances the world once per entry. k2 is the guard - a
+count of eight host paints would have cost it eight frames at the probe's cadence,
+and the duration costs it none, because 200ms of guest time expires long before the
+next host paint arrives.
+
+The LGT archives are unchanged, signatures included: that platform's titles do not
+drive their screen through `Card.serviceRepaints`, so nothing stands down for them.
+
+**No unit test, and the reason is the fixture.** `Canvas` is abstract, so the
+guest-paint side cannot be reached without building a concrete subclass and a
+display for it, and the suppression side needs the event queue driven by hand. What
+the change is really claimed to do is distinguish the two shapes, and the frame
+counts above do that in a way a field-write assertion would not.
