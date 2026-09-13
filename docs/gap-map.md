@@ -685,3 +685,56 @@ same limit already sits behind the multi-tap commit delay, which the probe also
 cannot exercise - making the probe's clock advance with ticks rather than with
 reads would unblock both, at the cost of new frame-signature baselines for every
 archive.
+
+### The probe's clock now runs on the guest's execution
+
+The measurement above could settle the shape of the Host-paint stand-down and not
+its size, because the probe's clock advanced a millisecond per *read*: a title
+that polls the clock in a delay loop had time fly, one that never asks had it
+stand still, and nothing measured in those milliseconds transferred to a frontend
+where the clock is real.
+
+It runs on `EXECUTED_INSTRUCTIONS` now - a counter that was already there, public
+and cumulative, so no shipped code changed. Within a tick, time advances only as
+the guest executes; at the end of a tick the probe folds that execution into the
+base and charges at least a tick's worth, so a moment where every task is asleep
+still ends.
+
+**Two attempts got it wrong first, and both are worth writing down.** Taking
+whichever of tick-pacing and execution-pacing had got further turns
+`Executor::tick`'s bound into "execute until work catches up with the tick count",
+which for a title that has been idle is not a bound at all - one archive went from
+running 8,000 ticks to not finishing 500. And pacing purely on execution hangs for
+a different reason: a task can make progress without executing a guest
+instruction, which `yield_now` and a sleep of nothing both do, so the time the
+tick is waiting for is time only the guest can buy and nobody is buying it. Clock
+reads remain as a floor under the rate, at a thousand to the millisecond rather
+than one.
+
+**The rate is 10,000 instructions to the millisecond, not the 100,000 a handset
+ARM of the era would give**, and the corpus is what chose it. At 100,000 the
+title that drives its own screen reads as 125 frames a second, which no title of
+this era was; at 10,000 it reads as 12.5, which is what it looks like. The
+difference is that this platform draws in host code, so a frame's real cost is
+missing from the guest's instruction count, and the rate is where that has to be
+absorbed.
+
+**What it measured.** Over 500 ticks - about four seconds of guest time:
+
+| archive | guest paints | gap p50 | max |
+|---|---:|---:|---:|
+| k4 (Bigi 미궁) | 50 | 80ms | 81ms |
+| k2 | 2 | 22ms | 22ms |
+| k1, k3, k5 | 0 | - | - |
+
+k4 drives its own screen at a very steady 12.5 frames a second, and its worst gap
+is 81ms - **about five paints of a 60Hz display, so a stand-down of eight covers
+it with margin.** That is the reference's own number, arrived at from this corpus
+instead of theirs. k2 still says the expiry is mandatory: two paints 22ms apart and
+then nothing for the rest of the run.
+
+**New KTF baselines**, since tick counts mean something different now: at 500
+ticks k1 draws 13 frames, k2 15, k3 13, k4 63, k5 13, and k1/k3/k5's 13 is exactly
+the probe's own every-40-ticks paint. The LGT probe is untouched, so 메이플2007,
+디스트로이어 and 엑시온2 keep the signatures this document has been checking
+against all along.

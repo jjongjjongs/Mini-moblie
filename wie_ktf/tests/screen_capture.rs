@@ -10,7 +10,12 @@
 //!
 //! - `WIE_KTF_ARCHIVE` - path to the archive to run. Unset, the probe is a
 //!   no-op, which is what keeps it out of the way of an ordinary `cargo test`.
-//! - `WIE_TICKS` - how many ticks to run (default 20000).
+//! - `WIE_TICKS` - how many ticks to run (default 20000). A tick is at least
+//!   eight milliseconds of guest time and more when the guest executes for
+//!   longer, so a tick count is now a duration: 500 is about four seconds of
+//!   guest time. It also costs what that time costs - a title that computes
+//!   through its whole tick pays for every instruction - so the counts worth
+//!   using here are much smaller than they were.
 //! - `WIE_SHOT` - where to write the last painted frame, as a binary PPM.
 //! - `WIE_KEY`/`WIE_PRESS_TICK` - one key press, to get past a title's notice.
 //! - `WIE_SCRIPT` - a walk into the title instead: `tick:KEY` pairs separated
@@ -94,10 +99,72 @@ impl Screen for CaptureScreen {
 struct CapturePlatform {
     inner: TestPlatform,
     screen: CaptureScreen,
-    /// A clock the probe advances itself: a title that waits on the wall clock
-    /// never gets anywhere on a clock that does not move.
-    clock: Arc<AtomicU64>,
+    clock: Arc<ProbeClock>,
 }
+
+/// The probe's guest clock.
+///
+/// It used to be a millisecond per *read*, which made time a function of how
+/// often a title looked at it: one that polls the clock in a delay loop had time
+/// fly, one that never asks had it stand still, and nothing measured in those
+/// milliseconds meant anything on a frontend where the clock is real.
+///
+/// It runs on the guest's own execution now. Within a tick time advances only as
+/// the guest executes, which keeps `Executor::tick`'s own eight-millisecond bound
+/// both reachable and bounded; at the end of a tick the probe folds that
+/// execution into the base and charges at least a tick's worth, so a moment where
+/// every task is asleep still ends. Taking whichever of the two had got further
+/// instead makes the bound "execute until work catches up with the tick count",
+/// which for a title that has been idle is not a bound at all.
+#[derive(Default)]
+struct ProbeClock {
+    base_ms: AtomicU64,
+    anchor: AtomicU64,
+    reads: AtomicU64,
+}
+
+impl ProbeClock {
+    fn now_ms(&self) -> u64 {
+        let executed = wie_core_arm::EXECUTED_INSTRUCTIONS.load(Ordering::Relaxed);
+        let since = executed.saturating_sub(self.anchor.load(Ordering::SeqCst));
+        let reads = self.reads.fetch_add(1, Ordering::SeqCst);
+
+        // Execution is what paces this, and reads are only a floor under it. The
+        // floor has to be there: a task can make progress without executing a
+        // guest instruction - `yield_now` and a sleep of nothing both do - and a
+        // tick whose bound is guest time would never end while one of those runs,
+        // because the time it is waiting for is time only the guest can buy.
+        // A thousand reads to the millisecond is slow enough that a delay loop
+        // polling the clock no longer has time fly, which is what the old one
+        // gave it at a millisecond each.
+        self.base_ms.load(Ordering::SeqCst) + (since / GUEST_STEPS_PER_MS).max(reads / READS_PER_MS)
+    }
+
+    /// Ends a tick: what the guest executed becomes time, and an idle tick still
+    /// costs one.
+    fn advance(&self) {
+        let executed = wie_core_arm::EXECUTED_INSTRUCTIONS.load(Ordering::Relaxed);
+        let worked = executed.saturating_sub(self.anchor.swap(executed, Ordering::SeqCst)) / GUEST_STEPS_PER_MS;
+        let read = self.reads.swap(0, Ordering::SeqCst) / READS_PER_MS;
+
+        self.base_ms.fetch_add(worked.max(read).max(MS_PER_TICK), Ordering::SeqCst);
+    }
+}
+
+/// Guest instructions to a millisecond of guest time.
+///
+/// A handset ARM of this era at about one instruction a cycle. The figure is not
+/// load-bearing to a factor of ten either way: it only has to be slow enough
+/// that a guest which waits by spinning still pays execution for the wait, and
+/// fast enough that a real delay fits inside a run worth doing.
+const GUEST_STEPS_PER_MS: u64 = 10_000;
+
+/// The least a tick costs, so a run where nothing executes still reaches its
+/// deadlines.
+const MS_PER_TICK: u64 = 8;
+
+/// Clock reads to a millisecond, the floor under the rate above.
+const READS_PER_MS: u64 = 1_000;
 
 impl Platform for CapturePlatform {
     fn screen(&self) -> &dyn Screen {
@@ -105,7 +172,7 @@ impl Platform for CapturePlatform {
     }
 
     fn now(&self) -> Instant {
-        Instant::from_epoch_millis(self.clock.fetch_add(1, Ordering::SeqCst))
+        Instant::from_epoch_millis(self.clock.now_ms())
     }
 
     fn database_repository(&self) -> &dyn DatabaseRepository {
@@ -282,6 +349,7 @@ fn run_once(
     let exited_clone = exited.clone();
     let screen = CaptureScreen::default();
 
+    let tick_clock = Arc::new(ProbeClock::default());
     let platform = Box::new(CapturePlatform {
         inner: TestPlatform::with_state_and_event_handler(state.clone(), move |event| match event {
             TestPlatformEvent::Stdout(buf) => eprint!("[stdout] {}", String::from_utf8_lossy(&buf)),
@@ -289,7 +357,7 @@ fn run_once(
             TestPlatformEvent::Exit => exited_clone.store(true, Ordering::SeqCst),
         }),
         screen: screen.clone(),
-        clock: Arc::new(AtomicU64::new(0)),
+        clock: tick_clock.clone(),
     });
 
     let options = Options {
@@ -335,6 +403,7 @@ fn run_once(
             stopped = Some(error);
             break;
         }
+        tick_clock.advance();
         ticks += 1;
     }
 
