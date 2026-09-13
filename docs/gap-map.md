@@ -1636,3 +1636,55 @@ there for the same reason we do. Neither runtime makes a single network call on
 this title. The difference in what reaches the screen is a smaller question than
 it looked, and the title does not "run" in the reference either in any sense
 beyond that splash.
+
+#### 격투가, seventh pass: the reference does run it, and the network premise was wrong
+
+Screenshots from the reference show this title reaching its opening cutscene and
+its "press any key" title screen, so the sixth pass's conclusion - that the
+reference stops at the splash for the same reason we do - was wrong. Running the
+reference's own CLI longer confirms it: under `-play -speed 50` for 12,000 ticks
+it holds the 프리스타일 logo to about tick 7,650 and then moves to a ZIO
+Interactive splash, and on from there.
+
+The conclusion that followed from it was wrong too, and worth stating plainly
+because it was about to be acted on. **This title never attempts a network call
+at all** - `org/kwis/msf/io` and the socket API are untouched in our runtime, and
+the reference's own counts show the same. `netState = -1` and `socket = null` are
+what a title looks like *before* it decides to connect, not a title blocked on
+connecting, and the screens the reference reaches are all in front of that point.
+Standing up a local `BillSocket`/authentication responder to move `netState`
+would not have touched the thing that is stuck.
+
+What the guest actually is, now that the classes are named: a thin Java shell
+over a C engine. `dnff` carries fourteen natives that are the engine's entry
+points - `startClet`, `pauseClet`, `resumeClet`, `destroyClet`, `calcClet`,
+`paintClet`, `initLCDClet`, `handleCletEvent`, `calcAnnunciatorClet`, and the
+five `net*Clet` - all sharing one veneer at `0x102983` that loads the real body
+from the descriptor's `+8`. `calcClet` (`0x1058bd`) is the tick, and it is what
+draws.
+
+Counting the natives our runtime actually enters, over 1,500 ticks:
+
+```
+39  paintClet          (0x105b8d)   - the host's paint events
+ 2  calcClet           (0x1058bd)   - the engine tick
+ 2  netGetStateClet    2  netSetStateClet
+ 1  startClet   1  initLCDClet   1  calcAnnunciatorClet
+```
+
+**The engine ticks twice.** `GamePlay.run` calls `calcClet` once per iteration,
+and its iteration ends in a countdown wait - `budget -= elapsed`, floored at 10,
+`sleep(budget)` - which is where the 11,033 ms sleeps come from: a twelve-second
+timeout draining, not frame pacing.
+
+Giving it far more time does not help. At 25,000 ticks the probe reaches 200
+seconds of guest time, 632 frames, and the screen is still one colour. Slowing
+the probe clock (1 ms a tick instead of 8, and twenty times the instructions to
+a millisecond) does not move it either. So this is not the probe's budget and not
+obviously its clock rate.
+
+Where that leaves it: the engine tick runs twice and then the loop stops making
+progress, while the reference's runs it enough to walk through three splash
+screens. The next thing to measure is what `GamePlay.run`'s loop does on the
+iteration where it stops advancing - the branch after `netGetStateClet`, which
+switches on 1, 2, 3 and 99 - rather than anything about the network.
