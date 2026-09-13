@@ -80,7 +80,7 @@ struct CMethodProxy {
 
 async fn handle_wipic_svc(
     core: &mut ArmCore,
-    (system, jvm, network_state, serial_state, filesystem_state, shared_buf_state, im_state): &mut (
+    (system, jvm, network_state, serial_state, filesystem_state, shared_buf_state, im_state, kernel_state): &mut (
         System,
         Jvm,
         net::SharedNetworkState,
@@ -88,6 +88,7 @@ async fn handle_wipic_svc(
         filesystem::SharedFilesystemState,
         shared_buf::SharedSharedBufState,
         im::SharedImState,
+        kernel::SharedKernelState,
     ),
     id: SvcId,
 ) -> Result<()> {
@@ -107,6 +108,7 @@ async fn handle_wipic_svc(
         filesystem_state.clone(),
         shared_buf_state.clone(),
         im_state.clone(),
+        kernel_state.clone(),
     );
     // An unimplemented WIPI-C function is reported and skipped rather than
     // ending the run. Stopping on the first one hides everything a title does
@@ -394,6 +396,7 @@ pub fn register_wipic_svc_handler(core: &mut ArmCore, system: &System, jvm: &Jvm
             filesystem::new_state(),
             shared_buf::new_state(),
             im::new_state(),
+            kernel::new_state(),
         ),
     )?;
     // The synchronous fast path for the hottest WIPI-C getters is installed by

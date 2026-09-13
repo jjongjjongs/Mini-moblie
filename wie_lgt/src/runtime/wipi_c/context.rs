@@ -12,7 +12,8 @@ use wie_util::{ByteRead, ByteWrite, Result, WieError, read_generic, write_generi
 use wie_wipi_c::{
     WIPICContext, WIPICMethodBody,
     api::{
-        filesystem::SharedFilesystemState, im::SharedImState, net::SharedNetworkState, serial::SharedSerialState, shared_buf::SharedSharedBufState,
+        filesystem::SharedFilesystemState, im::SharedImState, kernel::SharedKernelState, net::SharedNetworkState, serial::SharedSerialState,
+        shared_buf::SharedSharedBufState,
     },
 };
 
@@ -27,6 +28,7 @@ pub struct LgtWIPICContext {
     filesystem_state: SharedFilesystemState,
     shared_buf_state: SharedSharedBufState,
     im_state: SharedImState,
+    kernel_state: SharedKernelState,
 }
 
 impl LgtWIPICContext {
@@ -39,6 +41,7 @@ impl LgtWIPICContext {
         filesystem_state: SharedFilesystemState,
         shared_buf_state: SharedSharedBufState,
         im_state: SharedImState,
+        kernel_state: SharedKernelState,
     ) -> Self {
         Self {
             core,
@@ -49,6 +52,7 @@ impl LgtWIPICContext {
             filesystem_state,
             shared_buf_state,
             im_state,
+            kernel_state,
         }
     }
 }
@@ -134,6 +138,10 @@ impl WIPICContext for LgtWIPICContext {
 
     fn im_state(&self) -> SharedImState {
         self.im_state.clone()
+    }
+
+    fn kernel_state(&self) -> SharedKernelState {
+        self.kernel_state.clone()
     }
 
     async fn call_function(&mut self, address: WIPICWord, args: &[WIPICWord]) -> Result<WIPICWord> {

@@ -2,12 +2,16 @@ mod sprintf;
 
 use alloc::{
     boxed::Box,
+    collections::BTreeMap,
     format,
     string::{String, ToString},
+    sync::Arc,
     vec,
     vec::Vec,
 };
 use core::iter;
+
+use spin::Mutex;
 
 use bytemuck::{Pod, Zeroable};
 
@@ -263,6 +267,31 @@ pub async fn free(context: &mut dyn WIPICContext, memory: WIPICIndirectPtr) -> R
     Ok(memory)
 }
 
+/// What this platform has handed out as resource ids.
+///
+/// The id `MC_knlGetResourceID` answers is a pointer to a copy of the name, and
+/// a title stores it as the resource's identity, so it has to stay a pointer.
+/// What it must not be is where this platform reads the name back from. A
+/// title's drawing is not bounded by the surface it was given - a clear loop
+/// that runs off the end of a framebuffer lands in whatever the arena handed out
+/// next, and that can be this copy. The name then reads back empty, the resource
+/// lookup that follows misses, and the title fails somewhere else entirely: the
+/// reference traced one to a write through a null return seven hundred
+/// instructions and one platform call later.
+///
+/// So the name is kept here as well, and read from here. A handle whose meaning
+/// lives where the guest can write it is a handle the guest can destroy.
+#[derive(Default)]
+pub struct KernelState {
+    resource_names: BTreeMap<WIPICWord, String>,
+}
+
+pub type SharedKernelState = Arc<Mutex<KernelState>>;
+
+pub fn new_state() -> SharedKernelState {
+    Arc::new(Mutex::new(KernelState::default()))
+}
+
 pub async fn get_resource_id(context: &mut dyn WIPICContext, ptr_name: WIPICWord, ptr_size: WIPICWord) -> Result<i32> {
     tracing::debug!("MC_knlGetResourceID({ptr_name:#x}, {ptr_size:#x})");
 
@@ -311,6 +340,10 @@ pub async fn get_resource_id(context: &mut dyn WIPICContext, ptr_name: WIPICWord
     write_null_terminated_string_bytes(context, ptr_handle, name_bytes)?;
     write_generic(context, ptr_size, size as u32)?;
 
+    // Remember what this id was issued for, so the lookup that follows does not
+    // depend on the guest leaving those bytes alone.
+    context.kernel_state().lock().resource_names.insert(ptr_handle, name.to_string());
+
     tracing::debug!("  resource {name:?} is {size} bytes, handle {ptr_handle:#x}");
 
     Ok(ptr_handle as _)
@@ -329,9 +362,20 @@ pub async fn get_resource(context: &mut dyn WIPICContext, id: i32, buf: WIPICInd
         return Ok(-9); // M_E_INVALID
     }
 
-    let name_bytes = read_null_terminated_string_bytes(context, id as _)?;
-    // the handle was written by get_resource_id as utf-8, not guest-encoded
-    let name = String::from_utf8_lossy(&name_bytes);
+    let recorded = context.kernel_state().lock().resource_names.get(&(id as WIPICWord)).cloned();
+    let name = match recorded {
+        Some(name) => name,
+        None => {
+            // An id this run did not issue - a title that kept one across a
+            // restart, or made one up. Read it the way it used to be read, and
+            // say so, because a handle nobody here handed out is worth seeing.
+            tracing::warn!("MC_knlGetResource: {id:#x} is not an id this run issued; reading the name from guest memory");
+
+            let name_bytes = read_null_terminated_string_bytes(context, id as _)?;
+            // the handle was written by get_resource_id as utf-8, not guest-encoded
+            String::from_utf8_lossy(&name_bytes).into_owned()
+        }
+    };
 
     let data = context.read_resource(&name).await?;
 
@@ -759,6 +803,37 @@ mod test {
         write_null_terminated_string_bytes(&mut context, id, &[0xc7, 0xd1, 0xb1, 0xdb]).unwrap();
 
         assert_eq!(get_system_property(&mut context, id, out, 16).await.unwrap(), -9);
+
+        Ok(())
+    }
+
+    /// A title's drawing is not bounded by the surface it was given, so the copy
+    /// of the name this platform handed back as an id can be overwritten by a
+    /// clear loop that ran off the end of a framebuffer. The lookup has to
+    /// survive that: the platform keeps its own record of what each id was
+    /// issued for.
+    #[futures_test::test]
+    async fn a_destroyed_handle_still_names_its_resource() -> Result<()> {
+        let data = [1u8, 2, 3, 4];
+        let mut context = TestContext::new().with_resource("png/menu.dat", &data);
+        let name = context.alloc_raw(16).unwrap();
+        let size = context.alloc_raw(4).unwrap();
+
+        write_null_terminated_string_bytes(&mut context, name, "png/menu.dat".as_bytes()).unwrap();
+
+        let handle = get_resource_id(&mut context, name, size).await.unwrap();
+        assert!(handle >= 0);
+
+        // Something else writes over the name, the way an overrunning fill does.
+        context.write_bytes(handle as _, &[0u8; 13]).unwrap();
+        assert!(read_null_terminated_string_bytes(&context, handle as _).unwrap().is_empty());
+
+        let buf = context.alloc(4).unwrap();
+        assert_eq!(get_resource(&mut context, handle, buf, 4).await.unwrap(), 0);
+
+        let mut result = [0; 4];
+        context.read_bytes(context.data_ptr(buf).unwrap(), &mut result).unwrap();
+        assert_eq!(result, data);
 
         Ok(())
     }

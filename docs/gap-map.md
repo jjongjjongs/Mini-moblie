@@ -357,3 +357,48 @@ records was found by a title dying loudly: the line-pitch bug two sections up
 surfaces as `ArrayIndexOutOfBoundsException`, which absorption would have turned
 into a picture that quietly did not draw. It goes in when a local title needs it,
 not before.
+
+### A freed block this runtime leaves alone, and a handle it used to trust
+
+Their eleventh round is five titles that died reading an address nothing had
+computed, and the two worth the most were reading the arena's own
+use-after-free fill. A title had freed a structure, kept a pointer into it, read
+the pointer back out of the freed block and followed it - which works on a
+handset and in a release build, because both leave a freed block's contents
+alone, and failed only under the debug fill. One of the two runs a two-and-a-half
+thousand tick session with the detector recording instead of filling, and stops
+after 160 ticks with the fill.
+
+**Not ours.** `ListAllocator::free` reads the canary and writes the header;
+`BucketAllocator::free` clears a bit in a bitmap; `MC_knlFree` calls one of those
+and nothing else. A freed payload here keeps its bytes, so a title that reads one
+back gets what the handset gave it. The same lesson is already written into
+`bucket.rs` from the other end: a `debug_assert!` on a double free used to kill a
+debug build where release and the handset both carried on, and 창세기전3 is the
+title that showed it. The cost of never filling is that a use-after-free cannot
+be *detected* here either - their recording detector is a diagnostic we do not
+have, and building one is not a thing to do before a title asks for it.
+
+**One of the other three is ours, and it is on the LGT side.** A Clet's drawing
+is not bounded by the surface it was given: one of their titles clears several
+thousand bytes past the end of the LCD, and what it landed in was the copy of a
+resource name `MC_knlGetResourceID` had handed back as an id, sixty bytes past
+the end of the screen. The name read back empty, the `MC_knlGetResource` that
+followed looked for a resource called `""`, the title took a size out of a buffer
+it had not filled, asked for `0x1c1c1c1c` bytes, got the null that refuses, and
+stored through it - **reported as a write to address zero inside a timer
+callback, seven hundred instructions and one platform call after the cause.**
+
+`get_resource_id` here allocated a copy of the name and returned the pointer;
+`get_resource` read the name back from that pointer. Same shape, same exposure.
+The id still has to be a pointer to the name - that is what the other WIPI
+platform hands out and what a title stores as the resource's identity - so what
+changed is that the platform keeps its own record of what each id was issued for
+and reads the name from there. An id this run did not issue still reads from
+guest memory, and says so.
+
+**That fixes a consequence and not the cause.** Their other answer is to put
+pixels in a region of their own, so an overrun lands in space nothing else is
+keeping; here the framebuffer and everything else still come out of one arena, so
+an overrunning title can still destroy something. What it can no longer destroy
+silently is a resource name.
