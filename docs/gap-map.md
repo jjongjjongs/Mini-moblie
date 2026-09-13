@@ -576,3 +576,73 @@ host through `request_redraw`, so the two are not one queue - and their symptom,
 two titles running four hundred ticks with no error and no lit pixel, is specific
 enough to recognise if a local title ever shows it. Nothing here does, and
 rebuilding the scheduling on a symptom we cannot see is how a week goes missing.
+
+### Cards: two rounds of theirs we pass, one difference, and one exposure we have
+
+**Their eighth round found `serviceRepaints` painting a card the display was not
+showing.** A title that loads in stages inside `startApp`, calling repaint and
+serviceRepaints between stages to move a progress bar and pushing its card only
+at the end, had its `paint` entered against a state it had not built, and stopped
+in its own compiled null check. Not ours: `Card.serviceRepaints` here goes through
+the card's canvas, and the canvas is what the card stack sets on push and clears
+on pop and remove - so a card that has never been pushed has no canvas and nothing
+is painted. Their fallback-vtable finding is not ours either: `build_vtable` walks
+the real class hierarchy from the root down, so a superclass's slot number is
+valid on every subclass's table, and `KtfClassLoader::findClass` answers not-found
+for a class the guest's own table does not have rather than fabricating a record
+that extends Object.
+
+**Their ninth round is `Card.showNotify` never being called.** One of their titles
+divided by zero twice a frame because the field it divides by is written by a
+method whose first call site is its card's `showNotify`, and their card stack
+appended and truncated a slice without telling anyone. Ours calls it in all four
+operations - push, pop, remove, removeAll - and a push of a card already in the
+stack is a no-op, so nobody is notified twice.
+
+**One difference, recorded rather than changed.** Their shown card is the top of
+the pushed stack: `paintTopCard` paints it, `isShown` answers for it, and a change
+of top hides one card and shows another. Here every pushed card is shown and
+painted, bottom to top, so a dialog pushed over a menu leaves the menu drawn
+underneath and still `isShown`. That is internally consistent - canvas, `isShown`
+and paint all agree - and the specification line they quote settles only that push
+and pop drive `showNotify`, not what a covered card is. Changing it would move
+every title with a card stack, so it stays until something says which model a
+handset had.
+
+### A paint the guest did not ask for, which we do have
+
+Between those two rounds is the one that reaches us. A title can drive its own
+frame loop from Java - `Card.repaint` to ask, `Card.serviceRepaints` to enter
+`paint` - and if the Host's own paint keeps running beside it, the title gets two
+paints for every frame it asked for. **That is a correctness bug and not just
+waste, because a frame loop that lives inside `paint` advances the world once per
+entry.** Their scrolling title asked for 583 frames in 1,250 rounds and had `paint`
+entered 1,833 times, so its world moved three times per step it took: the same
+column of terrain laid down at three offsets, a slope drawn as a sawtooth, and
+ground that leaves the bottom of the screen and never comes back. Everything that
+looked like the cause - `copyArea`'s argument order, its overlapping snapshot, the
+palette transparency, the tile decode, the anchor - was checked and correct.
+
+**We have the same double paint.** Bigi 미궁 enters `paint` 535 times in 4,000
+probe ticks: 435 from its own `repaint`/`serviceRepaints` pairs and 100 from the
+`Event::Redraw` the probe feeds. And it is not a probe artefact - `wie_cli` turns
+winit's `RedrawRequested` into `Event::Redraw` and `wie_android` does the same, so
+on a real frontend the Host's paint arrives at the window's refresh rate beside
+whatever the title paints for itself.
+
+**Not ported, and the reason is the constant.** Their fix stands the round paint
+down for eight rounds after a frame the guest painted and brings it back when the
+guest stops - eight because they measured that a title driving its own screen
+returns within two or three rounds and at worst seven, while one that has handed
+the screen back leaves hundreds or never returns. Counting calls does not separate
+those two shapes, and standing down for good on the first call froze three of
+their titles, taking flush counts from about 600 in 600 rounds to 3, 4 and 36. So
+the number has to be measured against this corpus before it is worth anything
+here.
+
+**What to look for.** The signature is a world that advances faster than the title
+steps it: repeated terrain at several offsets, a scroll that outruns its own
+column, sprites that move in multiples. Our own "Y축 전경 지터 (더블이미지)"
+investigation closed against the reference without a shipped change; if that
+symptom returns, a Host paint running beside a guest-driven one is the cause to
+check first.
