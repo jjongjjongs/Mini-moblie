@@ -532,3 +532,47 @@ stop on a reference the JVM has no object for, and binding a synthetic `Object` 
 the call proceeds moved all three walls rather than removing them. Fabricating an
 object for an arbitrary word is the same wrong-answer-silently shape this document
 keeps refusing.
+
+### A catch block that was never handed what it caught
+
+This is the correction to what the exception-chain section above assumed. That
+change said the record's label, the caught object and the chain head were the
+guest restore function's business here, and the head was the one exception. **The
+caught object was not.** It cannot be: the restore function is handed
+`context_base` and `target`, and nothing ever tells it what was thrown.
+
+A handler record carries the exception at offset 16, and the record is built on
+the guest stack by the try block's prologue - so that word is whatever the frame
+underneath had there until the unwind fills it in. Nothing on this side reads it,
+which is why nothing on this side noticed, and a catch block reads it every time.
+Our field for it was named `unk3`.
+
+The values a title gets are the plausible kind, which is why one cause looked like
+several. The reference found it behind five titles at once: a
+`catch (e) { close(); throw e; }` rethrowing a Thumb code address, a
+`System.err.println(e)` and a `StringBuffer.append(e)` handing that word to a
+runtime method as an object reference, and `e.printStackTrace()` and
+`e.getMessage()` dispatching through it as an object header and faulting on a wild
+address inside the title's own helper - twice on the same instruction, which is
+what first suggested one cause rather than five.
+
+The test writes a sentinel at that offset before the throw and asserts the record
+carries the exception afterwards; on the old code it reads the sentinel back.
+
+**Two other findings from that round are not ours.** `ByteArrayInputStream` and
+`InputStream` both declare `mark`, `reset` and `markSupported` here, so a title
+that reads a header, resets, and hands the same bytes to its own decoder gets its
+bytes rather than the `IOException` three of their titles caught. And their record
+layout has one generation-dependent detail worth knowing: an older module keeps
+the label at 16 and the object at 12, the other way round from the current
+generation. We read the label at 12 and that has always worked, so the object at
+16 is the same generation's answer - a client of the older shape would need both
+swapped.
+
+**One structural difference is recorded rather than changed.** Their frame loop
+fix needed repaints and `callSerially` Runnables to come off one queue in posting
+order. Here a Runnable goes into `callSeriallyEvents` and a repaint drives the
+host through `request_redraw`, so the two are not one queue - and their symptom,
+two titles running four hundred ticks with no error and no lit pixel, is specific
+enough to recognise if a local title ever shows it. Nothing here does, and
+rebuilding the scheduling on a symptom we cannot see is how a week goes missing.

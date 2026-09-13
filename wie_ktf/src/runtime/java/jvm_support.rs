@@ -322,6 +322,13 @@ mod test {
             KtfJvmSupport::set_current_java_exception_handler(&mut core, inner)?;
 
             let exception = jvm.new_class("java/lang/Exception", "()V", ()).await.unwrap();
+            let exception_raw = KtfJvmSupport::class_instance_raw(&exception);
+
+            // A sentinel where the catch block reads what it caught, so the
+            // assertion below is about the unwind writing it rather than about
+            // the word happening to be right.
+            write_generic(&mut core, outer + 16, 0xbaad_f00du32)?;
+
             let result = JavaMethod::handle_exception(&mut core, &jvm, exception).await;
 
             match result {
@@ -340,6 +347,10 @@ mod test {
 
             // The frames it unwound past are gone.
             assert_eq!(KtfJvmSupport::current_java_exception_handler(&mut core)?, outer);
+
+            // And the catch block can read what it caught.
+            let caught: u32 = wie_util::read_generic(&core, outer + 16)?;
+            assert_eq!(caught, exception_raw, "the record carries the exception it caught");
 
             done_clone.store(true, Ordering::SeqCst);
 

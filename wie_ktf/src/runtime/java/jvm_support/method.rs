@@ -26,6 +26,18 @@ use core::fmt::Write as _;
 /// How far out a throw looks for a catch before the chain is called corrupt
 /// rather than deep.
 const MAX_EXCEPTION_HANDLERS: usize = 256;
+
+/// Where in a handler record the catch block reads what it caught.
+///
+/// The record is built on the guest stack by the try block's prologue, which
+/// leaves this word as whatever the frame underneath had there; the unwind is
+/// what has to fill it in. Nothing on this side reads it, so nothing on this side
+/// noticed it was never written - and a catch block reads it every time.
+const EXCEPTION_OBJECT_OFFSET: u32 = 16;
+
+/// Where in a handler record the saved registers start, which is what the
+/// restore function is handed.
+const EXCEPTION_CONTEXT_OFFSET: u32 = 24;
 use wie_core_arm::{
     Allocator, ArmCore, EmulatedFunction, EmulatedFunctionParam, RUN_FUNCTION_LR, RegisteredFunction, RegisteredFunctionHolder, ResultWriter,
 };
@@ -292,6 +304,7 @@ impl JavaMethod {
     pub async fn handle_exception(core: &mut ArmCore, jvm: &Jvm, exception: Box<dyn ClassInstance>) -> Result<JavaMethodResult> {
         tracing::warn!("Java exception thrown: {exception:?}");
 
+        let exception_raw = KtfJvmSupport::class_instance_raw(&exception);
         let mut handler_address = KtfJvmSupport::current_java_exception_handler(core)?;
 
         // What the search looked at, kept for the case where it finds nothing.
@@ -359,7 +372,7 @@ impl JavaMethod {
                 };
 
                 let restore_context: u32 = read_generic(core, exception_handler.ptr_functions + 4)?;
-                let contexts_base = handler_address + 24;
+                let contexts_base = handler_address + EXCEPTION_CONTEXT_OFFSET;
 
                 // Name what was caught and what caught it: a resume that lands
                 // in the wrong handler and a resume that lands in the right one
@@ -378,6 +391,15 @@ impl JavaMethod {
                 // The records this unwound past are gone, so the frame that
                 // caught it is the innermost one from here on.
                 KtfJvmSupport::set_current_java_exception_handler(core, handler_address)?;
+
+                // And hand the catch block what it caught. Without this it reads
+                // whatever the frame underneath left at that offset - the values
+                // are the plausible kind, a code address or a small integer, so
+                // what the title does with it is what the failure looks like:
+                // rethrowing a word that is not an object, printing it, or
+                // dispatching through it as an object header and faulting on a
+                // wild address in the title's own helper.
+                write_generic(core, handler_address + EXCEPTION_OBJECT_OFFSET, exception_raw)?;
 
                 return Err(WieError::JavaExceptionUnwind {
                     context_base: contexts_base,
