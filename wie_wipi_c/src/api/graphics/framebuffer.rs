@@ -13,7 +13,7 @@ use crate::context::WIPICContext;
 // same 256MB as wie_core_arm's HEAP_SIZE; not referenced directly to avoid the dependency
 const MAX_FRAMEBUFFER_BYTES: u32 = 0x1000_0000;
 
-fn buffer_size(width: u32, height: u32, bytes_per_pixel: u32) -> Result<(u32, u32)> {
+pub(crate) fn buffer_size(width: u32, height: u32, bytes_per_pixel: u32) -> Result<(u32, u32)> {
     let bpl = width.checked_mul(bytes_per_pixel).ok_or(WieError::AllocationFailure)?;
     let size = bpl.checked_mul(height).ok_or(WieError::AllocationFailure)?;
     if size > MAX_FRAMEBUFFER_BYTES {

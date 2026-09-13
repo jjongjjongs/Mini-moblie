@@ -307,8 +307,16 @@ impl Display {
             }
 
             // HACK: disable paint for clet apps, as they handle paint by themselves
+            //
+            // The flag covers a clet reached through `net.wie.CletWrapperCard`.
+            // A title whose card is an ordinary one but whose drawing is still a
+            // C engine - 던전앤파이터 격투가 pushes a plain `Card` subclass and
+            // paints its splash from the engine - never sets it, and flushing
+            // this screen image over the top is what painted that splash white.
+            // `title_drives_lcd` is the same answer found the other way: the
+            // emulator's tick has seen the title draw into the LCD itself.
             let disable_paint: bool = jvm.get_field(&this, "paintDisabled", "Z").await?;
-            if !disable_paint {
+            if !disable_paint && !context.system().title_drives_lcd() {
                 let screen_image: ClassInstanceRef<Image> = jvm.get_field(&this, "screenImage", "Ljavax/microedition/lcdui/Image;").await?;
                 let image = Image::image(jvm, &screen_image).await?;
 

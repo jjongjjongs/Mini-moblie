@@ -12,11 +12,13 @@ use wie_backend::{
     Event,
     canvas::{Canvas, Clip, Color, Image, PixelType, Rgb8Pixel, Rgb565Pixel, TextAlignment, string_width_px},
 };
-use wie_util::{Result, WieError, read_generic, read_null_terminated_string_bytes, write_generic};
+use wie_util::{ByteRead, Result, WieError, read_generic, read_null_terminated_string_bytes, write_generic};
 
 use wipi_types::wipic::{WIPICDisplayInfo, WIPICFramebuffer, WIPICImage, WIPICIndirectPtr, WIPICWord};
 
 use crate::context::WIPICContext;
+
+use self::framebuffer::buffer_size;
 
 use self::{
     bitmap_font::BitmapFace,
@@ -961,6 +963,43 @@ fn new_screen_surface(context: &mut dyn WIPICContext, width: u32, height: u32) -
     framebuffer.0.buf = WIPICIndirectPtr(framebuffer.0.buf.0 + strip * framebuffer.0.bpl);
 
     Ok(framebuffer)
+}
+
+/// The screen surface's pixels, read through raw guest memory.
+///
+/// A title whose drawing is a C engine writes the LCD frame buffer directly -
+/// `memcpy` into the pointer `MC_grpGetScreenFrameBuffer` handed it - and never
+/// calls `MC_grpFlushLcd`, because on the handset that buffer *is* the display.
+/// Nothing on the WIPI-C side sees those writes, and the Java side cannot reach
+/// guest memory at all, so the only place both the frame buffer and the screen
+/// are in scope is the emulator's own tick. This is what it reads.
+///
+/// `data_ptr` resolves an indirect pointer the way the platform does: KTF stores
+/// a handle whose target is eight bytes ahead of the data, LGT stores the
+/// address itself.
+///
+/// Answers `None` when the title has not taken a screen frame buffer, which is
+/// every title that draws through the Java layer instead.
+pub fn screen_surface_bytes(mem: &dyn ByteRead, data_ptr: &dyn Fn(WIPICWord) -> Result<WIPICWord>) -> Result<Option<(u32, u32, Vec<u8>)>> {
+    let handle: WIPICWord = read_generic(mem, SCREEN_FRAMEBUFFER_PTR)?;
+    if handle == 0 {
+        return Ok(None);
+    }
+
+    let framebuffer: WIPICFramebuffer = read_generic(mem, data_ptr(handle)?)?;
+    if framebuffer.width == 0 || framebuffer.height == 0 || framebuffer.bpp != FRAMEBUFFER_DEPTH || framebuffer.buf.0 == 0 {
+        return Ok(None);
+    }
+
+    let (size, _) = match buffer_size(framebuffer.width, framebuffer.height, framebuffer.bpp / 8) {
+        Ok(x) => x,
+        Err(_) => return Ok(None),
+    };
+
+    let mut bytes = vec![0u8; size as usize];
+    mem.read_bytes(data_ptr(framebuffer.buf.0)?, &mut bytes)?;
+
+    Ok(Some((framebuffer.width, framebuffer.height, bytes)))
 }
 
 /// The off-screen surfaces a title has asked for and not destroyed, so a flush

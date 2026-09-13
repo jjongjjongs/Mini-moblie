@@ -4,6 +4,7 @@ mod file_system;
 mod input_method;
 
 use alloc::{borrow::ToOwned, boxed::Box, string::String, sync::Arc};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use spin::{RwLock, RwLockWriteGuard};
 
@@ -40,6 +41,9 @@ pub struct System {
     /// The servers this run answers for itself, in place of ones that have been
     /// switched off for years. Empty unless the host registered one.
     local_network: Arc<RwLock<LocalNetwork>>,
+    /// Set once the title has been seen drawing into the LCD frame buffer
+    /// itself. See [`System::title_drives_lcd`].
+    title_drives_lcd: Arc<AtomicBool>,
 }
 
 impl System {
@@ -67,6 +71,7 @@ impl System {
             input_method: Arc::new(RwLock::new(InputMethod::new())),
             task_runner: Arc::new(task_runner),
             local_network: Arc::new(RwLock::new(local_network)),
+            title_drives_lcd: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -131,6 +136,25 @@ impl System {
 
     pub fn event_queue(&self) -> RwLockWriteGuard<'_, EventQueue> {
         self.event_queue.write()
+    }
+
+    /// Whether the title paints the LCD frame buffer itself.
+    ///
+    /// A title whose drawing is a C engine writes that buffer directly and never
+    /// flushes it, because on the handset the buffer is the display. The
+    /// emulator's tick notices the first such frame and says so here, and the
+    /// MIDP layer then stops flushing its own screen image over the top - which
+    /// is the same reason `Display.disablePaint` exists for the clet wrapper,
+    /// reached for a title that never goes through that wrapper.
+    ///
+    /// Stays false for every title that draws through the Java layer, so their
+    /// frames keep reaching the screen the way they always have.
+    pub fn title_drives_lcd(&self) -> bool {
+        self.title_drives_lcd.load(Ordering::SeqCst)
+    }
+
+    pub fn set_title_drives_lcd(&self) {
+        self.title_drives_lcd.store(true, Ordering::SeqCst);
     }
 
     pub fn current_input_mode(&self) -> u32 {

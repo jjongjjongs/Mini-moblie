@@ -2,9 +2,13 @@ use core::pin::Pin;
 
 use alloc::{borrow::ToOwned, boxed::Box, collections::BTreeMap, format, string::String, vec, vec::Vec};
 
+use bytemuck::pod_collect_to_vec;
 use jvm::{ClassInstance, Result as JvmResult, runtime::JavaLangString};
 
-use wie_backend::{Emulator, Event, Options, Platform, System, TaskRunner};
+use wie_backend::{
+    Emulator, Event, Options, Platform, System, TaskRunner,
+    canvas::{ImageBuffer, Rgb565Pixel, VecImageBuffer},
+};
 use wie_core_arm::{Allocator, ArmCore};
 use wie_jvm_support::JvmSupport;
 use wie_util::{Result, WieError};
@@ -30,6 +34,9 @@ impl TaskRunner for KtfTaskRunner {
 pub struct KtfEmulator {
     core: ArmCore,
     system: System,
+    /// What the LCD held the last time it was presented, so an unchanged frame
+    /// is not painted again. See [`KtfEmulator::present_lcd`].
+    lcd_digest: u64,
 }
 
 impl KtfEmulator {
@@ -93,7 +100,7 @@ impl KtfEmulator {
 
         system.spawn(async move || Self::start(&mut core_clone, &mut system_clone, jar_filename_clone, main_class_name).await);
 
-        Ok(Self { core, system })
+        Ok(Self { core, system, lcd_digest: 0 })
     }
 
     #[tracing::instrument(name = "start", skip_all)]
@@ -133,6 +140,56 @@ impl KtfEmulator {
     }
 }
 
+impl KtfEmulator {
+    /// Show the LCD frame buffer when the title has drawn into it itself.
+    ///
+    /// A title whose drawing is a C engine writes that buffer directly and never
+    /// flushes, because on the handset the buffer is the display; 던전앤파이터
+    /// 격투가 draws its whole splash sequence that way and nothing here ever saw
+    /// it. The Java layer cannot reach guest memory and the WIPI-C side never
+    /// sees the writes, so the tick is where it has to be noticed.
+    ///
+    /// Titles that draw through the Java layer are untouched: they never take a
+    /// screen frame buffer, so there is nothing to read, and their frames keep
+    /// reaching the screen through the MIDP paint at its own depth. A buffer
+    /// that has been taken but not drawn into is all one value and is left alone
+    /// too, so taking the pointer alone does not blank a title.
+    fn present_lcd(&mut self) {
+        let core = self.core.clone();
+        let data_ptr = |memory: u32| -> Result<u32> {
+            let base: u32 = wie_util::read_generic(&core, memory)?;
+            Ok(base + 8)
+        };
+
+        let Ok(Some((width, height, bytes))) = wie_wipi_c::api::graphics::screen_surface_bytes(&self.core, &data_ptr) else {
+            return;
+        };
+
+        let mut digest = 0xcbf2_9ce4_8422_2325u64;
+        for chunk in bytes.chunks(8) {
+            let mut word = [0u8; 8];
+            word[..chunk.len()].copy_from_slice(chunk);
+            digest = (digest ^ u64::from_le_bytes(word)).wrapping_mul(0x1000_0000_01b3);
+        }
+        if digest == self.lcd_digest {
+            return;
+        }
+
+        // An untouched buffer is one value throughout. Presenting it would paint
+        // over whatever the Java layer put on the screen.
+        let first = &bytes[..2.min(bytes.len())];
+        if bytes.chunks(2).all(|x| x == first) {
+            self.lcd_digest = digest;
+            return;
+        }
+
+        let image = VecImageBuffer::<Rgb565Pixel>::from_raw(width, height, pod_collect_to_vec(&bytes));
+        self.system.set_title_drives_lcd();
+        self.system.platform().screen().paint(&image);
+        self.lcd_digest = digest;
+    }
+}
+
 impl Emulator for KtfEmulator {
     fn handle_event(&mut self, event: Event) {
         self.system.event_queue().push(event)
@@ -145,6 +202,10 @@ impl Emulator for KtfEmulator {
                 WieError::FatalError(msg) => WieError::FatalError(format!("{msg}\n{reg_stack}")),
                 _ => WieError::FatalError(format!("{x}\n{reg_stack}")),
             }
-        })
+        })?;
+
+        self.present_lcd();
+
+        Ok(())
     }
 }
