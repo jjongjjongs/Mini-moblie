@@ -402,3 +402,44 @@ pixels in a region of their own, so an overrun lands in space nothing else is
 keeping; here the framebuffer and everything else still come out of one arena, so
 an overrunning title can still destroy something. What it can no longer destroy
 silently is a resource name.
+
+### A record list that counted nothing at all
+
+Their twelfth round is a unit ambiguity in `MC_dbListRecords`: the specification
+calls its third argument the size of the buffer over an `M_Int32 *`, which reads
+as bytes or as a count of ids, and there is no answer safe under both - a caller
+who meant bytes passes four times what a caller who meant entries does, so
+serving the count reading for a byte-meaning caller writes past the array as soon
+as the database holds more than a quarter of that number. They had read it as
+bytes, so a title's array of twelve got three ids and nine untouched words, and
+the title went on to index entry three.
+
+**Two of our three list calls already read it as a count**, and that is what
+settles it here without needing the specification to be clearer:
+`list_records_lgt`, whose bounds come from native's own `CMP`/`BLT`, and
+`list_record_info` on the same KTF path, which stops at capacity. The reference's
+title agrees from the other side - it reserves `0x30` bytes for twelve ids, hands
+the call `12`, and reads entry three.
+
+**The third read it as nothing at all.** KTF's `list_record` ignored the argument
+and wrote every id the database held, however small the buffer was - the platform
+itself overrunning a guest array. It now refuses a buffer that cannot hold them
+all with `M_E_SHORTBUF` and writes nothing, which is the pattern this file already
+documents elsewhere, and answers a null buffer or a count of nothing with the
+parameter error rather than an empty list. Switching from no check to a count
+check can only refuse a caller that would have been overrun, since the count
+reading is the more permissive of the two.
+
+**What the round is really about is the distance between a wrong call and the
+fault.** Their chain: a list call short by nine entries, a record id read out of
+an unwritten stack frame, a select that refused and wrote nothing, a structure
+field made of that same frame, an index 78 into a table of fourteen, an empty
+resource name, a lookup that answered not-found, and a null the caller
+dereferenced - with only the last link in the fault report. An error a title does
+not check is not a failure at the call; it is a value invented some distance
+later in a register nothing traces back.
+
+**One thing this turned up that is not answered.** `get_record_ids` returns ids in
+the repository's own order - the test above saw `[1, 3, 2]` - and a title that
+indexes the list by position cares. Nothing here establishes what native's order
+was, so the test sorts before comparing and the behaviour is left alone.

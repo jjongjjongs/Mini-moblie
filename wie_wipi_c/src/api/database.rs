@@ -1194,18 +1194,48 @@ pub async fn close_database(context: &mut dyn WIPICContext, db_id: i32) -> Resul
     Ok(0) // success
 }
 
+/// `MC_dbListRecords` - the record ids this database holds.
+///
+/// **The last argument counts identifiers, not bytes.** The specification calls
+/// it the size of the buffer over an `M_Int32 *`, which reads either way, and
+/// there is no answer that is safe under both: a caller who meant bytes passes
+/// four times what a caller who meant entries does, so serving the count reading
+/// for a byte-meaning caller writes past the array as soon as the database holds
+/// more than a quarter of that number. What settles it is that both the other
+/// list calls in this file already read it as a count - `list_records_lgt`, whose
+/// bounds come from native's own `CMP`/`BLT`, and `list_record_info` beside it -
+/// and that the reference has a title reserving `0x30` bytes of its frame for
+/// twelve ids, handing this call `12`, and going on to read entry three.
+///
+/// This one used to read it as nothing at all: every id went out however small
+/// the buffer was. That is the platform itself overrunning a guest array, and
+/// the failure it causes surfaces nowhere near here - the reference traced one
+/// through a record id read out of an unwritten stack frame, a select that
+/// refused, an index 78 into a table of fourteen and an empty resource name,
+/// before a null was dereferenced three platform calls later.
 pub async fn list_record(context: &mut dyn WIPICContext, db_id: i32, buf_ptr: WIPICWord, buf_len: WIPICWord) -> Result<i32> {
     tracing::debug!("MC_dbListRecords({db_id:#x}, {buf_ptr:#x}, {buf_len})");
 
     let Some(db) = get_database_from_db_id(context, db_id).await? else {
         return Ok(-25); // M_E_INVALIDHANDLE
     };
+
+    if buf_ptr == 0 || buf_len == 0 {
+        return Ok(-22); // M_E_BADRECID - this path's "bad parameter" idiom
+    }
+
     let ids = db.get_record_ids().await;
 
-    let mut cursor = 0;
-    for &id in &ids {
-        write_generic(context, buf_ptr + cursor, id)?;
-        cursor += size_of::<WIPICWord>() as u32;
+    // Refused and left untouched rather than filled as far as it goes: a title
+    // that gets a short list it did not ask for indexes an entry nobody wrote.
+    if ids.len() as u64 > buf_len as u64 {
+        tracing::warn!("MC_dbListRecords: {} ids do not fit in a buffer of {buf_len}; refused", ids.len());
+
+        return Ok(-18); // M_E_SHORTBUF
+    }
+
+    for (index, &id) in ids.iter().enumerate() {
+        write_generic(context, buf_ptr + (index * size_of::<WIPICWord>()) as u32, id)?;
     }
 
     Ok(ids.len() as _)
@@ -1850,6 +1880,9 @@ mod tests {
     use wie_backend::{DefaultTaskRunner, System};
     use wie_util::{ByteRead, ByteWrite, read_generic};
 
+    use alloc::borrow::ToOwned as _;
+
+    use crate::context::WIPICContext as _;
     use crate::context::test::TestContext;
 
     use super::{
@@ -2858,6 +2891,58 @@ mod tests {
 
         assert_eq!(list_databases_ktf(&mut context, 0, 12).await.unwrap(), -9);
         assert_eq!(list_databases_ktf(&mut context, 0x3000, 0).await.unwrap(), -9);
+    }
+
+    /// The last argument counts ids. A buffer that cannot hold them all is
+    /// refused and left alone rather than filled past its end - which is what
+    /// this did, whatever number it was handed.
+    #[futures_test::test]
+    async fn listing_records_counts_ids_and_refuses_a_short_buffer() {
+        let mut context = database_test_context();
+        let db_id = open_test_database(&mut context).await;
+        assert!(db_id > 0);
+
+        let pid = crate::context::WIPICContext::system(&mut context).pid().to_owned();
+        {
+            let mut db = crate::context::WIPICContext::system(&mut context)
+                .platform()
+                .database_repository()
+                .open("records", &pid)
+                .await;
+            db.add(b"one").await;
+            db.add(b"two").await;
+            db.add(b"three").await;
+        }
+
+        // Three ids do not fit in two, and nothing is written for the refusal.
+        context.write_bytes(0x3000, &[0xff; 16]).unwrap();
+        assert_eq!(list_record(&mut context, db_id, 0x3000, 2).await.unwrap(), -18);
+
+        let mut untouched = [0u8; 16];
+        context.read_bytes(0x3000, &mut untouched).unwrap();
+        assert_eq!(untouched, [0xff; 16], "a refused list writes nothing");
+
+        // Three fit in three, four bytes each, and the word after them is not
+        // touched either.
+        assert_eq!(list_record(&mut context, db_id, 0x3000, 3).await.unwrap(), 3);
+
+        let mut written = [0u8; 16];
+        context.read_bytes(0x3000, &mut written).unwrap();
+        let mut ids = [
+            u32::from_le_bytes(written[0..4].try_into().unwrap()),
+            u32::from_le_bytes(written[4..8].try_into().unwrap()),
+            u32::from_le_bytes(written[8..12].try_into().unwrap()),
+        ];
+        // Sorted before comparing: what this call fixes is how many ids go out
+        // and where, and nothing here establishes what order native listed them
+        // in.
+        ids.sort_unstable();
+        assert_eq!(ids, [1, 2, 3]);
+        assert_eq!(&written[12..16], &[0xff; 4]);
+
+        // A null buffer and a count of nothing are parameter errors.
+        assert_eq!(list_record(&mut context, db_id, 0, 3).await.unwrap(), -22);
+        assert_eq!(list_record(&mut context, db_id, 0x3000, 0).await.unwrap(), -22);
     }
 
     fn database_test_context() -> TestContext {
