@@ -39,6 +39,14 @@ const EXCEPTION_OBJECT_OFFSET: u32 = 16;
 /// restore function is handed.
 const EXCEPTION_CONTEXT_OFFSET: u32 = 24;
 
+/// Where in a handler record the stack pointer its own frame saved lives - the
+/// tenth of the eleven registers from r4 to lr.
+///
+/// It says which guest call the catch block belongs to. The guest stack is shared
+/// by every nested call the host has open, so a handler saved above a call's entry
+/// belongs to a caller the host has not returned to yet.
+const EXCEPTION_FRAME_STACK_OFFSET: u32 = EXCEPTION_CONTEXT_OFFSET + 9 * 4;
+
 /// Where in a handler record the label lives - which protected region of its
 /// method execution is in.
 ///
@@ -237,13 +245,36 @@ impl JavaMethod {
         // outermost frame whose caller is the Rust JVM rather than another ARM trampoline.
         async fn run_with_unwind(core: &mut ArmCore, mut pc: u32, mut args: Vec<u32>) -> Result<JavaMethodRunResult> {
             loop {
+                // Where this call is about to enter. A catch block whose frame was
+                // saved above it belongs to a caller that has not returned yet.
+                let entry_sp = core.save_context().sp;
+
                 match core.run_function::<JavaMethodRunResult>(pc, &args).await {
                     Ok(r) => return Ok(r),
                     Err(WieError::JavaExceptionUnwind {
                         context_base,
                         target,
                         next_pc,
+                        frame_sp,
                     }) => {
+                        if frame_sp > entry_sp {
+                            // Not this call's frame to resume. Leaving lets the next
+                            // call out ask the same question of its own entry, and
+                            // the outermost guest call owns the whole stack, so the
+                            // walk ends. Resuming it here would run a caller's code
+                            // inside this call, and when that caller returned the run
+                            // would end with the Rust frames that made it still
+                            // waiting on a guest stack that no longer exists.
+                            tracing::debug!("Exception restore belongs to an outer call: frame_sp={frame_sp:#x} above entry {entry_sp:#x}");
+
+                            return Err(WieError::JavaExceptionUnwind {
+                                context_base,
+                                target,
+                                next_pc,
+                                frame_sp,
+                            });
+                        }
+
                         tracing::debug!("Resuming via exception restore: pc={next_pc:#x}, context_base={context_base:#x}, target={target:#x}");
                         pc = next_pc;
                         args = vec![context_base, target];
@@ -423,6 +454,7 @@ impl JavaMethod {
                     context_base: contexts_base,
                     target: entry.target,
                     next_pc: restore_context,
+                    frame_sp: read_generic(core, handler_address + EXCEPTION_FRAME_STACK_OFFSET)?,
                 });
             }
 

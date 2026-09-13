@@ -18,7 +18,18 @@ pub enum WieError {
     InvalidMemoryAccess(u32),
     AllocationFailure,
     JavaException(u32), // to pass java exception down to rust
-    JavaExceptionUnwind { context_base: u32, target: u32, next_pc: u32 },
+    /// A guest `try` matched, and this is the long jump back into it.
+    ///
+    /// `frame_sp` is the stack pointer the handler's own frame saved, and it says
+    /// which guest call the catch block belongs to: the guest stack is shared by
+    /// every nested call the host has open, so a handler saved above a call's
+    /// entry belongs to a caller the host has not returned to yet.
+    JavaExceptionUnwind {
+        context_base: u32,
+        target: u32,
+        next_pc: u32,
+        frame_sp: u32,
+    },
     Unimplemented(String),
     FatalError(String),
 }
@@ -33,9 +44,10 @@ impl Display for WieError {
                 context_base,
                 target,
                 next_pc,
+                frame_sp,
             } => write!(
                 f,
-                "Java exception unwind: context_base={context_base:#x}, target={target:#x}, next_pc={next_pc:#x}"
+                "Java exception unwind: context_base={context_base:#x}, target={target:#x}, next_pc={next_pc:#x}, frame_sp={frame_sp:#x}"
             ),
             WieError::Unimplemented(message) => write!(f, "Unimplemented: {message}"),
             WieError::FatalError(message) => write!(f, "Fatal error: {message}"),

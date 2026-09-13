@@ -891,3 +891,36 @@ sizing it is worth more than the list: an AOT module stores every name and
 descriptor it links against verbatim, so scanning the module's string pool answers
 the whole demand as a set in one pass, rather than as a sequence where answering
 one member moves the failure to the next.
+
+### A long jump that outran the call it was made in
+
+The guest's `try` is a `setjmp`: a handler record on the guest stack holding r4-lr
+and a restore routine that loads them back. When a handler matched, this runtime
+resumed that routine wherever the throw happened to be raised - which is inside
+whichever nested guest call the host had open at the time.
+
+**The guest stack is shared by every one of those calls**, so a handler saved
+*above* a call's entry belongs to a caller the host has not returned to yet.
+Resuming it there runs that caller's code inside the inner call; when the caller
+eventually returns, the run ends while the Rust frames that made the inner call are
+still waiting on a guest stack that no longer exists. The reference watched a title
+do it on its first painted card and report `execute guest memory at 0x1a`.
+
+The answer is a comparison, not a mechanism. The unwind now carries the stack
+pointer the catching frame saved - the tenth of the eleven registers in the record,
+which is where `javaExceptionFrameStack` sits - and every place that resumes the
+guest at a restore routine compares it against the entry its own call was made at.
+A resume that would land above the entry returns the unwind instead: it leaves that
+call, and the next one out asks the same question of its own entry. The outermost
+guest call owns the whole stack, so the walk always ends. Three places ask it here -
+the AOT method loop and the two jump paths - which is the same count the reference
+has.
+
+**One generation-dependent detail is worth keeping.** The reference's comparison is
+`<=` for the current generation and strictly `<` for the older modules, whose
+handler record sits inside the frame that pushed it rather than below it: a nested
+call from that frame enters on exactly the saved stack pointer, so the equal case
+belongs to the nested call rather than the outer one. We are on the current
+generation - the label at 12 and the caught object at 16 both say so - and use `<=`.
+A client of the older shape would need the strict form, along with those two offsets
+swapped.

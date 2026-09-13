@@ -302,13 +302,15 @@ mod test {
             write_generic(&mut core, functions, 0u32)?;
             write_generic(&mut core, functions + 4, 0xdead_beefu32)?;
 
-            let mut build_handler = |ptr_method: u32, current_pc: u32, ptr_old_handler: u32| -> Result<u32> {
+            let mut build_handler = |ptr_method: u32, current_pc: u32, ptr_old_handler: u32, frame_sp: u32| -> Result<u32> {
                 let handler = Allocator::alloc(&mut core, size_of::<JavaExceptionHandler>() as _)?;
                 let mut record: JavaExceptionHandler = bytemuck::Zeroable::zeroed();
                 record.ptr_method = ptr_method;
                 record.ptr_old_handler = ptr_old_handler;
                 record.current_pc = current_pc;
                 record.ptr_functions = functions;
+                // r4-lr, so the stack pointer is the tenth.
+                record.context[9] = frame_sp;
                 write_generic(&mut core, handler, record)?;
 
                 Ok(handler)
@@ -316,8 +318,8 @@ mod test {
 
             // 0x250 is inside the outer frame's range and nowhere near the
             // inner frame's, so only the enclosing frame can catch.
-            let outer = build_handler(outer_method, 0x250, 0)?;
-            let inner = build_handler(inner_method, 0x100, outer)?;
+            let outer = build_handler(outer_method, 0x250, 0, 0xbeef_0000)?;
+            let inner = build_handler(inner_method, 0x100, outer, 0xbeef_1000)?;
 
             KtfJvmSupport::set_current_java_exception_handler(&mut core, inner)?;
 
@@ -336,10 +338,14 @@ mod test {
                     context_base,
                     target,
                     next_pc,
+                    frame_sp,
                 }) => {
                     assert_eq!(target, 0x2a0, "caught by the enclosing frame");
                     assert_eq!(context_base, outer + 24, "the enclosing frame's saved context");
                     assert_eq!(next_pc, 0xdead_beef);
+                    // Which guest call may resume this is decided against the stack
+                    // pointer the catching frame saved, so the unwind has to carry it.
+                    assert_eq!(frame_sp, 0xbeef_0000, "the catching frame's own stack pointer");
                 }
                 Err(other) => panic!("expected an unwind into the enclosing frame, got {other:?}"),
                 Ok(_) => panic!("expected an unwind into the enclosing frame, got a return"),
