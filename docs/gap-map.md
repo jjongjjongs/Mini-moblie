@@ -1070,3 +1070,40 @@ measured against this, and the heading was wrong.
 So the wall is inside the title's own consent handling, and what that handler is
 waiting for is not yet known. Finding it means reading the module rather than the
 trace - the same method their rounds kept returning to.
+
+### The decision on network and authentication, KTF included
+
+Running the reference against 게임빌2010슈퍼사커 settled a question this document
+had been circling: it reports `authentication: unsupported` for that title, shows
+"인증에 실패하였습니다. 다음 실행시 다시 인증을 시도합니다." and lets the title
+carry on past its own failure screen. Ours takes the other road - it answers the
+checks so they pass.
+
+The decision is to keep ours, on every platform, KTF included. The two approaches
+differ in what they do, not only in where they land:
+
+| | reference | here |
+|---|---|---|
+| identity | rewrites the archive's certificate so its subscriber field matches the session | reads the subscriber the certificate was *issued for* and reports that (`wie_backend::subscriber`) |
+| a check that dials | no local answer; the title sees its own failure path | the local gateway answers what the SDK reads as authenticated (`billing::response`, `BILLING_RESPONSE`) |
+| a check that cannot be answered | left to fail | the comparison's branch is flipped in `binary.mod` (`apply_offline_auth_patch` and the two beside it) |
+
+Reporting the number a certificate was sealed with is what makes a title's own
+decryption work rather than merely pass, and it is why `MC_knlGetSystemProperty`,
+`HandsetProperty.getSystemProperty` and every other reader here have to agree:
+a title that asks twice and is told two numbers rejects itself.
+
+KTF inherits all of that already - the subscriber recovery, the billing answers
+and the socket table are in `wie_backend`, `wie_wipi_c` and `wie_wipi_java`,
+which a KTF title loads the same as an LGT one - and none of the five KTF
+archives here reaches an authentication gate at all (no `PHONENUMBER`, no
+`cert.c2s`, no socket string in any of their `client.bin`s).
+
+The one KTF-only identity reader the reference serves and this did not is
+`wec.DMInfo`, the handset's device-management record: `getDMInfo()` answers the
+single instance and `gethandsetMIN()` its subscriber number. It is now published
+from `wie_ktf` rather than from the shared WIPI-Java classes, since it is KTF's
+and an LGT or SKT title has no business resolving it, and its number is read back
+through `HandsetProperty.getSystemProperty("MIN")` rather than recovered a second
+time - one recovery, one answer. Only those two members are served; anything else
+asked of it fails by name, which is the evidence the next round would need.

@@ -28,7 +28,10 @@ use wipi_types::ktf::InitParam2;
 
 use self::{
     array_class_instance::JavaArrayClassInstance,
-    classes::net::wie::{ClassLoaderContext, KtfClassLoader},
+    classes::{
+        net::wie::{ClassLoaderContext, KtfClassLoader},
+        wec::DMInfo,
+    },
     name::JavaFullName,
 };
 use super::interface::register_java_interface_svc_handler;
@@ -85,7 +88,10 @@ impl KtfJvmSupport {
         };
         write_generic(core, SUPPORT_CONTEXT_BASE, context_data)?;
 
-        let protos = [wie_wipi_java::get_protos().into(), wie_midp::get_protos().into()];
+        // KTF's own vendor classes go alongside the shared WIPI-Java and MIDP
+        // ones: an LGT or SKT title loads the shared two and not these.
+        let ktf_protos: Box<[_]> = Box::new([DMInfo::as_proto()]);
+        let protos = [wie_wipi_java::get_protos().into(), wie_midp::get_protos().into(), ktf_protos];
         let jvm_implementation = KtfJvmImplementation::new(core);
         let jvm = JvmSupport::new_jvm(system, jar_name, Box::new(protos), &[], jvm_implementation.clone()).await?;
         register_java_interface_svc_handler(core, &jvm)?;
@@ -521,6 +527,59 @@ mod test {
 
             let to_bits = |x: &Vec<f64>| x.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
             assert_eq!(to_bits(&loaded), to_bits(&values));
+
+            done_clone.store(true, Ordering::Relaxed);
+
+            Ok(())
+        });
+
+        loop {
+            system.tick()?;
+            if done.load(Ordering::Relaxed) {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// `wec.DMInfo` is the handset's own record, so it is one object for the
+    /// life of the handset and the number it reports is the one every other
+    /// question about this handset's identity is answered with. A title that
+    /// asks twice, or that asks here and through `HandsetProperty`, compares
+    /// the answers.
+    #[test]
+    fn the_handset_record_is_one_object_naming_the_one_subscriber() -> Result<()> {
+        let mut system = System::new(Box::new(TestPlatform::new()), "", "", DefaultTaskRunner);
+
+        let done = Arc::new(AtomicBool::new(false));
+        let done_clone = done.clone();
+        let mut system_clone = system.clone();
+
+        system.spawn(async move || {
+            let (jvm, _core) = init_jvm(&mut system_clone).await?;
+
+            let first: Box<dyn jvm::ClassInstance> = jvm.invoke_static("wec/DMInfo", "getDMInfo", "()Lwec/DMInfo;", []).await.unwrap();
+            let second: Box<dyn jvm::ClassInstance> = jvm.invoke_static("wec/DMInfo", "getDMInfo", "()Lwec/DMInfo;", []).await.unwrap();
+            assert!(first.equals(&*second).unwrap(), "the handset has one record, not one per call");
+
+            let min = jvm.invoke_virtual(&first, "gethandsetMIN", "()Ljava/lang/String;", []).await.unwrap();
+            let min = JavaLangString::to_rust_string(&jvm, &min).await.unwrap();
+
+            let name = JavaLangString::from_rust_string(&jvm, "MIN").await.unwrap();
+            let through_property = jvm
+                .invoke_static(
+                    "org/kwis/msp/handset/HandsetProperty",
+                    "getSystemProperty",
+                    "(Ljava/lang/String;)Ljava/lang/String;",
+                    (name,),
+                )
+                .await
+                .unwrap();
+            let through_property = JavaLangString::to_rust_string(&jvm, &through_property).await.unwrap();
+
+            assert_eq!(min, through_property, "both identity readers name the same handset");
+            assert!(!min.is_empty(), "the handset has a number to report");
 
             done_clone.store(true, Ordering::Relaxed);
 
