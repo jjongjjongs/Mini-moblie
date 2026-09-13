@@ -38,6 +38,15 @@ const EXCEPTION_OBJECT_OFFSET: u32 = 16;
 /// Where in a handler record the saved registers start, which is what the
 /// restore function is handed.
 const EXCEPTION_CONTEXT_OFFSET: u32 = 24;
+
+/// Where in a handler record the label lives - which protected region of its
+/// method execution is in.
+///
+/// The guest writes this as it moves between regions, and every exception entry's
+/// target is the first label past its own range. Entering a catch block leaves the
+/// region that was protected, so the record has to say so before the block runs,
+/// and writing the target is the same thing as saying it.
+const EXCEPTION_LABEL_OFFSET: u32 = 12;
 use wie_core_arm::{
     Allocator, ArmCore, EmulatedFunction, EmulatedFunctionParam, RUN_FUNCTION_LR, RegisteredFunction, RegisteredFunctionHolder, ResultWriter,
 };
@@ -400,6 +409,15 @@ impl JavaMethod {
                 // dispatching through it as an object header and faulting on a
                 // wild address in the title's own helper.
                 write_generic(core, handler_address + EXCEPTION_OBJECT_OFFSET, exception_raw)?;
+
+                // The block about to run is outside the region that was
+                // protected, and the label is what says which region execution is
+                // in. Some catch blocks write it themselves at the top and some do
+                // not, which is fine - it is this side's job on the way in. Left
+                // behind, a throw from inside the catch block matches the entry the
+                // block belongs to and jumps back to the block's own first
+                // instruction, and does it for as long as the run lasts.
+                write_generic(core, handler_address + EXCEPTION_LABEL_OFFSET, entry.target)?;
 
                 return Err(WieError::JavaExceptionUnwind {
                     context_base: contexts_base,

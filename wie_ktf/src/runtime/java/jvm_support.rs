@@ -352,6 +352,12 @@ mod test {
             let caught: u32 = wie_util::read_generic(&core, outer + 16)?;
             assert_eq!(caught, exception_raw, "the record carries the exception it caught");
 
+            // The label says the catch block is outside the region it is about to
+            // leave, so a throw from inside the block does not match the entry the
+            // block belongs to and jump back to its own first instruction.
+            let label: u32 = wie_util::read_generic(&core, outer + 12)?;
+            assert_eq!(label, 0x2a0, "the record's label is past the range it caught in");
+
             done_clone.store(true, Ordering::SeqCst);
 
             Ok(())

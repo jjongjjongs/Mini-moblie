@@ -455,17 +455,33 @@ pub async fn sprintk(
     Ok(result.len() as _)
 }
 
+/// What `MC_knlGetTotalMemory` and `MC_knlGetFreeMemory` answer.
+///
+/// The figures are bounded from both sides and neither bound is arbitrary.
+///
+/// **Too small and a memory-probing title refuses to start.** The old answer here
+/// was 1MiB, and titles that check before they load read that as a heap already
+/// full.
+///
+/// **Too large and the title's own arithmetic overflows.** A title does its sums
+/// on these in 32-bit ints, and a percentage is the common one: `free * 100`
+/// leaves `i32` above about 20.5MiB, so the reference has a title that printed
+/// `-28% FREE`, collected, printed `-29% FREE`, and went round for as long as it
+/// was left running. 32MiB and 24MiB were both past that. No handset these
+/// archives shipped for reported anything like either.
+///
+/// So both figures stay under the ceiling with room, and the test below is what
+/// says they do.
+const TOTAL_MEMORY: i32 = 16 * 1024 * 1024;
+const FREE_MEMORY: i32 = 12 * 1024 * 1024;
+
 pub async fn get_total_memory(_context: &mut dyn WIPICContext) -> Result<i32> {
-    // A handset reported tens of MiB here; the old 1 MiB made memory-probing
-    // titles believe the heap was already full and refuse to load.
-    const TOTAL_MEMORY: i32 = 32 * 1024 * 1024;
     tracing::debug!("MC_knlGetTotalMemory() -> {TOTAL_MEMORY:#x}");
 
     Ok(TOTAL_MEMORY)
 }
 
 pub async fn get_free_memory(_context: &mut dyn WIPICContext) -> Result<i32> {
-    const FREE_MEMORY: i32 = 24 * 1024 * 1024;
     tracing::debug!("MC_knlGetFreeMemory() -> {FREE_MEMORY:#x}");
 
     Ok(FREE_MEMORY)
@@ -730,6 +746,23 @@ mod test {
         // The null free returns early, and by the same rule.
         let nothing = free.into_body().call(&mut context, Box::new([0])).await.unwrap();
         assert!(nothing.results.is_empty(), "a void call must not write r0");
+    }
+
+    /// A title works out a percentage from these in 32-bit ints, so a figure that
+    /// cannot be multiplied by a hundred is a figure that comes back negative.
+    #[test]
+    fn the_memory_figures_survive_a_title_s_percentage() {
+        for reported in [super::TOTAL_MEMORY, super::FREE_MEMORY] {
+            assert!(
+                reported.checked_mul(100).is_some(),
+                "{reported} bytes times a hundred leaves i32, which is a title printing a negative percentage"
+            );
+        }
+
+        // And still large enough that a title which probes before loading does not
+        // read the heap as full.
+        assert!(super::FREE_MEMORY > 4 * 1024 * 1024);
+        assert!(super::TOTAL_MEMORY > super::FREE_MEMORY);
     }
 
     #[futures_test::test]

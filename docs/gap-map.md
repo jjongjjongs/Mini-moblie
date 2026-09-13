@@ -804,3 +804,45 @@ the time never got there. It moves. An end-to-end run that types into a title's 
 text field would be the next thing, and it needs a fixture: the one local archive
 with a text field is a first-run installer that has to be run twice to reach it, and
 reading its text back means reading pixels.
+
+### The third of the three writes, and a heap figure a title could not divide
+
+**The label was ours after all.** The chain-walking section said the record's
+label, the caught object and the chain head were the guest restore function's
+business and the head was the exception; the caught object turned out not to be,
+and neither is the label. Entering a catch block leaves the region that was
+protected, and the label is what says which region execution is in - so the record
+has to say so before the block runs. Writing the entry's target is the same thing
+as saying it, because every entry's target is the first label past its own range.
+
+Left stale, a throw from inside the catch block matches the entry the block belongs
+to and jumps back to the block's own first instruction. The reference watched a
+title do that four hundred thousand times and report its instruction ceiling.
+Theirs also names why this cannot be left to the guest: two of their three titles
+write the label themselves at the top of each catch block and the third does not,
+and there is nothing wrong with the third - it is the platform's job on the way in.
+The test asserts the record's label is the target afterwards; on the old code it is
+still the label the throw came from.
+
+**And a heap figure a title could not do arithmetic on.** `MC_knlGetTotalMemory`
+and `MC_knlGetFreeMemory` answered 32MiB and 24MiB here. The comment beside them
+recorded the lower bound - 1MiB made memory-probing titles read the heap as already
+full and refuse to load - and not the upper one: a title works these out in 32-bit
+ints, and `free * 100` for a percentage leaves `i32` above about 20.5MiB. The
+reference has a title that printed `-28% FREE`, collected, printed `-29% FREE`, and
+went round for as long as it was left running. Both of our figures were past that.
+They are 16MiB and 12MiB now, which is inside both bounds, and a test multiplies
+each by a hundred so the reason travels with the numbers.
+
+**The rest of those two rounds is not ours.** A title that patches a palette into
+an encoded PNG and leaves the chunk's old checksum behind is already handled here,
+and handled the same careful way - the CRCs are recomputed only after a decode has
+already failed, so no picture that decoded before takes a different path. Our own
+comment names 액션퍼즐패밀리1 for it and records a worse consequence than theirs: the
+null image takes an exception out through the title's key handler, past the line
+that releases the handler's lock, and the next key release waits on that lock
+forever. `getPixels`/`setPixels` are the device-format pair here too, a byte array
+with a byte pitch, which is what makes them different methods from
+`getRGBPixels` rather than a spelling of them. And both halves of a 64-bit answer
+already come back: a Long or Double return sends two result words, and one-word
+returns leave r1 as the callee had it.
