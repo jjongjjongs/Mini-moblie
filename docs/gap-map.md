@@ -1272,3 +1272,50 @@ a colour table and draws nothing with either.
 runtime does not serve and are handed null. So do all five KTF archives already
 in this corpus, and those render 505, 17, 13, 6 and 122 colours respectively. A
 null there is not what stops these two.
+
+### `MC_dbExists` was answering `true`/`false` where WIPI answers `0`/`-12`
+
+던파거너편 ran with the reference beside it, and the two runtimes agreed further
+than expected. Both link the same ten AOT call targets (`0x270ef4`, `0x270f1c`
+through `0x270f2c`, `0x270fb8` through `0x270fc4`); both resolve the same nine
+guest methods; both reach `Display.pushCard`, `Card.showNotify(true)` and
+`Clet$CletCard.paint`. So the vocabulary was never the problem.
+
+One line of the reference's own diagnostic was:
+
+```
+"cdb exists coupon.txt -> false": 1,
+"cdb exists option.txt -> false": 1,
+```
+
+One check each, and then nothing. Ours:
+
+```
+MC_dbExists("option.txt") -> 0        (twice)
+Created database handle for option.txt
+  5 × db.stream_read(…, 4)
+MC_dbExists("coupon.txt") -> 0        (twice)
+Created database handle for coupon.txt
+  db.stream_read(…, 4), db.stream_read(…, 52)
+```
+
+The reference is told the record is not there and takes its fresh-init path.
+Ours is told it *is* there, opens it, reads nothing back, and carries on with
+whatever that left behind - fifty paints of an empty card over 2,000 ticks.
+
+`exists_database_ktf` was answering `1` for present and `0` for absent. WIPI
+answers zero for success and a negative error otherwise, and `MC_fsIsExist` is
+no exception: `0` means the record is there, `M_E_NOENT` (-12) that it is not.
+So our "absent" answer was exactly the platform's "present". Our own non-KTF
+`exists_database` two hundred lines above had it right the whole time.
+
+With the convention corrected, 던파거너편 goes from one colour to 137 and from
+8 paints to 704 frames, and draws its title screen - "Dungeon & Fighter 거너편",
+version and rating badge and all. That is further than the reference CLI itself
+gets on this archive: it stops after nine flushes on the Paran splash.
+
+The five KTF archives already in the corpus are unchanged at 505, 17, 13, 6 and
+122 colours. The call is registered only in KTF's table, so no LGT title sees it.
+
+던전앤파이터 격투가 is unchanged by this - still one colour - so its wall is a
+different one.

@@ -1659,32 +1659,49 @@ pub async fn stat_by_name_ktf(context: &mut dyn WIPICContext, name_ptr: WIPICWor
     Ok(0)
 }
 
-/// KTF custom slot 16 — `MC_dbExists(name)`. Observed call shape across
+/// "No such record", which is what a WIPI call answers instead of `false`.
+const M_E_NOENT: i32 = -12;
+
+/// KTF custom slot 16 - `MC_dbExists(name)`. Observed call shape across
 /// multiple titles is `(name_ptr, 1, size_hint_or_zero, callback_garbage)`.
-/// Titles call it before deciding whether to take the load or fresh-init
-/// path. Returning 1 unconditionally makes them try to load nonexistent
-/// state on first run and trip later, so we read the C string at `a0` and
-/// answer based on the real persisted state.
+/// Titles call it before deciding whether to take the load or the fresh-init
+/// path.
+///
+/// It answers the way every other WIPI call answers - zero for yes, a negative
+/// error for no - and not the boolean its name suggests. `M_E_NOENT` is what a
+/// title branches to its fresh-init path on, so answering zero for a record
+/// that is not there tells it to load state it never saved: 던파거너편 read
+/// `option.txt` and `coupon.txt` that way, got nothing back, and painted an
+/// empty card fifty times over instead of its splash.
+///
+/// A packaged database counts as existing, the same as it does for
+/// [`exists_database`]: a title that ships its own initial state should be told
+/// it is there.
 pub async fn exists_database_ktf(context: &mut dyn WIPICContext, name_ptr: WIPICWord, _arg1: i32, _arg2: i32) -> Result<i32> {
     let name = match read_null_terminated_string_bytes(context, name_ptr) {
         Ok(bytes) => match String::from_utf8(bytes) {
             Ok(s) => s,
             Err(_) => {
-                tracing::warn!("MC_dbExists invalid utf8 name @ {name_ptr:#x}, defaulting to 0");
-                return Ok(0);
+                tracing::warn!("MC_dbExists invalid utf8 name @ {name_ptr:#x}, answering not found");
+                return Ok(M_E_NOENT);
             }
         },
         Err(_) => {
-            tracing::warn!("MC_dbExists unreadable name @ {name_ptr:#x}, defaulting to 0");
-            return Ok(0);
+            tracing::warn!("MC_dbExists unreadable name @ {name_ptr:#x}, answering not found");
+            return Ok(M_E_NOENT);
         }
     };
+
+    if read_packaged_database(context, &name).await?.is_some() {
+        tracing::debug!("MC_dbExists({name:?}) -> 0 (packaged)");
+        return Ok(0);
+    }
 
     let system = context.system();
     let pid = system.pid().to_owned();
     let exists = system.platform().database_repository().exists(&name, &pid).await;
 
-    let result = if exists { 1 } else { 0 };
+    let result = if exists { 0 } else { M_E_NOENT };
     tracing::debug!("MC_dbExists({name:?}) -> {result}");
     Ok(result)
 }
@@ -1886,11 +1903,11 @@ mod tests {
     use crate::context::test::TestContext;
 
     use super::{
-        LgtDatabaseMetadata, close_database_lgt, delete_database, delete_database_lgt, delete_record_lgt, exists_database, get_access_mode_ktf,
-        get_access_mode_lgt, get_number_of_records_ktf, get_number_of_records_lgt, get_record_size_ktf, get_record_size_lgt, insert_record_lgt,
-        list_databases_ktf, list_databases_lgt, list_record, list_record_info, list_records_lgt, load_handle, load_lgt_metadata, open_database,
-        open_database_lgt, open_db_for_handle, select_record, select_record_lgt, sort_records_ktf, sort_records_lgt, store_lgt_metadata, stream_read,
-        stream_write, update_record, update_record_lgt,
+        LgtDatabaseMetadata, close_database_lgt, delete_database, delete_database_lgt, delete_record_lgt, exists_database, exists_database_ktf,
+        get_access_mode_ktf, get_access_mode_lgt, get_number_of_records_ktf, get_number_of_records_lgt, get_record_size_ktf, get_record_size_lgt,
+        insert_record_lgt, list_databases_ktf, list_databases_lgt, list_record, list_record_info, list_records_lgt, load_handle, load_lgt_metadata,
+        open_database, open_database_lgt, open_db_for_handle, select_record, select_record_lgt, sort_records_ktf, sort_records_lgt,
+        store_lgt_metadata, stream_read, stream_write, update_record, update_record_lgt,
     };
 
     #[futures_test::test]
@@ -2953,5 +2970,33 @@ mod tests {
     async fn open_test_database(context: &mut TestContext) -> i32 {
         context.write_bytes(0x1000, b"records\0").unwrap();
         open_database(context, 0x1000, 0, 0).await.unwrap()
+    }
+
+    /// `MC_dbExists` answers the way a WIPI call answers - zero for yes, a
+    /// negative error for no - not the boolean its name suggests. It used to
+    /// answer 1 and 0, so a record that was not there read as one that was, and
+    /// a title took its load path over state it had never saved: 던파거너편
+    /// read `option.txt` and `coupon.txt` that way and painted an empty card
+    /// instead of its title screen.
+    #[futures_test::test]
+    async fn a_record_that_is_not_there_is_an_error_not_a_zero() {
+        let mut context = database_test_context();
+
+        context.write_bytes(0x3000, b"absent.txt\0").unwrap();
+        let absent: i32 = exists_database_ktf(&mut context, 0x3000, 1, 0).await.unwrap();
+        assert_eq!(absent, -12, "M_E_NOENT, the code a title takes its fresh-init path on");
+
+        // The same name once something has been written under it.
+        let pid = crate::context::WIPICContext::system(&mut context).pid().to_owned();
+        {
+            let mut db = crate::context::WIPICContext::system(&mut context)
+                .platform()
+                .database_repository()
+                .open("absent.txt", &pid)
+                .await;
+            db.add(b"saved").await;
+        }
+        let present: i32 = exists_database_ktf(&mut context, 0x3000, 1, 0).await.unwrap();
+        assert_eq!(present, 0, "zero is yes");
     }
 }
