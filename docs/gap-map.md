@@ -1367,3 +1367,42 @@ differences are in the frame and neither is yet shown to be the cause:
 Neither the reference CLI nor this runtime gets past the splash on this archive
 under the probe clock; the reference only draws the logo under `-play`, four
 flushes in 2,000 ticks.
+
+#### 격투가, second pass: four things ruled out and one hypothesis killed
+
+Disassembling the guest and instrumenting the bridge moved the boundary without
+reaching the cause. What is now settled:
+
+**`js_commonResInvokeNativeClinit` is not a game-level retry marker.** The
+format string sits at `0x15b7bc` in the image among `js_resGetStatic2ClinitD`,
+`js_dcmpl`, `mdbg_printf` and the file name `GCC_ArmThumb_MAppAotCLib.c` - it is
+the AOT C runtime library's own trace, printed whenever a class's native
+initialiser is invoked. Reading its repetition as the game looping on a failure
+was wrong; it is ordinary chatter.
+
+**The paint is not returning early.** The *first* `CardCanvas::paint` is where
+the whole resource load happens - 17,000 lines of trace between entering it and
+the `fillRect` that ends it. The empty paints come after, once loading is done.
+So the shape is one long loading paint and then an idle screen, not a paint that
+bails.
+
+**Sleep and the clock are sound.** Exactly 22 of the loading thread's 500 ms
+sleeps fit between two of the other thread's 11,033 ms sleeps, which is what
+22 × 500 = 11,000 should give. `System.currentTimeMillis` and `MC_knlCurrentTime`
+read the same platform clock. And 11,033 is what `12,000 - 967` looks like: a
+twelve-second period minus the work done in it, a heartbeat rather than a stall.
+
+**`WIPICX_incMemInterface` is ruled out for good.** The reference's
+`handleInitCall` answers `0` for it exactly as we do - only `WIPIC_knlInterface`,
+`WIPI_JBInterface` and `MNInterface` are served, and this image never asks for
+the third. The guest carries its own message for the case: "[warning] you can
+not use a static memory management API(new, malloc, free etc), because
+WIPICX_incMemInterface do not exist". Both runtimes put the title in that mode,
+and the reference still draws.
+
+Measured but unexplained: the one `getPixels(0, 0, 1, 1, buf, 0, 4)` the title
+makes, early in that first paint, reads back all zeros here because the frame
+buffer starts black. Whether the platform's starts otherwise is not established.
+
+Also in the image, for whenever this title gets far enough to need it:
+`UAFT BillSocket://222.231.31.45:22013!BillSocket://210.222.17.233:17004`.
