@@ -924,3 +924,52 @@ belongs to the nested call rather than the outer one. We are on the current
 generation - the label at 12 and the caught object at 16 both say so - and use `<=`.
 A client of the older shape would need the strict form, along with those two offsets
 swapped.
+
+### The last round, and one place this runtime was ahead
+
+Their second round closes the sweep, and nothing in it is a defect here.
+
+**`Thread.run` is declared.** Theirs had the body and no declaration, so a title
+subclassing `Thread` and handing its work to a `Runnable` through `super(r)` found
+nothing when the lookup walked up from the subclass. Ours declares it beside
+`start`.
+
+**A title drawing an image it never got is the title's own null**, and their
+conclusion is one this document has reached from several directions: the stop is
+honest, the cause is upstream - an encoding that did not decode or a resource name
+that came back empty - and making the draw tolerate null would hide it. The place
+this runtime says the same thing out loud is `MC_knlGetResource`, which warns that
+a handle was not one it issued rather than reading whatever is there.
+
+**`MC_fsFileAttribute` on a directory is the one place we are ahead, and not by
+guessing.** They refuse to answer, because saying otherwise means setting
+`MC_FILE_IS_DIR` in an attribute word whose value the specification leaves to the
+HAL, and a guessed bit is worse than a refusal - a later title asks and the
+refusal is what ends it, and they still did not guess. The question does not arise
+here: the LGT service this is reverse-engineered from writes three words, and word
+zero is the directory flag in full rather than a bit inside an attribute word. A
+firmware that can be read beats a specification that defers.
+
+**Their table 7 finding is our filesystem already.** They had been reading WIPI C
+table 7 as a second database and renamed the whole table from one call site;
+everything in it is published here under those names, `MC_fsMkDir` included. Their
+harder half is also answered: a flat store has nothing to create for a directory
+but it has an answer to give, and answering zero every time tells a title that
+checks that every run is its first. Ours answers `M_E_EXIST` for a name already
+there, and it does not need a list of made names beside the deleted ones because
+`mkdir` goes to the platform's own persistent filesystem keyed by the archive, so
+the answer after a restart is the answer before one.
+
+**One format we do not read, with no local demand.** A WIPI 1.1 client image is a
+relocatable module - a bss size, a relocation table, a terminator, then a segment
+whose first nine words are addresses, two `0x13580001` markers and a Thumb entry -
+and its entry takes a pointer to a table of functions rather than the bss size the
+newer one takes. We do not parse it. All five local KTF archives are the newer
+generation, with Thumb code at the first byte (`0x46c0e004`), so nothing here asks
+for it; and the reference's own work stops at not knowing what that function table
+holds. Recorded rather than started.
+
+**And a judgment worth copying.** They tightened what counts as a working title: a
+run that finishes its ticks without an error and lights no pixel is not a pass. The
+probe here reports `colors_in_last_frame` for exactly that reason, so the same
+tightening is available whenever a sweep is read.
