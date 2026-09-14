@@ -8,7 +8,7 @@ use jvm::{ClassInstance, Result as JvmResult, runtime::JavaLangString};
 use wie_backend::{
     Emulator, Event, Options, Platform, System, TaskRunner, TitlePlatform,
     canvas::{Rgb565Pixel, VecImageBuffer},
-    gz, title_quirks,
+    extract_zip, gz, title_quirks,
 };
 use wie_core_arm::{Allocator, ArmCore};
 use wie_jvm_support::JvmSupport;
@@ -78,6 +78,20 @@ impl KtfEmulator {
 
     pub fn loadable_jar(jar: &[u8]) -> bool {
         find_client_bin(jar).is_ok()
+    }
+
+    /// The panel this archive was packaged for, when its descriptor names one.
+    ///
+    /// A title sizes its drawing from what the screen reports, so this has to be
+    /// known before the screen is built and therefore before there is an
+    /// emulator to ask. The same shape as `LgtEmulator::screen_size`, and
+    /// answered from the `DisplaySize` line rather than a table because KTF's
+    /// descriptor carries it: of seven local archives, four say 240*320 and
+    /// three say 176*220.
+    pub fn screen_size(archive: &[u8]) -> Option<(u32, u32)> {
+        let files = extract_zip(archive).ok()?;
+
+        KtfAdf::parse(files.get("__adf__")?).display_size
     }
 
     fn load(

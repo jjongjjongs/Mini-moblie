@@ -133,6 +133,7 @@ impl Runner {
         // back to the default.
         let (width, height) = LgtEmulator::screen_size(&data)
             .or_else(|| SktEmulator::screen_size(&data))
+            .or_else(|| KtfEmulator::screen_size(&data))
             .unwrap_or((SCREEN_WIDTH, SCREEN_HEIGHT));
         if (width, height) != (SCREEN_WIDTH, SCREEN_HEIGHT) {
             tracing::info!("archive names its own panel: {width}x{height}");

@@ -67,6 +67,8 @@ struct Captured {
 #[derive(Default, Clone)]
 struct CaptureScreen {
     captured: Arc<Mutex<Captured>>,
+    /// The panel the archive under capture names for itself, when it names one.
+    native_size: Option<(u32, u32)>,
 }
 
 impl Screen for CaptureScreen {
@@ -95,11 +97,15 @@ impl Screen for CaptureScreen {
     }
 
     fn width(&self) -> u32 {
-        self.captured.lock().unwrap().width.max(240)
+        let (width, _) = self.native_size.unwrap_or((240, 320));
+
+        self.captured.lock().unwrap().width.max(width)
     }
 
     fn height(&self) -> u32 {
-        self.captured.lock().unwrap().height.max(320)
+        let (_, height) = self.native_size.unwrap_or((240, 320));
+
+        self.captured.lock().unwrap().height.max(height)
     }
 }
 
@@ -292,8 +298,12 @@ fn ktf_archive_probe() {
     let ticks_limit: u32 = std::env::var("WIE_TICKS").ok().and_then(|x| x.parse().ok()).unwrap_or(20000);
     let archive = std::fs::read(&path).expect("archive");
     let files = extract_zip(&archive).expect("extract");
+    // The panel the archive names for itself, which is what the Android
+    // frontend gives it too. Without this a capture runs a 176x220 title on a
+    // 240x320 screen and shows a layout no handset ever did.
+    let native_size = KtfEmulator::screen_size(&archive);
     eprintln!(
-        "[probe] {path}: {} entries, loadable={}",
+        "[probe] {path}: {} entries, loadable={}, panel={native_size:?}",
         files.len(),
         KtfEmulator::loadable_archive(&files)
     );
@@ -313,7 +323,7 @@ fn ktf_archive_probe() {
 
     if let Some(second) = second {
         eprintln!("[probe] first launch");
-        run_once(&files, &state, &script, ticks_limit, None, None);
+        run_once(&files, &state, &script, ticks_limit, None, None, native_size);
 
         let mut second_script = parse_script(Some(second.as_str()));
         second_script.sort_by_key(|(tick, _)| *tick);
@@ -327,6 +337,7 @@ fn ktf_archive_probe() {
             second_ticks,
             std::env::var("WIE_SHOT_DIR").ok().as_deref(),
             std::env::var("WIE_SHOT").ok().as_deref(),
+            native_size,
         );
 
         return;
@@ -339,6 +350,7 @@ fn ktf_archive_probe() {
         ticks_limit,
         std::env::var("WIE_SHOT_DIR").ok().as_deref(),
         std::env::var("WIE_SHOT").ok().as_deref(),
+        native_size,
     );
 }
 
@@ -351,10 +363,14 @@ fn run_once(
     ticks_limit: u32,
     shot_dir: Option<&str>,
     shot: Option<&str>,
+    native_size: Option<(u32, u32)>,
 ) {
     let exited = Arc::new(AtomicBool::new(false));
     let exited_clone = exited.clone();
-    let screen = CaptureScreen::default();
+    let screen = CaptureScreen {
+        native_size,
+        ..Default::default()
+    };
 
     let tick_clock = Arc::new(ProbeClock::default());
     let platform = Box::new(CapturePlatform {
