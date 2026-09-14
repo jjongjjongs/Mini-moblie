@@ -7,6 +7,12 @@
 //! [`start_collecting`] narrows it further to one stretch of play with every
 //! area turned on - which is what keeps a new question from needing a new
 //! build with new instrumentation in it.
+//!
+//! The copy is bounded, and what it holds arrives at wildly different rates, so
+//! it is kept in three lanes with a share of the bound each - the branch trace,
+//! the lines at info and above, and everything else - and merged back by time
+//! when it is read. Sharing one bound first-come, the densest lane decided how
+//! far back the whole capture reached, and it decided it in milliseconds.
 
 use std::{
     collections::VecDeque,
@@ -187,10 +193,15 @@ pub fn set_filter(directive: &str) -> core::result::Result<(), String> {
 /// not start" wants everything about the few hundred milliseconds after launch,
 /// which is what widening is for. "Why did that just happen while I was
 /// playing" wants the minutes leading up to a moment a person noticed - and at
-/// trace, 액션퍼즐패밀리1 fills the whole window in a quarter of a second, so
-/// the moment was never in it. Typing `info` in the filter box and collecting
-/// now covers a whole session: the input path, the unimplemented platform calls
-/// and the faults all log at info or above, and nothing else does.
+/// trace, 액션퍼즐패밀리1 fills the whole window in a quarter of a second.
+/// Typing `info` in the filter box and collecting narrows it to exactly the
+/// second question: the input path, the unimplemented platform calls and the
+/// faults all log at info or above, and nothing else does.
+///
+/// It is no longer the only way to get that far back, though - the record keeps
+/// those lines in a lane of their own (see `NOTABLE_SHARE_PERCENT`), so a
+/// window taken at full width still reaches back minutes for them. Setting the
+/// filter buys the debug detail around them as well.
 pub fn start_collecting() -> core::result::Result<(), String> {
     let chosen = filter();
     let widened = if chosen == DEFAULT_LOG_DIRECTIVE {
@@ -297,6 +308,40 @@ const COLLECT_MAX_BYTES: usize = 12 << 20;
 /// getting about a second of the bound - and the log gets back the rest.
 const TRACE_SHARE_PERCENT: usize = 60;
 
+/// The share of the bounds the notable lines are allowed, in percent.
+///
+/// The same argument as the branch trace's, one level down. A capture is mostly
+/// debug and trace - the per-call echo of graphics, strings, bytecode and class
+/// loading - and that is three orders of magnitude denser than the handful of
+/// lines a question asked afterwards is actually about: the input path, the
+/// unimplemented platform calls, the faults, the per-second counters. Sharing
+/// one bound first-come, the dense half decides how long the capture covers,
+/// and it decided it at a quarter of a second. Four windows of 액션퍼즐패밀리1
+/// were taken to find a key press the player saw fire by itself; all four came
+/// back 26,000 lines of `String` and bytecode covering 0.27 seconds, with
+/// 210,132 lines dropped behind them, and the press was in none of them.
+///
+/// So the lines at info and above get a lane of their own, and losing the flood
+/// no longer costs the log the minutes around it. At this title's rate - about
+/// 330 a second, itself mostly per-frame warnings - the always-on capture holds
+/// a little over two minutes of them and a window holds half a minute, which is
+/// long enough to contain something a person noticed and said so.
+const NOTABLE_SHARE_PERCENT: usize = 15;
+
+/// Whether a formatted line belongs in that lane, which is decided by its
+/// level.
+///
+/// Read back out of the text for the same reason the branch trace's target is:
+/// the record is fed formatted lines, and by the time one arrives its event is
+/// gone. The level is the field after the timestamp; a line without one - the
+/// header the save writes - is not notable and travels with the log.
+fn is_notable(line: &str) -> bool {
+    let mut fields = line.split_whitespace();
+    let (_time, level) = (fields.next(), fields.next());
+
+    matches!(level, Some("INFO" | "WARN" | "ERROR"))
+}
+
 /// How a branch-trace line is told apart from any other, which is by the target
 /// the format layer prints it under.
 ///
@@ -307,22 +352,31 @@ const TRACE_TARGET: &str = " wie_backend::probe: ";
 
 /// Lines the record is currently allowed, and bytes, for everything that is not
 /// the branch trace. Swapped by [`start_collecting`] and [`stop_collecting`].
-static CAP_LINES: AtomicUsize = AtomicUsize::new(MAX_LINES - MAX_LINES * TRACE_SHARE_PERCENT / 100);
-static CAP_BYTES: AtomicUsize = AtomicUsize::new(MAX_BYTES - MAX_BYTES * TRACE_SHARE_PERCENT / 100);
+static CAP_LINES: AtomicUsize = AtomicUsize::new(MAX_LINES - MAX_LINES * TRACE_SHARE_PERCENT / 100 - MAX_LINES * NOTABLE_SHARE_PERCENT / 100);
+static CAP_BYTES: AtomicUsize = AtomicUsize::new(MAX_BYTES - MAX_BYTES * TRACE_SHARE_PERCENT / 100 - MAX_BYTES * NOTABLE_SHARE_PERCENT / 100);
 
 /// The same, for the branch trace.
 static TRACE_CAP_LINES: AtomicUsize = AtomicUsize::new(MAX_LINES * TRACE_SHARE_PERCENT / 100);
 static TRACE_CAP_BYTES: AtomicUsize = AtomicUsize::new(MAX_BYTES * TRACE_SHARE_PERCENT / 100);
 
-/// Sets both budgets from one total, giving the branch trace its share.
+/// The same, for the lines at info and above.
+static NOTABLE_CAP_LINES: AtomicUsize = AtomicUsize::new(MAX_LINES * NOTABLE_SHARE_PERCENT / 100);
+static NOTABLE_CAP_BYTES: AtomicUsize = AtomicUsize::new(MAX_BYTES * NOTABLE_SHARE_PERCENT / 100);
+
+/// Sets every budget from one total, giving each lane its share. What is left
+/// after the two dense lanes have theirs is the log's.
 fn set_bounds(max_lines: usize, max_bytes: usize) {
     let trace_lines = max_lines * TRACE_SHARE_PERCENT / 100;
     let trace_bytes = max_bytes * TRACE_SHARE_PERCENT / 100;
+    let notable_lines = max_lines * NOTABLE_SHARE_PERCENT / 100;
+    let notable_bytes = max_bytes * NOTABLE_SHARE_PERCENT / 100;
 
     TRACE_CAP_LINES.store(trace_lines, Ordering::Relaxed);
     TRACE_CAP_BYTES.store(trace_bytes, Ordering::Relaxed);
-    CAP_LINES.store(max_lines - trace_lines, Ordering::Relaxed);
-    CAP_BYTES.store(max_bytes - trace_bytes, Ordering::Relaxed);
+    NOTABLE_CAP_LINES.store(notable_lines, Ordering::Relaxed);
+    NOTABLE_CAP_BYTES.store(notable_bytes, Ordering::Relaxed);
+    CAP_LINES.store(max_lines - trace_lines - notable_lines, Ordering::Relaxed);
+    CAP_BYTES.store(max_bytes - trace_bytes - notable_bytes, Ordering::Relaxed);
 }
 
 /// One bounded queue of lines: what it holds, what it has had to drop, and how
@@ -357,13 +411,23 @@ struct Record {
     /// evict the log around it. Merged back by time in [`snapshot`], so what
     /// is read is still one interleaved run.
     trace: Lines,
+    /// The lines at info and above, held apart from the debug and trace flood
+    /// for the same reason and merged back the same way. This is the lane a
+    /// question asked after the fact is answered from, so it is the one that
+    /// has to still cover the moment.
+    notable: Lines,
 }
 
 impl Record {
     fn push(&mut self, line: String) {
+        // The trace first: its lines carry a level too, and what makes one a
+        // trace line is where it came from, not how loud it is.
         if line.contains(TRACE_TARGET) {
             self.trace
                 .push(line, TRACE_CAP_LINES.load(Ordering::Relaxed), TRACE_CAP_BYTES.load(Ordering::Relaxed));
+        } else if is_notable(&line) {
+            self.notable
+                .push(line, NOTABLE_CAP_LINES.load(Ordering::Relaxed), NOTABLE_CAP_BYTES.load(Ordering::Relaxed));
         } else {
             self.log.push(line, CAP_LINES.load(Ordering::Relaxed), CAP_BYTES.load(Ordering::Relaxed));
         }
@@ -388,20 +452,22 @@ pub fn reset() {
     *record() = Record::default();
 }
 
-/// Everything logged since the last [`reset`], the branch trace merged back
-/// into the rest by time.
+/// Everything logged since the last [`reset`], the lanes merged back into one
+/// run by time.
 ///
-/// The two are held apart only so that neither can crowd the other out of its
+/// They are held apart only so that none can crowd the others out of its
 /// bounds; read back they are one run, and a line is worth reading against the
-/// branches that followed it.
+/// branches that followed it and the frames that were being drawn around it.
 pub fn snapshot() -> String {
     let record = record();
 
-    let mut out = String::with_capacity(record.log.bytes + record.trace.bytes + 256);
+    let mut out = String::with_capacity(record.log.bytes + record.trace.bytes + record.notable.bytes + 256);
 
-    // Each queue says what it had to drop, because the two ends mean different
-    // things: the log's beginning going means the window ran long, the trace's
-    // going means the emulated code branched harder than a window can hold.
+    // Each queue says what it had to drop, because the three ends mean
+    // different things: the log's beginning going means the window ran long,
+    // the trace's going means the emulated code branched harder than a window
+    // can hold, and the notable lane's going is the only one that means the
+    // capture no longer reaches back to what was asked about.
     if record.log.dropped > 0 {
         out.push_str(&format!(
             "[{} earlier lines dropped to stay inside the log's bounds]\n",
@@ -414,24 +480,37 @@ pub fn snapshot() -> String {
             record.trace.dropped
         ));
     }
+    if record.notable.dropped > 0 {
+        out.push_str(&format!(
+            "[{} earlier info-and-above lines dropped to stay inside their own bounds]\n",
+            record.notable.dropped
+        ));
+    }
 
-    let mut log = record.log.lines.iter().peekable();
-    let mut trace = record.trace.lines.iter().peekable();
+    // Ties go to the earliest lane listed, so lines sharing a timestamp keep
+    // the order the lanes were written in rather than shuffling between saves.
+    let mut lanes = [
+        record.log.lines.iter().peekable(),
+        record.notable.lines.iter().peekable(),
+        record.trace.lines.iter().peekable(),
+    ];
+
     loop {
-        let next = match (log.peek(), trace.peek()) {
-            (Some(left), Some(right)) => {
-                if line_time(left) <= line_time(right) {
-                    log.next()
-                } else {
-                    trace.next()
-                }
-            }
-            (Some(_), None) => log.next(),
-            (None, Some(_)) => trace.next(),
-            (None, None) => break,
-        };
+        let mut oldest: Option<(usize, &String)> = None;
+        for (index, lane) in lanes.iter_mut().enumerate() {
+            // Copied out of the peek, so holding it does not keep the lane
+            // borrowed while the next one is looked at.
+            let Some(line) = lane.peek().copied() else { continue };
 
-        let Some(line) = next else { break };
+            match oldest {
+                Some((_, best)) if line_time(best) <= line_time(line) => {}
+                _ => oldest = Some((index, line)),
+            }
+        }
+
+        let Some((index, _)) = oldest else { break };
+        let Some(line) = lanes[index].next() else { break };
+
         out.push_str(line);
         out.push('\n');
     }
@@ -677,15 +756,13 @@ mod tests {
         let _guard = ONE_AT_A_TIME.lock().unwrap_or_else(|x| x.into_inner());
         wie_backend::probe::disarm();
 
-        // Both budgets together are the bound; each holds its own share of it.
-        let outside = super::CAP_LINES.load(Ordering::Relaxed) + super::TRACE_CAP_LINES.load(Ordering::Relaxed);
-        assert_eq!(outside, MAX_LINES);
+        // Every budget together is the bound; each lane holds its own share.
+        assert_eq!(budget(), MAX_LINES);
 
         let _ = start_collecting();
         // A window is every area at trace plus the branches the code takes, and
         // that is where the memory goes.
-        let inside = super::CAP_LINES.load(Ordering::Relaxed) + super::TRACE_CAP_LINES.load(Ordering::Relaxed);
-        assert_eq!(inside, super::COLLECT_MAX_LINES);
+        assert_eq!(budget(), super::COLLECT_MAX_LINES);
         assert!(super::COLLECT_MAX_LINES < MAX_LINES);
 
         let cap = super::CAP_LINES.load(Ordering::Relaxed);
@@ -700,10 +777,14 @@ mod tests {
 
         let _ = stop_collecting();
         // Back to the bounds the crash auto-save is written from.
-        let outside = super::CAP_LINES.load(Ordering::Relaxed) + super::TRACE_CAP_LINES.load(Ordering::Relaxed);
-        assert_eq!(outside, MAX_LINES);
+        assert_eq!(budget(), MAX_LINES);
 
         reset();
+    }
+
+    /// What every lane is allowed together, which is the bound.
+    fn budget() -> usize {
+        super::CAP_LINES.load(Ordering::Relaxed) + super::TRACE_CAP_LINES.load(Ordering::Relaxed) + super::NOTABLE_CAP_LINES.load(Ordering::Relaxed)
     }
 
     /// The branch trace arrives hundreds of times faster than everything else -
@@ -766,6 +847,90 @@ mod tests {
         assert_eq!(times, ["00", "01", "02", "03", "04"], "the merge did not put the run back in order");
 
         reset();
+    }
+
+    /// The debug and trace flood is to the lines a question is about what the
+    /// branch trace is to the log: three orders of magnitude denser, and under
+    /// one shared bound it decided how far back a capture reached. Four windows
+    /// of 액션퍼즐패밀리1 were taken to find a key press and all four covered
+    /// 0.27 seconds of `String` and bytecode, with the press behind them.
+    #[test]
+    fn a_flood_of_debug_does_not_evict_the_lines_a_question_is_about() {
+        let _guard = ONE_AT_A_TIME.lock().unwrap_or_else(|x| x.into_inner());
+        wie_backend::probe::disarm();
+        reset();
+
+        let _ = start_collecting();
+        let flood_cap = super::CAP_LINES.load(Ordering::Relaxed);
+
+        let mut writer = make_writer();
+        writer.write_all(b"2000-01-01T00:00:00.000000Z  INFO input: NUM2 down\n").unwrap();
+
+        // Enough per-frame debug to have swallowed the bound whole before.
+        for index in 0..flood_cap * 2 {
+            writer
+                .write_all(format!("2000-01-01T00:00:01.{index:06}Z DEBUG drew a frame {index}\n").as_bytes())
+                .unwrap();
+        }
+
+        let log = snapshot();
+        assert!(log.contains("input: NUM2 down"), "the flood evicted the press the window was opened for");
+        assert!(
+            log.contains(&format!("frame {}", flood_cap * 2 - 1)),
+            "the flood lost its own most recent"
+        );
+        assert!(!log.contains("frame 0\n"), "the flood kept more than its share");
+
+        let _ = stop_collecting();
+        reset();
+    }
+
+    /// Held apart only so the flood cannot crowd them out; read back, one run.
+    #[test]
+    fn the_notable_lines_read_back_interleaved_with_the_flood() {
+        let _guard = ONE_AT_A_TIME.lock().unwrap_or_else(|x| x.into_inner());
+        wie_backend::probe::disarm();
+        reset();
+
+        let mut writer = make_writer();
+        for (time, level, line) in [
+            ("00.000000", "DEBUG", "drew a frame"),
+            ("01.000000", " INFO", "input: NUM2 down"),
+            ("02.000000", "DEBUG", "drew another frame"),
+            ("03.000000", " WARN", "lgt_java_diag(index=0xfd)"),
+            ("04.000000", "DEBUG", "drew one more frame"),
+        ] {
+            writer.write_all(format!("2000-01-01T00:00:{time}Z {level} {line}\n").as_bytes()).unwrap();
+        }
+
+        let log = snapshot();
+        let times: Vec<&str> = log.lines().filter_map(|line| line.get(17..19)).collect();
+        assert_eq!(times, ["00", "01", "02", "03", "04"], "the merge did not put the run back in order");
+
+        reset();
+    }
+
+    /// The level decides the lane, and it is read back out of the formatted
+    /// text because the event is gone by the time the record sees the line.
+    #[test]
+    fn the_level_decides_which_lane_a_line_travels_in() {
+        for line in [
+            "2000-01-01T00:00:00.000000Z  INFO input: NUM2 down",
+            "2000-01-01T00:00:00.000000Z  WARN wie_lgt::runtime::init: lgt_java_diag(index=0x5b)",
+            "2000-01-01T00:00:00.000000Z ERROR panic at src/lib.rs:1: nope",
+        ] {
+            assert!(super::is_notable(line), "{line} should be kept apart from the flood");
+        }
+
+        for line in [
+            "2000-01-01T00:00:00.000000Z DEBUG jvm::jvm: getfield",
+            "2000-01-01T00:00:00.000000Z TRACE jvm::jvm: aload_0",
+            // The header the save writes has no level at all.
+            "game: 액션퍼즐패밀리1",
+            "",
+        ] {
+            assert!(!super::is_notable(line), "{line} should travel with the flood");
+        }
     }
 
     #[test]
