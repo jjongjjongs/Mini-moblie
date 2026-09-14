@@ -1555,8 +1555,8 @@ public final class MainActivity extends Activity {
             // they do is whatever the game draws in the corners of its screen
             // above them. Back is the same key a handset marked C, which games
             // use both for their menu and for stepping back out of it.
-            keys.add(new Key("좌상단", 5, KEY_SOFT));
-            keys.add(new Key("우상단", 6, KEY_SOFT));
+            keys.add(new Key("L", 5, KEY_SOFT));
+            keys.add(new Key("R", 6, KEY_SOFT));
             keys.add(new Key("저장", 20, KEY_SAVE));
             keys.add(new Key("뒤로가기", 7, KEY_CLEAR));
 
@@ -1567,13 +1567,14 @@ public final class MainActivity extends Activity {
             keys.add(new Key("▼", 1, KEY_DIRECTION));
 
             // The number pad carries what a Korean handset printed beside each
-            // digit - the jamo pair over the Latin triple - because that is
-            // what the key looks like, and a player reading the pad recognises
-            // it faster than a bare column of digits. Nothing here is typed:
-            // the emulator sends the digit whatever is engraved next to it.
-            keys.add(new Key("1", 9, KEY_PLAIN, null, ".,?!"));
-            keys.add(new Key("2", 10, KEY_PLAIN, null, "ABC"));
-            keys.add(new Key("3", 11, KEY_PLAIN, null, "DEF"));
+            // digit, because that is what the key looks like and a player
+            // reading the pad recognises it faster than a bare column of
+            // digits: the 천지인 vowel strokes on 1-3, the jamo pairs on 4-0,
+            // the Latin triples throughout. Nothing here is typed - the
+            // emulator sends the digit whatever is engraved next to it.
+            keys.add(new Key("1", 9, KEY_PLAIN, "ㅣ", ".,?!"));
+            keys.add(new Key("2", 10, KEY_PLAIN, "·", "ABC"));
+            keys.add(new Key("3", 11, KEY_PLAIN, "ㅡ", "DEF"));
             keys.add(new Key("4", 12, KEY_PLAIN, "ㄱㅋ", "GHI"));
             keys.add(new Key("5", 13, KEY_PLAIN, "ㄴㄹ", "JKL"));
             keys.add(new Key("6", 14, KEY_PLAIN, "ㄷㅌ", "MNO"));
@@ -1582,7 +1583,7 @@ public final class MainActivity extends Activity {
             keys.add(new Key("9", 17, KEY_PLAIN, "ㅈㅊ", "WXYZ"));
             keys.add(new Key("✱", 18, KEY_PLAIN));
             keys.add(new Key("0", 8, KEY_PLAIN, "ㅇㅁ", null));
-            keys.add(new Key("#", 19, KEY_PLAIN));
+            keys.add(new Key("#", 19, KEY_PLAIN, null, "_"));
         }
 
         @Override
