@@ -22,18 +22,28 @@
 //! sixteen bytes, which is that word behind its length with a payload of eight.
 //! Answered so, the title shows that message and goes on to the game.
 //!
-//! This answers the authentication and nothing else. The same server carries the
-//! title's cash shop - `CKN_U` and `CKN_C` for KOIN, `CASH` for a handset
-//! payment - and those ask for balances and prices that no answer here could
-//! invent, so they are left to fail as they already do.
+//! The same server carries the title's cash shop, on a port of its own: a
+//! purchase dials `222.237.78.175:10020`, named `TEST_BILLSOCK` the same way.
+//! What it asks there - `CKN_C` for a KOIN balance, `CKN_U` to spend one, `CASH`
+//! for a handset payment - wants balances and prices back, which no answer here
+//! could invent, so this does not answer them.
+//!
+//! It does take the connection, for two reasons. The request is written down -
+//! a title only sends what it has, and this is the only place those bytes are
+//! ever visible - and the connection is then ended rather than left open, so the
+//! title reports its own network failure at once instead of sitting on a screen
+//! until a twenty second timeout it can no longer reach.
 
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 
 use super::{LocalConnection, LocalEndpoint, LocalRead};
 
-/// Where the authentication this answers for lived.
-const AUTHENTICATION_HOST: &str = "222.237.78.175";
+/// Where this title's servers lived.
+const GPANG_HOST: &str = "222.237.78.175";
+
+/// The port the authentication asks on, and the one the cash shop asks on.
 const AUTHENTICATION_PORT: u16 = 40240;
+const SHOP_PORT: u16 = 10020;
 
 /// The width of the length that opens every frame, counting only what follows.
 const LENGTH_WIDTH: usize = 4;
@@ -62,7 +72,7 @@ impl Default for GpangEndpoint {
 impl GpangEndpoint {
     pub fn new() -> Self {
         Self {
-            name: format!("gpang({AUTHENTICATION_HOST}:{AUTHENTICATION_PORT})"),
+            name: format!("gpang({GPANG_HOST}:{AUTHENTICATION_PORT},{SHOP_PORT})"),
         }
     }
 }
@@ -73,7 +83,7 @@ impl LocalEndpoint for GpangEndpoint {
     }
 
     fn accepts(&self, scheme: &str, host: &str, port: u16) -> bool {
-        scheme == "socket" && host == AUTHENTICATION_HOST && port == AUTHENTICATION_PORT
+        scheme == "socket" && host == GPANG_HOST && matches!(port, AUTHENTICATION_PORT | SHOP_PORT)
     }
 
     fn open(&self, _: &str, _: &str, _: u16) -> Box<dyn LocalConnection> {
@@ -87,6 +97,10 @@ struct GpangConnection {
     request: Vec<u8>,
     /// What is left to hand back.
     reply: Vec<u8>,
+    /// Whether the title asked something this cannot answer. Its read then
+    /// reports end of stream, which is a failure a title acts on, where silence
+    /// is one it waits out.
+    unanswerable: bool,
 }
 
 impl GpangConnection {
@@ -118,8 +132,12 @@ impl LocalConnection for GpangConnection {
         while let Some(payload) = self.take_frame() {
             if !payload.starts_with(AUTHENTICATION_REQUEST) {
                 // Everything else this server carries is the cash shop, which
-                // needs content rather than a yes. Saying which request went
-                // unanswered is the whole of what this can offer it.
+                // wants content rather than a yes. Writing the request down is
+                // what this can offer it - a title only sends what it has, and
+                // these bytes are visible nowhere else - and then ending the
+                // connection, so the title reports a failure rather than waiting
+                // on an answer that is not coming.
+                self.unanswerable = true;
                 tracing::info!(
                     "gpang: no answer for {:?}",
                     payload
@@ -146,7 +164,7 @@ impl LocalConnection for GpangConnection {
 
     fn read(&mut self, out: &mut [u8]) -> LocalRead {
         if self.reply.is_empty() {
-            return LocalRead::Pending;
+            return if self.unanswerable { LocalRead::Closed } else { LocalRead::Pending };
         }
 
         let taken = out.len().min(self.reply.len());
@@ -157,7 +175,7 @@ impl LocalConnection for GpangConnection {
     }
 
     fn readable(&self) -> bool {
-        !self.reply.is_empty()
+        !self.reply.is_empty() || self.unanswerable
     }
 }
 
@@ -169,7 +187,7 @@ mod tests {
     const REQUEST: &[u8] = b"\x00\x00\x00\x2cIR\t01046119269\tdemon\t1.0.2\t5080091\tWIPIC\tyes";
 
     fn connection() -> Box<dyn LocalConnection> {
-        GpangEndpoint::new().open("socket", AUTHENTICATION_HOST, AUTHENTICATION_PORT)
+        GpangEndpoint::new().open("socket", GPANG_HOST, AUTHENTICATION_PORT)
     }
 
     #[test]
@@ -225,13 +243,14 @@ mod tests {
         assert_eq!(connection.read(&mut [0u8; 16]), LocalRead::Pending);
     }
 
-    /// The cash shop asks for content, and a yes is not content.
+    /// The cash shop asks for content, and a yes is not content. The connection
+    /// ends instead, so the title reports a failure rather than waiting.
     #[test]
     fn the_cash_shop_is_not_answered() {
         let mut connection = connection();
         connection.write(b"\x00\x00\x00\x17CKN_U|0|demon|05590091|");
 
-        assert!(!connection.readable());
+        assert_eq!(connection.read(&mut [0u8; 16]), LocalRead::Closed);
     }
 
     /// Only the one server, so a title reaching any other still reaches the
@@ -240,9 +259,13 @@ mod tests {
     fn no_other_address_is_answered_for() {
         let endpoint = GpangEndpoint::new();
 
-        assert!(endpoint.accepts("socket", AUTHENTICATION_HOST, AUTHENTICATION_PORT));
-        assert!(!endpoint.accepts("socket", AUTHENTICATION_HOST, 80));
+        // Both of the title's ports: 데몬헌터 authenticates on one and shops on
+        // the other, and a shop connection left to the network is one that waits
+        // out a timeout with its request unread.
+        assert!(endpoint.accepts("socket", GPANG_HOST, AUTHENTICATION_PORT));
+        assert!(endpoint.accepts("socket", GPANG_HOST, SHOP_PORT));
+        assert!(!endpoint.accepts("socket", GPANG_HOST, 80));
         assert!(!endpoint.accepts("socket", "222.237.78.176", AUTHENTICATION_PORT));
-        assert!(!endpoint.accepts("http", AUTHENTICATION_HOST, AUTHENTICATION_PORT));
+        assert!(!endpoint.accepts("http", GPANG_HOST, AUTHENTICATION_PORT));
     }
 }
