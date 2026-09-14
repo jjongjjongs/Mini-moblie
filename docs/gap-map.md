@@ -1825,3 +1825,45 @@ the reference's CLI walks the splashes quickly is `-play -speed 50`.
 That leaves the slowness as a question about how fast a guest second should run
 on the device rather than anything divergent here, and a speed control is the
 shape of an answer rather than a bug to fix in the drawing path.
+
+#### 격투가 advances exactly as the reference does, round for round
+
+The screen not moving on the device looked like a progression bug and is not
+one. Counting the engine's own rounds - one `calcClet` call each - and reading
+the LCD at every round on both sides:
+
+```
+          ours                    reference
+round  1   18 colours     round  2   18 colours   프리스타일 splash
+round 14    4 colours     round 15    3 colours   ZIO interactive
+round 29  408 colours     round 30  408 colours   intro / title
+```
+
+Same screens, the same colour counts down to 408 against 408, one round apart.
+There is nothing stuck: this runtime walks the title's opening exactly as the
+reference walks it.
+
+What the rounds cost is the whole of the difference. `calcClet` answers 11,036
+every time on both sides - 165 rounds of the reference and 29 of ours, never
+another value - and both honour it: the reference's own ticks come 11,036 ms
+apart and the device log's come 11,035 ms apart. So ZIO is fourteen rounds in,
+about 154 seconds, and the intro is twenty-nine, about 320. A 55-second capture
+is five rounds, which is why the screen had not moved in it, and the reference
+at 1x needs the same 154 seconds - measured, ZIO at about 156.
+
+So the reference feeling smooth on the handset is its speed multiplier doing
+exactly what it says. That is not a workaround here: the title paces its own
+splash sequence at eleven seconds a frame, and a speed control is the only
+thing that changes it. The pacing model this was going to chase -
+`chargedFramePeriod` and `workSinceLastPeriod` - would not move any of these
+numbers, because the interval is not being computed on either side. It is what
+the engine asks for.
+
+Also measured on the way: the earlier "156 seconds against 240" was wrong. It
+compared the reference's wall clock against this probe's synthetic guest clock
+(an 8 ms floor per tick plus execution), which is not time. On the device the
+two run at the same rate.
+
+The only warning in a 55-second device log is `stub
+javax.microedition.lcdui.Font::getDefaultFont`, thirty times, and the splash
+renders correctly, so nothing there is waiting on it.
