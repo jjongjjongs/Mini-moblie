@@ -387,6 +387,13 @@ pub fn get_net_method_table() -> Vec<WIPICMethodBody> {
         // is one it means to send, so the arguments are `MC_netSocketWrite`'s
         // and the framing is the title's own.
         net::socket_write.into_body(),
+        // Slot 32 is the read that carries the answer back, and the title's own
+        // loop says so: once its request went out it called this with
+        // `(1, 0x179694, 0x10)` and then `(1, 0x179695, 0xf)`, `(1, 0x179696,
+        // 0xe)` - one buffer, advanced by what it has taken, shortened by the
+        // same. That is a transfer resuming where it left off, into a buffer
+        // holding nothing, which is the direction the write is not.
+        net::socket_read.into_body(),
     ]
 }
 
@@ -674,12 +681,14 @@ mod tests {
 
     #[test]
     fn the_slots_the_demon_hunter_authenticates_through_are_served() {
-        // Net slot 30 is the named connect its authentication calls and 31 the
-        // write that carries the request. A refusal at 30 is a title waiting for
-        // a callback it will never get; at 31 it is one asking to send the same
-        // 48 bytes until it gives up.
+        // Net slot 30 is the named connect its authentication calls, 31 the
+        // write that carries the request and 32 the read that brings the answer
+        // back. A refusal at 30 is a title waiting for a callback it will never
+        // get; at 31 it is one asking to send the same 48 bytes until it gives
+        // up; at 32 it is one that asked and is never answered.
         assert!(get_served_method_body(WIPICTableId::Net, 30).is_some());
         assert!(get_served_method_body(WIPICTableId::Net, 31).is_some());
+        assert!(get_served_method_body(WIPICTableId::Net, 32).is_some());
     }
 
     #[test]
