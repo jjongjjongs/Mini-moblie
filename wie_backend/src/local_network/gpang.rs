@@ -28,11 +28,17 @@
 //! for a handset payment - wants balances and prices back, which no answer here
 //! could invent, so this does not answer them.
 //!
-//! It does take the connection, for two reasons. The request is written down -
-//! a title only sends what it has, and this is the only place those bytes are
-//! ever visible - and the connection is then ended rather than left open, so the
-//! title reports its own network failure at once instead of sitting on a screen
-//! until a twenty second timeout it can no longer reach.
+//! It does take that connection, and ends it at once. A title left waiting on an
+//! endpoint that will never speak waits forever, where the dead server it used
+//! to reach at least timed out; an end is a failure a title acts on. The
+//! connection is worth taking anyway, because whatever the title sends on it is
+//! written down, and a title only sends what it has - those bytes are visible
+//! nowhere else.
+//!
+//! 데몬헌터's shop reads before it writes, so it is the greeting it never gets
+//! rather than an answer: it connects, reads, finds nothing, registers a read
+//! callback through net slot 13 and waits. Its authentication wrote first and
+//! read afterwards, which is why that one never noticed.
 
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 
@@ -86,8 +92,15 @@ impl LocalEndpoint for GpangEndpoint {
         scheme == "socket" && host == GPANG_HOST && matches!(port, AUTHENTICATION_PORT | SHOP_PORT)
     }
 
-    fn open(&self, _: &str, _: &str, _: u16) -> Box<dyn LocalConnection> {
-        Box::new(GpangConnection::default())
+    fn open(&self, _: &str, _: &str, port: u16) -> Box<dyn LocalConnection> {
+        // The shop's port is unanswerable from the moment it opens: nothing here
+        // can serve that exchange, whichever way round the title runs it. The
+        // connection is taken all the same, to write down whatever the title
+        // sends.
+        Box::new(GpangConnection {
+            unanswerable: port != AUTHENTICATION_PORT,
+            ..Default::default()
+        })
     }
 }
 
@@ -101,12 +114,10 @@ struct GpangConnection {
     /// reports end of stream, which is a failure a title acts on, where silence
     /// is one it waits out.
     unanswerable: bool,
-    /// Whether anything has ever been sent on this connection.
-    written: bool,
-    /// Whether it has been said that this connection is being read before
-    /// anything was sent on it. Once, because a title in that position either
-    /// polls or waits to be told, and neither wants a line per attempt.
-    waiting_said: bool,
+    /// Whether the end of this connection has been said out loud. Once, because
+    /// a title either polls or waits to be told, and neither wants a line per
+    /// attempt.
+    end_said: bool,
 }
 
 impl GpangConnection {
@@ -134,7 +145,6 @@ impl GpangConnection {
 impl LocalConnection for GpangConnection {
     fn write(&mut self, bytes: &[u8]) {
         self.request.extend_from_slice(bytes);
-        self.written = true;
 
         while let Some(payload) = self.take_frame() {
             if !payload.starts_with(AUTHENTICATION_REQUEST) {
@@ -171,16 +181,16 @@ impl LocalConnection for GpangConnection {
 
     fn read(&mut self, out: &mut [u8]) -> LocalRead {
         if self.reply.is_empty() {
-            if !self.unanswerable && !self.written && !self.waiting_said {
-                // A title reading a connection it has not written to is waiting
-                // for the server to speak first, and this one does not know what
-                // that server said. Worth one line, because from outside it
-                // looks exactly like a title that has simply stopped.
-                tracing::info!("gpang: read before anything was sent - this connection is waiting to be spoken to first");
-                self.waiting_said = true;
+            if !self.unanswerable {
+                return LocalRead::Pending;
             }
 
-            return if self.unanswerable { LocalRead::Closed } else { LocalRead::Pending };
+            if !self.end_said {
+                tracing::info!("gpang: nothing to answer with; ending the connection");
+                self.end_said = true;
+            }
+
+            return LocalRead::Closed;
         }
 
         let taken = out.len().min(self.reply.len());
@@ -190,6 +200,8 @@ impl LocalConnection for GpangConnection {
         LocalRead::Data(taken)
     }
 
+    /// A title that waits to be told rather than polling has to be told, or its
+    /// read never comes - including the read that finds the end.
     fn readable(&self) -> bool {
         !self.reply.is_empty() || self.unanswerable
     }
@@ -259,15 +271,34 @@ mod tests {
         assert_eq!(connection.read(&mut [0u8; 16]), LocalRead::Pending);
     }
 
-    /// A title reading a connection it has never written to is waiting to be
-    /// spoken to first - 데몬헌터's shop does exactly this - and that is a wait,
-    /// not an end: the endpoint has no grounds to say the exchange is over.
+    /// The authentication's own connection waits while it has nothing to say:
+    /// the answer is on its way as soon as the request arrives.
     #[test]
-    fn a_read_before_anything_is_sent_waits() {
+    fn a_read_before_the_request_waits() {
         let mut connection = connection();
 
         assert_eq!(connection.read(&mut [0u8; 16]), LocalRead::Pending);
         assert!(!connection.readable());
+    }
+
+    /// The shop's is over before it starts, whichever way round the title runs
+    /// it - 데몬헌터's reads first and would otherwise sit on that read forever.
+    #[test]
+    fn the_shop_connection_ends_rather_than_waiting() {
+        let mut connection = GpangEndpoint::new().open("socket", GPANG_HOST, SHOP_PORT);
+
+        assert!(connection.readable());
+        assert_eq!(connection.read(&mut [0u8; 16]), LocalRead::Closed);
+    }
+
+    /// And what it sends is still written down, whenever it sends it.
+    #[test]
+    fn the_shop_request_is_recorded_even_so() {
+        let mut connection = GpangEndpoint::new().open("socket", GPANG_HOST, SHOP_PORT);
+
+        connection.write(b"\x00\x00\x00\x17CKN_U|0|demon|05590091|");
+
+        assert_eq!(connection.read(&mut [0u8; 16]), LocalRead::Closed);
     }
 
     /// The cash shop asks for content, and a yes is not content. The connection
