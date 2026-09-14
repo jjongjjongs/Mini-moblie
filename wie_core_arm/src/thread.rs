@@ -1,3 +1,5 @@
+use alloc::collections::BTreeMap;
+
 use wie_util::Result;
 
 use crate::{ArmCore, context::ArmCoreContext};
@@ -9,6 +11,12 @@ pub struct ThreadState {
     pub context: ArmCoreContext,
     pub stack_base: usize,
     pub stack_size: usize,
+    /// This thread's own value for every word registered with
+    /// [`ArmCore::register_thread_local_word`], swapped in and out of guest
+    /// memory around each run of the thread. A word this thread has not
+    /// written yet is absent and reads as the value the word was registered
+    /// with.
+    pub thread_local: BTreeMap<u32, u32>,
 }
 
 impl ThreadState {
@@ -39,6 +47,7 @@ impl ThreadState {
             context,
             stack_base: stack_base as _,
             stack_size: STACK_SIZE as _,
+            thread_local: BTreeMap::new(),
         })
     }
 }

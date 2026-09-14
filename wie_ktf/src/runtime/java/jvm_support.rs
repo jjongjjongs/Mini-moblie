@@ -64,6 +64,10 @@ struct KtfJvmExceptionContext {
 
 /// `native_return_type` and `native_return_value` from the start of the
 /// exception context, for the reads `call_native` does without the struct.
+/// Where the head of the handler chain sits in that structure, which is what
+/// has to be private to each thread; see `register_thread_local_word`.
+const EXCEPTION_HANDLER_HEAD_OFFSET: u32 = 0x20;
+
 pub(crate) const NATIVE_RETURN_TYPE_OFFSET: u32 = 0x24;
 pub(crate) const NATIVE_RETURN_VALUE_OFFSET: u32 = 0x28;
 
@@ -97,6 +101,16 @@ impl KtfJvmSupport {
         };
         let ptr_jvm_exception_context = Allocator::alloc(core, size_of::<KtfJvmExceptionContext>() as u32)?;
         write_generic(core, ptr_jvm_exception_context, jvm_exception_context)?;
+
+        // The head of the handler chain is thread state, not process state.
+        // The AOT runtime links a record per `try` through this one word, whose
+        // address the module is handed at `fn_init`, so left shared every
+        // thread's records went onto one chain: a throw on one thread found a
+        // catch belonging to a frame on another thread's stack, and the unwind
+        // - rightly - refused to resume a frame that was not on the stack it
+        // was unwinding. 지크 loses its sound thread to that the moment two
+        // threads are running, and with it the game.
+        core.register_thread_local_word(ptr_jvm_exception_context + EXCEPTION_HANDLER_HEAD_OFFSET)?;
 
         let context_data = KtfJvmSupportContext {
             ptr_vtables_base: ptr_jvm_context + 12,

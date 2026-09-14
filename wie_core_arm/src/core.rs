@@ -4,7 +4,7 @@ use core::{fmt::Write as _, mem::size_of};
 use spin::Mutex;
 
 use wie_backend::{ProfileCallback, ProfileSample};
-use wie_util::{ByteRead, ByteWrite, Result, WieError, read_generic};
+use wie_util::{ByteRead, ByteWrite, Result, WieError, read_generic, write_generic};
 
 use crate::{
     EmulatedFunction, ResultWriter, ThreadId,
@@ -83,6 +83,9 @@ pub(crate) struct ArmCoreInner {
     /// returning to the instruction after the `svc`. Set by
     /// [`ArmCore::set_next_pc`] and cleared before each handler runs.
     next_pc_chosen: bool,
+    /// Guest words that are private to each thread, and what each reads before
+    /// its thread has written it. See [`ArmCore::register_thread_local_word`].
+    thread_local_defaults: BTreeMap<u32, u32>,
 }
 
 /// Upper bound on pooled thread stacks. Peak concurrency is small (a handful),
@@ -164,6 +167,7 @@ impl ArmCore {
             svc_stubs: BTreeMap::new(),
             svc_stub_ids: BTreeMap::new(),
             next_pc_chosen: false,
+            thread_local_defaults: BTreeMap::new(),
             stack_pool: Vec::new(),
             next_stub_address: FUNCTIONS_BASE,
             profile,
@@ -324,6 +328,40 @@ impl ArmCore {
         }
 
         (registers, ranges)
+    }
+
+    /// Makes one guest word private to each thread.
+    ///
+    /// Some of what a guest runtime keeps in a global is really per-thread
+    /// state. KTF's current Java exception-handler head is the one this exists
+    /// for: the AOT runtime pushes a handler record per `try` and links it
+    /// through a single word whose address the module is handed at `fn_init`,
+    /// so every thread's records went onto one chain. A throw on one thread
+    /// then found a catch belonging to a frame on another thread's stack -
+    /// 지크 dies that way, with the unwind refusing a handler it did find
+    /// because the frame was not on the stack the throw was on.
+    ///
+    /// Threads here are green: each one's future is polled inside its own
+    /// [`ThreadContextGuard`], which is already where the ARM registers are
+    /// swapped. A registered word swaps with them, so the guest reads and
+    /// writes it exactly as before and sees only its own thread's value.
+    ///
+    /// The word's current contents become what a thread reads before it has
+    /// written the word itself, so a thread that never pushes a record sees
+    /// the empty chain the runtime set up rather than another thread's.
+    pub fn register_thread_local_word(&mut self, address: u32) -> Result<()> {
+        let default: u32 = read_generic(self, address)?;
+
+        let mut inner = self.inner.lock();
+        inner.thread_local_defaults.insert(address, default);
+
+        Ok(())
+    }
+
+    /// The registered addresses and the value each reads before a thread has
+    /// written it.
+    fn thread_local_defaults(&self) -> Vec<(u32, u32)> {
+        self.inner.lock().thread_local_defaults.iter().map(|(&a, &v)| (a, v)).collect()
     }
 
     pub fn enter_thread_context(&self, thread_id: ThreadId) -> ThreadContextGuard {
@@ -1030,6 +1068,23 @@ impl ThreadContextGuard {
         };
         core.restore_context(&context);
 
+        // The thread's own value for every private word, so the guest reads
+        // what it last wrote there and not what another thread wrote.
+        for (address, default) in core.thread_local_defaults() {
+            let value = {
+                let inner = core.inner.lock();
+                inner
+                    .threads
+                    .get(&thread_id)
+                    .and_then(|state| state.thread_local.get(&address).copied())
+                    .unwrap_or(default)
+            };
+
+            // A word that cannot be written is one the guest cannot read
+            // either; there is nothing useful to do here but carry on.
+            let _ = write_generic(&mut core, address, value);
+        }
+
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(debug) = core.debug_inner() {
             debug.on_thread_entered(thread_id);
@@ -1047,7 +1102,19 @@ impl Drop for ThreadContextGuard {
     fn drop(&mut self) {
         let context = self.core.save_context();
 
+        // And back out again, so what this thread left in a private word
+        // travels with it to its next run rather than with the core.
+        let saved: Vec<(u32, u32)> = self
+            .core
+            .thread_local_defaults()
+            .into_iter()
+            .filter_map(|(address, _)| read_generic(&self.core, address).ok().map(|value: u32| (address, value)))
+            .collect();
+
         let mut inner = self.core.inner.lock();
+        if let Some(state) = inner.threads.get_mut(&self.thread_id) {
+            state.thread_local.extend(saved);
+        }
         inner.threads.get_mut(&self.thread_id).unwrap().context = context;
         inner.current_thread_id = self.previous_thread_id;
         drop(inner);
@@ -1102,6 +1169,85 @@ mod tests {
         }
 
         assert_eq!(core.inner.lock().stack_pool.len(), THREAD_STACK_POOL_CAP);
+    }
+
+    /// KTF's Java exception-handler head is a guest global that is really
+    /// thread state: left shared, a throw on one thread walks a chain of
+    /// records belonging to frames on another thread's stack. Registering the
+    /// word makes each thread see only what it wrote there.
+    #[test]
+    fn a_registered_word_is_private_to_each_thread() {
+        let mut core = ArmCore::new(false, None).unwrap();
+        crate::Allocator::init(&mut core).unwrap();
+
+        let word = crate::Allocator::alloc(&mut core, 4).unwrap();
+        write_generic(&mut core, word, 0u32).unwrap();
+        core.register_thread_local_word(word).unwrap();
+
+        let first = ThreadState::new(core.clone()).unwrap();
+        let second = ThreadState::new(core.clone()).unwrap();
+        {
+            let mut inner = core.inner.lock();
+            inner.threads.insert(1, first);
+            inner.threads.insert(2, second);
+        }
+
+        // Each thread pushes its own record onto what it reads as the head.
+        {
+            let _guard = core.enter_thread_context(1);
+            assert_eq!(
+                read_generic::<u32, _>(&core, word).unwrap(),
+                0,
+                "a thread starts from the registered value"
+            );
+            write_generic(&mut core.clone(), word, 0x1111_1111u32).unwrap();
+        }
+        {
+            let _guard = core.enter_thread_context(2);
+            assert_eq!(
+                read_generic::<u32, _>(&core, word).unwrap(),
+                0,
+                "the other thread's head leaked into this one"
+            );
+            write_generic(&mut core.clone(), word, 0x2222_2222u32).unwrap();
+        }
+
+        // And finds it again on its next run, whatever ran in between.
+        {
+            let _guard = core.enter_thread_context(1);
+            assert_eq!(read_generic::<u32, _>(&core, word).unwrap(), 0x1111_1111);
+        }
+        {
+            let _guard = core.enter_thread_context(2);
+            assert_eq!(read_generic::<u32, _>(&core, word).unwrap(), 0x2222_2222);
+        }
+    }
+
+    /// A word nobody registered is ordinary memory, shared like the rest of it.
+    #[test]
+    fn an_unregistered_word_is_still_shared() {
+        let mut core = ArmCore::new(false, None).unwrap();
+        crate::Allocator::init(&mut core).unwrap();
+
+        let word = crate::Allocator::alloc(&mut core, 4).unwrap();
+        write_generic(&mut core, word, 0u32).unwrap();
+
+        let first = ThreadState::new(core.clone()).unwrap();
+        let second = ThreadState::new(core.clone()).unwrap();
+        {
+            let mut inner = core.inner.lock();
+            inner.threads.insert(1, first);
+            inner.threads.insert(2, second);
+        }
+
+        {
+            let _guard = core.enter_thread_context(1);
+            write_generic(&mut core.clone(), word, 0x3333_3333u32).unwrap();
+        }
+        {
+            let _guard = core.enter_thread_context(2);
+            assert_eq!(read_generic::<u32, _>(&core, word).unwrap(), 0x3333_3333);
+        }
     }
 
     #[test]
