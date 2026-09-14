@@ -1541,13 +1541,26 @@ async fn draw_text(context: &mut dyn WIPICContext, dst: WIPICIndirectPtr, x: i32
 
     let color = context_color(&framebuffer, &gctx);
 
+    // The two platforms put `y` in different places, and the reference spells
+    // both out: LGT's `MC_grpDrawString` takes the top of the glyph box and
+    // derives the baseline from it (`baseline := y + face.Ascent`), KTF's takes
+    // the baseline itself (`baseline := registers[2]`). Drawing a KTF title's
+    // text from the top puts every string an ascent too low - which is what sat
+    // 격투가's menu labels against the bottom of their own boxes and cut the
+    // second line off its dialogue.
+    //
+    // A handset platform is the one whose indirect pointers are handles rather
+    // than addresses, the same question `new_screen_surface` asks.
+    let baseline_origin = context.data_ptr(dst)? != dst.0;
+
     // The handset's own face when the BIOS supplied one, drawn a pixel at a
     // time exactly as it is stored. The face is the one the title selected with
     // `SetContext(font)`, so a heading it asked `MC_grpGetFont` for a larger
     // size for is drawn - and measured - in that size.
     if let Some(face) = bitmap_font::face_for_height(gctx.font) {
+        let top = if baseline_origin { y - face.ascent as i32 } else { y };
         let mut canvas = framebuffer.canvas(context)?;
-        draw_bitmap_string(&mut **canvas, &face, string, x, y, color, clip);
+        draw_bitmap_string(&mut **canvas, &face, string, x, top, color, clip);
         canvas.flush()?;
 
         return Ok(());
@@ -1556,9 +1569,10 @@ async fn draw_text(context: &mut dyn WIPICContext, dst: WIPICIndirectPtr, x: i32
     // The size the title selected with SetContext(font); 0 keeps the default face.
     let font_height = font_handle_height(gctx.font as i32);
     let baseline = font_ascent_px(font_height);
+    let top = if baseline_origin { y - baseline as i32 } else { y };
 
     let mut canvas = framebuffer.canvas(context)?;
-    canvas.draw_text(string, x, y, font_height, baseline, TextAlignment::Left, color, clip);
+    canvas.draw_text(string, x, top, font_height, baseline, TextAlignment::Left, color, clip);
 
     // `flush` writes back only the glyph pixels themselves (see write_diff), so
     // a background the title blitted straight into this buffer shows through the
