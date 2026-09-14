@@ -810,13 +810,24 @@ fn is_high_frequency_svc(id: u32) -> bool {
 }
 
 /// `MC_knlExit` (service 0x68). The applet is asking to terminate, passing its
-/// exit code in `a0`. A title reaches this after deciding to quit - usually a
-/// failed start-up/auth check - so it is logged at info to make that decision
-/// visible in a normal (info-level) log capture. It is currently suppressed
-/// (returns instead of stopping the applet) so the surrounding behaviour is
-/// unchanged while the upstream cause is diagnosed.
-async fn knl_exit(_context: &mut dyn WIPICContext, exit_code: u32, a1: u32, a2: u32, a3: u32) -> Result<u32> {
+/// exit code in `a0`.
+///
+/// A title reaches this having decided to quit - its own quit menu, or the
+/// notice that asks to be started again - so the session ends here, which is
+/// what the other vendor's titles have always done through the same call and
+/// what the reference does with this slot. The call is logged at info because a
+/// title ending itself is the one thing a capture cannot reconstruct afterwards:
+/// it is not a failure, so nothing downstream prints anything for it.
+///
+/// It used to return instead, while the reason 이노티아 연대기 2 quit during
+/// start-up was being found. That left every title that asks to exit running on
+/// past a call that does not return - 아니마 ran thirteen thousand lines past its
+/// own, and 던파귀검사편 reaches its notice and then asks seventeen times in
+/// three seconds, because nothing answers the first one.
+async fn knl_exit(context: &mut dyn WIPICContext, exit_code: u32, a1: u32, a2: u32, a3: u32) -> Result<u32> {
     tracing::info!("MC_knlExit(code={exit_code:#x}) - applet requested termination [{a1:#x}, {a2:#x}, {a3:#x}]");
+
+    kernel::exit(context, exit_code as i32).await?;
 
     Ok(0)
 }

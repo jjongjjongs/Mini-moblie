@@ -727,8 +727,8 @@ mod test {
     use crate::{WIPICContext, context::test::TestContext, method::MethodImpl};
 
     use super::{
-        alloc, calloc, execute, free, get_access_level, get_app_manager_id, get_exec_names, get_parent_program_id, get_program_info, get_resource,
-        get_resource_id, get_system_property, load, mexecute, mload, program_stop, sprintk,
+        alloc, calloc, execute, exit, free, get_access_level, get_app_manager_id, get_exec_names, get_parent_program_id, get_program_info,
+        get_resource, get_resource_id, get_system_property, load, mexecute, mload, program_stop, sprintk,
     };
 
     /// `MC_knlFree` is declared `void`, so the register a caller reads after it
@@ -996,6 +996,19 @@ mod test {
 
         assert_eq!(execute(&mut context, 0).await.unwrap(), -12);
         assert_eq!(execute(&mut context, 0xdead_beef).await.unwrap(), -12);
+    }
+
+    /// A title that calls `MC_knlExit` has decided to quit - its own menu, or a
+    /// notice that asks to be started again - and is taken at its word. Every
+    /// vendor's kernel block reaches this one body, so a session that ends this
+    /// way ends the same on all of them.
+    #[futures_test::test]
+    async fn a_title_that_exits_is_let_go() {
+        let exited = Arc::new(AtomicBool::new(false));
+        let mut context = program_control_context(Some(exited.clone()));
+
+        exit(&mut context, 0).await.unwrap();
+        assert!(exited.load(Ordering::Relaxed));
     }
 
     /// Stopping the only program that runs is quitting, and is honoured.
