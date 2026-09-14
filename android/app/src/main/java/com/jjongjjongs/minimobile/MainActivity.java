@@ -119,7 +119,20 @@ public final class MainActivity extends Activity {
     /** Behind the emulated LCD, so its letterbox reads as a screen bezel. */
     private static final int COLOR_SCREEN_BEZEL = Color.rgb(10, 11, 14);
     /** The pad the keys sit on: dark, matching the device body. */
-    private static final int COLOR_KEYPAD_TRAY = Color.rgb(23, 26, 32);
+    private static final int COLOR_KEYPAD_TRAY = Color.rgb(30, 26, 22);
+
+    // The keypad is the gold-on-dark face of a Korean feature phone: a warm
+    // near-black panel with every glyph and every key outline engraved in
+    // champagne gold. One palette for every key - numbers, directions, soft
+    // keys, save and back all read as the same milled surface, the way a
+    // handset's pad does.
+    private static final int COLOR_KEY_FACE_TOP = Color.rgb(54, 47, 39);
+    private static final int COLOR_KEY_FACE_BOTTOM = Color.rgb(39, 34, 28);
+    private static final int COLOR_KEY_EDGE = Color.rgb(150, 122, 74);
+    private static final int COLOR_KEY_INK = Color.rgb(226, 194, 138);
+    /** The letters engraved beside a digit, a stop dimmer than the digit. */
+    private static final int COLOR_KEY_INK_SUB = Color.rgb(170, 140, 94);
+    private static final int COLOR_KEY_PRESSED = Color.rgb(108, 89, 57);
 
     // Light "Mini Mobile" palette for the library/home screen: a clean white
     // ground with a single green accent, matching the approved home redesign.
@@ -1506,6 +1519,7 @@ public final class MainActivity extends Activity {
     private final class KeypadView extends View {
         private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint ink = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint subInk = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint edge = new Paint(Paint.ANTI_ALIAS_FLAG);
 
         private final List<Key> keys = new ArrayList<>();
@@ -1524,6 +1538,11 @@ public final class MainActivity extends Activity {
 
             ink.setTextAlign(Paint.Align.CENTER);
             ink.setTypeface(Typeface.DEFAULT_BOLD);
+
+            // The letters beside a digit are printed, not moulded: lighter
+            // weight and smaller, the way a handset silkscreens them.
+            subInk.setTextAlign(Paint.Align.CENTER);
+            subInk.setTypeface(Typeface.DEFAULT);
 
             edge.setStyle(Paint.Style.STROKE);
             edge.setStrokeWidth(Math.max(1f, dp(1) * 0.8f));
@@ -1547,11 +1566,22 @@ public final class MainActivity extends Activity {
             keys.add(new Key("▶", 3, KEY_DIRECTION));
             keys.add(new Key("▼", 1, KEY_DIRECTION));
 
-            for (int digit = 1; digit <= 9; digit++) {
-                keys.add(new Key(String.valueOf(digit), 8 + digit, KEY_PLAIN));
-            }
+            // The number pad carries what a Korean handset printed beside each
+            // digit - the jamo pair over the Latin triple - because that is
+            // what the key looks like, and a player reading the pad recognises
+            // it faster than a bare column of digits. Nothing here is typed:
+            // the emulator sends the digit whatever is engraved next to it.
+            keys.add(new Key("1", 9, KEY_PLAIN, null, ".,?!"));
+            keys.add(new Key("2", 10, KEY_PLAIN, null, "ABC"));
+            keys.add(new Key("3", 11, KEY_PLAIN, null, "DEF"));
+            keys.add(new Key("4", 12, KEY_PLAIN, "ㄱㅋ", "GHI"));
+            keys.add(new Key("5", 13, KEY_PLAIN, "ㄴㄹ", "JKL"));
+            keys.add(new Key("6", 14, KEY_PLAIN, "ㄷㅌ", "MNO"));
+            keys.add(new Key("7", 15, KEY_PLAIN, "ㅂㅍ", "PQRS"));
+            keys.add(new Key("8", 16, KEY_PLAIN, "ㅅㅎ", "TUV"));
+            keys.add(new Key("9", 17, KEY_PLAIN, "ㅈㅊ", "WXYZ"));
             keys.add(new Key("✱", 18, KEY_PLAIN));
-            keys.add(new Key("0", 8, KEY_PLAIN));
+            keys.add(new Key("0", 8, KEY_PLAIN, "ㅇㅁ", null));
             keys.add(new Key("#", 19, KEY_PLAIN));
         }
 
@@ -1684,6 +1714,7 @@ public final class MainActivity extends Activity {
         @Override
         protected void onDraw(Canvas canvas) {
             float radius = dp(8);
+            subInk.setTextSize(ink.getTextSize() * 0.42f);
 
             for (Key key : keys) {
                 if (key.down) {
@@ -1700,18 +1731,53 @@ public final class MainActivity extends Activity {
                 canvas.drawRoundRect(key.bounds, radius, radius, edge);
 
                 ink.setColor(key.textColor());
-
-                // A label wider than its key is shrunk to fit rather than
-                // clipped, so a word can be used where a digit was.
                 float was = ink.getTextSize();
-                float limit = key.bounds.width() * 0.82f;
-                float measured = ink.measureText(key.label);
-                if (measured > limit && measured > 0f) {
-                    ink.setTextSize(was * limit / measured);
+
+                if (key.jamo == null && key.latin == null) {
+                    // A label wider than its key is shrunk to fit rather than
+                    // clipped, so a word can be used where a digit was.
+                    fit(ink, key.label, key.bounds.width() * 0.82f);
+                    canvas.drawText(key.label, key.bounds.centerX(), key.bounds.centerY() + ink.getTextSize() * 0.36f, ink);
+                    ink.setTextSize(was);
+                    continue;
                 }
 
-                canvas.drawText(key.label, key.bounds.centerX(), key.bounds.centerY() + ink.getTextSize() * 0.36f, ink);
+                // Engraved the way a handset prints it: the digit on the left
+                // of the key, the letters stacked in the space to its right.
+                float centerY = key.bounds.centerY();
+                float digitX = key.bounds.left + key.bounds.width() * 0.30f;
+                float letterX = key.bounds.left + key.bounds.width() * 0.71f;
+                float letterRoom = key.bounds.width() * 0.48f;
+
+                fit(ink, key.label, key.bounds.width() * 0.30f);
+                canvas.drawText(key.label, digitX, centerY + ink.getTextSize() * 0.36f, ink);
                 ink.setTextSize(was);
+
+                subInk.setColor(key.subTextColor());
+                float subWas = subInk.getTextSize();
+                if (key.jamo != null && key.latin != null) {
+                    fit(subInk, key.jamo, letterRoom);
+                    // Two lines straddling the key's middle, so the pair reads
+                    // as one block against the digit rather than sitting low.
+                    canvas.drawText(key.jamo, letterX, centerY - subWas * 0.22f, subInk);
+                    subInk.setTextSize(subWas);
+
+                    fit(subInk, key.latin, letterRoom);
+                    canvas.drawText(key.latin, letterX, centerY + subWas * 0.94f, subInk);
+                } else {
+                    String only = key.jamo != null ? key.jamo : key.latin;
+                    fit(subInk, only, letterRoom);
+                    canvas.drawText(only, letterX, centerY + subInk.getTextSize() * 0.36f, subInk);
+                }
+                subInk.setTextSize(subWas);
+            }
+        }
+
+        /** Shrinks {@code paint} just enough that {@code text} fits {@code room}. */
+        private void fit(Paint paint, String text, float room) {
+            float measured = paint.measureText(text);
+            if (measured > room && measured > 0f) {
+                paint.setTextSize(paint.getTextSize() * room / measured);
             }
         }
 
@@ -1805,6 +1871,10 @@ public final class MainActivity extends Activity {
     /** One key of {@link KeypadView}. */
     private static final class Key {
         final String label;
+        /** The jamo printed beside the digit, or null for a key without one. */
+        final String jamo;
+        /** The Latin letters printed beside the digit, or null. */
+        final String latin;
         final int code;
         final int style;
         final RectF bounds = new RectF();
@@ -1812,9 +1882,15 @@ public final class MainActivity extends Activity {
         boolean down;
 
         Key(String label, int code, int style) {
+            this(label, code, style, null, null);
+        }
+
+        Key(String label, int code, int style, String jamo, String latin) {
             this.label = label;
             this.code = code;
             this.style = style;
+            this.jamo = jamo;
+            this.latin = latin;
         }
 
         /** Rebuilds the face gradient for the bounds the key was just given. */
@@ -1824,78 +1900,44 @@ public final class MainActivity extends Activity {
                     topColor(), bottomColor(), android.graphics.Shader.TileMode.CLAMP);
         }
 
-        // Every key is a flat dark-navy face with light blue-gray text; save
-        // and back carry only a faint green / red cast within the same family
-        // so they still read apart from the rest at a glance. The top/bottom
-        // pair keeps the barest gradient so a face has some depth without
-        // looking glossy.
+        // One face and one outline for every key - numbers, directions, soft
+        // keys, save and back alike - because that is how a handset's pad
+        // reads: a single milled surface, gold on dark, with the glyph the only
+        // thing that ever differs. The top/bottom pair keeps the barest
+        // gradient so a face has some depth without looking glossy.
         private int topColor() {
-            switch (style) {
-                case KEY_SAVE:
-                    return Color.rgb(45, 74, 63);
-                case KEY_CLEAR:
-                    return Color.rgb(78, 51, 60);
-                case KEY_SOFT:
-                    return Color.rgb(52, 64, 92);
-                case KEY_DIRECTION:
-                    return Color.rgb(44, 56, 84);
-                default:
-                    return Color.rgb(46, 57, 84);
-            }
+            return COLOR_KEY_FACE_TOP;
         }
 
         private int bottomColor() {
-            switch (style) {
-                case KEY_SAVE:
-                    return Color.rgb(37, 62, 53);
-                case KEY_CLEAR:
-                    return Color.rgb(66, 43, 51);
-                case KEY_SOFT:
-                    return Color.rgb(43, 54, 80);
-                case KEY_DIRECTION:
-                    return Color.rgb(36, 46, 72);
-                default:
-                    return Color.rgb(38, 48, 72);
-            }
+            return COLOR_KEY_FACE_BOTTOM;
         }
 
         int borderColor() {
-            switch (style) {
-                case KEY_SAVE:
-                    return Color.rgb(28, 52, 44);
-                case KEY_CLEAR:
-                    return Color.rgb(52, 32, 38);
-                case KEY_SOFT:
-                    return Color.rgb(30, 40, 62);
-                default:
-                    return Color.rgb(24, 32, 52);
-            }
+            return COLOR_KEY_EDGE;
         }
 
         int pressedColor() {
-            switch (style) {
-                case KEY_SAVE:
-                    return Color.rgb(60, 110, 90);
-                case KEY_CLEAR:
-                    return Color.rgb(120, 70, 82);
-                case KEY_DIRECTION:
-                    return Color.rgb(70, 92, 132);
-                default:
-                    return Color.rgb(66, 82, 120);
-            }
+            return COLOR_KEY_PRESSED;
         }
 
+        // The one place the handset itself breaks the gold: the call key is
+        // printed green and the end key red, and those two sit exactly where
+        // save and back do here. Only the glyph is tinted - the face and the
+        // outline stay the same as every other key, as they do on the phone.
         int textColor() {
             switch (style) {
                 case KEY_SAVE:
-                    return Color.rgb(180, 214, 196);
+                    return Color.rgb(122, 196, 126);
                 case KEY_CLEAR:
-                    return Color.rgb(220, 186, 190);
-                case KEY_DIRECTION:
-                    return Color.rgb(198, 210, 230);
+                    return Color.rgb(214, 96, 88);
                 default:
-                    return Color.rgb(182, 194, 216);
+                    return COLOR_KEY_INK;
             }
+        }
+
+        int subTextColor() {
+            return COLOR_KEY_INK_SUB;
         }
     }
 }
