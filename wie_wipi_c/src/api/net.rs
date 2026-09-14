@@ -1577,6 +1577,8 @@ async fn write_billing_store(context: &mut dyn WIPICContext, name: &str, kept: &
 /// native `WPBill_Write` updates global `s_BillHeader[0]` before allocation
 /// and `dsocket_send`, so even a later send failure leaves the new length.
 pub async fn socket_write(context: &mut dyn WIPICContext, socket: i32, buffer: WIPICWord, length: i32) -> Result<i32> {
+    tracing::debug!("MC_netSocketWrite({socket}, {buffer:#x}, {length})");
+
     if buffer == 0 || length < 0 {
         return Ok(M_E_INVALID);
     }
@@ -1737,6 +1739,8 @@ pub async fn socket_write(context: &mut dyn WIPICContext, socket: i32, buffer: W
 /// a reply whose payload has not arrived when its header has is still read as
 /// one reply. See the comment at that store for what native does instead.
 pub async fn socket_read(context: &mut dyn WIPICContext, socket: i32, buffer: WIPICWord, length: i32) -> Result<i32> {
+    tracing::debug!("MC_netSocketRead({socket}, {buffer:#x}, {length})");
+
     if buffer == 0 || length < 0 {
         return Ok(M_E_INVALID);
     }

@@ -101,6 +101,12 @@ struct GpangConnection {
     /// reports end of stream, which is a failure a title acts on, where silence
     /// is one it waits out.
     unanswerable: bool,
+    /// Whether anything has ever been sent on this connection.
+    written: bool,
+    /// Whether it has been said that this connection is being read before
+    /// anything was sent on it. Once, because a title in that position either
+    /// polls or waits to be told, and neither wants a line per attempt.
+    waiting_said: bool,
 }
 
 impl GpangConnection {
@@ -128,6 +134,7 @@ impl GpangConnection {
 impl LocalConnection for GpangConnection {
     fn write(&mut self, bytes: &[u8]) {
         self.request.extend_from_slice(bytes);
+        self.written = true;
 
         while let Some(payload) = self.take_frame() {
             if !payload.starts_with(AUTHENTICATION_REQUEST) {
@@ -164,6 +171,15 @@ impl LocalConnection for GpangConnection {
 
     fn read(&mut self, out: &mut [u8]) -> LocalRead {
         if self.reply.is_empty() {
+            if !self.unanswerable && !self.written && !self.waiting_said {
+                // A title reading a connection it has not written to is waiting
+                // for the server to speak first, and this one does not know what
+                // that server said. Worth one line, because from outside it
+                // looks exactly like a title that has simply stopped.
+                tracing::info!("gpang: read before anything was sent - this connection is waiting to be spoken to first");
+                self.waiting_said = true;
+            }
+
             return if self.unanswerable { LocalRead::Closed } else { LocalRead::Pending };
         }
 
@@ -241,6 +257,17 @@ mod tests {
 
         assert!(!connection.readable());
         assert_eq!(connection.read(&mut [0u8; 16]), LocalRead::Pending);
+    }
+
+    /// A title reading a connection it has never written to is waiting to be
+    /// spoken to first - 데몬헌터's shop does exactly this - and that is a wait,
+    /// not an end: the endpoint has no grounds to say the exchange is over.
+    #[test]
+    fn a_read_before_anything_is_sent_waits() {
+        let mut connection = connection();
+
+        assert_eq!(connection.read(&mut [0u8; 16]), LocalRead::Pending);
+        assert!(!connection.readable());
     }
 
     /// The cash shop asks for content, and a yes is not content. The connection
