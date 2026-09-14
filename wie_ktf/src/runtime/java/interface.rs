@@ -381,6 +381,27 @@ async fn call_native(core: &mut ArmCore, _: &mut (), address: u32, ptr_data: u32
         Err(err) => return Err(err),
     };
 
+    // Only a native this platform implements answers in `r0`. One compiled into
+    // the title's own module leaves its result in the block, and copying `r0`
+    // over it destroys the answer.
+    //
+    // 던전앤파이터 격투가 is where the two come apart. Its `calcClet` is `()I`,
+    // and the body has a single exit reached down a single path, so `r0` there
+    // is always the 11,036 the epilogue loaded two instructions earlier as a
+    // field offset. `GamePlay.run` spends that as a frame period - one round
+    // every eleven seconds, every round, with no state that skips it: the arms
+    // of the `netGetStateClet` switch all branch back into the same sleep.
+    // Leaving the block alone takes 2,000 ticks from 37 frames to 438.
+    //
+    // Skipping the write for *every* native is what this replaced, and it broke
+    // the same title, because `System.currentTimeMillis` reaches here too and
+    // its answer really is in `r0`. `svc_stub_id` is what tells the two apart:
+    // an address in the stub arena stands for a registration of ours, and a
+    // guest address stands for the title's own code.
+    if core.svc_stub_id(address).is_none() {
+        return Ok(JavaMethodResult::new(vec![ptr_data], None));
+    }
+
     write_generic(core, ptr_data, result.value)?;
 
     // The container is eight bytes because a Java answer can be sixty-four bits

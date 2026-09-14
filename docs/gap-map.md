@@ -1867,3 +1867,50 @@ two run at the same rate.
 The only warning in a 55-second device log is `stub
 javax.microedition.lcdui.Font::getDefaultFont`, thirty times, and the splash
 renders correctly, so nothing there is waiting on it.
+
+## The eleven seconds were ours to give, not the engine's to ask
+
+The section above is wrong where it concludes, and the correction is the fix.
+
+`calcClet` is `()I` - confirmed twice over, from the module's own descriptor
+table (`()I+calcClet` at `0x13d26f`, method struct `0x15c71c`, `fn_body` the
+veneer `0x102983`, native body `0x1058bd`) and from the runtime. Its body has a
+single internal branch and one exit, so control reaches the epilogue down one
+path:
+
+```asm
+00105abc  ldr  r4, [sp, #0x10]
+00105abe  ldr  r0, [pc, #0x54]     ; [00105b14] = 0x2b1c (11036) - a field offset
+00105ac2  adds r3, r4, r0
+00105ac4  ldr  r3, [r3]
+00105ad6  pop  {r4, r5, r6, r7, pc}
+```
+
+Nothing writes `r0` after that load. The function answers with whatever the
+epilogue happened to be holding, and 11,036 is a field offset, not a period.
+
+It is not a period the title could skip, either. `GamePlay.run` switches on
+`netGetStateClet` and every arm that is not `0x63` branches back into the same
+sleep, so the eleven seconds are charged once a round whatever the network is
+doing. Measured over 160 seconds of guest time: fifteen sleeps of about 11,033
+ms on that thread, against 318 of 500 ms on the splash thread.
+
+What put 11,036 in front of the title was this runtime. The AOT native call
+answers through an eight-byte block and the module's thunks read it back
+(`ldr r0, [r0]`, or `ldr r1, [r0,#4]; ldr r0, [r0]` for a wide one), and we
+copied `r0` into that block for every native. For a native we implement that is
+right - `System.currentTimeMillis` really does answer in `r0`. For a native
+compiled into the title's own module it is not: the module fills its own block,
+and the copy overwrites the answer with a register the callee never set.
+
+Skipping the copy for every native breaks the same title, because it takes
+`currentTimeMillis` with it. `ArmCore::svc_stub_id` is the line between them: an
+address inside the stub arena is a registration of ours and answers in `r0`, a
+guest address is the title's own code and answers in the block.
+
+Measured: 2,000 ticks go from 37 frames to 438 and the last frame from 18
+colours to 160. The rest of the KTF corpus does not move - k1 50/255, k2 52/17,
+k3 50/34, k4 201/73, k5 50/255, 거너편 984/137, all identical either side.
+
+So a speed control is not the answer here, and neither is the reference: its own
+CLI runs this title for one flush and stops.
