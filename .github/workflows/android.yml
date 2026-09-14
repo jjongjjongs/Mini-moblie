@@ -20,6 +20,14 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    # The signing secrets are lifted to the job so a step can ask whether they
+    # exist. A step's `if` cannot read the `secrets` context - the workflow is
+    # rejected before it starts, with no job to show for it - but it can read
+    # `env`, and a secret that is not set arrives here as an empty string.
+    env:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -64,11 +72,9 @@ jobs:
       # Without the secret the build still runs and still produces an apk; it
       # just falls back to the per-run debug key, and says so.
       - name: Restore signing key
-        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
-        env:
-          SIGNING_KEY: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        if: env.ANDROID_KEYSTORE_BASE64 != ''
         run: |
-          printf '%s' "$SIGNING_KEY" | base64 -d > android/minimobile.jks
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > android/minimobile.jks
           echo "MINIMOBILE_KEYSTORE_FILE=minimobile.jks" >> "$GITHUB_ENV"
 
       - name: Build APK
@@ -79,7 +85,7 @@ jobs:
         # The run number is the version code, so a later build is never a
         # downgrade of an earlier one.
         env:
-          MINIMOBILE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          MINIMOBILE_KEYSTORE_PASSWORD: ${{ env.ANDROID_KEYSTORE_PASSWORD }}
           MINIMOBILE_KEY_ALIAS: minimobile
         run: gradle --no-daemon assembleDebug -PenableJit -PversionCode=${{ github.run_number }}
 
