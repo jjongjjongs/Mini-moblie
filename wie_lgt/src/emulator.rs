@@ -116,6 +116,53 @@ impl LgtEmulator {
         native_screen_size(&LgtAppInfo::parse(files.get("app_info")?).aid)
     }
 
+    /// The application id the module claims for itself, for a title that
+    /// arrives without a descriptor to ask.
+    ///
+    /// `binary.mod` opens with a `RAPT` header, and forty-eight bytes into it
+    /// sits the eight-character id, NUL terminated, followed by the platform
+    /// libraries the title links against. The layout is the same in all fifty
+    /// modules here.
+    ///
+    /// It is the answer only when there is no `app_info`. The module's claim
+    /// and the descriptor's agree for forty-four of the forty-nine local
+    /// archives; the five that differ are repacks whose descriptor was edited
+    /// and whose module was not, and there the descriptor is what the handset
+    /// filed the title under.
+    ///
+    /// Without this a title packaged as a bare jar - 액션퍼즐패밀리1 is one,
+    /// a wrapper zip of one jar and three icons with no descriptor between
+    /// them - runs under a hash of its own bytes, and every table this runtime
+    /// keys by application id misses it: the panel it should be given, the
+    /// status strip, the per-title billing answers, and the directory its
+    /// saves belong in.
+    pub fn jar_app_id(jar: &[u8]) -> Option<String> {
+        let files = extract_zip(jar).ok()?;
+
+        Self::module_app_id(files.get("binary.mod")?)
+    }
+
+    /// The id out of one module's header. See [`LgtEmulator::jar_app_id`].
+    fn module_app_id(module: &[u8]) -> Option<String> {
+        const MAGIC: &[u8] = b"RAPT";
+        const ID_OFFSET: usize = 48;
+        const ID_LENGTH: usize = 8;
+
+        let header = module.windows(MAGIC.len()).position(|x| x == MAGIC)?;
+        let start = header.checked_add(ID_OFFSET)?;
+        let end = start.checked_add(ID_LENGTH)?;
+        if module.len() <= end || module[end] != 0 {
+            return None;
+        }
+
+        let id = &module[start..end];
+        if !id.iter().all(u8::is_ascii_alphanumeric) {
+            return None;
+        }
+
+        Some(String::from_utf8_lossy(id).into_owned())
+    }
+
     pub fn loadable_jar(jar: &[u8]) -> bool {
         let Ok(files) = extract_zip(jar) else {
             return false;
@@ -701,6 +748,49 @@ fn reroot_archive(files: BTreeMap<String, Vec<u8>>) -> BTreeMap<String, Vec<u8>>
 /// Keyed on the descriptor's aid, so nothing else is touched.
 fn title_expects_annunciator(aid: &str) -> bool {
     title_quirks(TitlePlatform::Lgt, aid).expects_annunciator
+}
+
+#[cfg(test)]
+mod module_id_tests {
+    use alloc::{vec, vec::Vec};
+
+    use super::LgtEmulator;
+
+    /// The header as every local module writes it: the magic, forty-four bytes,
+    /// the eight character id, a NUL, then the library list.
+    fn module_with(id: &[u8]) -> Vec<u8> {
+        let mut module = vec![0xbb; 64];
+        module.extend_from_slice(b"RAPT");
+        module.extend_from_slice(&[0u8; 44]);
+        module.extend_from_slice(id);
+        module.push(0);
+        module.extend_from_slice(b"kernel dlet cldc wipijava lgte midp mmpp bankon_lib");
+        module.push(0);
+
+        module
+    }
+
+    #[test]
+    fn a_module_names_itself() {
+        assert_eq!(LgtEmulator::module_app_id(&module_with(b"00022EE2")).as_deref(), Some("00022EE2"));
+    }
+
+    #[test]
+    fn something_that_is_not_a_module_names_nothing() {
+        assert_eq!(LgtEmulator::module_app_id(b"no header here"), None);
+    }
+
+    /// Eight printable characters followed by a NUL is the whole of what makes
+    /// this the field; answering without checking would file a title under
+    /// whatever happened to sit there.
+    #[test]
+    fn a_header_that_does_not_look_like_one_names_nothing() {
+        let mut module = module_with(b"00022EE2");
+        let terminator = 64 + 4 + 44 + 8;
+        module[terminator] = b'x';
+
+        assert_eq!(LgtEmulator::module_app_id(&module), None);
+    }
 }
 
 #[cfg(test)]

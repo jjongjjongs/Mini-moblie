@@ -57,6 +57,17 @@ fn content_id(data: &[u8]) -> String {
     format!("{:x}", md5::compute(data))
 }
 
+/// What to file a bare jar under.
+///
+/// A title packaged without a descriptor has no name from the outside, and a
+/// hash of its bytes is a name nothing else knows: every table this runtime
+/// keys by application id - the panel a title is given, the status strip, the
+/// per-title billing answers, the directory its saves live in - misses it.
+/// An LGT module names itself in its own header, so ask it first.
+fn jar_app_id(jar: &[u8]) -> String {
+    LgtEmulator::jar_app_id(jar).unwrap_or_else(|| content_id(jar))
+}
+
 /// The jar a download package carries, when the package is only a wrapper.
 ///
 /// Some titles arrive as a zip holding one jar and its three icons rather than
@@ -299,7 +310,7 @@ fn build_emulator(platform: Box<AndroidPlatform>, data: &[u8], options: Options)
     // A package that is only a wrapper around one jar is opened to the jar,
     // so the formats below read the entries the title actually ships.
     let jar = packaged_jar(&files).unwrap_or_else(|| data.to_vec());
-    let id = content_id(&jar);
+    let id = jar_app_id(&jar);
     let jar_filename = format!("{id}.jar");
 
     if KtfEmulator::loadable_jar(&jar) {
@@ -384,9 +395,13 @@ pub fn save_ids(data: &[u8]) -> Option<SaveIds> {
         }
     }
 
-    // Anything else runs as a bare jar, which has no id but the one derived
-    // from its contents.
-    let id = content_id(data);
+    // Anything else runs as a bare jar. Its module names it when it carries
+    // one; otherwise the only id it has is derived from its contents.
+    //
+    // This reads the packaged jar rather than the wrapper around it, because
+    // that is what `start` runs and what the emulator is therefore given - a
+    // wrapper hashed whole answered a name no save was ever written under.
+    let id = jar_app_id(&packaged_jar(&files).unwrap_or_else(|| data.to_vec()));
 
     Some(SaveIds {
         records: id.clone(),
