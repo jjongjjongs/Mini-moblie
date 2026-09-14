@@ -90,6 +90,11 @@ fn dlet_get_process_local_property(core: &mut ArmCore, properties: &DletProperti
 
 type ImportFunctionCache = Arc<Mutex<BTreeMap<(u32, u32), u32>>>;
 type UnresolvedImportCallCounts = Arc<Mutex<BTreeMap<(u32, u32), u64>>>;
+
+/// How often each not-yet-implemented Java-interface index has been reached,
+/// so the diagnostic that reports it can be sampled the same way an unresolved
+/// import's is.
+type JavaDiagCallCounts = Arc<Mutex<BTreeMap<u32, u64>>>;
 /// Platform classes the application imports, published by import `0x14`.
 type ImportedClasses = Arc<Mutex<Option<ClassTable>>>;
 /// `(virtual_methods input, virtual_method_offsets output, first own row, one
@@ -505,6 +510,7 @@ struct InitSvcContext {
     firmware_mda_routes: Arc<BTreeMap<u32, u32>>,
     import_function_cache: ImportFunctionCache,
     unresolved_import_call_counts: UnresolvedImportCallCounts,
+    java_diag_call_counts: JavaDiagCallCounts,
     /// Array classes handed out by `vm_get_array_class`, to the size of one of
     /// their elements.
     array_classes: ArrayClasses,
@@ -590,6 +596,7 @@ fn register_init_svc_handler(
             firmware_mda_routes: Arc::new(firmware_mda_routes),
             import_function_cache: Default::default(),
             unresolved_import_call_counts: Default::default(),
+            java_diag_call_counts: Default::default(),
             array_classes: Default::default(),
             save_points: save_points.clone(),
             synthetic_classes: Default::default(),
@@ -721,7 +728,23 @@ async fn handle_init_svc(core: &mut ArmCore, context: &mut InitSvcContext, id: S
         let a2 = core.read_param(2)?;
         let a3 = core.read_param(3)?;
 
-        tracing::warn!("lgt_java_diag(index={function_index:#x}, a0={a0:#x}, a1={a1:#x}, a2={a2:#x}, a3={a3:#x})");
+        // Sampled exactly as an unresolved import is, and for the same reason
+        // one level up: an index a title reaches once tells us it exists, and
+        // one it reaches every frame tells us nothing more after the first few.
+        // 액션퍼즐패밀리1 calls 0x5b and 0xfd about 700 times a second between
+        // them, and in a capture taken to find something else they were 70% of
+        // every line logged at warn or above - which is the lane that decides
+        // how far back a capture reaches.
+        let count = {
+            let mut counts = context.java_diag_call_counts.lock();
+            let count = counts.entry(function_index).or_insert(0);
+            *count = count.saturating_add(1);
+            *count
+        };
+
+        if count <= 8 || count.is_power_of_two() {
+            tracing::warn!("lgt_java_diag(index={function_index:#x}, count={count}, a0={a0:#x}, a1={a1:#x}, a2={a2:#x}, a3={a3:#x})");
+        }
         if function_index == 0xf0
             || function_index == 0xf8
             || function_index == 0xfc

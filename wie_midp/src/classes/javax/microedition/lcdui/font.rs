@@ -118,8 +118,14 @@ impl Font {
         Ok(Self::pixel_height(size))
     }
 
+    /// Not a stub: the no-argument constructor sets FACE_SYSTEM, STYLE_PLAIN
+    /// and SIZE_MEDIUM, which is what MIDP's default font is. It logged at warn
+    /// as though it were one, and titles that measure text call it per string -
+    /// 액션퍼즐패밀리1 reaches it about 2,800 times a second, and in a capture
+    /// taken to find something else that was a quarter of every line logged at
+    /// warn or above.
     async fn get_default_font(jvm: &Jvm, _: &mut WieJvmContext) -> JvmResult<ClassInstanceRef<Self>> {
-        tracing::warn!("stub javax.microedition.lcdui.Font::getDefaultFont");
+        tracing::debug!("javax.microedition.lcdui.Font::getDefaultFont");
 
         let instance = jvm.new_class("javax/microedition/lcdui/Font", "()V", []).await?;
 
