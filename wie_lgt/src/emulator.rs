@@ -4,7 +4,7 @@ use alloc::{borrow::ToOwned, boxed::Box, collections::BTreeMap, format, string::
 
 use jvm::runtime::{JavaIoInputStream, JavaLangClassLoader};
 
-use wie_backend::{Emulator, Event, Options, Platform, System, TaskRunner, TitlePlatform, extract_zip, title_quirks};
+use wie_backend::{Emulator, Event, Options, Platform, System, TaskRunner, TitlePlatform, extract_zip, gz, title_quirks};
 use wie_core_arm::{Allocator, ArmCore, EXECUTED_INSTRUCTIONS, PC_SAMPLES};
 use wie_jvm_support::{JvmSupport, RustJavaJvmImplementation};
 use wie_util::{Result, WieError, write_generic};
@@ -207,6 +207,18 @@ impl LgtEmulator {
                 continue;
             }
             system.filesystem().add_virtual(filename, data.clone());
+
+            // Some of a package's data ships gzipped and is unpacked by the
+            // handset's installer; the guest only ever asks for the unpacked
+            // name. See `wie_backend::gz` - 지크 is the KTF title this was
+            // found on, and the packaging is the platform's rather than the
+            // title's. The packed entry stays where it is.
+            if let Some(member) = gz::read_member(data)
+                && let Some(unpacked) = gz::unpacked_path(filename, &member)
+            {
+                tracing::debug!("unpacked {filename} to {unpacked}, {} bytes", member.data.len());
+                system.filesystem().add_virtual(&unpacked, member.data);
+            }
 
             // An archive dumped off a handset keeps the title's own data
             // directory in it, under the path the handset stored it at -

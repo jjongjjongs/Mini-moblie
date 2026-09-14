@@ -16,6 +16,8 @@ ab_glyph = { version = "^0.2", features = ["libm"], default-features = false }
 hashbrown = { version = "^0.17", features = ["default-hasher"], default-features = false }
 image = { version = "^0.25", features = ["bmp", "gif", "jpeg", "png"], default-features = false }
 lazy_static = { version = "^1.5", default-features = false }
+# Reads the gzip members a WIPI package ships some of its data as; see `gz`.
+miniz_oxide = { version = "^0.8", default-features = false, features = ["with-alloc"] }
 num-traits = { version = "^0.2", default-features = false }
 zip = { version = "^8.6", features = ["deflate"], default-features = false }
 
@@ -29,4 +31,3 @@ smaf_player = { path = "../third_party/smaf_player" }
 
 [dev-dependencies]
 futures-test = { workspace = true }
-miniz_oxide = { version = "^0.8", default-features = false, features = ["with-alloc"] }

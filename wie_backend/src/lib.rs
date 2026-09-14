@@ -6,6 +6,7 @@ pub mod billing;
 pub mod canvas;
 mod database;
 mod executor;
+pub mod gz;
 mod local_network;
 mod platform;
 pub mod probe;

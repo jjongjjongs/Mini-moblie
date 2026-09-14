@@ -8,7 +8,7 @@ use jvm::{ClassInstance, Result as JvmResult, runtime::JavaLangString};
 use wie_backend::{
     Emulator, Event, Options, Platform, System, TaskRunner, TitlePlatform,
     canvas::{Rgb565Pixel, VecImageBuffer},
-    title_quirks,
+    gz, title_quirks,
 };
 use wie_core_arm::{Allocator, ArmCore};
 use wie_jvm_support::JvmSupport;
@@ -96,6 +96,20 @@ impl KtfEmulator {
         for (path, data) in files {
             let path = path.trim_start_matches("P/");
             system.filesystem().add_virtual(path, data.clone());
+
+            // A package ships some of its data gzipped and the handset's
+            // installer is what unpacks it; the guest only ever asks for the
+            // unpacked name. 지크 carries `snd/B1.mmf.gz` through `B13.mmf.gz`
+            // that way, beside the plain `snd/B0.mmf` in its jar, and without
+            // them its sound thread finds the slot for every sound but the
+            // first empty - see `wie_backend::gz`. The packed entry is left in
+            // place too, so a title that does ask for it still finds it.
+            if let Some(member) = gz::read_member(data)
+                && let Some(unpacked) = gz::unpacked_path(path, &member)
+            {
+                tracing::debug!("unpacked {path} to {unpacked}, {} bytes", member.data.len());
+                system.filesystem().add_virtual(&unpacked, member.data);
+            }
         }
 
         Allocator::init(&mut core)?;
