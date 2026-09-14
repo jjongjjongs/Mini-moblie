@@ -1785,3 +1785,43 @@ What was tried and rejected along the way: presenting the screen surface from
 `MC_grpRepaint` (the title calls it once, at start-up, long before the engine
 draws), and widening the `CletWrapperCard` test (the engine never flushes, so
 disabling the MIDP paint leaves an empty screen).
+
+#### 격투가 shows its splash now, and what is left is the title's own pace
+
+The fix works on the device: the 프리스타일 rating splash reaches the screen.
+The corpus confirms it and says nothing else moved - 격투가 one colour to
+eighteen, and k1 505, k2 17, k3 13, k4 6, k5 122, 던파거너편 137, all exactly
+their baselines, with the LGT sweep's only difference (00025C2B, 329 against
+326) reproducing between two runs of the *same* build. `title_drives_lcd` is
+set in one place, `KtfEmulator`, so LGT cannot reach it at all.
+
+It does not stop at the splash. Given time it walks on:
+
+```
+6,000 ticks   48s guest    18 colours   프리스타일 splash
+15,000 ticks  120s guest   18 colours   프리스타일 splash
+30,000 ticks  240s guest    4 colours   ZIO interactive
+```
+
+which is the reference's own sequence. What it is, is slow - about eleven
+seconds of guest time per engine tick - and a device log covering 5.5 seconds
+shows no `calcClet` at all for that reason, which is a sampling window and not
+a stall.
+
+The eleven seconds are not ours. Building the reference from source with a
+probe on its AOT native calls and on `Thread.sleep`:
+
+```
+REFCLET 1071293 11036          ; calcClet, the same 11,036 we measure
+REFSLEEP asked 10700 waited_ms 10700
+REFSLEEP asked 500  waited_ms 500
+```
+
+The engine asks the reference for the same eleven-second gap and the reference
+sleeps it; its `frameLoopPeriod` only raises waits that are too short, never
+caps a long one. So both runtimes pace this title identically, and the reason
+the reference's CLI walks the splashes quickly is `-play -speed 50`.
+
+That leaves the slowness as a question about how fast a guest second should run
+on the device rather than anything divergent here, and a speed control is the
+shape of an answer rather than a bug to fix in the drawing path.
