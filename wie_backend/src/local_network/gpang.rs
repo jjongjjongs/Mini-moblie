@@ -52,9 +52,23 @@
 //! finishes, which is why a capture of a purchase showed the connection taken
 //! and nothing sent on it. The bytes were arriving the whole time.
 //!
-//! Hence this writes the shop's bytes down as they arrive rather than framing
-//! them. The frame's shape here is read off the title's code, and code is what a
-//! title does, not what it sends; the bytes are the thing itself.
+//! What the title actually sends settles the rest. A handset payment writes
+//!
+//!   CASH|0|demon|05590091|00635C003|200|549895392
+//!
+//! and nothing ahead of it: the request carries no length at all, only the
+//! record - the command, the application, its serial, the product code, the
+//! price in won, and a number of its own for the transaction.
+//!
+//! The answer does carry a length. The parser at 0x12b298 reads exactly six
+//! bytes, steps a cursor two forward, takes four characters and compares them
+//! against a constant; equal takes the branch that shows a granted payment,
+//! unequal the one that shows a refused one. Six bytes is therefore a two-byte
+//! length and the word `SASH`, which is the answer this gives.
+//!
+//! The KOIN requests on the same connection - `CKN_C` for a balance, `CKN_U` to
+//! spend one - are left unanswered. They want numbers back, and a wrong number
+//! is worse than none.
 
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 
@@ -75,6 +89,10 @@ const AUTHENTICATION_REQUEST: &[u8] = b"IR\t";
 
 /// What a granted authentication answers with.
 const AUTHENTICATION_GRANTED: &[u8] = b"IROK";
+
+/// What a handset payment asks, and what a granted one answers with.
+const HANDSET_PAYMENT_REQUEST: &[u8] = b"CASH|";
+const HANDSET_PAYMENT_GRANTED: &[u8] = b"SASH";
 
 /// How much the answer carries behind that word. The title's read asks for
 /// sixteen bytes and gets no more; a shorter answer is one it waits out.
@@ -143,6 +161,32 @@ struct GpangConnection {
 }
 
 impl GpangConnection {
+    /// Answers one of the shop's requests, or writes down the one it cannot.
+    ///
+    /// The shop's requests carry no length: 데몬헌터 writes
+    /// `CASH|0|demon|05590091|00635C003|200|549895392` and nothing ahead of it.
+    /// Its answers do carry one - see the module - so a granted payment is two
+    /// bytes of length and then the word.
+    fn shop_request(&mut self, bytes: &[u8]) {
+        tracing::info!("gpang: shop sent {} bytes\n{}", bytes.len(), hex_dump(bytes));
+
+        self.request.extend_from_slice(bytes);
+
+        if !self.request.starts_with(HANDSET_PAYMENT_REQUEST) {
+            // The KOIN requests - CKN_C for a balance, CKN_U to spend one - want
+            // numbers back that no answer here could invent, and a wrong number
+            // is worse than none.
+            self.unanswerable = true;
+
+            return;
+        }
+
+        tracing::info!("gpang: granting the handset payment");
+
+        self.reply.extend_from_slice(&(HANDSET_PAYMENT_GRANTED.len() as u16).to_be_bytes());
+        self.reply.extend_from_slice(HANDSET_PAYMENT_GRANTED);
+    }
+
     /// Takes one complete frame off the front of `request`, if there is one.
     fn take_frame(&mut self) -> Option<Vec<u8>> {
         if self.request.len() < LENGTH_WIDTH {
@@ -167,10 +211,7 @@ impl GpangConnection {
 impl LocalConnection for GpangConnection {
     fn write(&mut self, bytes: &[u8]) {
         if !self.authentication {
-            // Written down as it arrives, for the reason the module gives: what
-            // this connection's frames look like is read off the title's code,
-            // and the bytes are what would prove it.
-            tracing::info!("gpang: shop sent {} bytes\n{}", bytes.len(), hex_dump(bytes));
+            self.shop_request(bytes);
 
             return;
         }
@@ -312,23 +353,47 @@ mod tests {
         assert!(!connection.readable());
     }
 
-    /// The shop's is over before it starts, whichever way round the title runs
-    /// it - 데몬헌터's reads first and would otherwise sit on that read forever.
-    #[test]
-    fn the_shop_connection_ends_rather_than_waiting() {
-        let mut connection = GpangEndpoint::new().open("socket", GPANG_HOST, SHOP_PORT);
-
-        assert!(connection.readable());
-        assert_eq!(connection.read(&mut [0u8; 16]), LocalRead::Closed);
+    fn shop() -> Box<dyn LocalConnection> {
+        GpangEndpoint::new().open("socket", GPANG_HOST, SHOP_PORT)
     }
 
-    /// And what it sends is still written down, whenever it sends it.
+    /// Exactly what 데몬헌터 sends to buy with a handset payment, off the wire.
+    const PAYMENT: &[u8] = b"CASH|0|demon|05590091|00635C003|200|549895392";
+
+    /// Six bytes: a two-byte length and the word its parser compares against.
     #[test]
-    fn the_shop_request_is_recorded_even_so() {
-        let mut connection = GpangEndpoint::new().open("socket", GPANG_HOST, SHOP_PORT);
+    fn a_handset_payment_is_granted() {
+        let mut connection = shop();
+        connection.write(PAYMENT);
 
-        connection.write(b"\x00\x00\x00\x17CKN_U|0|demon|05590091|");
+        assert!(connection.readable());
 
+        let mut out = [0u8; 6];
+        assert_eq!(connection.read(&mut out), LocalRead::Data(6));
+        assert_eq!(&out, b"\x00\x04SASH");
+    }
+
+    /// The KOIN requests want a balance back, so they get an end rather than a
+    /// number nobody knows - 데몬헌터 would otherwise sit on that read forever.
+    #[test]
+    fn a_koin_request_ends_rather_than_waiting() {
+        for request in [b"CKN_C|0|demon|0|".as_slice(), b"CKN_U|0|demon|05590091|".as_slice()] {
+            let mut connection = shop();
+            connection.write(request);
+
+            assert!(connection.readable());
+            assert_eq!(connection.read(&mut [0u8; 16]), LocalRead::Closed);
+        }
+    }
+
+    /// A shop connection nothing has been asked on yet is over too: the title
+    /// reads before it is answered, and an endpoint that will never speak leaves
+    /// it waiting forever.
+    #[test]
+    fn an_unasked_shop_connection_ends() {
+        let mut connection = shop();
+
+        assert!(connection.readable());
         assert_eq!(connection.read(&mut [0u8; 16]), LocalRead::Closed);
     }
 
