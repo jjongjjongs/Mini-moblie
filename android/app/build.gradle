@@ -6,6 +6,46 @@ apply plugin: 'com.android.application'
 def jniLibsDir = layout.buildDirectory.dir('jniLibs').get().asFile
 def abis = ['arm64-v8a']
 
+// The signing key is deliberately not in the repository. Point the build at it
+// with `-PkeystoreFile=... -PkeystorePassword=... -PkeyAlias=...`, or with the
+// matching `MINIMOBILE_KEYSTORE*` environment variables, or by putting the same
+// four keys in `android/keystore.properties`.
+//
+// Without it a build falls back to the SDK's own debug key, which is generated
+// per machine - and, on a CI runner, per run. That is why an apk from one build
+// would not install over an apk from the last: Android refuses an update whose
+// signature differs from the installed app's, so every patch meant uninstalling
+// first. One stable key is the whole of the fix.
+def signingProperties = { ->
+    def properties = new Properties()
+    def file = rootProject.file('keystore.properties')
+    if (file.isFile()) {
+        file.withInputStream { properties.load(it) }
+    }
+
+    def value = { name, environment ->
+        providers.gradleProperty(name).getOrNull() ?: System.getenv(environment) ?: properties.getProperty(name)
+    }
+
+    def store = value('keystoreFile', 'MINIMOBILE_KEYSTORE_FILE')
+    if (store == null || store.trim().isEmpty()) {
+        return null
+    }
+
+    def resolved = rootProject.file(store)
+    if (!resolved.isFile()) {
+        throw new GradleException("Signing keystore not found: ${resolved}")
+    }
+
+    [
+        file    : resolved,
+        password: value('keystorePassword', 'MINIMOBILE_KEYSTORE_PASSWORD'),
+        alias   : value('keyAlias', 'MINIMOBILE_KEY_ALIAS') ?: 'minimobile',
+        keyPassword: value('keyPassword', 'MINIMOBILE_KEY_PASSWORD')
+                ?: value('keystorePassword', 'MINIMOBILE_KEYSTORE_PASSWORD'),
+    ]
+}()
+
 android {
     namespace 'com.jjongjjongs.minimobile'
     compileSdk 35
@@ -15,7 +55,11 @@ android {
                 .getOrElse('com.jjongjjongs.minimobile')
         minSdk 24
         targetSdk 35
-        versionCode 1
+        // An update has to be at least the version it replaces, so a build that
+        // is meant to be installed over an older one cannot leave this at 1
+        // forever. CI passes its run number; a local build gets 1, which still
+        // reinstalls over itself.
+        versionCode providers.gradleProperty('versionCode').map { it as Integer }.getOrElse(1)
         versionName '0.0.1'
 
         ndk {
@@ -32,10 +76,32 @@ android {
         }
     }
 
+    if (signingProperties != null) {
+        signingConfigs {
+            minimobile {
+                storeFile signingProperties.file
+                storePassword signingProperties.password
+                keyAlias signingProperties.alias
+                keyPassword signingProperties.keyPassword
+            }
+        }
+    }
+
     buildTypes {
+        // Both types take the same key when there is one. The apk people
+        // install is the debug build, so signing only the release build would
+        // fix nothing.
+        debug {
+            if (signingProperties != null) {
+                signingConfig signingConfigs.minimobile
+            }
+        }
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (signingProperties != null) {
+                signingConfig signingConfigs.minimobile
+            }
         }
     }
 

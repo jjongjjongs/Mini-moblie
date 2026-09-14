@@ -122,7 +122,44 @@ $env:ANDROID_NDK_HOME = Get-ChildItem "$env:ANDROID_HOME\ndk" -Directory |
   Select-Object -First 1 -ExpandProperty FullName
 ```
 
-## 6. 깨끗한 상태에서 APK 빌드
+## 6. APK 서명 (업데이트 설치를 하려면 필수)
+
+안드로이드는 **설치된 앱과 서명이 다른 APK로는 업데이트를 거부한다.** 서명
+설정이 없으면 각 빌드는 SDK가 만든 debug 키로 서명되는데, 이 키는 머신마다 —
+CI 러너에서는 실행마다 — 새로 생성된다. 그래서 패치를 받을 때마다 기존 앱을
+지우고 다시 깔아야 했다. 키 하나를 고정하는 것이 해결책 전부다.
+
+키는 저장소에 넣지 않는다. 빌드는 아래 셋 중 아무 경로로나 키를 찾는다.
+
+1. Gradle 속성: `-PkeystoreFile=... -PkeystorePassword=... -PkeyAlias=...`
+2. 환경변수: `MINIMOBILE_KEYSTORE_FILE`, `MINIMOBILE_KEYSTORE_PASSWORD`,
+   `MINIMOBILE_KEY_ALIAS`, `MINIMOBILE_KEY_PASSWORD`
+3. `android/keystore.properties` (gitignore 되어 있다)
+
+3번이 가장 간단하다. `minimobile.jks`를 `android/`에 두고 그 옆에:
+
+```properties
+keystoreFile=minimobile.jks
+keystorePassword=<비밀번호>
+keyAlias=minimobile
+```
+
+셋 중 아무것도 없으면 빌드는 그대로 되고 debug 키로 떨어진다 — 설치는 되지만
+업데이트는 안 된다.
+
+### CI
+
+저장소 Secret 두 개를 등록한다.
+
+- `ANDROID_KEYSTORE_BASE64` — keystore 파일을 base64로 인코딩한 문자열
+  (`base64 -w0 minimobile.jks`)
+- `ANDROID_KEYSTORE_PASSWORD` — keystore 비밀번호
+
+워크플로는 Secret이 있을 때만 키를 복원하고, 없으면 종전대로 debug 키로
+빌드한다. `versionCode`에는 워크플로 실행 번호가 들어가므로 나중 빌드가 이전
+빌드의 다운그레이드가 되는 일은 없다.
+
+## 7. 깨끗한 상태에서 APK 빌드
 
 먼저 로컬 음원이 모두 준비됐는지 검사한다.
 
@@ -155,7 +192,7 @@ android/app/build/outputs/apk/debug/app-debug.apk
 앱 데이터까지 초기화해야 할 때만 기존 앱을 제거한 뒤 설치한다. 일반적인
 재검증에서는 `install -r`을 사용해 게임과 저장 데이터를 유지한다.
 
-## 7. 릴리스 APK
+## 8. 릴리스 APK
 
 현재 프로젝트에는 공개 저장소용 릴리스 개인키가 등록되어 있지 않다.
 따라서 다음 명령의 결과는 기본적으로 서명되지 않은 릴리스 APK다.
@@ -175,7 +212,7 @@ configuration 또는 Android SDK의 `apksigner`로 서명해야 한다. 개인�
 GitHub 저장소에 커밋하지 않는다. 이후 업데이트도 반드시 같은 개인키로
 서명해야 기존 앱 위에 설치할 수 있다.
 
-## 8. GitHub Actions 주의사항
+## 9. GitHub Actions 주의사항
 
 현재 `.github/workflows/android.yml`은 push 시 Android 빌드를 실행한다. 하지만
 GitHub runner에는 위 로컬 음원과 `soundfont.sf2`가 없으므로 `verifyLocalAudio`에서
@@ -191,7 +228,7 @@ GitHub runner에는 위 로컬 음원과 `soundfont.sf2`가 없으므로 `verify
 `-PprecompiledJava` 옵션으로 통과시키지 않는다. 이 옵션들은 개발 중 부분 검증을
 위한 것이며, 깨끗한 정식 소스 빌드를 대신하지 않는다.
 
-## 9. 기능 검증 기준
+## 10. 기능 검증 기준
 
 설치 후 최소한 다음을 직접 확인한다.
 

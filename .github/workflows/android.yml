@@ -54,11 +54,34 @@ jobs:
       - name: Export NDK location
         run: echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
 
+      # The apk is installed over the last one, and Android refuses an update
+      # whose signature differs from the installed app's. A runner is a fresh
+      # machine, so the SDK's own debug key is regenerated every run and every
+      # build used to be a different signature - which is why a patch could
+      # only be installed by uninstalling first. One key, kept in a secret,
+      # fixes it.
+      #
+      # Without the secret the build still runs and still produces an apk; it
+      # just falls back to the per-run debug key, and says so.
+      - name: Restore signing key
+        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        env:
+          SIGNING_KEY: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          printf '%s' "$SIGNING_KEY" | base64 -d > android/minimobile.jks
+          echo "MINIMOBILE_KEYSTORE_FILE=minimobile.jks" >> "$GITHUB_ENV"
+
       - name: Build APK
         working-directory: android
         # -PenableJit selects the machine-code JIT engine; drop it to ship the
         # interpreter.
-        run: gradle --no-daemon assembleDebug -PenableJit
+        #
+        # The run number is the version code, so a later build is never a
+        # downgrade of an earlier one.
+        env:
+          MINIMOBILE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          MINIMOBILE_KEY_ALIAS: minimobile
+        run: gradle --no-daemon assembleDebug -PenableJit -PversionCode=${{ github.run_number }}
 
       - name: Upload APK
         continue-on-error: true
