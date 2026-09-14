@@ -469,6 +469,26 @@ impl JavaMethod {
         Err(JvmSupport::to_wie_err(jvm, JavaError::JavaException(exception)).await)
     }
 
+    /// Whether the native entry point at `address` is one this platform
+    /// registered whose Java return type occupies two words.
+    ///
+    /// Only a method we implement can be answered for. A native compiled into
+    /// the title's own module returns through that module's convention, and
+    /// nothing here knows its descriptor.
+    pub fn native_entry_returns_wide(core: &ArmCore, address: u32) -> bool {
+        let Some((category, svc_id)) = core.svc_stub_id(address) else {
+            return false;
+        };
+        if category != SVC_CATEGORY_JAVA || svc_id & REGISTER_ARGS_SVC_FLAG != 0 {
+            return false;
+        }
+        let Ok(name) = Self::from_raw(svc_id, core).name() else {
+            return false;
+        };
+
+        matches!(*JavaType::parse(&name.descriptor).as_method().1, JavaType::Long | JavaType::Double)
+    }
+
     fn register_java_method<C, Context>(
         core: &mut ArmCore,
         jvm: &Jvm,

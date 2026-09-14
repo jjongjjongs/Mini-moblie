@@ -12,7 +12,7 @@ use jvm::{ClassInstanceRef, Jvm, runtime::JavaLangString};
 use wipi_types::ktf::{InitParam2, java::WIPIJBInterface};
 
 use wie_backend::YieldFuture;
-use wie_core_arm::{Allocator, ArmCore, EmulatedFunction, ResultWriter, SvcId};
+use wie_core_arm::{Allocator, ArmCore, EmulatedFunction, ResultWriter, RunFunctionResult, SvcId};
 use wie_jvm_support::JvmSupport;
 use wie_util::{ByteRead, Result, WieError, read_generic, read_null_terminated_string_bytes, write_generic};
 
@@ -359,7 +359,7 @@ async fn call_native(core: &mut ArmCore, _: &mut (), address: u32, ptr_data: u32
 
     // TODO correctly figure out parameter
     let entry_sp = core.save_context().sp;
-    let result = match core.run_function::<u32>(address, &[ptr_data, ptr_data]).await {
+    let result = match core.run_function::<NativeCallResult>(address, &[ptr_data, ptr_data]).await {
         Ok(result) => result,
         Err(WieError::JavaExceptionUnwind {
             context_base,
@@ -381,10 +381,40 @@ async fn call_native(core: &mut ArmCore, _: &mut (), address: u32, ptr_data: u32
         Err(err) => return Err(err),
     };
 
-    write_generic(core, ptr_data, result)?;
-    write_generic(core, ptr_data + 4, 0u32)?;
+    write_generic(core, ptr_data, result.value)?;
+
+    // The container is eight bytes because a Java answer can be sixty-four bits
+    // wide, and only then is the second word the high half. Every other native
+    // leaves it zero: `r1` after a call that returns one word is whatever the
+    // callee happened to be holding, not part of its answer.
+    //
+    // Writing zero unconditionally truncates a `long` to its low word. That is
+    // not a theoretical loss - `System.currentTimeMillis` read through this
+    // path gives a ten-digit number where a handset gives thirteen.
+    let value_high = if JavaMethod::native_entry_returns_wide(core, address) {
+        result.value_high
+    } else {
+        0
+    };
+    write_generic(core, ptr_data + 4, value_high)?;
 
     Ok(JavaMethodResult::new(vec![ptr_data], None))
+}
+
+/// Both words a native call can leave behind. Which of them is part of the
+/// answer is the caller's question; see `call_native`.
+struct NativeCallResult {
+    value: u32,
+    value_high: u32,
+}
+
+impl RunFunctionResult<NativeCallResult> for NativeCallResult {
+    fn get(core: &ArmCore) -> Self {
+        Self {
+            value: core.read_param(0).unwrap(),
+            value_high: core.read_param(1).unwrap(),
+        }
+    }
 }
 
 async fn java_jump_2(core: &mut ArmCore, _: &mut (), arg1: u32, arg2: u32, address: u32) -> Result<JavaMethodResult> {

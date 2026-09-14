@@ -7,7 +7,7 @@ use jvm::{ClassInstance, Result as JvmResult, runtime::JavaLangString};
 
 use wie_backend::{
     Emulator, Event, Options, Platform, System, TaskRunner,
-    canvas::{ImageBuffer, Rgb565Pixel, VecImageBuffer},
+    canvas::{Rgb565Pixel, VecImageBuffer},
 };
 use wie_core_arm::{Allocator, ArmCore};
 use wie_jvm_support::JvmSupport;

@@ -69,6 +69,9 @@ pub(crate) struct ArmCoreInner {
     svc_handlers: BTreeMap<u32, Arc<Box<dyn RegisteredFunction>>>,
     fast_svc: Option<FastSvcHandler>,
     svc_stubs: BTreeMap<(u32, u32), u32>,
+    /// The same stubs by address, so a caller handed a bare function pointer
+    /// can ask which registration it stands for. See [`ArmCore::svc_stub_id`].
+    svc_stub_ids: BTreeMap<u32, (u32, u32)>,
     next_stub_address: u32,
     profile: Option<ProfileState>,
     /// Guest allocations of freed thread stacks, kept for reuse. Every spawned
@@ -159,6 +162,7 @@ impl ArmCore {
             svc_handlers: BTreeMap::new(),
             fast_svc: None,
             svc_stubs: BTreeMap::new(),
+            svc_stub_ids: BTreeMap::new(),
             next_pc_chosen: false,
             stack_pool: Vec::new(),
             next_stub_address: FUNCTIONS_BASE,
@@ -646,10 +650,23 @@ impl ArmCore {
         // returns an identical, callable pointer.
         let thumb_address = address + 1;
         inner.svc_stubs.insert((category, id), thumb_address);
+        inner.svc_stub_ids.insert(thumb_address, (category, id));
 
         tracing::trace!("Register SVC stub at {address:#x}, category={category}, id={id}");
 
         Ok(thumb_address)
+    }
+
+    /// The category and id behind the stub at `address`, when `address` is one
+    /// this core wrote.
+    ///
+    /// A function pointer that arrives from guest code is either a stub of ours
+    /// or code compiled into the title's own module, and the two answer to
+    /// different conventions. Only the first stands for a method this platform
+    /// implements, whose descriptor is therefore knowable; the second returns
+    /// however its module was compiled, and nothing here can say what that is.
+    pub fn svc_stub_id(&self, address: u32) -> Option<(u32, u32)> {
+        self.inner.lock().svc_stub_ids.get(&(address | 1)).copied()
     }
 
     pub fn map(&mut self, address: u32, size: u32) -> Result<()> {
@@ -1189,6 +1206,21 @@ mod tests {
         assert!(matches!(call.as_mut().poll(&mut cx), Poll::Ready(Ok(()))));
 
         assert_eq!(core.save_context().pc, 0x1234, "the handler's resume address survives");
+    }
+
+    #[test]
+    fn a_stub_says_which_registration_it_stands_for() {
+        let mut core = ArmCore::new(false, None).unwrap();
+        core.register_svc_handler(1, test_svc_handler, &None).unwrap();
+
+        let stub = core.make_svc_stub(1, 7u32).unwrap();
+
+        assert_eq!(core.svc_stub_id(stub), Some((1, 7)));
+        // The caller has a Thumb pointer or a plain address depending on where
+        // it read it from, and both name the same stub.
+        assert_eq!(core.svc_stub_id(stub & !1), Some((1, 7)));
+        // Guest code is not ours to answer for.
+        assert_eq!(core.svc_stub_id(0x1058bd), None);
     }
 
     #[test]
