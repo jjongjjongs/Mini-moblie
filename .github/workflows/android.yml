@@ -108,6 +108,16 @@ jobs:
         run: |
           set -eu
 
+          # Whether this apk can be installed over the last one. Builds share a
+          # key only when the signing secret was there to restore, and an apk
+          # signed with the per-run debug key needs the installed app removed
+          # first - which is worth saying on the page people download from.
+          if [ -n "${MINIMOBILE_KEYSTORE_FILE:-}" ]; then
+            signing='project key - installs over the previous build'
+          else
+            signing='per-run debug key - uninstall the previous build first'
+          fi
+
           notes="Development build, replaced by every push.
 
           | | |
@@ -115,9 +125,11 @@ jobs:
           | Branch | \`${{ github.ref_name }}\` |
           | Commit | ${{ github.sha }} |
           | Built | $(date -u '+%Y-%m-%d %H:%M UTC') |
+          | Version code | ${{ github.run_number }} |
+          | Signing | $signing |
 
-          Debug build, unsigned for release: Android will ask for permission to
-          install it from outside the store."
+          Android will ask for permission to install it from outside the
+          store."
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --notes "$notes" --prerelease
