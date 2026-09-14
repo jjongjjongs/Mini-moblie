@@ -2029,18 +2029,31 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
     /// The library's type `5`, which carries nothing and is answered in kind.
     const SIGNAL_OPCODE: u8 = 0x01;
 
-    /// 퀸스크라운's attach, the one frame between its session and its licence.
+    /// 퀸스크라운 asking where its subscriber stands on the terms, and the same
+    /// question its `환경설정` menu asks under `약관 재동의`.
     ///
-    /// Its sender at 0x47044 asks under a service of its own - 1038, where the
+    /// The sender at 0x47044 asks under a service of its own - 1038, where the
     /// session it just opened was 1017 - and its body is that number and nothing
-    /// else. The answer's reader at 0x46ddc takes a single byte, and the screen
-    /// it is on decides what becomes of it: on 0x3c, which is where a launch
-    /// sits, it goes straight to 0x46d3c and sends the licence request this
-    /// already answers, whatever the byte said. The title's own forge screen
-    /// uses the same pair, and there the byte is a verdict - `2` is the one it
-    /// prints `제련에 성공하였습니다` for.
-    const ATTACH_OPCODE: u8 = 0x1a;
-    const ATTACHED: u8 = 2;
+    /// else. 0x17's sender does the same from another screen, and the two
+    /// answers are read by the same shape of code, at 0x46ddc and 0x457e0: one
+    /// byte, narrowed into the state byte at 0x150201c.
+    ///
+    ///   0 or 1  ->  1, agreed
+    ///   2       ->  2, withdrawn
+    ///   anything else, left alone
+    ///
+    /// What that byte then means is written down at 0x2395a, where the menu
+    /// reads it and goes to screen 0x40 for 0, 0x41 for 1 and 0x3f for anything
+    /// else. 0x41 is the one that offers `약관 동의철회`, and 0x3f is the one
+    /// behind `약관 동의를 철회하신 상태로 네트워크를 접속할 수 없습니다`, which
+    /// is also what stands between a withdrawn subscriber and the shop.
+    ///
+    /// So the answer is `1`. A `2` here is this emulator withdrawing a consent
+    /// on the subscriber's behalf - which it has no standing to do, and which
+    /// locks the title out of its own network until they re-agree.
+    const AGREEMENT_OPCODE: u8 = 0x1a;
+    const AGREEMENT_OPCODE_AGAIN: u8 = 0x17;
+    const AGREED: u8 = 1;
 
     /// The gate its network notice sits behind, sent from screen 0x3d - the one
     /// its `[네트워크 서비스이용약관] ... 약관에 동의 및 네트워크에 접속하시겠습니까?`
@@ -2117,7 +2130,8 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
         // The service each of these names is not weighed against anything: the
         // answers' readers never look at it, and the session that came before is
         // what said which title this is.
-        ATTACH_OPCODE if body.len() == 2 => (ATTACH_OPCODE, alloc::vec![ATTACHED]),
+        AGREEMENT_OPCODE if body.len() == 2 => (AGREEMENT_OPCODE, alloc::vec![AGREED]),
+        AGREEMENT_OPCODE_AGAIN if body.len() == 2 => (AGREEMENT_OPCODE_AGAIN, alloc::vec![AGREED]),
         GATE_OPCODE if body.len() == 2 => (GATE_OPCODE, alloc::vec![PASSED]),
         NOTICE_OPCODE if body.len() == 2 => {
             let mut answer = alloc::vec![0u8];
@@ -7292,27 +7306,48 @@ mod tests {
     use super::*;
 
     /// What 퀸스크라운 sends between its session and its licence, off the wire.
-    const QUEENS_CROWN_ATTACH: [u8; 7] = [
+    const QUEENS_CROWN_AGREEMENT: [u8; 7] = [
         0x00, 0x07, // the frame's length
         0x00, 0x1a, 0x00, // the opcode, between the two bytes written clear
         0x04, 0x0e, // the service it asks under: 1038
     ];
 
-    /// The frame that stood between 퀸스크라운 and its licence check. Its reader
-    /// takes one byte, so the answer carries one.
+    /// The frame that stood between 퀸스크라운 and its licence check asks where
+    /// its subscriber stands on the terms. Its reader takes one byte, so the
+    /// answer carries one - and that byte has to be the one that says agreed.
     #[test]
-    fn 퀸스크라운s_attach_is_answered() {
-        let reply = response(&QUEENS_CROWN_ATTACH).expect("the attach is answered");
+    fn 퀸스크라운s_subscriber_has_agreed() {
+        let reply = response(&QUEENS_CROWN_AGREEMENT).expect("the agreement is answered");
 
         assert_eq!(u16::from_be_bytes([reply[0], reply[1]]) as usize, reply.len());
         assert_eq!(&reply[..5], &[0x00, 0x06, 0x00, 0x1a, 0x00]);
-        assert_eq!(reply[5], 2, "the byte its own forge screen prints 제련에 성공하였습니다 for");
+        assert_eq!(reply[5], 1);
+
+        // Narrowed the way its reader narrows it, the byte has to land on the
+        // state its menu reads as agreed - not the one behind
+        // `약관 동의를 철회하신 상태로 네트워크를 접속할 수 없습니다`.
+        let state = match reply[5] {
+            0 | 1 => 1,
+            2 => 2,
+            _ => 0,
+        };
+        assert_eq!(state, 1, "2 is withdrawn, and withdrawing is not this emulator's to do");
     }
 
-    /// Its session opens on 1017, which this already served, and the attach is
-    /// the frame that came after - so the two together are the launch.
+    /// Its `환경설정` menu asks the same question under another opcode, and is
+    /// answered the same way.
     #[test]
-    fn 퀸스크라운s_session_opens_before_its_attach() {
+    fn 퀸스크라운s_menu_asks_the_same_question() {
+        let request = [0x00, 0x07, 0x00, 0x17, 0x00, 0x04, 0x0e];
+        let reply = response(&request).expect("the agreement is answered");
+
+        assert_eq!(&reply, &[0x00, 0x06, 0x00, 0x17, 0x00, 0x01]);
+    }
+
+    /// Its session opens on 1017, which this already served, and the agreement
+    /// is the frame that came after - so the two together are the launch.
+    #[test]
+    fn 퀸스크라운s_session_opens_before_it_asks() {
         let mut session = alloc::vec![0x00, 0x49, 0x00, 0x00, 0x00, 0x03, 0xf9];
         session.resize(0x49, 0);
 
