@@ -375,6 +375,18 @@ pub fn get_net_method_table() -> Vec<WIPICMethodBody> {
         // The carrier's own additions to the table start here; see
         // `net::socket_connect_by_name`.
         net::socket_connect_by_name.into_body(),
+        // Slot 31 is the write on that connection, and 데몬헌터's own request is
+        // what says so. Refused, it called this fourteen times in three seconds
+        // with `(1, 0x1796a0, 0x30)` - its descriptor, a buffer, and 48 bytes -
+        // and those 48 bytes are its authentication, already built:
+        //
+        //   00 00 00 2c  IR \t 01046119269 \t demon \t 1.0.2 \t 5080091 \t WIPIC \t yes
+        //
+        // A four-byte length ahead of the record the title's own format string
+        // spells, `IR\t%s\t%s\t%s\t%s\tWIPIC\t%s`. A buffer a title has filled
+        // is one it means to send, so the arguments are `MC_netSocketWrite`'s
+        // and the framing is the title's own.
+        net::socket_write.into_body(),
     ]
 }
 
@@ -661,10 +673,13 @@ mod tests {
     }
 
     #[test]
-    fn the_slot_the_demon_hunter_authenticates_through_is_served() {
-        // Net slot 30 is the named connect its authentication calls; a refusal
-        // there is a title that waits for a callback it will never get.
+    fn the_slots_the_demon_hunter_authenticates_through_are_served() {
+        // Net slot 30 is the named connect its authentication calls and 31 the
+        // write that carries the request. A refusal at 30 is a title waiting for
+        // a callback it will never get; at 31 it is one asking to send the same
+        // 48 bytes until it gives up.
         assert!(get_served_method_body(WIPICTableId::Net, 30).is_some());
+        assert!(get_served_method_body(WIPICTableId::Net, 31).is_some());
     }
 
     #[test]
