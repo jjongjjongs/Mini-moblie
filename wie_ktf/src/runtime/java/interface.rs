@@ -17,7 +17,8 @@ use wie_jvm_support::JvmSupport;
 use wie_util::{ByteRead, Result, WieError, read_generic, read_null_terminated_string_bytes, write_generic};
 
 use crate::runtime::java::jvm_support::{
-    JavaClassDefinition, JavaClassInstance, JavaMethod, JavaMethodResult, JavaVtable, KtfJvmSupport, KtfJvmWord,
+    JavaClassDefinition, JavaClassInstance, JavaMethod, JavaMethodResult, JavaVtable, KtfJvmSupport, KtfJvmWord, NATIVE_RETURN_TYPE_OFFSET,
+    NATIVE_RETURN_VALUE_OFFSET,
 };
 use crate::runtime::{SVC_CATEGORY_JAVA_INTERFACE, svc_ids::JavaSvcId};
 
@@ -359,6 +360,16 @@ async fn call_native(core: &mut ArmCore, _: &mut (), address: u32, ptr_data: u32
 
     // TODO correctly figure out parameter
     let entry_sp = core.save_context().sp;
+
+    // A native of the title's own answers in the runtime's return slot rather
+    // than in `r0`; clearing the tag first is what makes the read after this
+    // call this call's answer. See below.
+    let slot = KtfJvmSupport::native_return_slot(core)?;
+    let module_native = core.svc_stub_id(address).is_none();
+    if module_native {
+        write_generic(core, slot + NATIVE_RETURN_TYPE_OFFSET, 0u32)?;
+    }
+
     let result = match core.run_function::<NativeCallResult>(address, &[ptr_data, ptr_data]).await {
         Ok(result) => result,
         Err(WieError::JavaExceptionUnwind {
@@ -398,15 +409,34 @@ async fn call_native(core: &mut ArmCore, _: &mut (), address: u32, ptr_data: u32
     // its answer really is in `r0`. `svc_stub_id` is what tells the two apart:
     // an address in the stub arena stands for a registration of ours, and a
     // guest address stands for the title's own code.
-    if core.svc_stub_id(address).is_none() {
-        // What is left in the block is the veneer's spill of `r1`-`r3`, which
-        // for a method that takes no arguments is whatever the AOT caller last
-        // held. Reading that back as an answer is how 격투가 went from an
-        // eleven-second frame to a four-hundred-millisecond one - still not a
-        // frame, just a smaller piece of the same rubbish. A slot the callee
-        // never filled answers zero.
-        write_generic(core, ptr_data, 0u32)?;
-        write_generic(core, ptr_data + 4, 0u32)?;
+    let tag: u32 = if module_native {
+        read_generic(core, slot + NATIVE_RETURN_TYPE_OFFSET)?
+    } else {
+        0
+    };
+
+    if module_native {
+        // A native compiled into the title's own module does not answer in
+        // `r0`. The AOT C runtime linked into it keeps a return slot at the end
+        // of the JVM exception context - a structure this runtime allocates and
+        // hands over in `InitParam1` - and writes a type tag and the value
+        // there. 격투가's `calcClet` is the case that proves it: `r0` holds the
+        // field offset its epilogue happened to load last (11,036), the block
+        // holds the veneer's spill of `r1`-`r3`, and the slot holds 75 - which
+        // is what the frame loop spends as a frame period, fifteen frames a
+        // second. Reading `r0` slept eleven seconds a frame, the block four
+        // hundred milliseconds, and zero ran it flat out.
+        //
+        // The tag is cleared before the call so the value read after it is this
+        // call's and not one a `void` native left standing.
+        let (value, value_high) = if tag != 0 {
+            (read_generic(core, slot + NATIVE_RETURN_VALUE_OFFSET)?, 0)
+        } else {
+            (0, 0)
+        };
+
+        write_generic(core, ptr_data, value)?;
+        write_generic(core, ptr_data + 4, value_high)?;
 
         return Ok(JavaMethodResult::new(vec![ptr_data], None));
     }

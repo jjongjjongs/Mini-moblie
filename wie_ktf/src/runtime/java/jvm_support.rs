@@ -51,7 +51,21 @@ pub type KtfJvmWord = u32;
 struct KtfJvmExceptionContext {
     unk: [u32; 8],
     current_java_exception_handler: u32,
+    /// What a native compiled into the title's own module leaves its answer in.
+    ///
+    /// This structure is ours - `InitParam1` hands the module its address at
+    /// `fn_init` - and the AOT C runtime linked into the module keeps its
+    /// return slot at the end of it: a type tag, then the value. A native
+    /// returning `int` writes tag 2 and the number; a `void` one writes
+    /// nothing. See `call_native`, which is the only thing that reads them.
+    native_return_type: u32,
+    native_return_value: u32,
 }
+
+/// `native_return_type` and `native_return_value` from the start of the
+/// exception context, for the reads `call_native` does without the struct.
+pub(crate) const NATIVE_RETURN_TYPE_OFFSET: u32 = 0x24;
+pub(crate) const NATIVE_RETURN_VALUE_OFFSET: u32 = 0x28;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -78,6 +92,8 @@ impl KtfJvmSupport {
         let jvm_exception_context = KtfJvmExceptionContext {
             unk: [0; 8],
             current_java_exception_handler: 0,
+            native_return_type: 0,
+            native_return_value: 0,
         };
         let ptr_jvm_exception_context = Allocator::alloc(core, size_of::<KtfJvmExceptionContext>() as u32)?;
         write_generic(core, ptr_jvm_exception_context, jvm_exception_context)?;
@@ -182,6 +198,15 @@ impl KtfJvmSupport {
 
             instance.class_instance.ptr_raw
         }
+    }
+
+    /// Where a native compiled into the title's own module leaves its answer.
+    ///
+    /// See `KtfJvmExceptionContext::native_return_type`.
+    pub fn native_return_slot(core: &ArmCore) -> Result<u32> {
+        let context_data: KtfJvmSupportContext = read_generic(core, SUPPORT_CONTEXT_BASE)?;
+
+        Ok(context_data.ptr_jvm_exception_context)
     }
 
     pub fn get_vtable_index(core: &mut ArmCore, class: &JavaClassDefinition) -> Result<u32> {
