@@ -336,10 +336,24 @@ const NOTABLE_SHARE_PERCENT: usize = 15;
 /// gone. The level is the field after the timestamp; a line without one - the
 /// header the save writes - is not notable and travels with the log.
 fn is_notable(line: &str) -> bool {
-    let mut fields = line.split_whitespace();
-    let (_time, level) = (fields.next(), fields.next());
+    matches!(level_of(line), Some("INFO" | "WARN" | "ERROR"))
+}
 
-    matches!(level, Some("INFO" | "WARN" | "ERROR"))
+/// The level a formatted line was logged at, or `None` for a line that is the
+/// continuation of the one above it rather than a record of its own.
+///
+/// `tracing` writes a multi-line message as one record and several lines: only
+/// the first carries the timestamp and level, and the rest are the message's
+/// own newlines. A stack trace is the case that matters - the line that says
+/// a thread died carries nothing but "Uncaught exception in thread N:", and
+/// every frame is a continuation.
+fn level_of(line: &str) -> Option<&str> {
+    let mut fields = line.split_whitespace();
+    let _time = fields.next()?;
+
+    fields
+        .next()
+        .filter(|level| matches!(*level, "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR"))
 }
 
 /// How a branch-trace line is told apart from any other, which is by the target
@@ -404,6 +418,16 @@ impl Lines {
     }
 }
 
+/// Which queue a line is held in. The order is the order [`snapshot`] breaks
+/// ties in, so a line and the lines continuing it stay adjacent.
+#[derive(Copy, Clone, Default, PartialEq, Eq)]
+enum Lane {
+    #[default]
+    Log,
+    Notable,
+    Trace,
+}
+
 #[derive(Default)]
 struct Record {
     log: Lines,
@@ -416,27 +440,44 @@ struct Record {
     /// question asked after the fact is answered from, so it is the one that
     /// has to still cover the moment.
     notable: Lines,
+    /// The lane the last line went to, so the lines continuing it can follow.
+    last_lane: Lane,
 }
 
 impl Record {
     fn push(&mut self, line: String) {
-        // The trace first: its lines carry a level too, and what makes one a
-        // trace line is where it came from, not how loud it is.
-        if line.contains(TRACE_TARGET) {
-            self.trace
-                .push(line, TRACE_CAP_LINES.load(Ordering::Relaxed), TRACE_CAP_BYTES.load(Ordering::Relaxed));
-        } else if is_notable(&line) {
-            self.notable
-                .push(line, NOTABLE_CAP_LINES.load(Ordering::Relaxed), NOTABLE_CAP_BYTES.load(Ordering::Relaxed));
-        } else {
-            self.log.push(line, CAP_LINES.load(Ordering::Relaxed), CAP_BYTES.load(Ordering::Relaxed));
+        let lane = match level_of(&line) {
+            // The trace first: its lines carry a level too, and what makes one
+            // a trace line is where it came from, not how loud it is.
+            Some(_) if line.contains(TRACE_TARGET) => Lane::Trace,
+            Some(level) if matches!(level, "INFO" | "WARN" | "ERROR") => Lane::Notable,
+            Some(_) => Lane::Log,
+            // A continuation belongs to the record it continues, so it travels
+            // with it. Routed on its own it would be read as an ordinary debug
+            // line and held to the flood's bounds, which is how a capture came
+            // back saying a thread had died of an uncaught exception with the
+            // stack trace - the whole of what that line is for - evicted from
+            // underneath it.
+            None => self.last_lane,
+        };
+
+        self.last_lane = lane;
+
+        match lane {
+            Lane::Trace => self
+                .trace
+                .push(line, TRACE_CAP_LINES.load(Ordering::Relaxed), TRACE_CAP_BYTES.load(Ordering::Relaxed)),
+            Lane::Notable => self
+                .notable
+                .push(line, NOTABLE_CAP_LINES.load(Ordering::Relaxed), NOTABLE_CAP_BYTES.load(Ordering::Relaxed)),
+            Lane::Log => self.log.push(line, CAP_LINES.load(Ordering::Relaxed), CAP_BYTES.load(Ordering::Relaxed)),
         }
     }
 }
 
 /// The timestamp a line is ordered by: the leading field the format layer
-/// writes. A line without one orders by its own text, which is only the header
-/// lines nothing else is interleaved with.
+/// writes. Only asked of a line that starts a record; the lines continuing one
+/// are emitted with it rather than ordered on their own.
 fn line_time(line: &str) -> &str {
     line.split_once(char::is_whitespace).map_or(line, |(time, _)| time)
 }
@@ -513,6 +554,15 @@ pub fn snapshot() -> String {
 
         out.push_str(line);
         out.push('\n');
+
+        // A record is one line plus the lines continuing it, and it is read as
+        // one thing - a message and its stack trace. They are in this lane
+        // because that is where the line above them went, so take them now
+        // rather than letting a line from another lane land in the middle.
+        while let Some(continuation) = lanes[index].next_if(|line| level_of(line).is_none()) {
+            out.push_str(continuation);
+            out.push('\n');
+        }
     }
 
     out
@@ -880,6 +930,50 @@ mod tests {
             "the flood lost its own most recent"
         );
         assert!(!log.contains("frame 0\n"), "the flood kept more than its share");
+
+        let _ = stop_collecting();
+        reset();
+    }
+
+    /// A stack trace is the reason the line above it was logged, and `tracing`
+    /// writes the two as one record over several lines - only the first
+    /// carries a level. Routed on its own each frame reads as an ordinary
+    /// debug line and is held to the flood's bounds, so a capture of 지크 came
+    /// back saying a thread had died of an uncaught exception with every frame
+    /// evicted from underneath it, and the frames that did survive were sorted
+    /// away from the line they belonged to.
+    #[test]
+    fn a_stack_trace_travels_with_the_line_it_explains() {
+        let _guard = ONE_AT_A_TIME.lock().unwrap_or_else(|x| x.into_inner());
+        wie_backend::probe::disarm();
+        reset();
+
+        let _ = start_collecting();
+        let flood_cap = super::CAP_LINES.load(Ordering::Relaxed);
+
+        let mut writer = make_writer();
+        writer
+            .write_all(b"2000-01-01T00:00:00.000000Z ERROR Uncaught exception in thread 7:\njava.lang.NullPointerException\n\tat j.run()V\n")
+            .unwrap();
+
+        for index in 0..flood_cap * 2 {
+            writer
+                .write_all(format!("2000-01-01T00:00:01.{index:06}Z DEBUG drew a frame {index}\n").as_bytes())
+                .unwrap();
+        }
+
+        let log = snapshot();
+        let lines: Vec<&str> = log.lines().collect();
+        let header = lines
+            .iter()
+            .position(|line| line.contains("Uncaught exception"))
+            .expect("the flood evicted the line the capture was taken for");
+
+        assert_eq!(
+            &lines[header + 1..header + 3],
+            ["java.lang.NullPointerException", "\tat j.run()V"],
+            "the trace did not travel with the line it explains"
+        );
 
         let _ = stop_collecting();
         reset();
