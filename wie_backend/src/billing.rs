@@ -7280,16 +7280,27 @@ const ALBATYCOON2_GRANTED: &[u8] = b"IROK";
 /// which is `0002A1B1002` at 2900 won, one of the four its sender at 0x4736c
 /// picks between.
 ///
-/// What comes back it does not read. The receive dispatcher at 0x47b04 takes the
-/// type from its own state and hands 7 to 0x4740c, and that clears two buffers
-/// and closes the exchange without touching the answer; what moves the title on
-/// is the read succeeding at all - its callback at 0x4eacc turns a read of more
-/// than nothing into the state the screen shows `구매 성공..` for. The library's
-/// own check, at 0x4edfc, wants the magic and eight bytes.
+/// The answer needs a body. Answered with the header alone the title showed
+/// `고객님은 월구매한도로 인해 현재 사용이 불가하니` - its own words for a purchase
+/// that did not go through, and it was right to: the byte that says one did is
+/// read out of the answer.
 ///
-/// So the answer is that header and nothing else, carrying the request's own
-/// type back. The other types on this socket are left alone: their handlers do
-/// read what they are sent, and an empty answer would be read as content.
+/// Its network screen at 0x4790c draws `네트워크 성공!!` when the byte at
+/// 0x1691848 is set and otherwise picks a failure by request type, and for a
+/// purchase that is the monthly-limit line when 0x1691849 is clear. 0x1691848 is
+/// the receive buffer's own +0x818, and what sets it is the parser at 0x4f55c:
+///
+///   [buffer + 0x19] == 0  ->  [buffer + 0x818] = 1
+///   otherwise             ->  0
+///
+/// which is payload byte seventeen, counting past the eight-byte header. The
+/// same parser reads a `u16` at payload four and takes another path for `IC`,
+/// which a purchase is not.
+///
+/// So the answer carries eighteen bytes behind its header, all zero: the
+/// seventeenth is the one read, and zero is what it reads as granted. The other
+/// types on this socket are left alone - their own parsers read further into
+/// what they are sent, and zeros would be read as content.
 fn lgt_local_guardian_slave_response(request: &[u8]) -> Option<Vec<u8>> {
     /// The magic, and the header every frame opens with.
     const MAGIC: &[u8] = b"KP";
@@ -7313,11 +7324,15 @@ fn lgt_local_guardian_slave_response(request: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
+    // Eighteen, so that byte seventeen is there to be read.
+    const GRANTED_BODY: usize = 18;
+
     let mut response = Vec::from(MAGIC);
-    response.extend_from_slice(&(HEADER as u16).to_le_bytes());
+    response.extend_from_slice(&((HEADER + GRANTED_BODY) as u16).to_le_bytes());
     response.extend_from_slice(&CHANNEL.to_le_bytes());
     response.push(PURCHASE_TYPE);
     response.push(0);
+    response.resize(HEADER + GRANTED_BODY, 0);
 
     Some(response)
 }
@@ -7455,19 +7470,25 @@ mod tests {
         0x54, 0x0b, 0x00, 0x00, // 2900 won
     ];
 
-    /// The header its library checks for, carrying the request's own type back.
-    /// Its handler reads nothing behind that, so there is nothing behind it.
+    /// The header its library checks for, carrying the request's own type back,
+    /// and the body its parser reads the verdict out of.
     #[test]
     fn 가디언슬레이브s_purchase_is_answered() {
         let reply = response(&GUARDIAN_SLAVE_PURCHASE).expect("the purchase is answered");
-
-        assert_eq!(&reply, b"KP\x08\x00\x02\x00\x07\x00");
 
         // What its library checks, at 0x4edfc: the magic, and eight bytes to
         // find a payload past.
         assert!(reply.starts_with(b"KP"));
         assert_eq!(u16::from_le_bytes([reply[2], reply[3]]) as usize, reply.len());
-        assert_eq!(reply.len(), 8);
+        assert_eq!(&reply[4..8], &[0x02, 0x00, 0x07, 0x00]);
+
+        // And what the parser at 0x4f55c reads: payload byte seventeen, which is
+        // zero for a purchase that went through, and a `u16` at payload four
+        // that is not `IC`.
+        let payload = &reply[8..];
+        assert!(payload.len() > 17, "byte seventeen has to be there to be read");
+        assert_eq!(payload[17], 0);
+        assert_ne!(&payload[4..6], b"IC");
     }
 
     /// The other types on that socket read what they are sent, so an answer of
