@@ -968,10 +968,23 @@ fn new_screen_surface(context: &mut dyn WIPICContext, width: u32, height: u32) -
     let (size, _) = buffer_size(width, height.saturating_add(SURFACE_GUARD_ROWS), FRAMEBUFFER_DEPTH / 8)?;
     let base = context.data_ptr(framebuffer.0.buf)?;
     context.write_bytes(base, &vec![0u8; size as usize])?;
-    framebuffer.0.height = height - strip;
-    // Only a platform whose indirect pointers are plain addresses reserves a
-    // strip, so this is address arithmetic on the buffer just allocated.
-    framebuffer.0.buf = WIPICIndirectPtr(framebuffer.0.buf.0 + strip * framebuffer.0.bpl);
+    // Where an indirect pointer is an address, the strip is taken out of the
+    // framebuffer: the title is told the drawing area and handed a pointer that
+    // starts below the strip.
+    //
+    // On KTF an indirect pointer is a handle whose target holds the address, so
+    // neither is possible - adding a row's worth of bytes to a handle names no
+    // allocation at all, and 격투가 read its own frame buffer pointer back as 8
+    // and stored a pixel through it before it had drawn anything. There the
+    // title is told the whole panel and reserves the strip itself, which is
+    // what this engine does: told 320 it draws 296, told 296 it draws 272. So
+    // the strip comes off at the other end, where the panel is shown - see
+    // `screen_surface_bytes`.
+    let split = context.data_ptr(framebuffer.0.buf)? == framebuffer.0.buf.0;
+    framebuffer.0.height = if split { height - strip } else { height };
+    if split {
+        framebuffer.0.buf = WIPICIndirectPtr(framebuffer.0.buf.0 + strip * framebuffer.0.bpl);
+    }
 
     Ok(framebuffer)
 }
@@ -1002,7 +1015,18 @@ pub fn screen_surface_bytes(mem: &dyn ByteRead, data_ptr: &dyn Fn(WIPICWord) -> 
         return Ok(None);
     }
 
-    let (size, _) = match buffer_size(framebuffer.width, framebuffer.height, framebuffer.bpp / 8) {
+    // The panel less the handset's own status strip. On this platform the
+    // framebuffer spans the whole panel and the title reserves the strip
+    // itself - see `new_screen_surface` - so the rows it leaves at the bottom
+    // are the handset's to paint, not a frame, and showing them was a band of
+    // whatever had been there under every one of 격투가's frames.
+    let strip: u32 = read_generic(mem, ANNUNCIATOR_ROWS_PTR).unwrap_or(0);
+    let height = framebuffer.height.saturating_sub(strip);
+    if height == 0 {
+        return Ok(None);
+    }
+
+    let (size, _) = match buffer_size(framebuffer.width, height, framebuffer.bpp / 8) {
         Ok(x) => x,
         Err(_) => return Ok(None),
     };
@@ -1010,7 +1034,7 @@ pub fn screen_surface_bytes(mem: &dyn ByteRead, data_ptr: &dyn Fn(WIPICWord) -> 
     let mut bytes = vec![0u8; size as usize];
     mem.read_bytes(data_ptr(framebuffer.buf.0)?, &mut bytes)?;
 
-    Ok(Some((framebuffer.width, framebuffer.height, bytes)))
+    Ok(Some((framebuffer.width, height, bytes)))
 }
 
 /// The off-screen surfaces a title has asked for and not destroyed, so a flush

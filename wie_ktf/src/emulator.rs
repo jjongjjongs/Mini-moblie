@@ -105,15 +105,10 @@ impl KtfEmulator {
         // `wie_wipi_c::api::graphics::new_screen_surface`; the reference's own
         // table gives the strip 24 rows on a 240/320/400-wide panel.
         //
-        // No KTF title asks for one yet, so this only answers the host's own
-        // setting, which until now KTF ignored while LGT honoured it. 던전앤
-        // 파이터 격투가 looked like the first candidate - its C engine composes
-        // a 240x296 scene (`MC_grpFillRect(0, 0, 240, 296)`, last pixel at
-        // (239, 295)) onto a 320-row panel and leaves the bottom 24 rows to
-        // whatever was there - but giving it the strip kills it: the drawing
-        // area becomes 296 and `dnff.startApp` faults inside `initLCDClet` at
-        // `0x106a18` reading address 8, before a frame. Its band is the
-        // handset's own strip showing through, not a missing offset.
+        // 던전앤파이터 격투가 is the KTF title that asks for one: its C engine
+        // composes a 240x296 scene (`MC_grpFillRect(0, 0, 240, 296)`, last
+        // pixel at (239, 295)) onto a 320-row panel, so the bottom 24 rows are
+        // never its and kept whatever had been there under every frame.
         const ANNUNCIATOR_ROWS: u32 = 24;
         let annunciator = options
             .annunciator

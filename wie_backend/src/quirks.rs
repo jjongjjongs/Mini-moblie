@@ -77,6 +77,9 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     (TitlePlatform::Lgt, "0002A52B", annunciator()),
     // 알바타이쿤2: every screen it draws lands exactly one strip down.
     (TitlePlatform::Lgt, "0002D4D0", annunciator()),
+    // 던전앤파이터 격투가: draws 296 rows into a 320-row panel and leaves the
+    // rest to the handset, so the strip has to come off what is shown.
+    (TitlePlatform::Ktf, "0103BF27", annunciator()),
 ];
 
 /// What to do differently for the title `aid` on `platform`.
