@@ -1403,6 +1403,48 @@ pub async fn socket_connect(
     }
 }
 
+/// A socket connect that also names the connection - KTF net slot 30.
+///
+/// The slot is one past `MC_netHttpClose`, where the carrier's own additions to
+/// the table begin, and 데몬헌터's authentication is what reads it: it takes the
+/// descriptor `MC_netSocket(2, 1)` gave it, refuses to go on if that is
+/// negative, converts its server with `MC_utilInetAddrInt` and its port with
+/// `MC_utilHtons`, and calls this with
+///
+///   r0 = descriptor, r1 = address, r2 = port (sign-extended from 16 bits),
+///   r3 = a name, [sp] = callback, [sp+4] = the callback's own argument
+///
+/// which is `MC_netSocketConnect` with one argument more. The callback settles
+/// it: the title's is three-argument, `f(descriptor, result, param)`, and all it
+/// does is store `result == 0` in the object it was given - the completion a
+/// connect reports and nothing else does.
+///
+/// The name is a label for the connection rather than part of the destination,
+/// which the title's own two call sites show: a flag it keeps picks one of two
+/// fixed strings - `"TEST_BILLSOCK"` for the one that authenticates - and the
+/// address and port it passes are the same either way. So the connect is the
+/// ordinary one and the name is logged, which is also the only way the next
+/// title to reach this slot will say which name it used.
+pub async fn socket_connect_by_name(
+    context: &mut dyn WIPICContext,
+    socket: i32,
+    address: WIPICWord,
+    port: WIPICWord,
+    name: WIPICWord,
+    callback: WIPICWord,
+    callback_context: WIPICWord,
+) -> Result<i32> {
+    let name = if name == 0 {
+        String::new()
+    } else {
+        String::from_utf8_lossy(&read_null_terminated_string_bytes(context, name)?).into_owned()
+    };
+
+    tracing::debug!("MC_netSocketConnect({socket}, {}, {}) as {name:?}", dotted_quad(address), port as u16);
+
+    socket_connect(context, socket, address, port, callback, callback_context).await
+}
+
 /// What an answer here kept for itself, in the running title's record store.
 ///
 /// Empty when nothing has been kept yet, which is what an untouched store is.

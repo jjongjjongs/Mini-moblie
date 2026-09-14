@@ -1,4 +1,3 @@
-use alloc::vec::Vec;
 use core::mem::{size_of, size_of_val};
 
 use bytemuck::Pod;
@@ -7,38 +6,65 @@ use wipi_types::ktf::wipic::WIPICInterface;
 
 use wie_core_arm::{Allocator, ArmCore};
 use wie_util::{Result, write_generic};
-use wie_wipi_c::{WIPICContext, WIPICMethodBody};
+use wie_wipi_c::WIPICContext;
 
-use crate::runtime::wipi_c::method_table::{self, get_database_interface, get_graphics_interface};
+use crate::runtime::wipi_c::method_table::{self, WIPIC_TABLE_FUNCTIONS, get_database_interface, get_graphics_interface};
 
 use crate::runtime::svc_ids::WIPICTableId;
 
-fn write_methods(core: &mut ArmCore, context: &mut dyn WIPICContext, table_id: WIPICTableId, methods: Vec<WIPICMethodBody>) -> Result<u32> {
-    let address = context.alloc_raw((methods.len() * 4) as u32)?;
+/// Writes one WIPI C interface table: [`WIPIC_TABLE_FUNCTIONS`] function
+/// pointers, whatever the runtime has a body for.
+///
+/// The length is the table's, not ours. A guest reaches a function by indexing
+/// this array, so a table cut short at the last function we serve is one a title
+/// can index past - it reads whatever word follows and branches to it. Every
+/// slot therefore gets a stub, and `get_method_body` decides what the slot
+/// answers.
+fn write_methods(core: &mut ArmCore, context: &mut dyn WIPICContext, table_id: WIPICTableId) -> Result<u32> {
+    let address = context.alloc_raw(WIPIC_TABLE_FUNCTIONS as u32 * 4)?;
 
-    let mut cursor = address;
-    for (index, _) in methods.into_iter().enumerate() {
-        let address = core.make_svc_stub(crate::runtime::SVC_CATEGORY_WIPIC, table_id.function_id(index as u16))?;
-
-        write_generic(context, cursor, address)?;
-        cursor += 4;
-    }
+    write_stubs(core, context, table_id, address, 0)?;
 
     Ok(address)
+}
+
+/// Fills a table's slots from `first` to the end with their SVC stubs.
+fn write_stubs(core: &mut ArmCore, context: &mut dyn WIPICContext, table_id: WIPICTableId, address: u32, first: u16) -> Result<()> {
+    for index in first..WIPIC_TABLE_FUNCTIONS {
+        let stub = core.make_svc_stub(crate::runtime::SVC_CATEGORY_WIPIC, table_id.function_id(index))?;
+
+        write_generic(context, address + index as u32 * 4, stub)?;
+    }
+
+    Ok(())
 }
 
 pub fn get_wipic_knl_interface(core: &mut ArmCore) -> Result<u32> {
     let kernel_interface = method_table::get_kernel_interface(core)?;
 
-    let address = Allocator::alloc(core, size_of_val(&kernel_interface) as u32)?;
+    // A full table's worth of room, for the reason [`write_methods`] gives.
+    let address = Allocator::alloc(core, WIPIC_TABLE_FUNCTIONS as u32 * 4)?;
     write_generic(core, address, kernel_interface)?;
+
+    for index in (size_of_val(&kernel_interface) / 4) as u16..WIPIC_TABLE_FUNCTIONS {
+        let stub = core.make_svc_stub(crate::runtime::SVC_CATEGORY_WIPIC, WIPICTableId::Kernel.function_id(index))?;
+
+        write_generic(core, address + index as u32 * 4, stub)?;
+    }
 
     Ok(address)
 }
 
-fn write_interface<T: Pod>(context: &mut dyn WIPICContext, interface: T) -> Result<u32> {
-    let address = context.alloc_raw(size_of_val(&interface) as u32)?;
+/// Writes an interface whose functions are a named struct rather than a list.
+///
+/// The struct is still an array of function pointers as far as the guest is
+/// concerned, so it gets a full table's worth of room and its own slots are
+/// followed by stubs for the rest - see [`write_methods`].
+fn write_interface<T: Pod>(core: &mut ArmCore, context: &mut dyn WIPICContext, table_id: WIPICTableId, interface: T) -> Result<u32> {
+    let address = context.alloc_raw(WIPIC_TABLE_FUNCTIONS as u32 * 4)?;
     write_generic(context, address, interface)?;
+
+    write_stubs(core, context, table_id, address, (size_of_val(&interface) / 4) as u16)?;
 
     Ok(address)
 }
@@ -49,23 +75,23 @@ pub async fn get_wipic_interfaces(core: &mut ArmCore, context: &mut dyn WIPICCon
     let graphics_interface = get_graphics_interface(core)?;
     let database_interface = get_database_interface(core)?;
 
-    let util_interface = write_methods(core, context, WIPICTableId::Util, method_table::get_util_method_table())?;
-    let misc_interface = write_methods(core, context, WIPICTableId::Misc, method_table::get_misc_method_table())?;
-    let graphics_interface = write_interface(context, graphics_interface)?;
-    let interface_3 = write_methods(core, context, WIPICTableId::Interface3, method_table::get_unk3_method_table())?;
-    let interface_4 = write_methods(core, context, WIPICTableId::Interface4, method_table::get_stub_method_table(4))?;
-    let interface_5 = write_methods(core, context, WIPICTableId::Interface5, method_table::get_stub_method_table(5))?;
-    let database_interface = write_interface(context, database_interface)?;
-    let interface_7 = write_methods(core, context, WIPICTableId::Interface7, method_table::get_stub_method_table(7))?;
-    let uic_interface = write_methods(core, context, WIPICTableId::Uic, method_table::get_uic_method_table())?;
-    let media_interface = write_methods(core, context, WIPICTableId::Media, method_table::get_media_method_table())?;
-    let net_interface = write_methods(core, context, WIPICTableId::Net, method_table::get_net_method_table())?;
-    let interface_11 = write_methods(core, context, WIPICTableId::Interface11, method_table::get_stub_method_table(11))?;
-    let interface_12 = write_methods(core, context, WIPICTableId::Interface12, method_table::get_unk12_method_table())?;
-    let interface_13 = write_methods(core, context, WIPICTableId::Interface13, method_table::get_stub_method_table(13))?;
-    let interface_14 = write_methods(core, context, WIPICTableId::Interface14, method_table::get_stub_method_table(14))?;
-    let interface_15 = write_methods(core, context, WIPICTableId::Interface15, method_table::get_stub_method_table(15))?;
-    let interface_16 = write_methods(core, context, WIPICTableId::Interface16, method_table::get_stub_method_table(16))?;
+    let util_interface = write_methods(core, context, WIPICTableId::Util)?;
+    let misc_interface = write_methods(core, context, WIPICTableId::Misc)?;
+    let graphics_interface = write_interface(core, context, WIPICTableId::Graphics, graphics_interface)?;
+    let interface_3 = write_methods(core, context, WIPICTableId::Interface3)?;
+    let interface_4 = write_methods(core, context, WIPICTableId::Interface4)?;
+    let interface_5 = write_methods(core, context, WIPICTableId::Interface5)?;
+    let database_interface = write_interface(core, context, WIPICTableId::Database, database_interface)?;
+    let interface_7 = write_methods(core, context, WIPICTableId::Interface7)?;
+    let uic_interface = write_methods(core, context, WIPICTableId::Uic)?;
+    let media_interface = write_methods(core, context, WIPICTableId::Media)?;
+    let net_interface = write_methods(core, context, WIPICTableId::Net)?;
+    let interface_11 = write_methods(core, context, WIPICTableId::Interface11)?;
+    let interface_12 = write_methods(core, context, WIPICTableId::Interface12)?;
+    let interface_13 = write_methods(core, context, WIPICTableId::Interface13)?;
+    let interface_14 = write_methods(core, context, WIPICTableId::Interface14)?;
+    let interface_15 = write_methods(core, context, WIPICTableId::Interface15)?;
+    let interface_16 = write_methods(core, context, WIPICTableId::Interface16)?;
 
     let interface = WIPICInterface {
         util_interface,

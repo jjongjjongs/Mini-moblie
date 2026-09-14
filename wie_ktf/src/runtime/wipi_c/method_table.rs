@@ -23,6 +23,39 @@ fn gen_stub(id: WIPICWord, name: &'static str) -> WIPICMethodBody {
     body.into_body()
 }
 
+/// How many functions every WIPI C interface table holds.
+///
+/// A table is an array of function pointers in guest memory and the guest
+/// indexes it directly, so a table written only as long as the functions we
+/// serve is a table a title can index past: it reads a word that was never a
+/// function, branches to it, and the run ends on whatever that word happened to
+/// be. 데몬헌터 does exactly that - it asks the net table for slot 30, one past
+/// `MC_netHttpClose`, and read a zero there, so the authentication attempt
+/// faulted at `pc = 0` with nothing in the log to say which call it was.
+///
+/// So every table is this long whatever we have written for it, and the slots
+/// past the end answer [`gen_missing`]. The number is the reference's, whose
+/// largest original interface is the graphics table, well under it.
+pub const WIPIC_TABLE_FUNCTIONS: u16 = 64;
+
+/// The answer a table slot gives when the original interface had a function
+/// there and this runtime has none.
+///
+/// It is a refusal rather than a fault, because a WIPI C call that cannot be
+/// served has a documented way to say so and a game's own error path is written
+/// for it. The line it logs names the table and the slot, which is the only
+/// place either number is ever written down: the guest reaches a function
+/// through an array index, so no name for it appears in its own code.
+fn gen_missing(table_id: WIPICTableId, function_id: u16) -> WIPICMethodBody {
+    let body = move |_: &mut dyn WIPICContext| async move {
+        tracing::warn!("unserved WIPIC table {} function {}", table_id as u32, function_id);
+
+        Ok::<i32, WieError>(-1)
+    };
+
+    body.into_body()
+}
+
 pub fn get_kernel_interface(core: &mut ArmCore) -> Result<WIPICKnlInterface> {
     let table_id = WIPICTableId::Kernel;
 
@@ -337,6 +370,9 @@ pub fn get_net_method_table() -> Vec<WIPICMethodBody> {
         net::http_get_type.into_body(),
         net::http_get_encoding.into_body(),
         net::http_close.into_body(),
+        // The carrier's own additions to the table start here; see
+        // `net::socket_connect_by_name`.
+        net::socket_connect_by_name.into_body(),
     ]
 }
 
@@ -363,11 +399,16 @@ pub fn get_unk12_method_table() -> Vec<WIPICMethodBody> {
     vec![gen_unk_stub(12, 0), gen_unk_stub(12, 1), gen_unk_stub(12, 2)]
 }
 
-pub fn get_stub_method_table(interface: WIPICWord) -> Vec<WIPICMethodBody> {
-    (0..64).map(|_| gen_stub(interface, "stub")).collect::<Vec<_>>()
+pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPICMethodBody> {
+    if function_id >= WIPIC_TABLE_FUNCTIONS {
+        return None;
+    }
+
+    Some(get_served_method_body(table_id, function_id).unwrap_or_else(|| gen_missing(table_id, function_id)))
 }
 
-pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPICMethodBody> {
+/// The body this runtime has written for a slot, if it has written one.
+fn get_served_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPICMethodBody> {
     match table_id {
         WIPICTableId::Kernel => match WIPICKernelMethodId::try_from(function_id).ok()? {
             WIPICKernelMethodId::Printk => Some(kernel::printk.into_body()),
@@ -580,5 +621,56 @@ pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPIC
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TABLES: [WIPICTableId; 18] = [
+        WIPICTableId::Kernel,
+        WIPICTableId::Util,
+        WIPICTableId::Misc,
+        WIPICTableId::Graphics,
+        WIPICTableId::Interface3,
+        WIPICTableId::Interface4,
+        WIPICTableId::Interface5,
+        WIPICTableId::Database,
+        WIPICTableId::Interface7,
+        WIPICTableId::Uic,
+        WIPICTableId::Media,
+        WIPICTableId::Net,
+        WIPICTableId::Interface11,
+        WIPICTableId::Interface12,
+        WIPICTableId::Interface13,
+        WIPICTableId::Interface14,
+        WIPICTableId::Interface15,
+        WIPICTableId::Interface16,
+    ];
+
+    #[test]
+    fn every_slot_a_table_hands_out_has_something_behind_it() {
+        for table_id in TABLES {
+            for function_id in 0..WIPIC_TABLE_FUNCTIONS {
+                assert!(
+                    get_method_body(table_id, function_id).is_some(),
+                    "table {} function {function_id} has no body, so its slot would be a zero to branch to",
+                    table_id as u32
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_slot_the_demon_hunter_authenticates_through_is_served() {
+        // Net slot 30 is the named connect its authentication calls; a refusal
+        // there is a title that waits for a callback it will never get.
+        assert!(get_served_method_body(WIPICTableId::Net, 30).is_some());
+    }
+
+    #[test]
+    fn nothing_answers_past_the_end_of_a_table() {
+        assert!(get_method_body(WIPICTableId::Net, WIPIC_TABLE_FUNCTIONS).is_none());
     }
 }
