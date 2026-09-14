@@ -7324,15 +7324,28 @@ fn lgt_local_guardian_slave_response(request: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    // Eighteen, so that byte seventeen is there to be read.
+    // The library reads the answer twice over, and both readings have to land
+    // on the same verdict.
+    //
+    // The first byte after the header is the verdict itself: the parser takes
+    // the word the body opens with, keeps its lowest byte, and writes
+    // `byte != 0` into the flag the shop's message drawer reads. Zero there is
+    // exactly the 월구매한도 refusal, so the body has to open with something.
+    const GRANTED: u8 = 1;
+    /// The byte the header ends with says why a purchase was turned away;
+    /// 0x0c is the one behind `펌웨어 업그레이드 이후 사용하세요`.
+    const NO_COMPLAINT: u8 = 0;
+    /// Eighteen, so that byte seventeen - the one the second reading takes -
+    /// is there, and zero, which that reading also takes as granted.
     const GRANTED_BODY: usize = 18;
 
     let mut response = Vec::from(MAGIC);
     response.extend_from_slice(&((HEADER + GRANTED_BODY) as u16).to_le_bytes());
     response.extend_from_slice(&CHANNEL.to_le_bytes());
     response.push(PURCHASE_TYPE);
-    response.push(0);
+    response.push(NO_COMPLAINT);
     response.resize(HEADER + GRANTED_BODY, 0);
+    response[HEADER] = GRANTED;
 
     Some(response)
 }
@@ -7482,10 +7495,18 @@ mod tests {
         assert_eq!(u16::from_le_bytes([reply[2], reply[3]]) as usize, reply.len());
         assert_eq!(&reply[4..8], &[0x02, 0x00, 0x07, 0x00]);
 
-        // And what the parser at 0x4f55c reads: payload byte seventeen, which is
-        // zero for a purchase that went through, and a `u16` at payload four
-        // that is not `IC`.
+        // The byte the header ends with is the one 0x4ef14 reads as a complaint;
+        // 0x0c there is the firmware refusal.
+        assert_ne!(reply[7], 0x0c);
+
+        // And the verdict itself, which that parser takes from the word the
+        // payload opens with: it writes `byte != 0` into the flag the shop's
+        // message drawer reads, and a zero there is the 월구매한도 refusal.
         let payload = &reply[8..];
+        assert_ne!(payload[0], 0, "a zero here is read as the monthly limit turning the purchase away");
+
+        // The parser that runs a phase later reads payload byte seventeen and a
+        // `u16` at payload four, and wants the byte zero and the word not `IC`.
         assert!(payload.len() > 17, "byte seventeen has to be there to be read");
         assert_eq!(payload[17], 0);
         assert_ne!(&payload[4..6], b"IC");
