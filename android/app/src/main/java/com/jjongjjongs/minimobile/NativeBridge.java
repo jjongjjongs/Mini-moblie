@@ -47,6 +47,13 @@ final class NativeBridge {
     static native String nativeLastError();
 
     /**
+     * Whether the run that just ended was the title ending itself - a WIPI
+     * title calls MC_knlExit and the platform takes the screen back - rather
+     * than something going wrong. Only meaningful once nativeRunning() is 0.
+     */
+    static native int nativeExitedByTitle();
+
+    /**
      * @param index   key index, matching the keypad laid out in MainActivity
      * @param pressed 1 for down, 0 for up
      */

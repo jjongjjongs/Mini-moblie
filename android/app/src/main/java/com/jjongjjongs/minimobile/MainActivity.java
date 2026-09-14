@@ -1312,6 +1312,22 @@ public final class MainActivity extends Activity {
 
         if (NativeBridge.nativeRunning() == 0) {
             running = false;
+
+            // A title that ends itself is not a title that broke. Several here
+            // do it as part of working normally: 데몬헌터 builds its data on a
+            // first run, asks to be started again and exits when the player
+            // presses OK, and the run after that goes on to the game. Taking
+            // the player back to the library is what the handset did, and it is
+            // what makes "start it again" something they can just do. Nothing
+            // went wrong, so nothing is saved.
+            if (NativeBridge.nativeExitedByTitle() != 0) {
+                runOnUiThread(() -> {
+                    Toast.makeText(this, "게임이 종료되었습니다.", Toast.LENGTH_SHORT).show();
+                    exitGameToLibrary();
+                });
+                return;
+            }
+
             String error = NativeBridge.nativeLastError();
             runOnUiThread(() -> playerStatus.setText(error.isEmpty() ? "게임 실행이 중단되었습니다." : "실행 중단: " + error));
             // Already on the emulator thread; save before the log can be lost.

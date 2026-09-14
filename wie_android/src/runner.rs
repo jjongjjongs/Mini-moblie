@@ -105,11 +105,22 @@ struct Instance {
 pub struct Runner {
     instance: Option<Instance>,
     last_error: String,
+    /// Whether the run that just ended was the title's own doing.
+    ///
+    /// A WIPI title ends itself: it calls `MC_knlExit` and the platform takes
+    /// the screen back. Several here do it as part of working normally -
+    /// 데몬헌터 builds its data on a first run, says "please start the program
+    /// again", and exits when the player presses OK; the run after that goes on
+    /// to the game. A fault that stops the emulator looks the same from the
+    /// outside - the game is no longer running - and it is not the same thing:
+    /// one is worth a saved log and a message, the other is worth neither.
+    exited_by_title: bool,
 }
 
 static RUNNER: Mutex<Runner> = Mutex::new(Runner {
     instance: None,
     last_error: String::new(),
+    exited_by_title: false,
 });
 
 pub fn with_runner<T>(f: impl FnOnce(&mut Runner) -> T) -> T {
@@ -155,11 +166,13 @@ impl Runner {
                     pending_input: VecDeque::new(),
                 });
                 self.last_error.clear();
+                self.exited_by_title = false;
 
                 String::new()
             }
             Err(error) => {
                 self.last_error = error.clone();
+                self.exited_by_title = false;
 
                 error
             }
@@ -174,6 +187,9 @@ impl Runner {
         }
 
         self.instance = None;
+        // The player asked for this one, so there is nothing for the caller to
+        // tell them about it.
+        self.exited_by_title = false;
     }
 
     pub fn is_running(&self) -> bool {
@@ -182,6 +198,11 @@ impl Runner {
 
     pub fn last_error(&self) -> String {
         self.last_error.clone()
+    }
+
+    /// Whether the title ended the run itself. See [`Runner::exited_by_title`].
+    pub fn exited_by_title(&self) -> bool {
+        self.exited_by_title
     }
 
     /// Runs the emulator for up to `budget`. Returns a status line for the
@@ -210,6 +231,7 @@ impl Runner {
                 tracing::error!("Emulator stopped: {message}");
 
                 self.last_error = message.clone();
+                self.exited_by_title = false;
                 instance.shared.mixer().silence();
                 self.instance = None;
 
@@ -220,6 +242,10 @@ impl Runner {
                 tracing::info!("Application exited");
 
                 self.last_error.clear();
+                self.exited_by_title = true;
+                // As on every other path out: a sequence the title left playing
+                // would otherwise go on sounding over the library.
+                instance.shared.mixer().silence();
                 self.instance = None;
 
                 return String::new();

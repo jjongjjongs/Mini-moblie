@@ -164,6 +164,20 @@ pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativ
     guard_string(&env, || with_runner(|runner| runner.last_error()))
 }
 
+/// `nativeExitedByTitle() -> int`
+///
+/// Whether the run that just ended was the title ending itself rather than
+/// something going wrong. Only meaningful once `nativeRunning` says zero.
+///
+/// # Safety
+/// Called by the JVM with a valid `env` reference.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativeExitedByTitle(_env: JNIEnv, _class: JClass) -> jint {
+    std::panic::catch_unwind(AssertUnwindSafe(|| with_runner(|runner| runner.exited_by_title())))
+        .unwrap_or(false)
+        .into()
+}
+
 /// `nativeKey(int index, int pressed)`
 ///
 /// Called from the UI thread; the event is queued and applied on the next
