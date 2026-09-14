@@ -35,8 +35,12 @@ pub struct KtfEmulator {
     core: ArmCore,
     system: System,
     /// What the LCD held the last time it was presented, so an unchanged frame
-    /// is not painted again. See [`KtfEmulator::present_lcd`].
-    lcd_digest: u64,
+    /// is not painted again. `None` until the first look. See
+    /// [`KtfEmulator::present_lcd`].
+    lcd_digest: Option<u64>,
+    /// What the last look saw, so a frame is only shown once it has stopped
+    /// changing. See [`KtfEmulator::present_lcd`].
+    lcd_seen: Option<u64>,
 }
 
 impl KtfEmulator {
@@ -100,7 +104,12 @@ impl KtfEmulator {
 
         system.spawn(async move || Self::start(&mut core_clone, &mut system_clone, jar_filename_clone, main_class_name).await);
 
-        Ok(Self { core, system, lcd_digest: 0 })
+        Ok(Self {
+            core,
+            system,
+            lcd_digest: None,
+            lcd_seen: None,
+        })
     }
 
     #[tracing::instrument(name = "start", skip_all)]
@@ -171,7 +180,26 @@ impl KtfEmulator {
             word[..chunk.len()].copy_from_slice(chunk);
             digest = (digest ^ u64::from_le_bytes(word)).wrapping_mul(0x1000_0000_01b3);
         }
-        if digest == self.lcd_digest {
+
+        // The buffer holds whatever the heap left there until the title draws -
+        // `Allocator::alloc` does not zero - and that is not a frame. The first
+        // look is the baseline, shown to nobody, so the mostly-black noise a
+        // fresh allocation carries never reaches the screen.
+        let Some(shown) = self.lcd_digest else {
+            self.lcd_digest = Some(digest);
+            self.lcd_seen = Some(digest);
+            return;
+        };
+        if digest == shown {
+            return;
+        }
+
+        // Nothing says when the engine has finished a frame, and a tick can land
+        // in the middle of one. Waiting for the content to stop changing before
+        // showing it costs a tick and is what keeps a half-drawn frame off the
+        // screen.
+        if self.lcd_seen != Some(digest) {
+            self.lcd_seen = Some(digest);
             return;
         }
 
@@ -179,14 +207,14 @@ impl KtfEmulator {
         // over whatever the Java layer put on the screen.
         let first = &bytes[..2.min(bytes.len())];
         if bytes.chunks(2).all(|x| x == first) {
-            self.lcd_digest = digest;
+            self.lcd_digest = Some(digest);
             return;
         }
 
         let image = VecImageBuffer::<Rgb565Pixel>::from_raw(width, height, pod_collect_to_vec(&bytes));
         self.system.set_title_drives_lcd();
         self.system.platform().screen().paint(&image);
-        self.lcd_digest = digest;
+        self.lcd_digest = Some(digest);
     }
 }
 
