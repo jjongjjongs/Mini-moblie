@@ -47,8 +47,16 @@ pub const WIPIC_TABLE_FUNCTIONS: u16 = 64;
 /// place either number is ever written down: the guest reaches a function
 /// through an array index, so no name for it appears in its own code.
 fn gen_missing(table_id: WIPICTableId, function_id: u16) -> WIPICMethodBody {
-    let body = move |_: &mut dyn WIPICContext| async move {
-        tracing::warn!("unserved WIPIC table {} function {}", table_id as u32, function_id);
+    // The first four argument registers, whatever the function's real arity is.
+    // A guest reaches these by index, so the number is all a log would otherwise
+    // have to say about a call nobody has identified yet - and the registers are
+    // what tells you which function it is: a descriptor and a buffer read as a
+    // write, a descriptor alone as a close.
+    let body = move |_: &mut dyn WIPICContext, a0: WIPICWord, a1: WIPICWord, a2: WIPICWord, a3: WIPICWord| async move {
+        tracing::warn!(
+            "unserved WIPIC table {} function {function_id}({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})",
+            table_id as u32
+        );
 
         Ok::<i32, WieError>(-1)
     };
