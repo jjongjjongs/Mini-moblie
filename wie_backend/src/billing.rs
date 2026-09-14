@@ -7266,6 +7266,62 @@ const ALBATYCOON2_PLATFORM: &[u8] = b"\tWIPIC";
 /// its siblings (`SGOK`, `GGOK`, `APOK`, `SMOK`) are shaped like.
 const ALBATYCOON2_GRANTED: &[u8] = b"IROK";
 
+/// 가디언슬레이브 buying coins, answered so the exchange finishes.
+///
+/// Its frames open with `KP` and eight bytes of header, laid out by the builder
+/// at 0x4ee1c: the magic, the whole frame's length little end first, a `u16`
+/// every request carries as 2, the request's type, and a zero. A purchase is
+/// type 7 and carries twenty-eight bytes behind that - the subscriber, the
+/// product code, and the price in won:
+///
+///   4b 50 24 00 02 00 07 00
+///   "01046119269" 00  "0002A1B1002" 00  54 0b 00 00
+///
+/// which is `0002A1B1002` at 2900 won, one of the four its sender at 0x4736c
+/// picks between.
+///
+/// What comes back it does not read. The receive dispatcher at 0x47b04 takes the
+/// type from its own state and hands 7 to 0x4740c, and that clears two buffers
+/// and closes the exchange without touching the answer; what moves the title on
+/// is the read succeeding at all - its callback at 0x4eacc turns a read of more
+/// than nothing into the state the screen shows `구매 성공..` for. The library's
+/// own check, at 0x4edfc, wants the magic and eight bytes.
+///
+/// So the answer is that header and nothing else, carrying the request's own
+/// type back. The other types on this socket are left alone: their handlers do
+/// read what they are sent, and an empty answer would be read as content.
+fn lgt_local_guardian_slave_response(request: &[u8]) -> Option<Vec<u8>> {
+    /// The magic, and the header every frame opens with.
+    const MAGIC: &[u8] = b"KP";
+    const HEADER: usize = 8;
+
+    /// The `u16` at +4, which every request this title sends carries as 2.
+    const CHANNEL: u16 = 2;
+    /// A purchase, and what it carries: two twelve-byte strings and the price.
+    const PURCHASE_TYPE: u8 = 7;
+    const PURCHASE_BODY: usize = 12 + 12 + 4;
+
+    if request.len() != HEADER + PURCHASE_BODY || !request.starts_with(MAGIC) {
+        return None;
+    }
+
+    if u16::from_le_bytes([request[2], request[3]]) as usize != request.len() {
+        return None;
+    }
+
+    if u16::from_le_bytes([request[4], request[5]]) != CHANNEL || request[6] != PURCHASE_TYPE || request[7] != 0 {
+        return None;
+    }
+
+    let mut response = Vec::from(MAGIC);
+    response.extend_from_slice(&(HEADER as u16).to_le_bytes());
+    response.extend_from_slice(&CHANNEL.to_le_bytes());
+    response.push(PURCHASE_TYPE);
+    response.push(0);
+
+    Some(response)
+}
+
 pub fn response(request: &[u8]) -> Option<Vec<u8>> {
     lgt_local_granted_response(request)
         .or_else(|| lgt_local_cash_response(request))
@@ -7297,6 +7353,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_nomzero_response(request))
         .or_else(|| lgt_local_destroyer_response(request))
         .or_else(|| lgt_local_albatycoon2_response(request))
+        .or_else(|| lgt_local_guardian_slave_response(request))
 }
 
 #[cfg(test)]
@@ -7385,6 +7442,49 @@ mod tests {
         let body = &reply[5..];
         assert_eq!(body[0], 0);
         assert_eq!(u16::from_be_bytes([body[1], body[2]]) as usize, body.len() - 3);
+    }
+
+    /// 가디언슬레이브 buying `0002A1B1002` for 2900 won, off the wire.
+    const GUARDIAN_SLAVE_PURCHASE: [u8; 36] = [
+        0x4b, 0x50, // KP
+        0x24, 0x00, // the whole frame, little end first
+        0x02, 0x00, // the u16 every request carries as 2
+        0x07, 0x00, // a purchase, and the byte behind it
+        0x30, 0x31, 0x30, 0x34, 0x36, 0x31, 0x31, 0x39, 0x32, 0x36, 0x39, 0x00, // 01046119269
+        0x30, 0x30, 0x30, 0x32, 0x41, 0x31, 0x42, 0x31, 0x30, 0x30, 0x32, 0x00, // 0002A1B1002
+        0x54, 0x0b, 0x00, 0x00, // 2900 won
+    ];
+
+    /// The header its library checks for, carrying the request's own type back.
+    /// Its handler reads nothing behind that, so there is nothing behind it.
+    #[test]
+    fn 가디언슬레이브s_purchase_is_answered() {
+        let reply = response(&GUARDIAN_SLAVE_PURCHASE).expect("the purchase is answered");
+
+        assert_eq!(&reply, b"KP\x08\x00\x02\x00\x07\x00");
+
+        // What its library checks, at 0x4edfc: the magic, and eight bytes to
+        // find a payload past.
+        assert!(reply.starts_with(b"KP"));
+        assert_eq!(u16::from_le_bytes([reply[2], reply[3]]) as usize, reply.len());
+        assert_eq!(reply.len(), 8);
+    }
+
+    /// The other types on that socket read what they are sent, so an answer of
+    /// this shape would be read as content. They are left alone.
+    #[test]
+    fn 가디언슬레이브s_other_frames_are_left_alone() {
+        let mut other = GUARDIAN_SLAVE_PURCHASE;
+        other[6] = 5;
+
+        assert_eq!(response(&other), None);
+
+        // And a frame whose length word disagrees with what arrived is not one
+        // of these at all.
+        let mut short = GUARDIAN_SLAVE_PURCHASE;
+        short[2] = 0x23;
+
+        assert_eq!(response(&short), None);
     }
 
     /// 알바타이쿤2's 인증 record, captured off its billing socket.
