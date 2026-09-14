@@ -2029,6 +2029,19 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
     /// The library's type `5`, which carries nothing and is answered in kind.
     const SIGNAL_OPCODE: u8 = 0x01;
 
+    /// 퀸스크라운's attach, the one frame between its session and its licence.
+    ///
+    /// Its sender at 0x47044 asks under a service of its own - 1038, where the
+    /// session it just opened was 1017 - and its body is that number and nothing
+    /// else. The answer's reader at 0x46ddc takes a single byte, and the screen
+    /// it is on decides what becomes of it: on 0x3c, which is where a launch
+    /// sits, it goes straight to 0x46d3c and sends the licence request this
+    /// already answers, whatever the byte said. The title's own forge screen
+    /// uses the same pair, and there the byte is a verdict - `2` is the one it
+    /// prints `제련에 성공하였습니다` for.
+    const ATTACH_OPCODE: u8 = 0x1a;
+    const ATTACHED: u8 = 2;
+
     /// What 슈퍼액션히어로3 sends once its session is open, and `0x48c5c` reads
     /// the answer of.
     const REPORT_OPCODE: u8 = 0x32;
@@ -2077,6 +2090,10 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
             (SESSION_OPCODE, Vec::new())
         }
         SIGNAL_OPCODE if body.is_empty() => (SIGNAL_OPCODE, Vec::new()),
+        // The service it names is not weighed against anything: the answer's
+        // reader never looks at it, and the session that came before it is what
+        // said which title this is.
+        ATTACH_OPCODE if body.len() == 2 => (ATTACH_OPCODE, alloc::vec![ATTACHED]),
         // Whatever it carries, its answer is the one `u32` `0x48c5c` takes.
         REPORT_OPCODE if !body.is_empty() => (REPORT_OPCODE, Vec::from(0u32.to_be_bytes())),
         // The verdict, and a string behind its length - which the title keeps
@@ -7243,6 +7260,36 @@ mod tests {
     use alloc::{vec, vec::Vec};
 
     use super::*;
+
+    /// What 퀸스크라운 sends between its session and its licence, off the wire.
+    const QUEENS_CROWN_ATTACH: [u8; 7] = [
+        0x00, 0x07, // the frame's length
+        0x00, 0x1a, 0x00, // the opcode, between the two bytes written clear
+        0x04, 0x0e, // the service it asks under: 1038
+    ];
+
+    /// The frame that stood between 퀸스크라운 and its licence check. Its reader
+    /// takes one byte, so the answer carries one.
+    #[test]
+    fn 퀸스크라운s_attach_is_answered() {
+        let reply = response(&QUEENS_CROWN_ATTACH).expect("the attach is answered");
+
+        assert_eq!(u16::from_be_bytes([reply[0], reply[1]]) as usize, reply.len());
+        assert_eq!(&reply[..5], &[0x00, 0x06, 0x00, 0x1a, 0x00]);
+        assert_eq!(reply[5], 2, "the byte its own forge screen prints 제련에 성공하였습니다 for");
+    }
+
+    /// Its session opens on 1017, which this already served, and the attach is
+    /// the frame that came after - so the two together are the launch.
+    #[test]
+    fn 퀸스크라운s_session_opens_before_its_attach() {
+        let mut session = alloc::vec![0x00, 0x49, 0x00, 0x00, 0x00, 0x03, 0xf9];
+        session.resize(0x49, 0);
+
+        let reply = response(&session).expect("the session is answered");
+
+        assert_eq!(&reply, &[0x00, 0x05, 0x00, 0x00, 0x00]);
+    }
 
     /// 알바타이쿤2's 인증 record, captured off its billing socket.
     const ALBATYCOON2_AUTH: [u8; 44] = [
