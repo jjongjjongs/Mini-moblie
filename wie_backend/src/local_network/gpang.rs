@@ -35,10 +35,26 @@
 //! written down, and a title only sends what it has - those bytes are visible
 //! nowhere else.
 //!
-//! 데몬헌터's shop reads before it writes, so it is the greeting it never gets
-//! rather than an answer: it connects, reads, finds nothing, registers a read
-//! callback through net slot 13 and waits. Its authentication wrote first and
-//! read afterwards, which is why that one never noticed.
+//! The shop is not framed the way the authentication is, and its own state
+//! machine at 0x12aa84 is what says so. It runs on a halfword at its object's
+//! +4, and the states it steps through are:
+//!
+//!   3  waits, then converts its server and connects (net slot 30)
+//!   4  waits for the connect callback's byte at the socket's +9, picks its
+//!      request by a command code at +0x20 - 100, 200, 300, 500, 1000, 2000 -
+//!      builds it, and writes it through net slot 31
+//!   5  reads exactly **two** bytes and runs them through `MC_utilNtohs`
+//!   6  reads that many more
+//!
+//! So a shop frame is `[u16 length][payload]`, where an authentication frame is
+//! `[u32 length][payload]`. Reading the shop's request as the wider one is
+//! reading a length of tens of millions and waiting for a frame that never
+//! finishes, which is why a capture of a purchase showed the connection taken
+//! and nothing sent on it. The bytes were arriving the whole time.
+//!
+//! Hence this writes the shop's bytes down as they arrive rather than framing
+//! them. The frame's shape here is read off the title's code, and code is what a
+//! title does, not what it sends; the bytes are the thing itself.
 
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 
@@ -97,8 +113,11 @@ impl LocalEndpoint for GpangEndpoint {
         // can serve that exchange, whichever way round the title runs it. The
         // connection is taken all the same, to write down whatever the title
         // sends.
+        let authentication = port == AUTHENTICATION_PORT;
+
         Box::new(GpangConnection {
-            unanswerable: port != AUTHENTICATION_PORT,
+            authentication,
+            unanswerable: !authentication,
             ..Default::default()
         })
     }
@@ -106,6 +125,9 @@ impl LocalEndpoint for GpangEndpoint {
 
 #[derive(Default)]
 struct GpangConnection {
+    /// Whether this is the authentication's connection, which is the one whose
+    /// framing is known and whose request is answered.
+    authentication: bool,
     /// What the title has sent that is not yet a complete frame.
     request: Vec<u8>,
     /// What is left to hand back.
@@ -144,6 +166,15 @@ impl GpangConnection {
 
 impl LocalConnection for GpangConnection {
     fn write(&mut self, bytes: &[u8]) {
+        if !self.authentication {
+            // Written down as it arrives, for the reason the module gives: what
+            // this connection's frames look like is read off the title's code,
+            // and the bytes are what would prove it.
+            tracing::info!("gpang: shop sent {} bytes\n{}", bytes.len(), hex_dump(bytes));
+
+            return;
+        }
+
         self.request.extend_from_slice(bytes);
 
         while let Some(payload) = self.take_frame() {
@@ -326,4 +357,22 @@ mod tests {
         assert!(!endpoint.accepts("socket", "222.237.78.176", AUTHENTICATION_PORT));
         assert!(!endpoint.accepts("http", GPANG_HOST, AUTHENTICATION_PORT));
     }
+}
+
+/// Sixteen bytes to a line, hex then printable ASCII - the shape every other
+/// dump in this project reads in.
+fn hex_dump(bytes: &[u8]) -> String {
+    let mut out = String::new();
+
+    for (index, chunk) in bytes.chunks(16).enumerate() {
+        let hex: Vec<String> = chunk.iter().map(|byte| format!("{byte:02x}")).collect();
+        let text: String = chunk
+            .iter()
+            .map(|&byte| if (0x20..0x7f).contains(&byte) { char::from(byte) } else { '.' })
+            .collect();
+
+        out.push_str(&format!("  {:04x}  {:<47}  {text}\n", index * 16, hex.join(" ")));
+    }
+
+    out
 }
