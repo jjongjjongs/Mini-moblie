@@ -2042,6 +2042,30 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
     const ATTACH_OPCODE: u8 = 0x1a;
     const ATTACHED: u8 = 2;
 
+    /// The gate its network notice sits behind, sent from screen 0x3d - the one
+    /// its `[네트워크 서비스이용약관] ... 약관에 동의 및 네트워크에 접속하시겠습니까?`
+    /// screen asks under. That text is the title's own, at 0x5b874; what crosses
+    /// the wire is only this.
+    ///
+    /// The reader at 0x46fe8 takes one byte and goes on from **zero alone** - it
+    /// sends the frame below - where anything else opens the screen whose entry
+    /// at 0x62488 is null. So zero is not a choice here, it is the only answer
+    /// that is one.
+    const GATE_OPCODE: u8 = 0x1e;
+    const PASSED: u8 = 0;
+
+    /// What the gate sends next, and the only frame in this family whose answer
+    /// carries more than a byte. The reader at 0x46e54 takes a byte it keeps at
+    /// 0x151a3e8, a `u16`, and that many bytes of text, which it copies into the
+    /// 300-byte buffer at 0x151a414 and shows - anything longer it allocates for
+    /// and cuts to 299.
+    ///
+    /// The text is a notice from a server that is gone, and none of it is
+    /// knowable from here, so the answer carries none: an empty notice claims
+    /// nothing, where an invented one would be the title's own words for
+    /// something nobody said.
+    const NOTICE_OPCODE: u8 = 0x15;
+
     /// What 슈퍼액션히어로3 sends once its session is open, and `0x48c5c` reads
     /// the answer of.
     const REPORT_OPCODE: u8 = 0x32;
@@ -2090,10 +2114,16 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
             (SESSION_OPCODE, Vec::new())
         }
         SIGNAL_OPCODE if body.is_empty() => (SIGNAL_OPCODE, Vec::new()),
-        // The service it names is not weighed against anything: the answer's
-        // reader never looks at it, and the session that came before it is what
-        // said which title this is.
+        // The service each of these names is not weighed against anything: the
+        // answers' readers never look at it, and the session that came before is
+        // what said which title this is.
         ATTACH_OPCODE if body.len() == 2 => (ATTACH_OPCODE, alloc::vec![ATTACHED]),
+        GATE_OPCODE if body.len() == 2 => (GATE_OPCODE, alloc::vec![PASSED]),
+        NOTICE_OPCODE if body.len() == 2 => {
+            let mut answer = alloc::vec![0u8];
+            answer.extend_from_slice(&0u16.to_be_bytes());
+            (NOTICE_OPCODE, answer)
+        }
         // Whatever it carries, its answer is the one `u32` `0x48c5c` takes.
         REPORT_OPCODE if !body.is_empty() => (REPORT_OPCODE, Vec::from(0u32.to_be_bytes())),
         // The verdict, and a string behind its length - which the title keeps
@@ -7289,6 +7319,37 @@ mod tests {
         let reply = response(&session).expect("the session is answered");
 
         assert_eq!(&reply, &[0x00, 0x05, 0x00, 0x00, 0x00]);
+    }
+
+    /// The gate 퀸스크라운 sends from its 약관 screen, off the wire. Same shape
+    /// as the attach, a different opcode.
+    const QUEENS_CROWN_GATE: [u8; 7] = [0x00, 0x07, 0x00, 0x1e, 0x00, 0x04, 0x0e];
+
+    /// Zero is the only byte its reader goes on from - anything else opens a
+    /// screen whose table entry is null - so the answer is not a choice.
+    #[test]
+    fn 퀸스크라운s_gate_is_passed() {
+        let reply = response(&QUEENS_CROWN_GATE).expect("the gate is answered");
+
+        assert_eq!(&reply, &[0x00, 0x06, 0x00, 0x1e, 0x00, 0x00]);
+    }
+
+    /// What the gate sends next carries a notice: a byte, a length, and that
+    /// many bytes of text. The server that had the text is gone, so the length
+    /// is zero - an empty notice says nothing, where an invented one would put
+    /// words in the title's mouth.
+    #[test]
+    fn 퀸스크라운s_notice_is_answered_empty() {
+        let request = [0x00, 0x07, 0x00, 0x15, 0x00, 0x04, 0x0e];
+        let reply = response(&request).expect("the notice is answered");
+
+        assert_eq!(&reply, &[0x00, 0x08, 0x00, 0x15, 0x00, 0x00, 0x00, 0x00]);
+
+        // The shape its reader at 0x46e54 takes: a byte, then a length, then
+        // that many bytes - none here, and the frame ends where it says it does.
+        let body = &reply[5..];
+        assert_eq!(body[0], 0);
+        assert_eq!(u16::from_be_bytes([body[1], body[2]]) as usize, body.len() - 3);
     }
 
     /// 알바타이쿤2's 인증 record, captured off its billing socket.
