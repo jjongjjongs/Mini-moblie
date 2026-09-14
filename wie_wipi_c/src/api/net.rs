@@ -43,6 +43,15 @@ struct SocketCallbacks {
     read_context: WIPICWord,
     write_callback: WIPICWord,
     write_context: WIPICWord,
+    /// Whether this socket has been told it may write since its write callback
+    /// was last set.
+    ///
+    /// A platform socket is told by the poller, once, when it becomes writable.
+    /// A connection answered in process is writable from the moment it exists -
+    /// its write only buffers - so there is no edge to wait for and something
+    /// has to stand in for one. Without it the same standing readiness would be
+    /// delivered on every turn of the dispatcher's loop.
+    writable_delivered: bool,
 }
 
 impl Default for SocketCallbacks {
@@ -62,6 +71,7 @@ impl Default for SocketCallbacks {
             read_context: 0,
             write_callback: 0,
             write_context: 0,
+            writable_delivered: false,
         }
     }
 }
@@ -384,6 +394,27 @@ impl NetworkState {
         if let Some(entry) = self.sockets.get_mut(&socket) {
             entry.write_callback = callback;
             entry.write_context = context;
+            entry.writable_delivered = false;
+        }
+    }
+
+    /// The in-process connections waiting to be told they may write: those with
+    /// a write callback that has not been answered since it was set.
+    fn local_sockets_awaiting_writable(&self) -> Vec<i32> {
+        self.local_connections
+            .keys()
+            .copied()
+            .filter(|socket| {
+                self.sockets
+                    .get(socket)
+                    .is_some_and(|entry| entry.write_callback != 0 && !entry.writable_delivered)
+            })
+            .collect()
+    }
+
+    fn mark_writable_delivered(&mut self, socket: i32) {
+        if let Some(entry) = self.sockets.get_mut(&socket) {
+            entry.writable_delivered = true;
         }
     }
 
@@ -2257,6 +2288,26 @@ fn ensure_event_dispatcher(context: &mut dyn WIPICContext) -> Result<()> {
                         .map(|(socket, _)| wie_backend::NetworkEvent::Readable(socket))
                 };
 
+                // A title that waits to be told it may write waits forever on a
+                // connection answered in process: the poller that tells a
+                // platform socket so has nothing to poll here, and an endpoint's
+                // write only buffers, so it is writable from the moment it
+                // exists. 데몬헌터's shop is such a title - it connects, asks to
+                // be told, and never sends its purchase - where its
+                // authentication wrote straight away and so never noticed.
+                let local_event = match local_event {
+                    Some(event) => Some(event),
+                    None => {
+                        let socket = state.lock().local_sockets_awaiting_writable().into_iter().next();
+
+                        if let Some(socket) = socket {
+                            state.lock().mark_writable_delivered(socket);
+                        }
+
+                        socket.map(wie_backend::NetworkEvent::Writable)
+                    }
+                };
+
                 let event = match local_event {
                     Some(event) => Some(event),
                     None => {
@@ -2303,6 +2354,8 @@ fn ensure_event_dispatcher(context: &mut dyn WIPICContext) -> Result<()> {
 /// a missing socket or unavailable network is silently skipped. It always
 /// returns 0 - there are no error codes.
 pub async fn set_read_callback(context: &mut dyn WIPICContext, socket: i32, callback: WIPICWord, callback_context: WIPICWord) -> Result<i32> {
+    tracing::info!("MC_netSetReadCB({socket}, {callback:#x}, {callback_context:#x})");
+
     let stored = {
         let state = context.network_state();
         let mut state = state.lock();
@@ -2328,6 +2381,8 @@ pub async fn set_read_callback(context: &mut dyn WIPICContext, socket: i32, call
 /// socket +0x30) and context (at socket +0x44) only when the socket exists and
 /// its network is available, and always returns 0.
 pub async fn set_write_callback(context: &mut dyn WIPICContext, socket: i32, callback: WIPICWord, callback_context: WIPICWord) -> Result<i32> {
+    tracing::info!("MC_netSetWriteCB({socket}, {callback:#x}, {callback_context:#x})");
+
     let stored = {
         let state = context.network_state();
         let mut state = state.lock();
@@ -4044,6 +4099,44 @@ mod network_state_tests {
         // does not destroy the header.
         state.remove_socket(41);
         assert_eq!(state.billing_header(), Some(header));
+    }
+
+    /// A connection answered in process is writable from the moment it exists,
+    /// and a title waiting to be told so is told once - not on every turn of the
+    /// loop that looks.
+    #[test]
+    fn an_in_process_connection_says_it_may_be_written_to_once() {
+        let mut state = NetworkState::default();
+        state.process_state = ProcessNetworkState::Available;
+        state.register_socket(7, 1, 0);
+        state.bind_local(7, -0x1000);
+
+        // Nothing is waiting until a title asks to be told.
+        assert!(state.local_sockets_awaiting_writable().is_empty());
+
+        state.set_write_callback(7, 0x1111, 0x2222);
+        assert_eq!(state.local_sockets_awaiting_writable(), alloc::vec![7]);
+
+        state.mark_writable_delivered(7);
+        assert!(state.local_sockets_awaiting_writable().is_empty());
+
+        // Asking again is a fresh ask, which is how a title that writes in
+        // pieces gets told about the next one.
+        state.set_write_callback(7, 0x1111, 0x2222);
+        assert_eq!(state.local_sockets_awaiting_writable(), alloc::vec![7]);
+    }
+
+    /// A socket on the platform's own network is told by the poller, so nothing
+    /// here stands in for it.
+    #[test]
+    fn a_platform_socket_is_left_to_its_poller() {
+        let mut state = NetworkState::default();
+        state.process_state = ProcessNetworkState::Available;
+        state.register_socket(7, 1, 0);
+
+        state.set_write_callback(7, 0x1111, 0x2222);
+
+        assert!(state.local_sockets_awaiting_writable().is_empty());
     }
 
     /// A port is dialled in the order it was written, not the order it arrives
