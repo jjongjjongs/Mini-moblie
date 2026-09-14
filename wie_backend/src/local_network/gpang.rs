@@ -77,8 +77,11 @@
 //! first field before showing `결제가 완료되었습니다`.
 //!
 //! There is no balance to be right about - the account is as gone as the server
-//! - so the one answered here is the one that lets the shop work: more than the
-//! dearest thing it sells, in the five digits `보유: %5d KOIN` gives it.
+//! - so the one answered here is the one that lets the shop work: far more than
+//! the dearest thing it sells, and inside what the title can hold. That last
+//! part is not free: the balance is narrowed to a signed halfword at 0x12abbe,
+//! so a generous number wraps to a negative one and the shop refuses the
+//! purchase for want of funds it was just handed.
 
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 
@@ -112,9 +115,13 @@ const KOIN_PAYMENT_REQUEST: &[u8] = b"CKN_U|";
 ///
 /// There is no number to be right here - the account it would have been read
 /// from is as gone as the server - so this is the one that lets the shop work:
-/// enough for anything the title sells (its dearest item is 29) and five digits,
-/// which is the width `보유: %5d KOIN` gives it.
-const KOIN_BALANCE: u32 = 99999;
+/// far more than the dearest thing the title sells, which is 29.
+///
+/// It has to be a number the title can hold. The balance it reads is narrowed to
+/// a signed halfword at 0x12abbe, so anything past 32767 comes back negative:
+/// 99999 was read as -31073, printed as `보유: -31073 KOIN`, and refused for
+/// want of funds it had just been given.
+const KOIN_BALANCE: u32 = 9999;
 
 /// How much the answer carries behind that word. The title's read asks for
 /// sixteen bytes and gets no more; a shorter answer is one it waits out.
@@ -401,13 +408,20 @@ mod tests {
             panic!("the balance was not answered");
         };
 
-        assert_eq!(&out[..taken], b"\x00\x0eSKN_C|0|99999|");
+        assert_eq!(&out[..taken], b"\x00\rSKN_C|0|9999|");
 
         // And what the title makes of it: the word it compares, then the field
         // it weighs against the price over a hundred.
         let fields: Vec<&[u8]> = out[2..taken].split(|&byte| byte == b'|').collect();
         assert_eq!(fields[0], b"SKN_C");
-        assert_eq!(fields[2], b"99999");
+        assert_eq!(fields[2], b"9999");
+
+        // And it survives the narrowing the title puts it through, which 99999
+        // did not: that came back as -31073 and the shop said the account was
+        // short.
+        let balance: i32 = core::str::from_utf8(fields[2]).unwrap().parse().unwrap();
+        assert_eq!(balance as i16 as i32, balance);
+        assert!(balance > 29, "the dearest thing the shop sells is 29 KOIN");
     }
 
     /// Spending it is granted on the word alone, which is all its parser reads.
