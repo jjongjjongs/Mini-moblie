@@ -58,6 +58,11 @@ impl System {
             local_network.register(endpoint);
         }
 
+        // The servers this emulator answers for itself, behind whatever the host
+        // offers: a run that sets one of the diagnostic endpoints is asking to
+        // see the exchange rather than to have it answered.
+        local_network.register(Box::new(crate::local_network::GpangEndpoint::new()));
+
         let platform = Arc::new(platform);
 
         Self {

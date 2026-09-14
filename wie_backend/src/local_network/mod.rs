@@ -23,10 +23,12 @@
 
 mod ack;
 mod capture;
+mod gpang;
 
 pub use self::{
     ack::{AckEndpoint, Framing},
     capture::{CaptureAddress, CaptureEndpoint},
+    gpang::GpangEndpoint,
 };
 
 use alloc::{boxed::Box, collections::BTreeMap, string::String, vec::Vec};
