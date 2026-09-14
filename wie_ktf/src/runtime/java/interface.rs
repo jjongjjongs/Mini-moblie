@@ -399,6 +399,15 @@ async fn call_native(core: &mut ArmCore, _: &mut (), address: u32, ptr_data: u32
     // an address in the stub arena stands for a registration of ours, and a
     // guest address stands for the title's own code.
     if core.svc_stub_id(address).is_none() {
+        // What is left in the block is the veneer's spill of `r1`-`r3`, which
+        // for a method that takes no arguments is whatever the AOT caller last
+        // held. Reading that back as an answer is how 격투가 went from an
+        // eleven-second frame to a four-hundred-millisecond one - still not a
+        // frame, just a smaller piece of the same rubbish. A slot the callee
+        // never filled answers zero.
+        write_generic(core, ptr_data, 0u32)?;
+        write_generic(core, ptr_data + 4, 0u32)?;
+
         return Ok(JavaMethodResult::new(vec![ptr_data], None));
     }
 

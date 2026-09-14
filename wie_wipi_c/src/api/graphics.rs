@@ -957,6 +957,17 @@ fn new_screen_surface(context: &mut dyn WIPICContext, width: u32, height: u32) -
     // The surface spans the whole panel; the framebuffer reports - and every
     // path but the pointer getter uses - the drawing area below the strip.
     let mut framebuffer = FrameBuffer::new(context, width, height.saturating_add(SURFACE_GUARD_ROWS), FRAMEBUFFER_DEPTH)?;
+
+    // A handset's LCD buffer starts dark; ours starts as whatever the heap was
+    // last used for, because `Allocator::alloc` does not clear what it hands
+    // out. That only shows on this surface, because it is the one a title can
+    // put on the panel without having drawn every pixel of it - a C engine that
+    // composes its scene into the top rows leaves the rest untouched, and 던전
+    // 앤파이터 격투가 showed a band of old heap under every frame for exactly
+    // that reason. Clear it once, here, rather than trusting the title to.
+    let (size, _) = buffer_size(width, height.saturating_add(SURFACE_GUARD_ROWS), FRAMEBUFFER_DEPTH / 8)?;
+    let base = context.data_ptr(framebuffer.0.buf)?;
+    context.write_bytes(base, &vec![0u8; size as usize])?;
     framebuffer.0.height = height - strip;
     // Only a platform whose indirect pointers are plain addresses reserves a
     // strip, so this is address arithmetic on the buffer just allocated.
