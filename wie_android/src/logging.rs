@@ -180,8 +180,24 @@ pub fn set_filter(directive: &str) -> core::result::Result<(), String> {
 /// is still a window, and the bounded stretch is the half of this that matters;
 /// refusing to start because the filter would not widen would take that away
 /// too, and quietly.
+///
+/// **A filter the player set themselves is kept, not widened over.** The window
+/// is bounded in size, so how wide it is decides how long it covers, and the
+/// two questions a window gets asked want opposite answers. "Why did this title
+/// not start" wants everything about the few hundred milliseconds after launch,
+/// which is what widening is for. "Why did that just happen while I was
+/// playing" wants the minutes leading up to a moment a person noticed - and at
+/// trace, 액션퍼즐패밀리1 fills the whole window in a quarter of a second, so
+/// the moment was never in it. Typing `info` in the filter box and collecting
+/// now covers a whole session: the input path, the unimplemented platform calls
+/// and the faults all log at info or above, and nothing else does.
 pub fn start_collecting() -> core::result::Result<(), String> {
-    let widened = set_filter(COLLECT_LOG_DIRECTIVE);
+    let chosen = filter();
+    let widened = if chosen == DEFAULT_LOG_DIRECTIVE {
+        set_filter(COLLECT_LOG_DIRECTIVE)
+    } else {
+        Ok(())
+    };
 
     set_bounds(COLLECT_MAX_LINES, COLLECT_MAX_BYTES);
 

@@ -788,7 +788,7 @@ public final class MainActivity extends Activity {
         fields.addView(watches);
 
         TextView filterLabel = new TextView(this);
-        filterLabel.setText("\n기본 로그 필터  (수집 중에는 쓰이지 않음)");
+        filterLabel.setText("\n로그 필터  (비워두면 수집 중 전체 기록)");
         filterLabel.setTextSize(12f);
         fields.addView(filterLabel);
 
