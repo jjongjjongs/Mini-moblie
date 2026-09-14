@@ -23,28 +23,29 @@
 //! Answered so, the title shows that message and goes on to the game.
 //!
 //! The same server carries the title's cash shop, on a port of its own: a
-//! purchase dials `222.237.78.175:10020`, named `TEST_BILLSOCK` the same way.
-//! What it asks there - `CKN_C` for a KOIN balance, `CKN_U` to spend one, `CASH`
-//! for a handset payment - wants balances and prices back, which no answer here
-//! could invent, so this does not answer them.
+//! purchase dials `222.237.78.175:10020`, named `TEST_BILLSOCK` the same way,
+//! and asks one of three things - `CASH` for a handset payment, `CKN_C` for a
+//! KOIN balance, `CKN_U` to spend one.
 //!
-//! It does take that connection, and ends it at once. A title left waiting on an
-//! endpoint that will never speak waits forever, where the dead server it used
-//! to reach at least timed out; an end is a failure a title acts on. The
-//! connection is worth taking anyway, because whatever the title sends on it is
-//! written down, and a title only sends what it has - those bytes are visible
-//! nowhere else.
+//! Anything else on that port ends the connection rather than waiting on it. A
+//! title left reading an endpoint that will never speak reads forever, where the
+//! dead server it used to reach at least timed out; an end is a failure a title
+//! acts on. Whatever it sent is written down first, because a title only sends
+//! what it has and those bytes are visible nowhere else.
 //!
 //! The shop is not framed the way the authentication is, and its own state
 //! machine at 0x12aa84 is what says so. It runs on a halfword at its object's
 //! +4, and the states it steps through are:
 //!
 //!   3  waits, then converts its server and connects (net slot 30)
-//!   4  waits for the connect callback's byte at the socket's +9, picks its
-//!      request by a command code at +0x20 - 100, 200, 300, 500, 1000, 2000 -
-//!      builds it, and writes it through net slot 31
+//!   4  waits for the connect callback's byte at the socket's +9, appends the
+//!      product its price at +0x20 names - 100, 200, 300, 500, 1000 or 2000 won
+//!      - to the command, and writes the lot through net slot 31
 //!   5  reads exactly **two** bytes and runs them through `MC_utilNtohs`
 //!   6  reads that many more
+//!
+//! That halfword is a price rather than a code, which the balance path settles
+//! by dividing it by a hundred to get what the purchase costs in KOIN.
 //!
 //! So a shop frame is `[u16 length][payload]`, where an authentication frame is
 //! `[u32 length][payload]`. Reading the shop's request as the wider one is
@@ -66,9 +67,18 @@
 //! unequal the one that shows a refused one. Six bytes is therefore a two-byte
 //! length and the word `SASH`, which is the answer this gives.
 //!
-//! The KOIN requests on the same connection - `CKN_C` for a balance, `CKN_U` to
-//! spend one - are left unanswered. They want numbers back, and a wrong number
-//! is worse than none.
+//! The KOIN pair on the same connection is read the same way, from the two
+//! machines that drive it. `CKN_C` asks what the account holds: the parser at
+//! 0x12ab52 splits the answer on `|`, compares the first field, reads the
+//! **third** as a number, and weighs it against the price in won over a hundred
+//! - the rate the shop screen prints as `100원 = 1 KOIN`. Enough, and it offers
+//! `%d KOIN이 차감됩니다. 결제하시겠습니까?`; short, and it says the account is
+//! short. `CKN_U` then spends it, and the parser at 0x12af4c reads only the
+//! first field before showing `결제가 완료되었습니다`.
+//!
+//! There is no balance to be right about - the account is as gone as the server
+//! - so the one answered here is the one that lets the shop work: more than the
+//! dearest thing it sells, in the five digits `보유: %5d KOIN` gives it.
 
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 
@@ -93,6 +103,18 @@ const AUTHENTICATION_GRANTED: &[u8] = b"IROK";
 /// What a handset payment asks, and what a granted one answers with.
 const HANDSET_PAYMENT_REQUEST: &[u8] = b"CASH|";
 const HANDSET_PAYMENT_GRANTED: &[u8] = b"SASH";
+
+/// What the KOIN balance and the KOIN payment ask.
+const KOIN_BALANCE_REQUEST: &[u8] = b"CKN_C|";
+const KOIN_PAYMENT_REQUEST: &[u8] = b"CKN_U|";
+
+/// The balance this answers with, in KOIN.
+///
+/// There is no number to be right here - the account it would have been read
+/// from is as gone as the server - so this is the one that lets the shop work:
+/// enough for anything the title sells (its dearest item is 29) and five digits,
+/// which is the width `보유: %5d KOIN` gives it.
+const KOIN_BALANCE: u32 = 99999;
 
 /// How much the answer carries behind that word. The title's read asks for
 /// sixteen bytes and gets no more; a shorter answer is one it waits out.
@@ -172,19 +194,13 @@ impl GpangConnection {
 
         self.request.extend_from_slice(bytes);
 
-        if !self.request.starts_with(HANDSET_PAYMENT_REQUEST) {
-            // The KOIN requests - CKN_C for a balance, CKN_U to spend one - want
-            // numbers back that no answer here could invent, and a wrong number
-            // is worse than none.
+        let Some(answer) = shop_answer(&self.request) else {
             self.unanswerable = true;
 
             return;
-        }
+        };
 
-        tracing::info!("gpang: granting the handset payment");
-
-        self.reply.extend_from_slice(&(HANDSET_PAYMENT_GRANTED.len() as u16).to_be_bytes());
-        self.reply.extend_from_slice(HANDSET_PAYMENT_GRANTED);
+        self.reply.extend_from_slice(&shop_frame(answer.as_bytes()));
     }
 
     /// Takes one complete frame off the front of `request`, if there is one.
@@ -373,17 +389,50 @@ mod tests {
         assert_eq!(&out, b"\x00\x04SASH");
     }
 
-    /// The KOIN requests want a balance back, so they get an end rather than a
-    /// number nobody knows - 데몬헌터 would otherwise sit on that read forever.
+    /// The balance is answered in the field the title reads it from - the third,
+    /// counting from the word - and behind the same two-byte length.
     #[test]
-    fn a_koin_request_ends_rather_than_waiting() {
-        for request in [b"CKN_C|0|demon|0|".as_slice(), b"CKN_U|0|demon|05590091|".as_slice()] {
-            let mut connection = shop();
-            connection.write(request);
+    fn the_koin_balance_is_answered() {
+        let mut connection = shop();
+        connection.write(b"CKN_C|0|demon|0|");
 
-            assert!(connection.readable());
-            assert_eq!(connection.read(&mut [0u8; 16]), LocalRead::Closed);
-        }
+        let mut out = [0u8; 32];
+        let LocalRead::Data(taken) = connection.read(&mut out) else {
+            panic!("the balance was not answered");
+        };
+
+        assert_eq!(&out[..taken], b"\x00\x0eSKN_C|0|99999|");
+
+        // And what the title makes of it: the word it compares, then the field
+        // it weighs against the price over a hundred.
+        let fields: Vec<&[u8]> = out[2..taken].split(|&byte| byte == b'|').collect();
+        assert_eq!(fields[0], b"SKN_C");
+        assert_eq!(fields[2], b"99999");
+    }
+
+    /// Spending it is granted on the word alone, which is all its parser reads.
+    #[test]
+    fn a_koin_payment_is_granted() {
+        let mut connection = shop();
+        connection.write(b"CKN_U|0|demon|05590091|00635C003|2.00|549895392");
+
+        let mut out = [0u8; 32];
+        let LocalRead::Data(taken) = connection.read(&mut out) else {
+            panic!("the payment was not answered");
+        };
+
+        assert_eq!(&out[..taken], b"\x00\x08SKN_U|0|");
+    }
+
+    /// Anything else on that port is still an end rather than a wait, because a
+    /// title reading an endpoint that will never speak reads forever.
+    #[test]
+    fn an_unread_shop_request_ends_rather_than_waiting() {
+        let mut connection = shop();
+        connection.write(b"XXXX|0|demon|0|");
+
+        assert!(connection.readable());
+        assert_eq!(connection.read(&mut [0u8; 16]), LocalRead::Closed);
     }
 
     /// A shop connection nothing has been asked on yet is over too: the title
@@ -397,10 +446,10 @@ mod tests {
         assert_eq!(connection.read(&mut [0u8; 16]), LocalRead::Closed);
     }
 
-    /// The cash shop asks for content, and a yes is not content. The connection
-    /// ends instead, so the title reports a failure rather than waiting.
+    /// A shop request on the authentication's own port is not one of its own -
+    /// the two are different ports for a reason - and ends the connection.
     #[test]
-    fn the_cash_shop_is_not_answered() {
+    fn a_shop_request_on_the_authentication_port_is_not_answered() {
         let mut connection = connection();
         connection.write(b"\x00\x00\x00\x17CKN_U|0|demon|05590091|");
 
@@ -422,6 +471,51 @@ mod tests {
         assert!(!endpoint.accepts("socket", "222.237.78.176", AUTHENTICATION_PORT));
         assert!(!endpoint.accepts("http", GPANG_HOST, AUTHENTICATION_PORT));
     }
+}
+
+/// What the shop is answered with, or nothing for a request nobody has read.
+///
+/// Each of the three the title sends is checked by its own parser, and each
+/// parser wants a different amount: the payments compare the answer's first
+/// word and nothing else, where the balance also reads a number out of it.
+fn shop_answer(request: &[u8]) -> Option<String> {
+    if request.starts_with(HANDSET_PAYMENT_REQUEST) {
+        tracing::info!("gpang: granting the handset payment");
+
+        // The parser at 0x12b298 takes four characters and compares them; there
+        // is nothing behind the word for it to read.
+        return Some(String::from_utf8_lossy(HANDSET_PAYMENT_GRANTED).into_owned());
+    }
+
+    if request.starts_with(KOIN_BALANCE_REQUEST) {
+        tracing::info!("gpang: answering the KOIN balance with {KOIN_BALANCE}");
+
+        // The parser at 0x12ab52 splits the answer on `|`, compares the first
+        // field, and reads the **third** as the balance - which it then weighs
+        // against the price in won over a hundred, the rate the shop screen
+        // prints as `100원 = 1 KOIN`.
+        return Some(format!("SKN_C|0|{KOIN_BALANCE}|"));
+    }
+
+    if request.starts_with(KOIN_PAYMENT_REQUEST) {
+        tracing::info!("gpang: granting the KOIN payment");
+
+        // The parser at 0x12af4c splits the same way and reads only the first
+        // field.
+        return Some("SKN_U|0|".into());
+    }
+
+    None
+}
+
+/// One shop answer, behind the two-byte length its reader expects.
+fn shop_frame(payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(2 + payload.len());
+
+    frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    frame.extend_from_slice(payload);
+
+    frame
 }
 
 /// Sixteen bytes to a line, hex then printable ASCII - the shape every other
