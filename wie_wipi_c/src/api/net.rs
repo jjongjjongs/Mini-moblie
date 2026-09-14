@@ -488,39 +488,6 @@ pub fn new_state() -> SharedNetworkState {
     Arc::new(Mutex::new(NetworkState::default()))
 }
 
-pub async fn legacy_connect_stub(context: &mut dyn WIPICContext, cb: WIPICWord, param: WIPICWord) -> Result<i32> {
-    tracing::warn!("stub MC_netConnect({cb:#x}, {param:#x})");
-
-    struct ConnectCallback {
-        cb: WIPICWord,
-        param: WIPICWord,
-    }
-
-    #[async_trait::async_trait]
-    impl MethodBody<WieError> for ConnectCallback {
-        #[tracing::instrument(name = "timer", skip_all)]
-        async fn call(&self, context: &mut dyn WIPICContext, _: Box<[WIPICWord]>) -> Result<WIPICResult> {
-            context.system().sleep(1).await;
-            context.call_function(self.cb, &[u32::MAX, self.param]).await?;
-
-            Ok(WIPICResult { results: Vec::new() })
-        }
-    }
-
-    context.spawn(Box::new(ConnectCallback { cb, param }))?;
-    Ok(0)
-}
-
-pub async fn legacy_close_stub(_context: &mut dyn WIPICContext) -> Result<()> {
-    tracing::warn!("stub MC_netClose()");
-    Ok(())
-}
-
-pub async fn legacy_socket_close_stub(_context: &mut dyn WIPICContext, fd: i32) -> Result<i32> {
-    tracing::warn!("stub MC_netSocketClose({fd})");
-    Ok(-1)
-}
-
 pub async fn connect(context: &mut dyn WIPICContext, cb: WIPICWord, param: WIPICWord) -> Result<i32> {
     let state = context.network_state();
     let generation = match state.lock().begin_connect(cb, param) {

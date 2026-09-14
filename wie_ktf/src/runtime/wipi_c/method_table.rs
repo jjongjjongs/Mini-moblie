@@ -299,13 +299,21 @@ pub fn get_media_method_table() -> Vec<WIPICMethodBody> {
 
 pub fn get_net_method_table() -> Vec<WIPICMethodBody> {
     vec![
-        net::legacy_connect_stub.into_body(),
-        net::legacy_close_stub.into_body(),
+        // The same three the other vendor already serves for real. KTF was left
+        // on stubs that refuse: `MC_netConnect` reported failure through the
+        // caller's callback and nothing opened a socket afterwards, which is
+        // where 데몬헌터 stops - one connect in a whole capture and then only
+        // its own event loop. The refusal is the reference's deliberate answer
+        // to having no network; this runtime answers protocols in process
+        // instead, and a title that is never connected never reaches the
+        // endpoint that would answer it.
+        net::connect.into_body(),
+        net::close.into_body(),
         net::socket.into_body(),
         net::socket_connect.into_body(),
         net::socket_write.into_body(),
         net::socket_read.into_body(),
-        net::legacy_socket_close_stub.into_body(),
+        net::socket_close.into_body(),
         net::socket_bind.into_body(),
         net::get_max_packet_length.into_body(),
         net::socket_send_to.into_body(),
