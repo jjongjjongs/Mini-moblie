@@ -49,7 +49,8 @@ use std::{
 
 use test_utils::{TestPlatform, TestPlatformEvent, TestPlatformState};
 use wie_backend::{
-    AudioSink, DatabaseRepository, Emulator, Event, Filesystem, Instant, KeyCode, Options, Platform, Screen, canvas::Image, extract_zip,
+    AudioSink, DatabaseRepository, Emulator, Event, Filesystem, Instant, KeyCode, Network, NetworkError, NetworkPoll, Options, Platform, Screen,
+    canvas::Image, extract_zip,
 };
 use wie_ktf::KtfEmulator;
 use wie_util::Result;
@@ -113,6 +114,64 @@ struct CapturePlatform {
     inner: TestPlatform,
     screen: CaptureScreen,
     clock: Arc<ProbeClock>,
+    network: CaptureNetwork,
+}
+
+/// A network that hands out descriptors and reaches nothing.
+///
+/// The runtime answers some connections in process - a local endpoint, or a
+/// billing gateway - but it still asks the platform for the socket those
+/// connections are carried on, and `Platform::network` is `None` by default. A
+/// capture over that default never reaches the in-process paths at all:
+/// 데몬헌터's authentication asks for its socket, is told there is no network,
+/// and refuses to go on without a byte having been written.
+///
+/// So this hands out descriptors and nothing else. Everything that would reach
+/// a host fails, which is what a capture wants: what it records came from the
+/// answer this run gives rather than from somewhere off the machine.
+#[derive(Default)]
+struct CaptureNetwork {
+    next: AtomicU64,
+}
+
+impl Network for CaptureNetwork {
+    fn socket(&self, _family: i32, _socket_type: i32) -> std::result::Result<i32, NetworkError> {
+        Ok(self.next.fetch_add(1, Ordering::SeqCst) as i32 + 1)
+    }
+
+    fn connect(&self, _socket: i32, _address: u32, _port: u16) -> NetworkPoll<()> {
+        NetworkPoll::Ready(Err(NetworkError::HostUnreachable))
+    }
+
+    fn bind(&self, _socket: i32, _address: u32, _port: u16) -> std::result::Result<(), NetworkError> {
+        Err(NetworkError::Unsupported)
+    }
+
+    fn read(&self, _socket: i32, _buf: &mut [u8]) -> std::result::Result<usize, NetworkError> {
+        Err(NetworkError::NotConnected)
+    }
+
+    fn write(&self, _socket: i32, _buf: &[u8]) -> std::result::Result<usize, NetworkError> {
+        Err(NetworkError::NotConnected)
+    }
+
+    fn send_to(&self, _socket: i32, _buf: &[u8], _address: u32, _port: u16) -> std::result::Result<usize, NetworkError> {
+        Err(NetworkError::NotConnected)
+    }
+
+    fn recv_from(&self, _socket: i32, _buf: &mut [u8]) -> std::result::Result<(usize, u32, u16), NetworkError> {
+        Err(NetworkError::NotConnected)
+    }
+
+    fn close(&self, _socket: i32) -> std::result::Result<(), NetworkError> {
+        Ok(())
+    }
+
+    fn resolve_host(&self, _host: &str, _query_id: u32) {}
+
+    fn poll_event(&self) -> Option<wie_backend::NetworkEvent> {
+        None
+    }
 }
 
 /// The probe's guest clock.
@@ -209,6 +268,10 @@ impl Platform for CapturePlatform {
         }
 
         endpoints
+    }
+
+    fn network(&self) -> Option<&dyn Network> {
+        Some(&self.network)
     }
 
     fn screen(&self) -> &dyn Screen {
@@ -412,6 +475,7 @@ fn run_once(
         }),
         screen: screen.clone(),
         clock: tick_clock.clone(),
+        network: CaptureNetwork::default(),
     });
 
     let options = Options {
