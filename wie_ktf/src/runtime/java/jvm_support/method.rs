@@ -243,12 +243,22 @@ impl JavaMethod {
         // Re-enters `run_function` if a Java catch handler matches the current ARM frame —
         // mirrors the trampoline path in `interface.rs::map_jump_result`, but for the
         // outermost frame whose caller is the Rust JVM rather than another ARM trampoline.
-        async fn run_with_unwind(core: &mut ArmCore, mut pc: u32, mut args: Vec<u32>) -> Result<JavaMethodRunResult> {
+        /// Runs a guest call, resuming it at each catch block that belongs to it.
+        ///
+        /// `entry_sp` is where the call was entered, and a catch block whose
+        /// frame was saved above it belongs to a caller that has not returned
+        /// yet. It is a parameter rather than something read here because it
+        /// has to be the same value for every round: each resume continues
+        /// *this* call rather than starting a new one, and `run_function` does
+        /// not put the caller's registers back when it unwinds, so reading the
+        /// stack pointer again between rounds reads the throwing frame's rather
+        /// than the call's. That moved the boundary down each time, and a catch
+        /// block that throws again - 지크's does, twice in twenty milliseconds -
+        /// then failed the test against its own frame: the record found on the
+        /// second throw was the one that had just been resumed, and its frame
+        /// sat eight bytes above where the resumed continuation was running.
+        async fn run_with_unwind(core: &mut ArmCore, entry_sp: u32, mut pc: u32, mut args: Vec<u32>) -> Result<JavaMethodRunResult> {
             loop {
-                // Where this call is about to enter. A catch block whose frame was
-                // saved above it belongs to a caller that has not returned yet.
-                let entry_sp = core.save_context().sp;
-
                 match core.run_function::<JavaMethodRunResult>(pc, &args).await {
                     Ok(r) => return Ok(r),
                     Err(WieError::JavaExceptionUnwind {
@@ -284,6 +294,10 @@ impl JavaMethod {
             }
         }
 
+        // Read before either branch runs anything, so both describe the same
+        // moment: the stack as the JVM's caller left it.
+        let entry_sp = core.save_context().sp;
+
         let result: JavaMethodRunResult = if access_flags.contains(MethodAccessFlags::NATIVE) {
             let arg_container = Allocator::alloc(&mut core, (raw_args.len() as u32) * 4)?;
             for (i, arg) in raw_args.iter().enumerate() {
@@ -301,7 +315,7 @@ impl JavaMethod {
                 self.name().map(|x| x.name).unwrap_or_default(),
                 raw.fn_body_native_or_exception_table
             );
-            let result = run_with_unwind(&mut core, raw.fn_body_native_or_exception_table, vec![0, arg_container]).await;
+            let result = run_with_unwind(&mut core, entry_sp, raw.fn_body_native_or_exception_table, vec![0, arg_container]).await;
 
             Allocator::free(&mut core, arg_container, (raw_args.len() as u32) * 4)?;
 
@@ -311,7 +325,7 @@ impl JavaMethod {
             params.extend(raw_args);
 
             tracing::trace!("Calling method: {:#x}", raw.fn_body);
-            run_with_unwind(&mut core, raw.fn_body, params).await?
+            run_with_unwind(&mut core, entry_sp, raw.fn_body, params).await?
         };
 
         if matches!(return_type, JavaType::Double | JavaType::Long) {
