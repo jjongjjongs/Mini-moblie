@@ -6,12 +6,13 @@ use bytemuck::pod_collect_to_vec;
 use jvm::{ClassInstance, Result as JvmResult, runtime::JavaLangString};
 
 use wie_backend::{
-    Emulator, Event, Options, Platform, System, TaskRunner,
+    Emulator, Event, Options, Platform, System, TaskRunner, TitlePlatform,
     canvas::{Rgb565Pixel, VecImageBuffer},
+    title_quirks,
 };
 use wie_core_arm::{Allocator, ArmCore};
 use wie_jvm_support::JvmSupport;
-use wie_util::{Result, WieError};
+use wie_util::{Result, WieError, write_generic};
 
 use crate::{
     adf::{KtfAdf, find_client_bin},
@@ -89,6 +90,7 @@ impl KtfEmulator {
         mut options: Options,
     ) -> Result<Self> {
         let mut core = ArmCore::new(options.enable_gdbserver, options.profile.take())?;
+
         let system = System::new(platform, pid, aid, KtfTaskRunner { core: core.clone() });
 
         for (path, data) in files {
@@ -97,6 +99,30 @@ impl KtfEmulator {
         }
 
         Allocator::init(&mut core)?;
+
+        // The status strip a title has to work around, published where the
+        // WIPI-C graphics layer reads it. See
+        // `wie_wipi_c::api::graphics::new_screen_surface`; the reference's own
+        // table gives the strip 24 rows on a 240/320/400-wide panel.
+        //
+        // No KTF title asks for one yet, so this only answers the host's own
+        // setting, which until now KTF ignored while LGT honoured it. 던전앤
+        // 파이터 격투가 looked like the first candidate - its C engine composes
+        // a 240x296 scene (`MC_grpFillRect(0, 0, 240, 296)`, last pixel at
+        // (239, 295)) onto a 320-row panel and leaves the bottom 24 rows to
+        // whatever was there - but giving it the strip kills it: the drawing
+        // area becomes 296 and `dnff.startApp` faults inside `initLCDClet` at
+        // `0x106a18` reading address 8, before a frame. Its band is the
+        // handset's own strip showing through, not a missing offset.
+        const ANNUNCIATOR_ROWS: u32 = 24;
+        let annunciator = options
+            .annunciator
+            .unwrap_or_else(|| title_quirks(TitlePlatform::Ktf, aid).expects_annunciator);
+        write_generic(
+            &mut core,
+            wie_wipi_c::api::graphics::ANNUNCIATOR_ROWS_PTR,
+            if annunciator { ANNUNCIATOR_ROWS } else { 0 },
+        )?;
 
         let mut core_clone = core.clone();
         let mut system_clone = system.clone();
