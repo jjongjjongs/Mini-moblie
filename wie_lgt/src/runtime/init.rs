@@ -31,12 +31,12 @@ use super::{
         app_classes::{self, AppClass},
         class_table::ClassTable,
         compiled_class, get_java_interface_method,
-        handles::JavaHandles,
+        handles::{JavaHandles, array_payload_offset},
         interface::{
             ArrayClassInfo, ArrayClasses, CLASS_DATA_STATICS_AT, DISPATCH_TABLE_SLOTS, JAVA_DIAG_SVC_BASE, JAVA_INTERFACE_METHOD_SVC_BASE,
             JAVA_METHOD_SVC_LIMIT, JAVA_RESERVED_SLOT_SVC_BASE, JAVA_STATIC_METHOD_SVC_BASE, JAVA_UNKNOWN_SLOT_SVC_BASE,
-            JAVA_VIRTUAL_METHOD_SVC_BASE, REFERENCE_SIZE, bridge_class_chain, java_load_classes, java_resolve_one, primitive_element_size,
-            resolve_main_class_arguments, run_main_class, vm_get_constant_string, vm_instantiate_array,
+            JAVA_VIRTUAL_METHOD_SVC_BASE, LONG_ELEMENT_SIZE, REFERENCE_SIZE, bridge_class_chain, java_load_classes, java_resolve_one,
+            primitive_element_size, resolve_main_class_arguments, run_main_class, vm_get_constant_string, vm_instantiate_array,
         },
         method_bridge::{self, JavaReturn, ResolvedMember},
         platform_metadata::platform_class,
@@ -1038,6 +1038,75 @@ async fn handle_init_svc(core: &mut ArmCore, context: &mut InitSvcContext, id: S
 
             write_generic(core, data + 4 + index * REFERENCE_SIZE, value)?;
             0u32.write(core, lr)
+        }
+        // The `long[]` element helpers. Everything narrower the compiler
+        // reaches inline; a long does not fit a register, so a compiled title
+        // can only read or write one through these. Left unimplemented they
+        // returned zero and discarded stores, which makes every `long` a title
+        // keeps in an array read back as 0. 액션퍼즐패밀리1 stores
+        // `System.currentTimeMillis()` into one and gates its frame on the
+        // difference, so with the store thrown away the gate was always open:
+        // the screen ran at loop speed, which is what the flicker was.
+        //
+        // Offsets and register order are read off the firmware's own bodies in
+        // `liblgt_system.so` rather than assumed:
+        //
+        // - `vm_laload_impl` does `add r3, data, index lsl #3` then
+        //   `ldrd r0, r1, [r3, #8]`, so an eight-byte element sits at
+        //   `data + 8 + index*8` - one word further in than a narrow one, which
+        //   `vm_iaload_impl` reads at `data + 4 + index*4`. The pair comes back
+        //   the ordinary way round, low word in r0.
+        // - `vm_lastore_impl` stores the pair it was handed in r2:r3, low word
+        //   first, as AAPCS passes a long.
+        // - `vm_lastore_impl_fast` and `vm_lastore_impl_split` both shuffle the
+        //   two through `orr` and store them the other way round: the word in
+        //   r2 lands high and the word in r3 lands low. The argument that
+        //   settled it was a captured store of 0x1a0/0x9f0d743c, which read
+        //   that way is 1789374854204 - a millisecond clock reading, matching
+        //   the ones the same capture logs elsewhere.
+        // - The `_fast` entries skip the null check and dereference the array
+        //   immediately; `_split` keeps it. All of them bounds-check.
+        InitSvcId::VmLaloadImpl
+        | InitSvcId::VmLaloadImplFast
+        | InitSvcId::VmLastoreImpl
+        | InitSvcId::VmLastoreImplFast
+        | InitSvcId::VmLastoreImplSplit => {
+            let array = core.read_param(0)?;
+            let index = core.read_param(1)?;
+
+            let fast = id.0 == InitSvcId::VmLaloadImplFast as u32 || id.0 == InitSvcId::VmLastoreImplFast as u32;
+            if !fast && array == 0 {
+                return throw_vm_exception(core, context, "java/lang/NullPointerException").await;
+            }
+
+            let data: u32 = read_generic(core, array + 8)?;
+            let length: u32 = read_generic(core, data)?;
+
+            if index >= length {
+                return throw_vm_exception(core, context, "java/lang/ArrayIndexOutOfBoundsException").await;
+            }
+
+            let element = data + array_payload_offset(LONG_ELEMENT_SIZE) + index * LONG_ELEMENT_SIZE;
+
+            let is_load = id.0 == InitSvcId::VmLaloadImpl as u32 || id.0 == InitSvcId::VmLaloadImplFast as u32;
+
+            if is_load {
+                let low: u32 = read_generic(core, element)?;
+                let high: u32 = read_generic(core, element + 4)?;
+
+                core.write_return_value(&[low, high])?;
+                core.set_next_pc(lr)
+            } else {
+                let (low, high) = if id.0 == InitSvcId::VmLastoreImpl as u32 {
+                    (core.read_param(2)?, core.read_param(3)?)
+                } else {
+                    (core.read_param(3)?, core.read_param(2)?)
+                };
+
+                write_generic(core, element, low)?;
+                write_generic(core, element + 4, high)?;
+                0u32.write(core, lr)
+            }
         }
         InitSvcId::VmInstantiate => {
             let token = core.read_param(0)?;

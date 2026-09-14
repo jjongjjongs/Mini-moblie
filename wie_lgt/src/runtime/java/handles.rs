@@ -36,6 +36,18 @@ const INSTANCE_FIELDS_OFFSET: u32 = 8;
 /// Words an array's block spends on its length before the elements start.
 const ARRAY_HEADER_SIZE: u32 = 4;
 
+/// Where a guest array's elements begin, which depends on how wide they are.
+///
+/// The header is the element count, one word - but an eight-byte element has to
+/// be eight-aligned, so a `long[]` or `double[]` pads it to two words. The
+/// firmware's own helpers say so: `vm_iaload_impl` reads `data + 4 + index*4`
+/// and `vm_saload_impl` `data + 4 + index*2`, while `vm_laload_impl` reads
+/// `data + 8 + index*8`. Its allocator sizes every block `8 + length*width`
+/// regardless, so a narrow array simply carries four spare bytes at the end.
+pub(crate) const fn array_payload_offset(element_size: u32) -> u32 {
+    if element_size == 8 { 8 } else { ARRAY_HEADER_SIZE }
+}
+
 /// The guest global-data region (`ArmCore` maps 16 KiB here). Scanned as GC
 /// roots so an object referenced only from a global is not treated as garbage.
 const GUEST_GLOBAL_DATA_BASE: u32 = 0x7fff0000;
@@ -346,11 +358,12 @@ impl JavaHandles {
     pub fn allocate_array(&self, vtable: u32, length: u32, element_size: u32) -> Result<u32> {
         let mut core = self.core.clone();
 
+        let payload = array_payload_offset(element_size);
         let size = length * element_size;
-        let data = self.alloc_reporting_leaks(&mut core, ARRAY_HEADER_SIZE + size)?;
+        let data = self.alloc_reporting_leaks(&mut core, payload + size)?;
 
         write_generic(&mut core, data, length)?;
-        core.write_bytes(data + ARRAY_HEADER_SIZE, &vec![0; size as usize])?;
+        core.write_bytes(data + payload, &vec![0; size as usize])?;
 
         let instance = Allocator::alloc(&mut core, INSTANCE_HEADER_SIZE)?;
         write_generic(&mut core, instance, vtable)?;
@@ -361,7 +374,7 @@ impl JavaHandles {
             instance,
             GcObject {
                 payload: data,
-                payload_size: ARRAY_HEADER_SIZE + size,
+                payload_size: payload + size,
                 is_array: true,
             },
         );
@@ -686,7 +699,7 @@ impl JavaHandles {
         let length: u32 = read_generic(&core, data)?;
 
         let mut bytes = vec![0; (length * element_size) as usize];
-        core.read_bytes(data + ARRAY_HEADER_SIZE, &mut bytes)?;
+        core.read_bytes(data + array_payload_offset(element_size), &mut bytes)?;
 
         Ok(bytes)
     }
@@ -699,7 +712,7 @@ impl JavaHandles {
         let length: u32 = read_generic(&core, data)?;
         let count = bytes.len().min((length * element_size) as usize);
 
-        core.write_bytes(data + ARRAY_HEADER_SIZE, &bytes[..count])?;
+        core.write_bytes(data + array_payload_offset(element_size), &bytes[..count])?;
 
         Ok(())
     }
@@ -857,7 +870,7 @@ impl JavaHandles {
 
 #[cfg(test)]
 mod tests {
-    use alloc::collections::BTreeSet;
+    use alloc::{collections::BTreeSet, vec::Vec};
 
     use wie_core_arm::{Allocator, ArmCore};
     use wie_util::{ByteWrite, read_generic, write_generic};
@@ -928,6 +941,41 @@ mod tests {
             !handles.gc_objects.lock().contains_key(&orphan),
             "an object reachable through no root is reclaimed"
         );
+    }
+
+    /// A `long[]`'s elements start one word further in than a narrower array's,
+    /// because eight bytes have to be eight-aligned, and its block is that much
+    /// bigger. The firmware says so in its own helpers - `vm_laload_impl` reads
+    /// `data + 8 + index*8` where `vm_iaload_impl` reads `data + 4 + index*4` -
+    /// and a block sized for the narrow layout is four bytes short of holding
+    /// its last element.
+    #[test]
+    fn a_long_array_pads_its_header_and_a_narrow_one_does_not() {
+        let mut core = ArmCore::new(false, None).unwrap();
+        Allocator::init(&mut core).unwrap();
+
+        let handles = JavaHandles::new(core.clone());
+
+        for (element_size, payload) in [(1u32, 4u32), (2, 4), (4, 4), (8, 8)] {
+            let array = handles.allocate_array(0, 3, element_size).unwrap();
+            let data: u32 = read_generic(&core, array + INSTANCE_FIELDS_OFFSET).unwrap();
+
+            let length: u32 = read_generic(&core, data).unwrap();
+            assert_eq!(length, 3, "{element_size}-byte elements: the header counts elements");
+
+            // Writing every element through the width-aware helper and reading
+            // it back is what says the two agree on where the payload starts.
+            let bytes: Vec<u8> = (0..3 * element_size as usize).map(|index| index as u8 + 1).collect();
+            handles.write_array_bytes(array, element_size, &bytes).unwrap();
+            assert_eq!(handles.read_array_bytes(array, element_size).unwrap(), bytes);
+
+            // And the first element really is at the offset the firmware reads.
+            let first: u8 = read_generic(&core, data + payload).unwrap();
+            assert_eq!(first, 1, "{element_size}-byte elements start at data + {payload}");
+
+            let recorded = handles.gc_objects.lock().get(&array).unwrap().payload_size;
+            assert_eq!(recorded, payload + 3 * element_size, "the block has to hold the padding too");
+        }
     }
 
     #[test]

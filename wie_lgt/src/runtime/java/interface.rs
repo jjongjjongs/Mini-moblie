@@ -78,11 +78,24 @@ pub const JAVA_RESERVED_SLOT_SVC_BASE: u32 = 0x4000;
 pub const JAVA_METHOD_SVC_LIMIT: u32 = 0x2000;
 
 pub fn get_java_interface_method(core: &mut ArmCore, function_index: u32) -> Result<u32> {
-    // Table-0x64 is the CLDC module. The index is the module's own export order,
-    // recovered from the reference firmware's `cldc` export table in
-    // liblgt_system.so (each entry is [index, function, name]). This is the
-    // authoritative mapping; earlier per-slot guesses had many wrong.
-    let id = match function_index {
+    let Some(id) = cldc_import_id(function_index) else {
+        tracing::warn!("Unimplemented LGT CLDC import {function_index:#x}; installing diagnostic zero-return stub");
+        return core.make_svc_stub(SVC_CATEGORY_INIT, JAVA_DIAG_SVC_BASE + function_index);
+    };
+
+    core.make_svc_stub(SVC_CATEGORY_INIT, id)
+}
+
+/// What a CLDC-module import index means, or `None` for one this runtime does
+/// not implement yet.
+///
+/// Table-0x64 is the CLDC module. The index is the module's own export order,
+/// recovered from the reference firmware's `cldc` export table in
+/// liblgt_system.so (each entry is [index, function, name]) and written out in
+/// `docs/lgt-cldc-table-0x64.txt`. This is the authoritative mapping; earlier
+/// per-slot guesses had many wrong.
+fn cldc_import_id(function_index: u32) -> Option<InitSvcId> {
+    Some(match function_index {
         0x03 => InitSvcId::CldcModuleActivate,
         0x04 => InitSvcId::VmRegisterClasses,
         0x06 => InitSvcId::VmUnregisterClasses,
@@ -115,20 +128,25 @@ pub fn get_java_interface_method(core: &mut ArmCore, function_index: u32) -> Res
         0x55 => InitSvcId::VmThreadReschedule,
         0x56 => InitSvcId::VmMonitorEnter,
         0x57 => InitSvcId::VmMonitorExit,
+        // The long-array element helpers. A 32-bit target compiles every
+        // narrower array access inline, but a `long[]` element does not fit a
+        // register, so these are the only way the compiled code can reach one.
+        // Offsets and register order are read off the firmware's own bodies -
+        // see the handler.
+        0x5b => InitSvcId::VmLaloadImpl,
+        0x60 => InitSvcId::VmLastoreImpl,
         0x61 => InitSvcId::VmAastoreImpl,
         0x64 => InitSvcId::VmFindInterface,
         0x82 => InitSvcId::VmAddClasspath,
         0x83 => InitSvcId::VmRunMainClass,
         0xe1 => InitSvcId::VmGetStringClass,
         0xe2 => InitSvcId::VmGetStringArrayClass,
+        0xf4 => InitSvcId::VmLaloadImplFast,
+        0xf9 => InitSvcId::VmLastoreImplFast,
         0xfa => InitSvcId::VmAastoreImplFast,
-        _ => {
-            tracing::warn!("Unimplemented LGT CLDC import {function_index:#x}; installing diagnostic zero-return stub");
-            return core.make_svc_stub(SVC_CATEGORY_INIT, JAVA_DIAG_SVC_BASE + function_index);
-        }
-    };
-
-    core.make_svc_stub(SVC_CATEGORY_INIT, id)
+        0xfd => InitSvcId::VmLastoreImplSplit,
+        _ => return None,
+    })
 }
 
 /// Import `0x14`. Reads the tables describing every platform class the
@@ -1458,6 +1476,9 @@ pub type ArrayClasses = Arc<Mutex<BTreeMap<u32, ArrayClassInfo>>>;
 /// arrays takes.
 pub const REFERENCE_SIZE: u32 = 4;
 
+/// One `long` or `double` array element.
+pub const LONG_ELEMENT_SIZE: u32 = 8;
+
 /// Bytes one element of a primitive array takes.
 ///
 /// The codes are the JVM's `newarray` atypes, which is what
@@ -1531,6 +1552,32 @@ mod tests {
     use crate::runtime::java::app_classes::AppClass;
 
     use super::{array_element_descriptor, dispatch_overrides, write_continuation_slot};
+
+    /// The `long[]` element helpers used to fall through to the diagnostic
+    /// stub, which returns zero and discards stores - so every `long` a title
+    /// kept in an array read back as 0. The indices are the CLDC module's own
+    /// export order (see `docs/lgt-cldc-table-0x64.txt`).
+    #[test]
+    fn the_long_array_helpers_resolve_to_their_own_handlers() {
+        use super::cldc_import_id;
+        use crate::runtime::svc_ids::InitSvcId;
+
+        for (index, expected) in [
+            (0x5b, InitSvcId::VmLaloadImpl),
+            (0x60, InitSvcId::VmLastoreImpl),
+            (0xf4, InitSvcId::VmLaloadImplFast),
+            (0xf9, InitSvcId::VmLastoreImplFast),
+            (0xfd, InitSvcId::VmLastoreImplSplit),
+        ] {
+            let id = cldc_import_id(index).unwrap_or_else(|| panic!("CLDC import {index:#x} is still a diagnostic stub"));
+
+            assert_eq!(id as u32, expected as u32, "CLDC import {index:#x} went somewhere else");
+        }
+
+        // A neighbour that really has no implementation still falls through, so
+        // this is not just saying every index resolves.
+        assert!(cldc_import_id(0x5a).is_none(), "vm_iaload_impl is not implemented here");
+    }
 
     #[test]
     fn atype_maps_to_its_element_descriptor() {
