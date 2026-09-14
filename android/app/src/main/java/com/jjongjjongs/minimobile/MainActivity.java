@@ -921,9 +921,18 @@ public final class MainActivity extends Activity {
     }
 
     /**
-     * Uses the first reasonably sized PNG in the archive as cover art. Handset
-     * archives ship {@code big.png}/{@code middle.png}/{@code small.png} next
-     * to the descriptor.
+     * Uses the first reasonably sized image in the archive as cover art.
+     *
+     * <p>Which file that is depends on the carrier. LGT archives name their
+     * icons {@code big.png}/{@code middle.png}/{@code small.png}, and those were
+     * all this looked for. KTF archives name the same three
+     * {@code big.icon}/{@code middle.icon}/{@code small.icon} - and a few name
+     * them after the application, like {@code 0002E1A1_3_s.PNG} - so a KTF title
+     * came up with the placeholder tile every time.
+     *
+     * <p>So the name is not what says an entry is an icon; its first bytes are.
+     * They are PNGs whatever they are called, except where they are Windows
+     * bitmaps - 데몬헌터's `small.icon` is one - and both decode here.
      */
     private Bitmap readArchiveIcon(File game) {
         final int maxEntries = 200;
@@ -937,14 +946,31 @@ public final class MainActivity extends Activity {
             while ((entry = zip.getNextEntry()) != null && scanned < maxEntries) {
                 scanned++;
 
-                if (entry.isDirectory() || !entry.getName().toLowerCase().endsWith(".png")) {
+                if (entry.isDirectory()) {
                     continue;
                 }
                 if (entry.getSize() > maxIconBytes) {
                     continue;
                 }
 
+                // The header first, so an archive's own jar is passed over on
+                // its first eight bytes rather than read to the cap.
+                byte[] header = new byte[8];
+                int headerRead = 0;
+                while (headerRead < header.length) {
+                    int read = zip.read(header, headerRead, header.length - headerRead);
+                    if (read <= 0) {
+                        break;
+                    }
+                    headerRead += read;
+                }
+
+                if (!looksLikeImage(header, headerRead)) {
+                    continue;
+                }
+
                 ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+                buffer.write(header, 0, headerRead);
                 byte[] chunk = new byte[8192];
                 int read;
                 while ((read = zip.read(chunk)) > 0 && buffer.size() <= maxIconBytes) {
@@ -964,6 +990,19 @@ public final class MainActivity extends Activity {
         }
 
         return null;
+    }
+
+    /** Whether these bytes open the way an image these archives carry does. */
+    private static boolean looksLikeImage(byte[] header, int length) {
+        if (length < 4) {
+            return false;
+        }
+
+        boolean png = (header[0] & 0xff) == 0x89 && header[1] == 'P' && header[2] == 'N' && header[3] == 'G';
+        boolean bmp = header[0] == 'B' && header[1] == 'M';
+        boolean jpeg = (header[0] & 0xff) == 0xff && (header[1] & 0xff) == 0xd8;
+
+        return png || bmp || jpeg;
     }
 
     // --- import ----------------------------------------------------------
