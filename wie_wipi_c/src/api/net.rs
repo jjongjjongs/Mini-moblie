@@ -1085,7 +1085,12 @@ fn map_network_error(error: wie_backend::NetworkError) -> i32 {
     }
 }
 
+/// Opens a socket, and says so - for the reason [`socket_connect`] gives. A
+/// title that was refused one here never reaches the connect at all, and the two
+/// look the same from a capture that records neither.
 pub async fn socket(context: &mut dyn WIPICContext, family: i32, socket_type: i32) -> Result<i32> {
+    tracing::info!("MC_netSocket({family}, {socket_type})");
+
     if family != 2 || !matches!(socket_type, 1 | 2) {
         return Ok(M_E_NOTSUP);
     }
@@ -1127,6 +1132,14 @@ fn dialled_port(port: WIPICWord) -> u16 {
     (port as u16).swap_bytes()
 }
 
+/// Opens a connection, and says so.
+///
+/// At info because it happens once per connection and answers the first
+/// question a title reaching for a server raises - whether it reached at all,
+/// and for what. A capture asked "did the shop dial anything" is otherwise left
+/// reading the absence of a debug line, which a bounded window gives no grounds
+/// to trust: the lane that reaches back minutes carries info and above, and a
+/// title's drawing fills the rest of the window in seconds.
 pub async fn socket_connect(
     context: &mut dyn WIPICContext,
     socket: i32,
@@ -1135,6 +1148,8 @@ pub async fn socket_connect(
     callback: WIPICWord,
     callback_context: WIPICWord,
 ) -> Result<i32> {
+    tracing::info!("MC_netSocketConnect({socket}, {}, {})", dotted_quad(address), dialled_port(port));
+
     if address == 0 || callback == 0 {
         return Ok(M_E_INVALID);
     }
@@ -1457,11 +1472,9 @@ pub async fn socket_connect_by_name(
         String::from_utf8_lossy(&read_null_terminated_string_bytes(context, name)?).into_owned()
     };
 
-    tracing::debug!(
-        "MC_netSocketConnect({socket}, {}, {}) as {name:?}",
-        dotted_quad(address),
-        dialled_port(port)
-    );
+    // The connection itself is named by `socket_connect`; this adds the name
+    // the title gave it, which is the only place one is ever written down.
+    tracing::info!("MC_netSocketConnect as {name:?}");
 
     socket_connect(context, socket, address, port, callback, callback_context).await
 }
