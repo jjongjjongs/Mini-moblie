@@ -12,25 +12,18 @@ use crate::runtime::wipi_c::method_table::{self, WIPIC_TABLE_FUNCTIONS, get_data
 
 use crate::runtime::svc_ids::WIPICTableId;
 
-/// Writes one WIPI C interface table: [`WIPIC_TABLE_FUNCTIONS`] function
-/// pointers, whatever the runtime has a body for.
+/// How many slots a table holds in guest memory.
 ///
-/// The length is the table's, not ours. A guest reaches a function by indexing
-/// this array, so a table cut short at the last function we serve is one a title
-/// can index past - it reads whatever word follows and branches to it. Every
-/// slot therefore gets a stub, and `get_method_body` decides what the slot
-/// answers.
-fn write_methods(core: &mut ArmCore, context: &mut dyn WIPICContext, table_id: WIPICTableId) -> Result<u32> {
-    let address = context.alloc_raw(WIPIC_TABLE_FUNCTIONS as u32 * 4)?;
-
-    write_stubs(core, context, table_id, address, 0)?;
-
-    Ok(address)
+/// [`WIPIC_TABLE_FUNCTIONS`], or the interface's own length where that is longer
+/// - the kernel interface is, and shortening it would take away functions this
+/// runtime serves.
+fn table_slots(interface_size: usize) -> u16 {
+    WIPIC_TABLE_FUNCTIONS.max((interface_size / 4) as u16)
 }
 
-/// Fills a table's slots from `first` to the end with their SVC stubs.
-fn write_stubs(core: &mut ArmCore, context: &mut dyn WIPICContext, table_id: WIPICTableId, address: u32, first: u16) -> Result<()> {
-    for index in first..WIPIC_TABLE_FUNCTIONS {
+/// Fills a table's slots from `first` to `slots` with their SVC stubs.
+fn write_stubs(core: &mut ArmCore, context: &mut dyn WIPICContext, table_id: WIPICTableId, address: u32, first: u16, slots: u16) -> Result<()> {
+    for index in first..slots {
         let stub = core.make_svc_stub(crate::runtime::SVC_CATEGORY_WIPIC, table_id.function_id(index))?;
 
         write_generic(context, address + index as u32 * 4, stub)?;
@@ -39,14 +32,32 @@ fn write_stubs(core: &mut ArmCore, context: &mut dyn WIPICContext, table_id: WIP
     Ok(())
 }
 
+/// Writes one WIPI C interface table: [`table_slots`] function pointers,
+/// whatever the runtime has a body for.
+///
+/// The length is the table's, not ours. A guest reaches a function by indexing
+/// this array, so a table cut short at the last function we serve is one a title
+/// can index past - it reads whatever word follows and branches to it. Every
+/// slot therefore gets a stub, and `get_method_body` decides what the slot
+/// answers.
+fn write_methods(core: &mut ArmCore, context: &mut dyn WIPICContext, table_id: WIPICTableId) -> Result<u32> {
+    let slots = table_slots(0);
+    let address = context.alloc_raw(slots as u32 * 4)?;
+
+    write_stubs(core, context, table_id, address, 0, slots)?;
+
+    Ok(address)
+}
+
 pub fn get_wipic_knl_interface(core: &mut ArmCore) -> Result<u32> {
     let kernel_interface = method_table::get_kernel_interface(core)?;
 
     // A full table's worth of room, for the reason [`write_methods`] gives.
-    let address = Allocator::alloc(core, WIPIC_TABLE_FUNCTIONS as u32 * 4)?;
+    let slots = table_slots(size_of_val(&kernel_interface));
+    let address = Allocator::alloc(core, slots as u32 * 4)?;
     write_generic(core, address, kernel_interface)?;
 
-    for index in (size_of_val(&kernel_interface) / 4) as u16..WIPIC_TABLE_FUNCTIONS {
+    for index in (size_of_val(&kernel_interface) / 4) as u16..slots {
         let stub = core.make_svc_stub(crate::runtime::SVC_CATEGORY_WIPIC, WIPICTableId::Kernel.function_id(index))?;
 
         write_generic(core, address + index as u32 * 4, stub)?;
@@ -58,13 +69,14 @@ pub fn get_wipic_knl_interface(core: &mut ArmCore) -> Result<u32> {
 /// Writes an interface whose functions are a named struct rather than a list.
 ///
 /// The struct is still an array of function pointers as far as the guest is
-/// concerned, so it gets a full table's worth of room and its own slots are
+/// concerned, so it gets a full table's worth of room and its own fields are
 /// followed by stubs for the rest - see [`write_methods`].
 fn write_interface<T: Pod>(core: &mut ArmCore, context: &mut dyn WIPICContext, table_id: WIPICTableId, interface: T) -> Result<u32> {
-    let address = context.alloc_raw(WIPIC_TABLE_FUNCTIONS as u32 * 4)?;
+    let slots = table_slots(size_of_val(&interface));
+    let address = context.alloc_raw(slots as u32 * 4)?;
     write_generic(context, address, interface)?;
 
-    write_stubs(core, context, table_id, address, (size_of_val(&interface) / 4) as u16)?;
+    write_stubs(core, context, table_id, address, (size_of_val(&interface) / 4) as u16, slots)?;
 
     Ok(address)
 }
@@ -118,4 +130,20 @@ pub async fn get_wipic_interfaces(core: &mut ArmCore, context: &mut dyn WIPICCon
     write_generic(context, address, interface)?;
 
     Ok(address)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WIPIC_TABLE_FUNCTIONS, table_slots};
+
+    #[test]
+    fn a_short_interface_still_gets_a_whole_table() {
+        assert_eq!(table_slots(0), WIPIC_TABLE_FUNCTIONS);
+        assert_eq!(table_slots(30 * 4), WIPIC_TABLE_FUNCTIONS);
+    }
+
+    #[test]
+    fn a_long_interface_is_never_cut_down_to_one() {
+        assert_eq!(table_slots(65 * 4), 65);
+    }
 }

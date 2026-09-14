@@ -400,11 +400,7 @@ pub fn get_unk12_method_table() -> Vec<WIPICMethodBody> {
 }
 
 pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPICMethodBody> {
-    if function_id >= WIPIC_TABLE_FUNCTIONS {
-        return None;
-    }
-
-    Some(get_served_method_body(table_id, function_id).unwrap_or_else(|| gen_missing(table_id, function_id)))
+    get_served_method_body(table_id, function_id).or_else(|| (function_id < WIPIC_TABLE_FUNCTIONS).then(|| gen_missing(table_id, function_id)))
 }
 
 /// The body this runtime has written for a slot, if it has written one.
@@ -667,6 +663,14 @@ mod tests {
         // Net slot 30 is the named connect its authentication calls; a refusal
         // there is a title that waits for a callback it will never get.
         assert!(get_served_method_body(WIPICTableId::Net, 30).is_some());
+    }
+
+    #[test]
+    fn an_interface_longer_than_a_table_keeps_its_last_function() {
+        // The kernel interface has 65 of them, so a table length applied as a
+        // cap would take one away that this runtime serves.
+        assert!(get_served_method_body(WIPICTableId::Kernel, WIPIC_TABLE_FUNCTIONS).is_some());
+        assert!(get_method_body(WIPICTableId::Kernel, WIPIC_TABLE_FUNCTIONS).is_some());
     }
 
     #[test]
