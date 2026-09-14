@@ -180,6 +180,37 @@ const MS_PER_TICK: u64 = 8;
 const READS_PER_MS: u64 = 1_000;
 
 impl Platform for CapturePlatform {
+    /// The in-process answers this run offers, taken from the environment the
+    /// way the LGT probe takes them.
+    ///
+    /// `WIE_LOCAL_NET_ACK` is `1`/`any` for every connection or `host:port` for
+    /// one, then any of `len=`, `type=`, `status=`, `prefix=` to describe its
+    /// framing - see `wie_backend::AckEndpoint`. `WIE_LOCAL_NET_CAPTURE` takes
+    /// a connection the same way but records what the title sends instead of
+    /// answering it, which is how a protocol gets read in the first place: a
+    /// recorded connection never answers, so a title waiting on a reply waits.
+    ///
+    /// KTF titles reach their servers through the same `socket_connect` LGT
+    /// does, so a title whose server is gone - 데몬헌터's authentication, say -
+    /// can be answered here without a network.
+    fn local_endpoints(&self) -> Vec<Box<dyn wie_backend::LocalEndpoint>> {
+        let mut endpoints: Vec<Box<dyn wie_backend::LocalEndpoint>> = Vec::new();
+
+        // The approving endpoint first: a run that sets both wants its requests
+        // answered, with the recorder behind it for whatever it does not take.
+        let ack = std::env::var("WIE_LOCAL_NET_ACK").ok();
+        if let Some(endpoint) = wie_backend::AckEndpoint::from_setting(ack.as_deref()) {
+            endpoints.push(Box::new(endpoint));
+        }
+
+        let capture = std::env::var("WIE_LOCAL_NET_CAPTURE").ok();
+        if let Some(endpoint) = wie_backend::CaptureEndpoint::from_setting(capture.as_deref()) {
+            endpoints.push(Box::new(endpoint));
+        }
+
+        endpoints
+    }
+
     fn screen(&self) -> &dyn Screen {
         &self.screen
     }

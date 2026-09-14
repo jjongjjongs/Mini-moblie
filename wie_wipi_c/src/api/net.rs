@@ -1110,6 +1110,23 @@ pub async fn socket(context: &mut dyn WIPICContext, family: i32, socket_type: i3
     })
 }
 
+/// The port a socket call was given, as a number to dial.
+///
+/// It arrives in network order, the way a `sockaddr`'s does, because every
+/// caller runs it through `MC_utilHtons` first: 데몬헌터's authentication
+/// converts 40240 and passes 0x309d, LGT's `WPBill_SetGW` does the same with
+/// its gateway's 30000, and the reference stores its own endpoint's port
+/// byte-swapped so it can compare against the argument as it arrives. Native
+/// hands those bytes straight to its own stack and so never converts them back;
+/// anything here that dials a peer has to.
+///
+/// The billing header is the one place that keeps the argument as it stands -
+/// native builds it from the word the title passed, and a test pins the
+/// gateway's 30000 there as 0x3075.
+fn dialled_port(port: WIPICWord) -> u16 {
+    (port as u16).swap_bytes()
+}
+
 pub async fn socket_connect(
     context: &mut dyn WIPICContext,
     socket: i32,
@@ -1181,7 +1198,7 @@ pub async fn socket_connect(
         if local_network.is_empty() {
             None
         } else {
-            local_network.connect("socket", &dotted_quad(address), port as u16)
+            local_network.connect("socket", &dotted_quad(address), dialled_port(port))
         }
     };
 
@@ -1310,7 +1327,7 @@ pub async fn socket_connect(
 
         destination
     } else {
-        (address, port as u16)
+        (address, dialled_port(port))
     };
 
     let result = {
@@ -1440,7 +1457,11 @@ pub async fn socket_connect_by_name(
         String::from_utf8_lossy(&read_null_terminated_string_bytes(context, name)?).into_owned()
     };
 
-    tracing::debug!("MC_netSocketConnect({socket}, {}, {}) as {name:?}", dotted_quad(address), port as u16);
+    tracing::debug!(
+        "MC_netSocketConnect({socket}, {}, {}) as {name:?}",
+        dotted_quad(address),
+        dialled_port(port)
+    );
 
     socket_connect(context, socket, address, port, callback, callback_context).await
 }
@@ -4010,6 +4031,19 @@ mod network_state_tests {
         // does not destroy the header.
         state.remove_socket(41);
         assert_eq!(state.billing_header(), Some(header));
+    }
+
+    /// A port is dialled in the order it was written, not the order it arrives
+    /// in. 데몬헌터 converts 40240 and passes 0x309d; LGT's gateway is 30000 and
+    /// arrives as 0x3075.
+    #[test]
+    fn a_port_is_dialled_in_the_order_it_was_written() {
+        assert_eq!(dialled_port(0x309d), 40240);
+        assert_eq!(dialled_port(0x3075), 30000);
+
+        // And a port whose halves are equal is its own conversion, which is why
+        // one of those alone would not have caught this.
+        assert_eq!(dialled_port(0x3030), 0x3030);
     }
 
     #[test]
