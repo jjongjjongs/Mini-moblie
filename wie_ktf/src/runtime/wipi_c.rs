@@ -94,6 +94,10 @@ async fn handle_wipic_svc(
         .write(core, lr);
     }
 
+    if method_table::get_served_method_body(table_id, function_id).is_none() {
+        describe_unserved_call(core, table_id, function_id)?;
+    }
+
     let body = method_table::get_method_body(table_id, function_id)
         .ok_or_else(|| WieError::FatalError(alloc::format!("Unknown KTF WIPIC SVC id {:#x}", id.0)))?;
 
@@ -134,4 +138,60 @@ pub fn register_wipic_svc_handler(core: &mut ArmCore, system: &System, jvm: &Jvm
             kernel::new_state(),
         ),
     )
+}
+
+/// Names a call to a slot no function stands behind.
+///
+/// A guest reaches a WIPI C function by indexing a table, so the slot number is
+/// the only name the call has, and it is not one anybody can look up. Its
+/// arguments are what identify it: a descriptor and a buffer and a length read
+/// as a transfer, a descriptor alone as a close. Where those arguments do look
+/// like a buffer, the bytes settle which transfer it is - a request a title has
+/// just built reads as itself, where a buffer it means to have filled reads as
+/// nothing.
+///
+/// Written here rather than in the table's own refusal because this is where the
+/// registers and the memory they point at are.
+fn describe_unserved_call(core: &mut ArmCore, table_id: WIPICTableId, function_id: u16) -> Result<()> {
+    let arguments: [u32; 4] = core::array::from_fn(|index| u32::get(core, index));
+    let [_, pointer, length, _] = arguments;
+
+    tracing::warn!(
+        "unserved WIPIC table {} function {function_id}({:#x}, {:#x}, {:#x}, {:#x}){}",
+        table_id as u32,
+        arguments[0],
+        arguments[1],
+        arguments[2],
+        arguments[3],
+        buffer_preview(core, pointer, length)
+    );
+
+    Ok(())
+}
+
+/// What a `(pointer, length)` pair points at, bounded to what one log line can
+/// carry. Empty unless the pair is plausible and the memory is really there.
+fn buffer_preview(core: &ArmCore, address: u32, length: u32) -> alloc::string::String {
+    use wie_util::ByteRead;
+
+    if address == 0 || !(1..=0x1000).contains(&length) {
+        return alloc::string::String::new();
+    }
+
+    let mut bytes = vec![0u8; (length as usize).min(64)];
+    let Ok(read) = core.read_bytes(address, &mut bytes) else {
+        return alloc::string::String::new();
+    };
+    bytes.truncate(read);
+
+    let text: alloc::string::String = bytes
+        .iter()
+        .map(|&byte| match byte {
+            b'\t' => '\u{2192}',
+            0x20..=0x7e => char::from(byte),
+            _ => '.',
+        })
+        .collect();
+
+    alloc::format!(" [{read} of {length}: {text:?}]")
 }

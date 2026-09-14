@@ -46,20 +46,14 @@ pub const WIPIC_TABLE_FUNCTIONS: u16 = 64;
 /// for it. The line it logs names the table and the slot, which is the only
 /// place either number is ever written down: the guest reaches a function
 /// through an array index, so no name for it appears in its own code.
-fn gen_missing(table_id: WIPICTableId, function_id: u16) -> WIPICMethodBody {
-    // The first four argument registers, whatever the function's real arity is.
-    // A guest reaches these by index, so the number is all a log would otherwise
-    // have to say about a call nobody has identified yet - and the registers are
-    // what tells you which function it is: a descriptor and a buffer read as a
-    // write, a descriptor alone as a close.
-    let body = move |_: &mut dyn WIPICContext, a0: WIPICWord, a1: WIPICWord, a2: WIPICWord, a3: WIPICWord| async move {
-        tracing::warn!(
-            "unserved WIPIC table {} function {function_id}({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})",
-            table_id as u32
-        );
-
-        Ok::<i32, WieError>(-1)
-    };
+/// The answer a slot no function stands behind gives: -1, the error a WIPI C
+/// function reports for anything it cannot do.
+///
+/// The call is named where it is dispatched rather than here - see
+/// `describe_unserved_call`, which has the registers and the memory they point
+/// at, and this has neither.
+fn gen_missing(_table_id: WIPICTableId, _function_id: u16) -> WIPICMethodBody {
+    let body = move |_: &mut dyn WIPICContext| async move { Ok::<i32, WieError>(-1) };
 
     body.into_body()
 }
@@ -412,7 +406,7 @@ pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPIC
 }
 
 /// The body this runtime has written for a slot, if it has written one.
-fn get_served_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPICMethodBody> {
+pub fn get_served_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPICMethodBody> {
     match table_id {
         WIPICTableId::Kernel => match WIPICKernelMethodId::try_from(function_id).ok()? {
             WIPICKernelMethodId::Printk => Some(kernel::printk.into_body()),
