@@ -183,11 +183,18 @@ async fn find_java_method(class: &JavaClassDefinition, name: &str, descriptor: &
 }
 
 async fn java_jump_1(core: &mut ArmCore, _: &mut (), arg1: u32, address: u32) -> Result<JavaMethodResult> {
-    tracing::trace!("java_jump_1({arg1:#x}, {address:#x})");
-
     if address == 0 {
         return Err(WieError::FatalError("jump native address is null".to_string()));
     }
+
+    // The trampolines are the last place the guest's own return address is
+    // still in LR: by the time the entry point they jump to runs, `run_function`
+    // has replaced it with its sentinel. It is the only thing that says where
+    // in the title a call came from - which for `java_throw` is which
+    // dereference found a null - so it goes in the line that was already being
+    // written here.
+    let (caller_pc, caller_lr) = core.read_pc_lr().unwrap_or((0, 0));
+    tracing::trace!("java_jump_1({arg1:#x}, {address:#x}) from pc={caller_pc:#x}, lr={caller_lr:#x}");
 
     let entry_sp = core.save_context().sp;
 
@@ -478,11 +485,13 @@ impl RunFunctionResult<NativeCallResult> for NativeCallResult {
 }
 
 async fn java_jump_2(core: &mut ArmCore, _: &mut (), arg1: u32, arg2: u32, address: u32) -> Result<JavaMethodResult> {
-    tracing::trace!("java_jump_2({arg1:#x}, {arg2:#x}, {address:#x})");
-
     if address == 0 {
         return Err(WieError::FatalError("jump native address is null".to_string()));
     }
+
+    // See `java_jump_1`: the caller is still named here and nowhere after.
+    let (caller_pc, caller_lr) = core.read_pc_lr().unwrap_or((0, 0));
+    tracing::trace!("java_jump_2({arg1:#x}, {arg2:#x}, {address:#x}) from pc={caller_pc:#x}, lr={caller_lr:#x}");
 
     let entry_sp = core.save_context().sp;
 
@@ -490,11 +499,13 @@ async fn java_jump_2(core: &mut ArmCore, _: &mut (), arg1: u32, arg2: u32, addre
 }
 
 async fn java_jump_3(core: &mut ArmCore, _: &mut (), arg1: u32, arg2: u32, arg3: u32, address: u32) -> Result<JavaMethodResult> {
-    tracing::trace!("java_jump_3({arg1:#x}, {arg2:#x}, {arg3:#x}, {address:#x})");
-
     if address == 0 {
         return Err(WieError::FatalError("jump native address is null".to_string()));
     }
+
+    // See `java_jump_1`: the caller is still named here and nowhere after.
+    let (caller_pc, caller_lr) = core.read_pc_lr().unwrap_or((0, 0));
+    tracing::trace!("java_jump_3({arg1:#x}, {arg2:#x}, {arg3:#x}, {address:#x}) from pc={caller_pc:#x}, lr={caller_lr:#x}");
 
     let entry_sp = core.save_context().sp;
 
