@@ -248,6 +248,15 @@ impl Runner {
             return;
         };
 
+        // Every press and release, at info, because a key nobody pressed is a
+        // question no capture could answer otherwise: the floods a trace
+        // carries fill a bounded window in a fraction of a second, and the
+        // moment a phantom key fired has always already scrolled out of it by
+        // the time the log is taken. At info it survives any filter, and it
+        // says which side to look at - a press that is here came from the
+        // panel, and one that is not was invented further in.
+        tracing::info!("input: {key_code:?} {}", if pressed { "down" } else { "up" });
+
         instance
             .pending_input
             .push_back(if pressed { Event::Keydown(key_code) } else { Event::Keyup(key_code) });
@@ -312,6 +321,11 @@ fn build_emulator(platform: Box<AndroidPlatform>, data: &[u8], options: Options)
     let jar = packaged_jar(&files).unwrap_or_else(|| data.to_vec());
     let id = jar_app_id(&jar);
     let jar_filename = format!("{id}.jar");
+
+    // At info, because which name a title is filed under decides which of this
+    // runtime's per-title tables reach it, and a capture that does not say the
+    // name cannot answer why none of them did.
+    tracing::info!("bare jar filed as {id}");
 
     if KtfEmulator::loadable_jar(&jar) {
         KtfEmulator::from_jar(platform, &jar_filename, jar, &id, &id, None, options)

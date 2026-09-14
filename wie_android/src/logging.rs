@@ -75,9 +75,15 @@ const DEFAULT_LOG_DIRECTIVE: &str = "debug,wie_lgt=trace,wie_lgt::hot=warn,wie_l
 ///   drops the flood.
 /// - `wie_core_arm::function`, a line per call into a registered native
 ///   function, which on a spinning title tracks the spin one for one.
+/// - `jvm`, whose trace is a line per bytecode - every field read, every
+///   resolve, every invoke and its result. It is the same kind of flood as the
+///   interpreter's: a capture of 액션퍼즐패밀리1 taken to find a key press was
+///   79% `jvm::jvm` trace and covered two tenths of a second, which is not
+///   long enough to contain anything a person noticed. Its debug lines, which
+///   name the classes and methods rather than the steps, are kept.
 ///
 /// Everything else still arrives at trace, which is the point of the window.
-const COLLECT_LOG_DIRECTIVE: &str = "trace,arm32_cpu=warn,jni=warn,wie_lgt::hot=info,wie_core_arm::function=debug";
+const COLLECT_LOG_DIRECTIVE: &str = "trace,arm32_cpu=warn,jni=warn,jvm=debug,wie_lgt::hot=info,wie_core_arm::function=debug";
 
 /// Lets the player swap the log filter at runtime, so capturing a module's
 /// debug/trace detail no longer means editing the default above and rebuilding.
