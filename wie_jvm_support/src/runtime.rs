@@ -9,7 +9,7 @@ use java_runtime::{
     File, FileDescriptorId, FileSize, FileStat, FileType, IOError, IOResult, RT_RUSTJAR, Runtime, RuntimeClassProto, RuntimeContext, SpawnCallback,
     get_runtime_class_proto,
 };
-use jvm::{Array, ClassDefinition, ClassInstanceRef, Jvm, Result as JvmResult};
+use jvm::{Array, ClassDefinition, ClassInstanceRef, JavaChar, Jvm, Result as JvmResult, runtime::JavaLangString};
 
 use wie_backend::{AsyncCallable, System};
 use wie_util::WieError;
@@ -239,7 +239,7 @@ where
 
     async fn find_rustjar_class(&self, jvm: &Jvm, classpath: &str, class: &str) -> JvmResult<Option<Box<dyn ClassDefinition>>> {
         if classpath == RT_RUSTJAR {
-            let proto = get_runtime_class_proto(class).map(refuse_a_null_array);
+            let proto = get_runtime_class_proto(class).map(refuse_a_null_array).map(fill_in_string_buffer);
             if let Some(proto) = proto {
                 return Ok(Some(
                     self.implementation
@@ -267,6 +267,132 @@ where
     async fn define_array_class(&self, _jvm: &Jvm, element_type_name: &str) -> JvmResult<Box<dyn ClassDefinition>> {
         self.implementation.define_array_class(_jvm, element_type_name).await
     }
+}
+
+/// Stand-ins for the classes the bodies below belong to, so each can name its
+/// receiver the way every other proto does.
+struct StringBuffer;
+struct JavaString;
+
+/// Gives `java.lang.StringBuffer` the two methods the runtime does not carry.
+///
+/// A method the JVM cannot find is a fatal error, not a miss a title carries on
+/// past: 미니러비 formats the 소행성 name plate as `append`, `length`, `insert`
+/// - the zero-padding idiom - and the thread drawing the plate died on `Method
+/// insert(ILjava/lang/String;)Ljava/lang/StringBuffer; not found from
+/// java/lang/StringBuffer`, leaving the screen where it was. `deleteCharAt` is
+/// the same class's other gap and the same formatting helpers' other half; the
+/// title's constant pool names it too.
+///
+/// Anything that is not that class is handed back untouched, and so is a method
+/// the runtime has grown since - the runtime's own is the one to keep.
+fn fill_in_string_buffer(mut proto: RuntimeClassProto) -> RuntimeClassProto {
+    if proto.name != "java/lang/StringBuffer" {
+        return proto;
+    }
+
+    let missing = [
+        JavaMethodProto::new(
+            "insert",
+            "(ILjava/lang/String;)Ljava/lang/StringBuffer;",
+            string_buffer_insert_string,
+            MethodAccessFlags::empty(),
+        ),
+        JavaMethodProto::new(
+            "deleteCharAt",
+            "(I)Ljava/lang/StringBuffer;",
+            string_buffer_delete_char_at,
+            MethodAccessFlags::empty(),
+        ),
+    ];
+
+    for method in missing {
+        let present = proto.methods.iter().any(|x| x.name == method.name && x.descriptor == method.descriptor);
+
+        if !present {
+            proto.methods.push(method);
+        }
+    }
+
+    proto
+}
+
+async fn string_buffer_insert_string(
+    jvm: &Jvm,
+    _: &mut RuntimeContext,
+    mut this: ClassInstanceRef<StringBuffer>,
+    offset: i32,
+    string: ClassInstanceRef<JavaString>,
+) -> JvmResult<ClassInstanceRef<StringBuffer>> {
+    tracing::debug!("java.lang.StringBuffer::insert({this:?}, {offset}, {string:?})");
+
+    let count: i32 = jvm.get_field(&this, "count", "I").await?;
+    if offset < 0 || offset > count {
+        return Err(jvm
+            .exception("java/lang/StringIndexOutOfBoundsException", "insert offset is outside the buffer")
+            .await);
+    }
+
+    // A null inserts the four letters, the way every other conversion in this
+    // class spells one.
+    let inserted = if string.is_null() {
+        "null".into()
+    } else {
+        JavaLangString::to_rust_string(jvm, &string).await?
+    };
+    let inserted = inserted.encode_utf16().collect::<Vec<_>>();
+
+    let mut value: ClassInstanceRef<Array<JavaChar>> = jvm.get_field(&this, "value", "[C").await?;
+    let chars: Vec<JavaChar> = jvm.load_array(&value, 0, count as _).await?;
+
+    let (before, after) = chars.split_at(offset as _);
+    let new_chars = before.iter().chain(inserted.iter()).chain(after.iter()).copied().collect::<Vec<_>>();
+
+    // The buffer the class hands out is its own; it only has to be replaced
+    // when what goes in no longer fits, and the doubling is the one the
+    // runtime's own growth uses.
+    if jvm.array_length(&value).await? < new_chars.len() {
+        value = jvm.instantiate_array("C", new_chars.len() * 2).await?.into();
+        jvm.put_field(&mut this, "value", "[C", value.clone()).await?;
+    }
+
+    let new_count = new_chars.len() as i32;
+    jvm.store_array(&mut value, 0, new_chars).await?;
+    jvm.put_field(&mut this, "count", "I", new_count).await?;
+
+    Ok(this)
+}
+
+async fn string_buffer_delete_char_at(
+    jvm: &Jvm,
+    _: &mut RuntimeContext,
+    mut this: ClassInstanceRef<StringBuffer>,
+    index: i32,
+) -> JvmResult<ClassInstanceRef<StringBuffer>> {
+    tracing::debug!("java.lang.StringBuffer::deleteCharAt({this:?}, {index})");
+
+    let count: i32 = jvm.get_field(&this, "count", "I").await?;
+    if index < 0 || index >= count {
+        return Err(jvm
+            .exception("java/lang/StringIndexOutOfBoundsException", "no character at that index")
+            .await);
+    }
+
+    let mut value: ClassInstanceRef<Array<JavaChar>> = jvm.get_field(&this, "value", "[C").await?;
+    let chars: Vec<JavaChar> = jvm.load_array(&value, 0, count as _).await?;
+
+    let new_chars = chars
+        .iter()
+        .take(index as _)
+        .chain(chars.iter().skip(index as usize + 1))
+        .copied()
+        .collect::<Vec<_>>();
+
+    let new_count = new_chars.len() as i32;
+    jvm.store_array(&mut value, 0, new_chars).await?;
+    jvm.put_field(&mut this, "count", "I", new_count).await?;
+
+    Ok(this)
 }
 
 /// A stand-in for the class whose constructors are replaced below, so the
@@ -358,11 +484,15 @@ async fn byte_array_input_stream_init_with_offset_length(
 
 #[cfg(test)]
 mod tests {
-    use alloc::vec::Vec;
+    use alloc::{boxed::Box, vec::Vec};
 
     use java_runtime::get_runtime_class_proto;
+    use jvm::{ClassInstanceRef, Result as JvmResult, runtime::JavaLangString};
 
-    use super::refuse_a_null_array;
+    use test_utils::run_jvm_test;
+    use wie_util::WieError;
+
+    use super::{StringBuffer, refuse_a_null_array};
 
     #[test]
     fn byte_array_input_streams_constructors_are_the_ones_replaced() {
@@ -385,6 +515,67 @@ mod tests {
         assert_eq!(stock, guarded);
         assert!(guarded.contains(&("<init>".into(), "([B)V".into())));
         assert!(guarded.contains(&("<init>".into(), "([BII)V".into())));
+    }
+
+    /// The method the runtime does not carry has to behave like the one it
+    /// would have: insert at the front, in the middle and at the end, and grow
+    /// the buffer past the sixteen characters a fresh one holds.
+    #[test]
+    fn a_string_buffer_inserts_where_it_is_told() -> Result<(), WieError> {
+        run_jvm_test(Box::new([]), async |jvm| {
+            let buffer = jvm.new_class("java/lang/StringBuffer", "()V", ()).await?;
+
+            for (offset, inserted) in [(0, "middle"), (0, "the "), (10, " of it"), (16, ", and past what a new buffer holds")] {
+                let inserted = JavaLangString::from_rust_string(&jvm, inserted).await?;
+                let _: ClassInstanceRef<StringBuffer> = jvm
+                    .invoke_virtual(&buffer, "insert", "(ILjava/lang/String;)Ljava/lang/StringBuffer;", (offset, inserted))
+                    .await?;
+            }
+
+            let text = jvm.invoke_virtual(&buffer, "toString", "()Ljava/lang/String;", ()).await?;
+            assert_eq!(
+                JavaLangString::to_rust_string(&jvm, &text).await?,
+                "the middle of it, and past what a new buffer holds"
+            );
+
+            // An offset outside the buffer is the throw a title catches, not
+            // something that writes anywhere. The far end is not outside: a
+            // buffer is inserted at, and appending is inserting at its length.
+            for offset in [-1, 51] {
+                let inserted = JavaLangString::from_rust_string(&jvm, "nowhere").await?;
+                let result: JvmResult<ClassInstanceRef<StringBuffer>> = jvm
+                    .invoke_virtual(&buffer, "insert", "(ILjava/lang/String;)Ljava/lang/StringBuffer;", (offset, inserted))
+                    .await;
+
+                assert!(result.is_err(), "{offset} is outside a buffer of 50");
+            }
+
+            Ok(())
+        })
+    }
+
+    /// And the other half of the same formatting helpers: a character comes out
+    /// of the middle, and an index the buffer does not have throws.
+    #[test]
+    fn a_string_buffer_deletes_the_character_it_is_told_to() -> Result<(), WieError> {
+        run_jvm_test(Box::new([]), async |jvm| {
+            let text = JavaLangString::from_rust_string(&jvm, "abxcd").await?;
+            let buffer = jvm.new_class("java/lang/StringBuffer", "(Ljava/lang/String;)V", (text,)).await?;
+
+            let _: ClassInstanceRef<StringBuffer> = jvm.invoke_virtual(&buffer, "deleteCharAt", "(I)Ljava/lang/StringBuffer;", (2,)).await?;
+
+            let text = jvm.invoke_virtual(&buffer, "toString", "()Ljava/lang/String;", ()).await?;
+            assert_eq!(JavaLangString::to_rust_string(&jvm, &text).await?, "abcd");
+
+            for index in [-1, 4] {
+                let result: JvmResult<ClassInstanceRef<StringBuffer>> =
+                    jvm.invoke_virtual(&buffer, "deleteCharAt", "(I)Ljava/lang/StringBuffer;", (index,)).await;
+
+                assert!(result.is_err(), "{index} is not a character of a buffer of 4");
+            }
+
+            Ok(())
+        })
     }
 
     #[test]
