@@ -7463,18 +7463,6 @@ fn lgt_local_major_oil_response(request: &[u8]) -> Option<Vec<u8>> {
         // 포인트확인, from the title's opening menu. `0x705c` builds it with
         // nothing in the body at all - only the header `0x656c` writes - so the
         // length and the code are the whole of what can be matched on.
-        //
-        // Its answer goes to `0x6dc0`, which takes one word out of it and posts
-        // that alongside the code:
-        //
-        // ```asm
-        // 6dc6  ldr   r3, [r3]         ; the packet
-        // 6dca  ldr   r1, [r3, #0x44]  ; the points
-        // 6dcc  bl    #0x6c50          ; post (0x04000000, points, -1, -1)
-        // ```
-        //
-        // so the answer has to reach past `+0x44`, and what sits there is the
-        // number the title shows. A player who has never sent any has none.
         MAJOR_OIL_POINTS if request.len() == MAJOR_OIL_POINTS_FRAME => (MAJOR_OIL_POINTS, MAJOR_OIL_POINTS_REPLY),
 
         _ => return None,
@@ -7483,6 +7471,16 @@ fn lgt_local_major_oil_response(request: &[u8]) -> Option<Vec<u8>> {
     let mut reply = vec![0u8; reply_length];
     reply[..4].copy_from_slice(&(reply_length as u32).to_le_bytes());
     reply[MAJOR_OIL_CODE..MAJOR_OIL_CODE + 4].copy_from_slice(&code.to_le_bytes());
+
+    if code == MAJOR_OIL_POINTS {
+        for (at, value) in [
+            (MAJOR_OIL_POINTS_GRANTED_AT, MAJOR_OIL_POINTS_GRANTED),
+            (MAJOR_OIL_POINTS_HELD_AT, MAJOR_OIL_POINTS_HELD),
+            (MAJOR_OIL_POINTS_HELD_AT + 4, MAJOR_OIL_POINTS_HELD),
+        ] {
+            reply[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+    }
 
     Some(reply)
 }
@@ -7515,10 +7513,38 @@ const MAJOR_OIL_POINTS: u32 = 0x0400_0000;
 /// Bytes in that request, all of them header and uncleared stack.
 const MAJOR_OIL_POINTS_FRAME: usize = 68;
 
-/// Bytes in its answer: enough to reach the word at `+0x44` that `0x6dc0`
-/// hands the title as the point count, which is zero for a player who has
-/// never sent any.
-const MAJOR_OIL_POINTS_REPLY: usize = 0x48;
+/// The three words of its answer the title reads, and what it insists on
+/// finding in them.
+///
+/// `0x6dc0` takes `+0x44` out of the packet and posts it to the screen beside
+/// the code, and `0xda50` is where the screen spends it - against the packet it
+/// came from:
+///
+/// ```asm
+/// da54  ldr   r1, [r2, r3]     ; the word posted from +0x44
+/// da56  cmp   r1, #1
+/// da58  bne   #0xda78          ; anything else hangs up
+/// da5e  movs  r3, #0xc0
+/// da60  ldr   r4, [r0, #0x48]
+/// da62  lsls  r3, r3, #4       ; 0xc00
+/// da64  cmp   r4, r3
+/// da66  bne   #0xda74          ; and so does +0x48 being anything else
+/// da68  ldr   r3, [r0, #0x4c]
+/// da6a  cmp   r3, r4
+/// da6c  bne   #0xda74          ; and +0x4c not matching it
+/// da6e  str   r1, [r3]         ; only then is the screen answered
+/// ```
+///
+/// where `0xda78` is `0x2a8c`, the routine that closes the socket and puts the
+/// title back - which is what a reply of zeros got: the socket closed and
+/// -접속실패- 현재 네트워크 상태가 불안정 합니다.
+const MAJOR_OIL_POINTS_GRANTED_AT: usize = 0x44;
+const MAJOR_OIL_POINTS_GRANTED: u32 = 1;
+const MAJOR_OIL_POINTS_HELD_AT: usize = 0x48;
+const MAJOR_OIL_POINTS_HELD: u32 = 0xc00;
+
+/// Bytes in the answer: enough to reach the last of those three words.
+const MAJOR_OIL_POINTS_REPLY: usize = 0x50;
 
 /// The code of the request that follows the connect, built by `0x6a3c`.
 const MAJOR_OIL_SESSION: u32 = 0x01f0_0000;
@@ -7765,7 +7791,7 @@ mod major_oil_tests {
     ];
 
     #[test]
-    fn the_points_request_is_answered_with_a_count() {
+    fn the_points_request_is_answered_with_what_the_screen_checks() {
         let reply = lgt_local_major_oil_response(&MAJOR_OIL_POINTS_REQUEST).expect("포인트확인 is answered");
 
         assert_eq!(u32::from_le_bytes(reply[..4].try_into().unwrap()), reply.len() as u32);
@@ -7774,13 +7800,29 @@ mod major_oil_tests {
             MAJOR_OIL_POINTS
         );
 
-        // 0x6dc0 reads this word and hands it to the title as the count.
-        let points_at = 0x44;
-        assert!(reply.len() >= points_at + 4, "the count has to be inside the packet");
+        let word = |at: usize| u32::from_le_bytes(reply[at..at + 4].try_into().unwrap());
+
+        // The three 0xda50 walks through, in the order it walks through them.
+        assert!(reply.len() >= MAJOR_OIL_POINTS_HELD_AT + 8, "all three have to be in the packet");
+        assert_eq!(word(MAJOR_OIL_POINTS_GRANTED_AT), 1, "anything else hangs up at 0xda58");
+        assert_eq!(word(MAJOR_OIL_POINTS_HELD_AT), 0xc00, "and at 0xda66");
         assert_eq!(
-            u32::from_le_bytes(reply[points_at..points_at + 4].try_into().unwrap()),
-            0,
-            "a player who has never sent any has none"
+            word(MAJOR_OIL_POINTS_HELD_AT + 4),
+            word(MAJOR_OIL_POINTS_HELD_AT),
+            "0xda6a wants the two to match"
+        );
+    }
+
+    /// Zeros in those three words is what the title was answered with before,
+    /// and it hung up on them.
+    #[test]
+    fn a_reply_of_zeros_is_what_the_screen_refuses() {
+        let reply = lgt_local_major_oil_response(&MAJOR_OIL_POINTS_REQUEST).unwrap();
+
+        assert_ne!(
+            &reply[MAJOR_OIL_POINTS_GRANTED_AT..MAJOR_OIL_POINTS_HELD_AT + 8],
+            [0u8; 12].as_slice(),
+            "0xda58 hangs up on a zero there"
         );
     }
 
