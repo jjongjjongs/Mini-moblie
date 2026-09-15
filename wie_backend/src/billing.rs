@@ -7750,6 +7750,238 @@ const DUNGEON_CRASHER_SHOP: u8 = 3;
 /// refusal.
 const DUNGEON_CRASHER_GRANTED: u32 = 1;
 
+/// 소울헌터라키's special shop, which asks where its content server is.
+///
+/// The title (`0002E0EA`) reaches its 스페셜상점 over the billing socket it
+/// already has open to `211.43.222.153:12000` and writes one 28-byte record,
+/// seven little-endian words:
+///
+/// ```text
+/// 1c 00 00 00   28, the record's own length
+/// d4 17 00 00   6100, what it is asking
+/// 03 00 00 00   3, the protocol version
+/// 03 00 00 00   3, the same version again
+/// 64 00 00 00   100, the port field the title starts with
+/// 00 00 00 00
+/// 00 00 00 00
+/// ```
+///
+/// `0x5e4a4` builds it: the length and 6100 are written straight in, the two
+/// threes both come from `0x5d1b8` (`movs r0, #3; bx lr` - a constant), and the
+/// last words are halfwords the title's own setup put at the head of its
+/// context.
+///
+/// It is sent from `0x5ec06`, which is reached only while the flag at
+/// `context + 6595` is clear - and `0x5e7f8`, the handler for reply 6101, is
+/// what sets that flag. So 6100 asks one question: where do I connect for this.
+/// The handler answers it by copying thirty-two bytes out of the reply:
+///
+/// ```asm
+/// 5e7f8  ldr   r0, [pc, #0x308]   ; 0x9ac - the reply's payload, at +12
+/// 5e7fc  adds  r3, r6, r0
+/// 5e7fe  ldm   r3!, {r0, r1, r4}  ; 32 bytes, into 0x16641ec
+/// ...
+/// 5e80a  ldr   r0, [pc, #0x300]   ; 6595
+/// 5e812  strb  r2, [r3]           ; the address is in
+/// 5e814  movs  r0, #2             ; and the socket is dropped
+/// ```
+///
+/// `0x16641ec` is the address the title dials. `0x5d088` writes it as
+/// `sprintf(0x16641ec, "%s", host)` and `sprintf(0x16641ec + 0x12, "%d", port)`,
+/// and the title's own setup at `0x5db6a` fills it with `"211.43.222.153"` and
+/// `12000` - the pair it was already connected to. So the thirty-two bytes are
+/// an eighteen-byte host string followed by a fourteen-byte port string, and
+/// the reply to 6100 is a redirect.
+///
+/// This gateway stands in for the whole service rather than for one machine of
+/// it, so the redirect points back at the address the title arrived on: it
+/// drops the socket, waits out `0x5ed56`, reconnects through `0x5d754`, and
+/// asks its next question here. Nothing loops - the flag at 6595 stays set
+/// across the reconnect, and only the full reset at `0x5dae8` clears it.
+///
+/// The reply's own header is read by `0x5e5b0` before any handler sees it:
+///
+/// ```asm
+/// 5e608  ldr   r3, [r6, #8]   ; word 2
+/// 5e60c  subs  r3, #1
+/// 5e60e  cmp   r3, #9
+/// 5e610  bls   #0x5e61a       ; 1..10 - then word 0 is the length to read
+/// 5e612  movs  r3, #0xf0      ; anything else is 240 bytes of something else
+/// ```
+///
+/// so word 0 carries the whole reply's length and word 2 has to be a version
+/// the reader accepts. The request's own version is carried back, which is both.
+fn lgt_local_soul_hunter_raki_response(request: &[u8]) -> Option<Vec<u8>> {
+    if request.len() != RAKI_ADDRESS_FRAME {
+        return None;
+    }
+
+    let word = |at: usize| u32::from_le_bytes([request[at], request[at + 1], request[at + 2], request[at + 3]]);
+
+    if word(0) as usize != request.len() || word(RAKI_COMMAND_AT) != RAKI_ADDRESS_REQUEST {
+        return None;
+    }
+
+    // The version, written twice by a builder that reads it from one constant,
+    // and inside the range the title's own reader will take it back in.
+    let version = word(RAKI_VERSION_AT);
+    if version != word(RAKI_VERSION_AT + 4) || !RAKI_VERSIONS.contains(&version) {
+        return None;
+    }
+
+    let mut reply = Vec::with_capacity(RAKI_REPLY_LENGTH);
+
+    reply.extend_from_slice(&(RAKI_REPLY_LENGTH as u32).to_le_bytes());
+    reply.extend_from_slice(&RAKI_ADDRESS_REPLY.to_le_bytes());
+    reply.extend_from_slice(&version.to_le_bytes());
+    reply.extend_from_slice(&raki_field(RAKI_HOST, RAKI_HOST_FIELD));
+    reply.extend_from_slice(&raki_field(RAKI_PORT, RAKI_PORT_FIELD));
+
+    Some(reply)
+}
+
+/// One of the reply's two string fields, padded with the NULs the title's own
+/// `sprintf` would have left behind the text it wrote.
+fn raki_field(value: &[u8], width: usize) -> Vec<u8> {
+    let mut field = value.to_vec();
+    field.resize(width, 0);
+
+    field
+}
+
+/// Bytes in the address request: seven words and nothing else.
+const RAKI_ADDRESS_FRAME: usize = 28;
+
+/// Where the request says what it is, and what it says.
+const RAKI_COMMAND_AT: usize = 4;
+const RAKI_ADDRESS_REQUEST: u32 = 6100;
+
+/// What the reply says it is, which is the only thing `0x5e7ba` switches on.
+const RAKI_ADDRESS_REPLY: u32 = 6101;
+
+/// The version, written into the request twice, and the range `0x5e5b0` will
+/// read a reply's copy of it back in.
+const RAKI_VERSION_AT: usize = 8;
+const RAKI_VERSIONS: core::ops::RangeInclusive<u32> = 1..=10;
+
+/// The address `0x5e7f8` copies out of the reply: a host and a port, both as
+/// text, in the widths `0x5d088` writes them at.
+const RAKI_HOST_FIELD: usize = 0x12;
+const RAKI_PORT_FIELD: usize = 14;
+
+/// The address the title dials by default, out of its own `0x5db6a` - so the
+/// redirect leaves it where it already is.
+const RAKI_HOST: &[u8] = b"211.43.222.153";
+const RAKI_PORT: &[u8] = b"12000";
+
+/// The header the reader parses, and the address behind it.
+const RAKI_REPLY_LENGTH: usize = 12 + RAKI_HOST_FIELD + RAKI_PORT_FIELD;
+
+#[cfg(test)]
+mod soul_hunter_raki_tests {
+    use alloc::{vec, vec::Vec};
+
+    use super::*;
+
+    /// The record the device log caught on the way into 스페셜상점.
+    fn address_request() -> Vec<u8> {
+        vec![
+            0x1c, 0x00, 0x00, 0x00, 0xd4, 0x17, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00,
+        ]
+    }
+
+    fn word(reply: &[u8], at: usize) -> u32 {
+        u32::from_le_bytes([reply[at], reply[at + 1], reply[at + 2], reply[at + 3]])
+    }
+
+    /// Word 0 is what `0x5e5b0` reads the rest of the reply against, so a reply
+    /// that does not say its own length leaves the title reading for bytes that
+    /// are not coming.
+    #[test]
+    fn the_reply_declares_its_own_length() {
+        let reply = response(&address_request()).unwrap();
+
+        assert_eq!(word(&reply, 0) as usize, reply.len());
+        assert_eq!(reply.len(), 44);
+    }
+
+    /// 6101 is the only case in `0x5e7ba`'s switch that takes an address.
+    #[test]
+    fn the_reply_is_the_one_the_address_handler_answers_to() {
+        let reply = response(&address_request()).unwrap();
+
+        assert_eq!(word(&reply, 4), 6101);
+    }
+
+    /// Outside 1..10 the reader stops treating word 0 as a length and waits for
+    /// 240 bytes instead.
+    #[test]
+    fn the_version_comes_back_where_the_reader_will_take_it() {
+        let reply = response(&address_request()).unwrap();
+
+        assert!((1..=10).contains(&word(&reply, 8)));
+        assert_eq!(word(&reply, 8), 3);
+    }
+
+    /// `0x5e7f8` copies 32 bytes from +12 straight over the address the title
+    /// dials, which `0x5d088` keeps as a host string and a port string.
+    #[test]
+    fn the_address_is_the_one_the_title_arrived_on() {
+        let reply = response(&address_request()).unwrap();
+
+        let host = &reply[12..12 + 0x12];
+        let port = &reply[12 + 0x12..];
+
+        assert_eq!(host.len() + port.len(), 32);
+        assert_eq!(&host[..14], b"211.43.222.153");
+        assert!(host[14..].iter().all(|x| *x == 0));
+        assert_eq!(&port[..5], b"12000");
+        assert!(port[5..].iter().all(|x| *x == 0));
+    }
+
+    /// The two version words are one constant read twice, so a record whose
+    /// copies disagree is not this request.
+    #[test]
+    fn a_record_whose_versions_disagree_is_not_answered() {
+        let mut request = address_request();
+        request[12] = 4;
+
+        assert_eq!(lgt_local_soul_hunter_raki_response(&request), None);
+    }
+
+    /// A version the title's own reader would refuse the reply under.
+    #[test]
+    fn a_version_outside_the_readers_range_is_not_answered() {
+        for version in [0u32, 11] {
+            let mut request = address_request();
+            request[8..12].copy_from_slice(&version.to_le_bytes());
+            request[12..16].copy_from_slice(&version.to_le_bytes());
+
+            assert_eq!(lgt_local_soul_hunter_raki_response(&request), None);
+        }
+    }
+
+    /// Only 6100 asks where to connect; the title's other records are its own.
+    #[test]
+    fn another_command_at_the_same_length_is_not_answered() {
+        let mut request = address_request();
+        request[4..8].copy_from_slice(&6000u32.to_le_bytes());
+
+        assert_eq!(lgt_local_soul_hunter_raki_response(&request), None);
+    }
+
+    /// The length word is the record's own, and a record that disagrees with
+    /// itself is not one this shape describes.
+    #[test]
+    fn a_record_that_misstates_its_length_is_not_answered() {
+        let mut request = address_request();
+        request[0] = 0x20;
+
+        assert_eq!(lgt_local_soul_hunter_raki_response(&request), None);
+    }
+}
+
 pub fn response(request: &[u8]) -> Option<Vec<u8>> {
     lgt_local_granted_response(request)
         .or_else(|| lgt_local_cash_response(request))
@@ -7784,6 +8016,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_guardian_slave_response(request))
         .or_else(|| lgt_local_major_oil_response(request))
         .or_else(|| lgt_local_dungeon_crasher_response(request))
+        .or_else(|| lgt_local_soul_hunter_raki_response(request))
 }
 
 #[cfg(test)]
