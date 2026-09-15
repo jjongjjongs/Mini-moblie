@@ -13,7 +13,54 @@ use wie_util::{Result, WieError};
 use self::lbmp::decode_lbmp;
 
 lazy_static::lazy_static! {
-    static ref FONT: FontRef<'static> = FontRef::try_from_slice(include_bytes!("../../fonts/neodgm.ttf")).unwrap();
+    static ref NEODGM: FontRef<'static> = FontRef::try_from_slice(include_bytes!("../../fonts/neodgm.ttf")).unwrap();
+    static ref GALMURI9: FontRef<'static> = FontRef::try_from_slice(include_bytes!("../../fonts/galmuri9.ttf")).unwrap();
+    static ref GALMURI11: FontRef<'static> = FontRef::try_from_slice(include_bytes!("../../fonts/galmuri11.ttf")).unwrap();
+}
+
+/// The heights the system font's faces were drawn at, largest first.
+///
+/// Every face is a pixel font: its glyphs sit on a whole-pixel grid, so a face
+/// is only itself at whole multiples of the height it was drawn at. Asked for
+/// anything else the rasteriser lands between pixels and returns part coverage
+/// for nearly every one of them - neodgm asked for 12px comes back 84%
+/// part-covered, which reads as grey mush beside the sprites a title draws
+/// itself.
+const FACE_HEIGHTS: [u32; 3] = [16, 14, 11];
+
+/// The face that draws `height` on whole pixels, and `None` when no face can -
+/// nothing divides 12 - which leaves the text smeared but the size the title
+/// asked for.
+fn pixel_face(height: f32) -> Option<&'static FontRef<'static>> {
+    let height = height as u32;
+
+    if height == 0 {
+        return None;
+    }
+
+    // Largest first, so a height two faces can draw is drawn by the one that
+    // repeats its grid fewest times.
+    FACE_HEIGHTS
+        .into_iter()
+        .find(|design| height.is_multiple_of(*design))
+        .map(|design| match design {
+            16 => &*NEODGM,
+            14 => &*GALMURI11,
+            _ => &*GALMURI9,
+        })
+}
+
+/// The face to draw `height` with, falling back to the one the system font has
+/// always been when no face fits the height.
+fn face_for(height: f32) -> &'static FontRef<'static> {
+    pixel_face(height).unwrap_or(&NEODGM)
+}
+
+/// How far below the top of a line of `height` the baseline sits, for the face
+/// that draws it. Tracks the face, so a title placing text by its baseline and
+/// the rasteriser agree about where the glyphs go.
+pub fn baseline_px(height: f32) -> f32 {
+    face_for(height).as_scaled(height).ascent()
 }
 
 pub enum TextAlignment {
@@ -641,7 +688,7 @@ where
         color: Color,
         clip: Clip,
     ) {
-        let font = FONT.as_scaled(font_height);
+        let font = face_for(font_height).as_scaled(font_height);
 
         let total_width = string.chars().map(|c| font.h_advance(font.scaled_glyph(c).id)).sum::<f32>();
         let x = match text_alignment {
@@ -1181,13 +1228,14 @@ fn png_is_single_index0_tile(data: &[u8]) -> bool {
 }
 
 pub fn string_width(string: &str, pt_size: f32) -> f32 {
-    let font = FONT.as_scaled(FONT.pt_to_px_scale(pt_size).unwrap());
+    let px_height = NEODGM.pt_to_px_scale(pt_size).unwrap().y;
+    let font = face_for(px_height).as_scaled(px_height);
 
     string.chars().map(|c| font.h_advance(font.scaled_glyph(c).id)).sum::<f32>()
 }
 
 pub fn string_width_px(string: &str, px_height: f32) -> f32 {
-    let font = FONT.as_scaled(px_height);
+    let font = face_for(px_height).as_scaled(px_height);
 
     string.chars().map(|c| font.h_advance(font.scaled_glyph(c).id)).sum::<f32>()
 }
@@ -1201,7 +1249,10 @@ mod tests {
 
     use crate::canvas::{Clip, Image, ImageBufferCanvas};
 
-    use super::{ArgbPixel, Canvas, Color, Rgb332Pixel, TextAlignment, VecImageBuffer, decode_image, png_with_repaired_crcs};
+    use super::{
+        ArgbPixel, Canvas, Color, Font, Rgb332Pixel, ScaleFont, TextAlignment, VecImageBuffer, baseline_px, decode_image, pixel_face,
+        png_with_repaired_crcs,
+    };
 
     /// A 1x1 indexed PNG, which is the smallest thing that has a palette to
     /// patch.
@@ -1764,6 +1815,67 @@ mod tests {
 
         for x in 0..10 {
             assert!(is_set(&image, x, 5), "visible span of extreme line should be drawn (x={x})");
+        }
+    }
+
+    /// Every pixel a glyph puts down is fully on or fully off at the heights
+    /// the faces were drawn at.
+    ///
+    /// This is the whole point of picking a face per height: part coverage is
+    /// grey, and grey on a 176x220 screen blown up to a phone is the mush the
+    /// text used to be. neodgm asked for 12px is 84% part-covered.
+    #[test]
+    fn a_face_draws_whole_pixels_at_the_height_it_was_drawn_at() {
+        // Hangul with dense strokes, plus Latin and digits.
+        let sample = "밝긁힣가나다ABCgjq0123";
+
+        for height in [11.0, 14.0, 16.0, 22.0, 28.0, 32.0] {
+            let face = pixel_face(height).unwrap_or_else(|| panic!("no face draws {height}px"));
+            let scaled = face.as_scaled(height);
+
+            let mut solid = 0;
+            let mut partial = 0;
+            for c in sample.chars() {
+                if let Some(outlined) = scaled.outline_glyph(scaled.scaled_glyph(c)) {
+                    outlined.draw(|_, _, coverage| {
+                        if coverage > 0.99 {
+                            solid += 1;
+                        } else if coverage > 0.01 {
+                            partial += 1;
+                        }
+                    });
+                }
+            }
+
+            assert!(solid > 0, "{height}px drew nothing");
+            assert_eq!(partial, 0, "{height}px smeared {partial} of {} pixels", solid + partial);
+        }
+    }
+
+    /// The heights a title asks for are heights a face can draw. 12 is the one
+    /// that never could, which is why the sizes moved off it.
+    #[test]
+    fn the_heights_titles_ask_for_have_a_face() {
+        for height in [11.0, 14.0, 16.0, 22.0] {
+            assert!(pixel_face(height).is_some(), "{height}px has no face");
+        }
+
+        assert!(pixel_face(12.0).is_none(), "12px is the height no face divides");
+        assert!(pixel_face(0.0).is_none(), "a zero height picks no face");
+    }
+
+    /// The baseline follows the face, so a title laying text out by its
+    /// baseline and the glyphs it gets back agree about the line.
+    #[test]
+    fn the_baseline_follows_the_face() {
+        // neodgm is ascent 12 of 16, the Galmuri faces keep 2px for descenders.
+        assert_eq!(baseline_px(16.0), 12.0);
+        assert_eq!(baseline_px(14.0), 12.0);
+        assert_eq!(baseline_px(11.0), 10.0);
+
+        for height in [11.0, 14.0, 16.0, 22.0] {
+            let baseline = baseline_px(height);
+            assert!(baseline > 0.0 && baseline <= height, "{height}px baseline {baseline} is outside the line");
         }
     }
 

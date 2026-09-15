@@ -57,30 +57,31 @@ impl Font {
         }
     }
 
+    /// How tall a line of this size is.
+    ///
+    /// The system font is made of pixel faces, and a face only draws cleanly at
+    /// whole multiples of the height it was drawn at - 11, 14 and 16. So the
+    /// sizes a title actually asks for are the heights a face can draw: small
+    /// and medium land on 11 rather than 10 and 12, and large already sat on
+    /// 14. The three larger flags keep the heights they had, 20 and 24 among
+    /// them, which no face divides; they draw the way they always have.
     pub(crate) fn pixel_height(size: i32) -> i32 {
         match size {
-            8 => 10,  // SIZE_SMALL
-            0 => 12,  // SIZE_MEDIUM
+            8 => 11,  // SIZE_SMALL
+            0 => 11,  // SIZE_MEDIUM
             16 => 14, // SIZE_LARGE
             4096 => 16,
             8192 => 20,
             16384 => 22,
             32768 => 24,
-            _ => 12,
+            _ => 11,
         }
     }
 
+    /// Where the baseline sits in that line, taken from the face that draws it
+    /// so the metrics a title lays out with and the glyphs it gets agree.
     pub(crate) fn baseline(size: i32) -> i32 {
-        match size {
-            8 => 8,   // SIZE_SMALL
-            0 => 9,   // SIZE_MEDIUM
-            16 => 10, // SIZE_LARGE
-            4096 => 12,
-            8192 => 14,
-            16384 => 15,
-            32768 => 17,
-            _ => 9,
-        }
+        wie_backend::canvas::baseline_px(Self::pixel_height(size) as f32) as i32
     }
 
     async fn cl_init(jvm: &Jvm, _: &mut WieJvmContext) -> JvmResult<()> {
