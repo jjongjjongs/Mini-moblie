@@ -100,6 +100,13 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // 던전앤파이터 격투가: draws 296 rows into a 320-row panel and leaves the
     // rest to the handset, so the strip has to come off what is shown.
     (TitlePlatform::Ktf, "0103BF27", annunciator()),
+    // 겟앰프드: its descriptor says 240*320, but every full-screen picture it
+    // carries - title, menu, each map - is 240x296, and it centres its popup
+    // frame in whatever height the screen reports. Told 320 it put the frame at
+    // `(320 - 168) / 2 = 76`, twelve rows below the text it had laid out for
+    // `(296 - 168) / 2 = 64`, so a notice's title sat across the bottom of its
+    // own title bar and its first line across the bottom of the message box.
+    (TitlePlatform::Ktf, "01031C0A", panel(240, 296)),
     // 소울게이트: takes a 240x320 screen, composes every frame into a 320x240
     // off-screen buffer of its own, and copies that onto the screen a quarter
     // turn clockwise - the handset was meant to be turned sideways to play it.
@@ -144,6 +151,14 @@ mod tests {
     fn an_id_is_matched_whatever_case_it_is_written_in() {
         assert!(title_quirks(TitlePlatform::Lgt, "0002cb6a").expects_annunciator);
         assert!(title_quirks(TitlePlatform::Lgt, "0002CB6A").expects_annunciator);
+    }
+
+    /// 겟앰프드's descriptor names the handset's panel, not the area the title
+    /// draws in, and everything it lays out is centred in the latter.
+    #[test]
+    fn a_title_can_name_a_shorter_panel_than_its_descriptor_does() {
+        assert_eq!(title_quirks(TitlePlatform::Ktf, "01031C0A").screen_size, Some((240, 296)));
+        assert!(!title_quirks(TitlePlatform::Ktf, "01031C0A").expects_annunciator);
     }
 
     #[test]

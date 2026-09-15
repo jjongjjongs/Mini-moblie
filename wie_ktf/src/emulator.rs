@@ -88,10 +88,16 @@ impl KtfEmulator {
     /// answered from the `DisplaySize` line rather than a table because KTF's
     /// descriptor carries it: of seven local archives, four say 240*320 and
     /// three say 176*220.
+    ///
+    /// A descriptor can still name a panel the title does not draw for - it is
+    /// the handset's, and what the title gets is the handset's less the status
+    /// strip - so the table answers first for the titles where the two differ.
+    /// See `wie_backend::quirks`.
     pub fn screen_size(archive: &[u8]) -> Option<(u32, u32)> {
         let files = extract_zip(archive).ok()?;
+        let adf = KtfAdf::parse(files.get("__adf__")?);
 
-        KtfAdf::parse(files.get("__adf__")?).display_size
+        title_quirks(TitlePlatform::Ktf, &adf.aid).screen_size.or(adf.display_size)
     }
 
     fn load(
