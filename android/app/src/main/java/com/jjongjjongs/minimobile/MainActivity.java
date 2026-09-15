@@ -50,8 +50,11 @@ import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.Collections;
+import java.util.Enumeration;
+import java.util.Locale;
 import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
+import java.util.zip.ZipFile;
 import java.nio.ShortBuffer;
 
 /**
@@ -921,7 +924,7 @@ public final class MainActivity extends Activity {
     }
 
     /**
-     * Uses the first reasonably sized image in the archive as cover art.
+     * Uses a reasonably sized image in the archive as cover art.
      *
      * <p>Which file that is depends on the carrier. LGT archives name their
      * icons {@code big.png}/{@code middle.png}/{@code small.png}, and those were
@@ -933,60 +936,130 @@ public final class MainActivity extends Activity {
      * <p>So the name is not what says an entry is an icon; its first bytes are.
      * They are PNGs whatever they are called, except where they are Windows
      * bitmaps - 데몬헌터's `small.icon` is one - and both decode here.
+     *
+     * <p>Where the icon sits in the archive is not fixed either. This used to
+     * read the entries in order and give up after two hundred, which is every
+     * entry a handset archive has - but an archive carrying a title's extra
+     * downloaded data has hundreds more, and the icons can land behind all of
+     * them: 오즈 천공의기사단 with its data packed in keeps them at entry 334.
+     * Reading the archive's index instead of streaming it means the whole list
+     * is available cheaply, so the entries that look like icons by name are
+     * tried first and every other candidate is still there to fall back on.
      */
     private Bitmap readArchiveIcon(File game) {
-        final int maxEntries = 200;
+        final int maxCandidates = 200;
         final int maxIconBytes = 512 * 1024;
-        final int minSide = 12;
-        final int maxSide = 256;
 
-        try (ZipInputStream zip = new ZipInputStream(new FileInputStream(game))) {
-            int scanned = 0;
-            ZipEntry entry;
-            while ((entry = zip.getNextEntry()) != null && scanned < maxEntries) {
-                scanned++;
-
+        try (ZipFile zip = new ZipFile(game)) {
+            List<ZipEntry> candidates = new ArrayList<>();
+            Enumeration<? extends ZipEntry> entries = zip.entries();
+            while (entries.hasMoreElements()) {
+                ZipEntry entry = entries.nextElement();
                 if (entry.isDirectory()) {
                     continue;
                 }
-                if (entry.getSize() > maxIconBytes) {
+                long size = entry.getSize();
+                if (size > maxIconBytes) {
                     continue;
                 }
+                candidates.add(entry);
+            }
 
-                // The header first, so an archive's own jar is passed over on
-                // its first eight bytes rather than read to the cap.
-                byte[] header = new byte[8];
-                int headerRead = 0;
-                while (headerRead < header.length) {
-                    int read = zip.read(header, headerRead, header.length - headerRead);
-                    if (read <= 0) {
-                        break;
-                    }
-                    headerRead += read;
+            // The named icons first, then everything else in the archive's own
+            // order, so a title that names them something else still resolves.
+            Collections.sort(candidates, new Comparator<ZipEntry>() {
+                @Override
+                public int compare(ZipEntry left, ZipEntry right) {
+                    return iconNameRank(left.getName()) - iconNameRank(right.getName());
                 }
+            });
 
-                if (!looksLikeImage(header, headerRead)) {
-                    continue;
+            int tried = 0;
+            for (ZipEntry entry : candidates) {
+                if (tried >= maxCandidates) {
+                    break;
                 }
+                tried++;
 
-                ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-                buffer.write(header, 0, headerRead);
-                byte[] chunk = new byte[8192];
-                int read;
-                while ((read = zip.read(chunk)) > 0 && buffer.size() <= maxIconBytes) {
-                    buffer.write(chunk, 0, read);
-                }
-
-                byte[] bytes = buffer.toByteArray();
-                Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
-                if (bitmap != null
-                        && bitmap.getWidth() >= minSide && bitmap.getHeight() >= minSide
-                        && bitmap.getWidth() <= maxSide && bitmap.getHeight() <= maxSide) {
+                Bitmap bitmap = readIconEntry(zip, entry, maxIconBytes);
+                if (bitmap != null) {
                     return bitmap;
                 }
             }
         } catch (Exception e) {
             // A corrupt or unreadable archive still gets a placeholder tile.
+        }
+
+        return null;
+    }
+
+    /** Lower ranks are tried first: the names an icon usually has. */
+    private static int iconNameRank(String path) {
+        String name = path;
+        int slash = name.lastIndexOf('/');
+        if (slash >= 0) {
+            name = name.substring(slash + 1);
+        }
+        name = name.toLowerCase(Locale.US);
+
+        // Largest first, so the tile gets the best picture the archive has.
+        if (name.startsWith("big.")) {
+            return 0;
+        }
+        if (name.startsWith("middle.")) {
+            return 1;
+        }
+        if (name.startsWith("small.")) {
+            return 2;
+        }
+        if (name.endsWith(".icon") || name.contains("icon")) {
+            return 3;
+        }
+        if (name.endsWith("_l.png") || name.endsWith("_ad.png") || name.endsWith("_m.png") || name.endsWith("_s.png")) {
+            return 3;
+        }
+        return 4;
+    }
+
+    /** The entry decoded as cover art, or null when it is not one. */
+    private Bitmap readIconEntry(ZipFile zip, ZipEntry entry, int maxIconBytes) {
+        final int minSide = 12;
+        final int maxSide = 256;
+
+        try (InputStream stream = zip.getInputStream(entry)) {
+            // The header first, so an archive's own jar is passed over on its
+            // first eight bytes rather than read to the cap.
+            byte[] header = new byte[8];
+            int headerRead = 0;
+            while (headerRead < header.length) {
+                int read = stream.read(header, headerRead, header.length - headerRead);
+                if (read <= 0) {
+                    break;
+                }
+                headerRead += read;
+            }
+
+            if (!looksLikeImage(header, headerRead)) {
+                return null;
+            }
+
+            ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+            buffer.write(header, 0, headerRead);
+            byte[] chunk = new byte[8192];
+            int read;
+            while ((read = stream.read(chunk)) > 0 && buffer.size() <= maxIconBytes) {
+                buffer.write(chunk, 0, read);
+            }
+
+            byte[] bytes = buffer.toByteArray();
+            Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+            if (bitmap != null
+                    && bitmap.getWidth() >= minSide && bitmap.getHeight() >= minSide
+                    && bitmap.getWidth() <= maxSide && bitmap.getHeight() <= maxSide) {
+                return bitmap;
+            }
+        } catch (Exception e) {
+            // Not an icon, or unreadable; the next candidate still gets a turn.
         }
 
         return null;
