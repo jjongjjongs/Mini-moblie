@@ -325,6 +325,15 @@ const CLASS_FLAG_INTERFACE: u16 = 0x200;
 /// Guard on how far a class hierarchy is walked looking for a platform class.
 const MAX_SUPERCLASS_DEPTH: usize = 32;
 
+/// An application class lists the interfaces it implements at this offset into
+/// its metadata block: a count followed by one pointer per interface. See
+/// [`application_interface_dispatch`].
+const APP_LINKED_INTERFACES: u32 = 0x14;
+
+/// Guard on that count, so a pointer that is not such a table cannot make the
+/// search walk the whole image. A class implements a handful of interfaces.
+const MAX_LINKED_INTERFACES: u32 = 256;
+
 /// Native CLDC initializes both `the_vm_reschedule_count` and its threshold
 /// from configuration 32, whose LGT value is 100.
 const VM_RESCHEDULE_COUNT_THRESHOLD: u32 = 100;
@@ -1789,7 +1798,7 @@ async fn handle_init_svc(core: &mut ArmCore, context: &mut InitSvcContext, id: S
             let exception = context.java_handles.address_of(exception)?;
 
             tracing::debug!(
-                "vm_throw_virtual_machine_error(import={:#x}, message={message:#x}) -> longjmp({exception:#x})",
+                "vm_throw_virtual_machine_error(import={:#x}, message={message:#x}, lr={lr:#x}) -> longjmp({exception:#x})",
                 id.0
             );
             context.save_points.throw(core, exception)
@@ -1817,8 +1826,23 @@ async fn handle_init_svc(core: &mut ArmCore, context: &mut InitSvcContext, id: S
                 })
             };
 
+            // Only the platform's interfaces are in that table. An interface
+            // the application declares itself has no import row at all, and
+            // its dispatch table is not built here: the compiler already wrote
+            // one into the image for every class that implements it. Hand back
+            // the image's own table. 턴 gives its screens an `IEventHandler`
+            // and calls `Init` on the new one through this import, so without
+            // this the game-loop thread dies on the first screen it builds and
+            // only the paint thread is left running - a black screen forever.
             let Some((requested_name, dispatch)) = requested else {
-                0u32.write(core, lr)?;
+                let application = application_interface_dispatch(core, context, &receiver_name, requested_root)?;
+
+                tracing::trace!(
+                    "vm_find_interface(object={object:#x}, receiver={receiver_name}, root={requested_root:#x}, application) -> {:#x}",
+                    application.unwrap_or(0)
+                );
+
+                application.unwrap_or(0).write(core, lr)?;
                 return Ok(());
             };
 
@@ -2869,6 +2893,85 @@ fn class_implements_interface(context: &InitSvcContext, class_name: &str, interf
     }
 
     false
+}
+
+/// The interface dispatch table the compiler wrote into the image for
+/// `receiver_name`'s implementation of the interface whose class_shared root is
+/// `requested_root`, or `None` when this class and its superclasses implement
+/// no such interface.
+///
+/// A class lists them at `metadata+0x14`, a count followed by one pointer per
+/// interface it implements. Each row is the dispatch table itself:
+///
+/// ```text
+/// { u32 interface root, u32 entry[method count], u32 implementing class root }
+/// ```
+///
+/// which is the shape `vm_find_interface` answers with - word zero is the
+/// requested identity, and the compiled call site loads its method from
+/// `row + 4 + slot * 4`. 턴's `PlayGuide` has one row for `IEventHandler`,
+/// whose six entries are its `Init`, `Release`, `KeyDown`, `KeyUp`, `Render`
+/// and `SetPause` in the interface's own slot order.
+///
+/// The same offset holds `{name, first slot}` rows in other titles - see
+/// [`app_classes::linked_interface_rows`] - so a row counts only when its first
+/// word *is* the root being asked for. A name pointer never is.
+fn application_interface_dispatch(core: &ArmCore, context: &InitSvcContext, receiver_name: &str, requested_root: u32) -> Result<Option<u32>> {
+    if requested_root == 0 {
+        return Ok(None);
+    }
+
+    let mut current = Some(String::from(receiver_name));
+
+    for _ in 0..MAX_SUPERCLASS_DEPTH {
+        let Some(name) = current.take() else {
+            return Ok(None);
+        };
+
+        let Some(class) = context.app_classes.lock().iter().find(|class| class.name == name).cloned() else {
+            return Ok(None);
+        };
+
+        let metadata: u32 = read_generic(core, class.root + 8)?;
+        if metadata != 0
+            && let Some(row) = interface_row_for_root(core, read_generic(core, metadata + APP_LINKED_INTERFACES)?, requested_root)?
+        {
+            return Ok(Some(row));
+        }
+
+        current = class.superclass;
+    }
+
+    Ok(None)
+}
+
+/// The row of one class's linked interface table that describes `root`.
+fn interface_row_for_root<R>(reader: &R, table: u32, root: u32) -> Result<Option<u32>>
+where
+    R: ?Sized + ByteRead,
+{
+    if table == 0 {
+        return Ok(None);
+    }
+
+    let count: u32 = read_generic(reader, table)?;
+    if count == 0 || count > MAX_LINKED_INTERFACES {
+        return Ok(None);
+    }
+
+    for index in 0..count {
+        let row: u32 = read_generic(reader, table + 4 + index * 4)?;
+        if row == 0 {
+            continue;
+        }
+
+        let described: u32 = read_generic(reader, row)?;
+        if described == root {
+            return Ok(Some(row));
+        }
+    }
+
+    Ok(None)
 }
 
 /// Logs the argument registers, and the memory each pointer-looking one points
@@ -5442,5 +5545,117 @@ mod slot12_class_identity_tests {
     fn bridge_name_skips_primitive_array_component() {
         assert_eq!(class_identity_bridge_name("[I"), None);
         assert_eq!(class_identity_bridge_name("[[B"), None);
+    }
+}
+
+#[cfg(test)]
+mod application_interface_tests {
+    use alloc::{vec, vec::Vec};
+
+    use wie_util::{ByteRead, Result};
+
+    use super::interface_row_for_root;
+
+    /// A flat image laid out from a fixed base, so a table can be built by
+    /// writing words at known addresses.
+    struct Image {
+        base: u32,
+        data: Vec<u8>,
+    }
+
+    impl Image {
+        fn new(base: u32, size: usize) -> Self {
+            Self { base, data: vec![0; size] }
+        }
+
+        fn word(&mut self, address: u32, value: u32) {
+            let offset = (address - self.base) as usize;
+            self.data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+
+    impl ByteRead for Image {
+        fn read_bytes(&self, address: u32, result: &mut [u8]) -> Result<usize> {
+            let offset = (address - self.base) as usize;
+            let length = result.len().min(self.data.len() - offset);
+
+            result[..length].copy_from_slice(&self.data[offset..offset + length]);
+
+            Ok(length)
+        }
+    }
+
+    /// 턴's `PlayGuide`: one linked interface, whose row is the dispatch table
+    /// for `IEventHandler` - the interface's root, its six methods in slot
+    /// order, and the implementing class's own root closing the row.
+    fn play_guide_shaped_table() -> Image {
+        let mut image = Image::new(0x1400000, 0x2000);
+
+        image.word(0x140132c, 1);
+        image.word(0x1401330, 0x1401334);
+
+        image.word(0x1401334, 0x1400aac);
+        for (index, entry) in [0x87f80, 0x8802c, 0x87fb8, 0x88004, 0x88054, 0x884f4].into_iter().enumerate() {
+            image.word(0x1401338 + index as u32 * 4, entry);
+        }
+        image.word(0x1401350, 0x1401320);
+
+        image
+    }
+
+    #[test]
+    fn the_row_for_an_interface_is_the_one_naming_its_root() {
+        let image = play_guide_shaped_table();
+
+        let row = interface_row_for_root(&image, 0x140132c, 0x1400aac).unwrap().unwrap();
+
+        assert_eq!(row, 0x1401334);
+    }
+
+    /// Which is the table `vm_find_interface` answers with: word zero is the
+    /// identity asked for, and the compiled call site loads its method from
+    /// `row + 4 + slot * 4`. `IEventHandler.Init` has slot zero.
+    #[test]
+    fn the_row_is_the_dispatch_table_the_call_site_indexes() {
+        let image = play_guide_shaped_table();
+        let row = interface_row_for_root(&image, 0x140132c, 0x1400aac).unwrap().unwrap();
+
+        let mut word = [0u8; 4];
+        image.read_bytes(row + 4, &mut word).unwrap();
+
+        assert_eq!(u32::from_le_bytes(word), 0x87f80);
+    }
+
+    #[test]
+    fn an_interface_the_class_does_not_implement_has_no_row() {
+        let image = play_guide_shaped_table();
+
+        assert_eq!(interface_row_for_root(&image, 0x140132c, 0x1400b40).unwrap(), None);
+    }
+
+    /// The same metadata offset holds `{name, first slot}` rows in other
+    /// titles. A name pointer is never the root being asked for, so such a
+    /// table answers nothing rather than answering wrongly.
+    #[test]
+    fn a_table_of_name_rows_matches_nothing() {
+        let mut image = Image::new(0x1400000, 0x2000);
+
+        image.word(0x1401000, 2);
+        image.word(0x1401004, 0x1401010);
+        image.word(0x1401008, 0x1401018);
+        // {name, first dispatch slot}, the shape Legend of Master's `t` uses.
+        image.word(0x1401010, 0x1401800);
+        image.word(0x1401014, 10);
+        image.word(0x1401018, 0x1401820);
+        image.word(0x140101c, 0);
+
+        assert_eq!(interface_row_for_root(&image, 0x1401000, 0x1400aac).unwrap(), None);
+    }
+
+    #[test]
+    fn nothing_at_all_is_not_a_table() {
+        let image = play_guide_shaped_table();
+
+        assert_eq!(interface_row_for_root(&image, 0, 0x1400aac).unwrap(), None);
     }
 }
