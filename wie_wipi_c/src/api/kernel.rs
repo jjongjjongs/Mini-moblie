@@ -230,20 +230,26 @@ pub async fn unset_timer(context: &mut dyn WIPICContext, ptr_timer: WIPICWord) -
 pub async fn alloc(context: &mut dyn WIPICContext, size: WIPICWord) -> Result<WIPICIndirectPtr> {
     tracing::debug!("MC_knlAlloc({size:#x})");
 
-    if size == 0 {
-        return Ok(WIPICIndirectPtr(0));
-    }
+    // Zero bytes is a request like any other, and the answer is a unique,
+    // freeable, non-null pointer - what `malloc(0)` is defined to give and what
+    // the reference allocator gives. `MC_knlCalloc` already answers that way.
+    //
+    // Null here reads as "out of memory" to a caller that checks. 크로노스소드
+    // asks for zero bytes while it loads, and on null writes its own
+    // out-of-memory marker file and carries on down its failure path - a title
+    // reporting a memory exhaustion that never happened.
+    let allocated = context.alloc(size.max(1))?;
 
-    context.alloc(size)
+    Ok(allocated)
 }
 
 pub async fn calloc(context: &mut dyn WIPICContext, size: WIPICWord) -> Result<WIPICIndirectPtr> {
     tracing::debug!("MC_knlCalloc({size:#x})");
 
     // A zero-size request still returns a unique, freeable non-null pointer, as
-    // the reference allocator does. A title's font loader callocs a
-    // zero-length buffer and treats a null result as failure, unwinding into a
-    // state it then dereferences through a -1 handle; handing back null there
+    // the reference allocator does - see `alloc`. A title's font loader callocs
+    // a zero-length buffer and treats a null result as failure, unwinding into
+    // a state it then dereferences through a -1 handle; handing back null there
     // faulted it. Allocate a minimal block so the pointer is non-null.
     let alloc_size = size.max(1);
 
@@ -297,9 +303,18 @@ pub async fn free(context: &mut dyn WIPICContext, memory: WIPICIndirectPtr) -> R
 ///
 /// So the name is kept here as well, and read from here. A handle whose meaning
 /// lives where the guest can write it is a handle the guest can destroy.
+///
+/// The same name also has to keep answering with the same handle. A title is
+/// entitled to treat the id as the resource's identity and to compare ids:
+/// 크로노스소드 enumerates all 1876 of its resources once at startup and caches
+/// `{id, size, ...}` rows, then resolves a name to an id again at load time and
+/// looks that id up in the cache. Issuing a fresh pointer per call made every
+/// one of those lookups miss, so the size stayed zero, the buffer came back
+/// empty, and the blitter walked a header that was all zeroes.
 #[derive(Default)]
 pub struct KernelState {
     resource_names: BTreeMap<WIPICWord, String>,
+    resource_ids: BTreeMap<String, WIPICWord>,
 }
 
 pub type SharedKernelState = Arc<Mutex<KernelState>>;
@@ -347,18 +362,32 @@ pub async fn get_resource_id(context: &mut dyn WIPICContext, ptr_name: WIPICWord
 
     let size = size.unwrap();
 
-    let name_bytes = name.as_bytes();
-    let handle_size = name_bytes
-        .len()
-        .checked_add(1)
-        .ok_or_else(|| WieError::FatalError("Resource name too long".to_string()))?;
-    let ptr_handle = context.alloc_raw(handle_size as _)?;
-    write_null_terminated_string_bytes(context, ptr_handle, name_bytes)?;
-    write_generic(context, ptr_size, size as u32)?;
+    // One name, one id, for the life of the run - see `KernelState`.
+    let existing = context.kernel_state().lock().resource_ids.get(name.as_ref()).copied();
 
-    // Remember what this id was issued for, so the lookup that follows does not
-    // depend on the guest leaving those bytes alone.
-    context.kernel_state().lock().resource_names.insert(ptr_handle, name.to_string());
+    let ptr_handle = match existing {
+        Some(ptr_handle) => ptr_handle,
+        None => {
+            let name_bytes = name.as_bytes();
+            let handle_size = name_bytes
+                .len()
+                .checked_add(1)
+                .ok_or_else(|| WieError::FatalError("Resource name too long".to_string()))?;
+            let ptr_handle = context.alloc_raw(handle_size as _)?;
+            write_null_terminated_string_bytes(context, ptr_handle, name_bytes)?;
+
+            // Remember what this id was issued for, so the lookup that follows does not
+            // depend on the guest leaving those bytes alone.
+            let state = context.kernel_state();
+            let mut state = state.lock();
+            state.resource_names.insert(ptr_handle, name.to_string());
+            state.resource_ids.insert(name.to_string(), ptr_handle);
+
+            ptr_handle
+        }
+    };
+
+    write_generic(context, ptr_size, size as u32)?;
 
     tracing::debug!("  resource {name:?} is {size} bytes, handle {ptr_handle:#x}");
 
@@ -844,15 +873,21 @@ mod test {
         Ok(())
     }
 
+    /// Zero bytes is a request like any other, and both allocators answer it
+    /// with a unique, freeable, non-null pointer, as the reference one does.
+    /// Null is how this platform says it is out of memory, and a title that
+    /// checks takes its failure path on it.
     #[futures_test::test]
-    async fn test_zero_size_memory_returns_null() -> Result<()> {
+    async fn a_zero_size_allocation_is_a_pointer_not_a_refusal() -> Result<()> {
         let mut context = TestContext::new();
 
-        assert_eq!(alloc(&mut context, 0).await.unwrap().0, 0);
-        // calloc of zero returns a unique, freeable non-null pointer, matching
-        // the reference allocator that a font loader relies on.
+        let empty = alloc(&mut context, 0).await.unwrap();
+        assert_ne!(empty.0, 0);
+        free(&mut context, empty).await.unwrap();
+
         let zero = calloc(&mut context, 0).await.unwrap();
         assert_ne!(zero.0, 0);
+        assert_ne!(zero.0, empty.0, "each is a block of its own");
         free(&mut context, zero).await.unwrap();
         // Freeing null is accepted rather than refused. There is no return
         // value to check: the call is void.
@@ -902,6 +937,41 @@ mod test {
         let mut result = [0; 4];
         context.read_bytes(context.data_ptr(buf).unwrap(), &mut result).unwrap();
         assert_eq!(result, data);
+
+        Ok(())
+    }
+
+    /// A title may treat the id as the resource's identity and compare ids, so
+    /// the same name has to keep answering with the same one. 크로노스소드
+    /// enumerates every resource it ships once at startup, caches the id
+    /// alongside the size, and at load time resolves the name to an id again and
+    /// searches that cache for it; a fresh id per call made every one of those
+    /// searches miss, so it loaded each resource as zero bytes and faulted in
+    /// its blitter.
+    #[futures_test::test]
+    async fn the_same_name_always_gets_the_same_id() -> Result<()> {
+        let data = [1u8, 2, 3, 4];
+        let mut context = TestContext::new().with_resource("res/EA", &data).with_resource("res/EB", &data);
+        let name = context.alloc_raw(16).unwrap();
+        let size = context.alloc_raw(4).unwrap();
+
+        write_null_terminated_string_bytes(&mut context, name, b"res/EA").unwrap();
+        let first = get_resource_id(&mut context, name, size).await.unwrap();
+        assert!(first >= 0);
+
+        // The size comes back on every lookup, not only the one that issued the id.
+        context.write_bytes(size, &[0; 4]).unwrap();
+        let again = get_resource_id(&mut context, name, size).await.unwrap();
+        assert_eq!(again, first, "the id is the resource's identity");
+
+        let mut size_bytes = [0; 4];
+        context.read_bytes(size, &mut size_bytes).unwrap();
+        assert_eq!(u32::from_le_bytes(size_bytes), 4);
+
+        // And the id still names its own resource, not the one asked for last.
+        write_null_terminated_string_bytes(&mut context, name, b"res/EB").unwrap();
+        let other = get_resource_id(&mut context, name, size).await.unwrap();
+        assert_ne!(other, first, "two names are two resources");
 
         Ok(())
     }
