@@ -804,6 +804,29 @@ impl TextBoxComponent {
             )
             .await?;
 
+        // The box starts with the decorator's background rather than with
+        // `Component.<init>`'s "no background".
+        //
+        // Native leaves both colours at -1 (Component.<init> @0x216964 writes
+        // -1 to +0x14 and +0x18, and neither TextComponent's nor this class's
+        // constructor touches them), and `paintContent` skips the fill
+        // entirely for -1. A box a title never coloured would then draw its
+        // characters in Decorator.textColor - black - straight onto whatever
+        // the title had painted there. 드래곤하트 paints its name field black,
+        // so the name it asks for was typed and invisible, and the keypad
+        // looked dead.
+        //
+        // That cannot be what the platform did, and its own sibling says so:
+        // `TextFieldComponent.paintContent` @0x245a94 fills the whole
+        // component with Decorator.backgroundColor unconditionally, whatever
+        // the component's colours are. The same widget family, the same
+        // decorator, the same border rule - the field is white and the text is
+        // dark. -2 is how this class's own paint asks for that fill, so this
+        // is where the difference belongs rather than in the paint, which
+        // stays as the binary has it. A title that wants the box transparent
+        // still gets it by asking: `setBackground(-1)`.
+        jvm.put_field(&mut this, "bg", "I", -2).await?;
+
         // Native +0x8c = -1, +0x9c/+0x94/+0x98 = 0.
         jvm.put_field(&mut this, "__wieTextBoxValue", "I", -1).await?;
 
