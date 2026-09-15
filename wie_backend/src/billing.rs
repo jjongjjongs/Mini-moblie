@@ -8344,6 +8344,142 @@ mod soul_hunter_raki_tests {
     }
 }
 
+/// The frame every 넥슨모바일 title puts on the wire, and where each field is.
+///
+/// These titles do not speak the LGT billing protocol at all. They open
+/// `BillSocket://` to reach their own publisher's server - 훼밀리마트타이쿤
+/// dials `211.115.203.30:10007` - and write `DataOutputStream` records, big
+/// endian throughout:
+///
+/// ```text
+/// writeInt(total length, this field included)
+/// writeShort(0xFFFF)
+/// writeShort(command)
+/// writeUTF(...)...              the command's own arguments
+/// ```
+///
+/// A reply carries the same eight byte head, and the title's own reader
+/// (`binary.mod` at `0x6b180`) refuses it outright unless the marker reads
+/// `0xFFFF` and the command reads one past the command it sent: it answers -2
+/// and -3 for those, and the connection is over. The ez-i SDK stand-in this
+/// gateway falls back to fails on the marker, four bytes in, which is why these
+/// titles used to stop on their authentication screen.
+const NEXON_HEAD: usize = 8;
+const NEXON_MARKER_AT: usize = 4;
+const NEXON_COMMAND_AT: usize = 6;
+const NEXON_MARKER: u16 = 0xffff;
+
+/// The commands 훼밀리마트타이쿤's sign-on walks through, in order. Each reply
+/// moves the title's own state machine on to the next.
+const NEXON_USER_AUTHENTICATION: u16 = 10001;
+const NEXON_HANDSET_RECORD: u16 = 10400;
+const NEXON_SIGN_ON_DONE: u16 = 10003;
+
+/// The result byte every reply body opens with. The title's dispatcher at
+/// `0x5ae84` keeps it and its caller at `0x5b1f0` answers `1 - result`, so
+/// anything but zero ends the sign-on.
+const NEXON_GRANTED: u8 = 0;
+
+/// What `10400`'s reply says about the subscriber: a result byte, then the
+/// subscriber number as an eleven byte field, then a counted block of records.
+/// The title reads the number with `0x6be98`, which stops at a NUL or at eleven
+/// bytes, and reads the block's length as a `u16` before walking it - so the
+/// field is fixed width and the length has to be there even when there is
+/// nothing to walk.
+const NEXON_SUBSCRIBER_LEN: usize = 11;
+
+/// The field the handset record leads with, and what it is worth answering
+/// with: the number the title just told the server it was calling from.
+const NEXON_PHONENUMBER_TAG: &[u8] = b"phonenum:";
+
+/// A sign-on answer for the 넥슨모바일 server this gateway stands in for.
+///
+/// Recognised by shape: the length field has to be the frame's own length, the
+/// marker has to be `0xFFFF`, and the body has to open `writeUTF`-shaped. That
+/// is three independent fields agreeing, which no other title's record on this
+/// socket does.
+fn lgt_local_nexon_mobile_response(request: &[u8]) -> Option<Vec<u8>> {
+    if request.len() < NEXON_HEAD + 2 {
+        return None;
+    }
+
+    let length = u32::from_be_bytes([request[0], request[1], request[2], request[3]]);
+    if length as usize != request.len() {
+        return None;
+    }
+
+    if u16::from_be_bytes([request[NEXON_MARKER_AT], request[NEXON_MARKER_AT + 1]]) != NEXON_MARKER {
+        return None;
+    }
+
+    // The body opens with a `writeUTF`: a `u16` length and that many bytes. A
+    // record that does not is not one of these.
+    let first = u16::from_be_bytes([request[NEXON_HEAD], request[NEXON_HEAD + 1]]) as usize;
+    if first == 0 || NEXON_HEAD + 2 + first > request.len() {
+        return None;
+    }
+
+    let command = u16::from_be_bytes([request[NEXON_COMMAND_AT], request[NEXON_COMMAND_AT + 1]]);
+
+    let body = match command {
+        NEXON_HANDSET_RECORD => nexon_subscriber_body(&request[NEXON_HEAD + 2..NEXON_HEAD + 2 + first]),
+        // `10001` opens the sign-on and `10003` closes it; both want nothing
+        // back but the result. So does anything else this frame carries -
+        // answering the result alone is what says "granted, nothing attached".
+        NEXON_USER_AUTHENTICATION | NEXON_SIGN_ON_DONE => alloc::vec![NEXON_GRANTED],
+        // Any other command, from this title or another of the publisher's:
+        // the result alone still says "granted, nothing attached", which is
+        // the answer that lets a sign-on move on.
+        _ => alloc::vec![NEXON_GRANTED],
+    };
+
+    let mut reply = Vec::with_capacity(NEXON_HEAD + body.len());
+    reply.extend_from_slice(&((NEXON_HEAD + body.len()) as u32).to_be_bytes());
+    reply.extend_from_slice(&NEXON_MARKER.to_be_bytes());
+    reply.extend_from_slice(&command.wrapping_add(1).to_be_bytes());
+    reply.extend_from_slice(&body);
+
+    Some(reply)
+}
+
+/// `10400`'s body: the result, the subscriber number, and an empty record
+/// block.
+///
+/// The number is the one the request leads with - `phonenum:` and the digits
+/// after it - so the title is told it is the subscriber it just said it was.
+/// The title keeps this string and later checks it is not the empty one; a
+/// handset that reports no number at all still gets a field of the right width,
+/// because the reader takes eleven bytes whatever is in them.
+fn nexon_subscriber_body(record: &[u8]) -> Vec<u8> {
+    let mut body = Vec::with_capacity(1 + NEXON_SUBSCRIBER_LEN + 2);
+
+    body.push(NEXON_GRANTED);
+
+    let mut subscriber = [0u8; NEXON_SUBSCRIBER_LEN];
+    let tagged = record
+        .windows(NEXON_PHONENUMBER_TAG.len())
+        .position(|window| window == NEXON_PHONENUMBER_TAG);
+
+    if let Some(start) = tagged {
+        let digits = record[start + NEXON_PHONENUMBER_TAG.len()..]
+            .iter()
+            .copied()
+            .take_while(u8::is_ascii_digit)
+            .take(NEXON_SUBSCRIBER_LEN);
+
+        for (slot, digit) in subscriber.iter_mut().zip(digits) {
+            *slot = digit;
+        }
+    }
+
+    body.extend_from_slice(&subscriber);
+
+    // The record block, empty: its length and nothing after it.
+    body.extend_from_slice(&0u16.to_be_bytes());
+
+    body
+}
+
 pub fn response(request: &[u8]) -> Option<Vec<u8>> {
     lgt_local_granted_response(request)
         .or_else(|| lgt_local_cash_response(request))
@@ -8381,6 +8517,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_dungeon_crasher_response(request))
         .or_else(|| lgt_local_soul_hunter_raki_response(request))
         .or_else(|| lgt_local_soul_hunter_raki_catalogue_response(request))
+        .or_else(|| lgt_local_nexon_mobile_response(request))
 }
 
 #[cfg(test)]
@@ -11998,5 +12135,105 @@ mod tests {
 
         // And nothing to read at all.
         assert!(lgt_local_genesis3_episode2_response(&[0xfa, 0xcb]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod nexon_mobile_tests {
+    use alloc::vec;
+
+    use super::*;
+
+    /// 훼밀리마트타이쿤's first sign-on record, as the title writes it: the
+    /// length, the `0xFFFF` marker, command `10001`, and two `writeUTF` fields.
+    const NEXON_AUTHENTICATION_REQUEST: [u8; 46] = [
+        0x00, 0x00, 0x00, 0x2e, 0xff, 0xff, 0x27, 0x11, 0x00, 0x10, b'F', b'a', b'm', b'i', b'l', b'y', b'M', b'a', b'r', b't', b'T', b'y', b'c',
+        b'o', b'o', b'n', 0x00, 0x12, b'U', b's', b'e', b'r', b'A', b'u', b't', b'h', b'e', b'n', b't', b'i', b'c', b'a', b't', b'i', b'o', b'n',
+    ];
+
+    /// Its second: command `10400`, carrying the handset's own description.
+    fn handset_record(phone: &str) -> Vec<u8> {
+        let field = alloc::format!("phonenum:{phone} carrier:lgt platform:wipijava app_name:FamilyMartTycoon sms:true");
+
+        let mut request = vec![0u8; 4];
+        request.extend_from_slice(&NEXON_MARKER.to_be_bytes());
+        request.extend_from_slice(&NEXON_HANDSET_RECORD.to_be_bytes());
+        request.extend_from_slice(&(field.len() as u16).to_be_bytes());
+        request.extend_from_slice(field.as_bytes());
+
+        let length = request.len() as u32;
+        request[..4].copy_from_slice(&length.to_be_bytes());
+
+        request
+    }
+
+    #[test]
+    fn the_head_is_the_marker_and_one_past_the_command() {
+        let reply = response(&NEXON_AUTHENTICATION_REQUEST).expect("the sign-on is answered");
+
+        assert_eq!(u32::from_be_bytes([reply[0], reply[1], reply[2], reply[3]]) as usize, reply.len());
+        assert_eq!(u16::from_be_bytes([reply[4], reply[5]]), NEXON_MARKER);
+        assert_eq!(u16::from_be_bytes([reply[6], reply[7]]), NEXON_USER_AUTHENTICATION + 1);
+    }
+
+    /// `10001` and `10003` want the result and nothing else.
+    #[test]
+    fn opening_and_closing_the_sign_on_are_answered_with_the_result_alone() {
+        for request in [NEXON_AUTHENTICATION_REQUEST.to_vec(), {
+            let mut done = NEXON_AUTHENTICATION_REQUEST.to_vec();
+            done[NEXON_COMMAND_AT..NEXON_COMMAND_AT + 2].copy_from_slice(&NEXON_SIGN_ON_DONE.to_be_bytes());
+            done
+        }] {
+            let reply = response(&request).expect("answered");
+
+            assert_eq!(reply.len(), NEXON_HEAD + 1);
+            assert_eq!(reply[NEXON_HEAD], NEXON_GRANTED);
+        }
+    }
+
+    /// `10400`'s reply hands the number back as an eleven byte field and closes
+    /// with an empty record block - the length the title reads before walking
+    /// it, and nothing after.
+    #[test]
+    fn the_handset_record_is_answered_with_the_number_it_named() {
+        let reply = response(&handset_record("01062170215")).expect("the handset record is answered");
+
+        assert_eq!(u16::from_be_bytes([reply[6], reply[7]]), NEXON_HANDSET_RECORD + 1);
+        assert_eq!(reply[NEXON_HEAD], NEXON_GRANTED);
+        assert_eq!(&reply[NEXON_HEAD + 1..NEXON_HEAD + 1 + NEXON_SUBSCRIBER_LEN], b"01062170215");
+        assert_eq!(&reply[NEXON_HEAD + 1 + NEXON_SUBSCRIBER_LEN..], &[0, 0]);
+    }
+
+    /// A shorter number still fills the field, because the title reads eleven
+    /// bytes or up to the first NUL, whichever comes first.
+    #[test]
+    fn a_shorter_number_still_leaves_the_field_its_width() {
+        let reply = response(&handset_record("0106217")).expect("answered");
+
+        let field = &reply[NEXON_HEAD + 1..NEXON_HEAD + 1 + NEXON_SUBSCRIBER_LEN];
+        assert_eq!(&field[..7], b"0106217");
+        assert!(field[7..].iter().all(|&byte| byte == 0));
+        assert_eq!(&reply[NEXON_HEAD + 1 + NEXON_SUBSCRIBER_LEN..], &[0, 0]);
+    }
+
+    /// The three fields have to agree, so another title's record on the same
+    /// socket is not taken for one of these.
+    #[test]
+    fn a_record_that_is_not_one_of_these_is_left_alone() {
+        let mut wrong_length = NEXON_AUTHENTICATION_REQUEST;
+        wrong_length[3] = 0x2f;
+        assert_eq!(lgt_local_nexon_mobile_response(&wrong_length), None);
+
+        let mut wrong_marker = NEXON_AUTHENTICATION_REQUEST;
+        wrong_marker[NEXON_MARKER_AT] = 0xfe;
+        assert_eq!(lgt_local_nexon_mobile_response(&wrong_marker), None);
+
+        // A body whose first field is not `writeUTF`-shaped.
+        let mut wrong_body = NEXON_AUTHENTICATION_REQUEST;
+        wrong_body[NEXON_HEAD] = 0xff;
+        assert_eq!(lgt_local_nexon_mobile_response(&wrong_body), None);
+
+        // And nothing at all.
+        assert_eq!(lgt_local_nexon_mobile_response(&[]), None);
     }
 }
