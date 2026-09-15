@@ -1514,13 +1514,20 @@ public final class MainActivity extends Activity {
             // aspect needs, so the controls on either side stay uncovered.
             if (landscape) {
                 int h = MeasureSpec.getSize(heightSpec);
-                float aspect = bitmap != null && bitmap.getHeight() > 0
-                        ? (float) bitmap.getWidth() / bitmap.getHeight()
-                        : 240f / 320f;
-                setMeasuredDimension(Math.round(h * aspect), h);
+                setMeasuredDimension(Math.min(MeasureSpec.getSize(widthSpec), Math.round(h * aspect())), h);
                 return;
             }
             super.onMeasure(widthSpec, heightSpec);
+        }
+
+        /**
+         * The shape of the screen being shown, wide over tall.
+         *
+         * A handset panel until a frame says otherwise - a title written to be
+         * played sideways sends a landscape one (see {@code wie_backend::present}).
+         */
+        float aspect() {
+            return bitmap != null && bitmap.getHeight() > 0 ? (float) bitmap.getWidth() / bitmap.getHeight() : 240f / 320f;
         }
 
         /** @param frame {@code {width, height, RGB565 pixels...}} */
@@ -1534,6 +1541,15 @@ public final class MainActivity extends Activity {
 
             if (bitmap == null || bitmap.getWidth() != width || bitmap.getHeight() != height) {
                 bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.RGB_565);
+
+                // How wide this view wants to be is the new shape, and the
+                // keypad's side bands are what that leaves - so both have to be
+                // worked out again rather than kept from the shape assumed
+                // before any frame had arrived.
+                requestLayout();
+                if (keypad != null) {
+                    keypad.setScreenAspect(aspect());
+                }
             }
 
             bitmap.copyPixelsFromBuffer(ShortBuffer.wrap(frame, 2, width * height));
@@ -1586,6 +1602,13 @@ public final class MainActivity extends Activity {
          * stays one view either way so a finger on each side is still tracked.
          */
         boolean landscape;
+
+        /**
+         * The shape of the screen the bands make room for, wide over tall. A
+         * handset panel until a frame says otherwise; see
+         * {@link GameView#aspect}.
+         */
+        private float screenAspect = 240f / 320f;
 
         KeypadView(MainActivity activity) {
             super(activity);
@@ -1701,6 +1724,30 @@ public final class MainActivity extends Activity {
         }
 
         /**
+         * Says what shape the screen between the bands is, so they make room
+         * for the width it actually takes.
+         *
+         * A title written to be played with the handset held sideways sends a
+         * landscape frame, which is half again as wide as the portrait panel
+         * these bands were first written for - sized for the panel, the bands
+         * ended up underneath it.
+         */
+        void setScreenAspect(float aspect) {
+            if (aspect <= 0f || Math.abs(aspect - screenAspect) < 0.001f) {
+                return;
+            }
+
+            screenAspect = aspect;
+
+            // The view's own size has not changed, so onSizeChanged will not
+            // fire; the keys have to be placed again from here.
+            if (landscape && getWidth() > 0 && getHeight() > 0) {
+                layoutLandscape(getWidth(), getHeight());
+                invalidate();
+            }
+        }
+
+        /**
          * Landscape layout: two compact control clusters, one at each edge,
          * with the screen filling the wide gap between them. Left cluster is
          * the soft keys over the direction pad; right is save and back over
@@ -1712,12 +1759,19 @@ public final class MainActivity extends Activity {
             float pad = dp(10);
             float gap = dp(5);
 
-            // The screen keeps its portrait aspect in the middle; each side
-            // band is whatever is left over, and the keys sit compactly inside.
-            float centerW = height * (240f / 320f);
-            float sideW = (width - centerW) / 2f - pad;
-            if (sideW < dp(120)) {
-                sideW = (width - 2 * pad) / 2f - dp(60);
+            // The screen keeps its own aspect in the middle; each side band is
+            // whatever is left over, and the keys sit compactly inside. A
+            // landscape screen leaves narrower bands than a portrait one, and
+            // the keys shrink to fit rather than the band growing over them.
+            float centerW = height * screenAspect;
+            // The outer margin at one end of the band and a key's own gap at
+            // the other, so the cluster never runs up against the screen.
+            float sideW = (width - centerW) / 2f - pad - gap;
+            // Below what a key column needs at all, take that much anyway and
+            // let the keys sit over the edges of the screen - slivers would be
+            // worse than a little overlap.
+            if (sideW < dp(84)) {
+                sideW = Math.min(dp(84), (width - 2 * pad) / 2f - dp(60));
             }
             float leftX = pad;
             float rightX = width - pad - sideW;
