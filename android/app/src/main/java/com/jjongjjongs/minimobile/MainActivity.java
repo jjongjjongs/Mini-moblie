@@ -165,11 +165,6 @@ public final class MainActivity extends Activity {
     private File currentGame;
     /** Which way the player is turned; the toggle in the title bar flips it. */
     private boolean landscapeMode;
-    /**
-     * Whether this game has already been asked to be shown sideways, so it is
-     * asked once and pressing 세로 afterwards stays.
-     */
-    private boolean sidewaysAsked;
     /** What is waiting on the storage permission, if anything. */
     private Runnable pendingDownload;
     /** Telephone number waiting for Android's runtime CALL_PHONE permission. */
@@ -1121,7 +1116,6 @@ public final class MainActivity extends Activity {
         currentGameName = displayName(game);
         framePainted = false;
         landscapeMode = false;
-        sidewaysAsked = false;
         // The player is a dark device again, so restore light status-bar icons.
         setLightStatusBar(false);
 
@@ -1252,28 +1246,6 @@ public final class MainActivity extends Activity {
         button.setBackground(face);
 
         return button;
-    }
-
-    /**
-     * Turns the player sideways for a game that was drawn that way.
-     *
-     * Some titles were written to be played with the handset turned sideways:
-     * they compose a landscape picture and copy it onto the upright panel
-     * turned, and nothing in the emulated API says they did. The emulator turns
-     * such a frame back (see {@code wie_backend::present}), so it arrives wider
-     * than it is tall - which, upright, would be a thin letterboxed strip
-     * between two black bands.
-     *
-     * Asked once per game, so a player who prefers the strip can press 세로 and
-     * have it stay.
-     */
-    private void turnSidewaysOnce(int width, int height) {
-        if (sidewaysAsked || landscapeMode || width <= height) {
-            return;
-        }
-
-        sidewaysAsked = true;
-        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
     }
 
     /**
@@ -1408,7 +1380,6 @@ public final class MainActivity extends Activity {
             framePainted = true;
             runOnUiThread(() -> {
                 gameView.setFrame(frame);
-                turnSidewaysOnce(frame[0] & 0xFFFF, frame[1] & 0xFFFF);
                 if (first) {
                     playerStatus.setText(currentGameName);
                 }
