@@ -506,7 +506,12 @@ async fn marshal_arguments(
             // reaches a platform method that dereferences it without checking,
             // and the failure then reads as a bug in that method rather than
             // as the missing object it is.
-            _ => match handles.get(words[word]) {
+            // A guest array's JVM face is built from its block, and rebuilt on
+            // every crossing: the guest writes into that block between calls,
+            // and a copy kept from an earlier call would hand the platform what
+            // the array held then. So a handle this runtime allocated as an
+            // array takes the wrapping path below even once it has one.
+            _ => match handles.get(words[word]).filter(|_| handles.array_element_type(words[word]).is_none()) {
                 Some(instance) => JavaValue::Object(Some(instance)),
                 None if words[word] == 0 => JavaValue::Object(None),
                 None => {
@@ -621,6 +626,16 @@ async fn marshal_arguments(
                             if let Err(error) = jvm.store_array(&mut array, 0, elements).await {
                                 return Err(JvmSupport::to_wie_err(jvm, error).await);
                             }
+
+                            // The JVM array is this guest array on the far side of
+                            // the boundary, not a separate object. A title that
+                            // hands one to a collection takes it back out later,
+                            // and the handle it gets then has to be the one whose
+                            // block it reads its elements from - the guest reads
+                            // those itself, without asking the platform. Binding
+                            // the wrapper to the handle is what makes the return
+                            // path answer with it.
+                            handles.bind(handle, array.clone());
 
                             writebacks.references.push(ReferenceArrayWriteback {
                                 guest_handle: handle,
