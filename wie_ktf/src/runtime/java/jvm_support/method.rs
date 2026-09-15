@@ -132,37 +132,30 @@ impl JavaMethod {
         let access_flags = proto.access_flags;
         let proto = SharedMethodProto::from(proto);
 
-        // A method we flag NATIVE gets two entry points, because the two callers
-        // that reach it disagree about where the arguments are. `JavaMethod::run`
-        // - the Rust JVM invoking it - writes them into a parameter block and
-        // jumps to `fn_body_native`, which is what KTF's own native convention
-        // does. A title's AOT code, though, was compiled against the real
-        // handset's class metadata, and for a method that is ordinary Java there
-        // it emits an ordinary call: read `fn_body`, pass the arguments in
-        // registers, jump. 지크 does exactly that for `org.kwis.msf.io.Network.connect`
-        // and used to land on the 0 this wrote, dying as "jump native address is
-        // null" and taking its billing thread - and the whole title's progress
-        // past the menu - with it.
+        // Every method gets two entry points, because the callers that reach it
+        // disagree about where the arguments are. `JavaMethod::run` - the Rust
+        // JVM invoking it - writes them into a parameter block and jumps to
+        // `fn_body_native`, which is what KTF's own native convention does. A
+        // title's AOT code jumps to whichever of the two the handset it was
+        // compiled against used, and that is the handset's opinion of which
+        // methods are native, not ours.
         //
-        // So register the body twice: once reading arguments from the parameter
-        // block for `fn_body_native`, once from registers for `fn_body`. Both
-        // stubs run the same Rust body; only where they pick the arguments up
-        // differs, and each caller finds the entry point it expects.
-        let fn_native = if access_flags.contains(MethodAccessFlags::NATIVE) {
-            Some(Self::register_java_method(
-                core,
-                jvm,
-                ptr_raw,
-                &proto,
-                context.clone(),
-                java_functions.clone(),
-                true,
-            )?)
-        } else {
-            None
-        };
+        // Both directions of that disagreement have cost a title its thread.
+        // 지크 calls `org.kwis.msf.io.Network.connect` - native here - the
+        // ordinary way, reading `fn_body`; 미니러비's game loop calls
+        // `Object.wait(J)` - ordinary Java here - through the native entry
+        // point, and landed on the 0 an unflagged method used to leave there,
+        // dying as "jump native address is null" on its first pass.
+        //
+        // So register the body twice whatever the flags say: once reading
+        // arguments from the parameter block, once from registers. Both stubs
+        // run the same Rust body; only where they pick the arguments up
+        // differs, and each caller finds the entry point it expects. Nothing
+        // else wants the word `fn_body_native` shares - a proto carries no
+        // exception table, so `exception_table_count` below is always 0 and the
+        // readers that would take it as a table stop on that.
+        let fn_body_native = Self::register_java_method(core, jvm, ptr_raw, &proto, context.clone(), java_functions.clone(), true)?;
         let fn_body = Self::register_java_method(core, jvm, ptr_raw | REGISTER_ARGS_SVC_FLAG, &proto, context, java_functions, false)?;
-        let fn_body_native = fn_native.unwrap_or(0);
 
         write_generic(
             core,
