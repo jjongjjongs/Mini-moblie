@@ -1687,8 +1687,36 @@ async fn handle_init_svc(core: &mut ArmCore, context: &mut InitSvcContext, id: S
             // image it came from. 오즈 천공의기사단 stops on one of these
             // mid-map and goes on painting the frame it died in, which is
             // indistinguishable from a hang until the site is known.
+            //
+            // The registers come with it, annotated with the length of any
+            // array they point at: the compiled bounds check has the index in
+            // one register and the array it failed against in another, so the
+            // two numbers that say whether the index ran long or the array came
+            // up short are both here, and neither can be read out of the image.
             let (pc, lr) = core.read_pc_lr()?;
-            tracing::warn!("vm_throw_array_index_out_of_bounds_exception({message:#x}) from pc={pc:#x} lr={lr:#x} -> longjmp({exception:#x})");
+            let registers = core.save_context();
+            let arrays = [
+                ("r0", registers.r0),
+                ("r1", registers.r1),
+                ("r2", registers.r2),
+                ("r3", registers.r3),
+                ("r4", registers.r4),
+                ("r5", registers.r5),
+                ("r6", registers.r6),
+                ("r7", registers.r7),
+                ("r8", registers.r8),
+            ]
+            .into_iter()
+            .map(|(name, value)| match array_length_at(core, value) {
+                Some(length) => format!("{name}={value:#x}[{length}]"),
+                None => format!("{name}={value:#x}"),
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+
+            tracing::warn!(
+                "vm_throw_array_index_out_of_bounds_exception({message:#x}) from pc={pc:#x} lr={lr:#x} {arrays} -> longjmp({exception:#x})"
+            );
 
             context.save_points.throw(core, exception)
         }
@@ -3589,6 +3617,27 @@ fn array_component_class(array_classes: &ArrayClasses, array_class: u32) -> Resu
                 info.dimensions - 1
             ))
         })
+}
+
+/// How long the array at `value` is, when `value` looks like one.
+///
+/// An object holds its data block at +8 and an array's block starts with its
+/// length, so a handle that reads back a plausible length is almost certainly
+/// an array - which is all a diagnostic needs it to be.
+fn array_length_at(core: &ArmCore, value: u32) -> Option<u32> {
+    const MAX_PLAUSIBLE_LENGTH: u32 = 0x10_0000;
+
+    if value < 0x1000 {
+        return None;
+    }
+
+    let data: u32 = read_generic(core, value + 8).ok()?;
+    if data < 0x1000 {
+        return None;
+    }
+
+    let length: u32 = read_generic(core, data).ok()?;
+    (length <= MAX_PLAUSIBLE_LENGTH).then_some(length)
 }
 
 async fn throw_vm_exception(core: &mut ArmCore, context: &mut InitSvcContext, class_name: &str) -> Result<()> {
