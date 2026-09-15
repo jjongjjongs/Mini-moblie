@@ -7201,13 +7201,47 @@ fn lgt_local_destroyer_response(request: &[u8]) -> Option<Vec<u8>> {
             }
         }
 
+        // The purchase itself, sent once an item has been picked out of the
+        // shop:
+        //
+        // ```text
+        // 01 | 36 | 2c 01 | 00 00 00 00 00 00 | 02 00 "93" | 0b 00 "룬무늬 가방"
+        // ```
+        //
+        // The item's name rides at the end of it, so the frame is as long as
+        // whatever is being bought and its length says nothing.
+        DESTROYER_BUY => {
+            if request.len() < DESTROYER_BUY_HEAD {
+                return None;
+            }
+        }
+
         _ => return None,
     }
 
-    // Both are answered the same way, because both are read the same way: the
+    // They are answered the same way because they are read the same way: the
     // handler the reply's id reaches takes one signed byte and hands it to
     // `0x67848`, which files it as the result the screen is waiting on.
-    Some(vec![DESTROYER_MESSAGE_COUNT, request[1], DESTROYER_GRANTED])
+    let mut reply = vec![DESTROYER_MESSAGE_COUNT, request[1], DESTROYER_GRANTED];
+
+    // The purchase reads one thing more. `0x67e6c` is the 인증 handler with a
+    // second read bolted on:
+    //
+    // ```asm
+    // 67e72  bl    #0x83bac         ; the verdict byte, as everywhere
+    // 67e7c  bl    #0x67848         ; filed under 0x36
+    // 67e82  ldr   r1, ...          ; = 0x015efe3f
+    // 67e84  movs  r2, #0x64        ; a hundred bytes after it
+    // 67e88  bl    #0x83bac
+    // ```
+    //
+    // - a hundred bytes into a buffer the title shows the player. We have no
+    // notice to put in it, so it goes out empty rather than invented.
+    if request[1] == DESTROYER_BUY {
+        reply.resize(reply.len() + DESTROYER_BUY_NOTICE, 0);
+    }
+
+    Some(reply)
 }
 
 /// One message in the frame, which is all 인증 ever sends or expects.
@@ -7237,6 +7271,17 @@ const DESTROYER_PURCHASE: u8 = 3;
 const DESTROYER_PURCHASE_CARRIER: usize = 6;
 const DESTROYER_PURCHASE_SUBSCRIBER: usize = 11;
 const DESTROYER_PURCHASE_CARRIER_FIELD: &[u8; 5] = b"\x03\x00LGT";
+
+/// The message id an item is actually bought under.
+const DESTROYER_BUY: u8 = 0x36;
+
+/// What its frame carries before the item's name, which is the least of it that
+/// can arrive.
+const DESTROYER_BUY_HEAD: usize = 14;
+
+/// Bytes of notice its reply carries behind the verdict, which `0x67e6c` reads
+/// whatever is in them.
+const DESTROYER_BUY_NOTICE: usize = 0x64;
 
 /// 알바타이쿤2's 최초 인증.
 ///
@@ -7506,7 +7551,17 @@ fn lgt_local_major_oil_response(request: &[u8]) -> Option<Vec<u8>> {
         // 포인트확인, from the title's opening menu. `0x705c` builds it with
         // nothing in the body at all - only the header `0x656c` writes - so the
         // length and the code are the whole of what can be matched on.
-        MAJOR_OIL_POINTS if request.len() == MAJOR_OIL_POINTS_FRAME => (MAJOR_OIL_POINTS, MAJOR_OIL_POINTS_REPLY),
+        //
+        // 포인트몰 asks under the code beside it, with the same frame `0x705c`
+        // builds, and its answer is read the same way: `0x6da4` is `0x6dc0`
+        // with the code changed, and the screen it posts to (`0xda86`) opens on
+        // the same `cmp #1` against the word from `+0x44`, refusing into the
+        // same `0x2a8c` that hangs the socket up.
+        //
+        // What it does after that is page through 0xc00 bytes five hundred at a
+        // time, asking again for each page - which is the loading it sits on
+        // when the first page never comes.
+        code @ (MAJOR_OIL_POINTS | MAJOR_OIL_MALL) if request.len() == MAJOR_OIL_POINTS_FRAME => (code, MAJOR_OIL_POINTS_REPLY),
 
         _ => return None,
     };
@@ -7515,7 +7570,7 @@ fn lgt_local_major_oil_response(request: &[u8]) -> Option<Vec<u8>> {
     reply[..4].copy_from_slice(&(reply_length as u32).to_le_bytes());
     reply[MAJOR_OIL_CODE..MAJOR_OIL_CODE + 4].copy_from_slice(&code.to_le_bytes());
 
-    if code == MAJOR_OIL_POINTS {
+    if code == MAJOR_OIL_POINTS || code == MAJOR_OIL_MALL {
         for (at, value) in [
             (MAJOR_OIL_POINTS_GRANTED_AT, MAJOR_OIL_POINTS_GRANTED),
             (MAJOR_OIL_POINTS_HELD_AT, MAJOR_OIL_POINTS_HELD),
@@ -7588,6 +7643,9 @@ const MAJOR_OIL_POINTS_HELD: u32 = 0xc00;
 
 /// Bytes in the answer: enough to reach the last of those three words.
 const MAJOR_OIL_POINTS_REPLY: usize = 0x50;
+
+/// The code 포인트몰 asks under, next to 포인트확인's and answered like it.
+const MAJOR_OIL_MALL: u32 = 0x0400_0001;
 
 /// The code of the request that follows the connect, built by `0x6a3c`.
 const MAJOR_OIL_SESSION: u32 = 0x01f0_0000;
@@ -7757,6 +7815,52 @@ mod destroyer_purchase_tests {
 
     /// 인증 still answers under its own id, and the two do not answer each
     /// other's.
+    /// The purchase itself carries the item's name, and its reply carries a
+    /// hundred bytes of notice behind the verdict.
+    #[test]
+    fn the_item_purchase_is_granted_with_room_for_its_notice() {
+        let buy = [
+            DESTROYER_MESSAGE_COUNT,
+            DESTROYER_BUY,
+            0x2c,
+            0x01,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x02,
+            0x00,
+            b'9',
+            b'3',
+            0x0b,
+            0x00,
+            0xb7,
+            0xe9,
+            0xb9,
+            0xab,
+            0xb4,
+            0xcc,
+            0x20,
+            0xb0,
+            0xa1,
+            0xb9,
+            0xe6,
+        ];
+
+        let reply = lgt_local_destroyer_response(&buy).expect("the purchase is answered");
+
+        assert_eq!(reply[0], DESTROYER_MESSAGE_COUNT);
+        assert_eq!(reply[1], DESTROYER_BUY, "answered under the id it asked with");
+        assert_eq!(reply[2], DESTROYER_GRANTED);
+        assert_eq!(reply.len(), 3 + DESTROYER_BUY_NOTICE, "0x67e84 reads a hundred bytes after the verdict");
+        assert!(reply[3..].iter().all(|byte| *byte == 0), "no notice invented for it");
+
+        // A frame that stops before the item's name is not one of these.
+        assert!(lgt_local_destroyer_response(&buy[..8]).is_none());
+    }
+
     #[test]
     fn the_two_messages_keep_their_own_ids() {
         let auth = [
@@ -7920,6 +8024,28 @@ mod major_oil_tests {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x76, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x3d, 0x00,
         0x00, 0x00, 0x04, 0x80, 0x04, 0x49, 0x01, 0x00, 0x00, 0x00, 0x36, 0x2f, 0x11, 0x40, 0x01, 0x00, 0x00, 0x00, 0xc9, 0xa4, 0x03, 0x00,
     ];
+
+    /// 포인트몰 asks under its own code with the same frame, and is answered
+    /// the same way - the screen it posts to checks the same word first.
+    #[test]
+    fn the_mall_is_answered_like_the_points_screen() {
+        let mut mall = MAJOR_OIL_POINTS_REQUEST;
+        mall[MAJOR_OIL_CODE..MAJOR_OIL_CODE + 4].copy_from_slice(&MAJOR_OIL_MALL.to_le_bytes());
+
+        let reply = lgt_local_major_oil_response(&mall).expect("포인트몰 is answered");
+        let points = lgt_local_major_oil_response(&MAJOR_OIL_POINTS_REQUEST).unwrap();
+
+        assert_eq!(
+            u32::from_le_bytes(reply[MAJOR_OIL_CODE..MAJOR_OIL_CODE + 4].try_into().unwrap()),
+            MAJOR_OIL_MALL,
+            "answered under the code it asked with"
+        );
+        assert_eq!(
+            reply[MAJOR_OIL_POINTS_GRANTED_AT..],
+            points[MAJOR_OIL_POINTS_GRANTED_AT..],
+            "and with the words its screen checks"
+        );
+    }
 
     #[test]
     fn the_points_request_is_answered_with_what_the_screen_checks() {
