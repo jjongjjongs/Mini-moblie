@@ -99,9 +99,6 @@ pub struct InputMethod {
     ko_consonant_key: Option<i8>,
     ko_ring_index: u8,
     ko_last_key: Option<i8>,
-    /// When the last Korean key was pressed, for the same multi-tap window the
-    /// Latin ring uses.
-    ko_last_press: Option<Instant>,
     ko_undo: Vec<KoreanState>,
 }
 
@@ -158,7 +155,6 @@ impl InputMethod {
         self.ko_consonant_key = None;
         self.ko_ring_index = 0;
         self.ko_last_key = None;
-        self.ko_last_press = None;
         self.ko_undo.clear();
     }
 
@@ -170,7 +166,7 @@ impl InputMethod {
         match self.current_mode {
             0 | 1 => self.handle_english(key, now),
             2 => Self::handle_numeric(key),
-            3 => self.handle_korean(key, now),
+            3 => self.handle_korean(key),
             _ => InputMethodOutput::default(),
         }
     }
@@ -523,40 +519,6 @@ impl InputMethod {
         if is_prefix { Some(None) } else { None }
     }
 
-    fn modify_korean_consonant(scan: u8, key: i8) -> Option<u8> {
-        match (scan, key) {
-            (2, 42) => Some(17),
-            (2, 35) => Some(3),
-            (3, 35) => Some(2),
-            (17, 42) => Some(2),
-
-            (4, 42) => Some(5),
-            (5, 42) => Some(18),
-            (5, 35) => Some(6),
-            (6, 35) => Some(5),
-            (18, 42) => Some(4),
-
-            (8, 42) => Some(9),
-            (9, 42) => Some(19),
-            (9, 35) => Some(10),
-            (10, 35) => Some(9),
-            (19, 42) => Some(8),
-
-            (11, 42) => Some(14),
-            (11, 35) => Some(12),
-            (12, 35) => Some(11),
-            (14, 42) => Some(16),
-            (14, 35) => Some(15),
-            (15, 35) => Some(14),
-            (16, 42) => Some(11),
-
-            (13, 42) => Some(20),
-            (20, 42) => Some(13),
-
-            _ => None,
-        }
-    }
-
     fn korean_cho_char(cho: u8) -> Option<char> {
         match cho {
             2 => Some('ㄱ'),
@@ -701,33 +663,28 @@ impl InputMethod {
     /// as the Latin ring does. ✱ and # reach the same jamo the other way, by
     /// adding a stroke or doubling what is live, which is what a handset offers
     /// beside the ring.
-    fn press_korean_key(&mut self, key: i8, now: Instant) -> Option<KoreanPress> {
-        if matches!(key, 42 | 35) {
-            let scan = self.ko_consonant_scan?;
-            let modified = Self::modify_korean_consonant(scan, key)?;
-
-            self.ko_consonant_scan = Some(modified);
-            // The ring is left behind, so the number key pressed after a stroke
-            // key starts a fresh jamo rather than carrying on the cycle.
-            self.ko_consonant_key = None;
-            self.ko_last_key = Some(key);
-            self.ko_last_press = Some(now);
-
-            return Some(KoreanPress::Consonant {
-                scan: modified,
-                in_place: true,
-            });
-        }
-
+    /// Reads a number key as the jamo it writes.
+    ///
+    /// The consonant keys carry a ring: one press is the jamo on the left of
+    /// the key, a second is the one on the right, and on every key but ㄴㄹ and
+    /// ㅇㅁ - the two whose jamo have no tense form - a third is that tense
+    /// form. A fourth comes back round to the first.
+    ///
+    /// There is no timer on this. 천지인 steps the ring on the same key however
+    /// long the gap, which is why the same consonant twice in a row needs a
+    /// press that finishes the character in between - a direction key here,
+    /// which the handler sends in as the flush sentinel. Handing the ring a
+    /// timeout instead would mean 4 pressed twice slowly wrote ㄱㄱ where the
+    /// pad says ㅋ.
+    fn press_korean_key(&mut self, key: i8) -> Option<KoreanPress> {
         if let Some(ring) = Self::korean_consonant_ring(key) {
-            let cycling = self.ko_consonant_key == Some(key) && !Self::commit_delay_elapsed(self.ko_last_press, now);
+            let cycling = self.ko_consonant_key == Some(key);
             let index = if cycling { (self.ko_ring_index as usize + 1) % ring.len() } else { 0 };
 
             self.ko_consonant_key = Some(key);
             self.ko_ring_index = index as u8;
             self.ko_consonant_scan = Some(ring[index]);
             self.ko_last_key = Some(key);
-            self.ko_last_press = Some(now);
             // A consonant ends whatever vowel was being spelled.
             self.ko_stroke_len = 0;
 
@@ -741,7 +698,6 @@ impl InputMethod {
 
         self.ko_consonant_key = None;
         self.ko_last_key = Some(key);
-        self.ko_last_press = Some(now);
 
         let length = self.ko_stroke_len as usize;
         if length < KOREAN_STROKES {
@@ -763,7 +719,7 @@ impl InputMethod {
         Some(KoreanPress::Vowel { jung, restart: true })
     }
 
-    fn handle_korean(&mut self, key: i8, now: Instant) -> InputMethodOutput {
+    fn handle_korean(&mut self, key: i8) -> InputMethodOutput {
         if key == -99 {
             let mut output = InputMethodOutput::default();
             if let Some(ch) = self.current_korean_char() {
@@ -773,7 +729,6 @@ impl InputMethod {
             self.ko_stroke_len = 0;
             self.ko_consonant_key = None;
             self.ko_last_key = None;
-            self.ko_last_press = None;
             self.ko_undo.clear();
             return output;
         }
@@ -785,7 +740,7 @@ impl InputMethod {
         // Capture before press_korean_key mutates the key/stroke metadata.
         let before = self.korean_state();
 
-        let Some(press) = self.press_korean_key(key, now) else {
+        let Some(press) = self.press_korean_key(key) else {
             return InputMethodOutput::default();
         };
 
@@ -1176,16 +1131,42 @@ mod korean_input_tests {
         assert_eq!(typed, [0xc7, 0xd1, 0xb1, 0xdb]); // 한글
     }
 
-    /// ✱ and # reach the same jamo the other way, from whatever is live.
+    /// The ring has no clock on it. 천지인 steps the same key however long the
+    /// gap, so a slow second press on 4 is still ㅋ and not a second ㄱ - the
+    /// pad says ㅋ and it has to mean it.
     #[test]
-    fn korean_mode_applies_native_consonant_modifier() {
+    fn the_ring_steps_however_long_the_gap() {
+        use crate::time::Instant;
+
         let mut input = InputMethod::new();
         input.set_current_mode(3);
 
-        input.press(b'4' as i8, 2);
-        let ssang = input.press(b'#' as i8, 2);
-        assert!(ssang.handled);
-        assert_eq!(&ssang.output1[..ssang.output1_len], &[0xa4, 0xa2]); // ㄲ
+        let first = input.handle_input(b'4' as i8, 2, Instant::from_epoch_millis(0));
+        assert_eq!(&first.output1[..first.output1_len], &[0xa4, 0xa1]); // ㄱ
+
+        // A minute later, far past anything a multi-tap window would allow.
+        let second = input.handle_input(b'4' as i8, 2, Instant::from_epoch_millis(60_000));
+        assert_eq!(second.output0_len, 0, "the gap finished the character");
+        assert_eq!(&second.output1[..second.output1_len], &[0xa4, 0xbb]); // ㅋ
+    }
+
+    /// Which is why the same consonant twice needs a press that finishes the
+    /// character in between - the direction key the handler sends in as the
+    /// flush sentinel. Without it the second press just steps the ring.
+    #[test]
+    fn the_same_consonant_twice_is_separated_by_a_flush() {
+        let mut input = InputMethod::new();
+        input.set_current_mode(3);
+
+        let first = input.press(b'4' as i8, 2);
+        assert_eq!(&first.output1[..first.output1_len], &[0xa4, 0xa1]); // ㄱ
+
+        let flush = input.press(-99, 2);
+        assert_eq!(&flush.output0[..flush.output0_len], &[0xa4, 0xa1]); // ㄱ finished
+
+        let second = input.press(b'4' as i8, 2);
+        assert_eq!(second.output0_len, 0);
+        assert_eq!(&second.output1[..second.output1_len], &[0xa4, 0xa1]); // ㄱ again, not ㅋ
     }
 
     #[test]
@@ -1449,40 +1430,5 @@ mod korean_scan_tests {
                 assert!(InputMethod::korean_cho_index(*scan).is_some(), "{scan} cannot start a syllable");
             }
         }
-    }
-
-    #[test]
-    fn korean_consonant_modifiers_match_native_kscan() {
-        assert_eq!(InputMethod::modify_korean_consonant(2, 42), Some(17));
-        assert_eq!(InputMethod::modify_korean_consonant(2, 35), Some(3));
-        assert_eq!(InputMethod::modify_korean_consonant(3, 35), Some(2));
-        assert_eq!(InputMethod::modify_korean_consonant(17, 42), Some(2));
-
-        assert_eq!(InputMethod::modify_korean_consonant(4, 42), Some(5));
-        assert_eq!(InputMethod::modify_korean_consonant(5, 42), Some(18));
-        assert_eq!(InputMethod::modify_korean_consonant(5, 35), Some(6));
-        assert_eq!(InputMethod::modify_korean_consonant(6, 35), Some(5));
-        assert_eq!(InputMethod::modify_korean_consonant(18, 42), Some(4));
-
-        assert_eq!(InputMethod::modify_korean_consonant(8, 42), Some(9));
-        assert_eq!(InputMethod::modify_korean_consonant(9, 42), Some(19));
-        assert_eq!(InputMethod::modify_korean_consonant(9, 35), Some(10));
-        assert_eq!(InputMethod::modify_korean_consonant(10, 35), Some(9));
-        assert_eq!(InputMethod::modify_korean_consonant(19, 42), Some(8));
-
-        assert_eq!(InputMethod::modify_korean_consonant(11, 42), Some(14));
-        assert_eq!(InputMethod::modify_korean_consonant(11, 35), Some(12));
-        assert_eq!(InputMethod::modify_korean_consonant(12, 35), Some(11));
-        assert_eq!(InputMethod::modify_korean_consonant(14, 42), Some(16));
-        assert_eq!(InputMethod::modify_korean_consonant(14, 35), Some(15));
-        assert_eq!(InputMethod::modify_korean_consonant(15, 35), Some(14));
-        assert_eq!(InputMethod::modify_korean_consonant(16, 42), Some(11));
-
-        assert_eq!(InputMethod::modify_korean_consonant(13, 42), Some(20));
-        assert_eq!(InputMethod::modify_korean_consonant(20, 42), Some(13));
-
-        assert_eq!(InputMethod::modify_korean_consonant(7, 42), None);
-        assert_eq!(InputMethod::modify_korean_consonant(7, 35), None);
-        assert_eq!(InputMethod::modify_korean_consonant(4, 35), None);
     }
 }

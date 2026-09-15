@@ -1624,11 +1624,16 @@ public final class MainActivity extends Activity {
             // The number pad carries what a Korean handset printed beside each
             // digit, because that is what the key looks like and a player
             // reading the pad recognises it faster than a bare column of
-            // digits: the 천지인 vowel strokes on 1-3, the jamo pairs on 4-0,
-            // the Latin triples throughout. Nothing here is typed - the
-            // emulator sends the digit whatever is engraved next to it.
-            keys.add(new Key("1", 9, KEY_PLAIN, "ㅣ", ".,?!"));
-            keys.add(new Key("2", 10, KEY_PLAIN, "·", "ABC"));
+            // digits: the 천지인 vowel strokes on 1-3 and the jamo pairs on
+            // 4-0, with the Latin run each key writes beside them.
+            //
+            // The engraving is a promise about what the key types, so it says
+            // exactly what the input method writes and nothing else - a key
+            // engraved with a jamo it does not write is the bug this pad had.
+            // The 된소리 a third press reaches is left off, the way a handset
+            // left it off: ㄱㅋ is also where ㄲ lives.
+            keys.add(new Key("1", 9, KEY_PLAIN, "ㅣ", "@:/"));
+            keys.add(new Key("2", 10, KEY_PLAIN, "ㆍ", "ABC"));
             keys.add(new Key("3", 11, KEY_PLAIN, "ㅡ", "DEF"));
             keys.add(new Key("4", 12, KEY_PLAIN, "ㄱㅋ", "GHI"));
             keys.add(new Key("5", 13, KEY_PLAIN, "ㄴㄹ", "JKL"));
@@ -1637,8 +1642,8 @@ public final class MainActivity extends Activity {
             keys.add(new Key("8", 16, KEY_PLAIN, "ㅅㅎ", "TUV"));
             keys.add(new Key("9", 17, KEY_PLAIN, "ㅈㅊ", "WXYZ"));
             keys.add(new Key("✱", 18, KEY_PLAIN));
-            keys.add(new Key("0", 8, KEY_PLAIN, "ㅇㅁ", null));
-            keys.add(new Key("#", 19, KEY_PLAIN, null, "_"));
+            keys.add(new Key("0", 8, KEY_PLAIN, "ㅇㅁ", ".,?!"));
+            keys.add(new Key("#", 19, KEY_PLAIN));
         }
 
         @Override
