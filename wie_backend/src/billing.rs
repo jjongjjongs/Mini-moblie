@@ -7159,27 +7159,55 @@ pub fn lgt_local_supersoccer_response(request: &[u8]) -> Option<Vec<u8>> {
 /// message, id `0x37`, and the verdict byte.
 fn lgt_local_destroyer_response(request: &[u8]) -> Option<Vec<u8>> {
     // The framing bytes and the first field's own length.
-    if request.len() < 4 {
+    if request.len() < 4 || request[0] != DESTROYER_MESSAGE_COUNT {
         return None;
     }
 
-    if request[0] != DESTROYER_MESSAGE_COUNT || request[1] != DESTROYER_AUTHENTICATE {
-        return None;
+    match request[1] {
+        DESTROYER_AUTHENTICATE => {
+            // The subscriber number leads the payload; its length has to fit
+            // what arrived, or this is some other title's frame that opens the
+            // same way.
+            let length = u16::from_le_bytes([request[2], request[3]]) as usize;
+            if request.len() < 4 + length {
+                return None;
+            }
+
+            // And the platform it names is what tells the frame apart for
+            // certain.
+            if !request.windows(DESTROYER_PLATFORM.len()).any(|window| window == DESTROYER_PLATFORM) {
+                return None;
+            }
+        }
+
+        // The shop's purchase, which the title sends from inside the game
+        // rather than from its 인증 screen.
+        //
+        // Its body is laid out differently - the carrier's name and the
+        // subscriber behind two words, then a long stretch of the title's own
+        // tables - but the fields that lead it are fixed, and they are what
+        // tells this frame apart:
+        //
+        // ```text
+        // 01 | 03 | 3e 00 | 00 00 | 03 00 "LGT" | 0b 00 "01020663410" | ...
+        // ```
+        DESTROYER_PURCHASE => {
+            if request.len() < DESTROYER_PURCHASE_SUBSCRIBER {
+                return None;
+            }
+
+            if request[DESTROYER_PURCHASE_CARRIER..DESTROYER_PURCHASE_SUBSCRIBER] != *DESTROYER_PURCHASE_CARRIER_FIELD {
+                return None;
+            }
+        }
+
+        _ => return None,
     }
 
-    // The subscriber number leads the payload; its length has to fit what
-    // arrived, or this is some other title's frame that opens the same way.
-    let length = u16::from_le_bytes([request[2], request[3]]) as usize;
-    if request.len() < 4 + length {
-        return None;
-    }
-
-    // And the platform it names is what tells the frame apart for certain.
-    if !request.windows(DESTROYER_PLATFORM.len()).any(|window| window == DESTROYER_PLATFORM) {
-        return None;
-    }
-
-    Some(vec![DESTROYER_MESSAGE_COUNT, DESTROYER_AUTHENTICATE, DESTROYER_GRANTED])
+    // Both are answered the same way, because both are read the same way: the
+    // handler the reply's id reaches takes one signed byte and hands it to
+    // `0x67848`, which files it as the result the screen is waiting on.
+    Some(vec![DESTROYER_MESSAGE_COUNT, request[1], DESTROYER_GRANTED])
 }
 
 /// One message in the frame, which is all 인증 ever sends or expects.
@@ -7194,6 +7222,21 @@ const DESTROYER_GRANTED: u8 = 0;
 
 /// The platform name the ez-i request carries, third field in.
 const DESTROYER_PLATFORM: &[u8] = b"WIPIC";
+
+/// The shop's message id, both ways.
+///
+/// Its reply is read by `0x67afc`, which is the 인증 handler over again - one
+/// signed byte through `0x83bac`, sign-extended, then `0x67848` to file it -
+/// and differs from it only in the id it files the byte under, `0x3e` where 인증
+/// files `0x37`. Every screen that reads a filed result back reads it the same
+/// way, `ldrsh` then `cmp #0`, so zero is the verdict here too.
+const DESTROYER_PURCHASE: u8 = 3;
+
+/// The carrier field that leads the purchase's body, and where the subscriber
+/// starts after it. Both are fixed, whatever is being bought.
+const DESTROYER_PURCHASE_CARRIER: usize = 6;
+const DESTROYER_PURCHASE_SUBSCRIBER: usize = 11;
+const DESTROYER_PURCHASE_CARRIER_FIELD: &[u8; 5] = b"\x03\x00LGT";
 
 /// 알바타이쿤2's 최초 인증.
 ///
@@ -7683,6 +7726,94 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_guardian_slave_response(request))
         .or_else(|| lgt_local_major_oil_response(request))
         .or_else(|| lgt_local_dungeon_crasher_response(request))
+}
+
+#[cfg(test)]
+mod destroyer_purchase_tests {
+    use alloc::vec;
+
+    use super::*;
+
+    /// The head of what 디스트로이어's shop writes when something is bought.
+    ///
+    /// The frame runs to 394 bytes; the rest is the title's own tables, mostly
+    /// zeros, and nothing here reads past the fields that lead it.
+    const DESTROYER_PURCHASE_REQUEST: [u8; 48] = [
+        0x01, 0x03, 0x3e, 0x00, 0x00, 0x00, 0x03, 0x00, 0x4c, 0x47, 0x54, 0x0b, 0x00, 0x30, 0x31, 0x30, 0x32, 0x30, 0x36, 0x36, 0x33, 0x34, 0x31,
+        0x30, 0x02, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x0a, 0x00, 0x0a, 0x00, 0x0a, 0x00, 0x0a, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x01,
+    ];
+
+    #[test]
+    fn the_purchase_is_granted() {
+        let reply = lgt_local_destroyer_response(&DESTROYER_PURCHASE_REQUEST).expect("the purchase is answered");
+
+        assert_eq!(
+            reply,
+            vec![DESTROYER_MESSAGE_COUNT, DESTROYER_PURCHASE, DESTROYER_GRANTED],
+            "one message, the id it was asked under, and the byte 0x67afc reads"
+        );
+    }
+
+    /// 인증 still answers under its own id, and the two do not answer each
+    /// other's.
+    #[test]
+    fn the_two_messages_keep_their_own_ids() {
+        let auth = [
+            DESTROYER_MESSAGE_COUNT,
+            DESTROYER_AUTHENTICATE,
+            0x0b,
+            0x00,
+            b'0',
+            b'1',
+            b'0',
+            b'2',
+            b'0',
+            b'6',
+            b'6',
+            b'3',
+            b'4',
+            b'1',
+            b'0',
+            0x05,
+            0x00,
+            b'W',
+            b'I',
+            b'P',
+            b'I',
+            b'C',
+        ];
+
+        assert_eq!(lgt_local_destroyer_response(&auth).unwrap()[1], DESTROYER_AUTHENTICATE);
+        assert_eq!(lgt_local_destroyer_response(&DESTROYER_PURCHASE_REQUEST).unwrap()[1], DESTROYER_PURCHASE);
+    }
+
+    #[test]
+    fn nothing_else_is_claimed() {
+        assert!(lgt_local_destroyer_response(&[]).is_none());
+
+        // The carrier field is what tells a purchase apart.
+        let mut without_carrier = DESTROYER_PURCHASE_REQUEST;
+        without_carrier[DESTROYER_PURCHASE_CARRIER] = 0;
+        assert!(lgt_local_destroyer_response(&without_carrier).is_none());
+
+        // An id the title has no handler for here.
+        let mut other_id = DESTROYER_PURCHASE_REQUEST;
+        other_id[1] = 0x20;
+        assert!(lgt_local_destroyer_response(&other_id).is_none());
+
+        // And a frame that stops before the fields that identify it.
+        assert!(lgt_local_destroyer_response(&DESTROYER_PURCHASE_REQUEST[..8]).is_none());
+    }
+
+    #[test]
+    fn the_gateway_answers_it() {
+        assert_eq!(
+            response(&DESTROYER_PURCHASE_REQUEST),
+            lgt_local_destroyer_response(&DESTROYER_PURCHASE_REQUEST),
+            "claimed by the title's own shaper and nothing earlier"
+        );
+    }
 }
 
 #[cfg(test)]
