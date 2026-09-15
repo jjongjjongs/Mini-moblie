@@ -1631,7 +1631,9 @@ public final class MainActivity extends Activity {
             // exactly what the input method writes and nothing else - a key
             // engraved with a jamo it does not write is the bug this pad had.
             // The 된소리 a third press reaches is left off, the way a handset
-            // left it off: ㄱㅋ is also where ㄲ lives.
+            // left it off: ㄱㅋ is also where ㄲ lives. # is the space bar while
+            // Korean is being typed and types itself otherwise, so it carries
+            // the Korean label alone.
             keys.add(new Key("1", 9, KEY_PLAIN, "ㅣ", "@:/"));
             keys.add(new Key("2", 10, KEY_PLAIN, "ㆍ", "ABC"));
             keys.add(new Key("3", 11, KEY_PLAIN, "ㅡ", "DEF"));
@@ -1643,7 +1645,7 @@ public final class MainActivity extends Activity {
             keys.add(new Key("9", 17, KEY_PLAIN, "ㅈㅊ", "WXYZ"));
             keys.add(new Key("✱", 18, KEY_PLAIN));
             keys.add(new Key("0", 8, KEY_PLAIN, "ㅇㅁ", ".,?!"));
-            keys.add(new Key("#", 19, KEY_PLAIN));
+            keys.add(new Key("#", 19, KEY_PLAIN, "공백", null));
         }
 
         @Override

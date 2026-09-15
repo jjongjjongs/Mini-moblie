@@ -737,6 +737,32 @@ impl InputMethod {
             return self.clear_korean_input();
         }
 
+        if key == 35 {
+            // # is the space bar on a 천지인 pad, and pressing it finishes the
+            // character in progress the way any commit does - so it is also the
+            // other way to type the same consonant twice, one that reads off
+            // the pad rather than off a direction key.
+            let mut output = InputMethodOutput {
+                handled: true,
+                ..InputMethodOutput::default()
+            };
+
+            if let Some(ch) = self.current_korean_char() {
+                Self::put_korean_char(&mut output.output0, &mut output.output0_len, ch);
+            }
+
+            output.output0[output.output0_len] = b' ';
+            output.output0_len += 1;
+
+            self.reset_korean_composition();
+            self.ko_stroke_len = 0;
+            self.ko_consonant_key = None;
+            self.ko_last_key = Some(key);
+            self.ko_undo.clear();
+
+            return output;
+        }
+
         // Capture before press_korean_key mutates the key/stroke metadata.
         let before = self.korean_state();
 
@@ -1167,6 +1193,50 @@ mod korean_input_tests {
         let second = input.press(b'4' as i8, 2);
         assert_eq!(second.output0_len, 0);
         assert_eq!(&second.output1[..second.output1_len], &[0xa4, 0xa1]); // ㄱ again, not ㅋ
+    }
+
+    /// # is the space bar. It finishes the syllable in progress and puts a
+    /// space behind it, both in the one commit.
+    #[test]
+    fn the_hash_key_is_the_space_bar() {
+        let mut input = InputMethod::new();
+        input.set_current_mode(3);
+
+        input.press(b'4' as i8, 2); // ㄱ
+        input.press(b'1' as i8, 2); // 기
+        input.press(b'2' as i8, 2); // 가
+
+        let space = input.press(b'#' as i8, 2);
+        assert!(space.handled);
+        assert_eq!(&space.output0[..space.output0_len], &[0xb0, 0xa1, b' ']); // "가 "
+        assert_eq!(space.output1_len, 0);
+    }
+
+    /// Pressed with nothing in progress it is just a space.
+    #[test]
+    fn the_space_bar_on_its_own_is_a_space() {
+        let mut input = InputMethod::new();
+        input.set_current_mode(3);
+
+        let space = input.press(b'#' as i8, 2);
+        assert!(space.handled);
+        assert_eq!(&space.output0[..space.output0_len], b" ");
+    }
+
+    /// And because it finishes the syllable, it is the other way to type the
+    /// same consonant twice - the one written on the pad.
+    #[test]
+    fn the_space_bar_separates_the_same_consonant() {
+        let mut input = InputMethod::new();
+        input.set_current_mode(3);
+
+        input.press(b'4' as i8, 2);
+        let space = input.press(b'#' as i8, 2);
+        assert_eq!(&space.output0[..space.output0_len], &[0xa4, 0xa1, b' ']); // "ㄱ "
+
+        let again = input.press(b'4' as i8, 2);
+        assert_eq!(again.output0_len, 0);
+        assert_eq!(&again.output1[..again.output1_len], &[0xa4, 0xa1]); // ㄱ, not ㅋ
     }
 
     #[test]

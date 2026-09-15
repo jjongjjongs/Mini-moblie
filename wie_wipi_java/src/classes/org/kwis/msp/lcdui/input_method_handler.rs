@@ -257,10 +257,26 @@ impl InputMethodHandler {
             let chars: ClassInstanceRef<Array<JavaChar>> = jvm.invoke_virtual(&text, "toCharArray", "()[C", ()).await?;
             let char_count = jvm.array_length(&chars).await? as i32;
 
-            let change_type = if composing { OVER_THE_LIVE_CHARACTER } else { AS_NEW_TEXT };
-            let _: () = jvm
-                .invoke_virtual(&listener, "notifyTextChanged", "([CII)V", (chars, char_count, change_type))
-                .await?;
+            // Writing over the live character swaps one character for one, so a
+            // commit that carries more than that - the space bar, which
+            // finishes the syllable and adds a space behind it - writes its
+            // first character over the live one and the rest after.
+            let over_live = if composing { 1.min(char_count) } else { 0 };
+
+            for (from, count, change_type) in [(0, over_live, OVER_THE_LIVE_CHARACTER), (over_live, char_count - over_live, AS_NEW_TEXT)] {
+                if count == 0 {
+                    continue;
+                }
+
+                let part: ClassInstanceRef<String> = jvm
+                    .invoke_virtual(&text, "substring", "(II)Ljava/lang/String;", (from, from + count))
+                    .await?;
+                let part: ClassInstanceRef<Array<JavaChar>> = jvm.invoke_virtual(&part, "toCharArray", "()[C", ()).await?;
+
+                let _: () = jvm
+                    .invoke_virtual(&listener, "notifyTextChanged", "([CII)V", (part, count, change_type))
+                    .await?;
+            }
 
             // A finished character leaves nothing live behind; the one still
             // being built is what the next press writes over.
@@ -552,6 +568,27 @@ mod tests {
                 let log = type_on_the_korean_pad(&jvm, &['4' as i32, '1' as i32, '2' as i32, '5' as i32]).await?;
 
                 assert_eq!(log, "ㄱ@-1 기@0 가@0 간@0 ");
+
+                Ok(())
+            },
+        )
+    }
+
+    /// The space bar commits a syllable and a space together. Only the
+    /// syllable writes over the live character; the space goes after it.
+    ///
+    /// Writing both over the live character would be a two-for-one swap the
+    /// component cannot make, and would have eaten the character before it.
+    #[test]
+    fn a_commit_longer_than_the_live_character_puts_the_rest_after_it() -> Result<()> {
+        run_jvm_test(
+            Box::new([Box::new(get_protos()) as Box<[_]>, Box::new([RecordingListener::as_proto()]) as Box<[_]>]),
+            async |jvm| {
+                // 가, then the space bar.
+                let keys = ['4' as i32, '1' as i32, '2' as i32, '#' as i32];
+                let log = type_on_the_korean_pad(&jvm, &keys).await?;
+
+                assert_eq!(log, RustString::from("ㄱ@-1 기@0 가@0 가@0  @-1 "));
 
                 Ok(())
             },
