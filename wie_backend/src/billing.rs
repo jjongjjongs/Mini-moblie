@@ -7350,6 +7350,156 @@ fn lgt_local_guardian_slave_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(response)
 }
 
+/// The server connect 메이저 오일 컴퍼니 waits on.
+///
+/// The title (`0002E198`) opens a billing socket to `119.205.229.221:15028`,
+/// writes one 104-byte request and then sits on 접속중 forever, because the
+/// gateway it was writing to has been switched off for years.
+///
+/// Its packets carry their own header, written by `0x656c`:
+///
+/// ```asm
+/// 656c  push  {r4, lr}
+/// 6572  str   r2, [r0]         ; +0x00 = the length
+/// 6574  str   r1, [r0, #4]     ; +0x04 = the code
+/// ```
+///
+/// and the connect request is built on the stack at `0x659c`, which is where
+/// its code and its one distinguishing field come from:
+///
+/// ```asm
+/// 659e  sub   sp, #0x68        ; 104 bytes
+/// 65a0  movs  r3, #6
+/// 65a2  str   r3, [sp, #0x44]  ; +0x44 = 6
+/// 65a6  ldr   r4, [pc, #0x30]  ; = 0x01000001
+/// 65b6  movs  r2, #0x68
+/// 65bc  bl    #0x656c          ; (buffer, code, length)
+/// ```
+///
+/// The rest of those 104 bytes is whatever the stack held - the frame is never
+/// cleared, and a capture of it is full of the title's own pointers - so only
+/// the three fields it does write can be matched on.
+///
+/// What comes back is read by `0x2f58`, which waits for a whole packet and then
+/// takes the two words off the front of it:
+///
+/// ```asm
+/// 2f5a  bl    #0x2e88          ; assemble; nonzero once a packet is whole
+/// 2f76  bl    #0x40350         ; read a word - the length, thrown away
+/// 2f7e  bl    #0x40350         ; read a word - the code, returned
+/// ```
+///
+/// with `0x532c` reading each word little end first, and the assembler at
+/// `0x2e88` waiting until more than seven bytes are in hand and then until the
+/// length the packet declares has arrived. The code it returns is switched on
+/// at `0x73b0`, where `0x01000001` reaches `0x74f2`:
+///
+/// ```asm
+/// 73ee  subs  r3, #1           ; 0x01000001
+/// 73f0  cmp   r4, r3
+/// 73f2  beq   #0x74f2
+/// 74f2  bl    #0x6f88          ; RecvServerConnect
+/// ```
+///
+/// `RecvServerConnect` names itself in a trace string, and it is short:
+///
+/// ```asm
+/// 6f8e  ldr   r4, [r3]         ; the packet
+/// 6f92  ldr   r1, [r4, #4]     ; printf("RecvServerConnect() nCode :%x")
+/// 6f98  ldr   r2, [r4, #0x44]  ; kept at 0x015025a4
+/// 6fa0  ldr   r2, [r4, #0x5c]  ; kept at 0x015025a0
+/// 6fa6  bl    #0x6e10          ; post 0x01000001 to the title
+/// ```
+///
+/// where `0x6e10` is not a send - it is `0x6be0(code, -1, -1)`, which pushes the
+/// code onto the ten-deep queue at `0x015024e0` that the title's own state
+/// machine reads. So answering the connect is what lets the title leave the
+/// screen.
+///
+/// The two fields it keeps are written to a pair of adjacent globals that
+/// nothing else in the module names, so they are answered zero. Reading them
+/// is what settles the reply's length: it has to reach past `+0x5c`.
+fn lgt_local_major_oil_response(request: &[u8]) -> Option<Vec<u8>> {
+    if request.len() < MAJOR_OIL_CODE + 4 {
+        return None;
+    }
+
+    let word = |at: usize| u32::from_le_bytes([request[at], request[at + 1], request[at + 2], request[at + 3]]);
+
+    // Every one of these packets declares its own length first, the way
+    // `0x656c` writes it.
+    if word(0) as usize != request.len() {
+        return None;
+    }
+
+    let (code, reply_length) = match word(MAJOR_OIL_CODE) {
+        // The server connect. `0x659c` builds it at one size and writes one
+        // field into the body; everything else in the frame is uncleared stack.
+        MAJOR_OIL_CONNECT if request.len() == MAJOR_OIL_CONNECT_FRAME && word(MAJOR_OIL_CONNECT_KIND_AT) == MAJOR_OIL_CONNECT_KIND => {
+            (MAJOR_OIL_CONNECT, MAJOR_OIL_CONNECT_REPLY)
+        }
+
+        // What the title asks next, once the connect has been answered.
+        //
+        // `0x6a3c` builds it the same way - a caller's word at `+0x44` and a
+        // fixed mark at `+0x48`, over uncleared stack - and the handler the
+        // dispatcher sends its answer to is the whole of what the answer has to
+        // satisfy:
+        //
+        // ```asm
+        // 6e44  push  {lr}
+        // 6e46  movs  r0, #0xf8
+        // 6e48  lsls  r0, r0, #0x11   ; 0x01f00000
+        // 6e4a  bl    #0x6e10         ; post it, and nothing else
+        // ```
+        //
+        // It reads nothing out of the packet, so the answer is its header and
+        // no body - which still clears the eight bytes the assembler waits for
+        // before it will look at a packet at all.
+        MAJOR_OIL_SESSION if request.len() == MAJOR_OIL_SESSION_FRAME && word(MAJOR_OIL_SESSION_MARK_AT) == MAJOR_OIL_SESSION_MARK => {
+            (MAJOR_OIL_SESSION, MAJOR_OIL_HEADER)
+        }
+
+        _ => return None,
+    };
+
+    let mut reply = vec![0u8; reply_length];
+    reply[..4].copy_from_slice(&(reply_length as u32).to_le_bytes());
+    reply[MAJOR_OIL_CODE..MAJOR_OIL_CODE + 4].copy_from_slice(&code.to_le_bytes());
+
+    Some(reply)
+}
+
+/// Where a 메이저 오일 컴퍼니 packet carries its code, after the length.
+const MAJOR_OIL_CODE: usize = 4;
+
+/// The length and the code, which is all of a packet the title has to be given
+/// when the handler reads no body. Eight bytes is also what `0x2e88` waits for
+/// before it will read a packet's length at all.
+const MAJOR_OIL_HEADER: usize = 8;
+
+/// The code the title's server connect is sent and answered under.
+const MAJOR_OIL_CONNECT: u32 = 0x0100_0001;
+
+/// Bytes in that request, which `0x659c` builds the same way every time.
+const MAJOR_OIL_CONNECT_FRAME: usize = 104;
+
+/// The field `0x659c` writes into the body, and what it writes there.
+const MAJOR_OIL_CONNECT_KIND_AT: usize = 0x44;
+const MAJOR_OIL_CONNECT_KIND: u32 = 6;
+
+/// Bytes in the answer: enough that the two fields `RecvServerConnect` takes
+/// out of it, the later at `+0x5c`, are inside the packet.
+const MAJOR_OIL_CONNECT_REPLY: usize = 0x60;
+
+/// The code of the request that follows the connect, built by `0x6a3c`.
+const MAJOR_OIL_SESSION: u32 = 0x01f0_0000;
+
+/// Bytes in it, and the mark `0x6a3c` always writes into its body.
+const MAJOR_OIL_SESSION_FRAME: usize = 76;
+const MAJOR_OIL_SESSION_MARK_AT: usize = 0x48;
+const MAJOR_OIL_SESSION_MARK: u32 = 0xfc00_0000;
+
 pub fn response(request: &[u8]) -> Option<Vec<u8>> {
     lgt_local_granted_response(request)
         .or_else(|| lgt_local_cash_response(request))
@@ -7382,6 +7532,131 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_destroyer_response(request))
         .or_else(|| lgt_local_albatycoon2_response(request))
         .or_else(|| lgt_local_guardian_slave_response(request))
+        .or_else(|| lgt_local_major_oil_response(request))
+}
+
+#[cfg(test)]
+mod major_oil_tests {
+    use alloc::vec;
+
+    use super::*;
+
+    /// 메이저 오일 컴퍼니's server connect, off the device.
+    ///
+    /// Only three fields of it are the title's: the length it declares, the
+    /// code, and the 6 at `+0x44`. The rest is the uncleared stack `0x659c`
+    /// built it on, which is why there are pointers into the title's own heap
+    /// and its framebuffer sitting in the middle of a network request.
+    const MAJOR_OIL_CONNECT_REQUEST: [u8; MAJOR_OIL_CONNECT_FRAME] = [
+        0x68, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x76, 0x00, 0x00, 0x00, 0x48, 0x0c, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x98, 0x02, 0x50, 0x01, 0xc8, 0x19,
+        0x04, 0x00, 0x06, 0x00, 0x00, 0x00, 0xa4, 0x00, 0x00, 0x00, 0x2b, 0x27, 0x00, 0x00, 0xa4, 0x00, 0x00, 0x00, 0x76, 0x00, 0x00, 0x00, 0x06,
+        0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x08, 0xf0, 0x00, 0x00, 0x00, 0x40, 0x01, 0x00, 0x00, 0x04, 0x80, 0x04, 0x49, 0x00, 0x00, 0x00, 0x00,
+        0x4d, 0x27, 0x00, 0x00, 0x90, 0x38, 0x50, 0x01, 0x76, 0x00, 0x00, 0x00,
+    ];
+
+    /// What the title asks next, off the same run, once the connect has been
+    /// answered. Its own fields are the length, the code, and the mark at
+    /// `+0x48`.
+    const MAJOR_OIL_SESSION_REQUEST: [u8; MAJOR_OIL_SESSION_FRAME] = [
+        0x4c, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x2b, 0x27, 0x00, 0x00, 0xa4, 0x00, 0x00, 0x00, 0x76, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x3d, 0x00, 0x00, 0x00, 0x04, 0x80, 0x04, 0x49, 0x00, 0x00, 0x00, 0x00, 0x4d, 0x27, 0x00, 0x00, 0x01,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xfc,
+    ];
+
+    #[test]
+    fn the_session_request_is_answered_with_its_header_alone() {
+        let reply = lgt_local_major_oil_response(&MAJOR_OIL_SESSION_REQUEST).expect("the session request is answered");
+
+        assert_eq!(reply.len(), MAJOR_OIL_HEADER, "its handler reads no body");
+        assert_eq!(u32::from_le_bytes(reply[..4].try_into().unwrap()), reply.len() as u32);
+        assert_eq!(
+            u32::from_le_bytes(reply[MAJOR_OIL_CODE..MAJOR_OIL_CODE + 4].try_into().unwrap()),
+            MAJOR_OIL_SESSION
+        );
+        assert!(reply.len() > 7, "the assembler waits for more than seven bytes");
+    }
+
+    /// A frame of the right size under the wrong code is not this exchange.
+    #[test]
+    fn the_two_exchanges_are_told_apart_by_their_code() {
+        let mut connect_sized_session = MAJOR_OIL_SESSION_REQUEST;
+        connect_sized_session[MAJOR_OIL_CODE..MAJOR_OIL_CODE + 4].copy_from_slice(&MAJOR_OIL_CONNECT.to_le_bytes());
+        assert!(
+            lgt_local_major_oil_response(&connect_sized_session).is_none(),
+            "the connect is 104 bytes, not 76"
+        );
+
+        let mut without_mark = MAJOR_OIL_SESSION_REQUEST;
+        without_mark[MAJOR_OIL_SESSION_MARK_AT + 3] = 0;
+        assert!(lgt_local_major_oil_response(&without_mark).is_none());
+    }
+
+    #[test]
+    fn the_connect_is_answered_under_its_own_code() {
+        let reply = lgt_local_major_oil_response(&MAJOR_OIL_CONNECT_REQUEST).expect("the connect is answered");
+
+        assert_eq!(reply.len(), MAJOR_OIL_CONNECT_REPLY);
+        assert_eq!(
+            u32::from_le_bytes(reply[..4].try_into().unwrap()),
+            reply.len() as u32,
+            "a packet declares its own length"
+        );
+        assert_eq!(
+            u32::from_le_bytes(reply[MAJOR_OIL_CODE..MAJOR_OIL_CODE + 4].try_into().unwrap()),
+            MAJOR_OIL_CONNECT,
+            "the code the title switches on"
+        );
+    }
+
+    /// The reply has to reach past the later of the two fields
+    /// `RecvServerConnect` takes out of it, or the title reads off the end of
+    /// its own packet buffer.
+    #[test]
+    fn the_answer_covers_the_fields_it_is_read_for() {
+        let reply = lgt_local_major_oil_response(&MAJOR_OIL_CONNECT_REQUEST).unwrap();
+
+        assert!(reply.len() >= 0x5c + 4, "0x5c is read out of the answer");
+        assert!(reply.len() > 7, "the assembler waits for more than seven bytes");
+    }
+
+    /// A request that is not this one is left alone rather than answered with a
+    /// guess.
+    #[test]
+    fn nothing_else_is_claimed() {
+        assert!(lgt_local_major_oil_response(&[]).is_none());
+        assert!(
+            lgt_local_major_oil_response(&vec![0u8; MAJOR_OIL_CONNECT_FRAME]).is_none(),
+            "a zeroed frame is not a connect"
+        );
+
+        // The length must describe the frame in hand.
+        let mut wrong_length = MAJOR_OIL_CONNECT_REQUEST;
+        wrong_length[0] = 0x67;
+        assert!(lgt_local_major_oil_response(&wrong_length).is_none());
+
+        // Another code in the title's own family is not this exchange.
+        let mut other_code = MAJOR_OIL_CONNECT_REQUEST;
+        other_code[MAJOR_OIL_CODE] = 0x02;
+        assert!(lgt_local_major_oil_response(&other_code).is_none());
+
+        // And the body field the builder always writes.
+        let mut wrong_kind = MAJOR_OIL_CONNECT_REQUEST;
+        wrong_kind[MAJOR_OIL_CONNECT_KIND_AT] = 7;
+        assert!(lgt_local_major_oil_response(&wrong_kind).is_none());
+    }
+
+    /// It reaches the gateway through the same dispatch every other protocol
+    /// does.
+    #[test]
+    fn the_gateway_answers_it() {
+        assert_eq!(
+            response(&MAJOR_OIL_CONNECT_REQUEST),
+            lgt_local_major_oil_response(&MAJOR_OIL_CONNECT_REQUEST),
+            "the connect is claimed by its own shaper and nothing earlier"
+        );
+    }
 }
 
 #[cfg(test)]
