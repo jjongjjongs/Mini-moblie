@@ -1681,7 +1681,15 @@ async fn handle_init_svc(core: &mut ArmCore, context: &mut InitSvcContext, id: S
 
             let exception = context.java_handles.address_of(exception)?;
 
-            tracing::debug!("vm_throw_array_index_out_of_bounds_exception({message:#x}) -> longjmp({exception:#x})");
+            // The thrower's own address, because a compiled title's exception
+            // carries no Java frames: what reaches the event loop is the bare
+            // class name, and this is the only thing that says where in the
+            // image it came from. 오즈 천공의기사단 stops on one of these
+            // mid-map and goes on painting the frame it died in, which is
+            // indistinguishable from a hang until the site is known.
+            let (pc, lr) = core.read_pc_lr()?;
+            tracing::warn!("vm_throw_array_index_out_of_bounds_exception({message:#x}) from pc={pc:#x} lr={lr:#x} -> longjmp({exception:#x})");
+
             context.save_points.throw(core, exception)
         }
         // Native Java-interface 0x26 is
