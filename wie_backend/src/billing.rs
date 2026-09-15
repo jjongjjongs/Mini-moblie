@@ -7460,6 +7460,23 @@ fn lgt_local_major_oil_response(request: &[u8]) -> Option<Vec<u8>> {
             (MAJOR_OIL_SESSION, MAJOR_OIL_HEADER)
         }
 
+        // 포인트확인, from the title's opening menu. `0x705c` builds it with
+        // nothing in the body at all - only the header `0x656c` writes - so the
+        // length and the code are the whole of what can be matched on.
+        //
+        // Its answer goes to `0x6dc0`, which takes one word out of it and posts
+        // that alongside the code:
+        //
+        // ```asm
+        // 6dc6  ldr   r3, [r3]         ; the packet
+        // 6dca  ldr   r1, [r3, #0x44]  ; the points
+        // 6dcc  bl    #0x6c50          ; post (0x04000000, points, -1, -1)
+        // ```
+        //
+        // so the answer has to reach past `+0x44`, and what sits there is the
+        // number the title shows. A player who has never sent any has none.
+        MAJOR_OIL_POINTS if request.len() == MAJOR_OIL_POINTS_FRAME => (MAJOR_OIL_POINTS, MAJOR_OIL_POINTS_REPLY),
+
         _ => return None,
     };
 
@@ -7491,6 +7508,17 @@ const MAJOR_OIL_CONNECT_KIND: u32 = 6;
 /// Bytes in the answer: enough that the two fields `RecvServerConnect` takes
 /// out of it, the later at `+0x5c`, are inside the packet.
 const MAJOR_OIL_CONNECT_REPLY: usize = 0x60;
+
+/// The code 포인트확인 asks under, built by `0x705c`.
+const MAJOR_OIL_POINTS: u32 = 0x0400_0000;
+
+/// Bytes in that request, all of them header and uncleared stack.
+const MAJOR_OIL_POINTS_FRAME: usize = 68;
+
+/// Bytes in its answer: enough to reach the word at `+0x44` that `0x6dc0`
+/// hands the title as the point count, which is zero for a player who has
+/// never sent any.
+const MAJOR_OIL_POINTS_REPLY: usize = 0x48;
 
 /// The code of the request that follows the connect, built by `0x6a3c`.
 const MAJOR_OIL_SESSION: u32 = 0x01f0_0000;
@@ -7564,6 +7592,36 @@ mod major_oil_tests {
         0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x3d, 0x00, 0x00, 0x00, 0x04, 0x80, 0x04, 0x49, 0x00, 0x00, 0x00, 0x00, 0x4d, 0x27, 0x00, 0x00, 0x01,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xfc,
     ];
+
+    /// 포인트확인, off the device. `0x705c` writes only the header, so the body
+    /// here is all uncleared stack - the same run of it the session request
+    /// carries, eight bytes further up its shorter frame, with the title's
+    /// framebuffer pointer in the middle of it.
+    const MAJOR_OIL_POINTS_REQUEST: [u8; MAJOR_OIL_POINTS_FRAME] = [
+        0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x76, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x3d, 0x00,
+        0x00, 0x00, 0x04, 0x80, 0x04, 0x49, 0x01, 0x00, 0x00, 0x00, 0x36, 0x2f, 0x11, 0x40, 0x01, 0x00, 0x00, 0x00, 0xc9, 0xa4, 0x03, 0x00,
+    ];
+
+    #[test]
+    fn the_points_request_is_answered_with_a_count() {
+        let reply = lgt_local_major_oil_response(&MAJOR_OIL_POINTS_REQUEST).expect("포인트확인 is answered");
+
+        assert_eq!(u32::from_le_bytes(reply[..4].try_into().unwrap()), reply.len() as u32);
+        assert_eq!(
+            u32::from_le_bytes(reply[MAJOR_OIL_CODE..MAJOR_OIL_CODE + 4].try_into().unwrap()),
+            MAJOR_OIL_POINTS
+        );
+
+        // 0x6dc0 reads this word and hands it to the title as the count.
+        let points_at = 0x44;
+        assert!(reply.len() >= points_at + 4, "the count has to be inside the packet");
+        assert_eq!(
+            u32::from_le_bytes(reply[points_at..points_at + 4].try_into().unwrap()),
+            0,
+            "a player who has never sent any has none"
+        );
+    }
 
     #[test]
     fn the_session_request_is_answered_with_its_header_alone() {
