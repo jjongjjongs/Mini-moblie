@@ -1507,7 +1507,7 @@ pub fn primitive_element_size(atype: u32) -> Option<u32> {
 /// else the application never declared.
 pub async fn vm_instantiate_array(handles: &JavaHandles, array_class: &ArrayClasses, class: u32, length: u32) -> Result<u32> {
     let (element_size, vtable, element_type) = match array_class.lock().get(&class).copied() {
-        Some(info) => (info.element_size, info.vtable, array_element_descriptor(info.atype)),
+        Some(info) => (info.element_size, info.vtable, array_element_type(&info)),
         None => {
             tracing::warn!("vm_instantiate_array({class:#x}, {length}) names no array class; assuming references");
 
@@ -1526,6 +1526,25 @@ pub async fn vm_instantiate_array(handles: &JavaHandles, array_class: &ArrayClas
 /// Maps a `newarray` atype to the JVM descriptor byte for its element, so a
 /// compiled array can name its type to a method that takes it as `Object`.
 /// LoM's tag 1 and any unrecognised tag are treated as references.
+/// What one element of an array of this shape is, as a descriptor byte.
+///
+/// Only the innermost dimension holds primitives. `byte[7][]` is seven
+/// references, not seven bytes, and the element size `vm_get_array_class`
+/// recorded for it already says so - this has to agree, because it is what
+/// decides how the array crosses into the JVM. Read as bytes, a `byte[][]` of
+/// seven arrived there as a seven-*byte* array holding the first seven bytes of
+/// its references, and when the title took it back out of the `java.util.Vector`
+/// it had put it in, what came back was that shrunken copy: element 1 read as
+/// the low three bytes of the second reference with a zero on top, which is the
+/// pointer 오즈 천공의기사단 crashed dereferencing in its own paint.
+fn array_element_type(info: &ArrayClassInfo) -> u8 {
+    if info.dimensions > 1 || info.element_class != 0 {
+        return b'L';
+    }
+
+    array_element_descriptor(info.atype)
+}
+
 fn array_element_descriptor(atype: u32) -> u8 {
     match atype {
         4 => b'Z',
@@ -1551,7 +1570,7 @@ mod tests {
 
     use crate::runtime::java::app_classes::AppClass;
 
-    use super::{array_element_descriptor, dispatch_overrides, write_continuation_slot};
+    use super::{ArrayClassInfo, array_element_descriptor, array_element_type, dispatch_overrides, write_continuation_slot};
 
     /// The `long[]` element helpers used to fall through to the diagnostic
     /// stub, which returns zero and discards stores - so every `long` a title
@@ -1587,6 +1606,33 @@ mod tests {
         // LoM tag 1 and any unrecognised tag are references.
         assert_eq!(array_element_descriptor(1), b'L');
         assert_eq!(array_element_descriptor(0), b'L');
+    }
+
+    /// Only the innermost dimension of an array holds primitives. A
+    /// `byte[7][]` holds seven references, and saying otherwise is how it
+    /// crossed into the JVM as seven bytes: 오즈 천공의기사단 put one in a
+    /// `java.util.Vector`, got that seven-byte copy back, and died
+    /// dereferencing what the second reference had shrunk to.
+    #[test]
+    fn only_the_innermost_dimension_holds_primitives() {
+        let byte_array = ArrayClassInfo {
+            dimensions: 1,
+            element_class: 0,
+            atype: 8,
+            element_size: 1,
+            vtable: 0,
+        };
+        assert_eq!(array_element_type(&byte_array), b'B');
+
+        let byte_array_array = ArrayClassInfo { dimensions: 2, ..byte_array };
+        assert_eq!(array_element_type(&byte_array_array), b'L');
+
+        // An array of application objects is references whatever its tag says.
+        let object_array = ArrayClassInfo {
+            element_class: 0x4884_02a0,
+            ..byte_array
+        };
+        assert_eq!(array_element_type(&object_array), b'L');
     }
 
     #[test]
