@@ -35,6 +35,9 @@ impl BaseClip {
                 JavaFieldProto::new("player", "Ljavax/microedition/media/Player;", Default::default()),
                 JavaFieldProto::new("playListener", "Lorg/kwis/msp/media/PlayListener;", Default::default()),
                 JavaFieldProto::new("__wieBufferSize", "I", Default::default()),
+                // Whether this clip is sounding, so `Player.stop` can say
+                // whether it stopped anything. See `media_stop`.
+                JavaFieldProto::new("__wiePlaying", "Z", Default::default()),
             ],
             access_flags: Default::default(),
         }
@@ -123,7 +126,7 @@ impl BaseClip {
         Ok(length)
     }
 
-    async fn media_play(jvm: &Jvm, context: &mut WieJvmContext, this: ClassInstanceRef<Self>, repeat: bool) -> JvmResult<i32> {
+    async fn media_play(jvm: &Jvm, context: &mut WieJvmContext, mut this: ClassInstanceRef<Self>, repeat: bool) -> JvmResult<i32> {
         tracing::debug!("org.kwis.msp.media.BaseClip::mediaPlay({this:?}, {repeat})");
 
         let player: ClassInstanceRef<Player> = jvm.get_field(&this, "player", "Ljavax/microedition/media/Player;").await?;
@@ -131,6 +134,8 @@ impl BaseClip {
         if player.is_null() {
             return Ok(-9);
         }
+
+        jvm.put_field(&mut this, "__wiePlaying", "Z", true).await?;
 
         if player.class_definition().name() == "net/wie/SmafPlayer" {
             let audio_handle: i32 = jvm.get_field(&player, "audioHandle", "I").await?;
@@ -160,8 +165,16 @@ impl BaseClip {
         Ok(0)
     }
 
-    async fn media_stop(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<i32> {
+    /// Stops the clip, and records that it is no longer sounding.
+    ///
+    /// A clip that was not sounding is not stopped by this, which is what
+    /// `Player.stop` answers with - see [`crate::classes::org::kwis::msp::media::Player`].
+    async fn media_stop(jvm: &Jvm, _: &mut WieJvmContext, mut this: ClassInstanceRef<Self>) -> JvmResult<i32> {
         tracing::debug!("org.kwis.msp.media.BaseClip::mediaStop({this:?})");
+
+        // Whatever the clip's player situation, a stopped clip is not
+        // sounding - so this is recorded before anything can return early.
+        jvm.put_field(&mut this, "__wiePlaying", "Z", false).await?;
 
         let player: ClassInstanceRef<Player> = jvm.get_field(&this, "player", "Ljavax/microedition/media/Player;").await?;
 
@@ -200,6 +213,8 @@ impl BaseClip {
 
     async fn clear_data(jvm: &Jvm, _: &mut WieJvmContext, mut this: ClassInstanceRef<Self>) -> JvmResult<()> {
         tracing::debug!("org.kwis.msp.media.BaseClip::clearData({this:?})");
+
+        jvm.put_field(&mut this, "__wiePlaying", "Z", false).await?;
 
         let player: ClassInstanceRef<Player> = jvm.get_field(&this, "player", "Ljavax/microedition/media/Player;").await?;
         if player.is_null() {
@@ -245,6 +260,11 @@ impl MethodBody<JavaError, WieJvmContext> for ClipCompletionRunner {
         if self.stopped.load(Ordering::Relaxed) {
             return Ok(JavaValue::Void);
         }
+
+        // The clip played itself out, so it is no longer sounding - a title
+        // that asks `Player.stop` about it now is asking about nothing.
+        let mut clip = self.clip.clone();
+        jvm.put_field(&mut clip, "__wiePlaying", "Z", false).await?;
 
         let listener: ClassInstanceRef<PlayListener> = jvm.get_field(&self.clip, "playListener", "Lorg/kwis/msp/media/PlayListener;").await?;
 

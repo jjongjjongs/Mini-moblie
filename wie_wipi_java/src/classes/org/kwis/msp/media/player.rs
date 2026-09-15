@@ -97,6 +97,24 @@ impl Player {
         }
     }
 
+    /// Stops a clip, and answers whether there was anything to stop.
+    ///
+    /// The answer is not a health check on the audio system: a clip that is not
+    /// sounding is not stopped by this, and saying otherwise is a title being
+    /// told something that did not happen. 전설의 마법학교2 is what that costs -
+    /// its `App.a(String, boolean)` at `0x106138` builds the clip, calls this,
+    /// and reads the answer at `0x106312`:
+    ///
+    /// ```asm
+    /// 10630e  bl    #0x14ac46     ; Player.stop(clip)
+    /// 106312  lsls  r0, r0, #24   ; the boolean it answered
+    /// 106316  beq   #0x10632c     ; false - carry on and play it
+    /// 106318  movs  r3, #0xa4     ; true - park in state 0xa4 and return
+    /// ```
+    ///
+    /// so a clip it has only just loaded is a clip it never plays. Answered
+    /// out of what the clip is actually doing, that branch falls the way the
+    /// handset's did and its BGM starts.
     async fn stop_clip(jvm: &Jvm, _: &mut WieJvmContext, clip: ClassInstanceRef<Clip>) -> JvmResult<bool> {
         tracing::debug!("org.kwis.msp.media.Player::stop({clip:?})");
 
@@ -106,9 +124,10 @@ impl Player {
             return Ok(false);
         }
 
+        let playing: bool = jvm.get_field(&clip, "__wiePlaying", "Z").await?;
         let result: i32 = jvm.invoke_virtual(&clip, "mediaStop", "()I", ()).await?;
 
-        Ok(result >= 0)
+        Ok(playing && result >= 0)
     }
 
     /// The three a clip cannot answer. Pausing and resuming need a clip-side
@@ -214,6 +233,37 @@ mod test {
                 .invoke_static("org/kwis/msp/media/Player", "stop", "(Lorg/kwis/msp/media/Clip;)Z", (clip,))
                 .await?;
             assert!(!stopped);
+
+            Ok(())
+        })
+    }
+
+    /// A clip nobody played is a clip `Player.stop` stopped nothing of.
+    ///
+    /// 전설의 마법학교2 reads that answer before it starts its BGM - told the
+    /// clip it has only just loaded was already sounding, it parks and plays
+    /// nothing. See [`super::Player::stop_clip`].
+    #[test]
+    fn stopping_a_clip_nobody_played_stops_nothing() -> Result<()> {
+        run_jvm_test(Box::new([wie_midp::get_protos().into(), get_protos().into()]), |jvm| async move {
+            let r#type: ClassInstanceRef<String> = JavaLangString::from_rust_string(&jvm, "audio/test").await?.into();
+            let mut clip: ClassInstanceRef<Clip> = jvm.new_class("org/kwis/msp/media/Clip", "(Ljava/lang/String;)V", (r#type,)).await?.into();
+
+            let sounding: bool = jvm.get_field(&clip, "__wiePlaying", "Z").await?;
+            assert!(!sounding);
+
+            let stopped: bool = jvm
+                .invoke_static("org/kwis/msp/media/Player", "stop", "(Lorg/kwis/msp/media/Clip;)Z", (clip.clone(),))
+                .await?;
+            assert!(!stopped);
+
+            // And a clip that is sounding stops being so, so the next stop
+            // answers for what is true then rather than for what was.
+            jvm.put_field(&mut clip, "__wiePlaying", "Z", true).await?;
+            let _: i32 = jvm.invoke_virtual(&clip, "mediaStop", "()I", ()).await?;
+
+            let sounding: bool = jvm.get_field(&clip, "__wiePlaying", "Z").await?;
+            assert!(!sounding);
 
             Ok(())
         })
