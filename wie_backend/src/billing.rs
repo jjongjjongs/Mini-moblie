@@ -7877,6 +7877,100 @@ const RAKI_PORT: &[u8] = b"12000";
 /// The header the reader parses, and the address behind it.
 const RAKI_REPLY_LENGTH: usize = 12 + RAKI_HOST_FIELD + RAKI_PORT_FIELD;
 
+/// 소울헌터라키's shop asking the content server for a page of its catalogue.
+///
+/// Once the address reply above has sent it round to the content server, the
+/// shop inside 스페셜상점 writes a 6000 record - a URL fetch - and waits:
+///
+/// ```text
+/// 48 00 00 00   72, the record's own length
+/// 70 17 00 00   6000
+/// 03 00 00 00   3, the version
+/// "zodiac/idx.php?cmd=70&tel=LGT&mdn=01077405004&it=6&pa=1\0\0\0\0\0"
+/// ```
+///
+/// `0x5e43c` builds it around whatever URL it is handed, and `0x2b808` is what
+/// writes that URL: `"zodiac/idx.php?cmd=%d&tel=%s&mdn=%s&"` at `0x7befc`,
+/// then a suffix its switch picks by the command. Case `0x46` - 70 - is
+/// `0x2bbb8`, which appends `"it=%d&pa=%d"`: an item kind and a page.
+///
+/// A reply is routed by `0x5e7ba` on the command it carries rather than on the
+/// one that was asked, and 6304 is the case that carries a page of a list:
+///
+/// ```asm
+/// 5e990  ...                    ; free the last page, allocate 0x960 for this
+/// 5e9e8  ldrsb r3, [r5, #0]     ; the payload's first byte - a status
+/// 5e9ec  cmp   r3, #0
+/// 5e9ee  bne   #0x5ea62         ; anything but zero is state 7, the failure
+/// 5e9f4  ldrb  r2, [r5, #1]     ; and its second - how many entries follow
+/// 5ea0e  bl    #0x5d2bc         ; each one a string
+/// 5ea14  bl    #0x5d2ec         ;   and a four-byte number after it
+/// ```
+///
+/// laid out 260 bytes apart, which `0x5d574` and `0x5d588` hand back to the
+/// screen as a count and an entry. That screen is `0x2b71a`, which on a
+/// finished request asks `0x5d574` first and takes one path for a count of
+/// zero and another for anything more - so an empty page is a page it knows.
+///
+/// Which is what this answers with. The catalogue was the carrier's, it is not
+/// in the archive, and there is nothing here to read it out of; an empty page
+/// is the one answer that is not made up, and it leaves the shop drawing its
+/// own screen rather than waiting on a reply that is never coming. The status
+/// byte is zero, because a non-zero one is the failure the title shows an
+/// error for.
+fn lgt_local_soul_hunter_raki_catalogue_response(request: &[u8]) -> Option<Vec<u8>> {
+    if request.len() < RAKI_URL_AT {
+        return None;
+    }
+
+    let word = |at: usize| u32::from_le_bytes([request[at], request[at + 1], request[at + 2], request[at + 3]]);
+
+    if word(0) as usize != request.len() || word(RAKI_COMMAND_AT) != RAKI_URL_REQUEST {
+        return None;
+    }
+
+    let version = word(RAKI_VERSION_AT);
+    if !RAKI_VERSIONS.contains(&version) {
+        return None;
+    }
+
+    // The URL the title wrote, up to the NUL its own `strlen` measured to.
+    let url = &request[RAKI_URL_AT..];
+    let url = &url[..url.iter().position(|x| *x == 0).unwrap_or(url.len())];
+    if !url.starts_with(RAKI_CATALOGUE_URL) {
+        return None;
+    }
+
+    let mut reply = Vec::with_capacity(RAKI_CATALOGUE_REPLY_LENGTH);
+
+    reply.extend_from_slice(&(RAKI_CATALOGUE_REPLY_LENGTH as u32).to_le_bytes());
+    reply.extend_from_slice(&RAKI_CATALOGUE_REPLY.to_le_bytes());
+    reply.extend_from_slice(&version.to_le_bytes());
+    reply.push(RAKI_CATALOGUE_OK);
+    reply.push(RAKI_CATALOGUE_ENTRIES);
+
+    Some(reply)
+}
+
+/// What a URL fetch says it is, and where the URL itself starts behind the
+/// header the other records share.
+const RAKI_URL_REQUEST: u32 = 6000;
+const RAKI_URL_AT: usize = 12;
+
+/// The URL a page of the shop's catalogue is asked for under. `cmd=70` is the
+/// case at `0x2bbb8`, the only one that appends an item kind and a page.
+const RAKI_CATALOGUE_URL: &[u8] = b"zodiac/idx.php?cmd=70&";
+
+/// The reply `0x5e990` reads a page of a list out of, and the two bytes it
+/// reads first: a status, where anything but zero is the failure, and the
+/// number of entries behind it.
+const RAKI_CATALOGUE_REPLY: u32 = 6304;
+const RAKI_CATALOGUE_OK: u8 = 0;
+const RAKI_CATALOGUE_ENTRIES: u8 = 0;
+
+/// The header, the status and the count.
+const RAKI_CATALOGUE_REPLY_LENGTH: usize = 12 + 2;
+
 #[cfg(test)]
 mod soul_hunter_raki_tests {
     use alloc::{vec, vec::Vec};
@@ -7980,6 +8074,77 @@ mod soul_hunter_raki_tests {
 
         assert_eq!(lgt_local_soul_hunter_raki_response(&request), None);
     }
+
+    /// The catalogue page the shop inside 스페셜상점 asks for, as the device log
+    /// caught it once the address reply had sent it round to the content
+    /// server.
+    fn catalogue_request(url: &[u8]) -> Vec<u8> {
+        // The builder at 0x5e43c writes strlen + 17, which is the header, the
+        // text, its NUL and four bytes it leaves behind them.
+        let mut request = Vec::new();
+
+        request.extend_from_slice(&((url.len() + 17) as u32).to_le_bytes());
+        request.extend_from_slice(&6000u32.to_le_bytes());
+        request.extend_from_slice(&3u32.to_le_bytes());
+        request.extend_from_slice(url);
+        request.resize(url.len() + 17, 0);
+
+        request
+    }
+
+    fn page_request() -> Vec<u8> {
+        catalogue_request(b"zodiac/idx.php?cmd=70&tel=LGT&mdn=01077405004&it=6&pa=1")
+    }
+
+    /// The record the log caught, byte for byte.
+    #[test]
+    fn the_page_request_is_the_one_the_log_carried() {
+        assert_eq!(page_request().len(), 72);
+        assert_eq!(&page_request()[..12], &[0x48, 0, 0, 0, 0x70, 0x17, 0, 0, 0x03, 0, 0, 0]);
+    }
+
+    /// 6304 is the case in `0x5e7ba`'s switch that reads a page of a list.
+    #[test]
+    fn the_page_comes_back_as_a_page_of_a_list() {
+        let reply = response(&page_request()).unwrap();
+
+        assert_eq!(word(&reply, 0) as usize, reply.len());
+        assert_eq!(word(&reply, 4), 6304);
+        assert!((1..=10).contains(&word(&reply, 8)));
+    }
+
+    /// `0x5e9e8` takes anything but zero as the failure, and `0x5e9f4` reads the
+    /// count behind it - which is what `0x5d574` hands the screen.
+    #[test]
+    fn the_page_is_empty_and_not_a_failure() {
+        let reply = response(&page_request()).unwrap();
+
+        assert_eq!(reply.len(), 14);
+        assert_eq!(reply[12], 0);
+        assert_eq!(reply[13], 0);
+    }
+
+    /// The other commands this URL carries are other things entirely - 102 and
+    /// 1001 are the file downloads `0x5e81c` writes to disk - so only the
+    /// catalogue's own is answered.
+    #[test]
+    fn another_command_in_the_url_is_not_answered() {
+        for url in [
+            b"zodiac/idx.php?cmd=102&tel=LGT&mdn=01077405004&pa=1".as_slice(),
+            b"zodiac/idx.php?cmd=7&tel=LGT&mdn=01077405004&it=6&pa=1".as_slice(),
+            b"zodiac/idx.php?cmd=700&tel=LGT&mdn=01077405004".as_slice(),
+        ] {
+            assert_eq!(lgt_local_soul_hunter_raki_catalogue_response(&catalogue_request(url)), None);
+        }
+    }
+
+    /// The address request and the URL fetch share a header, so neither may
+    /// answer for the other.
+    #[test]
+    fn the_two_records_do_not_answer_for_each_other() {
+        assert_eq!(lgt_local_soul_hunter_raki_catalogue_response(&address_request()), None);
+        assert_eq!(lgt_local_soul_hunter_raki_response(&page_request()), None);
+    }
 }
 
 pub fn response(request: &[u8]) -> Option<Vec<u8>> {
@@ -8017,6 +8182,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_major_oil_response(request))
         .or_else(|| lgt_local_dungeon_crasher_response(request))
         .or_else(|| lgt_local_soul_hunter_raki_response(request))
+        .or_else(|| lgt_local_soul_hunter_raki_catalogue_response(request))
 }
 
 #[cfg(test)]
