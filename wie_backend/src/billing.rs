@@ -7528,6 +7528,101 @@ const MAJOR_OIL_SESSION_FRAME: usize = 76;
 const MAJOR_OIL_SESSION_MARK_AT: usize = 0x48;
 const MAJOR_OIL_SESSION_MARK: u32 = 0xfc00_0000;
 
+/// 던전크래셔's shop, which asks before it will sell anything.
+///
+/// The title (`00031C27`) opens a billing socket to `222.231.57.145:57000` on
+/// the way into its cash shop and writes one 48-byte record:
+///
+/// ```text
+/// "FS0\0"  19 00  03 00
+/// "01085300848\0"    the handset's number
+/// "00031C27010\0"    the title and its version
+/// "CI000026\0\0\0\0"   the item, built by 0x9be38 as "CI%06d"
+/// c4 09 00 00        2500, the price in won
+/// ```
+///
+/// - three twelve-byte fields and a price behind an eight-byte header. Nothing
+/// came back, and the shop sat there.
+///
+/// Its answers are read by `0xb1b8`, which takes a fixed eight-byte header off
+/// the stream and looks at two bytes of it:
+///
+/// ```asm
+/// b236  movs  r1, #8
+/// b238  bl    #0x9a178        ; read the header
+/// b23c  ldrb  r2, [r4, #7]    ; +7 - the status
+/// b242  cmp   r2, #0
+/// b244  bne   #0xb2f4         ; anything but zero fails the exchange
+/// b246  ldrb  r0, [r4, #6]    ; +6 - the command, which picks the body reader
+/// ```
+///
+/// The first six are never read. The command the shop sends is 3, and its body
+/// reader is `0xa23c`, four bytes and a table:
+///
+/// ```asm
+/// a244  movs  r1, #4
+/// a246  bl    #0x9a178        ; read the result
+/// a24c  cmp   r3, #0
+/// a250  movs  r2, #3          ; 0 -> state 3
+/// a258  movs  r2, #2          ; 1 -> state 2
+/// a260  movs  r2, #4          ; 2 -> state 4
+/// a268  movs  r2, #5          ; 3 -> state 5
+/// ```
+///
+/// and `0x489de` is where those states are spent, which is what says which of
+/// them is the one to answer with:
+///
+/// ```asm
+/// 489ec  cmp   r6, #2
+/// 48a02  ldr   r0, [pc, #0x130]   ; 인증에 성공하였습니다
+/// 488fe  cmp   r6, #3
+/// 48924  ldr   r0, [pc, #0x1f4]   ; 인증에 실패하였습니다
+/// 4894e  cmp   r6, #4             ; the same failure notice
+/// ```
+///
+/// So the result is 1. Zero - the value a switched-off gateway may look like it
+/// is returning - is the refusal.
+fn lgt_local_dungeon_crasher_response(request: &[u8]) -> Option<Vec<u8>> {
+    if request.len() != DUNGEON_CRASHER_FRAME || !request.starts_with(DUNGEON_CRASHER_MAGIC) {
+        return None;
+    }
+
+    // The header's own two bytes, read back the way `0xb1b8` reads them.
+    if request[DUNGEON_CRASHER_COMMAND] != DUNGEON_CRASHER_SHOP || request[DUNGEON_CRASHER_STATUS] != 0 {
+        return None;
+    }
+
+    let mut reply = Vec::with_capacity(DUNGEON_CRASHER_HEADER + 4);
+
+    // The first six bytes are not read. They carry the request's own, so a
+    // capture of the exchange reads as the one protocol it is.
+    reply.extend_from_slice(&request[..DUNGEON_CRASHER_COMMAND]);
+    reply.push(DUNGEON_CRASHER_SHOP);
+    reply.push(0);
+    reply.extend_from_slice(&DUNGEON_CRASHER_GRANTED.to_le_bytes());
+
+    Some(reply)
+}
+
+/// What every 던전크래셔 record opens with.
+const DUNGEON_CRASHER_MAGIC: &[u8] = b"FS0\0";
+
+/// Bytes in the shop's request: the header, three twelve-byte fields and the
+/// price.
+const DUNGEON_CRASHER_FRAME: usize = 48;
+
+/// The header both ends share, and the two bytes of it that are read.
+const DUNGEON_CRASHER_HEADER: usize = 8;
+const DUNGEON_CRASHER_COMMAND: usize = 6;
+const DUNGEON_CRASHER_STATUS: usize = 7;
+
+/// The command the shop asks under.
+const DUNGEON_CRASHER_SHOP: u8 = 3;
+
+/// The result that reaches the state the 성공 notice is drawn from. Zero is the
+/// refusal.
+const DUNGEON_CRASHER_GRANTED: u32 = 1;
+
 pub fn response(request: &[u8]) -> Option<Vec<u8>> {
     lgt_local_granted_response(request)
         .or_else(|| lgt_local_cash_response(request))
@@ -7561,6 +7656,72 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_albatycoon2_response(request))
         .or_else(|| lgt_local_guardian_slave_response(request))
         .or_else(|| lgt_local_major_oil_response(request))
+        .or_else(|| lgt_local_dungeon_crasher_response(request))
+}
+
+#[cfg(test)]
+mod dungeon_crasher_tests {
+    use alloc::vec;
+
+    use super::*;
+
+    /// What 던전크래셔's shop writes on the way in, off the device.
+    const DUNGEON_CRASHER_SHOP_REQUEST: [u8; DUNGEON_CRASHER_FRAME] = [
+        0x46, 0x53, 0x30, 0x00, 0x19, 0x00, 0x03, 0x00, 0x30, 0x31, 0x30, 0x38, 0x35, 0x33, 0x30, 0x30, 0x38, 0x34, 0x38, 0x00, 0x30, 0x30, 0x30,
+        0x33, 0x31, 0x43, 0x32, 0x37, 0x30, 0x31, 0x30, 0x00, 0x43, 0x49, 0x30, 0x30, 0x30, 0x30, 0x32, 0x36, 0x00, 0x00, 0x00, 0x00, 0xc4, 0x09,
+        0x00, 0x00,
+    ];
+
+    #[test]
+    fn the_shop_is_granted() {
+        let reply = lgt_local_dungeon_crasher_response(&DUNGEON_CRASHER_SHOP_REQUEST).expect("the shop is answered");
+
+        assert_eq!(reply.len(), DUNGEON_CRASHER_HEADER + 4);
+        assert!(reply.starts_with(DUNGEON_CRASHER_MAGIC));
+        assert_eq!(reply[DUNGEON_CRASHER_COMMAND], DUNGEON_CRASHER_SHOP, "the command picks the body reader");
+        assert_eq!(reply[DUNGEON_CRASHER_STATUS], 0, "anything else fails the exchange at 0xb244");
+
+        // 0xa23c reads this and 1 is the one that reaches the 성공 notice.
+        assert_eq!(u32::from_le_bytes(reply[DUNGEON_CRASHER_HEADER..].try_into().unwrap()), 1);
+    }
+
+    /// The header is what the title reads, so the reply has to clear the eight
+    /// bytes its assembler waits for before it looks at one.
+    #[test]
+    fn the_answer_clears_the_header_the_reader_waits_for() {
+        let reply = lgt_local_dungeon_crasher_response(&DUNGEON_CRASHER_SHOP_REQUEST).unwrap();
+
+        assert!(reply.len() > 7, "0x1b98a waits for more than seven bytes");
+    }
+
+    #[test]
+    fn nothing_else_is_claimed() {
+        assert!(lgt_local_dungeon_crasher_response(&[]).is_none());
+        assert!(
+            lgt_local_dungeon_crasher_response(&vec![0u8; DUNGEON_CRASHER_FRAME]).is_none(),
+            "no magic"
+        );
+
+        let mut other_command = DUNGEON_CRASHER_SHOP_REQUEST;
+        other_command[DUNGEON_CRASHER_COMMAND] = 1;
+        assert!(
+            lgt_local_dungeon_crasher_response(&other_command).is_none(),
+            "another command reads a body this does not know"
+        );
+
+        let mut short = DUNGEON_CRASHER_SHOP_REQUEST.to_vec();
+        short.pop();
+        assert!(lgt_local_dungeon_crasher_response(&short).is_none());
+    }
+
+    #[test]
+    fn the_gateway_answers_it() {
+        assert_eq!(
+            response(&DUNGEON_CRASHER_SHOP_REQUEST),
+            lgt_local_dungeon_crasher_response(&DUNGEON_CRASHER_SHOP_REQUEST),
+            "claimed by its own shaper and nothing earlier"
+        );
+    }
 }
 
 #[cfg(test)]
