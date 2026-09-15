@@ -30,7 +30,7 @@ pub use self::{
         NetworkPoll, Platform,
     },
     quirks::{TitlePlatform, TitleQuirks, title_quirks},
-    screen::Screen,
+    screen::{Screen, present, quarter_turn_left},
     system::{Event, FilesystemOverlay, InputMethodOutput, KeyCode, System},
     task::YieldFuture,
     task_runner::{DefaultTaskRunner, TaskRunner},

@@ -106,6 +106,7 @@ impl KtfEmulator {
         let mut core = ArmCore::new(options.enable_gdbserver, options.profile.take())?;
 
         let system = System::new(platform, pid, aid, KtfTaskRunner { core: core.clone() });
+        system.set_title_draws_sideways(title_quirks(TitlePlatform::Ktf, aid).drawn_sideways);
 
         for (path, data) in files {
             let path = path.trim_start_matches("P/");
@@ -262,7 +263,7 @@ impl KtfEmulator {
 
         let image = VecImageBuffer::<Rgb565Pixel>::from_raw(width, height, pod_collect_to_vec(&bytes));
         self.system.set_title_drives_lcd();
-        self.system.platform().screen().paint(&image);
+        wie_backend::present(&self.system, &image);
         self.lcd_digest = Some(digest);
     }
 }

@@ -320,10 +320,7 @@ impl Display {
                 let screen_image: ClassInstanceRef<Image> = jvm.get_field(&this, "screenImage", "Ljavax/microedition/lcdui/Image;").await?;
                 let image = Image::image(jvm, &screen_image).await?;
 
-                let platform = context.system().platform();
-                let screen = platform.screen();
-
-                screen.paint(&*image);
+                wie_backend::present(context.system(), &*image);
             }
             jvm.collect_garbage()?;
         }

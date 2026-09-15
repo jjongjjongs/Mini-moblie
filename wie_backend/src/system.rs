@@ -44,6 +44,9 @@ pub struct System {
     /// Set once the title has been seen drawing into the LCD frame buffer
     /// itself. See [`System::title_drives_lcd`].
     title_drives_lcd: Arc<AtomicBool>,
+    /// Whether this title draws its picture sideways into an upright panel.
+    /// See [`System::title_draws_sideways`].
+    title_draws_sideways: Arc<AtomicBool>,
 }
 
 impl System {
@@ -77,6 +80,7 @@ impl System {
             task_runner: Arc::new(task_runner),
             local_network: Arc::new(RwLock::new(local_network)),
             title_drives_lcd: Arc::new(AtomicBool::new(false)),
+            title_draws_sideways: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -160,6 +164,21 @@ impl System {
 
     pub fn set_title_drives_lcd(&self) {
         self.title_drives_lcd.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether the title composes a landscape picture and copies it onto its
+    /// upright panel a quarter turn clockwise, because it was written to be
+    /// played with the handset held sideways.
+    ///
+    /// A fact about one title rather than anything the API reports, so it is
+    /// looked up in `crate::quirks` and set here by the emulator that loaded
+    /// the archive. [`crate::present`] is what reads it.
+    pub fn title_draws_sideways(&self) -> bool {
+        self.title_draws_sideways.load(Ordering::SeqCst)
+    }
+
+    pub fn set_title_draws_sideways(&self, sideways: bool) {
+        self.title_draws_sideways.store(sideways, Ordering::SeqCst);
     }
 
     pub fn current_input_mode(&self) -> u32 {

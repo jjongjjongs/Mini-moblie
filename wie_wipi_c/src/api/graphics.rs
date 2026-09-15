@@ -782,10 +782,7 @@ pub async fn flush_lcd(
         }
     }
 
-    let platform = context.system().platform();
-    let screen = platform.screen();
-
-    screen.paint(&*src_canvas);
+    wie_backend::present(context.system(), &*src_canvas);
 
     // What is on the surfaces the title drew into but never handed back. After
     // the paint, so the frame is on its way before this reads anything, and the

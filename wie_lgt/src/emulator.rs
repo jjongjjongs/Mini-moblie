@@ -199,6 +199,7 @@ impl LgtEmulator {
         )?;
 
         let system = System::new(platform, pid, aid, LgtTaskRunner { core: core.clone() });
+        system.set_title_draws_sideways(title_draws_sideways(aid));
 
         for (filename, data) in files {
             let filename = filename.trim_start_matches("P/");
@@ -760,6 +761,19 @@ fn reroot_archive(files: BTreeMap<String, Vec<u8>>) -> BTreeMap<String, Vec<u8>>
 /// Keyed on the descriptor's aid, so nothing else is touched.
 fn title_expects_annunciator(aid: &str) -> bool {
     title_quirks(TitlePlatform::Lgt, aid).expects_annunciator
+}
+
+/// Whether the title composes its picture sideways, so what is shown has to be
+/// turned back a quarter turn.
+///
+/// 소울게이트 (`000323B3`) is the one this was found on: it takes the upright
+/// 240x320 screen, creates a 320x240 off-screen buffer of its own - a landscape
+/// one, the screen's size transposed - composes every frame into that, and
+/// copies it onto the screen turned. It asks for no rotation because there is
+/// no such call in WIPI-C to ask with; the handset was simply turned sideways
+/// in the player's hand. See `wie_backend::present`.
+fn title_draws_sideways(aid: &str) -> bool {
+    title_quirks(TitlePlatform::Lgt, aid).drawn_sideways
 }
 
 #[cfg(test)]

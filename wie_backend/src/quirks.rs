@@ -43,12 +43,22 @@ pub struct TitleQuirks {
     /// room for one above the drawing area rather than handing the title the
     /// whole panel.
     pub expects_annunciator: bool,
+
+    /// Whether the title draws its picture a quarter turn clockwise into an
+    /// upright panel, because it was meant to be played with the handset held
+    /// sideways.
+    ///
+    /// Nothing in the API says so - the title simply composes a landscape
+    /// scene and transposes it on its way to the screen - so the frame has to
+    /// be turned back where it is presented. See `wie_backend::present`.
+    pub drawn_sideways: bool,
 }
 
 const fn panel(width: u32, height: u32) -> TitleQuirks {
     TitleQuirks {
         screen_size: Some((width, height)),
         expects_annunciator: false,
+        drawn_sideways: false,
     }
 }
 
@@ -56,6 +66,15 @@ const fn annunciator() -> TitleQuirks {
     TitleQuirks {
         screen_size: None,
         expects_annunciator: true,
+        drawn_sideways: false,
+    }
+}
+
+const fn sideways() -> TitleQuirks {
+    TitleQuirks {
+        screen_size: None,
+        expects_annunciator: false,
+        drawn_sideways: true,
     }
 }
 
@@ -63,7 +82,8 @@ const fn annunciator() -> TitleQuirks {
 ///
 /// The reasoning behind each entry is at the function that reads it - the
 /// screen size at `LgtEmulator::screen_size`, the status strip at
-/// `wie_lgt`'s `title_expects_annunciator`.
+/// `wie_lgt`'s `title_expects_annunciator`, the quarter turn at
+/// `wie_backend::present`.
 const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // 미니게임 히어로즈2 터치: repaints a 240x80 sponsor banner along the
     // bottom of whatever height it is told, so its 320 rows of screen need a
@@ -80,6 +100,10 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // 던전앤파이터 격투가: draws 296 rows into a 320-row panel and leaves the
     // rest to the handset, so the strip has to come off what is shown.
     (TitlePlatform::Ktf, "0103BF27", annunciator()),
+    // 소울게이트: takes a 240x320 screen, composes every frame into a 320x240
+    // off-screen buffer of its own, and copies that onto the screen a quarter
+    // turn clockwise - the handset was meant to be turned sideways to play it.
+    (TitlePlatform::Lgt, "000323B3", sideways()),
 ];
 
 /// What to do differently for the title `aid` on `platform`.
@@ -120,6 +144,15 @@ mod tests {
     fn an_id_is_matched_whatever_case_it_is_written_in() {
         assert!(title_quirks(TitlePlatform::Lgt, "0002cb6a").expects_annunciator);
         assert!(title_quirks(TitlePlatform::Lgt, "0002CB6A").expects_annunciator);
+    }
+
+    #[test]
+    fn a_sideways_title_asks_for_nothing_else() {
+        let quirks = title_quirks(TitlePlatform::Lgt, "000323B3");
+
+        assert!(quirks.drawn_sideways);
+        assert_eq!(quirks.screen_size, None);
+        assert!(!quirks.expects_annunciator);
     }
 
     /// An id appearing twice for one platform would make the table's answer
