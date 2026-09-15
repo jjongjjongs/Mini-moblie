@@ -9,6 +9,12 @@ use crate::classes::org::kwis::msp::lcdui::{CandidateWindow, Display};
 
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 
+/// What `InputMethodListener.notifyTextChanged`'s third argument means, as
+/// `org.kwis.msp.lwc.InputListener` reads it: -1 inserts at the cursor, 0
+/// writes over the characters just before it, 1 deletes them.
+const AS_NEW_TEXT: i32 = -1;
+const OVER_THE_LIVE_CHARACTER: i32 = 0;
+
 // class org.kwis.msp.lcdui.InputMethodHandler
 pub struct InputMethodHandler;
 
@@ -61,6 +67,7 @@ impl InputMethodHandler {
                 JavaFieldProto::new("__wieSymbolWidth", "I", Default::default()),
                 JavaFieldProto::new("__wieSymbolHeight", "I", Default::default()),
                 JavaFieldProto::new("__wieInputMethodListener", "Lorg/kwis/msp/lcdui/InputMethodListener;", Default::default()),
+                JavaFieldProto::new("__wieComposing", "Z", Default::default()),
             ],
             access_flags: Default::default(),
         }
@@ -213,6 +220,11 @@ impl InputMethodHandler {
 
             let _: () = jvm.invoke_virtual(&listener, "notifyTextChanged", "([CII)V", (data, count, 1)).await?;
 
+            // What was under the cursor is gone, so the next character written
+            // has nothing to take its place.
+            let mut this = this;
+            jvm.put_field(&mut this, "__wieComposing", "Z", false).await?;
+
             return Ok(true);
         }
 
@@ -225,39 +237,38 @@ impl InputMethodHandler {
 
         let result = context.system().handle_input_method(normalized_key as i8, internal_event);
 
-        if result.output0_len != 0 {
-            let mut bytes: ClassInstanceRef<Array<i8>> = jvm.instantiate_array("B", result.output0_len).await?.into();
-            jvm.store_array(&mut bytes, 0, result.output0[..result.output0_len].iter().map(|byte| *byte as i8))
-                .await?;
+        // The input method answers in two parts: what it has finished, and what
+        // it is still building. Both go to the listener, but only one of them
+        // is new text - the character still being built is already on screen
+        // from the press before, and the listener is told to write over it
+        // rather than beside it. Without that every step of a multi-tap was
+        // left behind, and typing 간 on the Korean pad wrote ㄱ기가간.
+        let mut composing: bool = jvm.get_field(&this, "__wieComposing", "Z").await?;
 
-            let text: ClassInstanceRef<String> = jvm
-                .new_class("java/lang/String", "([BII)V", (bytes, 0, result.output0_len as i32))
-                .await?
-                .into();
+        for (bytes, length, is_live) in [(&result.output0, result.output0_len, false), (&result.output1, result.output1_len, true)] {
+            if length == 0 {
+                continue;
+            }
+
+            let mut array: ClassInstanceRef<Array<i8>> = jvm.instantiate_array("B", length).await?.into();
+            jvm.store_array(&mut array, 0, bytes[..length].iter().map(|byte| *byte as i8)).await?;
+
+            let text: ClassInstanceRef<String> = jvm.new_class("java/lang/String", "([BII)V", (array, 0, length as i32)).await?.into();
             let chars: ClassInstanceRef<Array<JavaChar>> = jvm.invoke_virtual(&text, "toCharArray", "()[C", ()).await?;
             let char_count = jvm.array_length(&chars).await? as i32;
 
+            let change_type = if composing { OVER_THE_LIVE_CHARACTER } else { AS_NEW_TEXT };
             let _: () = jvm
-                .invoke_virtual(&listener, "notifyTextChanged", "([CII)V", (chars, char_count, -1))
+                .invoke_virtual(&listener, "notifyTextChanged", "([CII)V", (chars, char_count, change_type))
                 .await?;
+
+            // A finished character leaves nothing live behind; the one still
+            // being built is what the next press writes over.
+            composing = is_live;
         }
 
-        if result.output1_len != 0 {
-            let mut bytes: ClassInstanceRef<Array<i8>> = jvm.instantiate_array("B", result.output1_len).await?.into();
-            jvm.store_array(&mut bytes, 0, result.output1[..result.output1_len].iter().map(|byte| *byte as i8))
-                .await?;
-
-            let text: ClassInstanceRef<String> = jvm
-                .new_class("java/lang/String", "([BII)V", (bytes, 0, result.output1_len as i32))
-                .await?
-                .into();
-            let chars: ClassInstanceRef<Array<JavaChar>> = jvm.invoke_virtual(&text, "toCharArray", "()[C", ()).await?;
-            let char_count = jvm.array_length(&chars).await? as i32;
-
-            let _: () = jvm
-                .invoke_virtual(&listener, "notifyTextChanged", "([CII)V", (chars, char_count, -1))
-                .await?;
-        }
+        let mut this = this;
+        jvm.put_field(&mut this, "__wieComposing", "Z", composing).await?;
 
         Ok(result.handled)
     }
@@ -434,5 +445,137 @@ impl InputMethodHandler {
         let mode_code: alloc::vec::Vec<ClassInstanceRef<String>> = jvm.load_array(&supported_modes, mode as usize, 1).await?;
 
         Ok(mode_code[0].clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::{boxed::Box, format, string::String as RustString, vec, vec::Vec};
+
+    use java_class_proto::{JavaFieldProto, JavaMethodProto};
+    use jvm::{Array, ClassInstanceRef, JavaChar, Jvm, Result as JvmResult, runtime::JavaLangString};
+    use test_utils::run_jvm_test;
+    use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
+    use wie_util::Result;
+
+    use crate::get_protos;
+
+    /// A listener that writes down what it was told, in the shape the LWC one
+    /// acts on: the text, and whether it goes beside what is there or over it.
+    struct RecordingListener;
+
+    impl RecordingListener {
+        fn as_proto() -> WieJavaClassProto {
+            WieJavaClassProto {
+                name: "test/RecordingListener",
+                parent_class: Some("java/lang/Object"),
+                interfaces: vec!["org/kwis/msp/lcdui/InputMethodListener"],
+                methods: vec![
+                    JavaMethodProto::new("<init>", "()V", Self::init, Default::default()),
+                    JavaMethodProto::new("notifyTextChanged", "([CII)V", Self::notify_text_changed, Default::default()),
+                ],
+                fields: vec![JavaFieldProto::new("log", "Ljava/lang/String;", Default::default())],
+                access_flags: Default::default(),
+            }
+        }
+
+        async fn init(jvm: &Jvm, _: &mut WieJvmContext, mut this: ClassInstanceRef<Self>) -> JvmResult<()> {
+            let _: () = jvm.invoke_special(&this, "java/lang/Object", "<init>", "()V", ()).await?;
+
+            let empty = JavaLangString::from_rust_string(jvm, "").await?;
+            jvm.put_field(&mut this, "log", "Ljava/lang/String;", empty).await
+        }
+
+        async fn notify_text_changed(
+            jvm: &Jvm,
+            _: &mut WieJvmContext,
+            mut this: ClassInstanceRef<Self>,
+            data: ClassInstanceRef<Array<JavaChar>>,
+            count: i32,
+            change_type: i32,
+        ) -> JvmResult<()> {
+            let text = if data.is_null() {
+                RustString::new()
+            } else {
+                let text: ClassInstanceRef<java_runtime::classes::java::lang::String> =
+                    jvm.new_class("java/lang/String", "([CII)V", (data, 0, count)).await?.into();
+
+                JavaLangString::to_rust_string(jvm, &text).await?
+            };
+
+            let log: ClassInstanceRef<java_runtime::classes::java::lang::String> = jvm.get_field(&this, "log", "Ljava/lang/String;").await?;
+            let log = JavaLangString::to_rust_string(jvm, &log).await?;
+
+            let log = JavaLangString::from_rust_string(jvm, &format!("{log}{text}@{change_type} ")).await?;
+            jvm.put_field(&mut this, "log", "Ljava/lang/String;", log).await
+        }
+    }
+
+    /// What the listener was told, as `text@changeType` per call.
+    async fn type_on_the_korean_pad(jvm: &Jvm, keys: &[i32]) -> JvmResult<RustString> {
+        let handler = jvm.new_class("org/kwis/msp/lcdui/InputMethodHandler", "(I)V", (0,)).await?;
+        let listener = jvm.new_class("test/RecordingListener", "()V", ()).await?;
+
+        let _: () = jvm
+            .invoke_virtual(
+                &handler,
+                "setInputMethodListener",
+                "(Lorg/kwis/msp/lcdui/InputMethodListener;)V",
+                (listener.clone(),),
+            )
+            .await?;
+
+        // Mode 3 is KO, the last of the four the handler supports.
+        let _: bool = jvm.invoke_virtual(&handler, "setCurrentMode", "(I)Z", (3,)).await?;
+
+        for key in keys {
+            let _: bool = jvm.invoke_virtual(&handler, "notifyKeyInput", "(II)Z", (*key, 1)).await?;
+        }
+
+        let log: ClassInstanceRef<java_runtime::classes::java::lang::String> = jvm.get_field(&listener, "log", "Ljava/lang/String;").await?;
+
+        JavaLangString::to_rust_string(jvm, &log).await
+    }
+
+    /// The character still being composed is already on screen, so each step of
+    /// it has to be written over the last rather than beside it. Only the first
+    /// one is new text.
+    ///
+    /// Typing 간 used to leave ㄱ기가간 in the field, every step of the
+    /// composition kept.
+    #[test]
+    fn a_syllable_being_composed_is_written_over_not_beside() -> Result<()> {
+        run_jvm_test(
+            Box::new([Box::new(get_protos()) as Box<[_]>, Box::new([RecordingListener::as_proto()]) as Box<[_]>]),
+            async |jvm| {
+                // ㄱ, ㅣ, the dot that makes it ㅏ, then ㄴ under it: 간.
+                let log = type_on_the_korean_pad(&jvm, &['4' as i32, '1' as i32, '2' as i32, '5' as i32]).await?;
+
+                assert_eq!(log, "ㄱ@-1 기@0 가@0 간@0 ");
+
+                Ok(())
+            },
+        )
+    }
+
+    /// A syllable the input method has finished takes the place of the live one
+    /// it grew out of, and the syllable that starts with the same press is new
+    /// text after it.
+    #[test]
+    fn a_finished_syllable_takes_the_place_of_the_live_one() -> Result<()> {
+        run_jvm_test(
+            Box::new([Box::new(get_protos()) as Box<[_]>, Box::new([RecordingListener::as_proto()]) as Box<[_]>]),
+            async |jvm| {
+                // 가, then ㄱ under it as 각, then ㅣ which carries the ㄱ out
+                // of 각 into a syllable of its own: 가 is finished and 기 is
+                // live.
+                let keys = ['4' as i32, '1' as i32, '2' as i32, '4' as i32, '1' as i32];
+                let log = type_on_the_korean_pad(&jvm, &keys).await?;
+
+                assert_eq!(log, "ㄱ@-1 기@0 가@0 각@0 가@0 기@-1 ");
+
+                Ok(())
+            },
+        )
     }
 }
