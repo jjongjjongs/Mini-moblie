@@ -508,7 +508,7 @@ impl TextComponent {
 
     async fn set_string(
         jvm: &Jvm,
-        _: &mut WieJvmContext,
+        context: &mut WieJvmContext,
         mut this: ClassInstanceRef<TextComponent>,
         mut string: ClassInstanceRef<String>,
     ) -> JvmResult<()> {
@@ -552,13 +552,25 @@ impl TextComponent {
         jvm.put_field(&mut this, "m_cPos", "I", 0).await?;
 
         if had_text {
-            let im_handler: ClassInstanceRef<()> = jvm.get_field(&this, "imHandler", "Lorg/kwis/msp/lcdui/InputMethodHandler;").await?;
+            let mut im_handler: ClassInstanceRef<()> = jvm.get_field(&this, "imHandler", "Lorg/kwis/msp/lcdui/InputMethodHandler;").await?;
 
             if im_handler.is_null() {
                 return Err(jvm.exception("java/lang/NullPointerException", "").await);
             }
 
-            let _: bool = jvm.invoke_virtual(&im_handler, "notifyKeyInput", "(II)Z", (-99, 1)).await?;
+            // The character the input method was still building has to be let
+            // go of, or the next press carries on composing a character that is
+            // no longer the one in the field.
+            //
+            // It is let go of rather than finished, because the string just set
+            // is the whole of the field: whatever was being composed is already
+            // in it or was meant to be dropped, and a finished character on top
+            // would be a second copy of one or text the caller did not set.
+            // So the input method is reset directly instead of through the
+            // handler, whose flush writes what it finishes to the listener.
+            jvm.put_field(&mut im_handler, "__wieComposing", "Z", false).await?;
+
+            context.system().reset_input_method_composition();
         }
 
         let _: () = jvm.invoke_virtual(&this, "invalidate", "()V", ()).await?;

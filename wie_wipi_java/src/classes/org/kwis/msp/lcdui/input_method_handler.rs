@@ -558,6 +558,50 @@ mod tests {
         )
     }
 
+    /// A flush with nothing on screen to write over inserts instead.
+    ///
+    /// `TextComponent.setString` replaces the whole text, puts the cursor back
+    /// to 0 and only then fires the flush, so the character the input method
+    /// was still building is already gone. Writing over it from there is a
+    /// replace at position -1, which threw out of the component and killed the
+    /// title the moment a direction key reached a field it had set.
+    #[test]
+    fn a_flush_with_nothing_to_write_over_does_not_reach_back() -> Result<()> {
+        run_jvm_test(
+            Box::new([Box::new(get_protos()) as Box<[_]>, Box::new([RecordingListener::as_proto()]) as Box<[_]>]),
+            async |jvm| {
+                let handler = jvm.new_class("org/kwis/msp/lcdui/InputMethodHandler", "(I)V", (0,)).await?;
+                let listener = jvm.new_class("test/RecordingListener", "()V", ()).await?;
+
+                let _: () = jvm
+                    .invoke_virtual(
+                        &handler,
+                        "setInputMethodListener",
+                        "(Lorg/kwis/msp/lcdui/InputMethodListener;)V",
+                        (listener.clone(),),
+                    )
+                    .await?;
+                let _: bool = jvm.invoke_virtual(&handler, "setCurrentMode", "(I)Z", (3,)).await?;
+
+                // A live ㄱ, then the text is taken out from under it.
+                let _: bool = jvm.invoke_virtual(&handler, "notifyKeyInput", "(II)Z", ('4' as i32, 1)).await?;
+
+                let mut handler = handler;
+                jvm.put_field(&mut handler, "__wieComposing", "Z", false).await?;
+
+                // The flush setString fires. It has to be new text, not a write
+                // over a character that is no longer there.
+                let _: bool = jvm.invoke_virtual(&handler, "notifyKeyInput", "(II)Z", (-99, 1)).await?;
+
+                let log: ClassInstanceRef<java_runtime::classes::java::lang::String> = jvm.get_field(&listener, "log", "Ljava/lang/String;").await?;
+
+                assert_eq!(JavaLangString::to_rust_string(&jvm, &log).await?, RustString::from("ㄱ@-1 ㄱ@-1 "));
+
+                Ok(())
+            },
+        )
+    }
+
     /// A syllable the input method has finished takes the place of the live one
     /// it grew out of, and the syllable that starts with the same press is new
     /// text after it.

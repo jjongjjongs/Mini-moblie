@@ -184,6 +184,18 @@ impl System {
     /// same key is left alone long enough, and measuring that on guest time
     /// rather than the host's keeps a frontend that runs ticks in batches
     /// typing the same text as one running live.
+    /// Lets go of the character the input method is still building, without
+    /// finishing it into anything.
+    ///
+    /// For a field whose whole text has been set from under it: what it was
+    /// composing is either already in that text or was meant to be dropped, so
+    /// finishing it would add a second copy or text nobody asked for.
+    pub fn reset_input_method_composition(&self) {
+        let mode = self.input_method.read().current_mode();
+
+        self.input_method.write().set_current_mode(mode);
+    }
+
     pub fn handle_input_method(&self, key: i8, event: u32) -> InputMethodOutput {
         let now = self.platform().now();
 

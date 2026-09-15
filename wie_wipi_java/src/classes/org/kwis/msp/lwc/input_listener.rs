@@ -86,6 +86,19 @@ impl InputListener {
 
             0 => {
                 let mut owner = owner;
+
+                // Writing over the live character needs a live character to
+                // write over. The cursor can be behind what the input method
+                // believes - setString replaces the text and puts the cursor
+                // back to 0, and the flush it fires arrives here afterwards -
+                // and replacing from a negative position throws out of the
+                // component.
+                if cursor < count {
+                    jvm.put_field(&mut owner, "iMode", "I", 1).await?;
+
+                    return jvm.invoke_virtual(&owner, "insert", "([CIII)V", (data, 0, count, cursor)).await;
+                }
+
                 jvm.put_field(&mut owner, "iMode", "I", 0).await?;
 
                 jvm.invoke_virtual(&owner, "replace", "([CII)V", (data, count, cursor - count)).await
