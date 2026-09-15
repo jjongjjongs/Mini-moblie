@@ -2821,6 +2821,196 @@ pub fn lgt_local_tera_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(response)
 }
 
+/// The answer to the `LGT`-tagged purchase 이터니티-천상의화원 writes.
+///
+/// 이터니티-천상의화원 (`0002D6C4`) dials `222.122.160.61:11001` when an item is
+/// bought in its shop and writes a 111-byte record - the same envelope
+/// 테라-영원의혼돈 uses, and a different message inside it:
+///
+/// ```text
+/// [0..3]    "LGT"
+/// [3]       13, the message
+/// [4]       1 or 2, which of its two modes the shop is in
+/// [5..9]    four bytes of the title's own state
+/// [9..11]   two flags
+/// [11..15]  u32 LE - the price, 800 for 생명의열매
+/// [15..26]  the item, "0002D6C4002" - this title's app id and the item's number
+/// [26..66]  "|255127127|생명의열매 800원", the line the shop drew, zero filled
+/// [66..71]  "00029", the shop it is
+/// [71..111] "이터니티-천상의화원", the same way
+/// ```
+///
+/// `0x1c3c` writes the header: `sprintf(buf, "%s%c", "LGT", message)` in front
+/// of a body whose length its caller passes, and the case at `0x3504` is the
+/// one that passes 107 - this message. The item's code comes from `0x1d18`,
+/// which maps the price to one of the thirteen at `0x4e9fc`.
+///
+/// Its receive is the loop at `0x2dc0`: state 0 reads exactly four bytes and
+/// `0x14ccc` reads them back as a little-endian `u32`, state 1 reads until that
+/// many more have arrived. `0x2e34` then takes the body's first byte as the
+/// message the reply answers, and `0x1f38` dispatches on it - 13 lands at
+/// `0x2442`, which is four instructions:
+///
+/// ```asm
+/// 2442  ldrb  r3, [r5, #5]    ; the body's second byte
+/// 244a  strb  r3, [r2]        ; -> 0x15016a4
+/// 2aaa  strb  r3, [r2]        ; -> 0x150177c
+/// ```
+///
+/// Nothing else in the reply is read. What that byte means is at `0x62bc`,
+/// which reads `0x150177c` back and jumps through the six-entry table at
+/// `0x50008`:
+///
+/// | byte | what the shop does |
+/// |------|--------------------|
+/// | 0 | 연결을 실패하였습니다. |
+/// | 1 | hands the item over - `0x62e6` takes it by index and grants it |
+/// | 2 | LGT임직원은 사용이 불가함을 양해바랍니다. |
+/// | 3 | 구매개수를 초과하였습니다. |
+/// | 4 | 고객님은 월구매한도로 인해 … |
+/// | 5 | 일한도를 초과하였습니다. |
+///
+/// Anything above five draws nothing at all. So the whole answer is a length of
+/// two and the two bytes behind it: the message come back, and 1.
+fn lgt_local_eternity_response(request: &[u8]) -> Option<Vec<u8>> {
+    if request.len() != ETERNITY_PURCHASE_REQUEST || !request.starts_with(ETERNITY_TAG) {
+        return None;
+    }
+    if request[ETERNITY_MESSAGE_AT] != ETERNITY_PURCHASE || !ETERNITY_MODES.contains(&request[ETERNITY_MODE_AT]) {
+        return None;
+    }
+
+    // The item field opens with the app id `0x1d18` put there, the way 테라's
+    // does - it is what says this record is a purchase of this title's rather
+    // than another message at the same length.
+    if !request[ETERNITY_ITEM_AT..ETERNITY_ITEM_AT + ETERNITY_APP_ID_LEN]
+        .iter()
+        .all(u8::is_ascii_hexdigit)
+    {
+        return None;
+    }
+
+    let body = [ETERNITY_PURCHASE, ETERNITY_GRANTED];
+
+    let mut reply = Vec::with_capacity(4 + body.len());
+    reply.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    reply.extend_from_slice(&body);
+
+    Some(reply)
+}
+
+/// The envelope this title shares with 테라-영원의혼돈, and the whole of the
+/// purchase record inside it.
+const ETERNITY_TAG: &[u8] = b"LGT";
+const ETERNITY_PURCHASE_REQUEST: usize = 111;
+
+/// The message at `[3]`, which comes back as the reply's first byte.
+const ETERNITY_MESSAGE_AT: usize = 3;
+const ETERNITY_PURCHASE: u8 = 13;
+
+/// The mode at `[4]`, which `0x350a` writes as one or the other and nothing
+/// else.
+const ETERNITY_MODE_AT: usize = 4;
+const ETERNITY_MODES: core::ops::RangeInclusive<u8> = 1..=2;
+
+/// Where the item's code starts, and the app id at the head of it.
+const ETERNITY_ITEM_AT: usize = 15;
+const ETERNITY_APP_ID_LEN: usize = 8;
+
+/// The one byte `0x50008` sends to the branch that hands the item over. Zero -
+/// which a switched-off gateway can look like it is returning - is 연결을
+/// 실패하였습니다.
+const ETERNITY_GRANTED: u8 = 1;
+
+#[cfg(test)]
+mod eternity_tests {
+    use alloc::{vec, vec::Vec};
+
+    use super::*;
+
+    /// The record the device log caught when 생명의열매 was bought.
+    fn purchase() -> Vec<u8> {
+        vec![
+            0x4c, 0x47, 0x54, 0x0d, 0x01, 0x01, 0x00, 0x00, 0x00, 0x01, 0x01, 0x20, 0x03, 0x00, 0x00, 0x30, 0x30, 0x30, 0x32, 0x44, 0x36, 0x43, 0x34,
+            0x30, 0x30, 0x32, 0x7c, 0x32, 0x35, 0x35, 0x31, 0x32, 0x37, 0x31, 0x32, 0x37, 0x7c, 0xbb, 0xfd, 0xb8, 0xed, 0xc0, 0xc7, 0xbf, 0xad, 0xb8,
+            0xc5, 0x20, 0x38, 0x30, 0x30, 0xbf, 0xf8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x30, 0x30,
+            0x32, 0x39, 0xc0, 0xcc, 0xc5, 0xcd, 0xb4, 0xcf, 0xc6, 0xbc, 0x2d, 0xc3, 0xb5, 0xbb, 0xf3, 0xc0, 0xc7, 0xc8, 0xad, 0xbf, 0xf8, 0x00, 0xc5,
+            0x20, 0x38, 0x30, 0x30, 0xbf, 0xf8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ]
+    }
+
+    /// The price at `[11..15]` and the item code behind it, as `0x3504` wrote
+    /// them - so the record this is read against is the one the log carried.
+    #[test]
+    fn the_record_is_the_one_the_log_carried() {
+        let request = purchase();
+
+        assert_eq!(request.len(), 111);
+        assert_eq!(&request[..4], b"LGT\x0d");
+        assert_eq!(u32::from_le_bytes(request[11..15].try_into().unwrap()), 800);
+        assert_eq!(&request[15..26], b"0002D6C4002");
+    }
+
+    /// `0x2dc0` reads four bytes and `0x14ccc` takes them as a little-endian
+    /// length; the body is what follows.
+    #[test]
+    fn the_reply_is_a_length_and_a_body() {
+        let reply = response(&purchase()).unwrap();
+
+        assert_eq!(reply.len(), 6);
+        assert_eq!(u32::from_le_bytes(reply[..4].try_into().unwrap()) as usize, reply.len() - 4);
+    }
+
+    /// `0x1f38` dispatches on the body's first byte, and 13 is the case that
+    /// reaches the purchase handler at `0x2442`.
+    #[test]
+    fn the_body_answers_under_the_message_that_was_asked() {
+        let reply = response(&purchase()).unwrap();
+
+        assert_eq!(reply[4], 13);
+    }
+
+    /// Index 1 of the table at `0x50008` is the branch that hands the item
+    /// over; every other index in it draws a notice instead.
+    #[test]
+    fn the_status_is_the_one_that_hands_the_item_over() {
+        let reply = response(&purchase()).unwrap();
+
+        assert_eq!(reply[5], 1);
+    }
+
+    /// 테라-영원의혼돈 writes the same envelope under message 0x14, and its own
+    /// answer is a different pair of bytes.
+    #[test]
+    fn another_titles_message_in_the_same_envelope_is_not_answered() {
+        let mut request = purchase();
+        request[3] = 0x14;
+
+        assert_eq!(lgt_local_eternity_response(&request), None);
+    }
+
+    /// `0x350a` writes one mode or the other and nothing else.
+    #[test]
+    fn a_mode_this_builder_does_not_write_is_not_answered() {
+        for mode in [0u8, 3, 0xff] {
+            let mut request = purchase();
+            request[4] = mode;
+
+            assert_eq!(lgt_local_eternity_response(&request), None);
+        }
+    }
+
+    /// The item field opens with an app id; a record without one there is not
+    /// this purchase.
+    #[test]
+    fn a_record_without_an_app_id_is_not_answered() {
+        let mut request = purchase();
+        request[15] = b'-';
+
+        assert_eq!(lgt_local_eternity_response(&request), None);
+    }
+}
+
 /// The answers to 영웅서기5's shop and 창고, whose gateway is the one they open.
 ///
 /// 영웅서기5 (`00032870`) connects to `210.222.18.28:18182` when the shop or the
@@ -6465,7 +6655,14 @@ pub fn lgt_local_hero5_response(request: &[u8]) -> Option<Vec<u8>> {
 
 /// The answer to 오셔너스's cash purchase, whose gateway is the one it opens.
 ///
-/// 오셔너스 (`0002D6C4`) confirms a CASH tab purchase behind a dialogue that
+/// The app id first recorded here was `0002D6C4`, and that is wrong: that id is
+/// 이터니티-천상의화원, whose archive carries no `GLSN` anywhere and whose own
+/// purchase is [`lgt_local_eternity_response`]. Which id this title carries is
+/// not something the capture that named it says, so it is left unnamed rather
+/// than named wrongly - the record is recognised by its tag and its service
+/// code either way.
+///
+/// 오셔너스 confirms a CASH tab purchase behind a dialogue that
 /// says the item costs real money - "실제 현금 %d원의 추가정보이용료 …
 /// 구입하시겠습니까?" - and on 예 it dials `203.231.235.183:12343` and writes a
 /// 44-byte record behind `WPBill_Write`'s 108-byte header:
@@ -8169,6 +8366,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_blademaster3_response(request))
         .or_else(|| lgt_local_id_framed_response(request))
         .or_else(|| lgt_local_tera_response(request))
+        .or_else(|| lgt_local_eternity_response(request))
         .or_else(|| lgt_local_hero5_response(request))
         .or_else(|| lgt_local_oceanus_response(request))
         .or_else(|| lgt_local_oceanus_settled_response(request))
