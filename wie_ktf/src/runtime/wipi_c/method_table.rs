@@ -9,7 +9,7 @@ use wie_core_arm::ArmCore;
 use wie_util::{Result, WieError};
 use wie_wipi_c::{
     MethodImpl, WIPICContext, WIPICMethodBody,
-    api::{database, graphics, im, kernel, media, misc, net, shared_buf, uic, util},
+    api::{database, filesystem, graphics, im, kernel, media, misc, net, shared_buf, uic, util},
 };
 
 use crate::runtime::{
@@ -238,11 +238,13 @@ pub fn get_database_interface(core: &mut ArmCore) -> Result<WIPICDatabaseInterfa
         update_record: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICDatabaseMethodId::UpdateRecord))?,
         delete_record: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICDatabaseMethodId::DeleteRecord))?,
         list_record: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICDatabaseMethodId::ListRecord))?,
-        sort_records: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICDatabaseMethodId::SortRecords))?,
+        // The interface struct's field names are the database reading of this
+        // table; slots 8 and 12 are the filesystem's - see `WIPICDatabaseMethodId`.
+        sort_records: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICDatabaseMethodId::MakeDirectory))?,
         get_access_mode: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICDatabaseMethodId::GetAccessMode))?,
         get_number_of_records: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICDatabaseMethodId::GetNumberOfRecords))?,
         get_record_size: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICDatabaseMethodId::GetRecordSize))?,
-        list_databases: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICDatabaseMethodId::ListDatabases))?,
+        list_databases: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICDatabaseMethodId::Available))?,
         unk13: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICDatabaseMethodId::Unk13))?,
         unk14: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICDatabaseMethodId::Unk14))?,
         unk15: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICDatabaseMethodId::Unk15))?,
@@ -582,11 +584,11 @@ pub fn get_served_method_body(table_id: WIPICTableId, function_id: u16) -> Optio
             WIPICDatabaseMethodId::UpdateRecord => Some(database::stat_by_name_ktf.into_body()),
             WIPICDatabaseMethodId::DeleteRecord => Some(database::delete_record_ktf.into_body()),
             WIPICDatabaseMethodId::ListRecord => Some(database::list_record.into_body()),
-            WIPICDatabaseMethodId::SortRecords => Some(database::sort_records_ktf.into_body()),
+            WIPICDatabaseMethodId::MakeDirectory => Some(filesystem::mkdir.into_body()),
             WIPICDatabaseMethodId::GetAccessMode => Some(database::get_access_mode_ktf.into_body()),
             WIPICDatabaseMethodId::GetNumberOfRecords => Some(database::get_number_of_records_ktf.into_body()),
             WIPICDatabaseMethodId::GetRecordSize => Some(database::get_record_size_ktf.into_body()),
-            WIPICDatabaseMethodId::ListDatabases => Some(database::list_databases_ktf.into_body()),
+            WIPICDatabaseMethodId::Available => Some(database::available_storage_ktf.into_body()),
             WIPICDatabaseMethodId::Unk13 => Some(gen_stub(13, "MC_dbUnk13")),
             WIPICDatabaseMethodId::Unk14 => Some(gen_stub(14, "MC_dbUnk14")),
             WIPICDatabaseMethodId::Unk15 => Some(gen_stub(15, "MC_dbUnk15")),

@@ -151,7 +151,7 @@ pub async fn open_database(context: &mut dyn WIPICContext, ptr_name: WIPICWord, 
         return Ok(-22); // M_E_BADRECID — closest WIPI parameter-error idiom in this file
     }
 
-    let packaged = read_packaged_database(context, &name).await?;
+    let packaged = packaged_store_bytes(context, &name).await?;
 
     let system = context.system();
     let pid = system.pid().to_owned();
@@ -1272,7 +1272,7 @@ pub async fn list_record_info(context: &mut dyn WIPICContext, ptr_name: WIPICWor
     let pid = system.pid().to_owned();
 
     if !system.platform().database_repository().exists(&name, &pid).await {
-        if let Some(data) = read_packaged_database(context, &name).await? {
+        if let Some(data) = packaged_store_bytes(context, &name).await? {
             if capacity > 0 {
                 write_generic(context, buf_ptr, 1u32)?;
                 write_generic(context, buf_ptr + 4, 0u32)?;
@@ -1312,7 +1312,7 @@ pub async fn exists_database(context: &mut dyn WIPICContext, ptr_name: WIPICWord
     let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, ptr_name)?) else {
         return Ok(-22);
     };
-    if read_packaged_database(context, &name).await?.is_some() {
+    if packaged_store_bytes(context, &name).await?.is_some() {
         return Ok(0);
     }
 
@@ -1692,7 +1692,7 @@ pub async fn exists_database_ktf(context: &mut dyn WIPICContext, name_ptr: WIPIC
         }
     };
 
-    if read_packaged_database(context, &name).await?.is_some() {
+    if packaged_store_bytes(context, &name).await?.is_some() {
         tracing::debug!("MC_dbExists({name:?}) -> 0 (packaged)");
         return Ok(0);
     }
@@ -1770,7 +1770,7 @@ pub async fn get_access_mode_ktf(context: &mut dyn WIPICContext, arg: WIPICWord)
         return Ok(-22);
     };
 
-    if read_packaged_database(context, &name).await?.is_some() {
+    if packaged_store_bytes(context, &name).await?.is_some() {
         return Ok(1);
     }
 
@@ -1784,73 +1784,58 @@ pub async fn get_access_mode_ktf(context: &mut dyn WIPICContext, arg: WIPICWord)
     }
 }
 
-/// KTF `MC_dbSortRecords(handle, ...)`.
+/// The storage one KTF program is allowed to fill, and what
+/// `available_storage_ktf` measures against.
 ///
-/// Reorders the records of a database. KTF's database holds one stream record,
-/// and one record is already in order, so this succeeds without calling the
-/// comparator it was handed - which is the same result sorting would reach, not
-/// a stand-in for it. A database that somehow holds more says so in the log,
-/// because then the answer would be a claim rather than a fact.
+/// A megabyte is what the reference gives a program, and a title that asks
+/// before it writes is asking against that figure rather than against the
+/// handset's whole card.
+const KTF_STORAGE_LIMIT: usize = 1024 * 1024;
+
+/// KTF slot 12, `MC_fsAvailable()`.
 ///
-/// Only the handle is read. The comparator and whatever else follows it are left
-/// alone, so nothing here depends on an argument shape no title we have pins
-/// down.
-pub async fn sort_records_ktf(context: &mut dyn WIPICContext, db_id: i32) -> Result<i32> {
-    tracing::debug!("MC_dbSortRecords({db_id:#x}) [KTF]");
-
-    let Some(db) = get_database_from_db_id(context, db_id).await? else {
-        return Ok(-25); // M_E_INVALIDHANDLE
-    };
-
-    let count = db.get_record_ids().await.len();
-    if count > 1 {
-        tracing::warn!("MC_dbSortRecords: {count} records left in the order they are in");
-    }
-
-    Ok(0)
-}
-
-/// KTF `MC_dbListDataBase(output, capacity)`.
+/// It answers the storage still available, in bytes - not a list, whatever the
+/// name this slot was first given here suggested. This runtime listed database
+/// names into the first argument and returned how many there were, and the
+/// first argument is not a buffer: 이타루스전기 arrives here with whatever was
+/// in r0 and a zero in r1, took the `M_E_INVALID` that produced as the space
+/// left, and painted `980009byte 공간이 부족합니다` over its own download
+/// instead of fetching it.
 ///
-/// Writes the databases this title has, as NUL-terminated names with one more
-/// NUL after the last, and answers how many there were. A buffer that cannot
-/// hold them is refused with `M_E_SHORTBUF` and left untouched, so a title that
-/// sizes its buffer from the failure and asks again gets the whole list.
-pub async fn list_databases_ktf(context: &mut dyn WIPICContext, output: WIPICWord, capacity: i32) -> Result<i32> {
-    tracing::debug!("MC_dbListDataBase({output:#x}, {capacity}) [KTF]");
+/// What the archive itself ships is not storage the player consumed - on a
+/// handset a program's own data arrives with it - so only what a store has
+/// grown past its packaged size counts. Without that a title that packages its
+/// maps and its text as databases reads its own content as a full disk.
+pub async fn available_storage_ktf(context: &mut dyn WIPICContext) -> Result<i32> {
+    let mut stored = Vec::new();
+    {
+        let system = context.system();
+        let pid = system.pid().to_owned();
 
-    if output == 0 || capacity <= 0 {
-        return Ok(-9); // M_E_INVALID
+        for name in system.platform().database_repository().list(&pid).await {
+            let db = system.platform().database_repository().open(&name, &pid).await;
+
+            let mut bytes = 0usize;
+            for id in db.get_record_ids().await {
+                if let Some(record) = db.get(id).await {
+                    bytes += record.len();
+                }
+            }
+
+            stored.push((name, bytes));
+        }
     }
 
-    let system = context.system();
-    let pid = system.pid().to_owned();
-    let mut names = system.platform().database_repository().list(&pid).await;
-
-    // The repository's order is whatever its backing store iterates in, which
-    // differs between a map and a host filesystem. A title that lists twice
-    // should see the same list both times.
-    names.sort();
-    names.dedup();
-
-    let required: usize = names.iter().map(|name| name.as_bytes().len() + 1).sum::<usize>() + 1;
-    if required > capacity as usize {
-        tracing::debug!("MC_dbListDataBase: {} names need {required} bytes, was given {capacity}", names.len());
-
-        return Ok(-18); // M_E_SHORTBUF
+    let mut used = 0usize;
+    for (name, bytes) in stored {
+        let packaged = context.get_resource_size(&name).await?.unwrap_or(0);
+        used += bytes.saturating_sub(packaged);
     }
 
-    let mut cursor = 0u32;
-    for name in &names {
-        let bytes = name.as_bytes();
-        context.write_bytes(output.wrapping_add(cursor), bytes)?;
-        cursor = cursor.wrapping_add(bytes.len() as u32);
-        context.write_bytes(output.wrapping_add(cursor), &[0])?;
-        cursor = cursor.wrapping_add(1);
-    }
-    context.write_bytes(output.wrapping_add(cursor), &[0])?;
+    let available = KTF_STORAGE_LIMIT.saturating_sub(used);
+    tracing::debug!("MC_fsAvailable() -> {available} ({used} of {KTF_STORAGE_LIMIT} used) [KTF]");
 
-    Ok(names.len() as i32)
+    Ok(available as i32)
 }
 
 fn load_handle(context: &mut dyn WIPICContext, db_id: i32) -> Result<Option<DatabaseHandle>> {
@@ -1889,6 +1874,34 @@ async fn read_packaged_database(context: &mut dyn WIPICContext, name: &str) -> R
     Ok(Some(context.read_resource(name).await?))
 }
 
+/// What the archive itself ships under this name, wherever it ships it.
+///
+/// KTF's storage table is the handset's filesystem as much as it is its
+/// database - the two share every slot - so a store's packaged content is not
+/// only a jar entry. A program that has extra data to download ships it as
+/// files beside the jar, in the archive's `P/` directory, and a handset's
+/// installer writes them where the program will open them: 이타루스전기 carries
+/// its 980KB that way, `patch.dat` recording that it arrived, and looked for
+/// `patch.dat` at start-up through this table. Reading only the jar answered
+/// "no such store", so the title asked to download what it already had.
+async fn packaged_store_bytes(context: &mut dyn WIPICContext, name: &str) -> Result<Option<Vec<u8>>> {
+    if let Some(packaged) = read_packaged_database(context, name).await? {
+        return Ok(Some(packaged));
+    }
+
+    let filesystem = context.system().filesystem().clone();
+    let Some(size) = filesystem.size(name).await else {
+        return Ok(None);
+    };
+
+    let mut data = vec![0; size];
+    filesystem.read(name, 0, size, &mut data).await;
+
+    tracing::debug!("{name:?} is a file the archive shipped, {size} bytes");
+
+    Ok(Some(data))
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::{boxed::Box, vec};
@@ -1899,15 +1912,14 @@ mod tests {
 
     use alloc::borrow::ToOwned as _;
 
-    use crate::context::WIPICContext as _;
     use crate::context::test::TestContext;
 
     use super::{
-        LgtDatabaseMetadata, close_database_lgt, delete_database, delete_database_lgt, delete_record_lgt, exists_database, exists_database_ktf,
-        get_access_mode_ktf, get_access_mode_lgt, get_number_of_records_ktf, get_number_of_records_lgt, get_record_size_ktf, get_record_size_lgt,
-        insert_record_lgt, list_databases_ktf, list_databases_lgt, list_record, list_record_info, list_records_lgt, load_handle, load_lgt_metadata,
-        open_database, open_database_lgt, open_db_for_handle, select_record, select_record_lgt, sort_records_ktf, sort_records_lgt,
-        store_lgt_metadata, stream_read, stream_write, update_record, update_record_lgt,
+        LgtDatabaseMetadata, available_storage_ktf, close_database_lgt, delete_database, delete_database_lgt, delete_record_lgt, exists_database,
+        exists_database_ktf, get_access_mode_ktf, get_access_mode_lgt, get_number_of_records_ktf, get_number_of_records_lgt, get_record_size_ktf,
+        get_record_size_lgt, insert_record_lgt, list_databases_lgt, list_record, list_record_info, list_records_lgt, load_handle, load_lgt_metadata,
+        open_database, open_database_lgt, open_db_for_handle, select_record, select_record_lgt, sort_records_lgt, store_lgt_metadata, stream_read,
+        stream_write, update_record, update_record_lgt,
     };
 
     #[futures_test::test]
@@ -2851,7 +2863,6 @@ mod tests {
 
         assert_eq!(get_number_of_records_ktf(&mut context, 0x2000).await.unwrap(), -25);
         assert_eq!(get_record_size_ktf(&mut context, 0x2000).await.unwrap(), -25);
-        assert_eq!(sort_records_ktf(&mut context, 0x2000).await.unwrap(), -25);
     }
 
     /// The access mode answers both shapes: a handle reports what the title
@@ -2873,41 +2884,37 @@ mod tests {
         assert_eq!(get_access_mode_ktf(&mut context, 0).await.unwrap(), -9);
     }
 
-    /// Sorting one record succeeds without a comparator, because one record is
-    /// already sorted.
+    /// Slot 12 answers the storage left, in bytes, and the archive's own
+    /// packaged data is not storage the player consumed. 이타루스전기 compares
+    /// what it reads here with the 980009 bytes it is about to download, and
+    /// took the error the old list-shaped answer returned as "no room".
     #[futures_test::test]
-    async fn ktf_sorting_one_record_succeeds() {
+    async fn ktf_answers_the_storage_it_has_left() {
         let mut context = database_test_context();
-        context.write_bytes(0x1000, b"save\0").unwrap();
 
+        let empty = available_storage_ktf(&mut context).await.unwrap();
+        assert_eq!(empty as usize, super::KTF_STORAGE_LIMIT);
+
+        context.write_bytes(0x1000, b"save\0").unwrap();
         let db_id = open_database(&mut context, 0x1000, 4, 0).await.unwrap();
-        context.write_bytes(0x2000, b"12345678").unwrap();
+        context.write_bytes(0x2000, &[7u8; 8]).unwrap();
         stream_write(&mut context, db_id, 0x2000, 8).await.unwrap();
 
-        assert_eq!(sort_records_ktf(&mut context, db_id).await.unwrap(), 0);
-        assert_eq!(get_record_size_ktf(&mut context, db_id).await.unwrap(), 8);
-    }
+        let after_a_save = available_storage_ktf(&mut context).await.unwrap();
+        assert_eq!(after_a_save, empty - 8, "only what the player wrote is spent");
 
-    /// The database list is names and terminators, counted, and a buffer too
-    /// small is refused rather than half-filled.
-    #[futures_test::test]
-    async fn ktf_lists_the_databases_it_has() {
-        let mut context = database_test_context();
-        context.write_bytes(0x1000, b"alpha\0").unwrap();
-        open_database(&mut context, 0x1000, 4, 0).await.unwrap();
-        context.write_bytes(0x1100, b"beta\0").unwrap();
-        open_database(&mut context, 0x1100, 4, 0).await.unwrap();
+        // A store the archive shipped is the program's own data, not the
+        // player's, so it spends nothing.
+        let mut packaged = database_test_context().with_resource("maps", &[0u8; 4096]);
+        packaged.write_bytes(0x1000, b"maps\0").unwrap();
+        let maps = open_database(&mut packaged, 0x1000, 4, 0).await.unwrap();
+        assert!(maps > 0);
 
-        // "alpha\0beta\0\0" is 12 bytes; one less is refused.
-        assert_eq!(list_databases_ktf(&mut context, 0x3000, 11).await.unwrap(), -18);
-
-        assert_eq!(list_databases_ktf(&mut context, 0x3000, 12).await.unwrap(), 2);
-        let mut listed = [0u8; 12];
-        context.read_bytes(0x3000, &mut listed).unwrap();
-        assert_eq!(&listed, b"alpha\0beta\0\0");
-
-        assert_eq!(list_databases_ktf(&mut context, 0, 12).await.unwrap(), -9);
-        assert_eq!(list_databases_ktf(&mut context, 0x3000, 0).await.unwrap(), -9);
+        assert_eq!(
+            available_storage_ktf(&mut packaged).await.unwrap() as usize,
+            super::KTF_STORAGE_LIMIT,
+            "packaged bytes are not a full disk"
+        );
     }
 
     /// The last argument counts ids. A buffer that cannot hold them all is
