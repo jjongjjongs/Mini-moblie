@@ -12,16 +12,72 @@ use crate::time::Instant;
 /// another WIPI runtime measured and shipped.
 const COMMIT_DELAY_MS: u64 = 900;
 
+/// The longest a 천지인 vowel's spelling gets: ㅙ is `·ㅡㅣ·ㅣ` and ㅞ is
+/// `ㅡ··ㅣㅣ`, both five strokes.
+const KOREAN_STROKES: usize = 5;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct KoreanState {
     cho: Option<u8>,
     jung: Option<u8>,
     jong: Option<u8>,
-    vowel_state: u8,
+    /// The strokes typed so far for the vowel in progress.
+    strokes: [u8; KOREAN_STROKES],
+    stroke_len: u8,
     consonant_scan: Option<u8>,
+    /// The key the live consonant came from, and how far into that key's ring
+    /// it is, so the same key pressed again steps to the next jamo on it.
+    consonant_key: Option<i8>,
+    ring_index: u8,
     last_key: Option<i8>,
-    vowel_toggle: bool,
 }
+
+/// What a number key does in Korean mode.
+enum KoreanPress {
+    /// A consonant. `in_place` replaces the live one rather than starting a new
+    /// syllable: the same key pressed again inside the multi-tap window, or a
+    /// stroke key applied to what is already there.
+    Consonant { scan: u8, in_place: bool },
+    /// A vowel stroke. `jung` is the vowel the strokes spell so far, which is
+    /// nothing yet for a lone dot; `restart` says the stroke could not extend
+    /// the vowel in progress, so what is on screen is finished first.
+    Vowel { jung: Option<u8>, restart: bool },
+}
+
+/// The strokes, as the table below spells them.
+const STROKE_I: u8 = 0;
+const STROKE_DOT: u8 = 1;
+const STROKE_EU: u8 = 2;
+
+/// Every vowel 천지인 spells, and the strokes that spell it.
+///
+/// Read `I` as ㅣ, `D` as the dot and `E` as ㅡ: ㅏ is ㅣ then a dot, ㅑ is a
+/// second dot on that, ㅐ is ㅏ closed with ㅣ. The run in progress extends as
+/// long as it is still the start of something here; the first stroke that is
+/// not finishes the syllable and starts the next run.
+const KOREAN_VOWELS: &[(&[u8], u8)] = &[
+    (&[STROKE_I], 29),                                              // ㅣ
+    (&[STROKE_I, STROKE_DOT], 3),                                   // ㅏ
+    (&[STROKE_I, STROKE_DOT, STROKE_I], 4),                         // ㅐ
+    (&[STROKE_I, STROKE_DOT, STROKE_DOT], 5),                       // ㅑ
+    (&[STROKE_I, STROKE_DOT, STROKE_DOT, STROKE_I], 6),             // ㅒ
+    (&[STROKE_DOT, STROKE_I], 7),                                   // ㅓ
+    (&[STROKE_DOT, STROKE_I, STROKE_I], 10),                        // ㅔ
+    (&[STROKE_DOT, STROKE_DOT, STROKE_I], 11),                      // ㅕ
+    (&[STROKE_DOT, STROKE_DOT, STROKE_I, STROKE_I], 12),            // ㅖ
+    (&[STROKE_DOT, STROKE_EU], 13),                                 // ㅗ
+    (&[STROKE_DOT, STROKE_EU, STROKE_I], 18),                       // ㅚ
+    (&[STROKE_DOT, STROKE_EU, STROKE_I, STROKE_DOT], 14),           // ㅘ
+    (&[STROKE_DOT, STROKE_EU, STROKE_I, STROKE_DOT, STROKE_I], 15), // ㅙ
+    (&[STROKE_DOT, STROKE_DOT, STROKE_EU], 19),                     // ㅛ
+    (&[STROKE_EU], 27),                                             // ㅡ
+    (&[STROKE_EU, STROKE_I], 28),                                   // ㅢ
+    (&[STROKE_EU, STROKE_DOT], 20),                                 // ㅜ
+    (&[STROKE_EU, STROKE_DOT, STROKE_I], 23),                       // ㅟ
+    (&[STROKE_EU, STROKE_DOT, STROKE_DOT], 26),                     // ㅠ
+    (&[STROKE_EU, STROKE_DOT, STROKE_DOT, STROKE_I], 21),           // ㅝ
+    (&[STROKE_EU, STROKE_DOT, STROKE_DOT, STROKE_I, STROKE_I], 22), // ㅞ
+];
 
 #[derive(Default)]
 pub struct InputMethod {
@@ -37,10 +93,15 @@ pub struct InputMethod {
     ko_cho: Option<u8>,
     ko_jung: Option<u8>,
     ko_jong: Option<u8>,
-    ko_vowel_state: u8,
+    ko_strokes: [u8; KOREAN_STROKES],
+    ko_stroke_len: u8,
     ko_consonant_scan: Option<u8>,
+    ko_consonant_key: Option<i8>,
+    ko_ring_index: u8,
     ko_last_key: Option<i8>,
-    ko_vowel_toggle: bool,
+    /// When the last Korean key was pressed, for the same multi-tap window the
+    /// Latin ring uses.
+    ko_last_press: Option<Instant>,
     ko_undo: Vec<KoreanState>,
 }
 
@@ -91,10 +152,13 @@ impl InputMethod {
         self.ko_cho = None;
         self.ko_jung = None;
         self.ko_jong = None;
-        self.ko_vowel_state = 0;
+        self.ko_strokes = [0; KOREAN_STROKES];
+        self.ko_stroke_len = 0;
         self.ko_consonant_scan = None;
+        self.ko_consonant_key = None;
+        self.ko_ring_index = 0;
         self.ko_last_key = None;
-        self.ko_vowel_toggle = false;
+        self.ko_last_press = None;
         self.ko_undo.clear();
     }
 
@@ -106,7 +170,7 @@ impl InputMethod {
         match self.current_mode {
             0 | 1 => self.handle_english(key, now),
             2 => Self::handle_numeric(key),
-            3 => self.handle_korean(key),
+            3 => self.handle_korean(key, now),
             _ => InputMethodOutput::default(),
         }
     }
@@ -124,8 +188,8 @@ impl InputMethod {
     ///
     /// Measured on the guest clock rather than the host's, so a frontend that
     /// runs a batch of ticks at once types the same text as one running live.
-    fn commit_delay_elapsed(&self, now: Instant) -> bool {
-        let Some(last) = self.eng_last_press else {
+    fn commit_delay_elapsed(last: Option<Instant>, now: Instant) -> bool {
+        let Some(last) = last else {
             return true;
         };
 
@@ -222,7 +286,7 @@ impl InputMethod {
         // the delay has run out the character it was building is finished and
         // this press starts the next one, which is what makes two of the same
         // letter in a row typable at all.
-        let still_cycling = self.eng_key == Some(key) && !self.commit_delay_elapsed(now);
+        let still_cycling = self.eng_key == Some(key) && !Self::commit_delay_elapsed(self.eng_last_press, now);
 
         if still_cycling {
             self.eng_index = (self.eng_index + 1) % chars.len();
@@ -412,93 +476,51 @@ impl InputMethod {
         }
     }
 
-    fn korean_vowel_jung(state: u8) -> Option<u8> {
-        match state {
-            1 => Some(3),   // ㅏ
-            2 => Some(5),   // ㅑ
-            3 => Some(6),   // ㅒ
-            4 => Some(4),   // ㅐ
-            5 => Some(7),   // ㅓ
-            6 => Some(11),  // ㅕ
-            7 => Some(12),  // ㅖ
-            8 => Some(10),  // ㅔ
-            9 => Some(13),  // ㅗ
-            10 => Some(19), // ㅛ
-            11 => Some(18), // ㅚ
-            12 => Some(14), // ㅘ
-            13 => Some(15), // ㅙ
-            14 => Some(20), // ㅜ
-            15 => Some(26), // ㅠ
-            16 => Some(21), // ㅝ
-            17 => Some(22), // ㅞ
-            18 => Some(23), // ㅟ
-            19 => Some(27), // ㅡ
-            20 => Some(28), // ㅢ
-            21 => Some(29), // ㅣ
-            _ => None,
-        }
+    /// The jamo each number key steps through, in the order the key is engraved
+    /// and a handset steps through them: 4 is ㄱ, ㅋ, ㄲ.
+    fn korean_consonant_ring(key: i8) -> Option<&'static [u8]> {
+        Some(match key {
+            52 => &[2, 17, 3],   // ㄱ ㅋ ㄲ
+            53 => &[4, 7],       // ㄴ ㄹ
+            54 => &[5, 18, 6],   // ㄷ ㅌ ㄸ
+            55 => &[9, 19, 10],  // ㅂ ㅍ ㅃ
+            56 => &[11, 20, 12], // ㅅ ㅎ ㅆ
+            57 => &[14, 16, 15], // ㅈ ㅊ ㅉ
+            48 => &[13, 8],      // ㅇ ㅁ
+            _ => return None,
+        })
     }
 
-    fn korean_vowel_transition(state: u8, scan: u8) -> Option<(u8, bool)> {
-        match (state, scan) {
-            (0, 21 | 22) => Some((1, false)),
-            (0, 23 | 24) => Some((9, false)),
-            (0, 25) => Some((19, false)),
-            (0, 26) => Some((21, false)),
-
-            (1, 21 | 22) => Some((5, true)),
-            (1, 26) => Some((4, false)),
-            (1, 27 | 28) => Some((2, false)),
-
-            (2, 26) => Some((3, false)),
-            (2, 27) => Some((1, false)),
-
-            (5, 21 | 22) => Some((1, true)),
-            (5, 26) => Some((8, false)),
-            (5, 27 | 28) => Some((6, false)),
-
-            (6, 26) => Some((7, false)),
-            (6, 27) => Some((5, false)),
-
-            (9, 21 | 22) => Some((12, false)),
-            (9, 23 | 24) => Some((14, true)),
-            (9, 26) => Some((11, false)),
-            (9, 27 | 28) => Some((10, false)),
-
-            (10, 27) => Some((9, true)),
-
-            (12, 26) => Some((13, false)),
-
-            (14, 21 | 22) => Some((16, false)),
-            (14, 23 | 24) => Some((9, true)),
-            (14, 26) => Some((18, false)),
-            (14, 27 | 28) => Some((15, false)),
-
-            (15, 27) => Some((14, false)),
-
-            (16, 26) => Some((17, false)),
-
-            (19, 26) => Some((20, true)),
-            (19, 27 | 28) => Some((20, false)),
-
-            _ => None,
-        }
+    /// The three strokes every 천지인 vowel is spelled out of: 사람 (ㅣ), 하늘
+    /// (the dot) and 땅 (ㅡ), on 1, 2 and 3.
+    fn korean_stroke(key: i8) -> Option<u8> {
+        Some(match key {
+            49 => STROKE_I,
+            50 => STROKE_DOT,
+            51 => STROKE_EU,
+            _ => return None,
+        })
     }
 
-    fn initial_korean_scan(key: i8) -> Option<u8> {
-        match key {
-            49 => Some(2),  // 1 -> ㄱ
-            50 => Some(4),  // 2 -> ㄴ
-            51 => Some(21), // 3 -> ㅏ-series
-            52 => Some(7),  // 4 -> ㄹ
-            53 => Some(8),  // 5 -> ㅁ
-            54 => Some(23), // 6 -> ㅗ-series
-            55 => Some(11), // 7 -> ㅅ
-            56 => Some(13), // 8 -> ㅇ
-            57 => Some(25), // 9 -> ㅡ-series
-            48 => Some(26), // 0 -> ㅣ
-            _ => None,
+    /// What a run of strokes spells.
+    ///
+    /// `None` means no vowel begins that way, so the run has to start over.
+    /// `Some(None)` is a run on its way to a vowel without being one yet - the
+    /// lone dot, and the two dots before ㅕ - which leaves the syllable showing
+    /// its consonant alone, the way a handset does.
+    fn korean_vowel_for_strokes(strokes: &[u8]) -> Option<Option<u8>> {
+        let mut is_prefix = false;
+
+        for (spelling, jung) in KOREAN_VOWELS {
+            if *spelling == strokes {
+                return Some(Some(*jung));
+            }
+            if spelling.starts_with(strokes) {
+                is_prefix = true;
+            }
         }
+
+        if is_prefix { Some(None) } else { None }
     }
 
     fn modify_korean_consonant(scan: u8, key: i8) -> Option<u8> {
@@ -627,7 +649,6 @@ impl InputMethod {
         self.ko_cho = None;
         self.ko_jung = None;
         self.ko_jong = None;
-        self.ko_vowel_state = 0;
         self.ko_consonant_scan = None;
     }
 
@@ -636,10 +657,12 @@ impl InputMethod {
             cho: self.ko_cho,
             jung: self.ko_jung,
             jong: self.ko_jong,
-            vowel_state: self.ko_vowel_state,
+            strokes: self.ko_strokes,
+            stroke_len: self.ko_stroke_len,
             consonant_scan: self.ko_consonant_scan,
+            consonant_key: self.ko_consonant_key,
+            ring_index: self.ko_ring_index,
             last_key: self.ko_last_key,
-            vowel_toggle: self.ko_vowel_toggle,
         }
     }
 
@@ -647,10 +670,12 @@ impl InputMethod {
         self.ko_cho = state.cho;
         self.ko_jung = state.jung;
         self.ko_jong = state.jong;
-        self.ko_vowel_state = state.vowel_state;
+        self.ko_strokes = state.strokes;
+        self.ko_stroke_len = state.stroke_len;
         self.ko_consonant_scan = state.consonant_scan;
+        self.ko_consonant_key = state.consonant_key;
+        self.ko_ring_index = state.ring_index;
         self.ko_last_key = state.last_key;
-        self.ko_vowel_toggle = state.vowel_toggle;
     }
 
     fn clear_korean_input(&mut self) -> InputMethodOutput {
@@ -669,88 +694,86 @@ impl InputMethod {
         output
     }
 
-    fn start_korean_vowel(&mut self, scan: u8) -> bool {
-        let Some((state, _)) = Self::korean_vowel_transition(0, scan) else {
-            return false;
-        };
-        let Some(jung) = Self::korean_vowel_jung(state) else {
-            return false;
-        };
-
-        self.ko_vowel_state = state;
-        self.ko_jung = Some(jung);
-        true
-    }
-
-    fn scan_korean_key(&mut self, key: i8) -> Option<(u8, bool)> {
+    /// Reads a number key as the jamo it writes.
+    ///
+    /// The consonant keys carry a ring - 4 is ㄱ, ㅋ, ㄲ and back to ㄱ - which
+    /// the same key steps through while the multi-tap window is open, exactly
+    /// as the Latin ring does. ✱ and # reach the same jamo the other way, by
+    /// adding a stroke or doubling what is live, which is what a handset offers
+    /// beside the ring.
+    fn press_korean_key(&mut self, key: i8, now: Instant) -> Option<KoreanPress> {
         if matches!(key, 42 | 35) {
-            if key == 42 && self.ko_vowel_state != 0 && matches!(self.ko_last_key, Some(48 | 51 | 54 | 57)) {
-                self.ko_last_key = Some(key);
-                return Some((27, false));
-            }
+            let scan = self.ko_consonant_scan?;
+            let modified = Self::modify_korean_consonant(scan, key)?;
 
-            if let Some(scan) = self.ko_consonant_scan {
-                if let Some(modified) = Self::modify_korean_consonant(scan, key) {
-                    self.ko_consonant_scan = Some(modified);
-                    self.ko_last_key = Some(key);
-                    return Some((modified, true));
-                }
-            }
-
+            self.ko_consonant_scan = Some(modified);
+            // The ring is left behind, so the number key pressed after a stroke
+            // key starts a fresh jamo rather than carrying on the cycle.
+            self.ko_consonant_key = None;
             self.ko_last_key = Some(key);
-            return None;
+            self.ko_last_press = Some(now);
+
+            return Some(KoreanPress::Consonant {
+                scan: modified,
+                in_place: true,
+            });
         }
 
-        let scan = match key {
-            51 => {
-                if self.ko_last_key == Some(51) {
-                    self.ko_vowel_toggle = !self.ko_vowel_toggle;
-                    if self.ko_vowel_toggle { 21 } else { 22 }
-                } else {
-                    self.ko_vowel_toggle = true;
-                    21
-                }
-            }
-            54 => {
-                if self.ko_last_key == Some(54) {
-                    self.ko_vowel_toggle = !self.ko_vowel_toggle;
-                    if self.ko_vowel_toggle { 23 } else { 24 }
-                } else {
-                    self.ko_vowel_toggle = true;
-                    23
-                }
-            }
-            57 => {
-                if self.ko_last_key == Some(57) {
-                    self.ko_vowel_toggle = !self.ko_vowel_toggle;
-                } else {
-                    self.ko_vowel_toggle = true;
-                }
-                25
-            }
-            48 => {
-                self.ko_vowel_toggle = false;
-                26
-            }
-            _ => {
-                self.ko_vowel_toggle = false;
-                Self::initial_korean_scan(key)?
-            }
-        };
+        if let Some(ring) = Self::korean_consonant_ring(key) {
+            let cycling = self.ko_consonant_key == Some(key) && !Self::commit_delay_elapsed(self.ko_last_press, now);
+            let index = if cycling { (self.ko_ring_index as usize + 1) % ring.len() } else { 0 };
 
+            self.ko_consonant_key = Some(key);
+            self.ko_ring_index = index as u8;
+            self.ko_consonant_scan = Some(ring[index]);
+            self.ko_last_key = Some(key);
+            self.ko_last_press = Some(now);
+            // A consonant ends whatever vowel was being spelled.
+            self.ko_stroke_len = 0;
+
+            return Some(KoreanPress::Consonant {
+                scan: ring[index],
+                in_place: cycling,
+            });
+        }
+
+        let stroke = Self::korean_stroke(key)?;
+
+        self.ko_consonant_key = None;
         self.ko_last_key = Some(key);
-        Some((scan, false))
+        self.ko_last_press = Some(now);
+
+        let length = self.ko_stroke_len as usize;
+        if length < KOREAN_STROKES {
+            let mut extended = self.ko_strokes;
+            extended[length] = stroke;
+
+            if let Some(jung) = Self::korean_vowel_for_strokes(&extended[..length + 1]) {
+                self.ko_strokes = extended;
+                self.ko_stroke_len = (length + 1) as u8;
+
+                return Some(KoreanPress::Vowel { jung, restart: false });
+            }
+        }
+
+        self.ko_strokes[0] = stroke;
+        self.ko_stroke_len = 1;
+        let jung = Self::korean_vowel_for_strokes(&self.ko_strokes[..1]).flatten();
+
+        Some(KoreanPress::Vowel { jung, restart: true })
     }
 
-    fn handle_korean(&mut self, key: i8) -> InputMethodOutput {
+    fn handle_korean(&mut self, key: i8, now: Instant) -> InputMethodOutput {
         if key == -99 {
             let mut output = InputMethodOutput::default();
             if let Some(ch) = self.current_korean_char() {
                 Self::put_korean_char(&mut output.output0, &mut output.output0_len, ch);
             }
             self.reset_korean_composition();
+            self.ko_stroke_len = 0;
+            self.ko_consonant_key = None;
             self.ko_last_key = None;
-            self.ko_vowel_toggle = false;
+            self.ko_last_press = None;
             self.ko_undo.clear();
             return output;
         }
@@ -759,10 +782,10 @@ impl InputMethod {
             return self.clear_korean_input();
         }
 
-        // Capture before scan_korean_key mutates the key/toggle metadata.
+        // Capture before press_korean_key mutates the key/stroke metadata.
         let before = self.korean_state();
 
-        let Some((scan, modifier)) = self.scan_korean_key(key) else {
+        let Some(press) = self.press_korean_key(key, now) else {
             return InputMethodOutput::default();
         };
 
@@ -775,42 +798,31 @@ impl InputMethod {
             ..InputMethodOutput::default()
         };
 
-        if Self::korean_cho_index(scan).is_some() {
-            if modifier {
-                if self.ko_jong.is_some() {
-                    if let Some(jong) = Self::korean_scan_to_jong(scan) {
-                        self.ko_jong = Some(jong);
+        match press {
+            KoreanPress::Consonant { scan, in_place } => {
+                if in_place {
+                    if self.ko_jong.is_some() {
+                        if let Some(jong) = Self::korean_scan_to_jong(scan) {
+                            self.ko_jong = Some(jong);
+                        }
+                    } else if self.ko_cho.is_some() {
+                        self.ko_cho = Some(scan);
                     }
-                } else if self.ko_cho.is_some() {
-                    self.ko_cho = Some(scan);
-                }
 
-                if let Some(ch) = self.current_korean_char() {
-                    Self::put_korean_char(&mut output.output1, &mut output.output1_len, ch);
-                }
-                self.ko_undo.push(before);
-                return output;
-            }
-
-            self.ko_vowel_state = 0;
-            self.ko_consonant_scan = Some(scan);
-
-            match (self.ko_cho, self.ko_jung, self.ko_jong) {
-                (None, None, None) => {
-                    self.ko_cho = Some(scan);
-                }
-                (Some(_), None, None) => {
                     if let Some(ch) = self.current_korean_char() {
-                        Self::put_korean_char(&mut output.output0, &mut output.output0_len, ch);
+                        Self::put_korean_char(&mut output.output1, &mut output.output1_len, ch);
                     }
-                    self.reset_korean_composition();
-                    self.ko_cho = Some(scan);
-                    self.ko_consonant_scan = Some(scan);
+                    self.ko_undo.push(before);
+                    return output;
                 }
-                (Some(_), Some(_), None) => {
-                    if let Some(jong) = Self::korean_scan_to_jong(scan) {
-                        self.ko_jong = Some(jong);
-                    } else {
+
+                self.ko_consonant_scan = Some(scan);
+
+                match (self.ko_cho, self.ko_jung, self.ko_jong) {
+                    (None, None, None) => {
+                        self.ko_cho = Some(scan);
+                    }
+                    (Some(_), None, None) => {
                         if let Some(ch) = self.current_korean_char() {
                             Self::put_korean_char(&mut output.output0, &mut output.output0_len, ch);
                         }
@@ -818,10 +830,22 @@ impl InputMethod {
                         self.ko_cho = Some(scan);
                         self.ko_consonant_scan = Some(scan);
                     }
-                }
-                (Some(_), Some(_), Some(jong)) => {
-                    if let Some(second) = Self::korean_scan_to_jong(scan) {
-                        if let Some(combined) = Self::combine_korean_jong(jong, second) {
+                    (Some(_), Some(_), None) => {
+                        if let Some(jong) = Self::korean_scan_to_jong(scan) {
+                            self.ko_jong = Some(jong);
+                        } else {
+                            if let Some(ch) = self.current_korean_char() {
+                                Self::put_korean_char(&mut output.output0, &mut output.output0_len, ch);
+                            }
+                            self.reset_korean_composition();
+                            self.ko_cho = Some(scan);
+                            self.ko_consonant_scan = Some(scan);
+                        }
+                    }
+                    (Some(_), Some(_), Some(jong)) => {
+                        let combined = Self::korean_scan_to_jong(scan).and_then(|second| Self::combine_korean_jong(jong, second));
+
+                        if let Some(combined) = combined {
                             self.ko_jong = Some(combined);
                         } else {
                             if let Some(ch) = self.current_korean_char() {
@@ -831,90 +855,49 @@ impl InputMethod {
                             self.ko_cho = Some(scan);
                             self.ko_consonant_scan = Some(scan);
                         }
-                    } else {
-                        if let Some(ch) = self.current_korean_char() {
-                            Self::put_korean_char(&mut output.output0, &mut output.output0_len, ch);
-                        }
+                    }
+                    _ => {
                         self.reset_korean_composition();
                         self.ko_cho = Some(scan);
                         self.ko_consonant_scan = Some(scan);
                     }
                 }
-                _ => {
+            }
+            KoreanPress::Vowel { jung, restart } => {
+                if let Some(jong) = self.ko_jong {
+                    // The vowel belongs to the next syllable, so the consonant
+                    // it was sitting under moves there with it.
+                    let (Some(old_cho), Some(old_jung)) = (self.ko_cho, self.ko_jung) else {
+                        return InputMethodOutput::default();
+                    };
+
+                    let (kept, carried) = Self::split_korean_jong(jong).map_or((1, jong), |(first, second)| (first, second));
+
+                    if let Some(committed) = Self::compose_korean_syllable(old_cho, old_jung, kept) {
+                        Self::put_korean_char(&mut output.output0, &mut output.output0_len, committed);
+                    }
+
                     self.reset_korean_composition();
-                    self.ko_cho = Some(scan);
-                    self.ko_consonant_scan = Some(scan);
+                    self.ko_cho = Self::korean_jong_to_cho(carried);
+                    self.ko_consonant_scan = self.ko_cho;
+                    commit_baseline = self.korean_state();
+                    commit_baseline.last_key = before.last_key;
+                    // CLEAR back to here is back to the carried consonant
+                    // alone, not to it with half a vowel still pending.
+                    commit_baseline.stroke_len = 0;
+
+                    self.ko_jung = jung;
+                } else if restart {
+                    if let Some(ch) = self.current_korean_char() {
+                        Self::put_korean_char(&mut output.output0, &mut output.output0_len, ch);
+                    }
+
+                    self.reset_korean_composition();
+                    self.ko_jung = jung;
+                } else {
+                    self.ko_jung = jung;
                 }
             }
-
-            if let Some(ch) = self.current_korean_char() {
-                Self::put_korean_char(&mut output.output1, &mut output.output1_len, ch);
-            }
-
-            if output.output0_len != 0 {
-                self.ko_undo.clear();
-                self.ko_undo.push(commit_baseline);
-            } else {
-                self.ko_undo.push(before);
-            }
-            return output;
-        }
-
-        if !(21..=28).contains(&scan) {
-            return InputMethodOutput::default();
-        }
-
-        if let Some(jong) = self.ko_jong {
-            let Some(old_cho) = self.ko_cho else {
-                return InputMethodOutput::default();
-            };
-            let Some(old_jung) = self.ko_jung else {
-                return InputMethodOutput::default();
-            };
-
-            if let Some((first, second)) = Self::split_korean_jong(jong) {
-                if let Some(committed) = Self::compose_korean_syllable(old_cho, old_jung, first) {
-                    Self::put_korean_char(&mut output.output0, &mut output.output0_len, committed);
-                }
-
-                self.reset_korean_composition();
-                self.ko_cho = Self::korean_jong_to_cho(second);
-                self.ko_consonant_scan = self.ko_cho;
-                commit_baseline = self.korean_state();
-                commit_baseline.last_key = before.last_key;
-                commit_baseline.vowel_toggle = before.vowel_toggle;
-            } else {
-                if let Some(committed) = Self::compose_korean_syllable(old_cho, old_jung, 1) {
-                    Self::put_korean_char(&mut output.output0, &mut output.output0_len, committed);
-                }
-
-                self.reset_korean_composition();
-                self.ko_cho = Self::korean_jong_to_cho(jong);
-                self.ko_consonant_scan = self.ko_cho;
-                commit_baseline = self.korean_state();
-                commit_baseline.last_key = before.last_key;
-                commit_baseline.vowel_toggle = before.vowel_toggle;
-            }
-
-            if !self.start_korean_vowel(scan) {
-                return output;
-            }
-        } else if self.ko_jung.is_some() {
-            if let Some((state, _)) = Self::korean_vowel_transition(self.ko_vowel_state, scan) {
-                self.ko_vowel_state = state;
-                self.ko_jung = Self::korean_vowel_jung(state);
-            } else {
-                if let Some(ch) = self.current_korean_char() {
-                    Self::put_korean_char(&mut output.output0, &mut output.output0_len, ch);
-                }
-
-                self.reset_korean_composition();
-                if !self.start_korean_vowel(scan) {
-                    return output;
-                }
-            }
-        } else if !self.start_korean_vowel(scan) {
-            return InputMethodOutput::default();
         }
 
         if let Some(ch) = self.current_korean_char() {
@@ -1087,40 +1070,122 @@ mod english_tests {
 
 #[cfg(test)]
 mod korean_input_tests {
-    use super::InputMethod;
+    use alloc::vec::Vec;
 
+    use super::{InputMethod, InputMethodOutput};
+
+    /// ㄱ, ㅣ, then the dot that turns ㅣ into ㅏ: 가. A consonant after that
+    /// lands under it as 각, and the vowel after that carries the ㄱ out of the
+    /// jong into the next syllable.
     #[test]
     fn korean_mode_composes_and_commits_syllables() {
         let mut input = InputMethod::new();
         input.set_current_mode(3);
 
-        let giyeok = input.press(b'1' as i8, 2);
+        let giyeok = input.press(b'4' as i8, 2);
         assert!(giyeok.handled);
-        assert_eq!(&giyeok.output1[..giyeok.output1_len], &[0xa4, 0xa1]);
+        assert_eq!(&giyeok.output1[..giyeok.output1_len], &[0xa4, 0xa1]); // ㄱ
 
-        let ga = input.press(b'3' as i8, 2);
-        assert!(ga.handled);
-        assert_eq!(&ga.output1[..ga.output1_len], &[0xb0, 0xa1]);
+        let gi = input.press(b'1' as i8, 2);
+        assert_eq!(&gi.output1[..gi.output1_len], &[0xb1, 0xe2]); // 기
 
-        let gak = input.press(b'1' as i8, 2);
-        assert!(gak.handled);
-        assert_eq!(&gak.output1[..gak.output1_len], &[0xb0, 0xa2]);
+        let ga = input.press(b'2' as i8, 2);
+        assert_eq!(&ga.output1[..ga.output1_len], &[0xb0, 0xa1]); // 가
 
-        let split = input.press(b'3' as i8, 2);
-        assert!(split.handled);
-        assert_eq!(&split.output0[..split.output0_len], &[0xb0, 0xa1]);
-        assert_eq!(&split.output1[..split.output1_len], &[0xb0, 0xa1]);
+        let gak = input.press(b'4' as i8, 2);
+        assert_eq!(&gak.output1[..gak.output1_len], &[0xb0, 0xa2]); // 각
+
+        let split = input.press(b'1' as i8, 2);
+        assert_eq!(&split.output0[..split.output0_len], &[0xb0, 0xa1]); // 가
+        assert_eq!(&split.output1[..split.output1_len], &[0xb1, 0xe2]); // 기
     }
 
+    /// The key pressed again steps to the next jamo engraved on it - 4 is ㄱ,
+    /// ㅋ, ㄲ - and the fourth press comes back round to ㄱ.
+    #[test]
+    fn a_key_pressed_again_steps_through_what_is_engraved_on_it() {
+        let mut input = InputMethod::new();
+        input.set_current_mode(3);
+
+        let expected: [[u8; 2]; 4] = [[0xa4, 0xa1], [0xa4, 0xbb], [0xa4, 0xa2], [0xa4, 0xa1]]; // ㄱ ㅋ ㄲ ㄱ
+
+        for (press, expected) in expected.iter().enumerate() {
+            let output = input.press(b'4' as i8, 2);
+
+            assert!(output.handled);
+            assert_eq!(output.output0_len, 0, "press {press} finished a character it should have cycled");
+            assert_eq!(&output.output1[..output.output1_len], expected, "press {press}");
+        }
+    }
+
+    /// The ring is per key: 5 carries ㄴ and ㄹ, and 0 carries ㅇ and ㅁ.
+    #[test]
+    fn each_key_steps_through_its_own_ring() {
+        for (key, expected) in [(b'5', [[0xa4, 0xa4], [0xa4, 0xa9]]), (b'0', [[0xa4, 0xb7], [0xa4, 0xb1]])] {
+            let mut input = InputMethod::new();
+            input.set_current_mode(3);
+
+            for expected in expected.iter() {
+                let output = input.press(key as i8, 2);
+                assert_eq!(&output.output1[..output.output1_len], expected, "key {}", key as char);
+            }
+        }
+    }
+
+    /// The dot and ㅡ around ㅣ are what the vowels are made of, and which side
+    /// the dot goes on is which vowel it is.
+    #[test]
+    fn the_strokes_build_the_vowel_they_are_written_in() {
+        // ㄱ, then: ㅣ· is ㅏ, ·ㅣ is ㅓ, ·ㅡ is ㅗ, ㅡ· is ㅜ, ㅣ·· is ㅑ.
+        for (strokes, expected) in [
+            ("12", [0xb0, 0xa1]),  // 가
+            ("21", [0xb0, 0xc5]),  // 거
+            ("23", [0xb0, 0xed]),  // 고
+            ("32", [0xb1, 0xb8]),  // 구
+            ("122", [0xb0, 0xbc]), // 갸
+        ] {
+            let mut input = InputMethod::new();
+            input.set_current_mode(3);
+            input.press(b'4' as i8, 2);
+
+            let mut last = InputMethodOutput::default();
+            for key in strokes.bytes() {
+                last = input.press(key as i8, 2);
+            }
+
+            assert_eq!(&last.output1[..last.output1_len], &expected, "strokes {strokes}");
+        }
+    }
+
+    /// A whole word, the way it is typed: ㅅㅅ for ㅎ, ㅣ· for ㅏ, ㄴ under it,
+    /// then ㄱ ㅡ and ㄴ stepped once more to ㄹ.
+    #[test]
+    fn a_word_types_the_way_it_is_spelled() {
+        let mut input = InputMethod::new();
+        input.set_current_mode(3);
+
+        let mut typed = Vec::new();
+        for key in b"881254355" {
+            let output = input.press(*key as i8, 2);
+            typed.extend_from_slice(&output.output0[..output.output0_len]);
+        }
+
+        let flush = input.press(-99, 2);
+        typed.extend_from_slice(&flush.output0[..flush.output0_len]);
+
+        assert_eq!(typed, [0xc7, 0xd1, 0xb1, 0xdb]); // 한글
+    }
+
+    /// ✱ and # reach the same jamo the other way, from whatever is live.
     #[test]
     fn korean_mode_applies_native_consonant_modifier() {
         let mut input = InputMethod::new();
         input.set_current_mode(3);
 
-        input.press(b'1' as i8, 2);
+        input.press(b'4' as i8, 2);
         let ssang = input.press(b'#' as i8, 2);
         assert!(ssang.handled);
-        assert_eq!(&ssang.output1[..ssang.output1_len], &[0xa4, 0xa2]);
+        assert_eq!(&ssang.output1[..ssang.output1_len], &[0xa4, 0xa2]); // ㄲ
     }
 
     #[test]
@@ -1128,12 +1193,13 @@ mod korean_input_tests {
         let mut input = InputMethod::new();
         input.set_current_mode(3);
 
+        input.press(b'4' as i8, 2);
         input.press(b'1' as i8, 2);
-        input.press(b'3' as i8, 2);
+        input.press(b'2' as i8, 2);
 
         let flush = input.press(-99, 2);
         assert!(!flush.handled);
-        assert_eq!(&flush.output0[..flush.output0_len], &[0xb0, 0xa1]);
+        assert_eq!(&flush.output0[..flush.output0_len], &[0xb0, 0xa1]); // 가
         assert_eq!(flush.output1_len, 0);
     }
 
@@ -1142,7 +1208,7 @@ mod korean_input_tests {
         let mut input = InputMethod::new();
         input.set_current_mode(3);
 
-        let giyeok = input.press(b'1' as i8, 2);
+        let giyeok = input.press(b'4' as i8, 2);
         assert_eq!(&giyeok.output1[..giyeok.output1_len], &[0xa4, 0xa1]);
 
         let clear = input.press(-16, 2);
@@ -1156,9 +1222,10 @@ mod korean_input_tests {
         let mut input = InputMethod::new();
         input.set_current_mode(3);
 
+        input.press(b'4' as i8, 2);
         input.press(b'1' as i8, 2);
-        input.press(b'3' as i8, 2);
-        let gak = input.press(b'1' as i8, 2);
+        input.press(b'2' as i8, 2);
+        let gak = input.press(b'4' as i8, 2);
         assert_eq!(&gak.output1[..gak.output1_len], &[0xb0, 0xa2]);
 
         let clear = input.press(-16, 2);
@@ -1172,18 +1239,19 @@ mod korean_input_tests {
         let mut input = InputMethod::new();
         input.set_current_mode(3);
 
-        input.press(b'1' as i8, 2); // ㄱ
-        input.press(b'3' as i8, 2); // 가
-        input.press(b'1' as i8, 2); // 각
+        input.press(b'4' as i8, 2); // ㄱ
+        input.press(b'1' as i8, 2); // 기
+        input.press(b'2' as i8, 2); // 가
+        input.press(b'4' as i8, 2); // 각
 
-        let split = input.press(b'3' as i8, 2);
-        assert_eq!(&split.output0[..split.output0_len], &[0xb0, 0xa1]);
-        assert_eq!(&split.output1[..split.output1_len], &[0xb0, 0xa1]);
+        let split = input.press(b'1' as i8, 2);
+        assert_eq!(&split.output0[..split.output0_len], &[0xb0, 0xa1]); // 가
+        assert_eq!(&split.output1[..split.output1_len], &[0xb1, 0xe2]); // 기
 
         let clear = input.press(-16, 2);
         assert!(clear.handled);
         assert_eq!(clear.output0_len, 0);
-        assert_eq!(&clear.output1[..clear.output1_len], &[0xa4, 0xa1]);
+        assert_eq!(&clear.output1[..clear.output1_len], &[0xa4, 0xa1]); // ㄱ
     }
 
     #[test]
@@ -1191,8 +1259,8 @@ mod korean_input_tests {
         let mut input = InputMethod::new();
         input.set_current_mode(3);
 
-        input.press(b'1' as i8, 2);
-        let next = input.press(b'2' as i8, 2);
+        input.press(b'4' as i8, 2);
+        let next = input.press(b'5' as i8, 2);
         assert_ne!(next.output0_len, 0);
 
         let clear = input.press(-16, 2);
@@ -1312,101 +1380,75 @@ mod korean_scan_tests {
         assert_eq!(InputMethod::korean_scan_to_jong(15), None);
     }
 
+    /// The spelling table is the vowel chart: every vowel 천지인 writes is in
+    /// it exactly once, and no two spell the same way.
     #[test]
-    fn korean_vowel_states_match_native_jung_codes() {
-        let expected = [
-            (1, 3),
-            (2, 5),
-            (3, 6),
-            (4, 4),
-            (5, 7),
-            (6, 11),
-            (7, 12),
-            (8, 10),
-            (9, 13),
-            (10, 19),
-            (11, 18),
-            (12, 14),
-            (13, 15),
-            (14, 20),
-            (15, 26),
-            (16, 21),
-            (17, 22),
-            (18, 23),
-            (19, 27),
-            (20, 28),
-            (21, 29),
-        ];
+    fn every_vowel_is_spelled_once() {
+        use alloc::collections::BTreeSet;
 
-        for (state, jung) in expected {
-            assert_eq!(InputMethod::korean_vowel_jung(state), Some(jung));
+        let mut jungs = BTreeSet::new();
+        let mut spellings = BTreeSet::new();
+
+        for (spelling, jung) in super::KOREAN_VOWELS {
+            assert!(jungs.insert(*jung), "{jung} is spelled twice");
+            assert!(spellings.insert(*spelling), "a spelling is used twice");
+            assert!(InputMethod::korean_jung_index(*jung).is_some(), "{jung} is not a jung");
+            assert!(!spelling.is_empty() && spelling.len() <= super::KOREAN_STROKES);
         }
 
-        assert_eq!(InputMethod::korean_vowel_jung(0), None);
-        assert_eq!(InputMethod::korean_vowel_jung(22), None);
+        assert_eq!(jungs.len(), 21, "Korean has twenty-one vowels");
     }
 
+    /// A run of strokes is read left to right: it spells a vowel, or it is on
+    /// the way to one, or nothing begins that way and it has to start over.
     #[test]
-    fn korean_vowel_fst_matches_native_transitions() {
-        assert_eq!(InputMethod::korean_vowel_transition(0, 21), Some((1, false)));
-        assert_eq!(InputMethod::korean_vowel_transition(0, 23), Some((9, false)));
-        assert_eq!(InputMethod::korean_vowel_transition(0, 25), Some((19, false)));
-        assert_eq!(InputMethod::korean_vowel_transition(0, 26), Some((21, false)));
+    fn strokes_spell_vowels_or_the_way_to_one() {
+        use super::{STROKE_DOT, STROKE_EU, STROKE_I};
 
-        assert_eq!(InputMethod::korean_vowel_transition(1, 21), Some((5, true)));
-        assert_eq!(InputMethod::korean_vowel_transition(1, 26), Some((4, false)));
-        assert_eq!(InputMethod::korean_vowel_transition(1, 27), Some((2, false)));
+        assert_eq!(InputMethod::korean_vowel_for_strokes(&[STROKE_I]), Some(Some(29))); // ㅣ
+        assert_eq!(InputMethod::korean_vowel_for_strokes(&[STROKE_I, STROKE_DOT]), Some(Some(3))); // ㅏ
+        assert_eq!(InputMethod::korean_vowel_for_strokes(&[STROKE_DOT, STROKE_I]), Some(Some(7))); // ㅓ
+        assert_eq!(InputMethod::korean_vowel_for_strokes(&[STROKE_DOT, STROKE_EU]), Some(Some(13))); // ㅗ
+        assert_eq!(InputMethod::korean_vowel_for_strokes(&[STROKE_EU, STROKE_DOT]), Some(Some(20))); // ㅜ
 
-        assert_eq!(InputMethod::korean_vowel_transition(2, 26), Some((3, false)));
-        assert_eq!(InputMethod::korean_vowel_transition(2, 27), Some((1, false)));
+        // The dot alone, and the two dots before ㅕ and ㅛ, are on the way to a
+        // vowel without being one.
+        assert_eq!(InputMethod::korean_vowel_for_strokes(&[STROKE_DOT]), Some(None));
+        assert_eq!(InputMethod::korean_vowel_for_strokes(&[STROKE_DOT, STROKE_DOT]), Some(None));
 
-        assert_eq!(InputMethod::korean_vowel_transition(5, 22), Some((1, true)));
-        assert_eq!(InputMethod::korean_vowel_transition(5, 26), Some((8, false)));
-        assert_eq!(InputMethod::korean_vowel_transition(5, 28), Some((6, false)));
-
-        assert_eq!(InputMethod::korean_vowel_transition(6, 26), Some((7, false)));
-        assert_eq!(InputMethod::korean_vowel_transition(6, 27), Some((5, false)));
-
-        assert_eq!(InputMethod::korean_vowel_transition(9, 21), Some((12, false)));
-        assert_eq!(InputMethod::korean_vowel_transition(9, 23), Some((14, true)));
-        assert_eq!(InputMethod::korean_vowel_transition(9, 26), Some((11, false)));
-        assert_eq!(InputMethod::korean_vowel_transition(9, 28), Some((10, false)));
-        assert_eq!(InputMethod::korean_vowel_transition(9, 25), None);
-
-        assert_eq!(InputMethod::korean_vowel_transition(10, 27), Some((9, true)));
-        assert_eq!(InputMethod::korean_vowel_transition(12, 26), Some((13, false)));
-
-        assert_eq!(InputMethod::korean_vowel_transition(14, 21), Some((16, false)));
-        assert_eq!(InputMethod::korean_vowel_transition(14, 24), Some((9, true)));
-        assert_eq!(InputMethod::korean_vowel_transition(14, 26), Some((18, false)));
-        assert_eq!(InputMethod::korean_vowel_transition(14, 27), Some((15, false)));
-        assert_eq!(InputMethod::korean_vowel_transition(14, 25), None);
-
-        assert_eq!(InputMethod::korean_vowel_transition(15, 27), Some((14, false)));
-        assert_eq!(InputMethod::korean_vowel_transition(16, 26), Some((17, false)));
-
-        assert_eq!(InputMethod::korean_vowel_transition(19, 26), Some((20, true)));
-        assert_eq!(InputMethod::korean_vowel_transition(19, 27), Some((20, false)));
-        assert_eq!(InputMethod::korean_vowel_transition(19, 28), Some((20, false)));
-
-        assert_eq!(InputMethod::korean_vowel_transition(20, 26), None);
+        // Nothing begins with three dots, or with ㅣ then ㅡ.
+        assert_eq!(InputMethod::korean_vowel_for_strokes(&[STROKE_DOT, STROKE_DOT, STROKE_DOT]), None);
+        assert_eq!(InputMethod::korean_vowel_for_strokes(&[STROKE_I, STROKE_EU]), None);
     }
 
+    /// The keys carry what the pad is engraved with: the strokes on 1-3 and the
+    /// jamo pairs and triples on 4-0.
     #[test]
-    fn korean_initial_key_scans_match_native_mapping() {
-        assert_eq!(InputMethod::initial_korean_scan(b'1' as i8), Some(2));
-        assert_eq!(InputMethod::initial_korean_scan(b'2' as i8), Some(4));
-        assert_eq!(InputMethod::initial_korean_scan(b'3' as i8), Some(21));
-        assert_eq!(InputMethod::initial_korean_scan(b'4' as i8), Some(7));
-        assert_eq!(InputMethod::initial_korean_scan(b'5' as i8), Some(8));
-        assert_eq!(InputMethod::initial_korean_scan(b'6' as i8), Some(23));
-        assert_eq!(InputMethod::initial_korean_scan(b'7' as i8), Some(11));
-        assert_eq!(InputMethod::initial_korean_scan(b'8' as i8), Some(13));
-        assert_eq!(InputMethod::initial_korean_scan(b'9' as i8), Some(25));
-        assert_eq!(InputMethod::initial_korean_scan(b'0' as i8), Some(26));
+    fn the_number_keys_carry_what_is_engraved_on_them() {
+        use super::{STROKE_DOT, STROKE_EU, STROKE_I};
 
-        assert_eq!(InputMethod::initial_korean_scan(b'*' as i8), None);
-        assert_eq!(InputMethod::initial_korean_scan(b'#' as i8), None);
+        assert_eq!(InputMethod::korean_stroke(b'1' as i8), Some(STROKE_I));
+        assert_eq!(InputMethod::korean_stroke(b'2' as i8), Some(STROKE_DOT));
+        assert_eq!(InputMethod::korean_stroke(b'3' as i8), Some(STROKE_EU));
+        assert_eq!(InputMethod::korean_stroke(b'4' as i8), None);
+
+        assert_eq!(InputMethod::korean_consonant_ring(b'4' as i8), Some(&[2u8, 17, 3][..])); // ㄱㅋㄲ
+        assert_eq!(InputMethod::korean_consonant_ring(b'5' as i8), Some(&[4u8, 7][..])); // ㄴㄹ
+        assert_eq!(InputMethod::korean_consonant_ring(b'6' as i8), Some(&[5u8, 18, 6][..])); // ㄷㅌㄸ
+        assert_eq!(InputMethod::korean_consonant_ring(b'7' as i8), Some(&[9u8, 19, 10][..])); // ㅂㅍㅃ
+        assert_eq!(InputMethod::korean_consonant_ring(b'8' as i8), Some(&[11u8, 20, 12][..])); // ㅅㅎㅆ
+        assert_eq!(InputMethod::korean_consonant_ring(b'9' as i8), Some(&[14u8, 16, 15][..])); // ㅈㅊㅉ
+        assert_eq!(InputMethod::korean_consonant_ring(b'0' as i8), Some(&[13u8, 8][..])); // ㅇㅁ
+
+        assert_eq!(InputMethod::korean_consonant_ring(b'1' as i8), None);
+        assert_eq!(InputMethod::korean_consonant_ring(b'*' as i8), None);
+
+        // Every jamo on a key is one the composer can place.
+        for key in [b'4', b'5', b'6', b'7', b'8', b'9', b'0'] {
+            for scan in InputMethod::korean_consonant_ring(key as i8).unwrap() {
+                assert!(InputMethod::korean_cho_index(*scan).is_some(), "{scan} cannot start a syllable");
+            }
+        }
     }
 
     #[test]
