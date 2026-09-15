@@ -1884,7 +1884,7 @@ async fn read_packaged_database(context: &mut dyn WIPICContext, name: &str) -> R
 /// its 980KB that way, `patch.dat` recording that it arrived, and looked for
 /// `patch.dat` at start-up through this table. Reading only the jar answered
 /// "no such store", so the title asked to download what it already had.
-async fn packaged_store_bytes(context: &mut dyn WIPICContext, name: &str) -> Result<Option<Vec<u8>>> {
+pub(crate) async fn packaged_store_bytes(context: &mut dyn WIPICContext, name: &str) -> Result<Option<Vec<u8>>> {
     if let Some(packaged) = read_packaged_database(context, name).await? {
         return Ok(Some(packaged));
     }

@@ -248,6 +248,24 @@ pub async fn get_volume(_context: &mut dyn WIPICContext) -> Result<WIPICWord> {
     Ok(FULL_VOLUME as WIPICWord)
 }
 
+/// `MC_mdaSetVolume(level)`, the handset's overall media volume.
+///
+/// KTF keeps it at media slot 15, where the level walks the scale on its own -
+/// 겟앰프드 sets it in `startApp`, before it has a clip to set anything on, and
+/// this slot answering "unimplemented" ended the run there with the title
+/// screen never drawn.
+///
+/// Nothing here models a handset-wide level, and what reaches the sink is each
+/// clip's own volume (`MC_mdaClipSetVolume`), which a title sets per sound
+/// right after loading it. Applying this to every clip would overwrite that a
+/// moment before the title asks for it, so the level is taken and left alone -
+/// the same answer [`get_volume`] gives from the other side.
+pub async fn set_volume(_context: &mut dyn WIPICContext, level: WIPICWord) -> Result<WIPICWord> {
+    tracing::debug!("MC_mdaSetVolume({level})");
+
+    Ok(0)
+}
+
 pub async fn play(context: &mut dyn WIPICContext, ptr_clip: WIPICWord, repeat: WIPICWord) -> Result<i32> {
     if ptr_clip == 0 {
         // Default-player titles (clip 0) play the handle their MC_mdaClipPutData

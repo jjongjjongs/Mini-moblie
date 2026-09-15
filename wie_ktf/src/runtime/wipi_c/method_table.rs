@@ -9,7 +9,7 @@ use wie_core_arm::ArmCore;
 use wie_util::{Result, WieError};
 use wie_wipi_c::{
     MethodImpl, WIPICContext, WIPICMethodBody,
-    api::{database, filesystem, graphics, im, kernel, media, misc, net, shared_buf, uic, util},
+    api::{database, filesystem, graphics, im, kernel, media, misc, net, record_database, shared_buf, uic, util},
 };
 
 use crate::runtime::{
@@ -319,7 +319,7 @@ pub fn get_media_method_table() -> Vec<WIPICMethodBody> {
         gen_stub(12, "MC_mdaUnk12"),
         gen_stub(13, "MC_mdaUnk13"),
         media::get_volume.into_body(),
-        gen_stub(15, "MC_mdaUnk15"),
+        media::set_volume.into_body(),
         media::vibrator.into_body(),
         media::unk17.into_body(),
         media::unk18.into_body(),
@@ -561,20 +561,27 @@ pub fn get_served_method_body(table_id: WIPICTableId, function_id: u16) -> Optio
             WIPICGraphicsMethodId::GetImageInfo => Some(gen_stub(59, "OEMC_grpGetImageInfo")),
         },
         WIPICTableId::Interface3 => get_unk3_method_table().into_iter().nth(function_id as usize),
-        WIPICTableId::Interface4 => {
-            if function_id < 64 {
-                Some(gen_stub(4, "stub"))
-            } else {
-                None
-            }
-        }
-        WIPICTableId::Interface5 => {
-            if function_id < 64 {
-                Some(gen_stub(5, "stub"))
-            } else {
-                None
-            }
-        }
+        // Table 5 is the record database - KTF's other storage API. See
+        // `wie_wipi_c::api::record_database` for what each slot is and how the
+        // numbers were settled.
+        WIPICTableId::Interface4 => match function_id {
+            0 => Some(record_database::open.into_body()),
+            1 => Some(record_database::close.into_body()),
+            2 => Some(record_database::delete_database.into_body()),
+            3 => Some(record_database::insert_record.into_body()),
+            4 => Some(record_database::select_record.into_body()),
+            5 => Some(record_database::update_record.into_body()),
+            6 => Some(record_database::delete_record.into_body()),
+            7 => Some(record_database::list_records.into_body()),
+            10 => Some(record_database::number_of_records.into_body()),
+            11 => Some(record_database::record_size.into_body()),
+            12 => Some(database::available_storage_ktf.into_body()),
+            // A slot nothing has shown the meaning of. Name the number rather
+            // than the table: it is the only thing that says which call it was,
+            // and one label for sixty-four functions says nothing at all.
+            _ => (function_id < WIPIC_TABLE_FUNCTIONS).then(|| gen_stub(function_id as _, "table 5 (record database)")),
+        },
+        WIPICTableId::Interface5 => (function_id < WIPIC_TABLE_FUNCTIONS).then(|| gen_stub(function_id as _, "table 6")),
         WIPICTableId::Database => match WIPICDatabaseMethodId::try_from(function_id).ok()? {
             WIPICDatabaseMethodId::OpenDatabase => Some(database::open_database.into_body()),
             WIPICDatabaseMethodId::StreamRead => Some(database::stream_read.into_body()),
