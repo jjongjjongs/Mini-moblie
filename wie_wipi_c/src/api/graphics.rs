@@ -1227,7 +1227,24 @@ pub async fn create_offscreen_framebuffer(context: &mut dyn WIPICContext, w: i32
 pub async fn destroy_offscreen_framebuffer(context: &mut dyn WIPICContext, framebuffer: WIPICIndirectPtr) -> Result<()> {
     tracing::debug!("MC_grpDestroyOffScreenFrameBuffer({:#x})", framebuffer.0);
 
+    if framebuffer.0 == 0 {
+        return Ok(());
+    }
+
     OFFSCREEN_SURFACES.lock().retain(|(memory, _, _)| *memory != framebuffer.0);
+
+    // The surface is two allocations - the descriptor and the pixels it points
+    // at - and freeing only the descriptor, as this did, leaks the pixels. A
+    // 240x320 surface is a quarter of a megabyte with its guard rows, so a
+    // title that takes one per frame walks through the heap: 록맨X does exactly
+    // that in its stages and stopped with `net.wie.WieError: Allocation
+    // failure` about four hundred frames in, the heap holding 396 surfaces
+    // nothing could reach. `MC_grpDestroyImage` beside this frees its planes
+    // for the same reason.
+    let raw: WIPICFramebuffer = read_generic(context, context.data_ptr(framebuffer)?)?;
+    if raw.buf.0 != 0 {
+        context.free(raw.buf)?;
+    }
 
     context.free(framebuffer)?;
 
