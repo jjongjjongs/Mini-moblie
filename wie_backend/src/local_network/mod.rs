@@ -23,12 +23,14 @@
 
 mod ack;
 mod capture;
+mod dragoneyes;
 mod funter;
 mod gpang;
 
 pub use self::{
     ack::{AckEndpoint, Framing},
     capture::{CaptureAddress, CaptureEndpoint},
+    dragoneyes::DragonEyesEndpoint,
     funter::FunterEndpoint,
     gpang::GpangEndpoint,
 };

@@ -162,6 +162,11 @@ impl KtfEmulator {
             system.local_network().register(Box::new(funter));
         }
 
+        // 드래곤아이즈2 checks its data with its own server before it will
+        // start, and waits on the answer for ever. See
+        // `wie_backend::local_network::dragoneyes`.
+        system.local_network().register(Box::new(wie_backend::DragonEyesEndpoint));
+
         Allocator::init(&mut core)?;
 
         // The status strip a title has to work around, published where the
