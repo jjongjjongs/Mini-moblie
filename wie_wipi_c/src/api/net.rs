@@ -535,10 +535,10 @@ pub async fn connect(context: &mut dyn WIPICContext, cb: WIPICWord, param: WIPIC
         async fn call(&self, context: &mut dyn WIPICContext, _: Box<[WIPICWord]>) -> Result<WIPICResult> {
             let callback = context.network_state().lock().finish_connect(self.generation);
 
-            if let Some((callback, param)) = callback {
-                if callback != 0 {
-                    context.call_function(callback, &[0, param]).await?;
-                }
+            if let Some((callback, param)) = callback
+                && callback != 0
+            {
+                context.call_function(callback, &[0, param]).await?;
             }
 
             Ok(WIPICResult { results: Vec::new() })
@@ -1672,28 +1672,28 @@ pub async fn socket_write(context: &mut dyn WIPICContext, socket: i32, buffer: W
             wie_backend::billing::load_hero5_warehouse(&kept);
         }
 
-        if billing_mode == 1 {
-            if let Some(response) = lgt_local_purchase_success_response(&data) {
-                tracing::debug!(
-                    "bill write {socket}: answered in process with {}",
-                    wie_backend::billing::bill_frame_trace(&response)
-                );
+        if billing_mode == 1
+            && let Some(response) = lgt_local_purchase_success_response(&data)
+        {
+            tracing::debug!(
+                "bill write {socket}: answered in process with {}",
+                wie_backend::billing::bill_frame_trace(&response)
+            );
 
-                state.lock().queue_local_billing_response(socket, response);
+            state.lock().queue_local_billing_response(socket, response);
 
-                if let Some(kept) = wie_backend::billing::hero4_warehouse_to_keep() {
-                    write_billing_store(context, wie_backend::billing::HERO4_WAREHOUSE_STORE, &kept).await;
-                }
-
-                if let Some(kept) = wie_backend::billing::hero5_warehouse_to_keep() {
-                    write_billing_store(context, wie_backend::billing::HERO5_WAREHOUSE_STORE, &kept).await;
-                }
-
-                // Match a successful application-level socket write. The
-                // request is consumed locally, so no carrier/backend write
-                // occurs for this purchase transaction.
-                return Ok(length);
+            if let Some(kept) = wie_backend::billing::hero4_warehouse_to_keep() {
+                write_billing_store(context, wie_backend::billing::HERO4_WAREHOUSE_STORE, &kept).await;
             }
+
+            if let Some(kept) = wie_backend::billing::hero5_warehouse_to_keep() {
+                write_billing_store(context, wie_backend::billing::HERO5_WAREHOUSE_STORE, &kept).await;
+            }
+
+            // Match a successful application-level socket write. The
+            // request is consumed locally, so no carrier/backend write
+            // occurs for this purchase transaction.
+            return Ok(length);
         }
 
         // Before WPBill_SetHeader has ever run, native s_BillHeader is BSS
@@ -1926,7 +1926,7 @@ pub async fn socket_read(context: &mut dyn WIPICContext, socket: i32, buffer: WI
 
         let accumulated = header_offset.saturating_add(read);
 
-        if accumulated <= LGT_BILL_READ_HEADER_SIZE - 1 {
+        if accumulated < LGT_BILL_READ_HEADER_SIZE {
             let mut state = state.lock();
 
             if let Some(entry) = state.sockets.get_mut(&socket) {
@@ -2363,11 +2363,11 @@ fn ensure_event_dispatcher(context: &mut dyn WIPICContext) -> Result<()> {
 
                 let callback = state.lock().take_callback_for_event(event);
 
-                if let Some((callback, args)) = callback {
-                    if let Err(error) = context.call_function(callback, &args).await {
-                        state.lock().stop_dispatcher(self.generation);
-                        return Err(error);
-                    }
+                if let Some((callback, args)) = callback
+                    && let Err(error) = context.call_function(callback, &args).await
+                {
+                    state.lock().stop_dispatcher(self.generation);
+                    return Err(error);
                 }
             }
         }

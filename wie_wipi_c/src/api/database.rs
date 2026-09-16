@@ -538,7 +538,7 @@ pub async fn list_databases_lgt(context: &mut dyn WIPICContext, output: WIPICWor
         let mut required = 1usize;
         for name in &names {
             // Native counts strlen("name.db") + 1.
-            let Some(charged) = name.as_bytes().len().checked_add(4) else {
+            let Some(charged) = name.len().checked_add(4) else {
                 return Ok(-18);
             };
             let Some(next) = required.checked_add(charged) else {
@@ -715,7 +715,7 @@ pub async fn list_records_lgt(context: &mut dyn WIPICContext, db_id: i32, buf_pt
     let mut record_id: i32 = 1;
 
     while record_id < next_record_id {
-        let is_free = metadata.free_ids.iter().any(|&id| id == record_id as u32);
+        let is_free = metadata.free_ids.contains(&(record_id as u32));
 
         if !is_free {
             // Exact native quirk: BLT, not BLE. Therefore capacity == written
@@ -813,7 +813,7 @@ pub async fn sort_records_lgt(
     if next_record_id > 1 {
         let mut record_id = 1i32;
         while record_id < next_record_id {
-            if !metadata.free_ids.iter().any(|&free_id| free_id == record_id as u32) {
+            if !metadata.free_ids.contains(&(record_id as u32)) {
                 record_ids.push(record_id as u32);
             }
             record_id = record_id.wrapping_add(1);
@@ -973,7 +973,7 @@ pub async fn delete_record_lgt(context: &mut dyn WIPICContext, db_id: i32, rec_i
     }
 
     let record_id = rec_id as u32;
-    if metadata.free_ids.iter().any(|&id| id == record_id) {
+    if metadata.free_ids.contains(&record_id) {
         return Ok(-22);
     }
 
@@ -1037,7 +1037,7 @@ pub async fn update_record_lgt(context: &mut dyn WIPICContext, db_id: i32, rec_i
         return Ok(-22);
     }
 
-    if metadata.free_ids.iter().any(|&id| id == rec_id as u32) {
+    if metadata.free_ids.contains(&(rec_id as u32)) {
         return Ok(-9);
     }
 
@@ -1093,7 +1093,7 @@ pub async fn select_record_lgt(context: &mut dyn WIPICContext, db_id: i32, rec_i
         return Ok(-22);
     }
 
-    if metadata.free_ids.iter().any(|&id| id == rec_id as u32) {
+    if metadata.free_ids.contains(&(rec_id as u32)) {
         return Ok(-22);
     }
 

@@ -236,7 +236,7 @@ impl WaveRuntime {
     fn step_envelope(&mut self) {
         match self.env_state {
             1 => {
-                self.env_q31 = self.release_q30 * self.env_q31 >> 30;
+                self.env_q31 = (self.release_q30 * self.env_q31) >> 30;
                 if self.env_q31 == 0 {
                     self.stop_silent();
                 }
@@ -253,13 +253,13 @@ impl WaveRuntime {
                 }
             }
             4 => {
-                self.env_q31 = self.decay1_q30 * self.env_q31 >> 30;
+                self.env_q31 = (self.decay1_q30 * self.env_q31) >> 30;
                 if self.env_q31 <= self.sustain_q31 {
                     self.env_state = 5;
                 }
             }
             5 => {
-                self.env_q31 = self.decay2_q30 * self.env_q31 >> 30;
+                self.env_q31 = (self.decay2_q30 * self.env_q31) >> 30;
                 if self.env_q31 == 0 {
                     self.stop_silent();
                 }
@@ -344,7 +344,7 @@ impl WaveRuntime {
             let delta = (self.pcm[i1 as usize] as i32 - s0) as f64;
             let mut level = self.effective_level_q15;
             if self.amp_lfo {
-                level = level * tables::lfo_level_q15(self.amp_lfo_depth as usize, ((self.lfo_phase_q20 as u32) >> 20) as usize) >> 15;
+                level = (level * tables::lfo_level_q15(self.amp_lfo_depth as usize, ((self.lfo_phase_q20 as u32) >> 20) as usize)) >> 15;
             }
             level = (((self.env_q31 as u64 >> 16) * level as u64) >> 15) as i32;
             let sample = (s0 as f64 + delta * (pos - i0 as f64)) / 32768.0 * level as f64 / 32768.0;
@@ -355,12 +355,7 @@ impl WaveRuntime {
             if self.pitch_lfo {
                 step *= tables::wave_pitch_q20(self.pitch_lfo_depth as usize, ((self.lfo_phase_q20 as u32) >> 20) as usize) as f64 / 1_048_576.0;
             }
-            if step < 0.03125 {
-                step = 0.03125;
-            }
-            if step > 4.0 {
-                step = 4.0;
-            }
+            step = step.clamp(0.03125, 4.0);
             self.position += step;
             self.lfo_phase_q20 = self.lfo_phase_q20.wrapping_add(self.lfo_step_q20);
             i += 1;
@@ -412,7 +407,7 @@ impl WaveRuntime {
             self.release_q30 = DECAY_RATE_Q30[rate_index(record[10] as i32 & 255, ksr) as usize] as i64;
             self.sustain_q31 = SUSTAIN_Q31[(record[13] as i32 & 15) as usize] as i64;
             let level_mode = [0, 2, 1, 3][(record[15] as i32 & 3) as usize];
-            self.effective_level_q15 = LEVEL_Q15[(record[14] as i32 & 63) as usize] * keyscale_level(self.base_step_q16, level_mode) >> 15;
+            self.effective_level_q15 = (LEVEL_Q15[(record[14] as i32 & 63) as usize] * keyscale_level(self.base_step_q16, level_mode)) >> 15;
             self.amp_lfo = record[19] != 0;
             self.amp_lfo_depth = record[18] as i32 & 3;
             self.pitch_lfo = record[7] != 0;

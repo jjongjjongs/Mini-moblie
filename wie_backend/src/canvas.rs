@@ -1141,7 +1141,7 @@ pub fn decode_image(data: &[u8]) -> Result<Box<dyn Image>> {
     let image = match decoded {
         Ok(image) => image,
         Err(error) => {
-            let repaired = png_with_repaired_crcs(&data).ok_or_else(|| WieError::FatalError(error.to_string()))?;
+            let repaired = png_with_repaired_crcs(data).ok_or_else(|| WieError::FatalError(error.to_string()))?;
 
             ImageReader::new(Cursor::new(&repaired))
                 .with_guessed_format()

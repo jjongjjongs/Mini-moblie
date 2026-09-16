@@ -106,7 +106,7 @@ impl BucketAllocator {
             let slots_start = header_address + header_len;
             let slots_end = slots_start + slot_size as u32 * slot_count as u32;
 
-            if address >= slots_start && address < slots_end && (address - slots_start) % slot_size as u32 == 0 {
+            if address >= slots_start && address < slots_end && (address - slots_start).is_multiple_of(slot_size as u32) {
                 return Ok(slot_size as u32);
             }
         }
@@ -121,7 +121,7 @@ impl BucketAllocator {
             let slots_start = header_address + header_len;
             let slots_end = slots_start + slot_size as u32 * slot_count as u32;
 
-            if address >= slots_start && address < slots_end && (address - slots_start) % slot_size as u32 == 0 {
+            if address >= slots_start && address < slots_end && (address - slots_start).is_multiple_of(slot_size as u32) {
                 return Self::free_in_bucket(core, base_address, address, bucket_index);
             }
         }

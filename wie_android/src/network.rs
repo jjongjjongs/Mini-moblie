@@ -16,7 +16,7 @@ enum TcpState {
     Disconnected,
     Connecting,
     Connected(TcpStream),
-    Failed(NetworkError),
+    Failed(#[allow(dead_code)] NetworkError),
 }
 
 enum Socket {
@@ -53,8 +53,8 @@ impl AndroidNetwork {
         let mut handle = start;
 
         loop {
-            if !inner.sockets.contains_key(&handle) {
-                inner.sockets.insert(handle, socket);
+            if let std::collections::hash_map::Entry::Vacant(slot) = inner.sockets.entry(handle) {
+                slot.insert(socket);
                 inner.next_handle = handle.checked_add(1).unwrap_or(1).max(1);
                 return handle;
             }

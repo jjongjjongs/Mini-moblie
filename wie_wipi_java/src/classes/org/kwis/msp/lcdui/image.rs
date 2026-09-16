@@ -407,7 +407,7 @@ impl Image {
                     table.push(source_index);
                 }
             }
-        } else if source % target == 0 {
+        } else if source.is_multiple_of(target) {
             // Native fast path when the scale factor divides exactly.
             let step = source / target;
             for destination_index in 0..target {

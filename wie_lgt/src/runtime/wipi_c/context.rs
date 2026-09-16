@@ -32,6 +32,7 @@ pub struct LgtWIPICContext {
 }
 
 impl LgtWIPICContext {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         core: ArmCore,
         system: System,

@@ -14,9 +14,9 @@ use crate::runtime::svc_ids::WIPICTableId;
 
 /// How many slots a table holds in guest memory.
 ///
-/// [`WIPIC_TABLE_FUNCTIONS`], or the interface's own length where that is longer
-/// - the kernel interface is, and shortening it would take away functions this
-/// runtime serves.
+/// [`WIPIC_TABLE_FUNCTIONS`], or the interface's own length where that is
+/// longer - the kernel interface is, and shortening it would take away
+/// functions this runtime serves.
 fn table_slots(interface_size: usize) -> u16 {
     WIPIC_TABLE_FUNCTIONS.max((interface_size / 4) as u16)
 }

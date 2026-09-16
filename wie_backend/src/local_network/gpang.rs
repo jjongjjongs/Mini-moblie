@@ -12,9 +12,9 @@
 //!
 //!   00 00 00 2c  IR \t 01046119269 \t demon \t 1.0.2 \t 5080091 \t WIPIC \t yes
 //!
-//! - four bytes of big-endian length counting only what follows, then the
-//! record its own format string spells, `IR\t%s\t%s\t%s\t%s\tWIPIC\t%s`, with
-//! the subscriber number the handset answered `PHONENUMBER` with.
+//! Four bytes of big-endian length counting only what follows, then the record
+//! its own format string spells, `IR\t%s\t%s\t%s\t%s\tWIPIC\t%s`, with the
+//! subscriber number the handset answered `PHONENUMBER` with.
 //!
 //! The answer is one frame the same way. `IROK` is the word the title's own code
 //! carries for a granted authentication, next to the message it shows for one -
@@ -70,18 +70,18 @@
 //! The KOIN pair on the same connection is read the same way, from the two
 //! machines that drive it. `CKN_C` asks what the account holds: the parser at
 //! 0x12ab52 splits the answer on `|`, compares the first field, reads the
-//! **third** as a number, and weighs it against the price in won over a hundred
-//! - the rate the shop screen prints as `100원 = 1 KOIN`. Enough, and it offers
-//! `%d KOIN이 차감됩니다. 결제하시겠습니까?`; short, and it says the account is
-//! short. `CKN_U` then spends it, and the parser at 0x12af4c reads only the
-//! first field before showing `결제가 완료되었습니다`.
+//! **third** as a number, and weighs it against the price in won over a
+//! hundred - the rate the shop screen prints as `100원 = 1 KOIN`. Enough, and
+//! it offers `%d KOIN이 차감됩니다. 결제하시겠습니까?`; short, and it says the
+//! account is short. `CKN_U` then spends it, and the parser at 0x12af4c reads
+//! only the first field before showing `결제가 완료되었습니다`.
 //!
-//! There is no balance to be right about - the account is as gone as the server
-//! - so the one answered here is the one that lets the shop work: far more than
-//! the dearest thing it sells, and inside what the title can hold. That last
-//! part is not free: the balance is narrowed to a signed halfword at 0x12abbe,
-//! so a generous number wraps to a negative one and the shop refuses the
-//! purchase for want of funds it was just handed.
+//! There is no balance to be right about - the account is as gone as the
+//! server - so the one answered here is the one that lets the shop work: far
+//! more than the dearest thing it sells, and inside what the title can hold.
+//! That last part is not free: the balance is narrowed to a signed halfword at
+//! 0x12abbe, so a generous number wraps to a negative one and the shop refuses
+//! the purchase for want of funds it was just handed.
 
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 
@@ -265,8 +265,8 @@ impl LocalConnection for GpangConnection {
             let granted = AUTHENTICATION_GRANTED.len() + GRANTED_PAYLOAD;
             let mut frame = vec![0u8; LENGTH_WIDTH + granted];
 
-            for index in 0..LENGTH_WIDTH {
-                frame[index] = (granted >> (8 * (LENGTH_WIDTH - 1 - index))) as u8;
+            for (index, byte) in frame.iter_mut().take(LENGTH_WIDTH).enumerate() {
+                *byte = (granted >> (8 * (LENGTH_WIDTH - 1 - index))) as u8;
             }
             frame[LENGTH_WIDTH..LENGTH_WIDTH + AUTHENTICATION_GRANTED.len()].copy_from_slice(AUTHENTICATION_GRANTED);
 

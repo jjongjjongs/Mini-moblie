@@ -307,14 +307,15 @@ impl FilesystemOverlay {
 
         // Platform objects shadow virtual files. A source that exists only in
         // the archive is read-only and cannot be renamed.
-        if !self.platform.filesystem().exists(&self.aid, &from).await && self.platform.filesystem().list(&self.aid, &from).await.is_none() {
-            if self.virtual_files.lock().contains_key(&from) || {
+        if !self.platform.filesystem().exists(&self.aid, &from).await
+            && self.platform.filesystem().list(&self.aid, &from).await.is_none()
+            && (self.virtual_files.lock().contains_key(&from) || {
                 let mut prefix = from.clone();
                 prefix.push('/');
                 self.virtual_files.lock().keys().any(|key| key.starts_with(&prefix))
-            } {
-                return Err(FilesystemRenameError::Other);
-            }
+            })
+        {
+            return Err(FilesystemRenameError::Other);
         }
 
         self.platform.filesystem().rename(&self.aid, &from, &to).await

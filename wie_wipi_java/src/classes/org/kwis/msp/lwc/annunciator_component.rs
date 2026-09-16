@@ -14,6 +14,10 @@ use crate::classes::org::kwis::msp::lcdui::{Display, Graphics, Image};
 // class org.kwis.msp.lwc.AnnunciatorComponent
 pub struct AnnunciatorComponent;
 
+/// Screen width, bar height, item count, the first state, then the per-item
+/// widths, margins and rows, and the atlas the icons are cut from.
+type AnnunciatorLayout<'a> = (i32, i32, usize, i32, &'a [i32], &'a [i32], &'a [i32], &'a [u8]);
+
 impl AnnunciatorComponent {
     pub fn as_proto() -> WieJavaClassProto {
         WieJavaClassProto {
@@ -261,7 +265,6 @@ impl AnnunciatorComponent {
         let decoded = decode_image(data).map_err(|_| {
             // The embedded resources are build-time constants and validated
             // ECNX blobs. Reaching this path indicates a broken build.
-            ()
         });
 
         let decoded = match decoded {
@@ -311,70 +314,69 @@ impl AnnunciatorComponent {
         const ROW_2: [i32; 13] = [9, 8, 7, 6, 5, 4, 1, 3, 0, 0, 0, 0, 0];
         const ROW_3: [i32; 13] = [9, 8, 7, 6, 5, 4, 1, 3, 0, 0, 0, 0, 0];
 
-        let (screen_width, bar_height, item_count, state0, widths, margins, rows, atlas_data): (i32, i32, usize, i32, &[i32], &[i32], &[i32], &[u8]) =
-            match internal_index {
-                0 => (
-                    120i32,
-                    14i32,
-                    8usize,
-                    6i32,
-                    &WIDTHS_0,
-                    &MARGINS_0,
-                    &ROW_0,
-                    include_bytes!("resources/annunciator_169x151.ecnx").as_slice(),
-                ),
-                1 => (
-                    176i32,
-                    20i32,
-                    8usize,
-                    6i32,
-                    &WIDTHS_1,
-                    &MARGINS_1,
-                    &ROW_1,
-                    include_bytes!("resources/annunciator_190x211.ecnx").as_slice(),
-                ),
-                2 => (
-                    240i32,
-                    24i32,
-                    13usize,
-                    7i32,
-                    &WIDTHS_2,
-                    &MARGINS_2,
-                    &ROW_2,
-                    include_bytes!("resources/annunciator_273x276.ecnx").as_slice(),
-                ),
-                3 => (
-                    320i32,
-                    24i32,
-                    13usize,
-                    7i32,
-                    &WIDTHS_3,
-                    &MARGINS_3,
-                    &ROW_3,
-                    include_bytes!("resources/annunciator_273x276.ecnx").as_slice(),
-                ),
-                4 => (
-                    220i32,
-                    20i32,
-                    8usize,
-                    6i32,
-                    &WIDTHS_1,
-                    &MARGINS_4,
-                    &ROW_1,
-                    include_bytes!("resources/annunciator_190x211.ecnx").as_slice(),
-                ),
-                5 => (
-                    400i32,
-                    24i32,
-                    13usize,
-                    7i32,
-                    &WIDTHS_3,
-                    &MARGINS_5,
-                    &ROW_3,
-                    include_bytes!("resources/annunciator_273x276.ecnx").as_slice(),
-                ),
-                _ => unreachable!(),
-            };
+        let (screen_width, bar_height, item_count, state0, widths, margins, rows, atlas_data): AnnunciatorLayout = match internal_index {
+            0 => (
+                120i32,
+                14i32,
+                8usize,
+                6i32,
+                &WIDTHS_0,
+                &MARGINS_0,
+                &ROW_0,
+                include_bytes!("resources/annunciator_169x151.ecnx").as_slice(),
+            ),
+            1 => (
+                176i32,
+                20i32,
+                8usize,
+                6i32,
+                &WIDTHS_1,
+                &MARGINS_1,
+                &ROW_1,
+                include_bytes!("resources/annunciator_190x211.ecnx").as_slice(),
+            ),
+            2 => (
+                240i32,
+                24i32,
+                13usize,
+                7i32,
+                &WIDTHS_2,
+                &MARGINS_2,
+                &ROW_2,
+                include_bytes!("resources/annunciator_273x276.ecnx").as_slice(),
+            ),
+            3 => (
+                320i32,
+                24i32,
+                13usize,
+                7i32,
+                &WIDTHS_3,
+                &MARGINS_3,
+                &ROW_3,
+                include_bytes!("resources/annunciator_273x276.ecnx").as_slice(),
+            ),
+            4 => (
+                220i32,
+                20i32,
+                8usize,
+                6i32,
+                &WIDTHS_1,
+                &MARGINS_4,
+                &ROW_1,
+                include_bytes!("resources/annunciator_190x211.ecnx").as_slice(),
+            ),
+            5 => (
+                400i32,
+                24i32,
+                13usize,
+                7i32,
+                &WIDTHS_3,
+                &MARGINS_5,
+                &ROW_3,
+                include_bytes!("resources/annunciator_273x276.ecnx").as_slice(),
+            ),
+            _ => unreachable!(),
+        };
 
         // Current WIE system-property backend exposes the same fixed state:
         // ANNUN_CALL/SILENT/ALARM/SMS/SECURITY = 0,

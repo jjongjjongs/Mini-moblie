@@ -346,10 +346,10 @@ fn compute_frame_count(analysis: &Analysis, rate: i32) -> i32 {
     }
     let mut frames = ticks_to_frames(analysis.total_ticks, rate);
     for note in &analysis.notes {
-        if note.tone.as_ref().and_then(|t| t.compact.as_ref()).map(|c| c.valid).unwrap_or(false) {
-            if let Some(voice) = create_streaming_voice_default(note, rate) {
-                frames = frames.max(ticks_to_frames(note.start_tick, rate) + voice.total_frames());
-            }
+        if note.tone.as_ref().and_then(|t| t.compact.as_ref()).map(|c| c.valid).unwrap_or(false)
+            && let Some(voice) = create_streaming_voice_default(note, rate)
+        {
+            frames = frames.max(ticks_to_frames(note.start_tick, rate) + voice.total_frames());
         }
     }
     for audio in &analysis.audio_events {

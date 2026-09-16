@@ -73,8 +73,6 @@ impl ConstraintChecker {
         let chars = jvm.load_array::<JavaChar>(&data, offset as usize, length as usize).await?;
 
         for ch in chars {
-            let ch = ch as u16;
-
             let valid = match constraint {
                 1 => (ch >= b'0' as u16 && ch <= b'9' as u16) || ch == b' ' as u16 || ch == b'-' as u16,
                 2 => ch >= b'0' as u16 && ch <= b'9' as u16,

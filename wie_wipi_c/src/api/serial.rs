@@ -269,6 +269,7 @@ pub async fn write(context: &mut dyn WIPICContext, handle: i32, buffer: WIPICWor
 /// - a non-negative handle not present in the four-entry object table returns -1.
 /// - a valid handle stores the callback at object +0x08 and its context at
 ///   object +0x10, then returns 0.
+///
 /// Callback and context values themselves are not validated, so zero clears
 /// either stored value just like the native implementation.
 pub async fn set_write_callback(context: &mut dyn WIPICContext, handle: i32, callback: WIPICWord, callback_context: WIPICWord) -> Result<i32> {

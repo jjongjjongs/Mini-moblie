@@ -289,6 +289,9 @@ pub async fn destroy(context: &mut dyn WIPICContext, component: WIPICWord) -> Re
     Ok(())
 }
 
+// A component rect and the dirty rect inside it: eight coordinates, the shape
+// the vendor's own call has.
+#[allow(clippy::too_many_arguments)]
 fn uic_repaint_rect(
     component_x: i32,
     component_y: i32,
@@ -1659,16 +1662,16 @@ async fn uic_handle_list(context: &mut dyn WIPICContext, component: WIPICWord, k
                 let selected = old_selected - 1;
                 write_generic(context, component + 0x48, selected)?;
 
-                if let Some((new_top, _new_bottom)) = uic_get_active_item_pos(selected, count, scroll) {
-                    if scroll > new_top {
-                        let span = bottom.saturating_add(1).saturating_sub(new_top);
-                        scroll = if span <= height {
-                            new_top
-                        } else {
-                            bottom.saturating_sub(height.saturating_sub(1))
-                        };
-                        write_generic(context, component + 0x4c, scroll)?;
-                    }
+                if let Some((new_top, _new_bottom)) = uic_get_active_item_pos(selected, count, scroll)
+                    && scroll > new_top
+                {
+                    let span = bottom.saturating_add(1).saturating_sub(new_top);
+                    scroll = if span <= height {
+                        new_top
+                    } else {
+                        bottom.saturating_sub(height.saturating_sub(1))
+                    };
+                    write_generic(context, component + 0x4c, scroll)?;
                 }
             }
         } else if scroll <= height {
@@ -1685,16 +1688,16 @@ async fn uic_handle_list(context: &mut dyn WIPICContext, component: WIPICWord, k
                 let selected = old_selected + 1;
                 write_generic(context, component + 0x48, selected)?;
 
-                if let Some((new_top, new_bottom)) = uic_get_active_item_pos(selected, count, scroll) {
-                    if scroll.saturating_add(height.saturating_sub(1)) < new_bottom {
-                        let span = new_bottom.saturating_add(1).saturating_sub(new_top);
-                        scroll = if span <= height {
-                            new_bottom.saturating_sub(height.saturating_sub(1))
-                        } else {
-                            new_top
-                        };
-                        write_generic(context, component + 0x4c, scroll)?;
-                    }
+                if let Some((new_top, new_bottom)) = uic_get_active_item_pos(selected, count, scroll)
+                    && scroll.saturating_add(height.saturating_sub(1)) < new_bottom
+                {
+                    let span = new_bottom.saturating_add(1).saturating_sub(new_top);
+                    scroll = if span <= height {
+                        new_bottom.saturating_sub(height.saturating_sub(1))
+                    } else {
+                        new_top
+                    };
+                    write_generic(context, component + 0x4c, scroll)?;
                 }
             }
         } else {

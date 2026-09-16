@@ -264,7 +264,7 @@ impl Cpu {
                 }
 
                 match opcode {
-                    0x8 | 0x9 | 0xA | 0xB => (), // no writeback
+                    0x8..=0xB => (), // no writeback
                     _ => self.reg[rd] = res,
                 }
             }

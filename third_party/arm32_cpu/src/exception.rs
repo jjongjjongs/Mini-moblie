@@ -47,9 +47,6 @@ impl Exception {
     #[inline]
     pub(crate) fn fiq_disable(self) -> bool {
         use self::Exception::*;
-        match self {
-            FastInterrupt | Reset => true,
-            _ => false,
-        }
+        matches!(self, FastInterrupt | Reset)
     }
 }

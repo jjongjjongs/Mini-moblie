@@ -335,7 +335,7 @@ impl LabelComponent {
 
                     let next_width = current_width + char_width;
                     let available_width = width - horizontal_offset;
-                    let newline = u16::from(ch) == 10;
+                    let newline = ch == 10;
 
                     if newline || next_width > available_width {
                         let previous_remaining = remaining_image_h;
@@ -604,7 +604,7 @@ impl LabelComponent {
 
             let next_width = current_width + char_width;
             let available_width = width - x;
-            let newline = u16::from(ch) == 10;
+            let newline = ch == 10;
 
             if next_width <= available_width && !newline {
                 current_width = next_width;

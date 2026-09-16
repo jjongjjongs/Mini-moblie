@@ -21,6 +21,9 @@ use context::LgtWIPICContext;
 use crate::runtime::java::classes::net::wie::{CletWrapper, CletWrapperCard, CletWrapperContext};
 use crate::runtime::{SVC_CATEGORY_WIPIC, svc_ids::WIPICSvcId};
 
+// The LGT time API below is implemented but not yet reachable from the
+// dispatch table, so nothing calls into it.
+#[allow(dead_code)]
 const TIME_VALUE_PTR: u32 = 0x7fff1004;
 
 /// Per-WIPI-C-function call counts (indexed by the raw svc id), so the perf
@@ -667,6 +670,7 @@ async fn fs_available(context: &mut dyn WIPICContext, _a0: u32, _a1: u32, _a2: u
     Ok(available)
 }
 
+#[allow(dead_code)]
 async fn time_now(context: &mut dyn WIPICContext, component_class: u32) -> Result<u32> {
     let epoch_seconds = context.system().platform().now().raw() / 1000;
     tracing::debug!("LGT_timeNow({component_class:#x}) -> {epoch_seconds}");
@@ -674,12 +678,14 @@ async fn time_now(context: &mut dyn WIPICContext, component_class: u32) -> Resul
     write_time_value(context, epoch_seconds as u32)
 }
 
+#[allow(dead_code)]
 async fn time_component(_context: &mut dyn WIPICContext, name: u32) -> Result<u32> {
     tracing::debug!("LGT_timeComponent({name:#x})");
 
     Ok(name)
 }
 
+#[allow(dead_code)]
 async fn time_convert(context: &mut dyn WIPICContext, date_time: u32, component: u32) -> Result<u32> {
     tracing::debug!("LGT_timeConvert({date_time:#x}, {component:#x})");
 
@@ -687,6 +693,7 @@ async fn time_convert(context: &mut dyn WIPICContext, date_time: u32, component:
     write_time_value(context, timestamp)
 }
 
+#[allow(dead_code)]
 async fn time_to_tm(context: &mut dyn WIPICContext, time_value: u32, out_ptr: u32) -> Result<i32> {
     tracing::debug!("LGT_timeToTm({time_value:#x}, {out_ptr:#x})");
 
@@ -702,6 +709,7 @@ async fn time_to_tm(context: &mut dyn WIPICContext, time_value: u32, out_ptr: u3
     Ok(0)
 }
 
+#[allow(dead_code)]
 fn write_time_value(context: &mut dyn WIPICContext, timestamp: u32) -> Result<u32> {
     let time_value_ptr: u32 = read_generic(context, TIME_VALUE_PTR)?;
     let memory = if time_value_ptr != 0 {
@@ -715,10 +723,12 @@ fn write_time_value(context: &mut dyn WIPICContext, timestamp: u32) -> Result<u3
     Ok(memory.0)
 }
 
+#[allow(dead_code)]
 fn read_time_value(context: &mut dyn WIPICContext, handle: u32) -> Result<u32> {
     read_generic(context, context.data_ptr(WIPICIndirectPtr(handle))?)
 }
 
+#[allow(dead_code)]
 fn unix_seconds_to_utc(timestamp: i64) -> (i32, i32, i32, i32, i32, i32) {
     let days = timestamp.div_euclid(86_400);
     let seconds_of_day = timestamp.rem_euclid(86_400);
@@ -778,6 +788,7 @@ mod fs_total_space_tests {
     }
 }
 
+#[allow(dead_code)]
 fn civil_from_days(days: i64) -> (i32, i32, i32) {
     let days = days + 719_468;
     let era = if days >= 0 { days } else { days - 146_096 } / 146_097;

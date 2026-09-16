@@ -204,8 +204,8 @@ impl TextFormatProcessor {
 
                     let mut containing_line = 0usize;
 
-                    for line in 1..old_positions.len() {
-                        if old_positions[line] > start_position {
+                    for (line, position) in old_positions.iter().enumerate().skip(1) {
+                        if *position > start_position {
                             break;
                         }
                         containing_line = line;
@@ -224,7 +224,7 @@ impl TextFormatProcessor {
 
             accumulated_width = accumulated_width.wrapping_add(char_width);
 
-            if ch as u16 == 10 {
+            if ch == 10 {
                 line_number += 1;
                 let next = index + 1;
                 Self::mark_new_line_position(jvm, this.clone(), next, line_number).await?;
@@ -331,7 +331,7 @@ impl TextFormatProcessor {
 
             // A newline terminates the logical line; the cursor remains
             // immediately before it.
-            if ch as u16 == 10 {
+            if ch == 10 {
                 return Ok(position);
             }
 
@@ -374,8 +374,8 @@ impl TextFormatProcessor {
 
         let usable = core::cmp::min(line_count as usize, values.len());
 
-        for line in 1..usable {
-            if values[line] > position {
+        for (line, value) in values.iter().enumerate().take(usable).skip(1) {
+            if *value > position {
                 return Ok(line as i32 - 1);
             }
         }
@@ -489,7 +489,7 @@ impl TextFormatProcessor {
                 let chars: alloc::vec::Vec<JavaChar> = jvm.load_array(&data, index as usize, 1).await?;
                 let ch = chars[0];
 
-                if ch as u16 != 10 {
+                if ch != 10 {
                     let draw_ch: JavaChar = if constraints == 2 { 42u16 } else { ch };
 
                     let _: () = jvm.invoke_virtual(&graphics, "drawChar", "(CIII)V", (draw_ch, x, y, 4i32)).await?;

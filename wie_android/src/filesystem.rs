@@ -247,7 +247,7 @@ impl Filesystem for AndroidFilesystem {
             return None;
         }
 
-        Some((stats.f_bsize as u64).saturating_mul(stats.f_blocks as u64))
+        Some((stats.f_bsize as u64).saturating_mul(stats.f_blocks))
     }
 
     async fn available_space(&self, aid: &str) -> Option<u64> {
@@ -275,7 +275,7 @@ impl Filesystem for AndroidFilesystem {
             return None;
         }
 
-        Some((stats.f_bsize as u64).saturating_mul(stats.f_bavail as u64))
+        Some((stats.f_bsize as u64).saturating_mul(stats.f_bavail))
     }
 
     async fn list(&self, aid: &str, path: &str) -> Option<Vec<String>> {

@@ -233,7 +233,7 @@ pub fn lgt_local_gamevil_packet_response(request: &[u8]) -> Option<Vec<u8>> {
     // A title's own commands are the even ones; the odd are what it is answered
     // with. Answering an odd command would be answering an answer.
     let command = u16::from_le_bytes([request[2], request[3]]);
-    if command == 0 || command % 2 != 0 {
+    if command == 0 || !command.is_multiple_of(2) {
         return None;
     }
 
@@ -1051,9 +1051,10 @@ pub fn lgt_local_big_endian_record_response(request: &[u8]) -> Option<Vec<u8>> {
     // A title's own commands are the even ones; the odd are what it is answered
     // with. Answering an odd command would be answering an answer.
     let command = u16::from_be_bytes([request[2], request[3]]);
-    // The bound belongs to the answer the title reads, which is this plus one -
-    // a request of exactly the bound is answered above it and dispatches.
-    if command + 1 <= LEAST_COMMAND || command % 2 != 0 {
+    // The bound belongs to the answer the title reads, which is the request plus
+    // one - a request of exactly the bound is answered above it and dispatches,
+    // so the request itself only has to clear the bound.
+    if command < LEAST_COMMAND || !command.is_multiple_of(2) {
         return None;
     }
 
@@ -1086,7 +1087,11 @@ pub fn lgt_local_big_endian_record_response(request: &[u8]) -> Option<Vec<u8>> {
     // differ rather than off a list of commands seen so far.
     const LOM2_REQUEST_STEP: u16 = 100;
 
-    let answer = if command % LOM2_REQUEST_STEP == 0 { command + 2 } else { command + 1 };
+    let answer = if command.is_multiple_of(LOM2_REQUEST_STEP) {
+        command + 2
+    } else {
+        command + 1
+    };
 
     let mut response = vec![0u8; HEADER + BODY + TAIL];
     response[0..2].copy_from_slice(&((BODY + LENGTH_OVERHEAD) as u16).to_be_bytes());
@@ -6550,7 +6555,10 @@ fn hero5_equipment_tail(stats: &[u8; HERO5_TABLE_STATS]) -> [u8; HERO5_EQUIPMENT
 /// build is what colours a name by it.
 const HERO5_STATS_GRADE: usize = 12;
 
-/// Which byte of a row's [`HERO5_TABLE_STATS`] is its 제한레벨.
+/// Which byte of a row's [`HERO5_TABLE_STATS`] is its 제한레벨. Nothing reads it
+/// yet; it is kept so the row layout stays written down next to the offset that
+/// is read.
+#[allow(dead_code)]
 const HERO5_STATS_LEVEL: usize = 13;
 
 pub fn lgt_local_hero5_response(request: &[u8]) -> Option<Vec<u8>> {
@@ -7866,7 +7874,7 @@ const MAJOR_OIL_SESSION_MARK: u32 = 0xfc00_0000;
 /// ```
 ///
 /// - three twelve-byte fields and a price behind an eight-byte header. Nothing
-/// came back, and the shop sat there.
+///   came back, and the shop sat there.
 ///
 /// Its answers are read by `0xb1b8`, which takes a fixed eight-byte header off
 /// the stream and looks at two bytes of it:

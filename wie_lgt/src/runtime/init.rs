@@ -199,11 +199,11 @@ const SVCTIME_NAMES: [&str; 7] = [
 
 /// Which [`SVCTIME_MS`] bucket an init SVC id falls in.
 fn svctime_bucket(id: u32) -> usize {
-    if id >= JAVA_INTERFACE_METHOD_SVC_BASE && id < JAVA_INTERFACE_METHOD_SVC_BASE + JAVA_METHOD_SVC_LIMIT {
+    if (JAVA_INTERFACE_METHOD_SVC_BASE..JAVA_INTERFACE_METHOD_SVC_BASE + JAVA_METHOD_SVC_LIMIT).contains(&id) {
         4
-    } else if id >= JAVA_VIRTUAL_METHOD_SVC_BASE && id < JAVA_VIRTUAL_METHOD_SVC_BASE + JAVA_METHOD_SVC_LIMIT {
+    } else if (JAVA_VIRTUAL_METHOD_SVC_BASE..JAVA_VIRTUAL_METHOD_SVC_BASE + JAVA_METHOD_SVC_LIMIT).contains(&id) {
         2
-    } else if id >= JAVA_STATIC_METHOD_SVC_BASE && id < JAVA_STATIC_METHOD_SVC_BASE + JAVA_METHOD_SVC_LIMIT {
+    } else if (JAVA_STATIC_METHOD_SVC_BASE..JAVA_STATIC_METHOD_SVC_BASE + JAVA_METHOD_SVC_LIMIT).contains(&id) {
         3
     } else if id == InitSvcId::VmThreadReschedule as u32 {
         0
@@ -2585,7 +2585,7 @@ fn reresolve_own_virtuals_against_class(core: &mut ArmCore, context: &InitSvcCon
         .own_class_entries
         .lock()
         .iter()
-        .filter(|entry| chain.iter().any(|name| *name == entry.name))
+        .filter(|entry| chain.contains(&entry.name))
         .map(|entry| (entry.virtual_method_start, entry.virtual_method_start + entry.virtual_method_count))
         .collect();
 
@@ -2921,7 +2921,7 @@ fn class_implements_interface(context: &InitSvcContext, class_name: &str, interf
             return false;
         };
 
-        if class.interfaces.iter().any(|interface| *interface == interface_name) {
+        if class.interfaces.contains(&interface_name) {
             return true;
         }
 
@@ -4382,6 +4382,7 @@ async fn invoke_imported_virtual(core: &mut ArmCore, context: &mut InitSvcContex
     invoke_object_self_method(core, context, &member, this).await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn load_native(
     core: &mut ArmCore,
     system: &mut System,
@@ -4500,11 +4501,11 @@ async fn get_import_function(
     // Rust WIPI-C stubs. The firmware export is real ARM code at an even
     // address, so it is returned directly and NOT run through the Thumb-stub
     // cache/validation path (which requires an odd address).
-    if import_table == 0x1fb {
-        if let Some(&firmware_addr) = firmware_mda_routes.get(&function_index) {
-            tracing::debug!("get_import_function({import_table:#x}, {function_index:#x}) -> firmware {firmware_addr:#x}");
-            return Ok(firmware_addr);
-        }
+    if import_table == 0x1fb
+        && let Some(&firmware_addr) = firmware_mda_routes.get(&function_index)
+    {
+        tracing::debug!("get_import_function({import_table:#x}, {function_index:#x}) -> firmware {firmware_addr:#x}");
+        return Ok(firmware_addr);
     }
 
     let key = (import_table, function_index);

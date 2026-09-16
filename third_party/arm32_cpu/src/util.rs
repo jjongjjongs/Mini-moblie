@@ -14,7 +14,11 @@ pub mod bit {
         fn shift_asr(self, rot: u32) -> (u32, u32);
         /// Returns the shifted value as well as the carry bit
         fn shift_ror(self, rot: u32) -> (u32, u32);
+        // u32 is Copy, so taking self by value is the cheap and correct choice
+        // here; the lint only fires because Self is unknown in the declaration.
+        #[allow(clippy::wrong_self_convention)]
         fn is_pos(self) -> bool;
+        #[allow(clippy::wrong_self_convention)]
         fn is_neg(self) -> bool;
         /// Performs addition and returns overflow and carry bits
         fn add_flags(self, rhs: u32, carry: u32) -> (u32, u32, u32);
@@ -52,7 +56,7 @@ pub mod bit {
         fn set_bit(self, off: u8, len: u8, val: u32) -> u32 {
             debug_assert!(off < 32 && len < 32);
             let mask = ((1u32 << len) - 1) << off;
-            ((std::u32::MAX - mask) & self) | ((val << off) & mask)
+            ((u32::MAX - mask) & self) | ((val << off) & mask)
         }
 
         #[inline]

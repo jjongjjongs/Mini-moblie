@@ -123,7 +123,7 @@ impl TextPopup {
         // Native always resolves the game action before event-type dispatch.
         let action: i32 = jvm.invoke_static("org/kwis/msp/lcdui/Display", "getGameAction", "(I)I", (key,)).await?;
 
-        if matches!(event_type, 1 | 2 | 3) {
+        if matches!(event_type, 1..=3) {
             if action == 90 {
                 if event_type != 1 {
                     return Ok(true);

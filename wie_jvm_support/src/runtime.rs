@@ -277,8 +277,8 @@ struct JavaString;
 /// Gives `java.lang.StringBuffer` the two methods the runtime does not carry.
 ///
 /// A method the JVM cannot find is a fatal error, not a miss a title carries on
-/// past: 미니러비 formats the 소행성 name plate as `append`, `length`, `insert`
-/// - the zero-padding idiom - and the thread drawing the plate died on `Method
+/// past: 미니러비 formats the 소행성 name plate as `append`, `length`, `insert` -
+/// the zero-padding idiom - and the thread drawing the plate died on `Method
 /// insert(ILjava/lang/String;)Ljava/lang/StringBuffer; not found from
 /// java/lang/StringBuffer`, leaving the screen where it was. `deleteCharAt` is
 /// the same class's other gap and the same formatting helpers' other half; the

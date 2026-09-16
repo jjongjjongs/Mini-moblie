@@ -114,9 +114,9 @@ impl Framing {
     fn write_length(&self, frame: &mut [u8], total: usize) {
         let value = if self.length_includes_prefix { total } else { total - self.length_width };
 
-        for index in 0..self.length_width {
+        for (index, byte) in frame.iter_mut().take(self.length_width).enumerate() {
             let shift = 8 * if self.big_endian { self.length_width - 1 - index } else { index };
-            frame[index] = (value >> shift) as u8;
+            *byte = (value >> shift) as u8;
         }
     }
 
@@ -230,7 +230,7 @@ fn parse_address(word: &str) -> Option<CaptureAddress> {
 /// Reads an even-length run of hex digits, with optional separators.
 fn parse_hex(text: &str) -> Option<Vec<u8>> {
     let digits: Vec<char> = text.chars().filter(|character| !matches!(character, ' ' | '-' | '_' | ':')).collect();
-    if digits.len() % 2 != 0 {
+    if !digits.len().is_multiple_of(2) {
         return None;
     }
 

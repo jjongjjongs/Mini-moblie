@@ -35,7 +35,10 @@ pub struct PlatformClass {
     pub interfaces: &'static [&'static str],
     pub flags: u32,
     pub instance_words: u32,
+    // Recorded from the platform table; nothing reads them back yet.
+    #[allow(dead_code)]
     pub get_class: u32,
+    #[allow(dead_code)]
     pub get_raw_class: u32,
     pub fields: &'static [PlatformField],
     pub methods: &'static [PlatformMethod],

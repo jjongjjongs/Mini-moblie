@@ -102,25 +102,13 @@ pub struct InputMethod {
     ko_undo: Vec<KoreanState>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct InputMethodOutput {
     pub handled: bool,
     pub output0: [u8; 8],
     pub output0_len: usize,
     pub output1: [u8; 8],
     pub output1_len: usize,
-}
-
-impl Default for InputMethodOutput {
-    fn default() -> Self {
-        Self {
-            handled: false,
-            output0: [0; 8],
-            output0_len: 0,
-            output1: [0; 8],
-            output1_len: 0,
-        }
-    }
 }
 
 impl InputMethod {

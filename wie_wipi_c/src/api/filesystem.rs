@@ -386,7 +386,7 @@ pub async fn seek(context: &mut dyn WIPICContext, fd: i32, offset: i32, origin: 
     if origin == 2 && offset > 0 {
         return Ok(-4);
     }
-    if !matches!(origin, 0 | 1 | 2) {
+    if !matches!(origin, 0..=2) {
         return Ok(-9);
     }
 

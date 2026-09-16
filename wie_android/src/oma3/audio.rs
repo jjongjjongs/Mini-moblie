@@ -58,7 +58,7 @@ pub fn decode_yamaha_adpcm4_mono(data: &[u8], offset: usize, len: usize) -> Vec<
                 delta = -delta;
             }
             let sample = (predictor + delta).clamp(-32768, 32767);
-            let next_step = (STEP_MUL[(nibble & 7) as usize] * step as i64 >> 14).clamp(127, 24576);
+            let next_step = ((STEP_MUL[(nibble & 7) as usize] * step as i64) >> 14).clamp(127, 24576);
             step = next_step as i32;
             out[write] = sample as i16;
             write += 1;

@@ -43,8 +43,8 @@ const BILLING_RESPONSE: [u8; 20] = [
 /// The billing gateway, as a local-network connection.
 ///
 /// The answer is armed when the connection opens and again whenever the SDK
-/// sends a request, so it is there whichever order the SDK reads and writes in
-/// - the reference SDK writes its 28 byte request and then reads, but a stream
+/// sends a request, so it is there whichever order the SDK reads and writes in -
+/// the reference SDK writes its 28 byte request and then reads, but a stream
 /// opened and read without one still finds the answer waiting, which is what
 /// the stand-in stream this replaces always did.
 struct BillingGateway {

@@ -371,6 +371,7 @@ pub async fn java_resolve_one(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn java_load_classes(
     core: &mut ArmCore,
     handles: &JavaHandles,

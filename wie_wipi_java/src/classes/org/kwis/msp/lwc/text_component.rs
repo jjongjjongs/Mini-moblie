@@ -924,7 +924,7 @@ impl TextComponent {
             return Ok(true);
         }
 
-        if matches!(event_type, 1 | 2 | 3) {
+        if matches!(event_type, 1..=3) {
             let im_handler = jvm.get_field(&this, "imHandler", "Lorg/kwis/msp/lcdui/InputMethodHandler;").await?;
 
             let handled: bool = jvm.invoke_virtual(&im_handler, "notifyKeyInput", "(II)Z", (key, event_type)).await?;

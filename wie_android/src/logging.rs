@@ -335,6 +335,7 @@ const NOTABLE_SHARE_PERCENT: usize = 15;
 /// the record is fed formatted lines, and by the time one arrives its event is
 /// gone. The level is the field after the timestamp; a line without one - the
 /// header the save writes - is not notable and travels with the log.
+#[allow(dead_code)]
 fn is_notable(line: &str) -> bool {
     matches!(level_of(line), Some("INFO" | "WARN" | "ERROR"))
 }
@@ -450,7 +451,7 @@ impl Record {
             // The trace first: its lines carry a level too, and what makes one
             // a trace line is where it came from, not how loud it is.
             Some(_) if line.contains(TRACE_TARGET) => Lane::Trace,
-            Some(level) if matches!(level, "INFO" | "WARN" | "ERROR") => Lane::Notable,
+            Some("INFO" | "WARN" | "ERROR") => Lane::Notable,
             Some(_) => Lane::Log,
             // A continuation belongs to the record it continues, so it travels
             // with it. Routed on its own it would be read as an ordinary debug

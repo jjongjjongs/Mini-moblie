@@ -792,7 +792,7 @@ pub async fn flush_lcd(
         // And the frame itself, on the rounds the off-screen surfaces are drawn
         // on. This is the one picture a reader can hold a screenshot against,
         // which is what says whether a surface reached the screen.
-        if FLUSHES.load(Ordering::Relaxed) % OFFSCREEN_TRACE_EVERY == 0 {
+        if FLUSHES.load(Ordering::Relaxed).is_multiple_of(OFFSCREEN_TRACE_EVERY) {
             for line in surface_thumbnail(&*src_canvas) {
                 tracing::info!("FRAME |{line}|");
             }
@@ -1181,7 +1181,7 @@ fn still_the_surface(raw: &WIPICFramebuffer, width: i32, height: i32) -> bool {
 /// a picture the screen does not show puts it in how the title got it there.
 fn trace_offscreen_surfaces(context: &mut dyn WIPICContext) {
     let flushes = FLUSHES.fetch_add(1, Ordering::Relaxed);
-    if flushes % OFFSCREEN_TRACE_EVERY != 0 {
+    if !flushes.is_multiple_of(OFFSCREEN_TRACE_EVERY) {
         return;
     }
 
@@ -1317,6 +1317,7 @@ fn is_transparent_key(color: Color) -> bool {
 /// layer over a magenta fill and blits it expecting the magenta keyed out; the
 /// graphics context carries no transparent pixel for these blits, so the
 /// convention is honoured here rather than read from it.
+#[allow(clippy::too_many_arguments)]
 fn blit_magenta_keyed(canvas: &mut dyn Canvas, dx: i32, dy: i32, w: i32, h: i32, src: &dyn Image, sx: i32, sy: i32) {
     let src_w = src.width() as i64;
     let src_h = src.height() as i64;

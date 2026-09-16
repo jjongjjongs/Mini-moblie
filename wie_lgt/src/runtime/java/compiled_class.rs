@@ -107,10 +107,7 @@ impl MethodBody<JavaError, CompiledContext> for CompiledMethod {
             // that block for every bounds check it makes. Mirror it in before
             // the call and read it back after: a method handed an array fills
             // it rather than returning it.
-            let array = match &value {
-                JavaValue::Object(Some(instance)) if instance.class_definition().name().starts_with('[') => true,
-                _ => false,
-            };
+            let array = matches!(&value, JavaValue::Object(Some(instance)) if instance.class_definition().name().starts_with('['));
 
             let Some(word) = Self::to_word(&context.handles, value) else {
                 return Err(jvm

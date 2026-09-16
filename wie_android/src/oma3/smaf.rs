@@ -632,16 +632,18 @@ impl<'a> Parser<'a> {
                             a.aspi_size = chunk.payload_size;
                             a.aspi = aspi;
                             next_current = Some(idx);
-                        } else if ty == 16 && current.is_some() {
-                            let idx = current.unwrap();
+                        } else if ty == 16
+                            && let Some(idx) = current
+                        {
                             self.checked_end(chunk.payload_offset, chunk.payload_size, self.data.len() as i32)?;
                             let id = self.audios[idx].id;
                             let seq = self.parse_sequence(chunk.payload_offset, chunk.payload_size, id, 2)?;
                             self.update_total_ticks(&seq);
                             self.audios[idx].sequence = seq;
                             next_current = Some(idx);
-                        } else if ty == 17 && current.is_some() {
-                            let idx = current.unwrap();
+                        } else if ty == 17
+                            && let Some(idx) = current
+                        {
                             self.checked_end(chunk.payload_offset, chunk.payload_size, self.data.len() as i32)?;
                             let bytes = self.copy_bytes(chunk.payload_offset, chunk.payload_size);
                             let a = &mut self.audios[idx];

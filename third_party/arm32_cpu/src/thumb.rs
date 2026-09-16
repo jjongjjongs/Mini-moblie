@@ -57,6 +57,10 @@ const INST_MATCH_ORDER: [Instruction; 21] = [
 ];
 
 impl Instruction {
+    /// The mask/test pair this instruction decodes under. Only
+    /// `decode_table_matches_pattern_scan` reads it, to prove the hand-written
+    /// decode table agrees with the encoding it documents.
+    #[cfg(test)]
     #[inline]
     #[rustfmt::skip]
     fn pattern(self) -> (u16, u16) {

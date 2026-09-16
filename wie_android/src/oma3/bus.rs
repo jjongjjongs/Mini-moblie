@@ -138,6 +138,11 @@ fn wave_gain(volume: i32, expression: i32, velocity: i32, master: i32, ctrl_tabl
     PERIOD[192.min(sum + pan_att) as usize] as f64 / 32768.0
 }
 
+// The gain of one channel: the mixer's own volume, expression, velocity and
+// master levels, plus how the pan is chosen. Each is a separate control the
+// hardware exposes, so there is no grouping that is not just a struct standing
+// in for the argument list.
+#[allow(clippy::too_many_arguments)]
 pub fn wave_left_gain(fixed_pan: bool, wave_index: i32, volume: i32, expression: i32, velocity: i32, master: i32, ctrl_table: bool, pan: i32) -> f64 {
     let pan_att = if fixed_pan {
         WAVE_FIXED_PAN[(wave_index & 31) as usize] as i32
@@ -147,6 +152,11 @@ pub fn wave_left_gain(fixed_pan: bool, wave_index: i32, volume: i32, expression:
     wave_gain(volume, expression, velocity, master, ctrl_table, pan_att)
 }
 
+// The gain of one channel: the mixer's own volume, expression, velocity and
+// master levels, plus how the pan is chosen. Each is a separate control the
+// hardware exposes, so there is no grouping that is not just a struct standing
+// in for the argument list.
+#[allow(clippy::too_many_arguments)]
 pub fn wave_right_gain(
     fixed_pan: bool,
     wave_index: i32,

@@ -821,7 +821,7 @@ impl TextFieldComponent {
         let action: i32 = jvm.invoke_static("org/kwis/msp/lcdui/Display", "getGameAction", "(I)I", (key,)).await?;
 
         // Native types 1/2/3 share the main path.
-        if matches!(event_type, 1 | 2 | 3) {
+        if matches!(event_type, 1..=3) {
             let handled: bool = jvm
                 .invoke_special(&this, "org/kwis/msp/lwc/TextComponent", "keyNotify", "(II)Z", (event_type, key))
                 .await?;

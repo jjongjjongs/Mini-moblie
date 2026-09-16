@@ -76,28 +76,35 @@ pub(crate) enum FastOp {
     CondBranch { cond: u8, target: u32, next: u32 },
     /// Unconditional short branch.
     Branch { target: u32 },
+    // PushPop, BranchExchange, BranchLink, BlockXfer and MovPc are built by the
+    // JIT frontend, which is not wired up yet; `decode` declines all five.
     /// `push`/`pop` (`PushPop`). `extra` is the R bit: LR for a push, PC for a
     /// pop. A pop that includes PC (`load && extra`) writes a dynamic PC and so
     /// ends the trace. Produced only by the JIT frontend (`decode` declines it).
+    #[allow(dead_code)]
     PushPop { load: bool, extra: bool, rlist: u8 },
     /// `bx`/`blx` register (`HiRegBx` op 3): jump to `rm`, switching ARM/Thumb
     /// from bit 0; `link` (BLX) also sets LR. Dynamic PC, so it ends the trace.
     /// Produced only by the JIT frontend.
+    #[allow(dead_code)]
     BranchExchange { link: bool, rm: u8 },
     /// Long branch with link (`bl`/`blx` immediate). `target`/`ret` are the
     /// pre-computed jump target and return address; `exchange` (BLX) clears the
     /// Thumb bit. A 32-bit instruction, so it advances PC by 4. Ends the trace.
     /// Produced only by the JIT frontend.
+    #[allow(dead_code)]
     BranchLink { exchange: bool, target: u32, ret: u32 },
     /// `ldmia`/`stmia rb!, {rlist}` (`BlockXfer`). Multi-register transfer with
     /// writeback to `rb`; `rlist` covers r0..r7 only (no PC), so it is
     /// straight-line. Produced only by the JIT frontend.
+    #[allow(dead_code)]
     BlockXfer { load: bool, rb: u8, rlist: u8 },
     /// `mov pc, rm` (`HiRegBx` op 2 with destination PC). A computed branch that,
     /// unlike `bx`, does *not* interwork: the target is `rm & !1` and execution
     /// stays in Thumb. Dynamic PC, so it ends the trace. `rm` is never PC (that
     /// degenerate form is left to the interpreter). Produced only by the JIT
     /// frontend.
+    #[allow(dead_code)]
     MovPc { rm: u8 },
 }
 
@@ -110,6 +117,8 @@ pub(crate) enum Decoded {
 /// Whether a compiled op writes a non-linear (dynamic or far) PC and so must be
 /// the last op in a JIT trace. `CondBranch` is excluded: it has a fall-through
 /// and an in-range target can be linked inside the trace.
+/// Used by the JIT frontend, which is not wired up yet.
+#[allow(dead_code)]
 pub(crate) fn ends_trace(op: &FastOp) -> bool {
     matches!(
         op,
@@ -129,20 +138,11 @@ const CACHE_MASK: u32 = (CACHE_SLOTS - 1) as u32;
 
 /// One direct-mapped cache slot. Validity is `gen == engine.generation`, which
 /// lets a cache flush be an O(1) generation bump instead of clearing every slot.
+#[derive(Default)]
 struct Slot {
     gen_tag: u32,
     pc: u32,
     ops: Vec<FastOp>,
-}
-
-impl Default for Slot {
-    fn default() -> Self {
-        Slot {
-            gen_tag: 0,
-            pc: 0,
-            ops: Vec::new(),
-        }
-    }
 }
 
 pub struct FastCpuEngine {
