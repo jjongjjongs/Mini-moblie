@@ -23,7 +23,8 @@ pub use self::{
     database::{Database, DatabaseRepository, RecordId},
     executor::{AsyncCallable, AsyncCallableResult},
     local_network::{
-        AckEndpoint, CaptureAddress, CaptureEndpoint, Framing, LocalConnection, LocalEndpoint, LocalNetwork, LocalRead, is_local_descriptor,
+        AckEndpoint, CaptureAddress, CaptureEndpoint, Framing, FunterEndpoint, LocalConnection, LocalEndpoint, LocalNetwork, LocalRead,
+        is_local_descriptor,
     },
     platform::{
         Filesystem, FilesystemMkdirError, FilesystemRenameError, FilesystemRmDirError, FilesystemSetModeError, Network, NetworkError, NetworkEvent,

@@ -146,6 +146,22 @@ impl KtfEmulator {
             }
         }
 
+        // What a download would have delivered, when this package has been
+        // through one already. A KTF title that fetches its data over the air
+        // offers to do it every launch and quits if refused, and the server it
+        // asks has been gone for years - but the archive's `P/` directory is
+        // the handset's own copy of what arrived, so the exchange can be
+        // answered out of it. See `wie_backend::local_network::funter`.
+        let packaged = files
+            .iter()
+            .filter_map(|(path, data)| Some((path.strip_prefix("P/")?.to_owned(), data.clone())))
+            .filter(|(path, _)| !path.is_empty())
+            .collect::<BTreeMap<_, _>>();
+        let funter = wie_backend::FunterEndpoint::new(packaged);
+        if !funter.is_empty() {
+            system.local_network().register(Box::new(funter));
+        }
+
         Allocator::init(&mut core)?;
 
         // The status strip a title has to work around, published where the

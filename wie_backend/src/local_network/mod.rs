@@ -23,11 +23,13 @@
 
 mod ack;
 mod capture;
+mod funter;
 mod gpang;
 
 pub use self::{
     ack::{AckEndpoint, Framing},
     capture::{CaptureAddress, CaptureEndpoint},
+    funter::FunterEndpoint,
     gpang::GpangEndpoint,
 };
 
