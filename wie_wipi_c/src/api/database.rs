@@ -1604,8 +1604,25 @@ pub async fn select_record_ktf(context: &mut dyn WIPICContext, db_id: i32, rec_i
     //     mode=2 on the read path destroys a prefetched buffer during a
     //     subsequent re-open and wipes the saved record). Both are treated
     //     as plain seek-and-rewind.
+    //   - `(handle, delta, 1)` — seeks from where the cursor already is,
+    //     the way `SEEK_CUR` does, rather than from the start.
+    //
+    // Mode 1 only tells itself apart from mode 0 once a handle has been read
+    // from: on a freshly opened one both land in the same place, which is why
+    // it went unnoticed. 드래곤아이즈2 is the title that reads first - it takes
+    // a four-byte offset out of `bodyImage.dat`'s table and then seeks by it,
+    // and taking that as absolute left it three bytes short of the resource,
+    // where it read a length out of the middle of the previous one, asked for
+    // 49194 bytes of whatever followed, and handed that to `MC_grpCreateImage`
+    // as an image. The whole of its loading screen is images fetched this way;
+    // the one it died on is the only one it seeks to twice.
     if rec_id >= 0 {
-        let offset = rec_id as u32;
+        let offset = if mode == 1 {
+            handle.read_cursor.saturating_add(rec_id as u32)
+        } else {
+            rec_id as u32
+        };
+
         handle.read_cursor = offset;
         handle.write_cursor = offset;
         write_generic(context, db_id as _, handle)?;
@@ -1934,8 +1951,8 @@ mod tests {
         LgtDatabaseMetadata, available_storage_ktf, close_database_lgt, delete_database, delete_database_lgt, delete_record_lgt, exists_database,
         exists_database_ktf, get_access_mode_ktf, get_access_mode_lgt, get_number_of_records_ktf, get_number_of_records_lgt, get_record_size_ktf,
         get_record_size_lgt, insert_record_lgt, list_databases_lgt, list_record, list_record_info, list_records_lgt, load_handle, load_lgt_metadata,
-        open_database, open_database_lgt, open_db_for_handle, select_record, select_record_lgt, sort_records_lgt, stat_by_name_ktf,
-        store_lgt_metadata, stream_read, stream_write, update_record, update_record_lgt,
+        open_database, open_database_lgt, open_db_for_handle, select_record, select_record_ktf, select_record_lgt, sort_records_lgt,
+        stat_by_name_ktf, store_lgt_metadata, stream_read, stream_write, update_record, update_record_lgt,
     };
 
     #[futures_test::test]
@@ -2919,6 +2936,63 @@ mod tests {
         // A name neither stored nor shipped is still a miss.
         context.write_bytes(0x1100, b"nothing\0").unwrap();
         assert_eq!(stat_by_name_ktf(&mut context, 0x1100, 0x3000, 1, 0).await.unwrap(), -22);
+    }
+
+    /// Mode 1 seeks from where the cursor already is, the way `SEEK_CUR` does.
+    ///
+    /// On a handle nothing has read from yet the two are the same place, which
+    /// is why every other title got away with it: 45 of 드래곤아이즈2's own 46
+    /// seeks are the only one that handle ever makes. The 46th is not. It reads
+    /// a four-byte offset out of `bodyImage.dat`'s table and then seeks by it,
+    /// and taken as absolute that lands three bytes before the resource rather
+    /// than at it - close enough to read a length out of the previous one and
+    /// hand `MC_grpCreateImage` 49194 bytes that are not an image.
+    #[futures_test::test]
+    async fn a_ktf_seek_of_mode_one_is_relative_to_the_cursor() {
+        // A stand-in for the container: a four-byte offset at 88, and the
+        // resource that offset names.
+        let mut shipped = vec![0u8; 512];
+        shipped[88..92].copy_from_slice(&200u32.to_le_bytes());
+        shipped[292..295].copy_from_slice(b"HIT");
+
+        let mut context = database_test_context().with_resource("bodyImage.dat", &shipped);
+        context.write_bytes(0x1000, b"bodyImage.dat\0").unwrap();
+        let db_id = open_database(&mut context, 0x1000, 4, 0).await.unwrap();
+
+        // Seek to the table entry and read it, exactly as the title does.
+        assert_eq!(select_record_ktf(&mut context, db_id, 88, 1, 0).await.unwrap(), 0);
+        stream_read(&mut context, db_id, 0x2000, 4).await.unwrap();
+        assert_eq!(read_generic::<u32, _>(&context, 0x2000).unwrap(), 200);
+
+        // Seeking by what it read carries on from the cursor, which is now 92,
+        // so the resource is at 292 rather than at 200.
+        assert_eq!(select_record_ktf(&mut context, db_id, 200, 1, 0).await.unwrap(), 0);
+        stream_read(&mut context, db_id, 0x2000, 3).await.unwrap();
+
+        let mut landed = [0u8; 3];
+        context.read_bytes(0x2000, &mut landed).unwrap();
+        assert_eq!(&landed, b"HIT", "a mode 1 seek is relative to the cursor");
+    }
+
+    /// Mode 0 is still absolute, which is what the save files that use it need.
+    #[futures_test::test]
+    async fn a_ktf_seek_of_mode_zero_is_still_absolute() {
+        let mut shipped = vec![0u8; 512];
+        shipped[200..203].copy_from_slice(b"HIT");
+
+        let mut context = database_test_context().with_resource("save.dat", &shipped);
+        context.write_bytes(0x1000, b"save.dat\0").unwrap();
+        let db_id = open_database(&mut context, 0x1000, 4, 0).await.unwrap();
+
+        select_record_ktf(&mut context, db_id, 88, 0, 0).await.unwrap();
+        stream_read(&mut context, db_id, 0x2000, 4).await.unwrap();
+
+        select_record_ktf(&mut context, db_id, 200, 0, 0).await.unwrap();
+        stream_read(&mut context, db_id, 0x2000, 3).await.unwrap();
+
+        let mut landed = [0u8; 3];
+        context.read_bytes(0x2000, &mut landed).unwrap();
+        assert_eq!(&landed, b"HIT", "mode 0 ignores where the cursor was");
     }
 
     /// Slot 12 answers the storage left, in bytes, and the archive's own
