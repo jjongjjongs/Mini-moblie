@@ -71,7 +71,15 @@ impl Canvas {
 
         Self::mark_dirty(jvm, &this, 0, 0, -1, -1).await?;
 
-        let display = jvm.get_field(&this, "currentDisplay", "Ljavax/microedition/lcdui/Display;").await?;
+        let display: ClassInstanceRef<Display> = jvm.get_field(&this, "currentDisplay", "Ljavax/microedition/lcdui/Display;").await?;
+        if display.is_null() {
+            // Not on the screen yet, so there is nobody to ask - the region
+            // just recorded is what the first paint will cover. 바이러스's card
+            // asks for one from `showNotify`, which `pushCard` calls before the
+            // canvas has been made current.
+            return Ok(());
+        }
+
         let _: () = jvm.invoke_virtual(&display, "repaint", "(IIII)V", (0, 0, -1, -1)).await?;
 
         Ok(())
@@ -140,7 +148,13 @@ impl Canvas {
 
         Self::mark_dirty(jvm, &this, x, y, width, height).await?;
 
-        let display = jvm.get_field(&this, "currentDisplay", "Ljavax/microedition/lcdui/Display;").await?;
+        let display: ClassInstanceRef<Display> = jvm.get_field(&this, "currentDisplay", "Ljavax/microedition/lcdui/Display;").await?;
+        if display.is_null() {
+            // See `repaint`: a canvas that is not on the screen has nothing to
+            // ask, and keeps the region for its first paint.
+            return Ok(());
+        }
+
         let _: () = jvm.invoke_virtual(&display, "repaint", "(IIII)V", (x, y, width, height)).await?;
 
         Ok(())

@@ -1,6 +1,7 @@
 mod array_class_definition;
 mod array_class_instance;
 mod class_definition;
+mod class_file;
 mod class_instance;
 mod classes;
 mod field;
