@@ -31,7 +31,11 @@ fn decode_linear_pcm(data: &[u8], base_bit: smaf::BaseBit, offset_binary: bool) 
             .chunks_exact(2)
             .map(|pair| {
                 let raw = u16::from_le_bytes([pair[0], pair[1]]);
-                if offset_binary { (i32::from(raw) - 32768) as i16 } else { raw as i16 }
+                if offset_binary {
+                    (i32::from(raw) - 32768) as i16
+                } else {
+                    raw as i16
+                }
             })
             .collect(),
         _ => Vec::new(),
