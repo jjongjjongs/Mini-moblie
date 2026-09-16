@@ -639,16 +639,94 @@ pub async fn program_stop(context: &mut dyn WIPICContext, program_id: WIPICWord)
     Ok(0)
 }
 
-/// `MC_knlGetExecNames` - list the programs that can be started.
+/// What divides a listing's two columns, and what ends the entry.
 ///
-/// None can, so there is no list to write. This refuses without touching the
-/// buffer it was given: a title that checks the result finds nothing to show,
-/// and one that does not check reads whatever it had there, not something this
-/// invented.
-pub async fn get_exec_names(_context: &mut dyn WIPICContext) -> Result<i32> {
-    tracing::info!("MC_knlGetExecNames() -> -12, nothing else is installed");
+/// Neither value is known: the one caller never reads them, it only steps over
+/// the separator, so these are the least surprising printable choice rather
+/// than a claim. The trailer's width is what puts the entry's last twenty-one
+/// characters where that caller looks.
+const EXEC_NAME_SEPARATOR: &str = "\t";
+const EXEC_NAME_TRAILER: &str = "\t000";
 
-    Ok(-12) // M_E_NOENT
+/// `MC_knlGetExecNames` - list the executables an installed program carries.
+///
+/// ```c
+/// M_Int32 MC_knlGetExecNames(char *program, M_Int32, M_Int32, char *out, M_Int32 out_length)
+/// ```
+///
+/// One program is installed here - the archive that is running - so the listing
+/// names it, and asking about any other name answers that there is nothing
+/// installed under it.
+///
+/// **The listing's layout is reconstructed from its one caller**, because
+/// nothing describes it: not the specification, not any handset we have. 록맨X
+/// reads it as its own second start-up gate and stops at `인증오류 ...
+/// (오류번호:2001)` when the call refuses, which is what it had been doing here:
+///
+/// ```c
+/// if (MC_knlGetExecNames(aid, 0, 0, out, 300) <= 0) fail;      /* 2001 */
+/// tail = out + strlen(out) - 21;
+/// for (i = 0; i < 8; i++) {
+///     if (tail[i] != tail[i + 9]) fail;                        /* 2002 */
+///     identity[i] = tail[i];
+/// }
+/// ```
+///
+/// It wants an entry whose last twenty-one characters carry an eight character
+/// token twice, nine apart, takes that token as the program's identity and
+/// compares it with the application id compiled into its own image. So an entry
+/// is `<AID><sep><AID><trailer>`: the program and the name of its executable,
+/// which for a KTF archive are the same string, the jar, the client image and
+/// the program all being named by the AID.
+///
+/// Everything above is stated rather than assumed to generalise. A second title
+/// that reads this listing differently would be evidence this is wrong, and
+/// there is none here either way.
+pub async fn get_exec_names(
+    context: &mut dyn WIPICContext,
+    ptr_program: WIPICWord,
+    _unknown1: WIPICWord,
+    _unknown2: WIPICWord,
+    p_out: WIPICWord,
+    out_length: i32,
+) -> Result<i32> {
+    let installed = context.system().aid().to_string();
+
+    // A name that cannot be read is treated as no name at all, which asks about
+    // whatever is installed - the shape of this argument is settled by one
+    // caller, so a pointer that is not a string is a thing that can happen.
+    let wanted = read_null_terminated_string_bytes(context, ptr_program)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+
+    if !wanted.is_empty() && !wanted.eq_ignore_ascii_case(&installed) {
+        // Not an error: the caller asked whether a program is there, and the
+        // answer is that it is not.
+        tracing::info!("MC_knlGetExecNames({wanted:?}) -> 0, nothing is installed under that name");
+
+        return Ok(0);
+    }
+
+    if p_out == 0 {
+        tracing::info!("MC_knlGetExecNames({wanted:?}) -> 0, there is nowhere to write the listing");
+
+        return Ok(0);
+    }
+
+    let listing = format!("{installed}{EXEC_NAME_SEPARATOR}{installed}{EXEC_NAME_TRAILER}");
+    if listing.len() + 1 > out_length.max(0) as usize {
+        tracing::info!("MC_knlGetExecNames({wanted:?}) -> -18 (buffer {out_length} too small for {listing:?})");
+
+        return Ok(-18); // M_E_SHORTBUF
+    }
+
+    write_null_terminated_string_bytes(context, p_out, listing.as_bytes())?;
+
+    tracing::info!("MC_knlGetExecNames({wanted:?}) -> {listing:?}");
+
+    // One program is installed, and the caller only checks that this is
+    // positive before reading the listing.
+    Ok(1)
 }
 
 /// `MC_knlGetProgramInfo` - the handset's record of an installed program.
@@ -1044,8 +1122,47 @@ mod test {
         assert_eq!(mexecute(&mut context, name).await.unwrap(), -12);
         assert_eq!(load(&mut context, name).await.unwrap(), -12);
         assert_eq!(mload(&mut context, name).await.unwrap(), -12);
-        assert_eq!(get_exec_names(&mut context).await.unwrap(), -12);
         assert_eq!(get_program_info(&mut context).await.unwrap(), -12);
+
+        // The listing answers the same way, in its own terms: no entry rather
+        // than an error, because being asked about a program that is not here
+        // is a question with an answer.
+        let out = context.alloc_raw(64).unwrap();
+        assert_eq!(get_exec_names(&mut context, name, 0, 0, out, 64).await.unwrap(), 0);
+    }
+
+    /// The one program installed is the title itself, listed the way its own
+    /// start-up gate reads a listing: the last twenty-one characters carry the
+    /// application id twice, nine apart.
+    #[futures_test::test]
+    async fn the_title_is_listed_under_its_own_application_id() {
+        let mut context = program_control_context(None);
+        let name = context.alloc_raw(16).unwrap();
+        let out = context.alloc_raw(64).unwrap();
+        write_null_terminated_string_bytes(&mut context, name, b"test-aid").unwrap();
+
+        assert_eq!(get_exec_names(&mut context, name, 0, 0, out, 64).await.unwrap(), 1);
+
+        let listing = read_null_terminated_string_bytes(&mut context, out).unwrap();
+        let tail = &listing[listing.len() - 21..];
+        for at in 0..8 {
+            assert_eq!(tail[at], tail[at + 9], "the token repeats nine apart, at {at}");
+        }
+        assert_eq!(&tail[..8], b"test-aid");
+
+        // Asked about nothing in particular, the listing is the same one.
+        assert_eq!(get_exec_names(&mut context, 0, 0, 0, out, 64).await.unwrap(), 1);
+    }
+
+    /// A buffer the listing does not fit in is refused rather than filled part
+    /// way, and nowhere to write it at all is answered as no listing.
+    #[futures_test::test]
+    async fn a_listing_is_only_written_where_it_fits() {
+        let mut context = program_control_context(None);
+        let out = context.alloc_raw(64).unwrap();
+
+        assert_eq!(get_exec_names(&mut context, 0, 0, 0, out, 8).await.unwrap(), -18);
+        assert_eq!(get_exec_names(&mut context, 0, 0, 0, 0, 64).await.unwrap(), 0);
     }
 
     /// Nothing launched the title and there is no manager to go back to.
