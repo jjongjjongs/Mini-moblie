@@ -140,11 +140,18 @@ impl ClassInstance for JavaClassInstance {
 
     fn get_field(&self, field: &dyn Field) -> JvmResult<JavaValue> {
         let field = field.as_any().downcast_ref::<JavaField>().unwrap();
-        // The cached name, read once: `Field::descriptor` hands back a fresh
-        // `String` and this used to ask for two of them per access, which on a
-        // title that reads a field per pixel is a copy per pixel.
-        let name = field.name().unwrap();
-        let field_type = JavaType::parse(&name.descriptor);
+        // The type its class read when it was indexed, or - for a handle made
+        // from a bare pointer - the descriptor parsed here. Parsing it per
+        // access allocated a `String` for every reference field, which a title
+        // that reads a field per pixel pays per pixel.
+        let parsed;
+        let field_type = match field.resolved_parts() {
+            Some(resolved) => &resolved.value_type,
+            None => {
+                parsed = JavaType::parse(&field.name().unwrap().descriptor);
+                &parsed
+            }
+        };
 
         assert!(!field.access_flags().contains(FieldAccessFlags::STATIC));
 
@@ -155,18 +162,24 @@ impl ClassInstance for JavaClassInstance {
             let value: KtfJvmWord = read_generic(&self.core, address).unwrap();
             let value_high: KtfJvmWord = read_generic(&self.core, address + 4).unwrap();
 
-            Ok(JavaValue::from_raw64(value, value_high, &field_type))
+            Ok(JavaValue::from_raw64(value, value_high, field_type))
         } else {
             let value: KtfJvmWord = read_generic(&self.core, address).unwrap();
 
-            Ok(JavaValue::from_raw(value, &field_type, &self.core))
+            Ok(JavaValue::from_raw(value, field_type, &self.core))
         }
     }
 
     fn put_field(&mut self, field: &dyn Field, value: JavaValue) -> JvmResult<()> {
         let field = field.as_any().downcast_ref::<JavaField>().unwrap();
-        let name = field.name().unwrap();
-        let field_type = JavaType::parse(&name.descriptor);
+        let parsed;
+        let field_type = match field.resolved_parts() {
+            Some(resolved) => &resolved.value_type,
+            None => {
+                parsed = JavaType::parse(&field.name().unwrap().descriptor);
+                &parsed
+            }
+        };
 
         assert!(!field.access_flags().contains(FieldAccessFlags::STATIC));
 

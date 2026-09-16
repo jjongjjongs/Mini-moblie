@@ -19,7 +19,12 @@ use wie_util::{
 use crate::runtime::java::JavaSvcFunctions;
 
 use super::{
-    KtfJvmWord, Result, class_instance::JavaClassInstance, field::JavaField, method::JavaMethod, name::JavaFullName, value::JavaValueExt,
+    KtfJvmWord, Result,
+    class_instance::JavaClassInstance,
+    field::{JavaField, ResolvedField},
+    method::JavaMethod,
+    name::JavaFullName,
+    value::JavaValueExt,
     vtable::JavaVtable,
 };
 
@@ -43,20 +48,22 @@ impl MemberKey {
     }
 }
 
-/// A class's declared fields, in the order the guest's own table lists them.
-struct FieldIndex(Vec<(MemberKey, u32)>);
+/// A class's declared fields, in the order the guest's own table lists them,
+/// each with everything its record says - see [`ResolvedField`].
+struct FieldIndex(Vec<(MemberKey, Arc<ResolvedField>)>);
 
-/// A class's declared methods, likewise. It is a type of its own so that the two
-/// indexes of one class do not answer for each other in the core's cache.
+/// A class's declared methods, likewise, though a method is still named by its
+/// pointer. It is a type of its own so that the two indexes of one class do not
+/// answer for each other in the core's cache.
 struct MethodIndex(Vec<(MemberKey, u32)>);
 
 /// The first member matching a lookup, which is the one the walk this replaced
 /// would have stopped at.
-fn find_member(members: &[(MemberKey, u32)], name: &str, descriptor: &str, is_static: bool) -> Option<u32> {
+fn find_member<'a, T>(members: &'a [(MemberKey, T)], name: &str, descriptor: &str, is_static: bool) -> Option<&'a T> {
     members
         .iter()
         .find(|(key, _)| key.is_static == is_static && key.name == name && key.descriptor == descriptor)
-        .map(|(_, ptr_raw)| *ptr_raw)
+        .map(|(_, member)| member)
 }
 
 #[derive(Clone)]
@@ -318,10 +325,21 @@ impl JavaClassDefinition {
         self.core.write_once_metadata(self.ptr_raw, || {
             let mut members = Vec::new();
             for field in this.fields()? {
-                let full_name = field.name()?;
-                let is_static = field.access_flags().contains(FieldAccessFlags::STATIC);
+                let name = field.name()?;
+                let access_flags = field.access_flags();
+                let is_static = access_flags.contains(FieldAccessFlags::STATIC);
 
-                members.push((MemberKey::of(&full_name, is_static), field.ptr_raw));
+                let resolved = ResolvedField {
+                    ptr_raw: field.ptr_raw,
+                    // A static field's record keeps its value in the word an
+                    // instance field keeps its offset in, and that word changes.
+                    offset: if is_static { None } else { Some(field.offset()?) },
+                    access_flags,
+                    value_type: JavaType::parse(&name.descriptor),
+                    name,
+                };
+
+                members.push((MemberKey::of(&resolved.name, is_static), Arc::new(resolved)));
             }
 
             Ok(FieldIndex(members))
@@ -331,13 +349,13 @@ impl JavaClassDefinition {
     pub fn method(&self, name: &str, descriptor: &str, is_static: bool) -> Result<Option<JavaMethod>> {
         let index = self.method_index()?;
 
-        Ok(find_member(&index.0, name, descriptor, is_static).map(|ptr_raw| JavaMethod::from_raw(ptr_raw, &self.core)))
+        Ok(find_member(&index.0, name, descriptor, is_static).map(|&ptr_raw| JavaMethod::from_raw(ptr_raw, &self.core)))
     }
 
     pub fn field(&self, name: &str, descriptor: &str, is_static: bool) -> Result<Option<JavaField>> {
         let index = self.field_index()?;
 
-        Ok(find_member(&index.0, name, descriptor, is_static).map(|ptr_raw| JavaField::from_raw(ptr_raw, &self.core)))
+        Ok(find_member(&index.0, name, descriptor, is_static).map(|resolved| JavaField::resolved(&self.core, resolved.clone())))
     }
 
     pub fn read_static_field(&self, field: &JavaField) -> Result<KtfJvmWord> {
