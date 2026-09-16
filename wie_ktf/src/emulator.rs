@@ -19,6 +19,48 @@ use crate::{
     runtime::KtfJvmSupport,
 };
 
+/// The directory an archive's `__adf__` sits in, when exactly one does.
+///
+/// A dump does not always put the descriptor at the root. 소울카드마스터2 arrives
+/// as a whole emulator bundle - the title under `game/<name>/`, beside the
+/// `backends/` the bundle runs on - and looking only at the root found no
+/// descriptor, so the archive was not recognised as one. It fell through to the
+/// bare-jar path, which knows no `MClass` and started the title with no main
+/// class at all: `Main class not found`, after a full runtime init.
+///
+/// The descriptor is what says where the archive is, at whatever depth it was
+/// filed. Two of them would mean two archives in one zip, and which is the
+/// title is not for this to guess.
+fn descriptor_directory(files: &BTreeMap<String, Vec<u8>>) -> Option<String> {
+    let mut directories = files.keys().filter_map(|path| path.strip_suffix("/__adf__"));
+
+    match (directories.next(), directories.next()) {
+        (Some(directory), None) => Some(directory.to_owned()),
+        _ => None,
+    }
+}
+
+/// Moves an archive whose descriptor sits in a subdirectory back to the root.
+///
+/// What lies under the descriptor's directory is the title. What lies beside it
+/// belongs to whatever packed the dump - a bundle ships an emulator's own
+/// binaries next to the game - and is dropped rather than folded in under its
+/// bare name, so nothing outside the archive can answer for a name inside it.
+fn reroot_archive(files: BTreeMap<String, Vec<u8>>) -> BTreeMap<String, Vec<u8>> {
+    let Some(directory) = descriptor_directory(&files) else {
+        return files;
+    };
+
+    tracing::info!("KTF archive is rooted at {directory}/");
+
+    let prefix = format!("{directory}/");
+
+    files
+        .into_iter()
+        .filter_map(|(path, data)| path.strip_prefix(&prefix).map(|inner| (inner.to_owned(), data)))
+        .collect()
+}
+
 pub const IMAGE_BASE: u32 = 0x100000;
 
 struct KtfTaskRunner {
@@ -46,6 +88,8 @@ pub struct KtfEmulator {
 
 impl KtfEmulator {
     pub fn from_archive(platform: Box<dyn Platform>, files: BTreeMap<String, Vec<u8>>, options: Options) -> Result<Self> {
+        let files = reroot_archive(files);
+
         let adf = files
             .get("__adf__")
             .ok_or_else(|| WieError::FatalError("Missing __adf__ in KTF archive".into()))?;
@@ -73,7 +117,7 @@ impl KtfEmulator {
     }
 
     pub fn loadable_archive(files: &BTreeMap<String, Vec<u8>>) -> bool {
-        files.contains_key("__adf__")
+        files.contains_key("__adf__") || descriptor_directory(files).is_some()
     }
 
     pub fn loadable_jar(jar: &[u8]) -> bool {
@@ -94,7 +138,7 @@ impl KtfEmulator {
     /// strip - so the table answers first for the titles where the two differ.
     /// See `wie_backend::quirks`.
     pub fn screen_size(archive: &[u8]) -> Option<(u32, u32)> {
-        let files = extract_zip(archive).ok()?;
+        let files = reroot_archive(extract_zip(archive).ok()?);
         let adf = KtfAdf::parse(files.get("__adf__")?);
 
         title_quirks(TitlePlatform::Ktf, &adf.aid).screen_size.or(adf.display_size)
@@ -325,5 +369,66 @@ impl Emulator for KtfEmulator {
         self.present_lcd();
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::{
+        collections::BTreeMap,
+        string::{String, ToString},
+        vec,
+        vec::Vec,
+    };
+
+    use super::{KtfEmulator, descriptor_directory, reroot_archive};
+
+    fn archive(paths: &[&str]) -> BTreeMap<String, Vec<u8>> {
+        paths.iter().map(|path| ((*path).to_string(), vec![0u8; 1])).collect()
+    }
+
+    /// A descriptor at the root is already where it belongs.
+    #[test]
+    fn an_archive_at_the_root_is_left_alone() {
+        let files = archive(&["__adf__", "__class__", "010261FB.jar", "P/save0"]);
+
+        assert_eq!(descriptor_directory(&files), None);
+        assert!(KtfEmulator::loadable_archive(&files));
+        assert_eq!(reroot_archive(files.clone()).keys().count(), files.len());
+    }
+
+    /// 소울카드마스터2 arrives as a whole emulator bundle, with the title two
+    /// directories down and the bundle's own binaries beside it. The title is
+    /// what the descriptor's directory holds; the binaries are not.
+    #[test]
+    fn a_bundled_archive_is_rerooted_to_its_descriptor() {
+        let files = archive(&[
+            "backends/SDL2.dll",
+            "backends/wipi-engine.exe",
+            "game/소울카드마스터2/__adf__",
+            "game/소울카드마스터2/__class__",
+            "game/소울카드마스터2/010261FB.jar",
+            "game/소울카드마스터2/P/save0",
+        ]);
+
+        assert_eq!(descriptor_directory(&files).as_deref(), Some("game/소울카드마스터2"));
+        assert!(KtfEmulator::loadable_archive(&files), "a bundled archive is still an archive");
+
+        let rerooted = reroot_archive(files);
+        let mut names: Vec<&str> = rerooted.keys().map(|x| x.as_str()).collect();
+        names.sort_unstable();
+
+        assert_eq!(names, ["010261FB.jar", "P/save0", "__adf__", "__class__"]);
+    }
+
+    /// Two descriptors are two archives in one zip, and which one is the title
+    /// is not for this to guess.
+    #[test]
+    fn two_descriptors_reroot_to_neither() {
+        let files = archive(&["game/one/__adf__", "game/two/__adf__"]);
+
+        assert_eq!(descriptor_directory(&files), None);
+        assert!(!KtfEmulator::loadable_archive(&files));
+        assert_eq!(reroot_archive(files.clone()).keys().count(), files.len(), "left as it was");
     }
 }

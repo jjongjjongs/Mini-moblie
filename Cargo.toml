@@ -57,11 +57,11 @@ spin = { version = "^0.12", features = ["spin_mutex", "rwlock"], default-feature
 tracing = { version = "^0.1", default-features = false, features = ["attributes"] }
 
 # Fork of dlunch/RustJava pinned to fixes for String.equals(Object) and System.arraycopy null args, plus Jvm::gc_reachable_identities for guest-heap GC; see jjongjjongs/RustJava@claude/gc-reachable-identities.
-java_class_proto = { git = "https://github.com/jjongjjongs/RustJava.git", rev = "2e3b71852180c41998e53e3383ad72a62f4e0de3" }
-java_constants = { git = "https://github.com/jjongjjongs/RustJava.git", rev = "2e3b71852180c41998e53e3383ad72a62f4e0de3" }
-java_runtime = { git = "https://github.com/jjongjjongs/RustJava.git", rev = "2e3b71852180c41998e53e3383ad72a62f4e0de3" }
-jvm = { git = "https://github.com/jjongjjongs/RustJava.git", rev = "2e3b71852180c41998e53e3383ad72a62f4e0de3" }
-jvm_rust = { git = "https://github.com/jjongjjongs/RustJava.git", rev = "2e3b71852180c41998e53e3383ad72a62f4e0de3" }
+java_class_proto = { git = "https://github.com/jjongjjongs/RustJava.git", rev = "b5dba271cf137fb20a092d75f94e89de80070e20" }
+java_constants = { git = "https://github.com/jjongjjongs/RustJava.git", rev = "b5dba271cf137fb20a092d75f94e89de80070e20" }
+java_runtime = { git = "https://github.com/jjongjjongs/RustJava.git", rev = "b5dba271cf137fb20a092d75f94e89de80070e20" }
+jvm = { git = "https://github.com/jjongjjongs/RustJava.git", rev = "b5dba271cf137fb20a092d75f94e89de80070e20" }
+jvm_rust = { git = "https://github.com/jjongjjongs/RustJava.git", rev = "b5dba271cf137fb20a092d75f94e89de80070e20" }
 wipi_types = { git = "https://github.com/dlunch/wipi.git" }
 
 wie_backend = { path = "wie_backend" }
