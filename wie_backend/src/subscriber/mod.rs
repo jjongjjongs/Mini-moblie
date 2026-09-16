@@ -10,10 +10,12 @@
 
 mod cert_c2s;
 mod fixed_key_cert;
+mod shifted_cert;
 
 pub use self::{
     cert_c2s::recover_phone_number as from_cert,
     fixed_key_cert::{HandsetIdentity, recover_identity as identity_from_cert},
+    shifted_cert::recover_phone_number as from_shifted_cert,
 };
 
 use alloc::{
@@ -103,9 +105,19 @@ pub fn from_certification(data: &[u8]) -> Option<String> {
 /// for, then a plain `certification` holding it, then the descriptor's own
 /// download URL. Each argument is the file's bytes, or `None` where the archive
 /// has no such file.
+///
+/// A `cert.c2s` comes in more than one form and each reader answers only for
+/// its own, so they are tried in turn; between themselves the order does not
+/// matter, because a certificate one of them reads is not a record another
+/// recognises.
 pub fn subscriber_number(cert: Option<&[u8]>, certification: Option<&[u8]>, app_info: Option<&[u8]>) -> String {
     if let Some(number) = cert.and_then(from_cert) {
         tracing::info!("recovered subscriber number from cert.c2s: {number:?}");
+        return number;
+    }
+
+    if let Some(number) = cert.and_then(from_shifted_cert) {
+        tracing::info!("recovered subscriber number from shifted cert.c2s: {number:?}");
         return number;
     }
 
@@ -209,5 +221,16 @@ mod tests {
         );
         assert_eq!(subscriber_number(None, None, Some(app_info)), "01085300848");
         assert_eq!(subscriber_number(None, None, None), FALLBACK);
+    }
+
+    /// A `cert.c2s` the keyed reader does not recognise still answers when it is
+    /// one of the other forms.
+    #[test]
+    fn a_certificate_of_another_form_is_read_by_the_reader_that_knows_it() {
+        // 록맨X's, which is shifted rather than encrypted.
+        let shifted = b"          \x60\x61\x60\x63\x86\x69\x86\x61  \x72\x8f\x83\x8b\x8d\x81\x8e\x78PPPPPPPP\x60\x61\x60\x69\x66\x65\x68\x69\x65\x66\x65 \x3b\x9a\x12\xff";
+
+        assert_eq!(subscriber_number(Some(shifted), None, None), "01096589565");
+        assert_eq!(subscriber_number(Some(shifted), Some(b"01011112222"), None), "01096589565");
     }
 }
