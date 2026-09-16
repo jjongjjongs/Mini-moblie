@@ -86,6 +86,22 @@ pub struct Options {
     pub annunciator: Option<bool>,
 }
 
+/// What a download is wrapped in, when it is not the title itself.
+///
+/// A handset's download could be delivered under OMA DRM, and what the store
+/// handed over is then a container: the title's own bytes are inside it, and
+/// the key that unlocks them is in a rights object issued to one handset, not
+/// in the file. Nothing here can open one - this only recognises it, so a
+/// player can say so instead of reporting a broken archive as if the title were
+/// at fault.
+///
+/// The container is OMA's DRM Content Format: `odcf`, then an `odrm` box
+/// holding the headers that describe the content and the content itself. Only
+/// the two markers are read; what is inside is not ours to interpret.
+pub fn protected_container(data: &[u8]) -> Option<&'static str> {
+    (data.get(..4)? == b"odcf" && data.get(12..16)? == b"odrm").then_some("OMA DRM (DCF)")
+}
+
 pub fn extract_zip(zip: &[u8]) -> Result<BTreeMap<String, Vec<u8>>> {
     extern crate std; // XXX
 
@@ -275,5 +291,29 @@ mod tests {
 
         assert!(files.contains_key("a/app_info"));
         assert!(files.contains_key("b/0002A4B1.jar"));
+    }
+}
+
+#[cfg(test)]
+mod protected_container_tests {
+    use super::protected_container;
+
+    /// The head of 화이트데이's download, which is a container and not the jar
+    /// its name says it is.
+    #[test]
+    fn an_oma_container_is_recognised_by_its_two_markers() {
+        let mut data = *b"odcf\x00\x02\x00\x00\x00\x00\x00\x01odrm";
+
+        assert_eq!(protected_container(&data), Some("OMA DRM (DCF)"));
+
+        data[13] = b'x';
+        assert_eq!(protected_container(&data), None);
+    }
+
+    #[test]
+    fn an_ordinary_archive_is_not_a_container() {
+        assert_eq!(protected_container(b"PK\x03\x04and then a jar"), None);
+        assert_eq!(protected_container(b"odcf"), None);
+        assert_eq!(protected_container(b""), None);
     }
 }

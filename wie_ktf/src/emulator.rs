@@ -8,7 +8,7 @@ use jvm::{ClassInstance, Result as JvmResult, runtime::JavaLangString};
 use wie_backend::{
     Emulator, Event, Options, Platform, System, TaskRunner, TitlePlatform,
     canvas::{Rgb565Pixel, VecImageBuffer},
-    extract_zip, gz, title_quirks,
+    extract_zip, gz, protected_container, title_quirks,
 };
 use wie_core_arm::{Allocator, ArmCore};
 use wie_jvm_support::JvmSupport;
@@ -109,6 +109,19 @@ impl KtfEmulator {
         files: &BTreeMap<String, Vec<u8>>,
         mut options: Options,
     ) -> Result<Self> {
+        // What the store delivered could be a DRM container rather than the
+        // title. Nothing further on can make sense of one - the jar it is asked
+        // to open is not a zip - so it is named here, where the answer can still
+        // be the reason rather than a failure further in. See
+        // `wie_backend::protected_container`.
+        if let Some(jar) = files.get(jar_filename)
+            && let Some(container) = protected_container(jar)
+        {
+            return Err(WieError::FatalError(format!(
+                "the title is wrapped in {container}, so there is nothing here to run"
+            )));
+        }
+
         let mut core = ArmCore::new(options.enable_gdbserver, options.profile.take())?;
 
         let system = System::new(platform, pid, aid, KtfTaskRunner { core: core.clone() });

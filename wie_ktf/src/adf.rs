@@ -5,7 +5,7 @@ use alloc::{
     vec::Vec,
 };
 
-use wie_backend::extract_zip;
+use wie_backend::{extract_zip, protected_container};
 use wie_util::{Result, WieError, descriptor_value};
 
 pub struct KtfAdf {
@@ -68,6 +68,17 @@ fn parse_display_size(value: &str) -> Option<(u32, u32)> {
 }
 
 pub fn find_client_bin(jar: &[u8]) -> Result<(String, Vec<u8>)> {
+    // A download that was delivered under DRM is a container, not the title, and
+    // reading it as a jar only reports a broken zip. Saying what it is instead
+    // is the difference between "this file cannot be opened" and knowing the
+    // copy has to be an unprotected one - the key is in a rights object issued
+    // to one handset, and is not in the file.
+    if let Some(container) = protected_container(jar) {
+        return Err(WieError::FatalError(format!(
+            "the title is wrapped in {container}, so there is nothing here to run"
+        )));
+    }
+
     let files: BTreeMap<String, Vec<u8>> = extract_zip(jar)?;
 
     files
