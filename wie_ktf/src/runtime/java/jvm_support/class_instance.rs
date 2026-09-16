@@ -140,7 +140,11 @@ impl ClassInstance for JavaClassInstance {
 
     fn get_field(&self, field: &dyn Field) -> JvmResult<JavaValue> {
         let field = field.as_any().downcast_ref::<JavaField>().unwrap();
-        let field_type = JavaType::parse(&field.descriptor());
+        // The cached name, read once: `Field::descriptor` hands back a fresh
+        // `String` and this used to ask for two of them per access, which on a
+        // title that reads a field per pixel is a copy per pixel.
+        let name = field.name().unwrap();
+        let field_type = JavaType::parse(&name.descriptor);
 
         assert!(!field.access_flags().contains(FieldAccessFlags::STATIC));
 
@@ -151,19 +155,18 @@ impl ClassInstance for JavaClassInstance {
             let value: KtfJvmWord = read_generic(&self.core, address).unwrap();
             let value_high: KtfJvmWord = read_generic(&self.core, address + 4).unwrap();
 
-            let r#type = JavaType::parse(&field.descriptor());
-            Ok(JavaValue::from_raw64(value, value_high, &r#type))
+            Ok(JavaValue::from_raw64(value, value_high, &field_type))
         } else {
             let value: KtfJvmWord = read_generic(&self.core, address).unwrap();
 
-            let r#type = JavaType::parse(&field.descriptor());
-            Ok(JavaValue::from_raw(value, &r#type, &self.core))
+            Ok(JavaValue::from_raw(value, &field_type, &self.core))
         }
     }
 
     fn put_field(&mut self, field: &dyn Field, value: JavaValue) -> JvmResult<()> {
         let field = field.as_any().downcast_ref::<JavaField>().unwrap();
-        let field_type = JavaType::parse(&field.descriptor());
+        let name = field.name().unwrap();
+        let field_type = JavaType::parse(&name.descriptor);
 
         assert!(!field.access_flags().contains(FieldAccessFlags::STATIC));
 

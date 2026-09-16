@@ -1,5 +1,9 @@
 use alloc::{borrow::ToOwned, boxed::Box, collections::BTreeMap, format, string::String, sync::Arc, vec, vec::Vec};
-use core::{any::Any, fmt::Write as _, mem::size_of};
+use core::{
+    any::{Any, TypeId},
+    fmt::Write as _,
+    mem::size_of,
+};
 
 use spin::Mutex;
 
@@ -86,8 +90,9 @@ pub(crate) struct ArmCoreInner {
     /// Guest words that are private to each thread, and what each reads before
     /// its thread has written it. See [`ArmCore::register_thread_local_word`].
     thread_local_defaults: BTreeMap<u32, u32>,
-    /// What [`ArmCore::write_once_metadata`] has already read, by address.
-    write_once_metadata: BTreeMap<u32, Arc<dyn Any + Send + Sync>>,
+    /// What [`ArmCore::write_once_metadata`] has already read, by address and
+    /// by what it was read as - one address can describe more than one thing.
+    write_once_metadata: BTreeMap<(u32, TypeId), Arc<dyn Any + Send + Sync>>,
 }
 
 /// Upper bound on pooled thread stacks. Peak concurrency is small (a handful),
@@ -383,7 +388,9 @@ impl ArmCore {
         T: Any + Send + Sync,
         F: FnOnce() -> Result<T>,
     {
-        if let Some(cached) = self.inner.lock().write_once_metadata.get(&address)
+        let key = (address, TypeId::of::<T>());
+
+        if let Some(cached) = self.inner.lock().write_once_metadata.get(&key)
             && let Ok(value) = cached.clone().downcast::<T>()
         {
             return Ok(value);
@@ -392,7 +399,7 @@ impl ArmCore {
         // Read outside the lock: `read` goes back through this core's memory.
         let value = Arc::new(read()?);
 
-        self.inner.lock().write_once_metadata.insert(address, value.clone());
+        self.inner.lock().write_once_metadata.insert(key, value.clone());
 
         Ok(value)
     }
