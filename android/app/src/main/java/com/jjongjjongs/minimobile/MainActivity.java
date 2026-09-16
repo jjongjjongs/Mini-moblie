@@ -24,6 +24,9 @@ import android.os.Bundle;
 import android.provider.OpenableColumns;
 import android.util.Log;
 import android.util.SparseArray;
+import android.view.InputDevice;
+import android.view.InputEvent;
+import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
@@ -104,6 +107,20 @@ public final class MainActivity extends Activity {
     private static final float KEYPAD_TOP_ROW = 0.19f;
 
     /** How a key is painted. */
+    // The handset keys a gamepad can reach, by the code the emulator takes.
+    // These are the same codes the keypad below sends; a pad is another way of
+    // pressing the same keys, not a second input path with its own numbering.
+    private static final int CODE_UP = 0;
+    private static final int CODE_DOWN = 1;
+    private static final int CODE_LEFT = 2;
+    private static final int CODE_RIGHT = 3;
+    private static final int CODE_OK = 4;
+    private static final int CODE_SOFT_L = 5;
+    private static final int CODE_SOFT_R = 6;
+    private static final int CODE_CLEAR = 7;
+    private static final int CODE_STAR = 18;
+    private static final int CODE_HASH = 19;
+
     private static final int KEY_PLAIN = 0;
     private static final int KEY_SAVE = 1;
     private static final int KEY_CLEAR = 2;
@@ -243,6 +260,153 @@ public final class MainActivity extends Activity {
         if (view != null) {
             view.releaseAll();
         }
+
+        // A pad's buttons go the same way a finger does: the release arrives
+        // wherever focus went, not here.
+        releasePad();
+    }
+
+    // --- gamepad ---------------------------------------------------------
+    //
+    // A pad presses the same handset keys the on-screen keypad does; what it
+    // cannot reach is the number pad, which has more keys than a pad has
+    // buttons, so that stays on the screen.
+    //
+    // The pad's own held-key state is kept here rather than in the keypad
+    // view, because the two are pressed independently: a finger holding ▶
+    // while a stick is pushed left must not have its key taken away when the
+    // stick centres. Each side releases only what it is holding.
+
+    /** Whether a handset key is held by the pad, by handset key code. */
+    private final boolean[] padHeld = new boolean[21];
+
+    /**
+     * How far a stick leaves centre before it counts as a direction.
+     *
+     * A handset's D-pad is a switch, so an analogue stick has to be made into
+     * one somewhere. Half travel is far enough that a resting stick's drift
+     * never reads as a press, and near enough that a player pushing a
+     * direction gets it well before the stick bottoms out.
+     */
+    private static final float STICK_THRESHOLD = 0.5f;
+
+    /** The handset key a gamepad button stands for, or -1 for one it does not. */
+    private static int handsetKeyFor(int keyCode) {
+        switch (keyCode) {
+            case KeyEvent.KEYCODE_DPAD_UP:
+                return CODE_UP;
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+                return CODE_DOWN;
+            case KeyEvent.KEYCODE_DPAD_LEFT:
+                return CODE_LEFT;
+            case KeyEvent.KEYCODE_DPAD_RIGHT:
+                return CODE_RIGHT;
+            // A and B sit where a handset's centre and C keys do, which is what
+            // a player reaches for without being told.
+            case KeyEvent.KEYCODE_BUTTON_A:
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+                return CODE_OK;
+            case KeyEvent.KEYCODE_BUTTON_B:
+                return CODE_CLEAR;
+            case KeyEvent.KEYCODE_BUTTON_L1:
+                return CODE_SOFT_L;
+            case KeyEvent.KEYCODE_BUTTON_R1:
+                return CODE_SOFT_R;
+            // The two keys left over go where a handset put its other two:
+            // games that use them use them for a menu or a mode switch.
+            case KeyEvent.KEYCODE_BUTTON_X:
+                return CODE_STAR;
+            case KeyEvent.KEYCODE_BUTTON_Y:
+                return CODE_HASH;
+            default:
+                return -1;
+        }
+    }
+
+    /**
+     * Whether an event came from a pad.
+     *
+     * A pad reports several sources at once - a stick, a D-pad and buttons are
+     * one device - so any of them being present is enough. Plain `SOURCE_DPAD`
+     * is not asked for on its own: a keyboard's arrow keys carry it, and they
+     * are not a pad.
+     */
+    private static boolean fromGamepad(InputEvent event) {
+        int source = event.getSource();
+
+        return (source & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD
+                || (source & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK;
+    }
+
+    /** Presses or releases a handset key the pad is driving. */
+    private void padKey(int code, boolean down) {
+        if (code < 0 || code >= padHeld.length || padHeld[code] == down) {
+            return;
+        }
+
+        padHeld[code] = down;
+        NativeBridge.nativeKey(code, down ? 1 : 0);
+    }
+
+    /** Releases every handset key the pad currently holds. */
+    private void releasePad() {
+        for (int code = 0; code < padHeld.length; code++) {
+            padKey(code, false);
+        }
+    }
+
+    @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+        int code = playerVisible && fromGamepad(event) ? handsetKeyFor(keyCode) : -1;
+        if (code < 0) {
+            return super.onKeyDown(keyCode, event);
+        }
+
+        // A held button repeats. The game reads a key as held or not, so the
+        // repeats say nothing the first press has not already said.
+        if (event.getRepeatCount() == 0) {
+            padKey(code, true);
+        }
+
+        return true;
+    }
+
+    @Override
+    public boolean onKeyUp(int keyCode, KeyEvent event) {
+        int code = playerVisible && fromGamepad(event) ? handsetKeyFor(keyCode) : -1;
+        if (code < 0) {
+            return super.onKeyUp(keyCode, event);
+        }
+
+        padKey(code, false);
+
+        return true;
+    }
+
+    @Override
+    public boolean onGenericMotionEvent(MotionEvent event) {
+        if (!playerVisible || !fromGamepad(event) || event.getAction() != MotionEvent.ACTION_MOVE) {
+            return super.onGenericMotionEvent(event);
+        }
+
+        // Some pads report their D-pad as a hat rather than as key events, so
+        // the hat is read first and the stick only answers for what the hat
+        // leaves at rest - otherwise a pad carrying both would have its stick
+        // undo what its D-pad just pressed.
+        float x = event.getAxisValue(MotionEvent.AXIS_HAT_X);
+        float y = event.getAxisValue(MotionEvent.AXIS_HAT_Y);
+
+        if (x == 0.0f && y == 0.0f) {
+            x = event.getAxisValue(MotionEvent.AXIS_X);
+            y = event.getAxisValue(MotionEvent.AXIS_Y);
+        }
+
+        padKey(CODE_LEFT, x <= -STICK_THRESHOLD);
+        padKey(CODE_RIGHT, x >= STICK_THRESHOLD);
+        padKey(CODE_UP, y <= -STICK_THRESHOLD);
+        padKey(CODE_DOWN, y >= STICK_THRESHOLD);
+
+        return true;
     }
 
     @Override
@@ -1706,16 +1870,16 @@ public final class MainActivity extends Activity {
             // they do is whatever the game draws in the corners of its screen
             // above them. Back is the same key a handset marked C, which games
             // use both for their menu and for stepping back out of it.
-            keys.add(new Key("L", 5, KEY_SOFT));
-            keys.add(new Key("R", 6, KEY_SOFT));
+            keys.add(new Key("L", CODE_SOFT_L, KEY_SOFT));
+            keys.add(new Key("R", CODE_SOFT_R, KEY_SOFT));
             keys.add(new Key("저장", 20, KEY_SAVE));
-            keys.add(new Key("뒤로가기", 7, KEY_CLEAR));
+            keys.add(new Key("뒤로가기", CODE_CLEAR, KEY_CLEAR));
 
-            keys.add(new Key("▲", 0, KEY_DIRECTION));
-            keys.add(new Key("◀", 2, KEY_DIRECTION));
-            keys.add(new Key("OK", 4, KEY_PLAIN));
-            keys.add(new Key("▶", 3, KEY_DIRECTION));
-            keys.add(new Key("▼", 1, KEY_DIRECTION));
+            keys.add(new Key("▲", CODE_UP, KEY_DIRECTION));
+            keys.add(new Key("◀", CODE_LEFT, KEY_DIRECTION));
+            keys.add(new Key("OK", CODE_OK, KEY_PLAIN));
+            keys.add(new Key("▶", CODE_RIGHT, KEY_DIRECTION));
+            keys.add(new Key("▼", CODE_DOWN, KEY_DIRECTION));
 
             // The number pad carries what a Korean handset printed beside each
             // digit, because that is what the key looks like and a player
@@ -1739,9 +1903,9 @@ public final class MainActivity extends Activity {
             keys.add(new Key("7", 15, KEY_PLAIN, "ㅂㅍ", "PQRS"));
             keys.add(new Key("8", 16, KEY_PLAIN, "ㅅㅎ", "TUV"));
             keys.add(new Key("9", 17, KEY_PLAIN, "ㅈㅊ", "WXYZ"));
-            keys.add(new Key("✱", 18, KEY_PLAIN));
+            keys.add(new Key("✱", CODE_STAR, KEY_PLAIN));
             keys.add(new Key("0", 8, KEY_PLAIN, "ㅇㅁ", ".,?!"));
-            keys.add(new Key("#", 19, KEY_PLAIN, "공백", null));
+            keys.add(new Key("#", CODE_HASH, KEY_PLAIN, "공백", null));
         }
 
         @Override

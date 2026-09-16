@@ -11,6 +11,14 @@
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
 
+    <!-- A pad is another way of pressing the handset's keys, never the only
+         one: the number pad has more keys than a pad has buttons, so the
+         on-screen keypad is always there and a touchscreen is still required.
+         Declared so a device that has a pad knows the app answers to it. -->
+    <uses-feature
+        android:name="android.hardware.gamepad"
+        android:required="false" />
+
     <application
         android:allowBackup="true"
         android:extractNativeLibs="false"
