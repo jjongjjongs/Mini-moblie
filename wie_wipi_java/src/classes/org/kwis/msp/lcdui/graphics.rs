@@ -827,7 +827,7 @@ impl Graphics {
     ) -> JvmResult<()> {
         tracing::debug!("org.kwis.msp.lcdui.Graphics::setRGBPixels({this:?}, {x}, {y}, {width}, {height}, {rgb_pixels:?}, {offset}, {bpl})");
 
-        let midp_graphics = jvm.get_field(&this, "midpGraphics", "Ljavax/microedition/lcdui/Graphics;").await?;
+        let mut midp_graphics: ClassInstanceRef<MidpGraphics> = jvm.get_field(&this, "midpGraphics", "Ljavax/microedition/lcdui/Graphics;").await?;
 
         // bpl is the *bytes* one line of the picture needs - "한 줄의 이미지가
         // 저장되기 위해서 필요한 바이트 수" - while MIDP's drawRGB counts its
@@ -837,13 +837,12 @@ impl Graphics {
         // half disagreeing with that one.
         let scan_length = bpl / 4;
 
-        jvm.invoke_virtual(
-            &midp_graphics,
-            "drawRGB",
-            "([IIIIIIIZ)V",
-            (rgb_pixels, offset, scan_length, x, y, width, height, true),
-        )
-        .await
+        // Straight into `drawRGB`'s own work rather than through the JVM: this
+        // is the call a title that plots its screen a pixel at a time makes
+        // thousands of times a frame, and a virtual dispatch for each of them
+        // resolves a method, boxes eight arguments and allocates a future
+        // before any pixel moves.
+        MidpGraphics::blit_rgb(jvm, &mut midp_graphics, &rgb_pixels, offset, scan_length, x, y, width, height, true).await
     }
 
     async fn set_gray_scale(jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>, value: i32) -> JvmResult<()> {

@@ -949,6 +949,28 @@ impl Graphics {
             "javax.microedition.lcdui.Graphics::drawRGB({this:?}, {rgb_data:?}, {offset}, {scan_length}, {x}, {y}, {width}, {height}, {process_alpha})"
         );
 
+        Self::blit_rgb(jvm, &mut this, &rgb_data, offset, scan_length, x, y, width, height, process_alpha).await
+    }
+
+    /// `drawRGB`'s own work, reachable without going through the JVM.
+    ///
+    /// WIPI's `Graphics.setRGBPixels` is the same call under another name and
+    /// forwards here. Forwarding it as a virtual call made the platform resolve
+    /// a method, box the arguments and allocate a future for every one - which
+    /// a title that plots its screen a pixel at a time (귀혼 무사편 blits
+    /// through `setRGBPixels(x, y, 1, 1, ...)`) pays per pixel.
+    pub async fn blit_rgb<T>(
+        jvm: &Jvm,
+        this: &mut ClassInstanceRef<Graphics>,
+        rgb_data: &ClassInstanceRef<Array<T>>,
+        offset: i32,
+        scan_length: i32,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        process_alpha: bool,
+    ) -> JvmResult<()> {
         // scanlength is the distance in array *elements* from the first pixel
         // of one row to the first of the next, which the specification lets
         // differ from the width: a caller may hand over a window into a wider
@@ -956,7 +978,7 @@ impl Graphics {
         // gathered one at a time when it does differ, and the whole block read
         // at once when it does not, which is every tightly packed caller.
         let pixel_data: Vec<i32> = if scan_length == width {
-            jvm.load_array(&rgb_data, offset as _, (width * height) as _).await?
+            jvm.load_array(rgb_data, offset as _, (width * height) as _).await?
         } else {
             let mut rows = Vec::with_capacity((width.max(0) * height.max(0)) as usize);
 
@@ -972,21 +994,21 @@ impl Graphics {
                         .await);
                 };
 
-                rows.extend(jvm.load_array::<i32>(&rgb_data, start as _, width as _).await?);
+                rows.extend(jvm.load_array::<i32>(rgb_data, start as _, width as _).await?);
             }
 
             rows
         };
 
-        let mut canvas = Self::canvas(jvm, &mut this).await?;
+        let mut canvas = Self::canvas(jvm, this).await?;
 
-        let translate_x: i32 = jvm.get_field(&this, "translateX", "I").await?;
-        let translate_y: i32 = jvm.get_field(&this, "translateY", "I").await?;
+        let translate_x: i32 = jvm.get_field(this, "translateX", "I").await?;
+        let translate_y: i32 = jvm.get_field(this, "translateY", "I").await?;
 
         let x = translate_x + x;
         let y = translate_y + y;
 
-        let clip = Self::clip(jvm, &this).await?;
+        let clip = Self::clip(jvm, this).await?;
 
         if process_alpha {
             let src_image = VecImageBuffer::<ArgbPixel>::from_raw(width as _, height as _, cast_vec(pixel_data));
