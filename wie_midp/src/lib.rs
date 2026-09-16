@@ -2,6 +2,7 @@
 extern crate alloc;
 
 pub mod classes;
+mod fields;
 
 use wie_jvm_support::WieJavaClassProto;
 

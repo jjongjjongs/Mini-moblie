@@ -11,7 +11,10 @@ use java_runtime::classes::java::lang::String;
 use wie_backend::canvas::{ArgbPixel, Canvas as BackendCanvas, Clip, PixelType, Rgb8Pixel, TextAlignment, VecImageBuffer};
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 
-use crate::classes::javax::microedition::lcdui::{Font, Image};
+use crate::{
+    classes::javax::microedition::lcdui::{Font, Image},
+    fields::declared_field,
+};
 
 bitflags::bitflags! {
     #[derive(Clone, Copy)]
@@ -67,6 +70,14 @@ fn vertical_anchor_offset(anchor: Anchor, font_height: i32, font_baseline: i32) 
     } else {
         0 // TOP or unspecified
     }
+}
+
+/// What a drawing call reads off a `Graphics` besides its image.
+struct GraphicsState {
+    translate_x: i32,
+    translate_y: i32,
+    clip: Clip,
+    xor_mode: bool,
 }
 
 // class javax.microedition.lcdui.Graphics
@@ -1000,15 +1011,13 @@ impl Graphics {
             rows
         };
 
-        let mut canvas = Self::canvas(jvm, this).await?;
+        let state = Self::state(jvm, this).await?;
+        let mut canvas = Self::canvas_in_mode(jvm, this, state.xor_mode).await?;
 
-        let translate_x: i32 = jvm.get_field(this, "translateX", "I").await?;
-        let translate_y: i32 = jvm.get_field(this, "translateY", "I").await?;
+        let x = state.translate_x + x;
+        let y = state.translate_y + y;
 
-        let x = translate_x + x;
-        let y = translate_y + y;
-
-        let clip = Self::clip(jvm, this).await?;
+        let clip = state.clip;
 
         if process_alpha {
             let src_image = VecImageBuffer::<ArgbPixel>::from_raw(width as _, height as _, cast_vec(pixel_data));
@@ -1032,13 +1041,44 @@ impl Graphics {
     }
 
     async fn canvas(jvm: &Jvm, this: &mut ClassInstanceRef<Graphics>) -> JvmResult<Box<dyn BackendCanvas>> {
+        let xor_mode: bool = jvm.get_field(this, "xorMode", "Z").await?;
+
+        Self::canvas_in_mode(jvm, this, xor_mode).await
+    }
+
+    /// The canvas for a caller that has already read the mode - see
+    /// [`Self::state`], which reads it beside everything else a drawing call
+    /// needs.
+    async fn canvas_in_mode(jvm: &Jvm, this: &mut ClassInstanceRef<Graphics>, xor_mode: bool) -> JvmResult<Box<dyn BackendCanvas>> {
         let image = Self::image(jvm, this).await?;
         let mut canvas = Image::canvas(jvm, &image).await?;
-        let xor_mode: bool = jvm.get_field(this, "xorMode", "Z").await?;
 
         canvas.set_xor_mode(xor_mode);
 
         Ok(canvas)
+    }
+
+    /// Everything but the image a drawing call reads off a `Graphics`, in one
+    /// pass over the class definition rather than one resolution per field.
+    ///
+    /// Translation, clip and mode are seven fields of the same object, and the
+    /// call that reads them is the one a title plotting its screen a pixel at a
+    /// time makes thousands of times a frame. See
+    /// [`crate::fields::declared_field`].
+    async fn state(jvm: &Jvm, this: &ClassInstanceRef<Graphics>) -> JvmResult<GraphicsState> {
+        let class = this.class_definition();
+
+        Ok(GraphicsState {
+            translate_x: declared_field(jvm, &*class, this, "translateX", "I").await?,
+            translate_y: declared_field(jvm, &*class, this, "translateY", "I").await?,
+            clip: Clip {
+                x: declared_field::<i32>(jvm, &*class, this, "clipX", "I").await? as _,
+                y: declared_field::<i32>(jvm, &*class, this, "clipY", "I").await? as _,
+                width: declared_field::<i32>(jvm, &*class, this, "clipWidth", "I").await? as _,
+                height: declared_field::<i32>(jvm, &*class, this, "clipHeight", "I").await? as _,
+            },
+            xor_mode: declared_field(jvm, &*class, this, "xorMode", "Z").await?,
+        })
     }
 
     pub async fn image(jvm: &Jvm, this: &mut ClassInstanceRef<Graphics>) -> JvmResult<ClassInstanceRef<Image>> {
