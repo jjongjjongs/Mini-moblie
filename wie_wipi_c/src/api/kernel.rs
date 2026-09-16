@@ -538,16 +538,36 @@ pub async fn get_program_name(context: &mut dyn WIPICContext, name_buf: WIPICWor
     tracing::debug!("MC_knlGetProgramName({name_buf:#x}, {buf_size})");
 
     let aid = context.system().aid().to_string();
+    let name = program_name(&aid);
 
-    if buf_size < aid.len() as i32 + 1 {
+    if buf_size < name.len() as i32 + 1 {
         return Ok(-18); // M_E_SHORTBUF
     }
 
-    let aid_bytes = aid.as_bytes();
-    context.write_bytes(name_buf, aid_bytes)?;
-    context.write_bytes(name_buf + aid_bytes.len() as u32, &[0])?;
+    let name_bytes = name.as_bytes();
+    context.write_bytes(name_buf, name_bytes)?;
+    context.write_bytes(name_buf + name_bytes.len() as u32, &[0])?;
 
     Ok(0)
+}
+
+/// The name a title's own binary was built to be called.
+///
+/// This is the archive's AID, which is what a title that only wants to compose
+/// a database or a resource name out of it expects. One asks for another
+/// reason: 드래곤로드EX carries `010100D5` - 데몬헌터's AID, left in when that
+/// project was reused - and compares what this answers against it before it
+/// will set its card up. Told its own `0102DD43`, which appears nowhere in its
+/// binary, it stops there having drawn nothing, and the screen stays black
+/// while its event loop runs on.
+///
+/// Keyed by AID because the AID is what the archive says and what the title
+/// disagrees with. An AID not named here answers itself.
+fn program_name(aid: &str) -> &str {
+    match aid {
+        "0102DD43" => "010100D5",
+        _ => aid,
+    }
 }
 
 /// The one program there is.
@@ -835,8 +855,28 @@ mod test {
 
     use super::{
         alloc, calloc, execute, exit, free, get_access_level, get_app_manager_id, get_exec_names, get_parent_program_id, get_program_info,
-        get_resource, get_resource_id, get_system_property, load, mexecute, mload, program_stop, sprintk,
+        get_program_name, get_resource, get_resource_id, get_system_property, load, mexecute, mload, program_stop, sprintk,
     };
+
+    /// `MC_knlGetProgramName` answers the name the title's own binary was built
+    /// to be called, which for all but one archive is its AID.
+    ///
+    /// 드래곤로드EX compares what it gets against the `010100D5` its binary
+    /// carries, and shows nothing at all when it does not match.
+    #[futures_test::test]
+    async fn the_program_name_is_the_one_the_binary_answers_to() {
+        for (aid, expected) in [("0102DD43", "010100D5"), ("01038088", "01038088")] {
+            let system = System::new(Box::new(TestPlatform::new()), "test-pid", aid, DefaultTaskRunner);
+            let mut context = TestContext::with_system(system);
+
+            assert_eq!(get_program_name(&mut context, 0x1000, 32).await.unwrap(), 0);
+            let answered = String::from_utf8(read_null_terminated_string_bytes(&context, 0x1000).unwrap()).unwrap();
+            assert_eq!(answered, expected);
+
+            // One byte short of the name and its terminator is refused.
+            assert_eq!(get_program_name(&mut context, 0x2000, expected.len() as i32).await.unwrap(), -18);
+        }
+    }
 
     /// `MC_knlFree` is declared `void`, so the register a caller reads after it
     /// has to be the one the caller left there. A compiler may put the free in
