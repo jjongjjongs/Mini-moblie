@@ -1,4 +1,4 @@
-use alloc::string::String;
+use alloc::{string::String, sync::Arc};
 use core::{
     fmt::{self, Debug, Formatter},
     mem::size_of,
@@ -52,7 +52,7 @@ impl JavaField {
         Ok(Self::from_raw(ptr_raw, core))
     }
 
-    pub fn name(&self) -> Result<JavaFullName> {
+    pub fn name(&self) -> Result<Arc<JavaFullName>> {
         let raw: RawJavaField = read_generic(&self.core, self.ptr_raw)?;
 
         JavaFullName::from_ptr(&self.core, raw.ptr_name)

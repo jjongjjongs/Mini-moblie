@@ -284,10 +284,15 @@ where
     fn get_pixel(&self, x: i32, y: i32) -> Color {
         let offset = (((y as u32) * self.width() + (x as u32)) * self.bytes_per_pixel()) as usize;
 
-        let mut buffer = vec![0; self.bytes_per_pixel() as usize];
-        self.raw_buffer.read(offset as _, &mut buffer).unwrap();
+        // A pixel is four bytes at most, so it is read into the stack rather
+        // than into an allocation: this is called once per pixel of every blend
+        // and every read-back, and a title that draws through the Java layer a
+        // pixel at a time was spending its frame in the allocator.
+        let mut buffer = [0u8; 4];
+        let size = size_of::<T::DataType>();
+        self.raw_buffer.read(offset as _, &mut buffer[..size]).unwrap();
 
-        T::to_color(*bytemuck::from_bytes(&buffer[..size_of::<T::DataType>()]))
+        T::to_color(*bytemuck::from_bytes(&buffer[..size]))
     }
 
     fn raw(&self) -> Cow<'_, [u8]> {
@@ -331,10 +336,12 @@ where
 
         let offset = (((y as u32) * self.width() + (x as u32)) * self.bytes_per_pixel()) as usize;
 
-        let raw_bytes = colors
-            .iter()
-            .flat_map(|color| bytemuck::bytes_of(&T::from_color(*color)).to_vec())
-            .collect::<Vec<_>>();
+        // One buffer for the run, filled in place; the flat_map this replaced
+        // allocated a `Vec` per pixel to hold its two or four bytes.
+        let mut raw_bytes = Vec::with_capacity(colors.len() * size_of::<T::DataType>());
+        for color in colors {
+            raw_bytes.extend_from_slice(bytemuck::bytes_of(&T::from_color(*color)));
+        }
 
         self.raw_buffer.write(offset as _, &raw_bytes).unwrap();
     }

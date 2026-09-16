@@ -89,6 +89,24 @@ where
     Ok(unsafe { destination.assume_init() })
 }
 
+/// How much of a string to ask for at once, and the alignment a request is kept
+/// inside.
+///
+/// A byte at a time is what this used to read, and a byte costs whatever the
+/// reader costs: on `ArmCore` that is a mutex, a dynamic call and a page lookup
+/// per character, and the guest's Java records are all named by strings - a
+/// field's name is read again on every `get_field`, its class's on every lookup
+/// that walks to it. A title whose paint loop reaches for a field per pixel
+/// pays for those characters more than for its own drawing (귀혼 무사편 plots
+/// its screen through `Graphics.setRGBPixels(x, y, 1, 1, ...)`, so a frame is
+/// thousands of field lookups and tens of thousands of these reads).
+///
+/// The span is kept inside one 4 KiB page because a reader may serve memory in
+/// pages and refuse a request that leaves a mapped one - `ArmCore` does - and
+/// the terminator is normally a few characters away, not a page.
+const STRING_CHUNK: u32 = 64;
+const STRING_CHUNK_ALIGNMENT: u32 = 0x1000;
+
 pub fn read_null_terminated_string_bytes<R>(reader: &R, address: u32) -> Result<Vec<u8>>
 where
     R: ?Sized + ByteRead,
@@ -97,24 +115,43 @@ where
         return Err(WieError::InvalidMemoryAccess(address));
     }
 
-    let mut result = Vec::with_capacity(20);
+    let mut result = Vec::with_capacity(STRING_CHUNK as usize);
     let mut cursor = address;
-    let mut byte = [0; 1];
+    let mut chunk = [0; STRING_CHUNK as usize];
     loop {
+        // A span that stops at the page the cursor is in, so a string at the end
+        // of one never asks for the next.
+        let span = STRING_CHUNK.min(STRING_CHUNK_ALIGNMENT - (cursor & (STRING_CHUNK_ALIGNMENT - 1))) as usize;
+        if span > 1
+            && let Ok(read) = reader.read_bytes(cursor, &mut chunk[..span])
+            && read > 0
+        {
+            if let Some(end) = chunk[..read].iter().position(|byte| *byte == 0) {
+                result.extend_from_slice(&chunk[..end]);
+                return Ok(result);
+            }
+
+            result.extend_from_slice(&chunk[..read]);
+            cursor += read as u32;
+
+            continue;
+        }
+
+        // Whatever the reader would not serve as a span it still has to answer
+        // for a byte, so the refusal a caller sees is the one it always saw.
+        let mut byte = [0; 1];
         let read = reader.read_bytes(cursor, &mut byte)?;
         if read != 1 {
             return Err(WieError::FatalError(format!("Short read at {cursor:#x}: expected 1, got {read}")));
         }
 
         if byte[0] == 0 {
-            break;
+            return Ok(result);
         }
 
         result.push(byte[0]);
         cursor += 1;
     }
-
-    Ok(result)
 }
 
 pub fn write_null_terminated_string_bytes<W>(writer: &mut W, address: u32, bytes: &[u8]) -> Result<()>
@@ -261,5 +298,56 @@ mod tests {
         let value = read_null_terminated_string_bytes(&memory, 1).unwrap();
 
         assert_eq!(value, b"test");
+    }
+
+    /// A reader that serves whatever fits and says how much it served, which is
+    /// what a paged memory does at the end of what it has.
+    struct PagedMemory {
+        memory: Vec<u8>,
+    }
+
+    impl ByteRead for PagedMemory {
+        fn read_bytes(&self, address: u32, result: &mut [u8]) -> Result<usize> {
+            let address = address as usize;
+            if address >= self.memory.len() {
+                return Err(WieError::InvalidMemoryAccess(address as u32));
+            }
+
+            let read = result.len().min(self.memory.len() - address);
+            result[..read].copy_from_slice(&self.memory[address..address + read]);
+
+            Ok(read)
+        }
+    }
+
+    /// The span a read asks for is a saving, not a promise: a reader that hands
+    /// back less than it was asked for still has to spell the string, and one
+    /// that refuses the span outright still has to spell it a byte at a time.
+    #[test]
+    fn a_string_reads_the_same_however_much_the_reader_serves_at_once() {
+        let mut memory = vec![0u8; 0x1000 - 8];
+        memory.extend_from_slice(b"a name that runs past the end of its page\0");
+
+        let start = 0x1000 - 8;
+        let paged = PagedMemory { memory: memory.clone() };
+        let strict = StrictMemory { memory };
+
+        assert_eq!(
+            read_null_terminated_string_bytes(&paged, start).unwrap(),
+            b"a name that runs past the end of its page"
+        );
+        assert_eq!(
+            read_null_terminated_string_bytes(&strict, start).unwrap(),
+            b"a name that runs past the end of its page"
+        );
+    }
+
+    /// An unreadable address is still an error, however the read was made.
+    #[test]
+    fn a_string_with_no_memory_under_it_is_refused() {
+        let memory = PagedMemory { memory: vec![b'x'; 4] };
+
+        assert!(read_null_terminated_string_bytes(&memory, 0).is_err());
+        assert!(read_null_terminated_string_bytes(&memory, 8).is_err());
     }
 }

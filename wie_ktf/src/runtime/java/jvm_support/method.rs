@@ -194,7 +194,7 @@ impl JavaMethod {
         raw.ptr_class
     }
 
-    pub fn name(&self) -> Result<JavaFullName> {
+    pub fn name(&self) -> Result<Arc<JavaFullName>> {
         let raw: RawJavaMethod = read_generic(&self.core, self.ptr_raw)?;
 
         JavaFullName::from_ptr(&self.core, raw.ptr_name)
@@ -305,7 +305,7 @@ impl JavaMethod {
             // ordinary ones the trace below counts) to afford reading it.
             tracing::trace!(
                 "Calling native method {}: {:#x}",
-                self.name().map(|x| x.name).unwrap_or_default(),
+                self.name().map(|x| x.name.clone()).unwrap_or_default(),
                 raw.fn_body_native_or_exception_table
             );
             let result = run_with_unwind(&mut core, entry_sp, raw.fn_body_native_or_exception_table, vec![0, arg_container]).await;
@@ -541,13 +541,13 @@ impl Method for JavaMethod {
     fn name(&self) -> String {
         let name = self.name().unwrap();
 
-        name.name
+        name.name.clone()
     }
 
     fn descriptor(&self) -> String {
         let name = self.name().unwrap();
 
-        name.descriptor
+        name.descriptor.clone()
     }
 
     async fn run(&self, jvm: &Jvm, args: Box<[JavaValue]>) -> JvmResult<JavaValue> {

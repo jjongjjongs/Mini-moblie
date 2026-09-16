@@ -10,7 +10,7 @@ mod name;
 mod value;
 mod vtable;
 
-use alloc::boxed::Box;
+use alloc::{boxed::Box, sync::Arc};
 use core::mem::size_of;
 use jvm_implementation::KtfJvmImplementation;
 
@@ -199,7 +199,7 @@ impl KtfJvmSupport {
         JavaClassDefinition::from_raw(ptr_class, core)
     }
 
-    pub fn read_name(core: &ArmCore, ptr_name: u32) -> Result<JavaFullName> {
+    pub fn read_name(core: &ArmCore, ptr_name: u32) -> Result<Arc<JavaFullName>> {
         JavaFullName::from_ptr(core, ptr_name)
     }
 

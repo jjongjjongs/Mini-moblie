@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
+use alloc::{boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 use core::{
     fmt::{self, Debug, Formatter},
     mem::size_of,
@@ -174,10 +174,10 @@ impl JavaClassDefinition {
             return Ok(Vec::new());
         }
 
-        let ptr_methods = read_null_terminated_table(&self.core, descriptor.ptr_methods)?;
+        let ptr_methods = self.member_table(descriptor.ptr_methods)?;
 
         let mut result = Vec::with_capacity(ptr_methods.len());
-        for method in ptr_methods {
+        for &method in ptr_methods.iter() {
             let method = JavaMethod::from_raw(method, &self.core);
 
             if method.ptr_class() == self.ptr_raw {
@@ -200,18 +200,42 @@ impl JavaClassDefinition {
             return Ok(Vec::new());
         }
 
-        let ptr_fields = read_null_terminated_table(&self.core, descriptor.ptr_fields_or_element_type)?;
+        let ptr_fields = self.member_table(descriptor.ptr_fields_or_element_type)?;
 
-        Ok(ptr_fields.into_iter().map(|x| JavaField::from_raw(x, &self.core)).collect())
+        Ok(ptr_fields.iter().map(|&x| JavaField::from_raw(x, &self.core)).collect())
     }
 
+    /// A class's table of field or method records, read once.
+    ///
+    /// Like the names the records carry, the table is written when the class is
+    /// registered and never rewritten, so it is cached against its own address.
+    /// A lookup reads the whole table to find one member, and a word of it is a
+    /// guest read like any other.
+    fn member_table(&self, address: u32) -> Result<Arc<Vec<u32>>> {
+        let core = self.core.clone();
+
+        self.core.write_once_metadata(address, || read_null_terminated_table(&core, address))
+    }
+
+    /// This class's name, read once out of the guest's own record.
+    ///
+    /// The record is written when the class is registered and never rewritten,
+    /// so the name is cached against the string's address - see
+    /// [`ArmCore::write_once_metadata`]. Every field and method lookup asks for
+    /// it, and spelling it out of guest memory each time cost more than the
+    /// lookup itself.
     pub fn name(&self) -> Result<String> {
         let raw: RawJavaClass = read_generic(&self.core, self.ptr_raw)?;
         let descriptor: RawJavaClassDescriptor = read_generic(&self.core, raw.ptr_descriptor)?;
 
-        let bytes = read_null_terminated_string_bytes(&self.core, descriptor.ptr_name)?;
+        let core = self.core.clone();
+        let name = self.core.write_once_metadata(descriptor.ptr_name, || {
+            let bytes = read_null_terminated_string_bytes(&core, descriptor.ptr_name)?;
 
-        Ok(String::from_utf8(bytes).unwrap())
+            Ok(String::from_utf8(bytes).unwrap())
+        })?;
+
+        Ok((*name).clone())
     }
 
     pub fn parent_class(&self) -> Result<Option<JavaClassDefinition>> {

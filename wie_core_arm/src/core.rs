@@ -1,5 +1,5 @@
 use alloc::{borrow::ToOwned, boxed::Box, collections::BTreeMap, format, string::String, sync::Arc, vec, vec::Vec};
-use core::{fmt::Write as _, mem::size_of};
+use core::{any::Any, fmt::Write as _, mem::size_of};
 
 use spin::Mutex;
 
@@ -86,6 +86,8 @@ pub(crate) struct ArmCoreInner {
     /// Guest words that are private to each thread, and what each reads before
     /// its thread has written it. See [`ArmCore::register_thread_local_word`].
     thread_local_defaults: BTreeMap<u32, u32>,
+    /// What [`ArmCore::write_once_metadata`] has already read, by address.
+    write_once_metadata: BTreeMap<u32, Arc<dyn Any + Send + Sync>>,
 }
 
 /// Upper bound on pooled thread stacks. Peak concurrency is small (a handful),
@@ -171,6 +173,7 @@ impl ArmCore {
             stack_pool: Vec::new(),
             next_stub_address: FUNCTIONS_BASE,
             profile,
+            write_once_metadata: BTreeMap::new(),
         };
 
         let result = Self {
@@ -356,6 +359,42 @@ impl ArmCore {
         inner.thread_local_defaults.insert(address, default);
 
         Ok(())
+    }
+
+    /// Read a record the runtime writes once and never rewrites, answering from
+    /// a per-core cache after the first read.
+    ///
+    /// A guest read is not free: every byte costs this core's lock, a dynamic
+    /// call and a page lookup, and the platforms describe their Java classes in
+    /// guest memory by NUL-terminated strings. A field is found by comparing
+    /// names, so one `getfield` spells out every field name of a class and the
+    /// class's own name - tens of reads each - and a title whose paint loop
+    /// reaches for a field per pixel spends its frame on those characters. The
+    /// records themselves are written when a class is registered and never
+    /// touched again, so reading one twice always answers the same.
+    ///
+    /// **The caller promises exactly that**: pass only an address whose content
+    /// is fixed for as long as this core lives. Nothing invalidates an entry, so
+    /// caching anything a title can rewrite - a field's value, a buffer, an
+    /// allocation that may be freed and handed out again - hands back the old
+    /// bytes forever.
+    pub fn write_once_metadata<T, F>(&self, address: u32, read: F) -> Result<Arc<T>>
+    where
+        T: Any + Send + Sync,
+        F: FnOnce() -> Result<T>,
+    {
+        if let Some(cached) = self.inner.lock().write_once_metadata.get(&address)
+            && let Ok(value) = cached.clone().downcast::<T>()
+        {
+            return Ok(value);
+        }
+
+        // Read outside the lock: `read` goes back through this core's memory.
+        let value = Arc::new(read()?);
+
+        self.inner.lock().write_once_metadata.insert(address, value.clone());
+
+        Ok(value)
     }
 
     /// The registered addresses and the value each reads before a thread has
