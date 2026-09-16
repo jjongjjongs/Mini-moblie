@@ -222,15 +222,30 @@ impl EventQueue {
                         MIDPKeyCode::from_key_code(x) as _,
                         0,
                     ],
-                    Event::Timer { due, callback } => {
+                    Event::Timer {
+                        id,
+                        generation,
+                        due,
+                        callback,
+                    } => {
+                        if !context.system().event_queue().is_timer_current(id, generation) {
+                            continue;
+                        }
+
                         // TODO we should wait for timer more efficiently
                         if due < now {
-                            callback()
-                                .or_else(async |x| Err(jvm.exception("net/wie/WieError", &x.to_string()).await))
-                                .await?
+                            if context.system().event_queue().take_timer(id, generation) {
+                                callback()
+                                    .or_else(async |x| Err(jvm.exception("net/wie/WieError", &x.to_string()).await))
+                                    .await?
+                            }
                         } else {
-                            // push it to event queue again
-                            pending_timer_events.push(Event::Timer { due, callback });
+                            pending_timer_events.push(Event::Timer {
+                                id,
+                                generation,
+                                due,
+                                callback,
+                            });
                         }
 
                         continue;
@@ -253,13 +268,27 @@ impl EventQueue {
                 context.system().sleep(16).await; // TODO we need to wait for events
 
                 for event in pending_timer_events.drain(..) {
-                    context.system().event_queue().push(event);
+                    let current = match &event {
+                        Event::Timer { id, generation, .. } => context.system().event_queue().is_timer_current(*id, *generation),
+                        _ => true,
+                    };
+
+                    if current {
+                        context.system().event_queue().push(event);
+                    }
                 }
             }
         }
 
         for event in pending_timer_events {
-            context.system().event_queue().push(event);
+            let current = match &event {
+                Event::Timer { id, generation, .. } => context.system().event_queue().is_timer_current(*id, *generation),
+                _ => true,
+            };
+
+            if current {
+                context.system().event_queue().push(event);
+            }
         }
 
         Ok(())
@@ -297,7 +326,15 @@ impl EventQueue {
 
         match event_kind {
             EventQueueEvent::RepaintEvent => {
-                let _: () = jvm.invoke_virtual(&display, "handlePaintEvent", "()V", ()).await?;
+                // A title driving its own frame loop gets this paint out of the
+                // way for a few rounds; one that has handed the screen back gets
+                // it straight back. See `HOST_PAINT_STAND_DOWN`.
+                let until: i64 = jvm.get_field(&display, "__wieStandDownUntil", "J").await?;
+                if (_context.system().platform().now().raw() as i64) < until {
+                    tracing::debug!("host paint stood down until {until}");
+                } else {
+                    let _: () = jvm.invoke_virtual(&display, "handlePaintEvent", "()V", ()).await?;
+                }
             }
             EventQueueEvent::KeyEvent => {
                 let event_type = if let Some(event_type) = KeyboardEventType::from_raw(event[1]) {

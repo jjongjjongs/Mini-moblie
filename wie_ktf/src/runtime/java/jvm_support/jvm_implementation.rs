@@ -13,7 +13,10 @@ use wie_jvm_support::JvmImplementation;
 
 use crate::runtime::java::{JavaSvcFunctions, register_java_svc_handler};
 
-use super::{JavaArrayClassDefinition, JavaClassDefinition};
+use super::{
+    JavaArrayClassDefinition, JavaClassDefinition, class_file,
+    classes::net::wie::{KtfClassLoader, module_class},
+};
 
 #[derive(Clone)]
 pub struct KtfJvmImplementation {
@@ -57,8 +60,34 @@ impl JvmImplementation for KtfJvmImplementation {
         })
     }
 
-    async fn define_class_java(&self, _jvm: &Jvm, _data: &[u8]) -> JvmResult<Box<dyn ClassDefinition>> {
-        unreachable!()
+    /// A class the ordinary class path found as a `.class` file.
+    ///
+    /// KTF runs no bytecode. A title's classes are compiled into its own module
+    /// and the runtime asks the module for them one at a time - which is what
+    /// the reference does too, and why nothing here can define a class from the
+    /// bytes it was built from.
+    ///
+    /// Most archives carry only the module, so this was never reached. 바이러스
+    /// keeps `Clet` and its card in the jar beside a client.bin that holds both,
+    /// and the class path - which the loader asks before its own `findClass` -
+    /// finds those first. So the bytes are read for the one thing they can
+    /// still answer, the name of the class being asked for, and the module is
+    /// asked for that class.
+    async fn define_class_java(&self, jvm: &Jvm, data: &[u8]) -> JvmResult<Box<dyn ClassDefinition>> {
+        let Some(name) = class_file::class_name(data) else {
+            return Err(jvm.exception("java/lang/ClassFormatError", "not a class file").await);
+        };
+
+        let Some(fn_get_class) = KtfClassLoader::module_entry_point(jvm).await else {
+            return Err(jvm
+                .exception("java/lang/ClassNotFoundException", &format!("{name}: no module to ask"))
+                .await);
+        };
+
+        match module_class(&mut self.core.clone(), fn_get_class, &name).await? {
+            Some(class) => Ok(Box::new(class) as _),
+            None => Err(jvm.exception("java/lang/ClassNotFoundException", &name).await),
+        }
     }
 
     async fn define_array_class(&self, jvm: &Jvm, element_type_name: &str) -> JvmResult<Box<dyn ClassDefinition>> {

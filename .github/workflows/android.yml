@@ -1,0 +1,147 @@
+name: Android APK
+
+# The apk is the deliverable, so it gets built on the branches it is being
+# worked on as well as on main - a workflow that only runs after merge cannot
+# tell anyone whether the thing builds.
+on:
+  push:
+    branches:
+      - main
+      - 'claude/**'
+  pull_request:
+  workflow_dispatch:
+
+# Needed only by the release step, which replaces the apk hanging off a fixed
+# tag. Everything else here reads.
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    # The signing secrets are lifted to the job so a step can ask whether they
+    # exist. A step's `if` cannot read the `secrets` context - the workflow is
+    # rejected before it starts, with no job to show for it - but it can read
+    # `env`, and a secret that is not set arrives here as an empty string.
+    env:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: android-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      # The runner image ships an NDK; cargo-ndk needs to be pointed at it.
+      - name: Export NDK location
+        run: echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+
+      # The apk is installed over the last one, and Android refuses an update
+      # whose signature differs from the installed app's. A runner is a fresh
+      # machine, so the SDK's own debug key is regenerated every run and every
+      # build used to be a different signature - which is why a patch could
+      # only be installed by uninstalling first. One key, kept in a secret,
+      # fixes it.
+      #
+      # Without the secret the build still runs and still produces an apk; it
+      # just falls back to the per-run debug key, and says so.
+      - name: Restore signing key
+        if: env.ANDROID_KEYSTORE_BASE64 != ''
+        run: |
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > android/minimobile.jks
+          echo "MINIMOBILE_KEYSTORE_FILE=minimobile.jks" >> "$GITHUB_ENV"
+
+      - name: Build APK
+        working-directory: android
+        # -PenableJit selects the machine-code JIT engine; drop it to ship the
+        # interpreter.
+        #
+        # The run number is the version code, so a later build is never a
+        # downgrade of an earlier one.
+        env:
+          MINIMOBILE_KEYSTORE_PASSWORD: ${{ env.ANDROID_KEYSTORE_PASSWORD }}
+          MINIMOBILE_KEY_ALIAS: minimobile
+        run: gradle --no-daemon assembleDebug -PenableJit -PversionCode=${{ github.run_number }}
+
+      - name: Upload APK
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: wie-mobile-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+
+      # An artifact can only be downloaded by someone signed in to GitHub, from
+      # a zip, which is awkward on the handset the apk is meant for. A release
+      # asset is a plain link, so the apk also goes to one - always the same
+      # tag, so the link does not change between builds.
+      - name: Publish the APK to the development release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: mobile-dev
+        run: |
+          set -eu
+
+          # Whether this apk can be installed over the last one. Builds share a
+          # key only when the signing secret was there to restore, and an apk
+          # signed with the per-run debug key needs the installed app removed
+          # first - which is worth saying on the page people download from.
+          if [ -n "${MINIMOBILE_KEYSTORE_FILE:-}" ]; then
+            signing='project key - installs over the previous build'
+          else
+            signing='per-run debug key - uninstall the previous build first'
+          fi
+
+          notes="Development build, replaced by every push.
+
+          | | |
+          |---|---|
+          | Branch | \`${{ github.ref_name }}\` |
+          | Commit | ${{ github.sha }} |
+          | Built | $(date -u '+%Y-%m-%d %H:%M UTC') |
+          | Version code | ${{ github.run_number }} |
+          | Signing | $signing |
+
+          Android will ask for permission to install it from outside the
+          store."
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes "$notes" --prerelease
+          else
+            gh release create "$TAG" --title 'WIE Mobile (development build)' --notes "$notes" --prerelease
+          fi
+
+          # The asset takes the file's own name, so it is renamed rather than
+          # uploaded as gradle's `app-debug.apk`.
+          cp android/app/build/outputs/apk/debug/app-debug.apk wie-mobile-debug.apk
+          gh release upload "$TAG" wie-mobile-debug.apk --clobber
+
+          # Drop a stale `app-debug.apk` asset left by an older workflow: it
+          # shows up next to the real one and is easy to download by mistake.
+          gh release delete-asset "$TAG" app-debug.apk --yes 2>/dev/null || true

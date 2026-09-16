@@ -16,7 +16,7 @@ use wie_backend::canvas::{
 };
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 
-use crate::classes::javax::microedition::lcdui::Graphics;
+use crate::{classes::javax::microedition::lcdui::Graphics, fields::declared_field};
 
 // class javax.microedition.lcdui.Image
 pub struct Image;
@@ -193,34 +193,28 @@ impl Image {
     }
 
     pub async fn image(jvm: &Jvm, this: &ClassInstanceRef<Self>) -> JvmResult<Box<dyn BackendImage>> {
-        let width: i32 = jvm.get_field(this, "w", "I").await?;
-        let bpl: i32 = jvm.get_field(this, "bpl", "I").await?;
+        let pixels = ImagePixels::of(jvm, this).await?;
 
-        let bytes_per_pixel = bpl / width;
-
-        Ok(match bytes_per_pixel {
-            1 => Box::new(JavaImageBuffer::<Rgb332Pixel>::new(jvm, this).await?) as _,
-            2 => Box::new(JavaImageBuffer::<Rgb565Pixel>::new(jvm, this).await?) as _,
-            4 => Box::new(JavaImageBuffer::<ArgbPixel>::new(jvm, this).await?) as _,
-            _ => unimplemented!("Unsupported pixel format: {bytes_per_pixel}"),
+        Ok(match pixels.bytes_per_pixel() {
+            1 => Box::new(pixels.buffer::<Rgb332Pixel>()) as _,
+            2 => Box::new(pixels.buffer::<Rgb565Pixel>()) as _,
+            4 => Box::new(pixels.buffer::<ArgbPixel>()) as _,
+            other => unimplemented!("Unsupported pixel format: {other}"),
         })
     }
 
     pub async fn canvas(jvm: &Jvm, this: &ClassInstanceRef<Self>) -> JvmResult<Box<dyn Canvas>> {
-        let width: i32 = jvm.get_field(this, "w", "I").await?;
-        let bpl: i32 = jvm.get_field(this, "bpl", "I").await?;
+        let pixels = ImagePixels::of(jvm, this).await?;
 
-        let bytes_per_pixel = bpl / width;
-
-        Ok(match bytes_per_pixel {
-            1 => Box::new(ImageBufferCanvas::new(JavaImageBuffer::<Rgb332Pixel>::new(jvm, this).await?)) as _,
-            2 => Box::new(ImageBufferCanvas::new(JavaImageBuffer::<Rgb565Pixel>::new(jvm, this).await?)) as _,
-            4 => Box::new(ImageBufferCanvas::new(JavaImageBuffer::<ArgbPixel>::new(jvm, this).await?)) as _,
-            _ => unimplemented!("Unsupported pixel format: {bytes_per_pixel}"),
+        Ok(match pixels.bytes_per_pixel() {
+            1 => Box::new(ImageBufferCanvas::new(pixels.buffer::<Rgb332Pixel>())) as _,
+            2 => Box::new(ImageBufferCanvas::new(pixels.buffer::<Rgb565Pixel>())) as _,
+            4 => Box::new(ImageBufferCanvas::new(pixels.buffer::<ArgbPixel>())) as _,
+            other => unimplemented!("Unsupported pixel format: {other}"),
         })
     }
 
-    async fn create_image_instance(jvm: &Jvm, width: u32, height: u32, data: &[u8], bytes_per_pixel: u32) -> JvmResult<ClassInstanceRef<Image>> {
+    pub async fn create_image_instance(jvm: &Jvm, width: u32, height: u32, data: &[u8], bytes_per_pixel: u32) -> JvmResult<ClassInstanceRef<Image>> {
         let mut data_array = jvm.instantiate_array("B", data.len() as _).await?;
         jvm.array_raw_buffer_mut(&mut data_array).await?.write(0, data)?;
 
@@ -235,6 +229,55 @@ impl Image {
     }
 }
 
+/// An image's size, pitch and pixels, read in one pass.
+///
+/// Both ways of reaching an image's pixels used to read `w` and `bpl` to find
+/// the pixel format and then read `imgData`, `w` and `h` again to build the
+/// buffer. That is five field resolutions where three fields are wanted, and a
+/// drawing call makes one per call - see [`crate::fields::declared_field`].
+struct ImagePixels {
+    width: i32,
+    height: i32,
+    bpl: i32,
+    raw_buffer: Box<dyn ArrayRawBufferMut>,
+}
+
+impl ImagePixels {
+    async fn of(jvm: &Jvm, this: &ClassInstanceRef<Image>) -> JvmResult<Self> {
+        let class = this.class_definition();
+
+        let width: i32 = declared_field(jvm, &*class, this, "w", "I").await?;
+        let height: i32 = declared_field(jvm, &*class, this, "h", "I").await?;
+        let bpl: i32 = declared_field(jvm, &*class, this, "bpl", "I").await?;
+        let mut data: ClassInstanceRef<Array<i8>> = declared_field(jvm, &*class, this, "imgData", "[B").await?;
+
+        let raw_buffer = jvm.array_raw_buffer_mut(&mut data).await?;
+
+        Ok(Self {
+            width,
+            height,
+            bpl,
+            raw_buffer,
+        })
+    }
+
+    fn bytes_per_pixel(&self) -> i32 {
+        self.bpl / self.width
+    }
+
+    fn buffer<T>(self) -> JavaImageBuffer<T>
+    where
+        T: PixelType,
+    {
+        JavaImageBuffer {
+            width: self.width,
+            height: self.height,
+            raw_buffer: self.raw_buffer,
+            _phantom: PhantomData,
+        }
+    }
+}
+
 struct JavaImageBuffer<T>
 where
     T: PixelType,
@@ -243,26 +286,6 @@ where
     height: i32,
     raw_buffer: Box<dyn ArrayRawBufferMut>,
     _phantom: PhantomData<T>,
-}
-
-impl<T> JavaImageBuffer<T>
-where
-    T: PixelType,
-{
-    pub async fn new(jvm: &Jvm, this: &ClassInstanceRef<Image>) -> JvmResult<Self> {
-        let mut java_img_data = jvm.get_field(this, "imgData", "[B").await?;
-        let raw_buffer = jvm.array_raw_buffer_mut(&mut java_img_data).await?;
-
-        let width: i32 = jvm.get_field(this, "w", "I").await?;
-        let height: i32 = jvm.get_field(this, "h", "I").await?;
-
-        Ok(Self {
-            width,
-            height,
-            raw_buffer,
-            _phantom: PhantomData,
-        })
-    }
 }
 
 impl<T> BackendImage for JavaImageBuffer<T>
@@ -284,10 +307,15 @@ where
     fn get_pixel(&self, x: i32, y: i32) -> Color {
         let offset = (((y as u32) * self.width() + (x as u32)) * self.bytes_per_pixel()) as usize;
 
-        let mut buffer = vec![0; self.bytes_per_pixel() as usize];
-        self.raw_buffer.read(offset as _, &mut buffer).unwrap();
+        // A pixel is four bytes at most, so it is read into the stack rather
+        // than into an allocation: this is called once per pixel of every blend
+        // and every read-back, and a title that draws through the Java layer a
+        // pixel at a time was spending its frame in the allocator.
+        let mut buffer = [0u8; 4];
+        let size = size_of::<T::DataType>();
+        self.raw_buffer.read(offset as _, &mut buffer[..size]).unwrap();
 
-        T::to_color(*bytemuck::from_bytes(&buffer[..size_of::<T::DataType>()]))
+        T::to_color(*bytemuck::from_bytes(&buffer[..size]))
     }
 
     fn raw(&self) -> Cow<'_, [u8]> {
@@ -331,10 +359,12 @@ where
 
         let offset = (((y as u32) * self.width() + (x as u32)) * self.bytes_per_pixel()) as usize;
 
-        let raw_bytes = colors
-            .iter()
-            .flat_map(|color| bytemuck::bytes_of(&T::from_color(*color)).to_vec())
-            .collect::<Vec<_>>();
+        // One buffer for the run, filled in place; the flat_map this replaced
+        // allocated a `Vec` per pixel to hold its two or four bytes.
+        let mut raw_bytes = Vec::with_capacity(colors.len() * size_of::<T::DataType>());
+        for color in colors {
+            raw_bytes.extend_from_slice(bytemuck::bytes_of(&T::from_color(*color)));
+        }
 
         self.raw_buffer.write(offset as _, &raw_bytes).unwrap();
     }

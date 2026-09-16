@@ -1,8 +1,15 @@
 pub mod database;
+pub mod filesystem;
 pub mod graphics;
+pub mod im;
 pub mod kernel;
 pub mod media;
 pub mod misc;
 pub mod net;
+pub mod phone;
+pub mod record_database;
+pub mod serial;
+pub mod shared_buf;
+pub mod system;
 pub mod uic;
 pub mod util;

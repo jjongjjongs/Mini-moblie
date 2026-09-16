@@ -1,6 +1,8 @@
+use alloc::collections::BTreeMap;
+
 use wie_util::Result;
 
-use crate::{Allocator, ArmCore, context::ArmCoreContext};
+use crate::{ArmCore, context::ArmCoreContext};
 
 const STACK_SIZE: u32 = 0x100000; // 1 MB
 
@@ -9,11 +11,17 @@ pub struct ThreadState {
     pub context: ArmCoreContext,
     pub stack_base: usize,
     pub stack_size: usize,
+    /// This thread's own value for every word registered with
+    /// [`ArmCore::register_thread_local_word`], swapped in and out of guest
+    /// memory around each run of the thread. A word this thread has not
+    /// written yet is absent and reads as the value the word was registered
+    /// with.
+    pub thread_local: BTreeMap<u32, u32>,
 }
 
 impl ThreadState {
     pub fn new(mut core: ArmCore) -> Result<Self> {
-        let stack_base = Allocator::alloc(&mut core, STACK_SIZE)?;
+        let stack_base = core.acquire_thread_stack(STACK_SIZE)?;
         let context = ArmCoreContext {
             r0: 0,
             r1: 0,
@@ -39,14 +47,13 @@ impl ThreadState {
             context,
             stack_base: stack_base as _,
             stack_size: STACK_SIZE as _,
+            thread_local: BTreeMap::new(),
         })
     }
 }
 
 impl Drop for ThreadState {
     fn drop(&mut self) {
-        if let Err(err) = Allocator::free(&mut self.core, self.stack_base as _, self.stack_size as u32) {
-            tracing::error!("Failed to free thread stack: {err}");
-        }
+        self.core.release_thread_stack(self.stack_base as u32, self.stack_size as u32);
     }
 }
