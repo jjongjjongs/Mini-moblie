@@ -837,12 +837,22 @@ impl Graphics {
         // half disagreeing with that one.
         let scan_length = bpl / 4;
 
+        // **A WIPI pixel carries no alpha.** The specification's word is
+        // `0x00RRGGBB` and the top byte is nothing, which is why the reference
+        // writes every pixel it is given and why `MC_grpSetRGBPixels` beside
+        // this one reads the word the same way. Handing it to `drawRGB` as an
+        // ARGB block made that empty byte a transparency: every pixel came out
+        // fully transparent and nothing was drawn at all. 귀혼 무사편 paints its
+        // whole screen through this call - and reads it back through
+        // `getRGBPixels`, which fills the same empty top byte - so it drew a
+        // flat fill and nothing else.
+        //
         // Straight into `drawRGB`'s own work rather than through the JVM: this
         // is the call a title that plots its screen a pixel at a time makes
         // thousands of times a frame, and a virtual dispatch for each of them
         // resolves a method, boxes eight arguments and allocates a future
         // before any pixel moves.
-        MidpGraphics::blit_rgb(jvm, &mut midp_graphics, &rgb_pixels, offset, scan_length, x, y, width, height, true).await
+        MidpGraphics::blit_rgb(jvm, &mut midp_graphics, &rgb_pixels, offset, scan_length, x, y, width, height, false).await
     }
 
     async fn set_gray_scale(jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>, value: i32) -> JvmResult<()> {
