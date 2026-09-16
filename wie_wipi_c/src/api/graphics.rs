@@ -762,7 +762,13 @@ pub async fn flush_lcd(
     // hundreds. Distinguishes "the image never got drawn" from "it was drawn
     // but is not reaching the display". Logged at info so it survives a normal
     // capture without turning on the per-primitive flood.
-    {
+    //
+    // Asked first whether anyone is listening: the summary walks every pixel of
+    // the frame and builds a set of its colours, and a session with the log off
+    // was paying that for a line nobody reads. It does not show up against the
+    // cost of a frame, so this is not a speed-up - it is work that had no
+    // reason to happen.
+    if tracing::enabled!(tracing::Level::INFO) {
         let (colours, non_black) = surface_content(&*src_canvas);
 
         tracing::info!(
@@ -1165,6 +1171,13 @@ fn still_the_surface(raw: &WIPICFramebuffer, width: i32, height: i32) -> bool {
 fn trace_offscreen_surfaces(context: &mut dyn WIPICContext) {
     let flushes = FLUSHES.fetch_add(1, Ordering::Relaxed);
     if flushes % OFFSCREEN_TRACE_EVERY != 0 {
+        return;
+    }
+
+    // Reading a surface back copies it out of guest memory and counts its
+    // colours, so like the frame summary above it is only worth doing for a
+    // reader who will see it.
+    if !tracing::enabled!(tracing::Level::INFO) {
         return;
     }
 

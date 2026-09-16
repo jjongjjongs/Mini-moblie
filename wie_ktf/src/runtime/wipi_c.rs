@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, vec};
+use alloc::{boxed::Box, sync::Arc, vec};
 
 use jvm::Jvm;
 use wie_backend::System;
@@ -10,7 +10,7 @@ use wie_wipi_c::{
 };
 
 use crate::runtime::SVC_CATEGORY_WIPIC;
-use crate::runtime::svc_ids::{WIPICKernelMethodId, WIPICTableId};
+use crate::runtime::svc_ids::{WIPICGraphicsMethodId, WIPICKernelMethodId, WIPICTableId};
 
 mod context;
 pub mod interface;
@@ -137,7 +137,67 @@ pub fn register_wipic_svc_handler(core: &mut ArmCore, system: &System, jvm: &Jvm
             im::new_state(),
             kernel::new_state(),
         ),
-    )
+    )?;
+
+    core.set_fast_svc_handler(Arc::new(|core: &mut ArmCore, category: u32, _lr: u32| -> Result<bool> {
+        match category {
+            SVC_CATEGORY_WIPIC => try_fast_wipic_call(core),
+            _ => Ok(false),
+        }
+    }));
+
+    Ok(())
+}
+
+/// Synchronous answers for the two WIPI C calls that are arithmetic.
+///
+/// On the handset these are a few instructions inline in the caller. Here every
+/// one of them is a supervisor call: the core leaves its run loop, the async
+/// dispatch clones a context of nine shared states, allocates two futures for
+/// the `async_trait` hop and unwinds back - for a shift and two ors.
+///
+/// That is most of what a title costs when it asks per pixel, and 록맨X does:
+/// a device trace of one gameplay frame holds **32,000 calls to
+/// `MC_grpGetPixelFromRGB`** against 128 `MC_grpDrawImage`, naming five
+/// distinct colours over and over - the colour key it tests each pixel
+/// against, resolved again for every pixel rather than once. Nothing about
+/// that is wrong on a handset, where the call is free; it is the round trip
+/// that is not free here, so the round trip is what goes.
+///
+/// Answered here rather than in [`graphics`] because the point is to not
+/// reach the generic path at all; the bodies there stay as they are and still
+/// answer every other caller. `Ok(true)` means the call is done, `Ok(false)`
+/// that the generic handler should take it.
+fn try_fast_wipic_call(core: &mut ArmCore) -> Result<bool> {
+    const GET_PIXEL_FROM_RGB: u32 = ((WIPICTableId::Graphics as u32) << 16) | WIPICGraphicsMethodId::GetPixelFromRgb as u32;
+    const GET_IMAGE_FRAMEBUFFER: u32 = ((WIPICTableId::Graphics as u32) << 16) | WIPICGraphicsMethodId::GetImageFramebuffer as u32;
+
+    let result = match core.read_svc_id() {
+        // `MC_grpGetPixelFromRGB`, the same RGB565 packing
+        // `wie_backend::canvas::Rgb565Pixel::from_color` does, on the low byte
+        // of each component as the generic body's `as u8` takes it.
+        GET_PIXEL_FROM_RGB => {
+            let r = core.read_param(0)? & 0xff;
+            let g = core.read_param(1)? & 0xff;
+            let b = core.read_param(2)? & 0xff;
+
+            ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+        }
+        // `MC_grpGetImageFrameBuffer`: a WIPICImage begins with its own
+        // framebuffer, so the image handle is already the answer.
+        GET_IMAGE_FRAMEBUFFER => core.read_param(0)?,
+        _ => return Ok(false),
+    };
+
+    // Back to the caller the way the generic path returns: the link register,
+    // which carries the caller's Thumb bit, not the SVC exception's own even
+    // return address.
+    let (_, lr) = core.read_pc_lr()?;
+
+    core.write_return_value(&[result])?;
+    core.set_next_pc(lr)?;
+
+    Ok(true)
 }
 
 /// Names a call to a slot no function stands behind.
