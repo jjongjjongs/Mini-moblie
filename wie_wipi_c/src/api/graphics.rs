@@ -44,7 +44,18 @@ pub const ANNUNCIATOR_ROWS_PTR: u32 = 0x7fff2000;
 /// binary. Reading them as UTF-8 turns every Hangul syllable into U+FFFD, and
 /// the font has no glyph for that, so a title's text silently drew nothing at
 /// all - which is what dialogue boxes with no words in them were.
+///
+/// A null pointer is the empty string, not a fault. A handset reads the byte at
+/// address zero like any other and finds the zero that terminates a string
+/// there, so a title that measures or draws a label it has not set yet gets a
+/// width of nothing and draws nothing. 드래곤로드EX's loading screen asks for
+/// the width of one on the frame it starts its intro music, and this runtime
+/// maps nothing at zero, so the read faulted and took the title with it.
 fn read_wipi_string(context: &mut dyn WIPICContext, ptr: WIPICWord, length: i32) -> Result<String> {
+    if ptr == 0 {
+        return Ok(String::new());
+    }
+
     let bytes = if length > 0 {
         let mut buf = vec![0u8; length as usize];
         context.read_bytes(ptr, &mut buf)?;
@@ -1473,6 +1484,10 @@ pub async fn get_string_width(context: &mut dyn WIPICContext, font: i32, ptr_str
 /// `MC_grpGetUnicodeStringWidth` takes UCS-2 rather than the EUC-KR of the
 /// byte-string calls.
 fn read_wipi_unicode_string(context: &mut dyn WIPICContext, ptr: WIPICWord, length: i32) -> Result<String> {
+    if ptr == 0 {
+        return Ok(String::new());
+    }
+
     let units: Vec<u16> = if length >= 0 {
         let mut buf = vec![0u8; (length as usize) * 2];
         context.read_bytes(ptr, &mut buf)?;
@@ -2088,8 +2103,31 @@ mod tests {
     use wie_backend::canvas::{ArgbPixel, Image, VecImageBuffer};
 
     use super::WIPICGraphicsContextIdx as Idx;
-    use super::{destination_stride, get_context, init_context, set_context, surface_content, surface_thumbnail};
+    use super::{
+        destination_stride, draw_string, get_context, get_string_width, get_unicode_string_width, init_context, set_context, surface_content,
+        surface_thumbnail,
+    };
     use crate::context::{WIPICContext, test::TestContext};
+
+    /// A string a title has not set yet is the empty one, and measuring or
+    /// drawing it does nothing.
+    ///
+    /// 드래곤로드EX's loading screen measures one, and reading it from address
+    /// zero ended the run with `Invalid memory access; address: 0` under the
+    /// title's own loading text.
+    #[futures_test::test]
+    async fn a_null_string_measures_and_draws_as_nothing() {
+        let mut context = TestContext::new();
+
+        for length in [-1, 0, 8] {
+            assert_eq!(get_string_width(&mut context, 10, 0, length).await.unwrap(), 0);
+            assert_eq!(get_unicode_string_width(&mut context, 10, 0, length).await.unwrap(), 0);
+        }
+
+        // And drawing one is a call that returns, not a fault. The destination
+        // is never reached, so it need not be a framebuffer.
+        draw_string(&mut context, super::WIPICIndirectPtr(0), 0, 0, 0, -1, 0).await.unwrap();
+    }
 
     /// A framebuffer of `pixels` (ARGB, row-major) as the guest holds one: the
     /// indirect pointer a WIPI-C call is handed.
