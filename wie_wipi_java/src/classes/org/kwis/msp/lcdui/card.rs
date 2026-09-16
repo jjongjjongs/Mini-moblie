@@ -4,10 +4,18 @@ use java_class_proto::{JavaFieldProto, JavaMethodProto};
 use java_constants::MethodAccessFlags;
 use jvm::{ClassInstanceRef, Jvm, Result as JvmResult};
 
-use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
+use wie_jvm_support::{WieJavaClassProto, WieJvmContext, declared_field, put_declared_field};
 use wie_midp::classes::javax::microedition::lcdui::Canvas;
 
 use crate::classes::org::kwis::msp::lcdui::{Display, Graphics};
+
+/// The class these fields belong to.
+///
+/// Every field below is read through it rather than off the instance: a title
+/// subclasses `Card` and names its own fields freely, and 레나크사가's
+/// `MainCanvas` declares an `x`, a `y`, a `w` and an `h` of its own. See
+/// `wie_jvm_support::declared_field`.
+const CARD: &str = "org/kwis/msp/lcdui/Card";
 
 // abstract class org.kwis.msp.lcdui.Card
 pub struct Card;
@@ -233,12 +241,12 @@ impl Card {
         }
 
         let _: () = jvm.invoke_special(&this, "java/lang/Object", "<init>", "()V", ()).await?;
-        jvm.put_field(&mut this, "display", "Lorg/kwis/msp/lcdui/Display;", display).await?;
-        jvm.put_field(&mut this, "x", "I", x).await?;
-        jvm.put_field(&mut this, "y", "I", y).await?;
-        jvm.put_field(&mut this, "w", "I", width).await?;
-        jvm.put_field(&mut this, "h", "I", height).await?;
-        jvm.put_field(&mut this, "transparent", "Z", transparent).await?;
+        put_declared_field(jvm, CARD, &mut this, "display", "Lorg/kwis/msp/lcdui/Display;", display).await?;
+        put_declared_field(jvm, CARD, &mut this, "x", "I", x).await?;
+        put_declared_field(jvm, CARD, &mut this, "y", "I", y).await?;
+        put_declared_field(jvm, CARD, &mut this, "w", "I", width).await?;
+        put_declared_field(jvm, CARD, &mut this, "h", "I", height).await?;
+        put_declared_field(jvm, CARD, &mut this, "transparent", "Z", transparent).await?;
 
         Ok(())
     }
@@ -246,8 +254,8 @@ impl Card {
     async fn move_card(jvm: &Jvm, _: &mut WieJvmContext, mut this: ClassInstanceRef<Card>, x: i32, y: i32) -> JvmResult<()> {
         tracing::debug!("org.kwis.msp.lcdui.Card::move({this:?}, {x}, {y})");
 
-        jvm.put_field(&mut this, "x", "I", x).await?;
-        jvm.put_field(&mut this, "y", "I", y).await
+        put_declared_field(jvm, CARD, &mut this, "x", "I", x).await?;
+        put_declared_field(jvm, CARD, &mut this, "y", "I", y).await
     }
 
     async fn resize(jvm: &Jvm, _: &mut WieJvmContext, mut this: ClassInstanceRef<Card>, width: i32, height: i32) -> JvmResult<()> {
@@ -259,20 +267,20 @@ impl Card {
                 .await);
         }
 
-        jvm.put_field(&mut this, "w", "I", width).await?;
-        jvm.put_field(&mut this, "h", "I", height).await
+        put_declared_field(jvm, CARD, &mut this, "w", "I", width).await?;
+        put_declared_field(jvm, CARD, &mut this, "h", "I", height).await
     }
 
     async fn get_x(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Card>) -> JvmResult<i32> {
         tracing::debug!("org.kwis.msp.lcdui.Card::getX({this:?})");
 
-        jvm.get_field(&this, "x", "I").await
+        declared_field(jvm, CARD, &this, "x", "I").await
     }
 
     async fn get_y(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Card>) -> JvmResult<i32> {
         tracing::debug!("org.kwis.msp.lcdui.Card::getY({this:?})");
 
-        jvm.get_field(&this, "y", "I").await
+        declared_field(jvm, CARD, &this, "y", "I").await
     }
 
     async fn pointer_notify(_: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Card>, r#type: i32, x: i32, y: i32) -> JvmResult<bool> {
@@ -284,33 +292,33 @@ impl Card {
     async fn get_display(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Card>) -> JvmResult<ClassInstanceRef<Display>> {
         tracing::debug!("org.kwis.msp.lcdui.Card::getDisplay({this:?})");
 
-        jvm.get_field(&this, "display", "Lorg/kwis/msp/lcdui/Display;").await
+        declared_field(jvm, CARD, &this, "display", "Lorg/kwis/msp/lcdui/Display;").await
     }
 
     async fn is_shown(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Card>) -> JvmResult<bool> {
         tracing::debug!("org.kwis.msp.lcdui.Card::isShown({this:?})");
 
-        let canvas: ClassInstanceRef<Canvas> = jvm.get_field(&this, "canvas", "Ljavax/microedition/lcdui/Canvas;").await?;
+        let canvas: ClassInstanceRef<Canvas> = declared_field(jvm, CARD, &this, "canvas", "Ljavax/microedition/lcdui/Canvas;").await?;
         Ok(!canvas.is_null())
     }
 
     async fn get_width(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Card>) -> JvmResult<i32> {
         tracing::debug!("org.kwis.msp.lcdui.Card::getWidth({this:?})");
 
-        jvm.get_field(&this, "w", "I").await
+        declared_field(jvm, CARD, &this, "w", "I").await
     }
 
     async fn get_height(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Card>) -> JvmResult<i32> {
         tracing::debug!("org.kwis.msp.lcdui.Card::getHeight({this:?})");
 
-        jvm.get_field(&this, "h", "I").await
+        declared_field(jvm, CARD, &this, "h", "I").await
     }
 
     async fn repaint(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Card>) -> JvmResult<()> {
         tracing::debug!("org.kwis.msp.lcdui.Card::repaint({this:?})");
 
-        let width: i32 = jvm.get_field(&this, "w", "I").await?;
-        let height: i32 = jvm.get_field(&this, "h", "I").await?;
+        let width: i32 = declared_field(jvm, CARD, &this, "w", "I").await?;
+        let height: i32 = declared_field(jvm, CARD, &this, "h", "I").await?;
 
         let _: () = jvm.invoke_virtual(&this, "repaint", "(IIII)V", (0, 0, width, height)).await?;
 
@@ -328,15 +336,15 @@ impl Card {
     ) -> JvmResult<()> {
         tracing::debug!("org.kwis.msp.lcdui.Card::repaint({this:?}, {x}, {y}, {width}, {height})");
 
-        let canvas: ClassInstanceRef<Canvas> = jvm.get_field(&this, "canvas", "Ljavax/microedition/lcdui/Canvas;").await?;
+        let canvas: ClassInstanceRef<Canvas> = declared_field(jvm, CARD, &this, "canvas", "Ljavax/microedition/lcdui/Canvas;").await?;
         if canvas.is_null() || width <= 0 || height <= 0 {
             return Ok(());
         }
 
-        let card_x: i32 = jvm.get_field(&this, "x", "I").await?;
-        let card_y: i32 = jvm.get_field(&this, "y", "I").await?;
-        let card_width: i32 = jvm.get_field(&this, "w", "I").await?;
-        let card_height: i32 = jvm.get_field(&this, "h", "I").await?;
+        let card_x: i32 = declared_field(jvm, CARD, &this, "x", "I").await?;
+        let card_y: i32 = declared_field(jvm, CARD, &this, "y", "I").await?;
+        let card_width: i32 = declared_field(jvm, CARD, &this, "w", "I").await?;
+        let card_height: i32 = declared_field(jvm, CARD, &this, "h", "I").await?;
 
         let repaint_x = i64::from(x).max(0).min(i64::from(card_width));
         let repaint_y = i64::from(y).max(0).min(i64::from(card_height));
@@ -366,7 +374,7 @@ impl Card {
     async fn service_repaints(jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Card>) -> JvmResult<()> {
         tracing::debug!("org.kwis.msp.lcdui.Card::serviceRepaints({this:?})");
 
-        let canvas: ClassInstanceRef<Canvas> = jvm.get_field(&this, "canvas", "Ljavax/microedition/lcdui/Canvas;").await?;
+        let canvas: ClassInstanceRef<Canvas> = declared_field(jvm, CARD, &this, "canvas", "Ljavax/microedition/lcdui/Canvas;").await?;
         if !canvas.is_null() {
             let _: () = jvm.invoke_virtual(&canvas, "serviceRepaints", "()V", ()).await?;
         }
@@ -389,7 +397,7 @@ impl Card {
     async fn set_canvas(jvm: &Jvm, _: &mut WieJvmContext, mut this: ClassInstanceRef<Card>, canvas: ClassInstanceRef<Canvas>) -> JvmResult<()> {
         tracing::debug!("org.kwis.msp.lcdui.Card::setCanvas({this:?}, {canvas:?})");
 
-        jvm.put_field(&mut this, "canvas", "Ljavax/microedition/lcdui/Canvas;", canvas).await
+        put_declared_field(jvm, CARD, &mut this, "canvas", "Ljavax/microedition/lcdui/Canvas;", canvas).await
     }
 }
 
