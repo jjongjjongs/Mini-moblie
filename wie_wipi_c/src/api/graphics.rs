@@ -723,6 +723,12 @@ pub async fn draw_image(
         image.0
     );
 
+    // The slot a title left empty is drawn as nothing, the same way
+    // `get_image_property` measures it as nothing.
+    if image.0 == 0 {
+        return Ok(());
+    }
+
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(framebuffer)?)?);
     let image: WIPICImage = read_generic(context, context.data_ptr(image)?)?;
 
@@ -1927,8 +1933,20 @@ pub async fn get_image_framebuffer(_context: &mut dyn WIPICContext, image: WIPIC
     Ok(image)
 }
 
+/// A property of an image, or nothing at all when there is no image.
+///
+/// A null handle is a slot a title never filled, not a fault. 드래곤아이즈2 lays
+/// its character-select screen out from a table of images and asks every entry
+/// its width, including the one it leaves empty; the handset reads the zero at
+/// address zero and answers nothing, where this walked from that address and
+/// took the run down. Size is what a null answers to, so it measures as
+/// nothing and [`draw_image`] draws it as nothing.
 pub async fn get_image_property(context: &mut dyn WIPICContext, image: WIPICIndirectPtr, property: i32) -> Result<i32> {
     tracing::debug!("MC_grpGetImageProperty({:#x}, {property})", image.0);
+
+    if image.0 == 0 {
+        return Ok(0);
+    }
 
     let image: WIPICImage = read_generic(context, context.data_ptr(image)?)?;
 
@@ -2105,10 +2123,42 @@ mod tests {
 
     use super::WIPICGraphicsContextIdx as Idx;
     use super::{
-        destination_stride, draw_string, get_context, get_string_width, get_unicode_string_width, init_context, set_context, surface_content,
-        surface_thumbnail,
+        destination_stride, draw_image, draw_string, get_context, get_image_property, get_string_width, get_unicode_string_width, init_context,
+        set_context, surface_content, surface_thumbnail,
     };
     use crate::context::{WIPICContext, test::TestContext};
+
+    /// An image slot a title never filled measures as nothing and draws as
+    /// nothing, rather than faulting on the read from address zero.
+    ///
+    /// 드래곤아이즈2 builds its character-select screen from a table of images
+    /// and asks every entry for its size, the empty one included. Asking took
+    /// the run down under its own menu.
+    #[futures_test::test]
+    async fn a_null_image_measures_and_draws_as_nothing() {
+        let mut context = TestContext::new();
+
+        for property in [4, 5, 99] {
+            assert_eq!(get_image_property(&mut context, super::WIPICIndirectPtr(0), property).await.unwrap(), 0);
+        }
+
+        // And drawing it is a call that returns. The destination is never
+        // reached, so it need not be a framebuffer.
+        draw_image(
+            &mut context,
+            super::WIPICIndirectPtr(0),
+            0,
+            0,
+            16,
+            16,
+            super::WIPICIndirectPtr(0),
+            0,
+            0,
+            0,
+        )
+        .await
+        .unwrap();
+    }
 
     /// A string a title has not set yet is the empty one, and measuring or
     /// drawing it does nothing.
