@@ -129,9 +129,18 @@ struct CapturePlatform {
 /// So this hands out descriptors and nothing else. Everything that would reach
 /// a host fails, which is what a capture wants: what it records came from the
 /// answer this run gives rather than from somewhere off the machine.
+///
+/// A connect fails the way a real stack fails it. No stack knows a host is out
+/// of reach before it has tried, so the answer is `Pending` and the failure
+/// follows as `ConnectFailed`. Returning the error straight from `connect`
+/// skipped the callback entirely, and a title that watches only the callback -
+/// 드래곤아이즈2 reads none of the return values - waited on a failure it was
+/// never told about, which reads in a capture exactly like a title that hangs
+/// on its own.
 #[derive(Default)]
 struct CaptureNetwork {
     next: AtomicU64,
+    events: std::sync::Mutex<std::collections::VecDeque<wie_backend::NetworkEvent>>,
 }
 
 impl Network for CaptureNetwork {
@@ -139,8 +148,15 @@ impl Network for CaptureNetwork {
         Ok(self.next.fetch_add(1, Ordering::SeqCst) as i32 + 1)
     }
 
-    fn connect(&self, _socket: i32, _address: u32, _port: u16) -> NetworkPoll<()> {
-        NetworkPoll::Ready(Err(NetworkError::HostUnreachable))
+    fn connect(&self, socket: i32, _address: u32, _port: u16) -> NetworkPoll<()> {
+        // A real stack cannot know a host is out of reach before it has tried,
+        // so the failure arrives as an event rather than as a return value.
+        self.events
+            .lock()
+            .unwrap_or_else(|x| x.into_inner())
+            .push_back(wie_backend::NetworkEvent::ConnectFailed(socket));
+
+        NetworkPoll::Pending
     }
 
     fn bind(&self, _socket: i32, _address: u32, _port: u16) -> std::result::Result<(), NetworkError> {
@@ -170,7 +186,7 @@ impl Network for CaptureNetwork {
     fn resolve_host(&self, _host: &str, _query_id: u32) {}
 
     fn poll_event(&self) -> Option<wie_backend::NetworkEvent> {
-        None
+        self.events.lock().unwrap_or_else(|x| x.into_inner()).pop_front()
     }
 }
 
