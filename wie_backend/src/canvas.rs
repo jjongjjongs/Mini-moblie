@@ -3,7 +3,7 @@ mod lbmp;
 use alloc::{borrow::Cow, boxed::Box, string::ToString, vec, vec::Vec};
 use core::mem::size_of;
 
-use ab_glyph::{Font, FontRef, ScaleFont};
+use ab_glyph::{Font, FontRef, PxScaleFont, ScaleFont};
 use bytemuck::{Pod, cast_slice, pod_collect_to_vec};
 use image::ImageReader;
 use num_traits::{Num, Zero};
@@ -28,39 +28,67 @@ lazy_static::lazy_static! {
 /// itself.
 const FACE_HEIGHTS: [u32; 3] = [16, 14, 11];
 
-/// The face that draws `height` on whole pixels, and `None` when no face can -
-/// nothing divides 12 - which leaves the text smeared but the size the title
-/// asked for.
-fn pixel_face(height: f32) -> Option<&'static FontRef<'static>> {
+/// How far a requested height may be moved to reach one a face draws whole.
+///
+/// One pixel. A face drawn a pixel from the size a title asked for is a pixel
+/// wrong in one place; the same face scaled to a size it was not drawn at is
+/// wrong in every pixel it puts down - 드래곤로드 asks for ten, and ten of
+/// neodgm comes back 91% part-covered, which is the grey the text reads as on
+/// the panel. The Java side of the same font already rounds this way: its
+/// small and medium sizes land on 11 rather than on 10 and 12, and this is
+/// that rule where the height comes from the title's own handle instead of a
+/// flag.
+const SNAP_PX: u32 = 1;
+
+/// The face and the whole-pixel size to draw `height` at, and `None` when no
+/// face has a size near enough - the nearest whole size to 20 is 22, two
+/// above it, so 20 is left smeared at the size the title asked for rather
+/// than moved that far.
+fn pixel_face(height: f32) -> Option<(&'static FontRef<'static>, u32)> {
     let height = height as u32;
 
     if height == 0 {
         return None;
     }
 
-    // Largest first, so a height two faces can draw is drawn by the one that
-    // repeats its grid fewest times.
     FACE_HEIGHTS
         .into_iter()
-        .find(|design| height.is_multiple_of(*design))
-        .map(|design| match design {
-            16 => &*NEODGM,
-            14 => &*GALMURI11,
-            _ => &*GALMURI9,
+        .flat_map(|design| {
+            // The multiple of this face's grid just below the height, and the
+            // one just above it.
+            let repeats = (height / design).max(1);
+
+            [repeats * design, (repeats + 1) * design].map(move |size| (design, size))
+        })
+        .filter(|(_, size)| size.abs_diff(height) <= SNAP_PX)
+        // Nearest, and the smaller of two equally near - a face a pixel short
+        // of the height cannot overflow the room the title left for it.
+        .min_by_key(|(_, size)| (size.abs_diff(height), *size))
+        .map(|(design, size)| {
+            let face = match design {
+                16 => &*NEODGM,
+                14 => &*GALMURI11,
+                _ => &*GALMURI9,
+            };
+
+            (face, size)
         })
 }
 
-/// The face to draw `height` with, falling back to the one the system font has
-/// always been when no face fits the height.
-fn face_for(height: f32) -> &'static FontRef<'static> {
-    pixel_face(height).unwrap_or(&NEODGM)
+/// The face and scale to draw `height` with, falling back to the one the system
+/// font has always been, at the height itself, when no face has a size near it.
+fn scaled_face(height: f32) -> PxScaleFont<&'static FontRef<'static>> {
+    match pixel_face(height) {
+        Some((face, size)) => face.as_scaled(size as f32),
+        None => NEODGM.as_scaled(height),
+    }
 }
 
 /// How far below the top of a line of `height` the baseline sits, for the face
 /// that draws it. Tracks the face, so a title placing text by its baseline and
 /// the rasteriser agree about where the glyphs go.
 pub fn baseline_px(height: f32) -> f32 {
-    face_for(height).as_scaled(height).ascent()
+    scaled_face(height).ascent()
 }
 
 pub enum TextAlignment {
@@ -688,7 +716,7 @@ where
         color: Color,
         clip: Clip,
     ) {
-        let font = face_for(font_height).as_scaled(font_height);
+        let font = scaled_face(font_height);
 
         let total_width = string.chars().map(|c| font.h_advance(font.scaled_glyph(c).id)).sum::<f32>();
         let x = match text_alignment {
@@ -1229,13 +1257,13 @@ fn png_is_single_index0_tile(data: &[u8]) -> bool {
 
 pub fn string_width(string: &str, pt_size: f32) -> f32 {
     let px_height = NEODGM.pt_to_px_scale(pt_size).unwrap().y;
-    let font = face_for(px_height).as_scaled(px_height);
+    let font = scaled_face(px_height);
 
     string.chars().map(|c| font.h_advance(font.scaled_glyph(c).id)).sum::<f32>()
 }
 
 pub fn string_width_px(string: &str, px_height: f32) -> f32 {
-    let font = face_for(px_height).as_scaled(px_height);
+    let font = scaled_face(px_height);
 
     string.chars().map(|c| font.h_advance(font.scaled_glyph(c).id)).sum::<f32>()
 }
@@ -1251,7 +1279,7 @@ mod tests {
 
     use super::{
         ArgbPixel, Canvas, Color, Font, Rgb332Pixel, ScaleFont, TextAlignment, VecImageBuffer, baseline_px, decode_image, pixel_face,
-        png_with_repaired_crcs,
+        png_with_repaired_crcs, scaled_face,
     };
 
     /// A 1x1 indexed PNG, which is the smallest thing that has a palette to
@@ -1829,9 +1857,9 @@ mod tests {
         // Hangul with dense strokes, plus Latin and digits.
         let sample = "밝긁힣가나다ABCgjq0123";
 
-        for height in [11.0, 14.0, 16.0, 22.0, 28.0, 32.0] {
-            let face = pixel_face(height).unwrap_or_else(|| panic!("no face draws {height}px"));
-            let scaled = face.as_scaled(height);
+        for height in [10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 21.0, 22.0, 28.0, 32.0] {
+            let (face, size) = pixel_face(height).unwrap_or_else(|| panic!("no face draws {height}px"));
+            let scaled = face.as_scaled(size as f32);
 
             let mut solid = 0;
             let mut partial = 0;
@@ -1852,15 +1880,36 @@ mod tests {
         }
     }
 
-    /// The heights a title asks for are heights a face can draw. 12 is the one
-    /// that never could, which is why the sizes moved off it.
+    /// A height a face draws is drawn at it, and a height a pixel away is drawn
+    /// at the face's own size rather than smeared across its grid. 드래곤로드
+    /// asks for ten.
     #[test]
-    fn the_heights_titles_ask_for_have_a_face() {
-        for height in [11.0, 14.0, 16.0, 22.0] {
-            assert!(pixel_face(height).is_some(), "{height}px has no face");
+    fn a_height_within_a_pixel_of_a_face_is_drawn_by_that_face() {
+        for (height, size) in [
+            (11.0, 11),
+            (14.0, 14),
+            (16.0, 16),
+            (22.0, 22),
+            (10.0, 11),
+            (12.0, 11),
+            (13.0, 14),
+            (15.0, 14),
+            (17.0, 16),
+            (21.0, 22),
+        ] {
+            assert_eq!(pixel_face(height).map(|(_, size)| size), Some(size), "{height}px");
+        }
+    }
+
+    /// A height no face comes near keeps the size it asked for: dropping 20 to
+    /// 16 loses more than the smearing costs.
+    #[test]
+    fn a_height_no_face_comes_near_is_left_as_it_is() {
+        for height in [19.0, 20.0, 24.0] {
+            assert!(pixel_face(height).is_none(), "{height}px");
+            assert_eq!(scaled_face(height).height().round(), height, "{height}px");
         }
 
-        assert!(pixel_face(12.0).is_none(), "12px is the height no face divides");
         assert!(pixel_face(0.0).is_none(), "a zero height picks no face");
     }
 
@@ -1872,6 +1921,11 @@ mod tests {
         assert_eq!(baseline_px(16.0), 12.0);
         assert_eq!(baseline_px(14.0), 12.0);
         assert_eq!(baseline_px(11.0), 10.0);
+
+        // And a height the face was snapped to reports that face's baseline,
+        // so the metric a title lays out with is the one its glyphs have.
+        assert_eq!(baseline_px(10.0), 10.0);
+        assert_eq!(baseline_px(12.0), 10.0);
 
         for height in [11.0, 14.0, 16.0, 22.0] {
             let baseline = baseline_px(height);
