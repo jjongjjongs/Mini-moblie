@@ -215,9 +215,12 @@ fn try_fast_wipic_call(core: &mut ArmCore) -> Result<bool> {
 fn describe_unserved_call(core: &mut ArmCore, table_id: WIPICTableId, function_id: u16) -> Result<()> {
     let arguments: [u32; 4] = core::array::from_fn(|index| u32::get(core, index));
     let [_, pointer, length, _] = arguments;
+    // Where the title called from, which is the only way to find the call in
+    // its own code and read what it does with the answer.
+    let (_, lr) = core.read_pc_lr().unwrap_or((0, 0));
 
     tracing::warn!(
-        "unserved WIPIC table {} function {function_id}({:#x}, {:#x}, {:#x}, {:#x}){}",
+        "unserved WIPIC table {} function {function_id}({:#x}, {:#x}, {:#x}, {:#x}) from {lr:#x}{}",
         table_id as u32,
         arguments[0],
         arguments[1],

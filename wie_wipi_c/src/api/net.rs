@@ -1510,6 +1510,37 @@ pub async fn socket_connect_by_name(
     socket_connect(context, socket, address, port, callback, callback_context).await
 }
 
+/// Whether a server can be reached - KTF net slot 34.
+///
+/// The slot sits four past the three the carrier added for 데몬헌터, and
+/// 드래곤로드's data download is what reads it. Its downloader calls this with
+/// its server spelled as one string, `"kt68wipiwicgs.magicn.com:27090"`, and
+/// looks at nothing but the sign of the answer: negative and it stops, having
+/// created no socket at all, which is where the title sat - its own screen
+/// offering to download, and behind it `MC_netSetReadCB(0, ...)` every few
+/// seconds on a socket that was never opened, because a slot this runtime did
+/// not serve refuses with -1.
+///
+/// Answered, the title goes on to do the ordinary thing: `MC_netSocket(2, 1)`,
+/// then slot 30 with an address and port of its own, then its protocol. So
+/// this is asked *before* anything is opened and about a destination it does
+/// not otherwise pass - a question, not a connection - and nothing of the
+/// answer is kept. A platform cannot know whether a server answers until it
+/// connects, and the connect is where that is found out and already reported;
+/// so the answer here is yes, and the name is written down because this is the
+/// only place it appears.
+pub async fn check_server(context: &mut dyn WIPICContext, ptr_name: WIPICWord) -> Result<i32> {
+    let name = if ptr_name == 0 {
+        String::new()
+    } else {
+        String::from_utf8_lossy(&read_null_terminated_string_bytes(context, ptr_name)?).into_owned()
+    };
+
+    tracing::info!("MC_netCheckServer({name:?}) -> 0");
+
+    Ok(0)
+}
+
 /// What an answer here kept for itself, in the running title's record store.
 ///
 /// Empty when nothing has been kept yet, which is what an untouched store is.

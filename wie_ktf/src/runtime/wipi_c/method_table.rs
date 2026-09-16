@@ -396,6 +396,14 @@ pub fn get_net_method_table() -> Vec<WIPICMethodBody> {
         // same. That is a transfer resuming where it left off, into a buffer
         // holding nothing, which is the direction the write is not.
         net::socket_read.into_body(),
+        // Slot 33 is not known. No title here reaches it, and a slot nothing
+        // has asked for is not one to invent - it refuses the way every
+        // unwritten slot does, and says so.
+        gen_missing(WIPICTableId::Net, 33),
+        // Slot 34 is the question a title asks before it opens anything; see
+        // `net::check_server`. 드래곤로드's data download stops dead without
+        // it.
+        net::check_server.into_body(),
     ]
 }
 
