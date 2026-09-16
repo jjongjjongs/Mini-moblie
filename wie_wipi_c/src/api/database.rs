@@ -1627,6 +1627,12 @@ pub async fn select_record_ktf(context: &mut dyn WIPICContext, db_id: i32, rec_i
 /// the DB exists with a non-trivial payload. The third int is treated as a
 /// size threshold (must exceed 199 bytes). We fill the struct with
 /// `{0, 0, record_size}` and return 0 on hit, -22 on miss.
+///
+/// A packaged database counts as existing, as it does for [`exists_database_ktf`]
+/// and [`get_access_mode_ktf`]: the three answer one question between them, and
+/// a store the archive ships is a store that is there. 드래곤로드 asks this
+/// about its map before it decides whether its data has to be fetched, so an
+/// archive that already carries that data was being told it did not.
 pub async fn stat_by_name_ktf(context: &mut dyn WIPICContext, name_ptr: WIPICWord, out_buf: WIPICWord, mode: i32, _arg3: i32) -> Result<i32> {
     let name = match read_null_terminated_string_bytes(context, name_ptr) {
         Ok(bytes) => match String::from_utf8(bytes) {
@@ -1636,18 +1642,28 @@ pub async fn stat_by_name_ktf(context: &mut dyn WIPICContext, name_ptr: WIPICWor
         Err(_) => return Ok(-22),
     };
 
+    let packaged = packaged_store_bytes(context, &name).await?;
+
     let system = context.system();
     let pid = system.pid().to_owned();
     let exists = system.platform().database_repository().exists(&name, &pid).await;
-    if !exists {
+    if !exists && packaged.is_none() {
         tracing::debug!("db.stat_by_name({name:?}, mode={mode}) -> -22 (not found)");
         return Ok(-22);
     }
 
     // Pull record 1's size as the "valid save" indicator the game checks
-    // against 0xC7 in v2[2].
-    let db = system.platform().database_repository().open(&name, &pid).await;
-    let record_size = db.get(1).await.map(|x| x.len() as u32).unwrap_or(0);
+    // against 0xC7 in v2[2]. What the archive ships stands in for a record
+    // that has not been written yet, the way opening one seeds it.
+    let record_size = if exists {
+        let db = system.platform().database_repository().open(&name, &pid).await;
+        match db.get(1).await {
+            Some(record) => record.len() as u32,
+            None => packaged.map(|data| data.len() as u32).unwrap_or(0),
+        }
+    } else {
+        packaged.map(|data| data.len() as u32).unwrap_or(0)
+    };
 
     if out_buf != 0 {
         write_generic(context, out_buf, 0u32)?;
@@ -1918,8 +1934,8 @@ mod tests {
         LgtDatabaseMetadata, available_storage_ktf, close_database_lgt, delete_database, delete_database_lgt, delete_record_lgt, exists_database,
         exists_database_ktf, get_access_mode_ktf, get_access_mode_lgt, get_number_of_records_ktf, get_number_of_records_lgt, get_record_size_ktf,
         get_record_size_lgt, insert_record_lgt, list_databases_lgt, list_record, list_record_info, list_records_lgt, load_handle, load_lgt_metadata,
-        open_database, open_database_lgt, open_db_for_handle, select_record, select_record_lgt, sort_records_lgt, store_lgt_metadata, stream_read,
-        stream_write, update_record, update_record_lgt,
+        open_database, open_database_lgt, open_db_for_handle, select_record, select_record_lgt, sort_records_lgt, stat_by_name_ktf,
+        store_lgt_metadata, stream_read, stream_write, update_record, update_record_lgt,
     };
 
     #[futures_test::test]
@@ -2882,6 +2898,27 @@ mod tests {
         assert_eq!(get_access_mode_ktf(&mut context, 0x1100).await.unwrap(), -12);
 
         assert_eq!(get_access_mode_ktf(&mut context, 0).await.unwrap(), -9);
+    }
+
+    /// Slot 5 answers about a store the archive shipped, which is the same
+    /// answer `MC_dbExists` and `MC_dbOpenDataBase` give about it.
+    ///
+    /// 드래곤로드 asks this about six of its data files before it decides
+    /// whether they have to be fetched over the air. Told they were missing it
+    /// offered the download every launch - and quits after one, asking to be
+    /// restarted - so an archive carrying that very data never reached the
+    /// title screen.
+    #[futures_test::test]
+    async fn ktf_stat_by_name_sees_a_store_the_archive_shipped() {
+        let mut context = database_test_context().with_resource("dragon.map", &[0u8; 4096]);
+        context.write_bytes(0x1000, b"dragon.map\0").unwrap();
+
+        assert_eq!(stat_by_name_ktf(&mut context, 0x1000, 0x3000, 1, 0).await.unwrap(), 0);
+        assert_eq!(read_generic::<u32, _>(&context, 0x3008).unwrap(), 4096, "its size");
+
+        // A name neither stored nor shipped is still a miss.
+        context.write_bytes(0x1100, b"nothing\0").unwrap();
+        assert_eq!(stat_by_name_ktf(&mut context, 0x1100, 0x3000, 1, 0).await.unwrap(), -22);
     }
 
     /// Slot 12 answers the storage left, in bytes, and the archive's own
