@@ -1116,16 +1116,21 @@ impl Graphics {
             rgb.push((0xff00_0000u32 | (r << 16) | (g << 8) | b) as i32);
         }
 
-        let mut rgb_array = jvm.instantiate_array("I", pixel_count).await?;
-        jvm.store_array(&mut rgb_array, 0, rgb).await?;
+        // Straight to the drawing with the pixels already in hand. Going back
+        // through `setRGBPixels` meant a guest `int[]` of the whole picture per
+        // call - and nothing frees one, because a KTF object is never
+        // collected. 록맨X repaints its screen through here every frame, which
+        // is a 240x288 array each time: 276KB a frame, and the guest heap was
+        // gone after a few hundred of them, `net.wie.WieError: Allocation
+        // failure` part way into the first stage. The array was only ever read
+        // straight back by the call it was written for.
+        //
+        // MIDP's own drawing already applies the current translation, clipping
+        // and XOR state, matching dgraphics_draw_raw_data(); the pixels are
+        // opaque `0x00RRGGBB`, as everywhere else in WIPI - see `setRGBPixels`.
+        let mut midp_graphics: ClassInstanceRef<MidpGraphics> = jvm.get_field(&this, "midpGraphics", "Ljavax/microedition/lcdui/Graphics;").await?;
 
-        // MIDP drawRGB already applies the current translation, clipping and
-        // XOR state, matching dgraphics_draw_raw_data().
-        let _: () = jvm
-            .invoke_virtual(&this, "setRGBPixels", "(IIII[III)V", (x, y, width, height, rgb_array, 0, width * 4))
-            .await?;
-
-        Ok(())
+        MidpGraphics::blit_pixels(jvm, &mut midp_graphics, rgb, x, y, width, height, false).await
     }
 
     async fn reset(jvm: &Jvm, _: &mut WieJvmContext, mut this: ClassInstanceRef<Self>) -> JvmResult<()> {

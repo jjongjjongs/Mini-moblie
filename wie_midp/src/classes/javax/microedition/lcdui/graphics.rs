@@ -1011,6 +1011,26 @@ impl Graphics {
             rows
         };
 
+        Self::blit_pixels(jvm, this, pixel_data, x, y, width, height, process_alpha).await
+    }
+
+    /// Draws a block of pixels a caller already holds.
+    ///
+    /// The half of [`Self::blit_rgb`] past the array: the clip, the translation
+    /// and the two pixel readings, with nothing of the JVM left in it. A caller
+    /// whose pixels are not in a Java array - the WIPI `setPixels`, which is
+    /// handed RGB565 bytes and converts them - reaches the same drawing without
+    /// having to build one guest array per call for this to read straight back.
+    pub async fn blit_pixels(
+        jvm: &Jvm,
+        this: &mut ClassInstanceRef<Graphics>,
+        pixel_data: Vec<i32>,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        process_alpha: bool,
+    ) -> JvmResult<()> {
         let state = Self::state(jvm, this).await?;
         let mut canvas = Self::canvas_in_mode(jvm, this, state.xor_mode).await?;
 
