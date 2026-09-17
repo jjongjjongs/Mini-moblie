@@ -512,19 +512,25 @@ pub async fn stop(context: &mut dyn WIPICContext, ptr_clip: WIPICWord) -> Result
     }
 
     let clip: MdaClip = read_generic(context, ptr_clip)?;
-    let callback = clip.h_proc as WIPICWord;
 
-    // Whether this clip was actually playing lives in the backend registry, not
-    // in the guest ABI struct, so a stop only reports the interruption when it
-    // really tears down a running playback.
-    let was_playing = context.system().audio().is_playing(clip.handle);
-
+    // One ending, reported once.
+    //
+    // A stopped playback ends, and the watcher `MC_mdaPlay` leaves behind says
+    // so - see there. This used to say so as well, from in here and before the
+    // stop had even returned, so a title heard the same ending twice: once as
+    // `-1` inside its own stop, and again as end-of-media a frame later.
+    //
+    // 놈ZERO acts on both. Its clip handler reads `-1` as the end (it maps the
+    // one to the other outright, at 0x47db4) and tears the clip down, and the
+    // end-of-media that follows tears it down again, so a title that should
+    // have been left playing its looping track rebuilt and restarted it a
+    // dozen times a second - twenty seconds of play came to six hundred plays
+    // where the ending told once is two hundred.
+    //
+    // Nothing is lost by leaving it to the watcher: a title that reads `-1`
+    // reads it as the end, and one that waits for end-of-media (KBO 프로야구
+    // 2010) only ever hears that.
     context.system().audio().stop(clip.handle);
-
-    if was_playing && callback != 0 {
-        tracing::debug!("MC_mdaStop callback({callback:#x}, clip={ptr_clip:#x}, event=-1)");
-        context.call_function(callback, &[ptr_clip, (-1i32) as WIPICWord]).await?;
-    }
 
     Ok(0)
 }
