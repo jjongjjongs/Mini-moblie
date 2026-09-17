@@ -2,6 +2,7 @@ mod bitmap_font;
 mod framebuffer;
 mod grp_context;
 mod image;
+mod pixel_op;
 
 use core::mem::size_of;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -738,6 +739,11 @@ pub async fn draw_image(
     // keyed rather than blended.
     let keyed = image.mask.buf.0 == 0;
     let source = if keyed { image.img } else { image.mask };
+    // A title's own pixel operation decides what every pixel becomes, and it is
+    // read before the canvas takes the context.
+    let grp_ctx: WIPICGraphicsContext = read_generic(context, graphics_context)?;
+    let operation = grp_ctx.pixel_op_func_ptr;
+
     let src_image = FrameBuffer(source).image(context)?;
     let mut canvas = framebuffer.canvas(context)?;
 
@@ -748,14 +754,99 @@ pub async fn draw_image(
         height: h as _,
     };
 
-    if keyed {
-        blit_magenta_keyed(&mut **canvas, dx, dy, w, h, &*src_image, sx, sy);
-    } else {
-        canvas.draw(dx as _, dy as _, w as _, h as _, &*src_image, sx as _, sy as _, clip);
+    // Without the operation applied, 드래곤하트2's glow lands as an opaque disc.
+    if operation == 0 {
+        if keyed {
+            blit_magenta_keyed(&mut **canvas, dx, dy, w, h, &*src_image, sx, sy);
+        } else {
+            canvas.draw(dx as _, dy as _, w as _, h as _, &*src_image, sx as _, sy as _, clip);
+        }
+        canvas.flush()?;
+
+        return Ok(());
+    }
+
+    drop(canvas);
+    drop(src_image);
+
+    let kind = pixel_op::classify(context, operation).await?;
+
+    let source = FrameBuffer(source);
+    let pairs = {
+        let src_image = source.image(context)?;
+        let canvas = framebuffer.canvas(context)?;
+
+        blend_pairs(&**canvas, dx, dy, w, h, &*src_image, sx, sy, keyed)
+    };
+
+    // A recognised operation is done here; anything else is asked, a pixel at a
+    // time, which is what the reference does for all of them.
+    let mut blended = Vec::with_capacity(pairs.len());
+    for &(x, y, destination, source_pixel) in &pairs {
+        let result = match pixel_op::apply(kind, destination, source_pixel) {
+            Some(result) => result,
+            None => {
+                context
+                    .call_function(operation, &[destination as WIPICWord, source_pixel as WIPICWord])
+                    .await? as u16
+            }
+        };
+
+        blended.push((x, y, result));
+    }
+
+    let mut canvas = framebuffer.canvas(context)?;
+    for (x, y, pixel) in blended {
+        canvas.put_pixel(x, y, Rgb565Pixel::to_color(pixel));
     }
     canvas.flush()?;
 
     Ok(())
+}
+
+/// The destination and source pixel of everything a blit would write, as
+/// RGB565 and in the order it would write them.
+///
+/// Gathered in one pass because asking the title what a pixel becomes needs the
+/// canvas let go of first.
+#[allow(clippy::too_many_arguments)]
+fn blend_pairs(canvas: &dyn Canvas, dx: i32, dy: i32, w: i32, h: i32, src: &dyn Image, sx: i32, sy: i32, keyed: bool) -> Vec<(i32, i32, u16, u16)> {
+    let src_w = src.width() as i64;
+    let src_h = src.height() as i64;
+    let destination = canvas.image();
+    let dst_w = destination.width() as i64;
+    let dst_h = destination.height() as i64;
+
+    let mut pairs = Vec::new();
+
+    for row in 0..h as i64 {
+        let sy_px = sy as i64 + row;
+        let dy_px = dy as i64 + row;
+        if sy_px < 0 || sy_px >= src_h || dy_px < 0 || dy_px >= dst_h {
+            continue;
+        }
+        for col in 0..w as i64 {
+            let sx_px = sx as i64 + col;
+            let dx_px = dx as i64 + col;
+            if sx_px < 0 || sx_px >= src_w || dx_px < 0 || dx_px >= dst_w {
+                continue;
+            }
+
+            let source = src.get_pixel(sx_px as i32, sy_px as i32);
+            if keyed && is_transparent_key(source) {
+                continue;
+            }
+
+            pairs.push((
+                dx_px as i32,
+                dy_px as i32,
+                Rgb565Pixel::from_color(destination.get_pixel(dx_px as i32, dy_px as i32)),
+                Rgb565Pixel::from_color(source),
+            ));
+        }
+    }
+
+    pairs
 }
 
 pub async fn flush_lcd(
@@ -2158,6 +2249,59 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    /// A pixel operation of the title's own decides what a blit writes.
+    ///
+    /// 드래곤하트2 plants one and draws its hit effect through it. WIE stored
+    /// the pointer and drew as though it were not there, so the effect came
+    /// down as an opaque disc over the field. Here the stand-in adds the two
+    /// pixels, and the destination has to come out added rather than
+    /// overwritten.
+    #[futures_test::test]
+    async fn a_blit_goes_through_the_titles_own_pixel_operation() {
+        let mut context = test_context();
+
+        // Adds the RGB565 channels, which is one of the two 드래곤하트2 plants.
+        context.set_guest_function(|_, args| super::pixel_op::additive(args[0] as u16, args[1] as u16) as u32);
+
+        let pgc_handle = context.alloc(core::mem::size_of::<super::WIPICGraphicsContext>() as u32).unwrap();
+        let pgc = context.data_ptr(pgc_handle).unwrap();
+        init_context(&mut context, pgc).await.unwrap();
+
+        // Half-bright grey over half-bright grey. Overwriting leaves it where
+        // it was; adding lifts it.
+        let destination = framebuffer_of(&mut context, 2, 2, &[0xff80_8080; 4]).await;
+        let source = framebuffer_of(&mut context, 2, 2, &[0xff80_8080; 4]).await;
+
+        let image_handle = context.alloc(core::mem::size_of::<wipi_types::wipic::WIPICImage>() as u32).unwrap();
+        let image_address = context.data_ptr(image_handle).unwrap();
+        let image = wipi_types::wipic::WIPICImage {
+            img: read_generic(&context, context.data_ptr(source).unwrap()).unwrap(),
+            mask: super::FrameBuffer::empty().0,
+            loop_count: 0,
+            delay: 0,
+            animated: 0,
+            buf: super::WIPICIndirectPtr(0),
+            offset: 0,
+            current: 0,
+            len: 0,
+        };
+        write_generic(&mut context, image_address, image).unwrap();
+
+        set_context(&mut context, pgc, Idx::PixelopIdx, 0x1234).await.unwrap();
+
+        draw_image(&mut context, destination, 0, 0, 2, 2, image_handle, 0, 0, pgc).await.unwrap();
+
+        let handle = read_generic(&context, context.data_ptr(destination).unwrap()).unwrap();
+        let drawn = super::FrameBuffer(handle).image(&mut context).unwrap();
+
+        // 0x80 is 16 of 31 in red, so added it lands at 31 rather than staying
+        // at 16 - which is what says the operation ran.
+        let out = drawn.get_pixel(0, 0);
+        assert!(out.r > 0x90, "red {} was not lifted by the operation", out.r);
+        assert!(out.g > 0x90, "green {} was not lifted by the operation", out.g);
+        assert!(out.b > 0x90, "blue {} was not lifted by the operation", out.b);
     }
 
     /// A string a title has not set yet is the empty one, and measuring or

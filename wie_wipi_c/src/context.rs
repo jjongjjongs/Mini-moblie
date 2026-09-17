@@ -133,9 +133,19 @@ pub mod test {
         /// API which defers work can then say the deferral happened without an
         /// executor to run it on.
         spawned: Vec<WIPICMethodBody>,
+        /// Stands in for code of the title's own, so a test can drive an API
+        /// that calls back into it - a pixel operation, a database comparator -
+        /// without an ARM core to run it on. The address is passed through, so
+        /// one function can answer for several.
+        guest_function: Option<fn(WIPICWord, &[WIPICWord]) -> WIPICWord>,
     }
 
     impl TestContext {
+        /// Installs code that stands in for the title's own.
+        pub fn set_guest_function(&mut self, function: fn(WIPICWord, &[WIPICWord]) -> WIPICWord) {
+            self.guest_function = Some(function);
+        }
+
         #[allow(clippy::new_without_default)]
         pub fn new() -> Self {
             Self {
@@ -152,6 +162,7 @@ pub mod test {
                 im_state: new_im_state(),
                 kernel_state: new_kernel_state(),
                 spawned: Vec::new(),
+                guest_function: None,
             }
         }
 
@@ -170,6 +181,7 @@ pub mod test {
                 im_state: new_im_state(),
                 kernel_state: new_kernel_state(),
                 spawned: Vec::new(),
+                guest_function: None,
             }
         }
 
@@ -228,8 +240,11 @@ pub mod test {
             Ok(memory.0)
         }
 
-        async fn call_function(&mut self, _address: WIPICWord, _args: &[WIPICWord]) -> Result<WIPICWord> {
-            todo!()
+        async fn call_function(&mut self, address: WIPICWord, args: &[WIPICWord]) -> Result<WIPICWord> {
+            match self.guest_function {
+                Some(function) => Ok(function(address, args)),
+                None => todo!(),
+            }
         }
 
         fn system(&mut self) -> &mut System {
