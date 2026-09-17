@@ -158,7 +158,8 @@ impl BaseClip {
         if player.class_definition().name() == "net/wie/SmafPlayer" {
             let audio_handle: i32 = jvm.get_field(&player, "audioHandle", "I").await?;
             let system = context.system();
-            let (completed, stopped) = system.audio().play_with_completion(system, audio_handle as u32, repeat).unwrap();
+            let playback = system.audio().play_with_completion(system, audio_handle as u32, repeat).unwrap();
+            let (completed, stopped) = (playback.completed, playback.stopped);
 
             // The completion callback only fires at end-of-media, which a looping
             // clip never reaches - so a repeating clip needs no watcher. Skipping

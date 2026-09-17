@@ -330,13 +330,14 @@ pub async fn play(context: &mut dyn WIPICContext, ptr_clip: WIPICWord, repeat: W
         system.audio().play_with_completion(system, clip.handle, repeat != 0)
     };
 
-    let (completed, stopped) = match completed {
-        Ok(status) => status,
+    let playback = match completed {
+        Ok(playback) => playback,
         Err(error) => {
             tracing::error!("Failed to play audio: {error:?}");
             return Ok(0);
         }
     };
+    let (completed, stopped, superseded) = (playback.completed, playback.stopped, playback.superseded);
 
     // A looping clip is watched too. It never reaches the end of its media on
     // its own, but it does end when the title stops it, and a title that drives
@@ -358,6 +359,7 @@ pub async fn play(context: &mut dyn WIPICContext, ptr_clip: WIPICWord, repeat: W
         struct PlaybackCompletedCallback {
             completed: Arc<AtomicBool>,
             stopped: Arc<AtomicBool>,
+            superseded: Arc<AtomicBool>,
             callback: WIPICWord,
             clip: WIPICWord,
             /// Held for as long as this watcher lives, so the playback is not
@@ -374,6 +376,20 @@ pub async fn play(context: &mut dyn WIPICContext, ptr_clip: WIPICWord, repeat: W
                     // finer read cannot see anything sooner and only takes
                     // executor time away from the guest.
                     context.system().sleep(COMPLETION_POLL_PERIOD).await;
+                }
+
+                // A playback the title replaced with another is not reported.
+                //
+                // It ended, but the title is the one that ended it by asking for
+                // the next track, and it is not waiting to hear about the one it
+                // moved off. 놈ZERO is: told the track it had just replaced had
+                // ended, its handler tears the clip down and its tick builds it
+                // again, which replaces the track once more - so its music
+                // restarted a dozen times a second and came out in fragments.
+                if self.superseded.load(Ordering::Acquire) {
+                    tracing::debug!("MC_mdaPlay superseded, nothing to report for clip {:#x}", self.clip);
+
+                    return Ok(WIPICResult { results: Vec::new() });
                 }
 
                 // A stopped clip has ended too, and is told so.
@@ -404,6 +420,7 @@ pub async fn play(context: &mut dyn WIPICContext, ptr_clip: WIPICWord, repeat: W
             _watch: watch,
             completed,
             stopped,
+            superseded,
             callback,
             clip: ptr_clip,
         }))?;

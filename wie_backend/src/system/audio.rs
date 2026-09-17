@@ -55,6 +55,10 @@ struct ActiveSmaf {
     sink_handle: AudioHandle,
     stop_flag: Arc<AtomicBool>,
     completed: Arc<AtomicBool>,
+    /// Set instead of nothing when this playback is replaced by another rather
+    /// than stopped, so its ending is not reported as one. See
+    /// [`Audio::flush_active`].
+    superseded: Arc<AtomicBool>,
     /// Reaper polls remaining before a deferred stop actually stops the sink;
     /// `None` while playing. A re-play clears it, so continuous re-play never
     /// stops; a genuine stop with no re-play flushes after the grace.
@@ -70,6 +74,19 @@ const PENDING_STOP_GRACE_POLLS: u32 = 3;
 /// The volume a clip has until a title says otherwise, which is what the
 /// reference's clip record is created holding.
 pub const FULL_VOLUME: u8 = 100;
+
+/// A playback in flight, and the three things a caller watching for its ending
+/// needs to tell apart.
+pub struct Playback {
+    /// Set when the clip reached the end of its media on its own.
+    pub completed: Arc<AtomicBool>,
+    /// Set when the playback is over, however it came to be over.
+    pub stopped: Arc<AtomicBool>,
+    /// Set when it is over because the title started another in its place,
+    /// rather than because the title stopped it. The title asked for the
+    /// replacement, so the ending is not news to it.
+    pub superseded: Arc<AtomicBool>,
+}
 
 fn smaf_hash(data: &[u8]) -> u64 {
     // FNV-1a, enough to tell one clip's bytes from another.
@@ -132,12 +149,10 @@ impl Audio {
         Ok(())
     }
 
-    pub fn play_with_completion(
-        &mut self,
-        system: &System,
-        audio_handle: AudioHandle,
-        repeat: bool,
-    ) -> Result<(Arc<AtomicBool>, Arc<AtomicBool>), AudioError> {
+    /// Plays a clip and hands back the three things a caller watching for its
+    /// ending needs to tell apart: whether it played out, whether it was
+    /// stopped, and whether it was simply replaced by another play.
+    pub fn play_with_completion(&mut self, system: &System, audio_handle: AudioHandle, repeat: bool) -> Result<Playback, AudioError> {
         let data = match self.files.get(&audio_handle) {
             Some(AudioFile::Smaf(data)) => data.clone(),
             None => return Err(AudioError::InvalidHandle),
@@ -156,21 +171,26 @@ impl Audio {
         {
             active.pending_stop_polls = None;
             active.handle = audio_handle;
-            let (completed, stop_flag) = (active.completed.clone(), active.stop_flag.clone());
+            let playback = Playback {
+                completed: active.completed.clone(),
+                stopped: active.stop_flag.clone(),
+                superseded: active.superseded.clone(),
+            };
             // The sink still plays this clip under the handle it first started
             // on, so the volume has to go there rather than to the fresh handle
             // the title just allocated - see `ActiveSmaf::sink_handle`.
             let sink_handle = active.sink_handle;
             self.sink.set_clip_volume(sink_handle, volume.load(Ordering::Relaxed));
-            self.playing.insert(audio_handle, stop_flag.clone());
-            return Ok((completed, stop_flag));
+            self.playing.insert(audio_handle, playback.stopped.clone());
+            return Ok(playback);
         }
 
         // A different looping clip replaces the active one: stop it for real
         // first. A one-shot (SFX) never becomes active and never disturbs a
-        // looping BGM playing alongside it.
+        // looping BGM playing alongside it. It is replaced rather than stopped,
+        // so it is marked as such and its ending goes unreported.
         if repeat {
-            self.flush_active();
+            self.flush_active(true);
         }
 
         self.stop(audio_handle);
@@ -178,6 +198,7 @@ impl Audio {
 
         let stop_flag = Arc::new(AtomicBool::new(false));
         let completed = Arc::new(AtomicBool::new(false));
+        let superseded = Arc::new(AtomicBool::new(false));
         self.playing.insert(audio_handle, stop_flag.clone());
 
         // Offer the file to the sink's own renderer first. When it takes it, the
@@ -194,6 +215,7 @@ impl Audio {
                     sink_handle: audio_handle,
                     stop_flag: stop_flag.clone(),
                     completed: completed.clone(),
+                    superseded: superseded.clone(),
                     pending_stop_polls: None,
                 });
                 self.ensure_reaper(system);
@@ -228,7 +250,11 @@ impl Audio {
                     Ok(())
                 });
             }
-            return Ok((completed, stop_flag));
+            return Ok(Playback {
+                completed,
+                stopped: stop_flag,
+                superseded,
+            });
         }
 
         // Otherwise stream the sequence live as MIDI events.
@@ -250,7 +276,11 @@ impl Audio {
             Ok(())
         });
 
-        Ok((completed, stop_flag))
+        Ok(Playback {
+            completed,
+            stopped: stop_flag,
+            superseded,
+        })
     }
 
     pub fn is_playing(&self, audio_handle: AudioHandle) -> bool {
@@ -319,11 +349,19 @@ impl Audio {
     }
 
     /// Stops the active looping clip's sink playback immediately and forgets it.
-    fn flush_active(&mut self) {
+    ///
+    /// `superseded` says whether this is the title replacing the track with
+    /// another - in which case the playback ends without that being news, since
+    /// the title is the one that replaced it - or a stop it asked for and may be
+    /// waiting to hear about.
+    fn flush_active(&mut self, superseded: bool) {
         if let Some(active) = self.active.take() {
             // Stop the stream the sink actually plays, not the latest handle the
             // title allocated - they differ once a looping clip has re-played.
             self.sink.stop_smaf(active.sink_handle);
+            if superseded {
+                active.superseded.store(true, Ordering::Relaxed);
+            }
             active.stop_flag.store(true, Ordering::Relaxed);
             self.playing.remove(&active.handle);
         }
@@ -356,7 +394,9 @@ impl Audio {
                     None => false,
                 };
                 if flush {
-                    audio.flush_active();
+                    // The title asked for this stop and may be waiting to hear
+                    // that it happened, so it is not a supersede.
+                    audio.flush_active(false);
                 }
             }
         });
@@ -906,6 +946,43 @@ mod tests {
         // reason to remember it.
         audio.close(effect).unwrap();
         assert_eq!(sink.volumes.lock().last(), Some(&(effect, 100)));
+    }
+
+    /// A looping clip the title replaces with another is superseded, not
+    /// stopped; one the title stops is stopped, not superseded.
+    ///
+    /// The two look the same from the audio layer - a playback that is over -
+    /// but they are not the same news. A title that stopped a clip may be
+    /// waiting to hear that it ended; a title that replaced one already knows,
+    /// because it asked. 놈ZERO is the second: told the track it had just
+    /// replaced had ended, it tore the clip down and built it again, which
+    /// replaced the track once more, and its music came out in fragments.
+    #[test]
+    fn a_replaced_playback_is_superseded_and_a_stopped_one_is_not() {
+        let (system, _counters) = new_system_with_smaf_counters();
+
+        let music = system.audio().load_smaf(b"BGM-ONE").unwrap();
+        let first = system.audio().play_with_completion(&system, music, true).unwrap();
+        let (stopped, superseded) = (first.stopped, first.superseded);
+        assert!(!stopped.load(Ordering::SeqCst));
+        assert!(!superseded.load(Ordering::SeqCst));
+
+        // A different looping track takes its place. The playback is over, but
+        // the title is the one that ended it.
+        let other = system.audio().load_smaf(b"BGM-TWO").unwrap();
+        let second = system.audio().play_with_completion(&system, other, true).unwrap();
+        let (other_stopped, other_superseded) = (second.stopped, second.superseded);
+
+        assert!(stopped.load(Ordering::SeqCst), "the replaced playback is over");
+        assert!(superseded.load(Ordering::SeqCst), "and it is over because it was replaced");
+
+        // Stopping the one that is playing now is the other case: over, and
+        // over because the title said so.
+        system.audio().stop(other);
+        system.audio().flush_active(false);
+
+        assert!(other_stopped.load(Ordering::SeqCst));
+        assert!(!other_superseded.load(Ordering::SeqCst), "a stop the title asked for is not a supersede");
     }
 
     #[test]
