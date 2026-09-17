@@ -190,6 +190,12 @@ pub mod test {
             self.spawned.len()
         }
 
+        /// Takes the spawned bodies, for a test that wants to run the deferred
+        /// work itself.
+        pub fn take_spawned(&mut self) -> Vec<WIPICMethodBody> {
+            core::mem::take(&mut self.spawned)
+        }
+
         pub fn with_resource(mut self, name: &str, data: &[u8]) -> Self {
             self.resources.push((String::from(name), data.to_vec()));
             self

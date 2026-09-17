@@ -7,6 +7,8 @@ use wipi_types::wipic::WIPICWord;
 
 use wie_util::{Result, WieError, read_generic, write_generic};
 
+use spin::Mutex;
+
 use crate::{WIPICResult, context::WIPICContext, method::MethodBody};
 
 /// Top of the `MC_mdaClipSetVolume` range, and what a clip with no level of its
@@ -266,6 +268,43 @@ pub async fn set_volume(_context: &mut dyn WIPICContext, level: WIPICWord) -> Re
     Ok(0)
 }
 
+/// The playbacks a completion watcher is already waiting on.
+///
+/// A playback is named by the stop flag it shares with the audio layer, which
+/// is the one thing a re-play of the same looping clip keeps. An entry lives
+/// exactly as long as its watcher, which holds that flag alive, so an address
+/// here is never a stale one.
+static WATCHED: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+/// How many playbacks can be watched at once, so a title that plays without
+/// ever stopping cannot grow this without end.
+const WATCHED_LIMIT: usize = 64;
+
+/// A claim on watching one playback, given up when the watcher is dropped.
+struct WatchedPlayback(usize);
+
+impl WatchedPlayback {
+    /// Takes the claim, or answers `None` if this playback is watched already
+    /// or there are too many watched at once.
+    fn claim(stopped: &Arc<AtomicBool>) -> Option<Self> {
+        let key = Arc::as_ptr(stopped) as usize;
+        let mut watched = WATCHED.lock();
+
+        if watched.contains(&key) || watched.len() >= WATCHED_LIMIT {
+            return None;
+        }
+        watched.push(key);
+
+        Some(Self(key))
+    }
+}
+
+impl Drop for WatchedPlayback {
+    fn drop(&mut self) {
+        WATCHED.lock().retain(|watched| *watched != self.0);
+    }
+}
+
 pub async fn play(context: &mut dyn WIPICContext, ptr_clip: WIPICWord, repeat: WIPICWord) -> Result<i32> {
     if ptr_clip == 0 {
         // Default-player titles (clip 0) play the handle their MC_mdaClipPutData
@@ -299,7 +338,20 @@ pub async fn play(context: &mut dyn WIPICContext, ptr_clip: WIPICWord, repeat: W
         }
     };
 
-    if callback != 0 && repeat == 0 {
+    // A looping clip is watched too. It never reaches the end of its media on
+    // its own, but it does end when the title stops it, and a title that drives
+    // its sound engine off that event needs telling either way - KBO 프로야구
+    // 2010 stops its menu track to move to the next one and waits to be told it
+    // ended, so leaving a looping clip unwatched left the game as silent from
+    // the menu on as it had been from the title screen before.
+    //
+    // A playback is watched once rather than once per play: a looping clip
+    // re-played with identical data continues the playback the first play
+    // started and shares its flags, so watching per call would pile up tasks
+    // that all report the one ending.
+    if callback != 0
+        && let Some(watch) = WatchedPlayback::claim(&stopped)
+    {
         /// How often a clip's completion flag is read while it plays.
         const COMPLETION_POLL_PERIOD: u64 = 16;
 
@@ -308,6 +360,9 @@ pub async fn play(context: &mut dyn WIPICContext, ptr_clip: WIPICWord, repeat: W
             stopped: Arc<AtomicBool>,
             callback: WIPICWord,
             clip: WIPICWord,
+            /// Held for as long as this watcher lives, so the playback is not
+            /// watched twice over.
+            _watch: WatchedPlayback,
         }
 
         #[async_trait::async_trait]
@@ -346,6 +401,7 @@ pub async fn play(context: &mut dyn WIPICContext, ptr_clip: WIPICWord, repeat: W
         }
 
         context.spawn(Box::new(PlaybackCompletedCallback {
+            _watch: watch,
             completed,
             stopped,
             callback,
@@ -499,7 +555,7 @@ pub async fn unk18(_context: &mut dyn WIPICContext, clip: WIPICWord) -> Result<W
 
 #[cfg(test)]
 mod tests {
-    use alloc::boxed::Box;
+    use alloc::{boxed::Box, vec::Vec};
 
     use test_utils::TestPlatform;
     use wie_backend::{DefaultTaskRunner, System};
@@ -507,7 +563,21 @@ mod tests {
 
     use crate::context::test::TestContext;
 
-    use super::{FULL_VOLUME, clip_create, clip_get_volume, clip_put_data, clip_set_volume};
+    use core::sync::atomic::AtomicBool;
+
+    use alloc::sync::Arc;
+
+    use super::{FULL_VOLUME, WatchedPlayback, clip_create, clip_get_volume, clip_put_data, clip_set_volume, play, stop};
+
+    /// What the clip callback was called with. A static, because the test
+    /// context takes a plain function rather than a closure.
+    static CALLS: spin::Mutex<Vec<(u32, u32)>> = spin::Mutex::new(Vec::new());
+
+    fn record(_address: u32, args: &[u32]) -> u32 {
+        CALLS.lock().push((args[0], args[1]));
+
+        0
+    }
 
     fn test_context() -> TestContext {
         let system = System::new(Box::new(TestPlatform::new()), "test-pid", "test-aid", DefaultTaskRunner);
@@ -532,6 +602,67 @@ mod tests {
         let level = clip_get_volume(&mut context, clip).await.unwrap();
         assert_eq!(clip_set_volume(&mut context, clip, level).await.unwrap(), 0);
         assert_eq!(clip_get_volume(&mut context, clip).await.unwrap(), 20);
+    }
+
+    /// A looping clip that is stopped is told its media ended, the same as a
+    /// one-shot that played out.
+    ///
+    /// A looping clip never reaches the end of its own accord, so it used to be
+    /// left unwatched and a stop told the title nothing it could act on. KBO
+    /// 프로야구 2010 drives its sound engine off that event - it stops the track
+    /// it is playing and waits to be told it ended before starting the next -
+    /// so its menu stayed as silent as its title screen had been.
+    #[futures_test::test]
+    async fn a_looping_clip_that_is_stopped_reports_its_end() {
+        CALLS.lock().clear();
+
+        let mut context = test_context();
+        context.set_guest_function(record);
+
+        // The third argument is the clip's callback; a title that wants to be
+        // told anything passes one.
+        let clip = clip_create(&mut context, 0, 0x793, 0x3d89).await.unwrap();
+        context.write_bytes(0x1000, b"MMMD\0\0\0\0").unwrap();
+        clip_put_data(&mut context, clip, 0x1000, 8).await.unwrap();
+
+        play(&mut context, clip, 1).await.unwrap();
+        assert_eq!(context.spawned(), 1, "a looping clip is watched, so its end can be reported");
+
+        stop(&mut context, clip).await.unwrap();
+
+        // The watcher is what reports the end; run it, as the executor would.
+        for body in context.take_spawned() {
+            body.call(&mut context, Box::new([])).await.unwrap();
+        }
+
+        let calls = CALLS.lock().clone();
+        assert!(
+            calls.contains(&(clip, 3)),
+            "the title has to be told the clip ended, not only that it was stopped: {calls:?}"
+        );
+    }
+
+    /// One playback is watched once, and watching it again is possible only
+    /// once the first watcher has gone.
+    ///
+    /// A looping clip re-played with identical data continues the playback the
+    /// first play started and shares its flags, so without this a title that
+    /// re-plays its background track every frame would pile up watchers that
+    /// all report the one ending.
+    #[test]
+    fn a_playback_is_watched_once() {
+        let playback = Arc::new(AtomicBool::new(false));
+        let other = Arc::new(AtomicBool::new(false));
+
+        let claim = WatchedPlayback::claim(&playback).expect("the first watcher takes it");
+        assert!(WatchedPlayback::claim(&playback).is_none(), "the same playback is not watched twice");
+
+        // A different playback is its own business.
+        assert!(WatchedPlayback::claim(&other).is_some());
+
+        // And once the watcher is gone the playback can be watched again.
+        drop(claim);
+        assert!(WatchedPlayback::claim(&playback).is_some());
     }
 
     /// A clip with nothing loaded has no level of its own. Answer full scale:
