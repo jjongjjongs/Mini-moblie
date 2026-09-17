@@ -52,6 +52,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.Collections;
 import java.util.Enumeration;
@@ -169,7 +170,32 @@ public final class MainActivity extends Activity {
     private static final int LIB_GREEN_LINE = Color.rgb(199, 232, 209);// #c7e8d1 button border
     private static final int LIB_GREEN_SOFTER = Color.rgb(238, 248, 241);// #eef8f1 empty tile
 
-    private final ScheduledExecutorService emulatorThread = Executors.newSingleThreadScheduledExecutor();
+    /**
+     * How much stack the emulator thread gets.
+     *
+     * A WIPI title is emulated by running its ARM code and answering the
+     * services it calls, and those answers run more of its code - loading a
+     * class runs its initialiser, which loads another class - so how deep the
+     * native stack goes is decided by the game, not by us. Nothing in the
+     * native library asks for much on its own: built the way it ships, its
+     * largest single stack frame is under 4 KB. Depth is what runs it out.
+     *
+     * A thread from {@link Executors#newSingleThreadScheduledExecutor()} takes
+     * the platform's default, which is 1 MB, and the Y700 crash report is that
+     * 1 MB spent - SIGSEGV with the stack pointer one page past the bottom of
+     * the thread's mapping, while {@code nativeStart} was still loading the
+     * game. So the emulator is given a thread whose stack is sized for it.
+     *
+     * The cost is address space, not memory: the pages are committed as they
+     * are first touched, and the app is arm64-only, where 64 MB of reserved
+     * address space is nothing.
+     */
+    private static final long EMULATOR_STACK_BYTES = 64L * 1024 * 1024;
+
+    private static final ThreadFactory EMULATOR_THREADS =
+            runnable -> new Thread(null, runnable, "emulator", EMULATOR_STACK_BYTES);
+
+    private final ScheduledExecutorService emulatorThread = Executors.newSingleThreadScheduledExecutor(EMULATOR_THREADS);
 
     private AndroidAudioOutput audioOutput;
     private File gamesDir;
