@@ -1255,13 +1255,6 @@ fn png_is_single_index0_tile(data: &[u8]) -> bool {
     indexed && !has_trns && palette_entries == 1
 }
 
-pub fn string_width(string: &str, pt_size: f32) -> f32 {
-    let px_height = NEODGM.pt_to_px_scale(pt_size).unwrap().y;
-    let font = scaled_face(px_height);
-
-    string.chars().map(|c| font.h_advance(font.scaled_glyph(c).id)).sum::<f32>()
-}
-
 pub fn string_width_px(string: &str, px_height: f32) -> f32 {
     let font = scaled_face(px_height);
 

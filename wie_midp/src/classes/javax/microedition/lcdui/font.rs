@@ -171,12 +171,13 @@ impl Font {
         Ok(canvas::string_width_px(&substring, Self::pixel_height(size) as f32) as _)
     }
 
-    async fn char_width(_: &Jvm, _: &mut WieJvmContext, _: ClassInstanceRef<Self>, char: JavaChar) -> JvmResult<i32> {
-        tracing::warn!("stub javax.microedition.lcdui.Font::charWidth({char:?})");
+    async fn char_width(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, char: JavaChar) -> JvmResult<i32> {
+        tracing::debug!("javax.microedition.lcdui.Font::charWidth({char:?})");
 
         let string = RustString::from_utf16(&[char]).unwrap();
+        let size: i32 = jvm.get_field(&this, "size", "I").await?;
 
-        Ok(canvas::string_width(&string, 10.0) as _)
+        Ok(canvas::string_width_px(&string, Self::pixel_height(size) as f32) as _)
     }
 
     async fn chars_width(
@@ -194,5 +195,53 @@ impl Font {
         let size: i32 = jvm.get_field(&this, "size", "I").await?;
 
         Ok(canvas::string_width_px(&string, Self::pixel_height(size) as f32) as _)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::{boxed::Box, vec};
+
+    use jvm::{Array, ClassInstanceRef, JavaChar};
+    use test_utils::run_jvm_test;
+    use wie_util::Result;
+
+    use crate::{classes::javax::microedition::lcdui::Font, get_protos};
+
+    /// A character measured on its own is the same width as the same character
+    /// measured in a string, at whatever size the font was asked for.
+    ///
+    /// charWidth used to ignore the font it was called on and answer for a
+    /// 14-pixel face every time, so a title laying its own text out a character
+    /// at a time - 치킨타이쿤 measures every one it draws - was told the default
+    /// font was wider than it is, and wrapped early.
+    #[test]
+    fn a_character_measures_the_same_alone_as_in_a_string() -> Result<()> {
+        run_jvm_test(Box::new([get_protos().into()]), |jvm| async move {
+            // SIZE_SMALL, SIZE_MEDIUM and SIZE_LARGE, and the sizes above them
+            // that map to their own faces.
+            for size in [8, 0, 16, 4096, 8192, 16384, 32768] {
+                let font: ClassInstanceRef<Font> = jvm
+                    .invoke_static(
+                        "javax/microedition/lcdui/Font",
+                        "getFont",
+                        "(III)Ljavax/microedition/lcdui/Font;",
+                        (0, 0, size),
+                    )
+                    .await?;
+
+                for character in ['가', 'A', 'W', ' '] {
+                    let mut chars: ClassInstanceRef<Array<JavaChar>> = jvm.instantiate_array("C", 1).await?.into();
+                    jvm.store_array(&mut chars, 0, vec![character as JavaChar]).await?;
+
+                    let alone: i32 = jvm.invoke_virtual(&font, "charWidth", "(C)I", (character as JavaChar,)).await?;
+                    let in_a_string: i32 = jvm.invoke_virtual(&font, "charsWidth", "([CII)I", (chars, 0, 1)).await?;
+
+                    assert_eq!(alone, in_a_string, "{character:?} at size {size}");
+                }
+            }
+
+            Ok(())
+        })
     }
 }
