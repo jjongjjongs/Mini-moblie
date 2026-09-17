@@ -26,7 +26,7 @@ struct SocketCallbacks {
     /// purchase operation 0x68. A fixed buffer preserves SocketCallbacks'
     /// Copy semantics and is sufficient for the seven-byte 0x69 success
     /// frame.
-    billing_local_response: [u8; LGT_LOCAL_PURCHASE_RESPONSE_SIZE],
+    billing_local_response: [u8; LGT_LOCAL_RESPONSE_CAPACITY],
     billing_local_response_len: u8,
     billing_local_response_offset: u8,
     /// Native socket object +0x4c..+0x83: 56-byte inbound billing header.
@@ -59,7 +59,7 @@ impl Default for SocketCallbacks {
         Self {
             socket_type: 0,
             billing_mode: 0,
-            billing_local_response: [0u8; LGT_LOCAL_PURCHASE_RESPONSE_SIZE],
+            billing_local_response: [0u8; LGT_LOCAL_RESPONSE_CAPACITY],
             billing_local_response_len: 0,
             billing_local_response_offset: 0,
             billing_read_header: [0u8; LGT_BILL_READ_HEADER_SIZE],
@@ -314,12 +314,29 @@ impl NetworkState {
         self.sockets.get(&socket).map(|entry| entry.billing_mode)
     }
 
-    fn queue_local_billing_response(&mut self, socket: i32, response: [u8; LGT_LOCAL_PURCHASE_RESPONSE_SIZE]) {
+    fn queue_local_billing_response(&mut self, socket: i32, response: &[u8]) {
         let entry = self.sockets.get_mut(&socket).expect("socket metadata disappeared");
 
-        entry.billing_local_response = response;
-        entry.billing_local_response_len = LGT_LOCAL_PURCHASE_RESPONSE_SIZE as u8;
+        let length = response.len().min(LGT_LOCAL_RESPONSE_CAPACITY);
+
+        entry.billing_local_response = [0u8; LGT_LOCAL_RESPONSE_CAPACITY];
+        entry.billing_local_response[..length].copy_from_slice(&response[..length]);
+        entry.billing_local_response_len = length as u8;
         entry.billing_local_response_offset = 0;
+    }
+
+    /// A billing socket holding an answer WIE wrote itself.
+    ///
+    /// These have no platform socket and no local descriptor, so nothing polls
+    /// them: a title that registers a read callback and waits would otherwise
+    /// wait on a reply already sitting in its own queue.
+    fn socket_with_pending_billing_response(&self) -> Option<i32> {
+        self.sockets
+            .iter()
+            .find(|(_, entry)| {
+                entry.billing_local_response_len > 0 && (entry.billing_local_response_offset as usize) < entry.billing_local_response_len as usize
+            })
+            .map(|(socket, _)| *socket)
     }
 
     fn take_local_billing_response(&mut self, socket: i32, output: &mut [u8]) -> Option<usize> {
@@ -662,6 +679,11 @@ const LGT_LOCAL_PURCHASE_REQUEST_TYPE: u16 = 0x0068;
 const LGT_LOCAL_PURCHASE_RESPONSE_TYPE: u16 = 0x0069;
 const LGT_LOCAL_PURCHASE_RESPONSE_SIZE: usize = 7;
 
+/// Room for the longest answer WIE writes back into a billing socket itself.
+/// The purchase reply is seven bytes; 리듬스타2's authentication reply is 88,
+/// and a byte length is what the socket records, so this stays under 256.
+const LGT_LOCAL_RESPONSE_CAPACITY: usize = 96;
+
 /// Build the LGT purchase-success application frame a title can read.
 ///
 /// The frame Red Gem writes is:
@@ -714,6 +736,72 @@ const HTTP_HANDLE_BASE: i32 = 0x4000_0000;
 /// Consecutive would-block yields the HTTP exchange tolerates on send or receive
 /// before abandoning a stalled socket, so a silent peer can never wedge the task.
 const HTTP_IDLE_POLL_LIMIT: u32 = 60_000;
+
+/// The answer 리듬스타2 (`0002D504`) waits for when it asks for a certificate.
+///
+/// The title opens a billing socket to `121.254.169.67:13505` and speaks its
+/// own framing rather than the `0xffff` one the purchase path uses. Its reader
+/// is a plain accumulator: a frame is a `u16` little-endian total length that
+/// counts itself, and the sixteen bytes after it are a header:
+///
+/// ```text
+///   +0x00 u16  total length, this field included
+///   +0x02 u8   command
+///   +0x03 u8   sub-command
+///   +0x04 u32  set by the sender
+///   +0x08 u32  set by the sender
+///   +0x0c u16  0x00ff, which every frame this engine builds carries
+///   +0x0e u8
+///   +0x0f u8
+///   +0x10      payload
+/// ```
+///
+/// Command 2 sub-command 0 is the certificate request - 576 bytes carrying the
+/// MDN, the handset name and its codec list - and its reply goes to the handler
+/// the title reaches through a jump table on the sub-command. That handler
+/// copies 0x48 bytes of payload, sets the flag that says the certificate has
+/// arrived, and then reads four fields only when payload byte 1 is non-zero.
+/// There is no branch anywhere in it that fails: what the certificate says is
+/// never examined, only that one came back. So the reply is the header with a
+/// payload of zeroes, which is the shortest thing the title accepts, and
+/// leaving byte 1 zero is what keeps its own defaults rather than writing
+/// invented numbers over them.
+const RHYTHM_STAR2_AUTHENTICATION_RESPONSE_SIZE: usize = 88;
+const RHYTHM_STAR2_FRAME_HEADER_SIZE: usize = 16;
+const RHYTHM_STAR2_COMMAND: u8 = 2;
+const RHYTHM_STAR2_CERTIFICATE_SUBCOMMAND: u8 = 0;
+const RHYTHM_STAR2_FRAME_MARK: u16 = 0x00ff;
+const RHYTHM_STAR2_FRAME_MARK_OFFSET: usize = 0x0c;
+
+fn rhythm_star2_authentication_response(request: &[u8]) -> Option<[u8; RHYTHM_STAR2_AUTHENTICATION_RESPONSE_SIZE]> {
+    if request.len() < RHYTHM_STAR2_FRAME_HEADER_SIZE {
+        return None;
+    }
+
+    // A frame declares its own length, and the title writes one frame per call.
+    let declared = u16::from_le_bytes([request[0], request[1]]) as usize;
+    if declared != request.len() {
+        return None;
+    }
+
+    if request[2] != RHYTHM_STAR2_COMMAND || request[3] != RHYTHM_STAR2_CERTIFICATE_SUBCOMMAND {
+        return None;
+    }
+
+    let mark = u16::from_le_bytes([request[RHYTHM_STAR2_FRAME_MARK_OFFSET], request[RHYTHM_STAR2_FRAME_MARK_OFFSET + 1]]);
+    if mark != RHYTHM_STAR2_FRAME_MARK {
+        return None;
+    }
+
+    let mut response = [0u8; RHYTHM_STAR2_AUTHENTICATION_RESPONSE_SIZE];
+
+    response[0..2].copy_from_slice(&(RHYTHM_STAR2_AUTHENTICATION_RESPONSE_SIZE as u16).to_le_bytes());
+    response[2] = RHYTHM_STAR2_COMMAND;
+    response[3] = RHYTHM_STAR2_CERTIFICATE_SUBCOMMAND;
+    response[RHYTHM_STAR2_FRAME_MARK_OFFSET..RHYTHM_STAR2_FRAME_MARK_OFFSET + 2].copy_from_slice(&RHYTHM_STAR2_FRAME_MARK.to_le_bytes());
+
+    Some(response)
+}
 
 fn copy_lgt_bill_c_string(header: &mut [u8; LGT_BILL_HEADER_SIZE], offset: usize, value: &[u8]) {
     if offset >= header.len() {
@@ -1672,6 +1760,19 @@ pub async fn socket_write(context: &mut dyn WIPICContext, socket: i32, buffer: W
             wie_backend::billing::load_hero5_warehouse(&kept);
         }
 
+        // The certificate 리듬스타2 asks for. Its server has been off for years
+        // and the title will sit on its notice for as long as it is left to,
+        // asking again every second and a half.
+        if billing_mode == 1
+            && let Some(response) = rhythm_star2_authentication_response(&data)
+        {
+            tracing::debug!("bill write {socket}: answered 리듬스타2's certificate request in process");
+
+            state.lock().queue_local_billing_response(socket, &response);
+
+            return Ok(length);
+        }
+
         if billing_mode == 1
             && let Some(response) = lgt_local_purchase_success_response(&data)
         {
@@ -1680,7 +1781,7 @@ pub async fn socket_write(context: &mut dyn WIPICContext, socket: i32, buffer: W
                 wie_backend::billing::bill_frame_trace(&response)
             );
 
-            state.lock().queue_local_billing_response(socket, response);
+            state.lock().queue_local_billing_response(socket, &response);
 
             if let Some(kept) = wie_backend::billing::hero4_warehouse_to_keep() {
                 write_billing_store(context, wie_backend::billing::HERO4_WAREHOUSE_STORE, &kept).await;
@@ -2330,6 +2431,17 @@ fn ensure_event_dispatcher(context: &mut dyn WIPICContext) -> Result<()> {
                 // exists. 데몬헌터's shop is such a title - it connects, asks to
                 // be told, and never sends its purchase - where its
                 // authentication wrote straight away and so never noticed.
+                // The same goes for a billing socket WIE answered itself: the
+                // reply is in the socket's own queue rather than an endpoint,
+                // and 리듬스타2 asks to be told rather than reading again.
+                let local_event = match local_event {
+                    Some(event) => Some(event),
+                    None => state
+                        .lock()
+                        .socket_with_pending_billing_response()
+                        .map(wie_backend::NetworkEvent::Readable),
+                };
+
                 let local_event = match local_event {
                     Some(event) => Some(event),
                     None => {
@@ -4081,6 +4193,65 @@ mod network_state_tests {
         assert_eq!(sockets, vec![9]);
         assert!(state.http_get(handle).is_none());
     }
+    /// 리듬스타2 asks for its certificate and is given one.
+    ///
+    /// The reply is the sixteen-byte header its reader expects, addressed to
+    /// the same command and sub-command, carrying the `0x00ff` every frame this
+    /// engine builds carries, and long enough for the 0x48 bytes the handler
+    /// copies out of it.
+    #[test]
+    fn the_certificate_request_is_answered_with_a_frame_the_title_reads() {
+        let mut request = alloc::vec![0u8; 576];
+        request[0..2].copy_from_slice(&576u16.to_le_bytes());
+        request[2] = 2;
+        request[3] = 0;
+        request[0x0c..0x0e].copy_from_slice(&0x00ffu16.to_le_bytes());
+
+        let response = rhythm_star2_authentication_response(&request).expect("the certificate request is answered");
+
+        assert_eq!(u16::from_le_bytes([response[0], response[1]]), 88);
+        assert_eq!(response.len(), 88);
+        assert_eq!(response[2], 2);
+        assert_eq!(response[3], 0);
+        assert_eq!(u16::from_le_bytes([response[0x0c], response[0x0d]]), 0x00ff);
+
+        // The payload the handler copies, and the byte that keeps it from
+        // reading fields no server is here to fill in.
+        assert_eq!(response.len() - 0x10, 72);
+        assert_eq!(response[0x11], 0);
+    }
+
+    /// Everything else on the socket is left alone.
+    ///
+    /// The keep-alive the title sends every second and a half is command 0xff,
+    /// which its own dispatcher drops, and a purchase frame belongs to the path
+    /// that already answers it.
+    #[test]
+    fn only_the_certificate_request_is_answered() {
+        let mut keep_alive = alloc::vec![0u8; 24];
+        keep_alive[0..2].copy_from_slice(&24u16.to_le_bytes());
+        keep_alive[2] = 0xff;
+        keep_alive[3] = 0x01;
+        keep_alive[0x0c..0x0e].copy_from_slice(&0x00ffu16.to_le_bytes());
+        assert!(rhythm_star2_authentication_response(&keep_alive).is_none());
+
+        // A frame whose declared length is not what was written is not one of
+        // these frames.
+        let mut truncated = alloc::vec![0u8; 24];
+        truncated[0..2].copy_from_slice(&576u16.to_le_bytes());
+        truncated[2] = 2;
+        truncated[0x0c..0x0e].copy_from_slice(&0x00ffu16.to_le_bytes());
+        assert!(rhythm_star2_authentication_response(&truncated).is_none());
+
+        // The right command without this engine's mark is another title's.
+        let mut unmarked = alloc::vec![0u8; 576];
+        unmarked[0..2].copy_from_slice(&576u16.to_le_bytes());
+        unmarked[2] = 2;
+        assert!(rhythm_star2_authentication_response(&unmarked).is_none());
+
+        assert!(rhythm_star2_authentication_response(&[]).is_none());
+    }
+
     #[test]
     fn socket_billing_mode_metadata_tracks_native_modes() {
         let mut state = NetworkState::default();
@@ -5051,7 +5222,7 @@ mod network_state_tests {
         let mut state = NetworkState::default();
         state.register_socket(7, 1, 1);
 
-        state.queue_local_billing_response(7, [0xff, 0xff, 0x00, 0x07, 0x00, 0x69, 0x00]);
+        state.queue_local_billing_response(7, &[0xff, 0xff, 0x00, 0x07, 0x00, 0x69, 0x00]);
 
         let mut first = [0u8; 3];
         assert_eq!(state.take_local_billing_response(7, &mut first), Some(3));
