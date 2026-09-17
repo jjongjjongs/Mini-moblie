@@ -305,6 +305,13 @@ impl Drop for WatchedPlayback {
     }
 }
 
+/// The clip's playback has begun. A title has no call that asks a clip whether
+/// it is sounding, so this is how it knows.
+const MDA_EVENT_PLAYING: WIPICWord = 2;
+
+/// The clip reached the end of its media - or was stopped, which ends it too.
+const MDA_EVENT_END_OF_MEDIA: WIPICWord = 3;
+
 pub async fn play(context: &mut dyn WIPICContext, ptr_clip: WIPICWord, repeat: WIPICWord) -> Result<i32> {
     if ptr_clip == 0 {
         // Default-player titles (clip 0) play the handle their MC_mdaClipPutData
@@ -338,6 +345,48 @@ pub async fn play(context: &mut dyn WIPICContext, ptr_clip: WIPICWord, repeat: W
         }
     };
     let (completed, stopped, superseded) = (playback.completed, playback.stopped, playback.superseded);
+
+    // The clip is told that it is playing.
+    //
+    // A title reads its clip's state out of the events it has been handed -
+    // there is no call that asks - so one that is never told playback began
+    // reads its own music as not playing. 놈ZERO's menu tests exactly that,
+    // every frame:
+    //
+    //     0x47f44  ldrb r3, [r0, #0x11]   ; the last event it was handed
+    //     0x47f46  lsrs r2, r3, #4
+    //     0x47f48  cmp  r2, #0            ; 0 - never started
+    //     0x47f4c  cmp  r2, #3            ; 3 - ended
+    //
+    // and on a no it asks for its background music again. With nothing but the
+    // ending ever reported the answer was always no, so it tore the track down
+    // and rebuilt it twice a second for as long as it ran - which is what its
+    // music sounded like. Told that it is playing, it leaves the track alone:
+    // twenty thousand ticks of play came to 168 plays and now come to 3.
+    //
+    // The reference reports the same way, one state change at a time, out of
+    // `setMediaState` - `MC_mdaStop` hands the callback 0, `MC_mdaPause` 2,
+    // `MC_mdaResume` 1 - and queues them rather than calling in from inside the
+    // service it is serving, which is why this is spawned rather than called
+    // here.
+    if callback != 0 {
+        struct PlaybackStartedCallback {
+            callback: WIPICWord,
+            clip: WIPICWord,
+        }
+
+        #[async_trait::async_trait]
+        impl MethodBody<WieError> for PlaybackStartedCallback {
+            async fn call(&self, context: &mut dyn WIPICContext, _: Box<[WIPICWord]>) -> Result<WIPICResult> {
+                tracing::debug!("MC_mdaPlay started callback({:#x}, event={MDA_EVENT_PLAYING})", self.callback);
+                context.call_function(self.callback, &[self.clip, MDA_EVENT_PLAYING]).await?;
+
+                Ok(WIPICResult { results: Vec::new() })
+            }
+        }
+
+        context.spawn(Box::new(PlaybackStartedCallback { callback, clip: ptr_clip }))?;
+    }
 
     // A looping clip is watched too. It never reaches the end of its media on
     // its own, but it does end when the title stops it, and a title that drives
@@ -409,8 +458,8 @@ pub async fn play(context: &mut dyn WIPICContext, ptr_clip: WIPICWord, repeat: W
                 // every frame for the rest of the run, and never sounded again.
                 let ended = if self.stopped.load(Ordering::Acquire) { "stopped" } else { "completed" };
 
-                tracing::debug!("MC_mdaPlay {ended} callback({:#x}, event=3)", self.callback);
-                context.call_function(self.callback, &[self.clip, 3]).await?;
+                tracing::debug!("MC_mdaPlay {ended} callback({:#x}, event={MDA_EVENT_END_OF_MEDIA})", self.callback);
+                context.call_function(self.callback, &[self.clip, MDA_EVENT_END_OF_MEDIA]).await?;
 
                 Ok(WIPICResult { results: Vec::new() })
             }
@@ -649,7 +698,11 @@ mod tests {
         clip_put_data(&mut context, clip, 0x1000, 8).await.unwrap();
 
         play(&mut context, clip, 1).await.unwrap();
-        assert_eq!(context.spawned(), 1, "a looping clip is watched, so its end can be reported");
+        assert_eq!(
+            context.spawned(),
+            2,
+            "a looping clip is told it is playing, and is watched so its end can be reported"
+        );
 
         stop(&mut context, clip).await.unwrap();
 
@@ -663,6 +716,37 @@ mod tests {
             calls.contains(&(clip, 3)),
             "the title has to be told the clip ended, not only that it was stopped: {calls:?}"
         );
+    }
+
+    /// A clip that starts playing is told so.
+    ///
+    /// A title has no call that asks a clip whether it is sounding - it reads
+    /// the last event it was handed - so one that is never told playback began
+    /// reads its own music as stopped. 놈ZERO's menu asks that question every
+    /// frame and rebuilds its background music on a no, so with only the ending
+    /// ever reported its music restarted twice a second for as long as it ran.
+    #[futures_test::test]
+    async fn a_clip_that_starts_playing_is_told_so() {
+        CALLS.lock().clear();
+
+        let mut context = test_context();
+        context.set_guest_function(record);
+
+        let clip = clip_create(&mut context, 0, 0x793, 0x47ded).await.unwrap();
+        context.write_bytes(0x1000, b"MMMD\0\0\0\0").unwrap();
+        clip_put_data(&mut context, clip, 0x1000, 8).await.unwrap();
+
+        play(&mut context, clip, 1).await.unwrap();
+
+        // The report is queued rather than made from inside the play, as the
+        // reference queues its own state changes. Run it - and only it, since
+        // the watcher queued behind it waits for an ending this test never
+        // brings about.
+        let queued = context.take_spawned().into_iter().next().unwrap();
+        queued.call(&mut context, Box::new([])).await.unwrap();
+
+        let calls = CALLS.lock().clone();
+        assert!(calls.contains(&(clip, 2)), "the title has to be told its clip is playing: {calls:?}");
     }
 
     /// One playback is watched once, and watching it again is possible only

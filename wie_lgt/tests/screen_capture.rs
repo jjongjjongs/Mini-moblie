@@ -111,6 +111,40 @@ struct CapturePlatform {
     network: CaptureNetwork,
 }
 
+/// A sink that takes SMAF files the way the Android one does.
+///
+/// The default test sink declines `play_smaf`, so everything the audio layer
+/// does for a sink with its own renderer - the active looping clip, the
+/// seamless re-play that keeps a per-frame teardown/rebuild from restarting the
+/// track, the deferred stop - never runs in a test. A title whose music
+/// restarts (놈ZERO rebuilds its BGM every few frames) cannot be reproduced
+/// without it.
+///
+/// Opt in with `WIE_SMAF_SINK=1`; captures without it keep the default sink, so
+/// the sweep baseline is unaffected.
+struct RenderingCaptureSink;
+
+impl AudioSink for RenderingCaptureSink {
+    fn play_wave(&self, _clip: u32, _channel: u8, _sampling_rate: u32, _wave_data: &[i16]) {}
+    fn midi_note_on(&self, _voice: u32, _channel_id: u8, _note: u8, _velocity: u8) {}
+    fn midi_note_off(&self, _voice: u32, _channel_id: u8, _note: u8, _velocity: u8) {}
+    fn midi_program_change(&self, _voice: u32, _channel_id: u8, _program: u8) {}
+    fn midi_control_change(&self, _voice: u32, _channel_id: u8, _control: u8, _value: u8) {}
+    fn midi_pitch_bend(&self, _voice: u32, _channel_id: u8, _value: u16) {}
+    fn midi_sysex(&self, _voice: u32, _data: &[u8]) {}
+
+    fn play_smaf(&self, id: u32, data: &[u8], repeat: bool) -> Option<u32> {
+        // The length does not have to be the file's real one - nothing here
+        // renders - only long enough that a one-shot does not finish instantly.
+        tracing::info!("[sink] play_smaf(id={id:#x}, {} bytes, repeat={repeat})", data.len());
+        Some(10_000)
+    }
+
+    fn stop_smaf(&self, id: u32) {
+        tracing::info!("[sink] stop_smaf(id={id:#x})");
+    }
+}
+
 /// A network that hands out sockets and refuses every operation on them.
 ///
 /// The runtime answers some connections in process - a local endpoint, or the
@@ -239,6 +273,9 @@ impl Platform for CapturePlatform {
         self.inner.filesystem()
     }
     fn audio_sink(&self) -> Box<dyn AudioSink> {
+        if std::env::var("WIE_SMAF_SINK").is_ok() {
+            return Box::new(RenderingCaptureSink);
+        }
         self.inner.audio_sink()
     }
     fn write_stdout(&self, buf: &[u8]) {
