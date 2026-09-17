@@ -9,11 +9,15 @@ use crate::classes::org::kwis::msp::lcdui::{CandidateWindow, Display};
 
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 
-/// What `InputMethodListener.notifyTextChanged`'s third argument means, as
-/// `org.kwis.msp.lwc.InputListener` reads it: -1 inserts at the cursor, 0
-/// writes over the characters just before it, 1 deletes them.
+/// What `InputMethodListener.notifyTextChanged`'s third argument means: -1
+/// inserts at the cursor, 1 deletes the characters just before it.
+///
+/// A title that draws its own field implements the listener itself, and the
+/// two it implements are these. 치킨타이쿤 and 생과일타이쿤 both ignore a third
+/// kind that asks them to write over what is already there, so the live
+/// character is replaced by taking it back and writing the new one instead.
 const AS_NEW_TEXT: i32 = -1;
-const OVER_THE_LIVE_CHARACTER: i32 = 0;
+const TAKING_BACK_WHAT_WAS_WRITTEN: i32 = 1;
 
 // class org.kwis.msp.lcdui.InputMethodHandler
 pub struct InputMethodHandler;
@@ -218,7 +222,9 @@ impl InputMethodHandler {
             let data: ClassInstanceRef<Array<JavaChar>> = ClassInstanceRef::new(None);
             let count = if event_type == 3 { -1 } else { 1 };
 
-            let _: () = jvm.invoke_virtual(&listener, "notifyTextChanged", "([CII)V", (data, count, 1)).await?;
+            let _: () = jvm
+                .invoke_virtual(&listener, "notifyTextChanged", "([CII)V", (data, count, TAKING_BACK_WHAT_WAS_WRITTEN))
+                .await?;
 
             // What was under the cursor is gone, so the next character written
             // has nothing to take its place.
@@ -240,9 +246,9 @@ impl InputMethodHandler {
         // The input method answers in two parts: what it has finished, and what
         // it is still building. Both go to the listener, but only one of them
         // is new text - the character still being built is already on screen
-        // from the press before, and the listener is told to write over it
-        // rather than beside it. Without that every step of a multi-tap was
-        // left behind, and typing 간 on the Korean pad wrote ㄱ기가간.
+        // from the press before, so it is taken back before the new one goes
+        // down. Without that every step of a multi-tap was left behind, and
+        // typing 간 on the Korean pad wrote ㄱ기가간.
         let mut composing: bool = jvm.get_field(&this, "__wieComposing", "Z").await?;
 
         for (bytes, length, is_live) in [(&result.output0, result.output0_len, false), (&result.output1, result.output1_len, true)] {
@@ -257,24 +263,24 @@ impl InputMethodHandler {
             let chars: ClassInstanceRef<Array<JavaChar>> = jvm.invoke_virtual(&text, "toCharArray", "()[C", ()).await?;
             let char_count = jvm.array_length(&chars).await? as i32;
 
-            // Writing over the live character swaps one character for one, so a
-            // commit that carries more than that - the space bar, which
-            // finishes the syllable and adds a space behind it - writes its
-            // first character over the live one and the rest after.
+            // The character still being built was written by the press before,
+            // so it is taken back first and the whole of what the input method
+            // now reads is written in its place. One character for one on a
+            // multi-tap step, and more when a commit carries more - the space
+            // bar finishes the syllable and adds a space behind it.
             let over_live = if composing { 1.min(char_count) } else { 0 };
 
-            for (from, count, change_type) in [(0, over_live, OVER_THE_LIVE_CHARACTER), (over_live, char_count - over_live, AS_NEW_TEXT)] {
-                if count == 0 {
-                    continue;
-                }
-
-                let part: ClassInstanceRef<String> = jvm
-                    .invoke_virtual(&text, "substring", "(II)Ljava/lang/String;", (from, from + count))
-                    .await?;
-                let part: ClassInstanceRef<Array<JavaChar>> = jvm.invoke_virtual(&part, "toCharArray", "()[C", ()).await?;
+            if over_live > 0 {
+                let gone: ClassInstanceRef<Array<JavaChar>> = ClassInstanceRef::new(None);
 
                 let _: () = jvm
-                    .invoke_virtual(&listener, "notifyTextChanged", "([CII)V", (part, count, change_type))
+                    .invoke_virtual(&listener, "notifyTextChanged", "([CII)V", (gone, over_live, TAKING_BACK_WHAT_WAS_WRITTEN))
+                    .await?;
+            }
+
+            if char_count > 0 {
+                let _: () = jvm
+                    .invoke_virtual(&listener, "notifyTextChanged", "([CII)V", (chars, char_count, AS_NEW_TEXT))
                     .await?;
             }
 
@@ -553,32 +559,30 @@ mod tests {
         JavaLangString::to_rust_string(jvm, &log).await
     }
 
-    /// The character still being composed is already on screen, so each step of
-    /// it has to be written over the last rather than beside it. Only the first
-    /// one is new text.
+    /// The character still being composed is already on screen, so each step
+    /// of it takes back the step before and writes itself in its place. Only
+    /// the first one is new text with nothing to take back.
     ///
     /// Typing 간 used to leave ㄱ기가간 in the field, every step of the
     /// composition kept.
     #[test]
-    fn a_syllable_being_composed_is_written_over_not_beside() -> Result<()> {
+    fn a_syllable_being_composed_takes_back_the_step_before_it() -> Result<()> {
         run_jvm_test(
             Box::new([Box::new(get_protos()) as Box<[_]>, Box::new([RecordingListener::as_proto()]) as Box<[_]>]),
             async |jvm| {
                 // ㄱ, ㅣ, the dot that makes it ㅏ, then ㄴ under it: 간.
                 let log = type_on_the_korean_pad(&jvm, &['4' as i32, '1' as i32, '2' as i32, '5' as i32]).await?;
 
-                assert_eq!(log, "ㄱ@-1 기@0 가@0 간@0 ");
+                assert_eq!(log, "ㄱ@-1 @1 기@-1 @1 가@-1 @1 간@-1 ");
 
                 Ok(())
             },
         )
     }
 
-    /// The space bar commits a syllable and a space together. Only the
-    /// syllable writes over the live character; the space goes after it.
-    ///
-    /// Writing both over the live character would be a two-for-one swap the
-    /// component cannot make, and would have eaten the character before it.
+    /// The space bar commits a syllable and a space together. The live
+    /// character is taken back once, and the syllable and the space go down
+    /// together as the one thing that replaces it.
     #[test]
     fn a_commit_longer_than_the_live_character_puts_the_rest_after_it() -> Result<()> {
         run_jvm_test(
@@ -588,7 +592,7 @@ mod tests {
                 let keys = ['4' as i32, '1' as i32, '2' as i32, '#' as i32];
                 let log = type_on_the_korean_pad(&jvm, &keys).await?;
 
-                assert_eq!(log, RustString::from("ㄱ@-1 기@0 가@0 가@0  @-1 "));
+                assert_eq!(log, RustString::from("ㄱ@-1 @1 기@-1 @1 가@-1 @1 가 @-1 "));
 
                 Ok(())
             },
@@ -653,7 +657,7 @@ mod tests {
                 let keys = ['4' as i32, '1' as i32, '2' as i32, '4' as i32, '1' as i32];
                 let log = type_on_the_korean_pad(&jvm, &keys).await?;
 
-                assert_eq!(log, "ㄱ@-1 기@0 가@0 각@0 가@0 기@-1 ");
+                assert_eq!(log, "ㄱ@-1 @1 기@-1 @1 가@-1 @1 각@-1 @1 가@-1 기@-1 ");
 
                 Ok(())
             },
