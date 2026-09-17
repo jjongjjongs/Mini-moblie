@@ -38,15 +38,24 @@ impl BaseClip {
                 // Whether this clip is sounding, so `Player.stop` can say
                 // whether it stopped anything. See `media_stop`.
                 JavaFieldProto::new("__wiePlaying", "Z", Default::default()),
+                // The clip's volume, which it has from construction whether or
+                // not it has any data. See `media_get_volume`.
+                JavaFieldProto::new("__wieVolume", "I", Default::default()),
             ],
             access_flags: Default::default(),
         }
     }
 
-    async fn init(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<()> {
+    /// The volume a clip is built with, which is what the reference's Clip
+    /// constructor puts in the clip's volume record.
+    const DEFAULT_VOLUME: i32 = 100;
+
+    async fn init(jvm: &Jvm, _: &mut WieJvmContext, mut this: ClassInstanceRef<Self>) -> JvmResult<()> {
         tracing::debug!("org.kwis.msp.media.BaseClip::<init>({this:?})");
 
         let _: () = jvm.invoke_special(&this, "java/lang/Object", "<init>", "()V", ()).await?;
+
+        jvm.put_field(&mut this, "__wieVolume", "I", Self::DEFAULT_VOLUME).await?;
 
         Ok(())
     }
@@ -123,6 +132,15 @@ impl BaseClip {
 
         jvm.put_field(&mut this, "player", "Ljavax/microedition/media/Player;", player).await?;
 
+        // The clip's volume outlives its data - the reference keeps it in a
+        // record of its own, keyed by the clip - so a title that set a volume
+        // before the data arrived gets that volume on the player the data just
+        // created rather than the default.
+        let volume: i32 = jvm.get_field(&this, "__wieVolume", "I").await?;
+        if volume != Self::DEFAULT_VOLUME {
+            let _: i32 = jvm.invoke_virtual(&this, "mediaSetVolume", "(I)I", (volume,)).await?;
+        }
+
         Ok(length)
     }
 
@@ -187,25 +205,37 @@ impl BaseClip {
         Ok(0)
     }
 
+    /// The clip's volume, which every clip has from the moment it is built.
+    ///
+    /// The reference gives a clip a volume record in its constructor, holding
+    /// 100, and `getVolume` answers whatever is in that record - it is never an
+    /// error code, and it does not depend on the clip having any data.
+    ///
+    /// 졸라맨액션학원 makes the difference audible: at startup it builds a Clip
+    /// it never gives data to and asks it for its volume, keeps the answer as
+    /// the volume the whole game plays at, and only turns sound on at all if it
+    /// came back above zero. WIE answered -9 - the backend's "no such clip" -
+    /// so the game ran silent however its own sound setting was set.
     async fn media_get_volume(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<i32> {
         tracing::debug!("org.kwis.msp.media.BaseClip::mediaGetVolume({this:?})");
 
-        let player: ClassInstanceRef<Player> = jvm.get_field(&this, "player", "Ljavax/microedition/media/Player;").await?;
-
-        if player.is_null() {
-            return Ok(-9);
-        }
-
-        jvm.invoke_virtual(&player, "getVolume", "()I", ()).await
+        jvm.get_field(&this, "__wieVolume", "I").await
     }
 
-    async fn media_set_volume(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, volume: i32) -> JvmResult<i32> {
+    /// Sets the clip's volume.
+    ///
+    /// The reference records the volume whether or not the clip has any data
+    /// yet, so a title that sets a volume first and loads the clip afterwards
+    /// gets the volume it asked for - see `put_data`.
+    async fn media_set_volume(jvm: &Jvm, _: &mut WieJvmContext, mut this: ClassInstanceRef<Self>, volume: i32) -> JvmResult<i32> {
         tracing::debug!("org.kwis.msp.media.BaseClip::mediaSetVolume({this:?}, {volume})");
+
+        jvm.put_field(&mut this, "__wieVolume", "I", volume).await?;
 
         let player: ClassInstanceRef<Player> = jvm.get_field(&this, "player", "Ljavax/microedition/media/Player;").await?;
 
         if player.is_null() {
-            return Ok(-9);
+            return Ok(0);
         }
 
         jvm.invoke_virtual(&player, "setVolume", "(I)I", (volume,)).await

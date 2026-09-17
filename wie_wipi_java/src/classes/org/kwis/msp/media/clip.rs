@@ -393,6 +393,40 @@ mod test {
         })
     }
 
+    /// A Clip has a volume from the moment it is built, whether or not it has
+    /// any data, and that volume is 100.
+    ///
+    /// The reference gives every Clip a volume record in its constructor. A
+    /// data-less Clip asked for its volume answers 100 there, not an error -
+    /// 졸라맨액션학원 builds exactly such a Clip at startup, keeps the answer as
+    /// the volume it plays everything at, and goes silent for the whole run if
+    /// it is not above zero.
+    #[test]
+    fn a_clip_has_a_volume_before_it_has_data() -> Result<()> {
+        run_jvm_test(Box::new([wie_midp::get_protos().into(), get_protos().into()]), |jvm| async move {
+            let r#type = JavaLangString::from_rust_string(&jvm, "audio/test").await?;
+            let clip: ClassInstanceRef<Clip> = jvm.new_class("org/kwis/msp/media/Clip", "(Ljava/lang/String;)V", (r#type,)).await?.into();
+
+            let volume: i32 = jvm.invoke_virtual(&clip, "getVolume", "()I", ()).await?;
+            assert_eq!(volume, 100);
+
+            // Setting a volume before the data arrives is remembered, and the
+            // data does not put it back to the default.
+            let set: bool = jvm.invoke_virtual(&clip, "setVolume", "(I)Z", (30,)).await?;
+            assert!(set);
+
+            let mut data = jvm.instantiate_array("B", 1).await?;
+            jvm.store_array(&mut data, 0, [0i8]).await?;
+            let stored: bool = jvm.invoke_virtual(&clip, "setBuffer", "([BI)Z", (data, 1)).await?;
+            assert!(stored);
+
+            let volume_after_data: i32 = jvm.invoke_virtual(&clip, "getVolume", "()I", ()).await?;
+            assert_eq!(volume_after_data, 30);
+
+            Ok(())
+        })
+    }
+
     #[test]
     fn test_volume_range_round_trip() -> Result<()> {
         run_jvm_test(Box::new([wie_midp::get_protos().into(), get_protos().into()]), |jvm| async move {
