@@ -321,13 +321,24 @@ pub async fn play(context: &mut dyn WIPICContext, ptr_clip: WIPICWord, repeat: W
                     context.system().sleep(COMPLETION_POLL_PERIOD).await;
                 }
 
-                if self.stopped.load(Ordering::Acquire) {
-                    tracing::debug!("MC_mdaPlay completion callback cancelled for stopped clip {:#x}", self.clip);
+                // A stopped clip has ended too, and is told so.
+                //
+                // This used to return here without telling the title anything,
+                // on the reasoning that a clip the title stopped itself needs no
+                // end-of-media. But a title's sound engine is a state machine
+                // whose only way forward is that event, and stopping is how it
+                // gets from one sound to the next.
+                //
+                // KBO 프로야구 2010 is built exactly that way: to play a sound it
+                // records the one it wants, stops whatever is sounding and waits
+                // to be told the clip ended before starting it. Its handler
+                // takes events 1, 2, 3 and 9 and ignores everything else - the
+                // `-1` MC_mdaStop answers with is nothing to it - so with this
+                // event withheld it played its opening jingle, asked for a stop
+                // every frame for the rest of the run, and never sounded again.
+                let ended = if self.stopped.load(Ordering::Acquire) { "stopped" } else { "completed" };
 
-                    return Ok(WIPICResult { results: Vec::new() });
-                }
-
-                tracing::debug!("MC_mdaPlay completion callback({:#x}, event=3)", self.callback);
+                tracing::debug!("MC_mdaPlay {ended} callback({:#x}, event=3)", self.callback);
                 context.call_function(self.callback, &[self.clip, 3]).await?;
 
                 Ok(WIPICResult { results: Vec::new() })
