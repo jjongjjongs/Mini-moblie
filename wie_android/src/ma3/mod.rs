@@ -29,7 +29,7 @@ mod tone;
 mod voice;
 mod wave;
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use crate::ma3::{
     bus::{clamp_i16, mix_q15, saturate_pcm, soft_limit, stereo_gain_q15},
@@ -466,7 +466,10 @@ struct SongPlayback {
     /// The clip's own volume, 0 to 100, as the title last set it.
     volume: u8,
     /// Interleaved stereo at the output rate, as [`crate::oma3`] renders it.
-    samples: Vec<i16>,
+    /// Shared, because the same rendered track is installed again and again by
+    /// a title that rebuilds its music every frame - see the sink's render
+    /// cache - and copying megabytes per frame to do it would be its own stall.
+    samples: Arc<Vec<i16>>,
     /// Read position into `samples`.
     position: usize,
     repeat: bool,
@@ -546,7 +549,7 @@ impl SynthMixer {
     /// loop) would otherwise pile the two loops on top of each other. One-shot
     /// songs are effects fired over the music and still mix in, matching the
     /// reference.
-    pub fn set_song(&mut self, id: u32, samples: Vec<i16>, repeat: bool) {
+    pub fn set_song(&mut self, id: u32, samples: Arc<Vec<i16>>, repeat: bool) {
         self.songs.retain(|song| song.id != id && !(repeat && song.repeat));
         self.songs.push(SongPlayback {
             id,
@@ -857,13 +860,15 @@ fn wav(samples: &[i16]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::{CHANNELS, Channel, MAX_VOICES, SAMPLE_RATE, Synth, SynthMixer, modulation_depth};
 
     #[test]
     fn song_mixes_then_finishes() {
         let mut mixer = SynthMixer::new();
         // Two stereo frames.
-        mixer.set_song(1, vec![100, 100, 200, 200], false);
+        mixer.set_song(1, Arc::new(vec![100, 100, 200, 200]), false);
         // One frame at a time: the song plays out, then the mixer goes silent.
         let first = mixer.render(1).expect("song frame");
         assert_eq!(first, vec![100, 100]);
@@ -875,7 +880,7 @@ mod tests {
     #[test]
     fn song_loops_when_repeating() {
         let mut mixer = SynthMixer::new();
-        mixer.set_song(1, vec![100, 100], true);
+        mixer.set_song(1, Arc::new(vec![100, 100]), true);
         assert_eq!(mixer.render(1), Some(vec![100, 100]));
         assert_eq!(mixer.render(1), Some(vec![100, 100]), "a repeating song wraps");
         mixer.stop_song(1);
@@ -890,7 +895,7 @@ mod tests {
         // plays as often as during it, and `play_smaf` installs its stream off
         // the caller's thread a moment later.
         mixer.set_clip_volume(1, 50);
-        mixer.set_song(1, vec![100, 100, 100, 100], false);
+        mixer.set_song(1, Arc::new(vec![100, 100, 100, 100]), false);
         assert_eq!(mixer.render(1), Some(vec![50, 50]));
 
         // And set while it is sounding.
@@ -907,8 +912,8 @@ mod tests {
     #[test]
     fn one_clip_turned_down_leaves_the_others_alone() {
         let mut mixer = SynthMixer::new();
-        mixer.set_song(1, vec![100, 100], true);
-        mixer.set_song(2, vec![40, 40], false);
+        mixer.set_song(1, Arc::new(vec![100, 100]), true);
+        mixer.set_song(2, Arc::new(vec![40, 40]), false);
         assert_eq!(mixer.render(1), Some(vec![140, 140]));
 
         // The effect is muted before being stopped; the music keeps its level.
@@ -925,13 +930,13 @@ mod tests {
     fn songs_play_concurrently() {
         let mut mixer = SynthMixer::new();
         // A looping background track and a one-shot effect over it.
-        mixer.set_song(1, vec![100, 100], true);
-        mixer.set_song(2, vec![10, 10], false);
+        mixer.set_song(1, Arc::new(vec![100, 100]), true);
+        mixer.set_song(2, Arc::new(vec![10, 10]), false);
         assert_eq!(mixer.render(1), Some(vec![110, 110]), "both mix");
         // The effect ends; the looping track keeps playing on its own.
         assert_eq!(mixer.render(1), Some(vec![100, 100]));
         // A new effect under the same handle replaces the old one, not the music.
-        mixer.set_song(2, vec![5, 5], false);
+        mixer.set_song(2, Arc::new(vec![5, 5]), false);
         assert_eq!(mixer.render(1), Some(vec![105, 105]));
     }
 
@@ -939,14 +944,14 @@ mod tests {
     fn a_new_loop_replaces_the_previous_background_music() {
         let mut mixer = SynthMixer::new();
         // A two-frame one-shot effect and a looping background track are playing.
-        mixer.set_song(1, vec![10, 10, 10, 10], false);
-        mixer.set_song(2, vec![100, 100], true);
+        mixer.set_song(1, Arc::new(vec![10, 10, 10, 10]), false);
+        mixer.set_song(2, Arc::new(vec![100, 100]), true);
         assert_eq!(mixer.render(1), Some(vec![110, 110]), "effect and music mix");
 
         // A new track on a fresh handle - a screen change that plays its own
         // music without stopping the old loop - takes over the background music
         // instead of stacking a second loop, but leaves the one-shot effect.
-        mixer.set_song(3, vec![50, 50], true);
+        mixer.set_song(3, Arc::new(vec![50, 50]), true);
         assert_eq!(mixer.render(1), Some(vec![60, 60]), "old loop gone, effect stays");
         // The one-shot effect ends; only the new loop remains.
         assert_eq!(mixer.render(1), Some(vec![50, 50]));

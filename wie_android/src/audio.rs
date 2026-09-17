@@ -21,7 +21,7 @@
 //! opcode 2.
 
 use crate::{
-    ma3::{FULL_VOLUME, SAMPLE_RATE},
+    ma3::{CHANNELS, FULL_VOLUME, SAMPLE_RATE},
     platform::Shared,
 };
 use std::{
@@ -43,6 +43,95 @@ const OPCODE_VIBRATE: u8 = 8;
 /// Header length shared by both commands; `AndroidAudioOutput` rejects
 /// anything shorter.
 const HEADER_LEN: usize = 10;
+
+/// Rendered `.mmf` streams, kept by the bytes they were rendered from.
+///
+/// Rendering an FM sequence costs one and a half to three and a half seconds of
+/// CPU for a track of this length, and a title that rebuilds its music every
+/// frame asks for the same handful of tracks over and over: 놈ZERO tears its
+/// BGM down and builds it again on each frame, cycling six tracks, which came to
+/// four hundred renders in fifty seconds - hundreds of seconds of CPU per second
+/// of play, on threads competing with the emulator, which is what its frame
+/// drops were. Rendered once and kept, those four hundred become six.
+///
+/// Bounded by total size, oldest use dropped first, so a title with more music
+/// than fits cannot grow this without end.
+struct RenderCache {
+    entries: Vec<RenderedSong>,
+    clock: u64,
+}
+
+struct RenderedSong {
+    /// Hash of the `.mmf` bytes this was rendered from.
+    hash: u64,
+    samples: Arc<Vec<i16>>,
+    /// When this was last handed out, for choosing what to drop.
+    used: u64,
+}
+
+/// How much rendered audio is kept. A track of the length 놈ZERO plays is about
+/// five megabytes, so this holds its whole rotation and a little more.
+const RENDER_CACHE_BYTES: usize = 32 * 1024 * 1024;
+
+impl RenderCache {
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            clock: 0,
+        }
+    }
+
+    fn get(&mut self, hash: u64) -> Option<Arc<Vec<i16>>> {
+        self.clock += 1;
+        let clock = self.clock;
+        let entry = self.entries.iter_mut().find(|entry| entry.hash == hash)?;
+        entry.used = clock;
+
+        Some(entry.samples.clone())
+    }
+
+    fn insert(&mut self, hash: u64, samples: Arc<Vec<i16>>) {
+        if self.entries.iter().any(|entry| entry.hash == hash) {
+            return;
+        }
+
+        self.clock += 1;
+        self.entries.push(RenderedSong {
+            hash,
+            samples,
+            used: self.clock,
+        });
+
+        while self.bytes() > RENDER_CACHE_BYTES && self.entries.len() > 1 {
+            let oldest = self
+                .entries
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, entry)| entry.used)
+                .map(|(index, _)| index);
+
+            match oldest {
+                Some(index) => drop(self.entries.remove(index)),
+                None => break,
+            }
+        }
+    }
+
+    fn bytes(&self) -> usize {
+        self.entries.iter().map(|entry| entry.samples.len() * size_of::<i16>()).sum()
+    }
+}
+
+/// Names a `.mmf` by its bytes, to find it in the render cache.
+fn mmf_hash(data: &[u8]) -> u64 {
+    // FNV-1a, as the audio layer names a clip's bytes.
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &byte in data {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
 
 /// Fixed gain the reference's MMF player applies to the rendered stream before
 /// the clip's own volume, from its `gain=2.0` log. Its output stage is this
@@ -149,6 +238,8 @@ fn play_wave_command(channel: u8, sampling_rate: u32, wave_data: &[i16]) -> Vec<
 
 pub struct AndroidAudioSink {
     shared: Shared,
+    /// What has already been rendered, so the same track is not rendered twice.
+    rendered: Arc<Mutex<RenderCache>>,
     /// The current render generation for each audio handle. A clip is rendered
     /// off-thread, so a stop or a replay can land while its render is still
     /// running; the worker installs its stream only if the handle's generation
@@ -167,6 +258,7 @@ impl AndroidAudioSink {
         install_audio_mixer(shared.mixer_handle());
         Self {
             shared,
+            rendered: Arc::new(Mutex::new(RenderCache::new())),
             render_generation: Arc::new(Mutex::new(HashMap::new())),
             next_generation: AtomicU64::new(0),
         }
@@ -254,6 +346,26 @@ impl wie_backend::AudioSink for AndroidAudioSink {
     /// reference plays them. A file with no FM notes (a bare recorded-wave clip)
     /// is declined so the live wave path keeps handling it.
     fn play_smaf(&self, id: u32, data: &[u8], repeat: bool) -> Option<u32> {
+        // Already rendered? Then there is nothing to do but hand the stream
+        // over - no parse, no analysis, no render, no thread. This is the whole
+        // of the work for a title that plays the same few tracks over and over.
+        let hash = mmf_hash(data);
+        if let Some(samples) = self.rendered.lock().unwrap_or_else(|x| x.into_inner()).get(hash) {
+            let duration_ms = (samples.len() as u64 / u64::from(CHANNELS as u32) * 1000 / u64::from(SAMPLE_RATE)) as u32;
+
+            // Take this handle off whatever generation it was on, so a render
+            // still in flight for it cannot land on top of what is installed
+            // here. Generations before mixer, the order `stop_smaf` uses.
+            let mut generations = self.render_generation.lock().unwrap_or_else(|x| x.into_inner());
+            generations.remove(&id);
+            self.shared.mixer().set_song(id, samples, repeat);
+            drop(generations);
+
+            tracing::info!("[smaf] oma3 cached stream, {duration_ms}ms, repeat={repeat}, id={id}");
+
+            return Some(duration_ms);
+        }
+
         let smaf = crate::oma3::smaf::parse(data).ok()?;
         let analysis = crate::oma3::analysis::analyze(&smaf);
         if analysis.notes.is_empty() && analysis.audio_events.is_empty() {
@@ -294,6 +406,7 @@ impl wie_backend::AudioSink for AndroidAudioSink {
 
         let shared = self.shared.clone();
         let render_generation = self.render_generation.clone();
+        let rendered = self.rendered.clone();
         std::thread::spawn(move || {
             let pcm = crate::oma3::renderer::render_all(analysis, SAMPLE_RATE as i32);
             // The reference's player drives the rendered stream with a fixed
@@ -302,10 +415,16 @@ impl wie_backend::AudioSink for AndroidAudioSink {
             // full level and only clips the peaks - a loudness lift, not a plain
             // halving. Match it here so a sequence carries the same body it does
             // on the handset rather than playing back at half the level.
-            let samples: Vec<i16> = pcm
-                .iter()
-                .map(|&s| (s * MMF_GAIN * 32767.0).round().clamp(-32768.0, 32767.0) as i16)
-                .collect();
+            let samples: Arc<Vec<i16>> = Arc::new(
+                pcm.iter()
+                    .map(|&s| (s * MMF_GAIN * 32767.0).round().clamp(-32768.0, 32767.0) as i16)
+                    .collect(),
+            );
+
+            // Kept whatever becomes of this play: the work is done, and the
+            // next title that asks for these bytes - most likely this one, next
+            // frame - should not pay for it again.
+            rendered.lock().unwrap_or_else(|x| x.into_inner()).insert(hash, samples.clone());
 
             // Install only if this handle is still on the generation this render
             // began under; a stop or a newer play has otherwise superseded it.
@@ -332,7 +451,57 @@ impl wie_backend::AudioSink for AndroidAudioSink {
 
 #[cfg(test)]
 mod tests {
-    use super::{HEADER_LEN, play_wave_command, scale_wave_volume, vibrate_command};
+    use std::sync::Arc;
+
+    use super::{HEADER_LEN, RENDER_CACHE_BYTES, RenderCache, mmf_hash, play_wave_command, scale_wave_volume, vibrate_command};
+
+    /// The same bytes are rendered once and handed out again after that.
+    ///
+    /// 놈ZERO rebuilds its music every frame out of six tracks, which was four
+    /// hundred renders in fifty seconds at one and a half to three and a half
+    /// seconds of CPU each - far more work than there was time to do it in, on
+    /// threads competing with the emulator. Kept, it is six.
+    #[test]
+    fn a_track_is_rendered_once_however_often_it_is_played() {
+        let mut cache = RenderCache::new();
+        let track = b"MMMD....track one";
+        let other = b"MMMD....track two";
+
+        assert!(cache.get(mmf_hash(track)).is_none(), "nothing is rendered to begin with");
+
+        let rendered = Arc::new(vec![1i16, 2, 3, 4]);
+        cache.insert(mmf_hash(track), rendered.clone());
+
+        // Every later play of those bytes is answered out of the cache, and
+        // with the same buffer rather than a copy of it.
+        for _ in 0..400 {
+            let hit = cache.get(mmf_hash(track)).expect("rendered already");
+            assert!(Arc::ptr_eq(&hit, &rendered));
+        }
+
+        // A different track is a different entry, and inserting the same track
+        // twice does not double it up.
+        assert!(cache.get(mmf_hash(other)).is_none());
+        cache.insert(mmf_hash(track), Arc::new(vec![9i16]));
+        assert_eq!(cache.entries.len(), 1);
+    }
+
+    /// The cache is bounded, and what goes is what was used longest ago.
+    #[test]
+    fn the_oldest_use_is_dropped_when_the_cache_is_full() {
+        let mut cache = RenderCache::new();
+
+        // Three tracks, each a little over half the budget, so only the last
+        // two can be held at once.
+        let big = RENDER_CACHE_BYTES / 2 / size_of::<i16>() + 1;
+        for track in 0..3u64 {
+            cache.insert(track, Arc::new(vec![0i16; big]));
+        }
+
+        assert!(cache.bytes() <= RENDER_CACHE_BYTES);
+        assert!(cache.get(0).is_none(), "the track used longest ago is the one dropped");
+        assert!(cache.get(2).is_some(), "the newest is kept");
+    }
 
     #[test]
     fn play_wave_layout_matches_java_decoder() {
