@@ -325,6 +325,54 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
     let gctx: WIPICGraphicsContext = read_generic(context, p_gctx)?;
     let color = context_color(&framebuffer, &gctx);
 
+    // A fill goes through the title's own operation too - 드래곤하트2 lays two
+    // hundred of them through a live one in a single capture - so the colour
+    // meets what is already there rather than covering it.
+    if let Some((kind, function)) = pixel_op::of_context(context, gctx.pixel_op_func_ptr, gctx.param1, gctx.xor_mode).await? {
+        let source = Rgb565Pixel::from_color(color);
+
+        let existing = {
+            let canvas = framebuffer.canvas(context)?;
+            let surface = canvas.image();
+            let (width, height) = (surface.width() as i32, surface.height() as i32);
+
+            let mut existing = Vec::new();
+            for row in y..y + h {
+                for col in x..x + w {
+                    if col < 0 || col >= width || row < 0 || row >= height {
+                        continue;
+                    }
+
+                    existing.push((col, row, Rgb565Pixel::from_color(surface.get_pixel(col, row))));
+                }
+            }
+
+            existing
+        };
+
+        let mut filled = Vec::with_capacity(existing.len());
+        for &(col, row, destination) in &existing {
+            let result = match pixel_op::apply(kind, destination, source) {
+                Some(result) => result,
+                None => {
+                    context
+                        .call_function(function, &[destination as WIPICWord, source as WIPICWord, gctx.param1])
+                        .await? as u16
+                }
+            };
+
+            filled.push((col, row, result));
+        }
+
+        let mut canvas = framebuffer.canvas(context)?;
+        for (col, row, pixel) in filled {
+            canvas.put_pixel(col, row, Rgb565Pixel::to_color(pixel));
+        }
+        canvas.flush()?;
+
+        return Ok(());
+    }
+
     // A solid, fully opaque rectangle is just bytes, and the clip this passes
     // is the rectangle itself, so nothing about the result needs the surface
     // staged: write the rows it covers straight into the framebuffer. A title
@@ -742,10 +790,10 @@ pub async fn draw_image(
     // A title's own pixel operation decides what every pixel becomes, and it is
     // read before the canvas takes the context.
     let grp_ctx: WIPICGraphicsContext = read_generic(context, graphics_context)?;
-    let operation = grp_ctx.pixel_op_func_ptr;
 
-    let src_image = FrameBuffer(source).image(context)?;
-    let mut canvas = framebuffer.canvas(context)?;
+    // Asked before anything takes the context, because asking runs the title's
+    // own code. Without it 드래곤하트2's glow lands as an opaque disc.
+    let operation = pixel_op::of_context(context, grp_ctx.pixel_op_func_ptr, grp_ctx.param1, grp_ctx.xor_mode).await?;
 
     let clip = Clip {
         x: dx as _,
@@ -754,8 +802,10 @@ pub async fn draw_image(
         height: h as _,
     };
 
-    // Without the operation applied, 드래곤하트2's glow lands as an opaque disc.
-    if operation == 0 {
+    let Some((kind, function)) = operation else {
+        let src_image = FrameBuffer(source).image(context)?;
+        let mut canvas = framebuffer.canvas(context)?;
+
         if keyed {
             blit_magenta_keyed(&mut **canvas, dx, dy, w, h, &*src_image, sx, sy);
         } else {
@@ -764,12 +814,7 @@ pub async fn draw_image(
         canvas.flush()?;
 
         return Ok(());
-    }
-
-    drop(canvas);
-    drop(src_image);
-
-    let kind = pixel_op::classify(context, operation).await?;
+    };
 
     let source = FrameBuffer(source);
     let pairs = {
@@ -787,7 +832,7 @@ pub async fn draw_image(
             Some(result) => result,
             None => {
                 context
-                    .call_function(operation, &[destination as WIPICWord, source_pixel as WIPICWord])
+                    .call_function(function, &[destination as WIPICWord, source_pixel as WIPICWord, grp_ctx.param1])
                     .await? as u16
             }
         };
@@ -2210,7 +2255,7 @@ pub async fn get_framebuffer_bpp(_context: &mut dyn WIPICContext, framebuffer: W
 mod tests {
     use wie_util::{read_generic, write_generic};
 
-    use wie_backend::canvas::{ArgbPixel, Image, VecImageBuffer};
+    use wie_backend::canvas::{ArgbPixel, Color, Image, PixelType, Rgb565Pixel, VecImageBuffer};
 
     use super::WIPICGraphicsContextIdx as Idx;
     use super::{
@@ -2269,10 +2314,10 @@ mod tests {
         let pgc = context.data_ptr(pgc_handle).unwrap();
         init_context(&mut context, pgc).await.unwrap();
 
-        // Half-bright grey over half-bright grey. Overwriting leaves it where
-        // it was; adding lifts it.
-        let destination = framebuffer_of(&mut context, 2, 2, &[0xff80_8080; 4]).await;
-        let source = framebuffer_of(&mut context, 2, 2, &[0xff80_8080; 4]).await;
+        // Two different greys, so a destination read as nothing would show up
+        // as the source alone rather than passing by luck.
+        let destination = framebuffer_of(&mut context, 2, 2, &[0xff40_4040; 4]).await;
+        let source = framebuffer_of(&mut context, 2, 2, &[0xff20_2020; 4]).await;
 
         let image_handle = context.alloc(core::mem::size_of::<wipi_types::wipic::WIPICImage>() as u32).unwrap();
         let image_address = context.data_ptr(image_handle).unwrap();
@@ -2296,12 +2341,97 @@ mod tests {
         let handle = read_generic(&context, context.data_ptr(destination).unwrap()).unwrap();
         let drawn = super::FrameBuffer(handle).image(&mut context).unwrap();
 
-        // 0x80 is 16 of 31 in red, so added it lands at 31 rather than staying
-        // at 16 - which is what says the operation ran.
+        let expected = Rgb565Pixel::to_color(super::pixel_op::additive(
+            Rgb565Pixel::from_color(Color {
+                a: 0xff,
+                r: 0x40,
+                g: 0x40,
+                b: 0x40,
+            }),
+            Rgb565Pixel::from_color(Color {
+                a: 0xff,
+                r: 0x20,
+                g: 0x20,
+                b: 0x20,
+            }),
+        ));
+
         let out = drawn.get_pixel(0, 0);
-        assert!(out.r > 0x90, "red {} was not lifted by the operation", out.r);
-        assert!(out.g > 0x90, "green {} was not lifted by the operation", out.g);
-        assert!(out.b > 0x90, "blue {} was not lifted by the operation", out.b);
+        assert_eq!((out.r, out.g, out.b), (expected.r, expected.g, expected.b));
+    }
+
+    /// A fill goes through the operation too, not only a blit.
+    ///
+    /// 드래곤하트2 lays two hundred rectangles through a live operation in one
+    /// capture, so a fill that covers what is under it is as wrong there as a
+    /// blit that does.
+    #[futures_test::test]
+    async fn a_fill_goes_through_the_titles_own_pixel_operation() {
+        let mut context = test_context();
+        context.set_guest_function(|_, args| super::pixel_op::additive(args[0] as u16, args[1] as u16) as u32);
+
+        let pgc_handle = context.alloc(core::mem::size_of::<super::WIPICGraphicsContext>() as u32).unwrap();
+        let pgc = context.data_ptr(pgc_handle).unwrap();
+        init_context(&mut context, pgc).await.unwrap();
+
+        let destination = framebuffer_of(&mut context, 2, 2, &[0xff40_4040; 4]).await;
+
+        // A fill colour of its own, and an operation that adds it to what is
+        // there. The framebuffer is 32bpp, so the colour is written as one.
+        set_context(&mut context, pgc, Idx::FgPixelIdx, 0x0020_2020).await.unwrap();
+        set_context(&mut context, pgc, Idx::PixelopIdx, 0x1234).await.unwrap();
+
+        super::fill_rect(&mut context, destination, 0, 0, 2, 2, pgc).await.unwrap();
+
+        let handle = read_generic(&context, context.data_ptr(destination).unwrap()).unwrap();
+        let filled = super::FrameBuffer(handle).image(&mut context).unwrap();
+
+        let expected = Rgb565Pixel::to_color(super::pixel_op::additive(
+            Rgb565Pixel::from_color(Color {
+                a: 0xff,
+                r: 0x40,
+                g: 0x40,
+                b: 0x40,
+            }),
+            Rgb565Pixel::from_color(Color {
+                a: 0xff,
+                r: 0x20,
+                g: 0x20,
+                b: 0x20,
+            }),
+        ));
+
+        let out = filled.get_pixel(0, 0);
+        assert_eq!((out.r, out.g, out.b), (expected.r, expected.g, expected.b));
+    }
+
+    /// XOR mode draws through the built-in the reference plants for it, even
+    /// though there is no guest address to report back for it.
+    #[futures_test::test]
+    async fn xor_mode_draws_through_the_built_in_operation() {
+        let mut context = test_context();
+
+        let pgc_handle = context.alloc(core::mem::size_of::<super::WIPICGraphicsContext>() as u32).unwrap();
+        let pgc = context.data_ptr(pgc_handle).unwrap();
+        init_context(&mut context, pgc).await.unwrap();
+
+        let destination = framebuffer_of(&mut context, 2, 2, &[0xff00_0000; 4]).await;
+
+        set_context(&mut context, pgc, Idx::XorModeIdx, 1).await.unwrap();
+        super::fill_rect(&mut context, destination, 0, 0, 2, 2, pgc).await.unwrap();
+
+        let handle = read_generic(&context, context.data_ptr(destination).unwrap()).unwrap();
+        let filled = super::FrameBuffer(handle).image(&mut context).unwrap();
+
+        // Black inverted is white, whatever colour the fill was.
+        let out = filled.get_pixel(0, 0);
+        assert!(
+            out.r > 0xf0 && out.g > 0xf0 && out.b > 0xf0,
+            "black was not inverted: {} {} {}",
+            out.r,
+            out.g,
+            out.b
+        );
     }
 
     /// A string a title has not set yet is the empty one, and measuring or

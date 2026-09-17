@@ -1,9 +1,15 @@
 //! The pixel operation a title plants in its graphics context.
 //!
 //! `MC_grpSetContext(ctx, PixelopIdx, f)` hands the runtime a function of the
-//! title's own, and every pixel a blit would write goes through it first:
-//! `f(destination, source)` answers what to write. A title that draws a glow or
-//! a shadow does it this way - there is no blend mode in the API, only this.
+//! title's own, and every pixel a draw would write goes through it first:
+//! `f(destination, source, param)` answers what to write, where `param` is the
+//! context's own `PixelParam1Idx`. A title that draws a glow or a shadow does
+//! it this way - there is no blend mode in the API, only this.
+//!
+//! The reference's `WPGrp_PixelOperation` is where that shape comes from: it
+//! loads the destination into the first argument and the source into the
+//! second, hands the operation the context's parameter as the third, and
+//! stores what comes back over the destination.
 //!
 //! WIE stored the pointer and drew as though it were not there, so 드래곤하트2's
 //! hit effect came down as an opaque blue disc over the field and its ground
@@ -33,6 +39,11 @@ pub enum PixelOp {
     /// `out = max - (max - dst) * (max - src) / max` per channel - a wash that
     /// lightens without ever darkening.
     Screen,
+    /// The destination inverted, which is what the reference plants when a
+    /// title turns XOR mode on: `WPGrp_PutXorPixel` is `mvn r0, r0` and a
+    /// return, so the source has no part in it. Drawing the same thing twice
+    /// puts back what was there, which is what the mode is for.
+    Invert,
     /// Something else. The title is asked for every pixel.
     Guest,
 }
@@ -60,6 +71,11 @@ pub fn additive(destination: u16, source: u16) -> u16 {
         (green(destination) + green(source)).min(0x3f),
         (blue(destination) + blue(source)).min(0x1f),
     )
+}
+
+/// Every bit of the destination flipped, the source ignored.
+pub fn invert(destination: u16, _source: u16) -> u16 {
+    !destination
 }
 
 /// The inverses multiplied and inverted back, which is what the title's own
@@ -103,14 +119,16 @@ static KNOWN: Mutex<Vec<(WIPICWord, PixelOp)>> = Mutex::new(Vec::new());
 const KNOWN_LIMIT: usize = 32;
 
 /// Asks the title's operation what it does, and remembers the answer.
-pub async fn classify(context: &mut dyn WIPICContext, function: WIPICWord) -> Result<PixelOp> {
+pub async fn classify(context: &mut dyn WIPICContext, function: WIPICWord, param: WIPICWord) -> Result<PixelOp> {
     if let Some(known) = KNOWN.lock().iter().find(|(address, _)| *address == function) {
         return Ok(known.1);
     }
 
     let mut answers = Vec::with_capacity(PROBES.len());
     for (destination, source) in PROBES {
-        let answer = context.call_function(function, &[destination as WIPICWord, source as WIPICWord]).await?;
+        let answer = context
+            .call_function(function, &[destination as WIPICWord, source as WIPICWord, param])
+            .await?;
 
         answers.push(answer as u16);
     }
@@ -126,6 +144,8 @@ pub async fn classify(context: &mut dyn WIPICContext, function: WIPICWord) -> Re
         PixelOp::Additive
     } else if matches(screen) {
         PixelOp::Screen
+    } else if matches(invert) {
+        PixelOp::Invert
     } else {
         PixelOp::Guest
     };
@@ -140,18 +160,42 @@ pub async fn classify(context: &mut dyn WIPICContext, function: WIPICWord) -> Re
     Ok(operation)
 }
 
+/// What a context draws through, if anything.
+///
+/// A title that plants its own operation gets that one. A title that turns XOR
+/// mode on instead gets the built-in the reference plants for it: WIE has no
+/// guest address to report back for that one, so the slot a title reads stays
+/// empty while the drawing still inverts.
+pub async fn of_context(
+    context: &mut dyn WIPICContext,
+    function: WIPICWord,
+    param: WIPICWord,
+    xor_mode: WIPICWord,
+) -> Result<Option<(PixelOp, WIPICWord)>> {
+    if function != 0 {
+        return Ok(Some((classify(context, function, param).await?, function)));
+    }
+
+    if xor_mode != 0 {
+        return Ok(Some((PixelOp::Invert, 0)));
+    }
+
+    Ok(None)
+}
+
 /// Applies a recognised operation. `Guest` has no answer here - it is asked.
 pub fn apply(operation: PixelOp, destination: u16, source: u16) -> Option<u16> {
     match operation {
         PixelOp::Additive => Some(additive(destination, source)),
         PixelOp::Screen => Some(screen(destination, source)),
+        PixelOp::Invert => Some(invert(destination, source)),
         PixelOp::Guest => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PixelOp, additive, apply, pack, screen};
+    use super::{PixelOp, additive, apply, invert, pack, screen};
 
     /// The channels add and stop at their maximum rather than wrapping past it.
     #[test]
@@ -211,10 +255,28 @@ mod tests {
         assert!(super::PROBES.iter().any(|&(d, s)| screen(d, s) != s));
     }
 
+    /// XOR mode inverts what is there and pays no attention to the source,
+    /// which is what `WPGrp_PutXorPixel` does - `mvn r0, r0` and a return. Two
+    /// draws put back what was there, which is the point of the mode.
+    #[test]
+    fn xor_mode_inverts_the_destination_and_ignores_the_source() {
+        assert_eq!(invert(0x0000, 0x39e7), 0xffff);
+        assert_eq!(invert(0xffff, 0x39e7), 0x0000);
+
+        for destination in [0x0000u16, 0x18c3, 0x39e7, 0x7bef, 0xffff] {
+            // The source makes no difference at all.
+            assert_eq!(invert(destination, 0x0000), invert(destination, 0xffff));
+
+            // And inverting twice is where it started.
+            assert_eq!(invert(invert(destination, 0), 0), destination);
+        }
+    }
+
     #[test]
     fn a_guest_operation_has_no_answer_of_its_own() {
         assert_eq!(apply(PixelOp::Additive, 0x1084, 0x1084), Some(0x2108));
         assert_eq!(apply(PixelOp::Screen, 0x0000, 0x39e7), Some(screen(0x0000, 0x39e7)));
+        assert_eq!(apply(PixelOp::Invert, 0x0000, 0x1084), Some(0xffff));
         assert_eq!(apply(PixelOp::Guest, 0x1084, 0x1084), None);
     }
 }
