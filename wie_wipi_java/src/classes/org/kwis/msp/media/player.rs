@@ -41,14 +41,31 @@ impl Player {
         Ok(())
     }
 
-    async fn pause(_: &Jvm, _: &mut WieJvmContext, clip: ClassInstanceRef<BaseClip>) -> JvmResult<bool> {
-        tracing::warn!("stub org.kwis.msp.media.Player::pause({clip:?})");
+    /// The same play the `Clip` overload below does.
+    ///
+    /// A title reaches for whichever of the two its own code is declared
+    /// against, and `Clip` extends `BaseClip`, so both are handed a clip that
+    /// can be played - the sound does not depend on which name the descriptor
+    /// happens to carry. This one answered that nothing played, so the two
+    /// 전설의 마법학교 titles, which call it for every sound they make, ran with
+    /// no sound at all while loading their clips and setting volumes on them
+    /// exactly as a title that could be heard does.
+    async fn play(jvm: &Jvm, _: &mut WieJvmContext, clip: ClassInstanceRef<BaseClip>, repeat: bool) -> JvmResult<bool> {
+        tracing::debug!("org.kwis.msp.media.Player::play({clip:?}, {repeat})");
 
-        Ok(false)
+        Self::play_any(jvm, &clip, repeat).await
     }
 
-    async fn stop(_: &Jvm, _: &mut WieJvmContext, clip: ClassInstanceRef<BaseClip>) -> JvmResult<bool> {
-        tracing::warn!("stub org.kwis.msp.media.Player::stop({clip:?})");
+    /// The same stop the `Clip` overload below does - see [`Self::stop_clip`]
+    /// for why the answer is the clip's own state rather than a fixed one.
+    async fn stop(jvm: &Jvm, _: &mut WieJvmContext, clip: ClassInstanceRef<BaseClip>) -> JvmResult<bool> {
+        tracing::debug!("org.kwis.msp.media.Player::stop({clip:?})");
+
+        Self::stop_any(jvm, &clip).await
+    }
+
+    async fn pause(_: &Jvm, _: &mut WieJvmContext, clip: ClassInstanceRef<BaseClip>) -> JvmResult<bool> {
+        tracing::warn!("stub org.kwis.msp.media.Player::pause({clip:?})");
 
         Ok(false)
     }
@@ -59,42 +76,58 @@ impl Player {
         Ok(false)
     }
 
-    async fn play(_: &Jvm, _: &mut WieJvmContext, clip: ClassInstanceRef<BaseClip>, repeat: bool) -> JvmResult<bool> {
-        tracing::warn!("stub org.kwis.msp.media.Player::play({clip:?}, {repeat})");
-
-        Ok(false)
-    }
-
     async fn record(_: &Jvm, _: &mut WieJvmContext, clip: ClassInstanceRef<BaseClip>) -> JvmResult<bool> {
         tracing::warn!("stub org.kwis.msp.media.Player::record({clip:?})");
 
         Ok(false)
     }
 
-    async fn play_clip(jvm: &Jvm, _: &mut WieJvmContext, clip: ClassInstanceRef<Clip>, repeat: bool) -> JvmResult<bool> {
-        tracing::debug!("org.kwis.msp.media.Player::play({clip:?}, {repeat})");
-
+    /// Plays a clip, whichever of the two overloads asked for it.
+    ///
+    /// Everything it calls - `allocPlayer`, `mediaPlay` - is declared on
+    /// `BaseClip`, so a `Clip` and a `BaseClip` are played the same way.
+    async fn play_any<T>(jvm: &Jvm, clip: &ClassInstanceRef<T>, repeat: bool) -> JvmResult<bool> {
         // Titles call these with a clip slot they have not filled - a sound
         // that failed to load, or a "stop whatever is playing" call made before
         // anything was. They shipped on handsets doing it, so the platform
-        // tolerates it; answering that nothing played is that answer, and it is
-        // what the `BaseClip` overloads below already do.
+        // tolerates it; answering that nothing played is that answer.
         if clip.is_null() {
             return Ok(false);
         }
 
-        let alloc_result: i32 = jvm.invoke_virtual(&clip, "allocPlayer", "()I", ()).await?;
+        let alloc_result: i32 = jvm.invoke_virtual(clip, "allocPlayer", "()I", ()).await?;
         if alloc_result != 0 {
             return Err(jvm.exception("org/kwis/msp/media/MediaUnavailableException", "").await);
         }
 
-        let play_result: i32 = jvm.invoke_virtual(&clip, "mediaPlay", "(Z)I", (repeat,)).await?;
+        let play_result: i32 = jvm.invoke_virtual(clip, "mediaPlay", "(Z)I", (repeat,)).await?;
 
         match play_result {
             0 => Ok(true),
             -16 | -9 | -7 | -6 | -1 => Err(jvm.exception("org/kwis/msp/media/MediaUnavailableException", "").await),
             _ => Ok(false),
         }
+    }
+
+    /// Stops a clip, whichever of the two overloads asked for it, and answers
+    /// whether there was anything to stop.
+    async fn stop_any<T>(jvm: &Jvm, clip: &ClassInstanceRef<T>) -> JvmResult<bool> {
+        // As in `play_any` above: 레나크사가 stops a clip it never set, and a
+        // deref here took the whole emulator down rather than the title.
+        if clip.is_null() {
+            return Ok(false);
+        }
+
+        let playing: bool = jvm.get_field(clip, "__wiePlaying", "Z").await?;
+        let result: i32 = jvm.invoke_virtual(clip, "mediaStop", "()I", ()).await?;
+
+        Ok(playing && result >= 0)
+    }
+
+    async fn play_clip(jvm: &Jvm, _: &mut WieJvmContext, clip: ClassInstanceRef<Clip>, repeat: bool) -> JvmResult<bool> {
+        tracing::debug!("org.kwis.msp.media.Player::play({clip:?}, {repeat})");
+
+        Self::play_any(jvm, &clip, repeat).await
     }
 
     /// Stops a clip, and answers whether there was anything to stop.
@@ -118,16 +151,7 @@ impl Player {
     async fn stop_clip(jvm: &Jvm, _: &mut WieJvmContext, clip: ClassInstanceRef<Clip>) -> JvmResult<bool> {
         tracing::debug!("org.kwis.msp.media.Player::stop({clip:?})");
 
-        // As in `play` above: 레나크사가 stops a clip it never set, and a
-        // deref here took the whole emulator down rather than the title.
-        if clip.is_null() {
-            return Ok(false);
-        }
-
-        let playing: bool = jvm.get_field(&clip, "__wiePlaying", "Z").await?;
-        let result: i32 = jvm.invoke_virtual(&clip, "mediaStop", "()I", ()).await?;
-
-        Ok(playing && result >= 0)
+        Self::stop_any(jvm, &clip).await
     }
 
     /// The three a clip cannot answer. Pausing and resuming need a clip-side
@@ -168,6 +192,7 @@ mod test {
         get_protos,
     };
 
+    /// The three a clip cannot answer stay unanswered on this overload too.
     #[test]
     fn test_base_clip_overloads_return_false() -> Result<()> {
         run_jvm_test(Box::new([wie_midp::get_protos().into(), get_protos().into()]), |jvm| async move {
@@ -176,29 +201,78 @@ mod test {
             let paused: bool = jvm
                 .invoke_static("org/kwis/msp/media/Player", "pause", "(Lorg/kwis/msp/media/BaseClip;)Z", (clip.clone(),))
                 .await?;
-            let stopped: bool = jvm
-                .invoke_static("org/kwis/msp/media/Player", "stop", "(Lorg/kwis/msp/media/BaseClip;)Z", (clip.clone(),))
-                .await?;
             let resumed: bool = jvm
                 .invoke_static("org/kwis/msp/media/Player", "resume", "(Lorg/kwis/msp/media/BaseClip;)Z", (clip.clone(),))
                 .await?;
+            let recorded: bool = jvm
+                .invoke_static("org/kwis/msp/media/Player", "record", "(Lorg/kwis/msp/media/BaseClip;)Z", (clip.clone(),))
+                .await?;
+
+            assert!(!paused);
+            assert!(!resumed);
+            assert!(!recorded);
+
+            // A clip with nothing in it is not stopped by a stop, the same
+            // answer the `Clip` overload gives.
+            let stopped: bool = jvm
+                .invoke_static("org/kwis/msp/media/Player", "stop", "(Lorg/kwis/msp/media/BaseClip;)Z", (clip,))
+                .await?;
+            assert!(!stopped);
+
+            Ok(())
+        })
+    }
+
+    /// Playing through the `BaseClip` overload plays, exactly as the `Clip` one
+    /// does.
+    ///
+    /// Which one a title reaches for is whichever its own code is declared
+    /// against, and `Clip` extends `BaseClip`, so the sound cannot depend on
+    /// it. This one answered `false` without playing anything, and the two
+    /// 전설의 마법학교 titles - which load their clips and set volumes on them
+    /// just like a title that can be heard - ran silent for it.
+    #[test]
+    fn either_overload_plays_the_same_clip() -> Result<()> {
+        run_jvm_test(Box::new([wie_midp::get_protos().into(), get_protos().into()]), |jvm| async move {
+            let r#type: ClassInstanceRef<String> = JavaLangString::from_rust_string(&jvm, "audio/test").await?.into();
+            let mut data = jvm.instantiate_array("B", 1).await?;
+            jvm.store_array(&mut data, 0, [0i8]).await?;
+            let clip: ClassInstanceRef<Clip> = jvm
+                .new_class("org/kwis/msp/media/Clip", "(Ljava/lang/String;[B)V", (r#type, data))
+                .await?
+                .into();
+
             let played: bool = jvm
                 .invoke_static(
                     "org/kwis/msp/media/Player",
                     "play",
                     "(Lorg/kwis/msp/media/BaseClip;Z)Z",
-                    (clip.clone(), true),
+                    (clip.clone(), false),
                 )
                 .await?;
-            let recorded: bool = jvm
-                .invoke_static("org/kwis/msp/media/Player", "record", "(Lorg/kwis/msp/media/BaseClip;)Z", (clip,))
-                .await?;
+            assert!(played, "the BaseClip overload has to play the clip, not decline it");
+            assert!(jvm.get_field::<bool>(&clip, "__wiePlaying", "Z").await?);
 
-            assert!(!paused);
-            assert!(!stopped);
-            assert!(!resumed);
-            assert!(!played);
-            assert!(!recorded);
+            // And the stop that goes with it reaches the same clip, so it
+            // answers that it stopped something rather than that it did not.
+            let stopped: bool = jvm
+                .invoke_static("org/kwis/msp/media/Player", "stop", "(Lorg/kwis/msp/media/BaseClip;)Z", (clip.clone(),))
+                .await?;
+            assert!(stopped);
+            assert!(!jvm.get_field::<bool>(&clip, "__wiePlaying", "Z").await?);
+
+            // A clip with no data is unavailable through this overload too,
+            // which is what the `Clip` one answers.
+            let empty_type: ClassInstanceRef<String> = JavaLangString::from_rust_string(&jvm, "audio/empty").await?.into();
+            let empty: ClassInstanceRef<Clip> = jvm
+                .new_class("org/kwis/msp/media/Clip", "(Ljava/lang/String;)V", (empty_type,))
+                .await?
+                .into();
+            let result: core::result::Result<bool, JavaError> = jvm
+                .invoke_static("org/kwis/msp/media/Player", "play", "(Lorg/kwis/msp/media/BaseClip;Z)Z", (empty, false))
+                .await;
+            let JavaError::JavaException(exception) = result.expect_err("an unbuffered clip must throw");
+            assert!(jvm.is_instance(&*exception, "org/kwis/msp/media/MediaUnavailableException"));
 
             Ok(())
         })
