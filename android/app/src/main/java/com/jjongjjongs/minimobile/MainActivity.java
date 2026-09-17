@@ -308,9 +308,14 @@ public final class MainActivity extends Activity {
                 return CODE_OK;
             case KeyEvent.KEYCODE_BUTTON_B:
                 return CODE_CLEAR;
+            // Either pair reaches the soft keys. A pad puts them where it
+            // likes and the reference lets a player pick between the two, so
+            // taking both is the nearest thing to that without a setting.
             case KeyEvent.KEYCODE_BUTTON_L1:
+            case KeyEvent.KEYCODE_BUTTON_L2:
                 return CODE_SOFT_L;
             case KeyEvent.KEYCODE_BUTTON_R1:
+            case KeyEvent.KEYCODE_BUTTON_R2:
                 return CODE_SOFT_R;
             // The two keys left over go where a handset put its other two:
             // games that use them use them for a menu or a mode switch.
@@ -405,6 +410,12 @@ public final class MainActivity extends Activity {
         padKey(CODE_RIGHT, x >= STICK_THRESHOLD);
         padKey(CODE_UP, y <= -STICK_THRESHOLD);
         padKey(CODE_DOWN, y >= STICK_THRESHOLD);
+
+        // Many pads report a trigger only as an axis, never as a button, so
+        // the soft keys would be unreachable on them without this. A trigger
+        // rests at zero and runs to one, so half travel is a press.
+        padKey(CODE_SOFT_L, event.getAxisValue(MotionEvent.AXIS_LTRIGGER) >= STICK_THRESHOLD);
+        padKey(CODE_SOFT_R, event.getAxisValue(MotionEvent.AXIS_RTRIGGER) >= STICK_THRESHOLD);
 
         return true;
     }
