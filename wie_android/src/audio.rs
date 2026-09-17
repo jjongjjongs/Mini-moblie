@@ -20,13 +20,16 @@
 //! events, so [`crate::ma3`] renders the sequence here and it leaves as
 //! opcode 2.
 
-use crate::{ma3::SAMPLE_RATE, platform::Shared};
+use crate::{
+    ma3::{FULL_VOLUME, SAMPLE_RATE},
+    platform::Shared,
+};
 use std::{
     collections::HashMap,
     ffi::c_void,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicPtr, AtomicU8, AtomicU64, Ordering},
+        atomic::{AtomicPtr, AtomicU64, Ordering},
     },
 };
 
@@ -146,7 +149,6 @@ fn play_wave_command(channel: u8, sampling_rate: u32, wave_data: &[i16]) -> Vec<
 
 pub struct AndroidAudioSink {
     shared: Shared,
-    master_volume: AtomicU8,
     /// The current render generation for each audio handle. A clip is rendered
     /// off-thread, so a stop or a replay can land while its render is still
     /// running; the worker installs its stream only if the handle's generation
@@ -165,7 +167,6 @@ impl AndroidAudioSink {
         install_audio_mixer(shared.mixer_handle());
         Self {
             shared,
-            master_volume: AtomicU8::new(100),
             render_generation: Arc::new(Mutex::new(HashMap::new())),
             next_generation: AtomicU64::new(0),
         }
@@ -173,26 +174,28 @@ impl AndroidAudioSink {
 }
 
 impl wie_backend::AudioSink for AndroidAudioSink {
-    fn set_master_volume(&self, volume: u8) {
-        let volume = volume.min(100);
-        self.master_volume.store(volume, Ordering::Relaxed);
-        self.shared.mixer().set_master_volume(volume);
+    fn set_clip_volume(&self, clip: u32, volume: u8) {
+        self.shared.mixer().set_clip_volume(clip, volume.min(FULL_VOLUME));
     }
 
-    fn open_midi_voice(&self) -> u32 {
-        self.shared.mixer().open()
+    fn open_midi_voice(&self, clip: u32) -> u32 {
+        self.shared.mixer().open(clip)
     }
 
     fn close_midi_voice(&self, voice: u32) {
         self.shared.mixer().close(voice);
     }
 
-    fn play_wave(&self, channel: u8, sampling_rate: u32, wave_data: &[i16]) {
+    fn play_wave(&self, clip: u32, channel: u8, sampling_rate: u32, wave_data: &[i16]) {
         if wave_data.is_empty() {
             return;
         }
 
-        let volume = self.master_volume.load(Ordering::Relaxed);
+        // A recorded wave belongs to the clip whose sequence fired it, so it
+        // plays at that clip's volume. It is baked into the samples here rather
+        // than carried alongside them, because the mixer plays a wave as a
+        // one-shot it has already taken ownership of.
+        let volume = self.shared.mixer().clip_volume(clip);
         if volume == 0 {
             return;
         }
@@ -207,7 +210,7 @@ impl wie_backend::AudioSink for AndroidAudioSink {
         // one-shot AudioTrack. The device sounds the streamed synth output but
         // not the per-clip static tracks the old opcode-1 path opened, so routing
         // recorded effects through the same stream is what makes them audible.
-        let samples = if volume == 100 {
+        let samples = if volume == FULL_VOLUME {
             wave_data.to_vec()
         } else {
             scale_wave_volume(wave_data, volume)

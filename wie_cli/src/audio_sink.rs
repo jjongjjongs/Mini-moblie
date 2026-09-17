@@ -23,7 +23,7 @@ unsafe impl Sync for AudioSink {}
 unsafe impl Send for AudioSink {}
 
 impl wie_backend::AudioSink for AudioSink {
-    fn play_wave(&self, channel: u8, sampling_rate: u32, wave_data: &[i16]) {
+    fn play_wave(&self, _clip: u32, channel: u8, sampling_rate: u32, wave_data: &[i16]) {
         self.audio_tx.send((channel, sampling_rate, wave_data.to_vec())).unwrap();
     }
 

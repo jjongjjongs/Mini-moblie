@@ -111,6 +111,10 @@ pub const CHANNELS: usize = 2;
 /// it should sound. Matched to that ceiling.
 const MAX_VOICES: usize = 31;
 
+/// The volume a clip plays at until a title turns it down, on the 0..=100 scale
+/// WIPI sets volumes on.
+pub const FULL_VOLUME: u8 = 100;
+
 /// Source samples over which a recorded effect is ramped to silence at its end.
 /// The recordings stop at whatever level the last sample held rather than
 /// decaying, so cutting straight to zero clicks on every tail; a few
@@ -435,7 +439,13 @@ fn gains(state: &Channel, velocity: u8, master_volume: u8) -> (i32, i32) {
 pub struct SynthMixer {
     voices: BTreeMap<u32, MixerVoice>,
     next_id: u32,
-    master_volume: u8,
+    /// What each clip is turned down to, for the clips a title has said
+    /// something about. A clip that is not in here is at full scale, which is
+    /// where every clip starts, so a title that never sets a volume puts
+    /// nothing here at all. An entry is dropped when its clip goes back to full
+    /// scale - which is what closing a clip does - so this stays the size of
+    /// the set of sounds a title is actually holding down.
+    clip_volumes: BTreeMap<u32, u8>,
     /// One-shot recorded waves (a hit, a door, the logo voice), mixed into the
     /// same output stream as the sequenced voices. Titles fire these through the
     /// wave path; routing them here plays them on the one AudioTrack that works,
@@ -453,6 +463,8 @@ pub struct SynthMixer {
 struct SongPlayback {
     /// The audio handle that owns this song, so a stop can target it.
     id: u32,
+    /// The clip's own volume, 0 to 100, as the title last set it.
+    volume: u8,
     /// Interleaved stereo at the output rate, as [`crate::oma3`] renders it.
     samples: Vec<i16>,
     /// Read position into `samples`.
@@ -461,6 +473,8 @@ struct SongPlayback {
 }
 
 struct MixerVoice {
+    /// The clip this voice is sounding for, so the clip's volume reaches it.
+    clip: u32,
     synth: Synth,
     /// The clip has stopped feeding this voice; keep rendering until its sound
     /// decays (release tails finished), then `render` drops it, so a stop does
@@ -516,7 +530,7 @@ impl SynthMixer {
         Self {
             voices: BTreeMap::new(),
             next_id: 1,
-            master_volume: 100,
+            clip_volumes: BTreeMap::new(),
             pcm: Vec::new(),
             songs: Vec::new(),
         }
@@ -536,10 +550,44 @@ impl SynthMixer {
         self.songs.retain(|song| song.id != id && !(repeat && song.repeat));
         self.songs.push(SongPlayback {
             id,
+            volume: self.clip_volume(id),
             samples,
             position: 0,
             repeat,
         });
+    }
+
+    /// What clip `clip` is playing at, full scale unless a title said otherwise.
+    ///
+    /// A clip's volume is set before it starts as often as during it - and the
+    /// stream a `play_smaf` renders is installed a moment after the play, off
+    /// the caller's thread - so the level is kept here rather than only on what
+    /// is sounding, and whatever starts next picks it up.
+    pub fn clip_volume(&self, clip: u32) -> u8 {
+        self.clip_volumes.get(&clip).copied().unwrap_or(FULL_VOLUME)
+    }
+
+    /// Sets clip `clip`'s volume, and nothing else's.
+    ///
+    /// This is the reference's per-clip gain: `syncKTFClipGain` clamps the
+    /// clip's own record to 0..=100 and calls `SetClipGain` for that clip. It
+    /// reaches whatever that clip is sounding through - a pre-rendered song, or
+    /// the voices of a sequence being streamed live - and leaves every other
+    /// clip where it was.
+    pub fn set_clip_volume(&mut self, clip: u32, volume: u8) {
+        let volume = volume.min(FULL_VOLUME);
+        if volume == FULL_VOLUME {
+            self.clip_volumes.remove(&clip);
+        } else {
+            self.clip_volumes.insert(clip, volume);
+        }
+
+        for song in self.songs.iter_mut().filter(|song| song.id == clip) {
+            song.volume = volume;
+        }
+        for entry in self.voices.values_mut().filter(|entry| entry.clip == clip) {
+            entry.synth.set_master_volume(volume);
+        }
     }
 
     /// Stops the pre-rendered song owned by `id`, if any.
@@ -563,12 +611,12 @@ impl SynthMixer {
 
     /// Opens an isolated voice and returns its id. Id 0 is never handed out, so
     /// a caller can use it as "no voice".
-    pub fn open(&mut self) -> u32 {
+    pub fn open(&mut self, clip: u32) -> u32 {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
         let mut synth = Synth::new();
-        synth.set_master_volume(self.master_volume);
-        self.voices.insert(id, MixerVoice { synth, closing: false });
+        synth.set_master_volume(self.clip_volume(clip));
+        self.voices.insert(id, MixerVoice { clip, synth, closing: false });
         id
     }
 
@@ -617,13 +665,6 @@ impl SynthMixer {
     pub fn sysex(&mut self, voice: u32, message: &[u8]) {
         if let Some(synth) = self.synth(voice) {
             synth.sysex(message);
-        }
-    }
-
-    pub fn set_master_volume(&mut self, volume: u8) {
-        self.master_volume = volume;
-        for entry in self.voices.values_mut() {
-            entry.synth.set_master_volume(volume);
         }
     }
 
@@ -693,12 +734,11 @@ impl SynthMixer {
             });
         }
 
-        // Mix each pre-rendered song, scaled by the master volume, looping or
-        // finishing at its end; drop the one-shots that have played out. The
+        // Mix each pre-rendered song, scaled by its own clip's volume, looping
+        // or finishing at its end; drop the one-shots that have played out. The
         // already-exhausted ones are dropped first, before an accumulator is
         // created, so a fully-finished set of songs leaves the output silent
         // rather than a zero buffer.
-        let master_volume = i32::from(self.master_volume);
         self.songs
             .retain(|song| !((song.samples.is_empty() || !song.repeat) && song.position >= song.samples.len()));
         if !self.songs.is_empty() {
@@ -712,7 +752,7 @@ impl SynthMixer {
                             return false;
                         }
                     }
-                    *slot += i32::from(song.samples[song.position]) * master_volume / 100;
+                    *slot += i32::from(song.samples[song.position]) * i32::from(song.volume) / i32::from(FULL_VOLUME);
                     song.position += 1;
                 }
                 true
@@ -843,11 +883,42 @@ mod tests {
     }
 
     #[test]
-    fn song_scales_by_master_volume() {
+    fn a_song_plays_at_its_own_clip_volume() {
         let mut mixer = SynthMixer::new();
-        mixer.set_master_volume(50);
-        mixer.set_song(1, vec![100, 100], false);
+
+        // Set before the stream is installed: a clip's volume is set before it
+        // plays as often as during it, and `play_smaf` installs its stream off
+        // the caller's thread a moment later.
+        mixer.set_clip_volume(1, 50);
+        mixer.set_song(1, vec![100, 100, 100, 100], false);
         assert_eq!(mixer.render(1), Some(vec![50, 50]));
+
+        // And set while it is sounding.
+        mixer.set_clip_volume(1, 25);
+        assert_eq!(mixer.render(1), Some(vec![25, 25]));
+    }
+
+    /// Turning one clip down is that clip's business and no other's.
+    ///
+    /// This used to be one master volume for the whole sink, so a title that
+    /// muted an effect before stopping it - 졸라맨액션학원 pairs the two - took
+    /// the music playing underneath with it. The reference sets a gain per
+    /// clip; so does this.
+    #[test]
+    fn one_clip_turned_down_leaves_the_others_alone() {
+        let mut mixer = SynthMixer::new();
+        mixer.set_song(1, vec![100, 100], true);
+        mixer.set_song(2, vec![40, 40], false);
+        assert_eq!(mixer.render(1), Some(vec![140, 140]));
+
+        // The effect is muted before being stopped; the music keeps its level.
+        mixer.set_clip_volume(2, 0);
+        assert_eq!(mixer.render(1), Some(vec![100, 100]));
+
+        // And a clip that goes back to full scale is forgotten rather than kept.
+        mixer.set_clip_volume(2, 100);
+        assert!(mixer.clip_volumes.is_empty());
+        assert_eq!(mixer.clip_volume(2), 100);
     }
 
     #[test]

@@ -1,12 +1,27 @@
 pub trait AudioSink: Sync + Send {
-    fn set_master_volume(&self, _volume: u8) {}
-    fn play_wave(&self, channel: u8, sampling_rate: u32, wave_data: &[i16]);
+    /// Sets the volume of one clip, 0 to 100.
+    ///
+    /// The reference keeps a volume record per clip and hands it to the mixer
+    /// as that clip's gain - `syncKTFClipGain` clamps the record to 0..=100 and
+    /// calls `SetClipGain` for that clip alone. So turning one sound down says
+    /// nothing about the others: a title that mutes an effect before stopping
+    /// it leaves the music it is playing over untouched.
+    ///
+    /// The sink remembers the level even when the clip is not sounding, because
+    /// a title sets a volume before it plays and expects it to take.
+    fn set_clip_volume(&self, _clip: u32, _volume: u8) {}
 
-    /// Opens an isolated MIDI voice - its own synth - and returns its id. Every
-    /// `midi_*` call tagged with that id renders into that voice, mixed with the
-    /// others, so concurrently playing clips do not collide on shared channels.
-    /// A sink without per-voice synths returns 0 (a single shared voice).
-    fn open_midi_voice(&self) -> u32 {
+    /// Plays a recorded wave out of clip `clip`'s sequence, at that clip's
+    /// volume.
+    fn play_wave(&self, clip: u32, channel: u8, sampling_rate: u32, wave_data: &[i16]);
+
+    /// Opens an isolated MIDI voice - its own synth - for clip `clip` and
+    /// returns its id. Every `midi_*` call tagged with that id renders into that
+    /// voice, mixed with the others, so concurrently playing clips do not
+    /// collide on shared channels. The clip it belongs to is what a later
+    /// [`Self::set_clip_volume`] reaches it by. A sink without per-voice synths
+    /// returns 0 (a single shared voice).
+    fn open_midi_voice(&self, _clip: u32) -> u32 {
         0
     }
     /// Marks a voice's clip as finished. The voice keeps sounding until its

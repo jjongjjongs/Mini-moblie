@@ -275,7 +275,7 @@ pub struct TestAudioSink;
 /// running a title that makes a sound died on the sound rather than on
 /// whatever it was testing.
 impl AudioSink for TestAudioSink {
-    fn play_wave(&self, _channel: u8, _sampling_rate: u32, _wave_data: &[i16]) {}
+    fn play_wave(&self, _clip: u32, _channel: u8, _sampling_rate: u32, _wave_data: &[i16]) {}
 
     fn midi_note_on(&self, _voice: u32, _channel_id: u8, _note: u8, _velocity: u8) {}
 

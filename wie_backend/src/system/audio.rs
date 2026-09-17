@@ -67,6 +67,10 @@ struct ActiveSmaf {
 const REAPER_POLL_MS: u64 = 100;
 const PENDING_STOP_GRACE_POLLS: u32 = 3;
 
+/// The volume a clip has until a title says otherwise, which is what the
+/// reference's clip record is created holding.
+pub const FULL_VOLUME: u8 = 100;
+
 fn smaf_hash(data: &[u8]) -> u64 {
     // FNV-1a, enough to tell one clip's bytes from another.
     let mut hash: u64 = 0xcbf29ce484222325;
@@ -117,7 +121,7 @@ impl Audio {
 
         self.last_audio_handle += 1;
         self.files.insert(audio_handle, AudioFile::Smaf(data.to_vec()));
-        self.volumes.insert(audio_handle, Arc::new(AtomicU8::new(100)));
+        self.volumes.insert(audio_handle, Arc::new(AtomicU8::new(FULL_VOLUME)));
 
         Ok(audio_handle)
     }
@@ -153,7 +157,11 @@ impl Audio {
             active.pending_stop_polls = None;
             active.handle = audio_handle;
             let (completed, stop_flag) = (active.completed.clone(), active.stop_flag.clone());
-            self.sink.set_master_volume(volume.load(Ordering::Relaxed));
+            // The sink still plays this clip under the handle it first started
+            // on, so the volume has to go there rather than to the fresh handle
+            // the title just allocated - see `ActiveSmaf::sink_handle`.
+            let sink_handle = active.sink_handle;
+            self.sink.set_clip_volume(sink_handle, volume.load(Ordering::Relaxed));
             self.playing.insert(audio_handle, stop_flag.clone());
             return Ok((completed, stop_flag));
         }
@@ -166,7 +174,7 @@ impl Audio {
         }
 
         self.stop(audio_handle);
-        self.sink.set_master_volume(volume.load(Ordering::Relaxed));
+        self.sink.set_clip_volume(audio_handle, volume.load(Ordering::Relaxed));
 
         let stop_flag = Arc::new(AtomicBool::new(false));
         let completed = Arc::new(AtomicBool::new(false));
@@ -225,6 +233,7 @@ impl Audio {
 
         // Otherwise stream the sequence live as MIDI events.
         let player = SmafPlayer::new(&data);
+        let clip = audio_handle;
         let mut system_clone = system.clone();
         let sink_clone = self.sink.clone();
         let stop_flag_clone = stop_flag.clone();
@@ -232,7 +241,7 @@ impl Audio {
 
         // TODO use dedicated audio player task
         system.spawn(async move || {
-            player.play(&mut system_clone, &**sink_clone, &stop_flag_clone, repeat).await;
+            player.play(clip, &mut system_clone, &**sink_clone, &stop_flag_clone, repeat).await;
 
             if !stop_flag_clone.load(Ordering::Relaxed) {
                 completed_clone.store(true, Ordering::Release);
@@ -248,15 +257,38 @@ impl Audio {
         self.playing.contains_key(&audio_handle)
     }
 
+    /// Sets one clip's volume, which is the clip's own and nothing else's.
+    ///
+    /// This used to reach the sink as `set_master_volume`, so a title that
+    /// turned one sound down turned everything down with it - and one that
+    /// muted an effect before stopping it (졸라맨액션학원 pairs the two) silenced
+    /// the music playing underneath. The reference has no such control: a
+    /// volume belongs to a clip, and `syncKTFClipGain` sets that clip's gain
+    /// alone.
+    ///
+    /// The level is kept whether or not the clip is sounding, because a title
+    /// sets a volume before it plays and expects the sound to come out at it.
     pub fn set_volume(&mut self, audio_handle: AudioHandle, volume: u8) -> Result<(), AudioError> {
         let state = self.volumes.get(&audio_handle).ok_or(AudioError::InvalidHandle)?;
-        state.store(volume.min(100), Ordering::Relaxed);
+        let volume = volume.min(FULL_VOLUME);
+        state.store(volume, Ordering::Relaxed);
 
-        if self.playing.contains_key(&audio_handle) {
-            self.sink.set_master_volume(volume.min(100));
-        }
+        self.sink.set_clip_volume(self.sink_handle_of(audio_handle), volume);
 
         Ok(())
+    }
+
+    /// The handle the sink knows a clip by.
+    ///
+    /// A looping clip re-played with identical data keeps the stream it first
+    /// started, under the handle it started on, while the title goes on
+    /// allocating fresh handles for it - so anything aimed at the sink has to
+    /// be aimed there. See [`ActiveSmaf::sink_handle`].
+    fn sink_handle_of(&self, audio_handle: AudioHandle) -> AudioHandle {
+        match self.active.as_ref() {
+            Some(active) if active.handle == audio_handle => active.sink_handle,
+            _ => audio_handle,
+        }
     }
 
     pub fn get_volume(&self, audio_handle: AudioHandle) -> Result<u8, AudioError> {
@@ -337,6 +369,10 @@ impl Audio {
             return Err(AudioError::InvalidHandle);
         }
         self.volumes.remove(&audio_handle);
+        // A closed clip has no volume of its own any more, and saying so is what
+        // keeps the sink from remembering a level per handle for a title that
+        // loads and closes thousands of them.
+        self.sink.set_clip_volume(audio_handle, FULL_VOLUME);
 
         Ok(())
     }
@@ -351,11 +387,12 @@ impl SmafPlayer {
         Self { events: parse_smaf(data) }
     }
 
-    pub async fn play(&self, system: &mut System, sink: &dyn AudioSink, stop_flag: &AtomicBool, repeat: bool) {
+    pub async fn play(&self, clip: AudioHandle, system: &mut System, sink: &dyn AudioSink, stop_flag: &AtomicBool, repeat: bool) {
         // An isolated voice for this clip, so its sequence does not collide with
         // other clips playing at the same time (a looping track under short
-        // effects) on shared MIDI channels.
-        let voice = sink.open_midi_voice();
+        // effects) on shared MIDI channels. It is opened in the clip's name so
+        // the clip's volume reaches it.
+        let voice = sink.open_midi_voice(clip);
         tracing::info!("[audio] SMAF clip on isolated voice {voice}");
 
         loop {
@@ -383,7 +420,7 @@ impl SmafPlayer {
                         sampling_rate,
                         data,
                     } => {
-                        sink.play_wave(*channel, *sampling_rate, data);
+                        sink.play_wave(clip, *channel, *sampling_rate, data);
                     }
                     SmafEvent::MidiNoteOn { channel, note, velocity } => {
                         sink.midi_note_on(voice, *channel, *note, *velocity);
@@ -439,6 +476,7 @@ mod tests {
     use alloc::{boxed::Box, sync::Arc, vec};
     use alloc::{string::String, vec::Vec};
     use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use spin::Mutex;
 
     use smaf_player::SmafEvent;
 
@@ -634,7 +672,7 @@ mod tests {
     struct NoopAudioSink;
 
     impl AudioSink for NoopAudioSink {
-        fn play_wave(&self, _channel: u8, _sampling_rate: u32, _wave_data: &[i16]) {}
+        fn play_wave(&self, _clip: u32, _channel: u8, _sampling_rate: u32, _wave_data: &[i16]) {}
 
         fn midi_note_on(&self, _voice: u32, _channel_id: u8, _note: u8, _velocity: u8) {}
 
@@ -661,7 +699,7 @@ mod tests {
     }
 
     impl AudioSink for SmafCountingSink {
-        fn play_wave(&self, _channel: u8, _sampling_rate: u32, _wave_data: &[i16]) {}
+        fn play_wave(&self, _clip: u32, _channel: u8, _sampling_rate: u32, _wave_data: &[i16]) {}
         fn midi_note_on(&self, _voice: u32, _channel_id: u8, _note: u8, _velocity: u8) {}
         fn midi_note_off(&self, _voice: u32, _channel_id: u8, _note: u8, _velocity: u8) {}
         fn midi_program_change(&self, _voice: u32, _channel_id: u8, _program: u8) {}
@@ -681,6 +719,28 @@ mod tests {
         }
     }
 
+    /// Records every clip volume the sink is handed, so a test can see which
+    /// clip a level was aimed at rather than only that one was set. The log is
+    /// shared, so a test keeps hold of it after handing the `Audio` its sink.
+    #[derive(Clone, Default)]
+    struct VolumeRecordingSink {
+        volumes: Arc<Mutex<Vec<(u32, u8)>>>,
+    }
+
+    impl AudioSink for VolumeRecordingSink {
+        fn set_clip_volume(&self, clip: u32, volume: u8) {
+            self.volumes.lock().push((clip, volume));
+        }
+
+        fn play_wave(&self, _clip: u32, _channel: u8, _sampling_rate: u32, _wave_data: &[i16]) {}
+        fn midi_note_on(&self, _voice: u32, _channel_id: u8, _note: u8, _velocity: u8) {}
+        fn midi_note_off(&self, _voice: u32, _channel_id: u8, _note: u8, _velocity: u8) {}
+        fn midi_program_change(&self, _voice: u32, _channel_id: u8, _program: u8) {}
+        fn midi_control_change(&self, _voice: u32, _channel_id: u8, _control: u8, _value: u8) {}
+        fn midi_pitch_bend(&self, _voice: u32, _channel_id: u8, _value: u16) {}
+        fn midi_sysex(&self, _voice: u32, _data: &[u8]) {}
+    }
+
     struct CountingSink {
         program_change_count: Arc<AtomicUsize>,
         stop_after: usize,
@@ -688,7 +748,7 @@ mod tests {
     }
 
     impl AudioSink for CountingSink {
-        fn play_wave(&self, _channel: u8, _sampling_rate: u32, _wave_data: &[i16]) {}
+        fn play_wave(&self, _clip: u32, _channel: u8, _sampling_rate: u32, _wave_data: &[i16]) {}
 
         fn midi_note_on(&self, _voice: u32, _channel_id: u8, _note: u8, _velocity: u8) {}
 
@@ -786,7 +846,7 @@ mod tests {
         };
         let mut system = new_system();
 
-        player.play(&mut system, &sink, &stop_flag, false).await;
+        player.play(1, &mut system, &sink, &stop_flag, false).await;
 
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
@@ -805,9 +865,47 @@ mod tests {
         };
         let mut system = new_system();
 
-        player.play(&mut system, &sink, &stop_flag, true).await;
+        player.play(1, &mut system, &sink, &stop_flag, true).await;
 
         assert_eq!(counter.load(Ordering::SeqCst), 2);
+    }
+
+    /// A volume is one clip's, and reaches the sink named as that clip's.
+    ///
+    /// It used to reach the sink as a master volume - one level for everything
+    /// it was playing - so a title that muted an effect muted the music under
+    /// it. It was also dropped entirely unless the clip happened to be sounding
+    /// at the time, which lost a volume set before a play.
+    #[test]
+    fn a_volume_belongs_to_one_clip() {
+        let sink = VolumeRecordingSink::default();
+        let mut audio = super::Audio::new(Box::new(sink.clone()));
+
+        let music = audio.load_smaf(b"music").unwrap();
+        let effect = audio.load_smaf(b"effect").unwrap();
+
+        // Set before either has played: the level has to stick, because that is
+        // when titles set it.
+        audio.set_volume(effect, 0).unwrap();
+        audio.set_volume(music, 80).unwrap();
+
+        assert_eq!(audio.get_volume(effect).unwrap(), 0);
+        assert_eq!(audio.get_volume(music).unwrap(), 80, "one clip's volume is not the other's");
+
+        assert_eq!(
+            sink.volumes.lock().as_slice(),
+            &[(effect, 0), (music, 80)],
+            "each level reaches the sink named as the clip it belongs to"
+        );
+
+        // Over 100 is held at 100, as the reference clamps the record it syncs.
+        audio.set_volume(music, 250).unwrap();
+        assert_eq!(audio.get_volume(music).unwrap(), 100);
+
+        // Closing a clip takes its level back to full scale, so the sink has no
+        // reason to remember it.
+        audio.close(effect).unwrap();
+        assert_eq!(sink.volumes.lock().last(), Some(&(effect, 100)));
     }
 
     #[test]
