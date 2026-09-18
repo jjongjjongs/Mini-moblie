@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, vec};
+use alloc::{boxed::Box, format, vec};
 
 use bytemuck::cast_slice;
 use java_class_proto::{JavaClassProto, JavaFieldProto, JavaMethodProto};
@@ -67,15 +67,18 @@ impl KtfClassLoader {
             .await?;
 
         // load client.bin
-        let name_rust = JavaLangString::to_rust_string(jvm, &binary_name).await.unwrap();
+        let name_rust = JavaLangString::to_rust_string(jvm, &binary_name).await?;
         let data_stream = jvm
             .invoke_virtual(&this, "getResourceAsStream", "(Ljava/lang/String;)Ljava/io/InputStream;", (binary_name,))
-            .await
-            .unwrap();
-        let data = JavaIoInputStream::read_until_end(jvm, &data_stream).await.unwrap();
+            .await?;
+        let data = JavaIoInputStream::read_until_end(jvm, &data_stream).await?;
 
-        // load binary
-        let native_functions = load_native(
+        // load binary. The title's own WIPI init runs in here and fails if a class
+        // it asks for is one we do not have, so this is the first place a missing
+        // class shows up - as a failure, not a bug in the loader. Raising it as an
+        // exception carrying the code keeps that diagnosable; unwrapping turned
+        // every one of them into a panic reported only as "에뮬레이터 내부 오류".
+        let native_functions = match load_native(
             &mut context.core,
             &mut context.system,
             jvm,
@@ -85,7 +88,10 @@ impl KtfClassLoader {
             ptr_jvm_exception_context as _,
         )
         .await
-        .unwrap();
+        {
+            Ok(x) => x,
+            Err(e) => return Err(jvm.exception("net/wie/WieError", &format!("loading {name_rust} failed: {e}")).await),
+        };
 
         jvm.put_field(&mut this, "fnGetClass", "I", native_functions.fn_get_class as i32).await?;
 

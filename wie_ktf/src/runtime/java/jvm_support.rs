@@ -174,14 +174,21 @@ impl KtfJvmSupport {
 
         jvm.register_class(Box::new(class_loader_class), None).await.unwrap();
 
-        let class_loader = jvm
+        // The loader's constructor runs the title's own WIPI init, so a class the
+        // title wants and we do not have surfaces here. Carrying it out as a
+        // WieError names the class; unwrapping made it a panic with nothing but
+        // "에뮬레이터 내부 오류" to show for it.
+        let class_loader = match jvm
             .new_class(
                 "net/wie/KtfClassLoader",
                 "(Ljava/lang/ClassLoader;Ljava/lang/String;II)V",
                 (system_class_loader, binary_name, ptr_jvm_context as i32, ptr_jvm_exception_context as i32),
             )
             .await
-            .unwrap();
+        {
+            Ok(x) => x,
+            Err(x) => return Err(JvmSupport::to_wie_err(&jvm, x).await),
+        };
 
         Ok((jvm, class_loader))
     }
