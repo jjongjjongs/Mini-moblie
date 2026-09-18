@@ -47,6 +47,9 @@ pub struct System {
     /// Whether this title draws its picture sideways into an upright panel.
     /// See [`System::title_draws_sideways`].
     title_draws_sideways: Arc<AtomicBool>,
+    /// Whether this title lays its screens out below a status strip.
+    /// See [`System::title_expects_annunciator`].
+    title_expects_annunciator: Arc<AtomicBool>,
 }
 
 impl System {
@@ -81,6 +84,7 @@ impl System {
             local_network: Arc::new(RwLock::new(local_network)),
             title_drives_lcd: Arc::new(AtomicBool::new(false)),
             title_draws_sideways: Arc::new(AtomicBool::new(false)),
+            title_expects_annunciator: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -179,6 +183,21 @@ impl System {
 
     pub fn set_title_draws_sideways(&self, sideways: bool) {
         self.title_draws_sideways.store(sideways, Ordering::SeqCst);
+    }
+
+    /// Whether the title lays its screens out below the handset's status strip,
+    /// so the strip has to be there for them to land where they belong.
+    ///
+    /// The same fact the WIPI-C side reads out of `ANNUNCIATOR_ROWS_PTR`, for
+    /// the titles that reach the strip through `org.kwis.msp.lwc` instead.
+    /// Looked up in `crate::quirks` and set here by the emulator that loaded the
+    /// archive.
+    pub fn title_expects_annunciator(&self) -> bool {
+        self.title_expects_annunciator.load(Ordering::SeqCst)
+    }
+
+    pub fn set_title_expects_annunciator(&self, expects: bool) {
+        self.title_expects_annunciator.store(expects, Ordering::SeqCst);
     }
 
     pub fn current_input_mode(&self) -> u32 {

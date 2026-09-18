@@ -100,6 +100,10 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // 던전앤파이터 격투가: draws 296 rows into a 320-row panel and leaves the
     // rest to the handset, so the strip has to come off what is shown.
     (TitlePlatform::Ktf, "0103BF27", annunciator()),
+    // 만귀토벌전: lays every screen out below the strip and inside the rows
+    // left under it. Without one its menus and its battle scene sat a strip's
+    // worth short of the bottom, over whatever the frame before had left there.
+    (TitlePlatform::Ktf, "0102A356", annunciator()),
     // 겟앰프드: its descriptor says 240*320, but every full-screen picture it
     // carries - title, menu, each map - is 240x296, and it centres its popup
     // frame in whatever height the screen reports. Told 320 it put the frame at

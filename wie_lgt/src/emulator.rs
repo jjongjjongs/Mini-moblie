@@ -200,6 +200,7 @@ impl LgtEmulator {
 
         let system = System::new(platform, pid, aid, LgtTaskRunner { core: core.clone() });
         system.set_title_draws_sideways(title_draws_sideways(aid));
+        system.set_title_expects_annunciator(annunciator);
 
         for (filename, data) in files {
             let filename = filename.trim_start_matches("P/");

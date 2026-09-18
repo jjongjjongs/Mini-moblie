@@ -50,6 +50,14 @@ impl AnnunciatorComponent {
             fields: vec![
                 // Native class-static +0x3c.
                 JavaFieldProto::new("__wieAnnunciatorSizes", "[I", FieldAccessFlags::STATIC),
+                // The atlas the bar's icons are cut from, and which of the six
+                // it is. Decoding one costs a 160KB guest image, and the bar is
+                // painted with every frame it is on the screen, so it is decoded
+                // once and kept: 만귀토벌전 filled its whole heap in eight
+                // seconds and died on `Failed to instantiate array` when it was
+                // not.
+                JavaFieldProto::new("__wieAtlas", "Lorg/kwis/msp/lcdui/Image;", FieldAccessFlags::STATIC),
+                JavaFieldProto::new("__wieAtlasIndex", "I", FieldAccessFlags::STATIC),
                 // Native AnnunciatorComponent +0x84.
                 JavaFieldProto::new("__wieBTrans", "Z", Default::default()),
                 // Native AnnunciatorComponent +0x88.
@@ -66,6 +74,10 @@ impl AnnunciatorComponent {
         jvm.store_array(&mut sizes, 0, [14i32, 20, 24, 24, 0, 20, 24, 48, 48, 48, 48]).await?;
 
         jvm.put_static_field("org/kwis/msp/lwc/AnnunciatorComponent", "__wieAnnunciatorSizes", "[I", sizes)
+            .await?;
+
+        // No atlas decoded yet; every real index is zero or above.
+        jvm.put_static_field("org/kwis/msp/lwc/AnnunciatorComponent", "__wieAtlasIndex", "I", -1i32)
             .await?;
 
         Ok(())
@@ -143,7 +155,7 @@ impl AnnunciatorComponent {
         Ok(())
     }
 
-    async fn show(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<AnnunciatorComponent>) -> JvmResult<()> {
+    async fn show(jvm: &Jvm, context: &mut WieJvmContext, this: ClassInstanceRef<AnnunciatorComponent>) -> JvmResult<()> {
         tracing::debug!("org.kwis.msp.lwc.AnnunciatorComponent::show({this:?})");
 
         // Native order:
@@ -152,24 +164,40 @@ impl AnnunciatorComponent {
         //    setDockedCard(getCard(), 0)
         // 3. register a fresh AnnunciatorEventListener.
         //
-        // Step 2 is deliberately skipped: the handset's status strip does not
-        // appear over a running title on the reference, whichever title it is,
-        // so putting the annunciator's card on the screen shows a bar no player
-        // sees there and costs the title the rows underneath it. Leaving the
-        // card undocked is what makes it invisible - `CardCanvas` paints the
-        // docked card and offsets the pushed ones below it, and with none
-        // docked every card gets the whole panel from its first row, which is
-        // the geometry titles are written for.
+        // Step 2 is skipped for most titles: the handset's status strip does
+        // not appear over a running title on the reference, whichever title it
+        // is, so putting the annunciator's card on the screen shows a bar no
+        // player sees there and costs the title the rows underneath it. Leaving
+        // the card undocked is what makes it invisible - `CardCanvas` paints the
+        // docked card and offsets the pushed ones below it, and with none docked
+        // every card gets the whole panel from its first row, which is the
+        // geometry most titles are written for.
         //
-        // Everything a title can observe is still here: the component is built,
-        // laid out and validated, `getCard` still answers, and the event
-        // listener below still runs, so a title that shows an annunciator and
-        // then asks about it sees what it expects. `paint` and the atlas it
-        // draws stay too, as the record of what the strip is - nothing on the
-        // screen reaches them now.
+        // A title that lays itself out *below* the strip needs it there, and
+        // 만귀토벌전 is one: it clears its client area sixteen rows short of
+        // whatever height it is told and puts every screen inside that, so with
+        // no strip above it its menus and its battle scene stopped a strip's
+        // worth short of the bottom and the rows under them kept the frame
+        // before. Docked, its screens land where the handset put them and fill
+        // the panel. That is the same fact `wie_wipi_c::api::graphics` reads out
+        // of `ANNUNCIATOR_ROWS_PTR` for the titles that reach the strip the
+        // other way, so it is the same per-title answer, from `crate::quirks`.
+        //
+        // Everything a title can observe is still here either way: the component
+        // is built, laid out and validated, `getCard` still answers, and the
+        // event listener below still runs.
         let _: () = jvm.invoke_virtual(&this, "validate", "()V", ()).await?;
 
         let display: ClassInstanceRef<Display> = jvm.get_field(&this, "display", "Lorg/kwis/msp/lcdui/Display;").await?;
+
+        if context.system().title_expects_annunciator() {
+            let card: ClassInstanceRef<Card> = jvm.invoke_virtual(&this, "getCard", "()Lorg/kwis/msp/lcdui/Card;", ()).await?;
+
+            tracing::debug!("org.kwis.msp.lwc.AnnunciatorComponent::show({this:?}) docks its card");
+            let _: () = jvm
+                .invoke_virtual(&display, "setDockedCard", "(Lorg/kwis/msp/lcdui/Card;I)V", (card, 0))
+                .await?;
+        }
 
         let listener = jvm
             .new_class(
@@ -298,6 +326,41 @@ impl AnnunciatorComponent {
         let size_index: i32 = jvm.get_field(&this, "__wieDisplaySizeIndex", "I").await?;
 
         Self::paint0(jvm, context, graphics, size_index).await
+    }
+
+    /// The atlas for `index`, decoded on the first paint that needs it and kept
+    /// from then on.
+    ///
+    /// One is 160KB of guest heap and the bar is painted with every frame, so
+    /// decoding one per paint is a leak the run does not survive - the six are
+    /// build-time constants, and only one of them is ever in use.
+    async fn atlas(jvm: &Jvm, index: usize, data: &[u8]) -> JvmResult<ClassInstanceRef<Image>> {
+        let cached_index: i32 = jvm
+            .get_static_field("org/kwis/msp/lwc/AnnunciatorComponent", "__wieAtlasIndex", "I")
+            .await?;
+
+        if cached_index == index as i32 {
+            let cached: ClassInstanceRef<Image> = jvm
+                .get_static_field("org/kwis/msp/lwc/AnnunciatorComponent", "__wieAtlas", "Lorg/kwis/msp/lcdui/Image;")
+                .await?;
+            if !cached.is_null() {
+                return Ok(cached);
+            }
+        }
+
+        let atlas = Self::load_annunciator_image(jvm, data).await?;
+
+        jvm.put_static_field(
+            "org/kwis/msp/lwc/AnnunciatorComponent",
+            "__wieAtlas",
+            "Lorg/kwis/msp/lcdui/Image;",
+            atlas.clone(),
+        )
+        .await?;
+        jvm.put_static_field("org/kwis/msp/lwc/AnnunciatorComponent", "__wieAtlasIndex", "I", index as i32)
+            .await?;
+
+        Ok(atlas)
     }
 
     async fn load_annunciator_image(jvm: &Jvm, data: &[u8]) -> JvmResult<ClassInstanceRef<Image>> {
@@ -448,7 +511,7 @@ impl AnnunciatorComponent {
             states[12] = map_digit(minute % 10);
         }
 
-        let atlas = Self::load_annunciator_image(jvm, atlas_data).await?;
+        let atlas = Self::atlas(jvm, internal_index, atlas_data).await?;
 
         // Native background.
         let _: () = jvm.invoke_virtual(&graphics, "setColor", "(I)V", (0x00ffffffi32,)).await?;

@@ -191,6 +191,7 @@ impl KtfEmulator {
 
         let system = System::new(platform, pid, aid, KtfTaskRunner { core: core.clone() });
         system.set_title_draws_sideways(title_quirks(TitlePlatform::Ktf, aid).drawn_sideways);
+        system.set_title_expects_annunciator(title_quirks(TitlePlatform::Ktf, aid).expects_annunciator);
 
         for (path, data) in files {
             let path = packaged_name(path).unwrap_or(path);
