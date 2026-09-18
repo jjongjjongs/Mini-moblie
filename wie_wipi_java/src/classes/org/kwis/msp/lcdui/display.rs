@@ -1,9 +1,9 @@
-use alloc::vec;
+use alloc::{boxed::Box, vec};
 
-use java_class_proto::{JavaFieldProto, JavaMethodProto};
+use java_class_proto::{JavaFieldProto, JavaMethodProto, MethodBody};
 use java_constants::{FieldAccessFlags, MethodAccessFlags};
 use java_runtime::classes::java::lang::{Object, Runnable, String};
-use jvm::{ClassInstanceRef, Jvm, Result as JvmResult, runtime::JavaLangString};
+use jvm::{ClassInstanceRef, JavaError, JavaValue, Jvm, Result as JvmResult, runtime::JavaLangString};
 
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 
@@ -475,14 +475,36 @@ impl Display {
         Ok(())
     }
 
+    /// `callSerially(Runnable, int)` - the same queueing as the one-argument
+    /// form, after waiting the number of milliseconds asked for.
+    ///
+    /// This was a stub that dropped the runnable, and a title that hands its
+    /// next step to it never takes that step. 드래곤나이트2 shows its publisher
+    /// plate, asks for the rest of its start-up this way once, and then has
+    /// nothing left to do: the event loop spun on an empty queue behind a
+    /// picture that never changed.
     async fn call_serially_with_timeout(
-        _: &Jvm,
-        _: &mut WieJvmContext,
+        jvm: &Jvm,
+        context: &mut WieJvmContext,
         this: ClassInstanceRef<Self>,
         runnable: ClassInstanceRef<Runnable>,
         timeout: i32,
     ) -> JvmResult<()> {
-        tracing::warn!("stub org.kwis.msp.lcdui.Display::callSerially({this:?}, {runnable:?}, {timeout})");
+        tracing::debug!("org.kwis.msp.lcdui.Display::callSerially({this:?}, {runnable:?}, {timeout})");
+
+        // No wait to serve, so this is the one-argument call written longhand.
+        if timeout <= 0 {
+            return Self::call_serially(jvm, context, this, runnable).await;
+        }
+
+        context.spawn(
+            jvm,
+            Box::new(DelayedCallSerially {
+                display: this,
+                runnable,
+                delay: timeout as u64,
+            }),
+        )?;
 
         Ok(())
     }
@@ -830,6 +852,31 @@ impl Display {
 
     pub async fn midp_display(jvm: &Jvm, this: &ClassInstanceRef<Self>) -> JvmResult<ClassInstanceRef<MidpDisplay>> {
         jvm.get_field(this, "midpDisplay", "Ljavax/microedition/lcdui/Display;").await
+    }
+}
+
+/// Waits out a [`Display::call_serially_with_timeout`] delay and then hands the
+/// runnable to the queue, so it runs on the event thread like any other.
+struct DelayedCallSerially {
+    display: ClassInstanceRef<Display>,
+    runnable: ClassInstanceRef<Runnable>,
+    delay: u64,
+}
+
+#[async_trait::async_trait]
+impl MethodBody<JavaError, WieJvmContext> for DelayedCallSerially {
+    async fn call(&self, jvm: &Jvm, context: &mut WieJvmContext, _args: Box<[JavaValue]>) -> Result<JavaValue, JavaError> {
+        jvm.attach_thread(None).await?;
+
+        context.system().sleep(self.delay).await;
+
+        let midp_display: ClassInstanceRef<MidpDisplay> = jvm.get_field(&self.display, "midpDisplay", "Ljavax/microedition/lcdui/Display;").await?;
+
+        let _: () = jvm
+            .invoke_virtual(&midp_display, "callSerially", "(Ljava/lang/Runnable;)V", (self.runnable.clone(),))
+            .await?;
+
+        Ok(JavaValue::Void)
     }
 }
 
