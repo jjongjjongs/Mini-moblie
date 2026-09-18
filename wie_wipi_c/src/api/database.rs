@@ -131,8 +131,35 @@ async fn store_lgt_metadata(db: &mut dyn Database, metadata: &LgtDatabaseMetadat
     db.set(LGT_METADATA_RECORD_ID, &metadata.encode()).await
 }
 
-pub async fn open_database(context: &mut dyn WIPICContext, ptr_name: WIPICWord, mode: i32, r#type: i32) -> Result<i32> {
-    tracing::debug!("MC_dbOpenDataBase({ptr_name:#x}, {mode}, {type})");
+/// KTF `MC_dbOpenDataBase(name, recordSize, create)`.
+///
+/// The two arguments after the name are a record size and a create flag - the
+/// same pair `open_database_lgt` below reads off the LGT native, and the same
+/// pair the reference takes off this call: its database dispatch derives
+/// `create` from the third argument (`cmp w9, #0; cset x3, ne`) and checks the
+/// second against `1..=0x100000` as a record size before opening anything.
+///
+/// This entry used to read the second as a mode and the third as a type, and
+/// that reading broke titles in two different directions. Measured across six
+/// KTF archives, every open passes `create = 1` and a record size of 1, 4 or
+/// 8:
+///
+/// - a record size of 1 hit the old `mode == 1` branch, which answered
+///   `M_E_NOENT` whenever the database was not already there - so those titles
+///   could never create one at all;
+/// - a record size of 4 hit the old `mode == 4` branch, which deleted record 1
+///   before handing back the handle - so opening a save wiped it;
+/// - a record size of 8 matched nothing, so the database was never created:
+///   던파 귀검사편 leaves its options screen with
+///   `MC_dbOpenDataBase("option.txt", 8, 1)`, then asks `MC_dbExists` whether
+///   it arrived and is still told no.
+///
+/// There is no fourth argument. The word after `create` is the same trailing
+/// self pointer KTF's other database slots carry - it reads `0x71000fe1`, one
+/// of this runtime's own stubs, in every one of those archives - so it is not
+/// read here.
+pub async fn open_database(context: &mut dyn WIPICContext, ptr_name: WIPICWord, record_size: i32, create: i32) -> Result<i32> {
+    tracing::debug!("MC_dbOpenDataBase({ptr_name:#x}, record_size={record_size}, create={create})");
 
     // Guest-provided C string — invalid UTF-8 must not bring down the
     // emulator. Treat it as a bad parameter and return -22, matching the
@@ -143,34 +170,41 @@ pub async fn open_database(context: &mut dyn WIPICContext, ptr_name: WIPICWord, 
         return Ok(-22);
     };
 
-    // Validate before any repository side effects. Mode 4 deletes record 1
-    // up front, so a too-long name reaching that path would wipe data we
-    // can't open a handle for anyway.
+    // Validate before any repository side effects, so a name this file cannot
+    // key by never reaches the repository at all.
     if name.len() > MAX_NAME_LEN {
         tracing::warn!("MC_dbOpenDataBase: name {name:?} too long ({} > {MAX_NAME_LEN})", name.len());
         return Ok(-22); // M_E_BADRECID — closest WIPI parameter-error idiom in this file
     }
 
-    let packaged = packaged_store_bytes(context, &name).await?;
+    // KTF has no access argument to report back, and `MC_dbGetAccessMode`
+    // answers 1 for a name that exists, so a handle answers the same.
+    open_database_named(context, &name, create != 0, 1).await
+}
+
+/// The body of an open, once the name is known and the caller has made the
+/// create decision the platform it speaks for makes.
+///
+/// `create` is what the title asked for on KTF and what `open_database_lgt`
+/// has already decided on LGT: whether a database that is not there yet may be
+/// brought into being. A database that exists, or that the archive ships,
+/// seeds the handle's buffer from record 1 so a seek-and-overlay write keeps
+/// the bytes around what it writes - multi-slot saves live at fixed offsets
+/// inside that one record.
+async fn open_database_named(context: &mut dyn WIPICContext, name: &str, create: bool, access: i32) -> Result<i32> {
+    let packaged = packaged_store_bytes(context, name).await?;
 
     let system = context.system();
     let pid = system.pid().to_owned();
-    let exists = system.platform().database_repository().exists(&name, &pid).await;
+    let exists = system.platform().database_repository().exists(name, &pid).await;
 
-    if !exists && packaged.is_none() && mode == 1 {
+    if !exists && packaged.is_none() && !create {
         return Ok(-12); // M_E_NOENT
     }
 
-    // Mode 4 (`MC_DB_CREATE`) wipes any prior contents up front unless the
-    // DB is backed by a packaged resource. Other modes seed the per-handle
-    // buffer with the existing record or packaged data so seek+overlay writes
-    // preserve unrelated bytes (multi-slot saves at fixed byte offsets).
     let initial: Vec<u8> = if exists {
-        let mut db = system.platform().database_repository().open(&name, &pid).await;
-        if mode == 4 && packaged.is_none() {
-            db.delete(1).await;
-            Vec::new()
-        } else if let Some(data) = db.get(1).await {
+        let mut db = system.platform().database_repository().open(name, &pid).await;
+        if let Some(data) = db.get(1).await {
             data
         } else if let Some(data) = packaged {
             db.set(1, &data).await;
@@ -179,13 +213,15 @@ pub async fn open_database(context: &mut dyn WIPICContext, ptr_name: WIPICWord, 
             Vec::new()
         }
     } else if let Some(data) = packaged {
-        let mut db = system.platform().database_repository().open(&name, &pid).await;
+        let mut db = system.platform().database_repository().open(name, &pid).await;
         db.set(1, &data).await;
         data
-    } else if mode == 4 {
-        system.platform().database_repository().open(&name, &pid).await;
-        Vec::new()
     } else {
+        // Nothing there and the title asked for it to exist. Opening it in the
+        // repository is what makes it exist: a title that writes nothing
+        // before closing still expects to find it on the next `MC_dbExists`,
+        // which is how an options screen records that it has been visited.
+        system.platform().database_repository().open(name, &pid).await;
         Vec::new()
     };
 
@@ -199,7 +235,7 @@ pub async fn open_database(context: &mut dyn WIPICContext, ptr_name: WIPICWord, 
         buffer_ptr: 0,
         buffer_len: 0,
         buffer_capacity: 0,
-        mode: mode as u32,
+        mode: access as u32,
     };
     handle.name[..name_bytes.len()].copy_from_slice(name_bytes);
 
@@ -337,10 +373,14 @@ pub async fn open_database_lgt(context: &mut dyn WIPICContext, ptr_name: WIPICWo
         }
     }
 
-    // Mode 0 in the existing WIE helper preserves existing contents.  The
-    // LGT wrapper has already performed the native create/existence checks,
-    // so this does not inherit the KTF-oriented mode interpretation.
-    open_database(context, ptr_name, 0, access).await
+    // The LGT wrapper has already made the native create/existence decision
+    // above, so the shared body is told the database may be brought into
+    // being rather than being asked to decide again.
+    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, ptr_name)?) else {
+        return Ok(-9);
+    };
+
+    open_database_named(context, &name, true, access).await
 }
 
 /// LGT canonical `MC_dbGetAccessMode` (service 0x1fd).
@@ -1959,11 +1999,11 @@ mod tests {
     use crate::context::test::TestContext;
 
     use super::{
-        LgtDatabaseMetadata, available_storage_ktf, close_database_lgt, delete_database, delete_database_lgt, delete_record_lgt, exists_database,
-        exists_database_ktf, get_access_mode_ktf, get_access_mode_lgt, get_number_of_records_ktf, get_number_of_records_lgt, get_record_size_ktf,
-        get_record_size_lgt, insert_record_lgt, list_databases_lgt, list_record, list_record_info, list_records_lgt, load_handle, load_lgt_metadata,
-        open_database, open_database_lgt, open_db_for_handle, select_record, select_record_ktf, select_record_lgt, sort_records_lgt,
-        stat_by_name_ktf, store_lgt_metadata, stream_read, stream_write, update_record, update_record_lgt,
+        LgtDatabaseMetadata, available_storage_ktf, close_database, close_database_lgt, delete_database, delete_database_lgt, delete_record_lgt,
+        exists_database, exists_database_ktf, get_access_mode_ktf, get_access_mode_lgt, get_number_of_records_ktf, get_number_of_records_lgt,
+        get_record_size_ktf, get_record_size_lgt, insert_record_lgt, list_databases_lgt, list_record, list_record_info, list_records_lgt,
+        load_handle, load_lgt_metadata, open_database, open_database_lgt, open_db_for_handle, select_record, select_record_ktf, select_record_lgt,
+        sort_records_lgt, stat_by_name_ktf, store_lgt_metadata, stream_read, stream_write, update_record, update_record_lgt,
     };
 
     #[futures_test::test]
@@ -2801,7 +2841,7 @@ mod tests {
         context.write_bytes(0x1000, b"records\0").unwrap();
 
         assert_eq!(exists_database(&mut context, 0x1000, 1).await.unwrap(), -12);
-        let db_id = open_database(&mut context, 0x1000, 0, 0).await.unwrap();
+        let db_id = open_database(&mut context, 0x1000, 0, 1).await.unwrap();
         context.write_bytes(0x2000, &[1]).unwrap();
         assert_eq!(stream_write(&mut context, db_id, 0x2000, 1).await.unwrap(), 1);
         assert_eq!(exists_database(&mut context, 0x1000, 1).await.unwrap(), 0);
@@ -2813,7 +2853,7 @@ mod tests {
         context.write_bytes(0x1000, b"records\0").unwrap();
 
         assert_eq!(exists_database(&mut context, 0x1000, 1).await.unwrap(), -12);
-        let db_id = open_database(&mut context, 0x1000, 4, 0).await.unwrap();
+        let db_id = open_database(&mut context, 0x1000, 4, 1).await.unwrap();
         assert!(db_id > 0);
         assert_eq!(exists_database(&mut context, 0x1000, 1).await.unwrap(), 0);
     }
@@ -2857,7 +2897,7 @@ mod tests {
         context.write_bytes(0x1000, b"kickass\0").unwrap();
 
         assert_eq!(exists_database(&mut context, 0x1000, 1).await.unwrap(), 0);
-        let db_id = open_database(&mut context, 0x1000, 1, 0).await.unwrap();
+        let db_id = open_database(&mut context, 0x1000, 1, 1).await.unwrap();
         assert!(db_id > 0);
         assert_eq!(stream_read(&mut context, db_id, 0x2000, 9).await.unwrap(), 9);
 
@@ -2873,7 +2913,7 @@ mod tests {
         let mut context = database_test_context();
         context.write_bytes(0x1000, b"save\0").unwrap();
 
-        let db_id = open_database(&mut context, 0x1000, 4, 0).await.unwrap();
+        let db_id = open_database(&mut context, 0x1000, 4, 1).await.unwrap();
         assert!(db_id > 0);
         assert_eq!(get_number_of_records_ktf(&mut context, db_id).await.unwrap(), 0);
 
@@ -2891,7 +2931,7 @@ mod tests {
         let mut context = database_test_context();
         context.write_bytes(0x1000, b"save\0").unwrap();
 
-        let db_id = open_database(&mut context, 0x1000, 4, 0).await.unwrap();
+        let db_id = open_database(&mut context, 0x1000, 4, 1).await.unwrap();
         assert_eq!(get_record_size_ktf(&mut context, db_id).await.unwrap(), 0);
 
         context.write_bytes(0x2000, b"12345678").unwrap();
@@ -2921,15 +2961,76 @@ mod tests {
         assert!(space > 0, "a title reads this as the room it has");
     }
 
-    /// The access mode answers both shapes: a handle reports what the title
-    /// opened it with, a name reports whether such a database is there.
+    /// A KTF open reads a record size and a create flag, not a mode.
+    ///
+    /// Every KTF archive measured passes `create = 1` with a record size of 1,
+    /// 4 or 8. Read as a mode, `1` answered `M_E_NOENT` and the title could
+    /// never make its database, `4` deleted record 1 on the way in, and `8`
+    /// matched nothing so the database was never created at all.
+    #[futures_test::test]
+    async fn ktf_open_reads_a_record_size_and_a_create_flag() {
+        for record_size in [1i32, 4, 8] {
+            let mut context = database_test_context();
+            context.write_bytes(0x1000, b"option.txt\0").unwrap();
+
+            // Nothing there yet, and the title asks for it.
+            assert_eq!(exists_database_ktf(&mut context, 0x1000, 1, 0).await.unwrap(), -12);
+
+            let db_id = open_database(&mut context, 0x1000, record_size, 1).await.unwrap();
+            assert!(db_id > 0, "record size {record_size} has to open");
+            assert_eq!(close_database(&mut context, db_id).await.unwrap(), 0);
+
+            // 던파 귀검사편 asks exactly this after leaving its options screen,
+            // having written nothing in between.
+            assert_eq!(
+                exists_database_ktf(&mut context, 0x1000, 1, 0).await.unwrap(),
+                0,
+                "record size {record_size} has to leave the database behind"
+            );
+        }
+    }
+
+    /// Opening a database does not empty it, whatever record size it is opened
+    /// with. A four byte record used to take the old `mode == 4` branch, which
+    /// deleted record 1 before handing back the handle.
+    #[futures_test::test]
+    async fn ktf_open_keeps_what_the_database_already_holds() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"save.txt\0").unwrap();
+
+        let db_id = open_database(&mut context, 0x1000, 4, 1).await.unwrap();
+        context.write_bytes(0x2000, b"saved").unwrap();
+        assert_eq!(stream_write(&mut context, db_id, 0x2000, 5).await.unwrap(), 5);
+        assert_eq!(close_database(&mut context, db_id).await.unwrap(), 0);
+
+        let reopened = open_database(&mut context, 0x1000, 4, 1).await.unwrap();
+        assert_eq!(stream_read(&mut context, reopened, 0x3000, 5).await.unwrap(), 5);
+
+        let mut read_back = [0u8; 5];
+        context.read_bytes(0x3000, &mut read_back).unwrap();
+        assert_eq!(&read_back, b"saved");
+    }
+
+    /// Without the create flag a database that is not there is still an error.
+    #[futures_test::test]
+    async fn ktf_open_without_create_refuses_a_database_that_is_not_there() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"save.txt\0").unwrap();
+
+        assert_eq!(open_database(&mut context, 0x1000, 8, 0).await.unwrap(), -12);
+        assert_eq!(exists_database_ktf(&mut context, 0x1000, 1, 0).await.unwrap(), -12);
+    }
+
+    /// The access mode answers both shapes, and both answer the same thing:
+    /// KTF's `MC_dbOpenDataBase` carries no access argument, so a handle says
+    /// what a name that exists says.
     #[futures_test::test]
     async fn ktf_access_mode_answers_a_handle_and_a_name() {
         let mut context = database_test_context();
         context.write_bytes(0x1000, b"save\0").unwrap();
 
-        let db_id = open_database(&mut context, 0x1000, 4, 0).await.unwrap();
-        assert_eq!(get_access_mode_ktf(&mut context, db_id as u32).await.unwrap(), 4);
+        let db_id = open_database(&mut context, 0x1000, 4, 1).await.unwrap();
+        assert_eq!(get_access_mode_ktf(&mut context, db_id as u32).await.unwrap(), 1);
 
         // The same name, now that the database exists, and one that does not.
         assert_eq!(get_access_mode_ktf(&mut context, 0x1000).await.unwrap(), 1);
@@ -2980,7 +3081,7 @@ mod tests {
 
         let mut context = database_test_context().with_resource("bodyImage.dat", &shipped);
         context.write_bytes(0x1000, b"bodyImage.dat\0").unwrap();
-        let db_id = open_database(&mut context, 0x1000, 4, 0).await.unwrap();
+        let db_id = open_database(&mut context, 0x1000, 4, 1).await.unwrap();
 
         // Seek to the table entry and read it, exactly as the title does.
         assert_eq!(select_record_ktf(&mut context, db_id, 88, 1, 0).await.unwrap(), 0);
@@ -3005,7 +3106,7 @@ mod tests {
 
         let mut context = database_test_context().with_resource("save.dat", &shipped);
         context.write_bytes(0x1000, b"save.dat\0").unwrap();
-        let db_id = open_database(&mut context, 0x1000, 4, 0).await.unwrap();
+        let db_id = open_database(&mut context, 0x1000, 4, 1).await.unwrap();
 
         select_record_ktf(&mut context, db_id, 88, 0, 0).await.unwrap();
         stream_read(&mut context, db_id, 0x2000, 4).await.unwrap();
@@ -3030,7 +3131,7 @@ mod tests {
         assert_eq!(empty as usize, super::KTF_STORAGE_LIMIT);
 
         context.write_bytes(0x1000, b"save\0").unwrap();
-        let db_id = open_database(&mut context, 0x1000, 4, 0).await.unwrap();
+        let db_id = open_database(&mut context, 0x1000, 4, 1).await.unwrap();
         context.write_bytes(0x2000, &[7u8; 8]).unwrap();
         stream_write(&mut context, db_id, 0x2000, 8).await.unwrap();
 
@@ -3041,7 +3142,7 @@ mod tests {
         // player's, so it spends nothing.
         let mut packaged = database_test_context().with_resource("maps", &[0u8; 4096]);
         packaged.write_bytes(0x1000, b"maps\0").unwrap();
-        let maps = open_database(&mut packaged, 0x1000, 4, 0).await.unwrap();
+        let maps = open_database(&mut packaged, 0x1000, 4, 1).await.unwrap();
         assert!(maps > 0);
 
         assert_eq!(
@@ -3110,7 +3211,7 @@ mod tests {
 
     async fn open_test_database(context: &mut TestContext) -> i32 {
         context.write_bytes(0x1000, b"records\0").unwrap();
-        open_database(context, 0x1000, 0, 0).await.unwrap()
+        open_database(context, 0x1000, 0, 1).await.unwrap()
     }
 
     /// `MC_dbExists` answers the way a WIPI call answers - zero for yes, a
