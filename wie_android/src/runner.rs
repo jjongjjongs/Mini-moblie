@@ -320,6 +320,19 @@ const FIRMWARE_BIOS_NAME: &str = "libarm32_lgt_system.so";
 fn build_emulator(platform: Box<AndroidPlatform>, data: &[u8], options: Options) -> Result<Box<dyn Emulator + Send>, String> {
     let mut files = extract_zip(data).map_err(|x| format!("압축을 열 수 없습니다: {x}"))?;
 
+    // The handset's own bitmap faces live in the bundled firmware, and drawing
+    // text with them needs nothing else from it - so they are installed here,
+    // for whichever platform the archive turns out to be. Only LGT loads the
+    // image as firmware, which is why only LGT used to have the faces; every
+    // KTF title was drawing its text with an anti-aliased outline instead,
+    // which is what made 괴도키리's Korean text look soft against its own
+    // pixel art. See `wie_wipi_c::api::graphics::install_bios_font`.
+    if wie_wipi_c::api::graphics::install_bios_font(FIRMWARE_BIOS) {
+        tracing::info!("handset bitmap faces installed; text is drawn from the handset's own glyphs");
+    } else {
+        tracing::warn!("no bitmap face in the bundled firmware; text stays on the outline font");
+    }
+
     // Handset archives are detected by their descriptor. A jar carries no
     // descriptor, so it is only considered once all three archive formats have
     // been ruled out - an apk or jar is itself a zip and would otherwise be

@@ -418,6 +418,18 @@ fn ktf_archive_probe() {
         .with_writer(std::io::stderr)
         .try_init();
 
+    // The handset's own bitmap faces, which the Android frontend installs from
+    // the firmware it bundles. A capture has no frontend, so text is drawn from
+    // the outline font unless one is named here - and the two do not look alike,
+    // which is the whole reason this knob exists.
+    if let Ok(bios) = std::env::var("WIE_BIOS") {
+        let image = std::fs::read(&bios).expect("bios image");
+        let installed = wie_wipi_c::api::graphics::install_bios_font(&image);
+        eprintln!("[probe] bios {bios}: bitmap face installed={installed}");
+    } else {
+        wie_wipi_c::api::graphics::clear_bios_font();
+    }
+
     let ticks_limit: u32 = std::env::var("WIE_TICKS").ok().and_then(|x| x.parse().ok()).unwrap_or(20000);
     let archive = std::fs::read(&path).expect("archive");
     let files = extract_zip(&archive).expect("extract");
