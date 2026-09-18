@@ -171,8 +171,11 @@ impl Executor {
         let waker = self.create_waker();
 
         for &task_id in poll_order.iter() {
-            {
+            // Everything the poll needs is settled under one lock: whether the
+            // task is still asleep, the task itself, and whose task it is.
+            let mut task = {
                 let mut inner = self.inner.lock();
+
                 match inner.sleeping_tasks.get(&task_id) {
                     Some(&until) if until > now => continue,
                     Some(_) => {
@@ -180,16 +183,18 @@ impl Executor {
                     }
                     None => {}
                 }
-            }
 
-            let mut task = match self.inner.lock().tasks.remove(&task_id) {
-                Some(task) => task,
-                // Gone since the order was taken - a task another one finished off.
-                None => continue,
+                match inner.tasks.remove(&task_id) {
+                    Some(task) => {
+                        inner.current_task_id = Some(task_id);
+                        task
+                    }
+                    // Gone since the order was taken - a task another one finished off.
+                    None => continue,
+                }
             };
 
             let mut context = Context::from_waker(&waker);
-            self.inner.lock().current_task_id = Some(task_id);
 
             let poll = task.as_mut().poll(&mut context);
 
