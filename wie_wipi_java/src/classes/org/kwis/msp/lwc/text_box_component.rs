@@ -642,6 +642,31 @@ impl TextBoxComponent {
 
         jvm.put_field(&mut this, "m_cPos", "I", position).await?;
 
+        // Native focusNotify @ 0x233f5c ends by putting the mode indicator
+        // where this box is:
+        //   modeViewer.move(getXOnScreen(), countModeYPos())
+        //
+        // Without it the 13x7 indicator never leaves (0, 0), and the symbol
+        // mode computes its candidate window from there: `setSymbolPosition`
+        // takes `modeViewer.getY()`, or that less 8, as the window's top, so a
+        // box whose indicator still sits at the origin asks for a window at
+        // y = 0 or y = -8. `InputMethodHandler.setSymbolPosition` refuses a
+        // non-positive position, which is what killed 드래곤하트 the moment a
+        // name field regained focus while the keypad was in symbol mode.
+        let mode_viewer: ClassInstanceRef<()> = jvm
+            .get_field(&this, "__wieModeViewer", "Lorg/kwis/msp/lwc/TextComponent$ModeViewer;")
+            .await?;
+
+        let x: i32 = jvm.invoke_virtual(&this, "getXOnScreen", "()I", ()).await?;
+
+        let y: i32 = jvm.invoke_virtual(&this, "countModeYPos", "()I", ()).await?;
+
+        if mode_viewer.is_null() {
+            return Err(jvm.exception("java/lang/NullPointerException", "").await);
+        }
+
+        let _: () = jvm.invoke_virtual(&mode_viewer, "move", "(II)V", (x, y)).await?;
+
         Ok(())
     }
 
@@ -884,5 +909,89 @@ impl TextBoxComponent {
             .await?;
 
         Self::init_with_display(jvm, context, this, display, data, constraint).await
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use alloc::boxed::Box;
+
+    use jvm::{ClassInstanceRef, runtime::JavaLangString};
+    use test_utils::run_jvm_test;
+    use wie_util::Result;
+
+    use crate::{classes::org::kwis::msp::lcdui::Display, get_protos};
+
+    /// A text box that has been focused once puts the input-mode indicator
+    /// beside itself, and the symbol keypad then has somewhere to open.
+    ///
+    /// 드래곤하트 names its character in a text box. Leaving the indicator at
+    /// the origin made `setSymbolPosition` ask for a candidate window at
+    /// y = -8, which the handler refuses, so the title died the moment the
+    /// name field took focus back with the keypad in symbol mode.
+    #[test]
+    fn a_focused_box_puts_the_mode_indicator_beside_itself() -> Result<()> {
+        run_jvm_test(Box::new([wie_midp::get_protos().into(), get_protos().into()]), |jvm| async move {
+            let _midlet = jvm.new_class("net/wie/WIPIMIDlet", "()V", ()).await?;
+            let _jlet = jvm.new_class("org/kwis/msp/lcdui/Jlet", "()V", ()).await?;
+
+            let display: ClassInstanceRef<Display> = jvm
+                .invoke_static("org/kwis/msp/lcdui/Display", "getDefaultDisplay", "()Lorg/kwis/msp/lcdui/Display;", ())
+                .await?;
+
+            let shell = jvm
+                .new_class("org/kwis/msp/lwc/ShellComponent", "(Lorg/kwis/msp/lcdui/Display;)V", (display.clone(),))
+                .await?;
+
+            let form = jvm
+                .new_class("org/kwis/msp/lwc/FormComponent", "(Lorg/kwis/msp/lcdui/Display;)V", (display.clone(),))
+                .await?;
+
+            let empty = JavaLangString::from_rust_string(&jvm, "").await?;
+            let text_box = jvm
+                .new_class(
+                    "org/kwis/msp/lwc/TextBoxComponent",
+                    "(Lorg/kwis/msp/lcdui/Display;Ljava/lang/String;I)V",
+                    (display.clone(), empty, 0),
+                )
+                .await?;
+
+            let _: i32 = jvm
+                .invoke_virtual(&form, "addComponent", "(Lorg/kwis/msp/lwc/Component;)I", (text_box.clone(),))
+                .await?;
+
+            let _: i32 = jvm
+                .invoke_virtual(&shell, "addComponent", "(Lorg/kwis/msp/lwc/Component;)I", (form.clone(),))
+                .await?;
+
+            let _: () = jvm.invoke_virtual(&shell, "show", "()V", ()).await?;
+
+            let _: () = jvm.invoke_virtual(&form, "configure", "(IIIII)V", (0, 0, 240, 320, 3)).await?;
+            let _: () = jvm.invoke_virtual(&text_box, "configure", "(IIIII)V", (10, 100, 200, 20, 3)).await?;
+
+            let _: () = jvm.invoke_virtual(&text_box, "focusNotify", "(Z)V", (true,)).await?;
+
+            let mode_viewer: ClassInstanceRef<()> = jvm
+                .get_field(&text_box, "__wieModeViewer", "Lorg/kwis/msp/lwc/TextComponent$ModeViewer;")
+                .await?;
+
+            let viewer_x: i32 = jvm.invoke_virtual(&mode_viewer, "getX", "()I", ()).await?;
+            let viewer_y: i32 = jvm.invoke_virtual(&mode_viewer, "getY", "()I", ()).await?;
+
+            assert_eq!(viewer_x, 10);
+            assert_eq!(viewer_y, 95);
+
+            // With the indicator where it belongs, symbol mode can open its
+            // candidate window; before, this threw "pos neg value".
+            let im_handler: ClassInstanceRef<()> = jvm.get_field(&text_box, "imHandler", "Lorg/kwis/msp/lcdui/InputMethodHandler;").await?;
+
+            let _: bool = jvm.invoke_virtual(&im_handler, "setCurrentMode", "(I)Z", (99,)).await?;
+            let _: () = jvm.invoke_virtual(&text_box, "focusNotify", "(Z)V", (true,)).await?;
+
+            let symbol_y: i32 = jvm.get_field(&im_handler, "__wieSymbolY", "I").await?;
+            assert!(symbol_y > 0, "symbol card asked for y = {symbol_y}");
+
+            Ok(())
+        })
     }
 }
