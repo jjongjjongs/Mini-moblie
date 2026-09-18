@@ -274,7 +274,7 @@ where
 struct StringBuffer;
 struct JavaString;
 
-/// Gives `java.lang.StringBuffer` the two methods the runtime does not carry.
+/// Gives `java.lang.StringBuffer` the methods the runtime does not carry.
 ///
 /// A method the JVM cannot find is a fatal error, not a miss a title carries on
 /// past: 미니러비 formats the 소행성 name plate as `append`, `length`, `insert` -
@@ -283,6 +283,9 @@ struct JavaString;
 /// java/lang/StringBuffer`, leaving the screen where it was. `deleteCharAt` is
 /// the same class's other gap and the same formatting helpers' other half; the
 /// title's constant pool names it too.
+///
+/// `setCharAt` is the third. 다크슬레이어2 writes its menu through it and died
+/// on its own title screen, before a key was pressed.
 ///
 /// Anything that is not that class is handed back untouched, and so is a method
 /// the runtime has grown since - the runtime's own is the one to keep.
@@ -304,6 +307,7 @@ fn fill_in_string_buffer(mut proto: RuntimeClassProto) -> RuntimeClassProto {
             string_buffer_delete_char_at,
             MethodAccessFlags::empty(),
         ),
+        JavaMethodProto::new("setCharAt", "(IC)V", string_buffer_set_char_at, MethodAccessFlags::empty()),
     ];
 
     for method in missing {
@@ -393,6 +397,30 @@ async fn string_buffer_delete_char_at(
     jvm.put_field(&mut this, "count", "I", new_count).await?;
 
     Ok(this)
+}
+
+async fn string_buffer_set_char_at(
+    jvm: &Jvm,
+    _: &mut RuntimeContext,
+    this: ClassInstanceRef<StringBuffer>,
+    index: i32,
+    character: JavaChar,
+) -> JvmResult<()> {
+    tracing::debug!("java.lang.StringBuffer::setCharAt({this:?}, {index}, {character})");
+
+    let count: i32 = jvm.get_field(&this, "count", "I").await?;
+    if index < 0 || index >= count {
+        return Err(jvm
+            .exception("java/lang/StringIndexOutOfBoundsException", "no character at that index")
+            .await);
+    }
+
+    // One character over one character: the buffer neither grows nor shrinks,
+    // so `count` is left where it is.
+    let mut value: ClassInstanceRef<Array<JavaChar>> = jvm.get_field(&this, "value", "[C").await?;
+    jvm.store_array(&mut value, index as _, [character]).await?;
+
+    Ok(())
 }
 
 /// A stand-in for the class whose constructors are replaced below, so the
@@ -548,6 +576,31 @@ mod tests {
                     .await;
 
                 assert!(result.is_err(), "{offset} is outside a buffer of 50");
+            }
+
+            Ok(())
+        })
+    }
+
+    /// The third gap: a character is written over the one already there, the
+    /// buffer keeps its length, and an index it does not have throws.
+    #[test]
+    fn a_string_buffer_writes_over_the_character_it_is_told_to() -> Result<(), WieError> {
+        run_jvm_test(Box::new([]), async |jvm| {
+            let text = JavaLangString::from_rust_string(&jvm, "abxd").await?;
+            let buffer = jvm.new_class("java/lang/StringBuffer", "(Ljava/lang/String;)V", (text,)).await?;
+
+            let _: () = jvm.invoke_virtual(&buffer, "setCharAt", "(IC)V", (2, b'c' as u16)).await?;
+
+            let text = jvm.invoke_virtual(&buffer, "toString", "()Ljava/lang/String;", ()).await?;
+            assert_eq!(JavaLangString::to_rust_string(&jvm, &text).await?, "abcd");
+
+            // Writing at the length is past the end - unlike `insert`, there is
+            // no character there to write over.
+            for index in [-1, 4] {
+                let result: JvmResult<()> = jvm.invoke_virtual(&buffer, "setCharAt", "(IC)V", (index, b'z' as u16)).await;
+
+                assert!(result.is_err(), "{index} is not a character of a buffer of 4");
             }
 
             Ok(())
