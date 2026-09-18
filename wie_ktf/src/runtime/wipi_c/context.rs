@@ -59,6 +59,12 @@ impl KtfWIPICContext {
 
 #[async_trait::async_trait]
 impl WIPICContext for KtfWIPICContext {
+    /// KTF hands a title's pixel operation the source first - see the note on
+    /// the trait method.
+    fn pixel_op_takes_source_first(&self) -> bool {
+        true
+    }
+
     fn alloc_raw(&mut self, size: WIPICWord) -> Result<WIPICWord> {
         Allocator::alloc(&mut self.core, size)
     }

@@ -36,6 +36,25 @@ pub trait WIPICContext: ByteRead + ByteWrite + Send + Sync {
     async fn read_resource(&self, name: &str) -> Result<Vec<u8>>;
     fn set_timer(&mut self, id: WIPICWord, due: Instant, callback: WIPICMethodBody);
     fn unset_timer(&mut self, id: WIPICWord);
+
+    /// Which of the two pixels a title's `PixelopIdx` operation is handed
+    /// first. The two handsets disagree, and a title is written against the one
+    /// it shipped on.
+    ///
+    /// LGT hands it the destination: 드래곤하트2's operation @0x2618 is
+    /// `if (b == transparentColour) return a` and then lerps `a` towards `b` -
+    /// keeping `a` when `b` has nothing to say is only a blit if `a` is what is
+    /// already on screen. The firmware agrees: `dgraphics_set_pixel_operation`
+    /// plants a span at ctx+0x58 called as `f(dst*, src*, count, param)`.
+    ///
+    /// KTF hands it the source: 마스터오브소드4's @0x10c89c is `if (a != white)
+    /// return a; else return textColour`, which recolours the one white its
+    /// glyph strips carry and never looks at the second pixel at all. Handed
+    /// the destination it answers the box the glyph lands on, and the title
+    /// draws no text anywhere.
+    fn pixel_op_takes_source_first(&self) -> bool {
+        false
+    }
 }
 
 pub struct WIPICResult {
@@ -138,12 +157,21 @@ pub mod test {
         /// without an ARM core to run it on. The address is passed through, so
         /// one function can answer for several.
         guest_function: Option<fn(WIPICWord, &[WIPICWord]) -> WIPICWord>,
+        /// Which handset the test is standing in for, where that decides what
+        /// an API does - so far only the order a pixel operation is asked in.
+        pixel_op_takes_source_first: bool,
     }
 
     impl TestContext {
         /// Installs code that stands in for the title's own.
         pub fn set_guest_function(&mut self, function: fn(WIPICWord, &[WIPICWord]) -> WIPICWord) {
             self.guest_function = Some(function);
+        }
+
+        /// Stands in for a KTF handset, which asks a pixel operation about the
+        /// source first.
+        pub fn set_pixel_op_takes_source_first(&mut self, source_first: bool) {
+            self.pixel_op_takes_source_first = source_first;
         }
 
         #[allow(clippy::new_without_default)]
@@ -163,6 +191,7 @@ pub mod test {
                 kernel_state: new_kernel_state(),
                 spawned: Vec::new(),
                 guest_function: None,
+                pixel_op_takes_source_first: false,
             }
         }
 
@@ -182,6 +211,7 @@ pub mod test {
                 kernel_state: new_kernel_state(),
                 spawned: Vec::new(),
                 guest_function: None,
+                pixel_op_takes_source_first: false,
             }
         }
 
@@ -251,6 +281,10 @@ pub mod test {
                 Some(function) => Ok(function(address, args)),
                 None => todo!(),
             }
+        }
+
+        fn pixel_op_takes_source_first(&self) -> bool {
+            self.pixel_op_takes_source_first
         }
 
         fn system(&mut self) -> &mut System {

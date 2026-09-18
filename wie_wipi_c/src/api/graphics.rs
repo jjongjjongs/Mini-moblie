@@ -355,10 +355,13 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
             let result = match pixel_op::apply(kind, destination, source) {
                 Some(result) => result,
                 None => {
-                    // Source first, as in `draw_image` - see the note there.
-                    context
-                        .call_function(function, &[source as WIPICWord, destination as WIPICWord, gctx.param1])
-                        .await? as u16
+                    let pixels = if context.pixel_op_takes_source_first() {
+                        [source as WIPICWord, destination as WIPICWord]
+                    } else {
+                        [destination as WIPICWord, source as WIPICWord]
+                    };
+
+                    context.call_function(function, &[pixels[0], pixels[1], gctx.param1]).await? as u16
                 }
             };
 
@@ -832,17 +835,17 @@ pub async fn draw_image(
         let result = match pixel_op::apply(kind, destination, source_pixel) {
             Some(result) => result,
             None => {
-                // The source first, then the destination. 마스터오브소드4's
-                // operation @0x10c89c is `if (a != white) return a; else return
-                // textColour` - it recolours the one white the glyph strips are
-                // drawn in - and `a` can only be the source: a destination test
-                // would leave every glyph pixel as the box it lands on, which is
-                // exactly the empty dialogue box it drew here. The two
-                // operations recognised in Rust are commutative, so the order
-                // only ever showed up in one a title is asked for.
-                context
-                    .call_function(function, &[source_pixel as WIPICWord, destination as WIPICWord, grp_ctx.param1])
-                    .await? as u16
+                // Which pixel goes first is the handset's, not ours - see
+                // `pixel_op_takes_source_first`. The two operations recognised
+                // in Rust are commutative, so the order only ever shows up in
+                // one a title is asked for.
+                let pixels = if context.pixel_op_takes_source_first() {
+                    [source_pixel as WIPICWord, destination as WIPICWord]
+                } else {
+                    [destination as WIPICWord, source_pixel as WIPICWord]
+                };
+
+                context.call_function(function, &[pixels[0], pixels[1], grp_ctx.param1]).await? as u16
             }
         };
 
@@ -2386,6 +2389,8 @@ mod tests {
     async fn a_pixel_operation_is_asked_about_the_source_first() {
         let mut context = test_context();
 
+        context.set_pixel_op_takes_source_first(true);
+
         // The shape 마스터오브소드4 plants: the first argument decides, and a
         // white one is answered with a colour neither side carries.
         const RECOLOURED: u32 = 0x001f; // pure blue in RGB565
@@ -2438,7 +2443,9 @@ mod tests {
     async fn a_blit_through_an_operation_leaves_a_transparent_pixel_alone() {
         let mut context = test_context();
 
-        context.set_guest_function(|_, args| args[0]);
+        // White whatever it is asked, so this says nothing about which pixel
+        // goes first - only which pixels are asked about at all.
+        context.set_guest_function(|_, _| 0xffff);
 
         let pgc_handle = context.alloc(core::mem::size_of::<super::WIPICGraphicsContext>() as u32).unwrap();
         let pgc = context.data_ptr(pgc_handle).unwrap();
