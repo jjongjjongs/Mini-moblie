@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{
     future::Future,
     pin::Pin,
@@ -18,6 +18,9 @@ pub struct ExecutorInner {
     current_task_id: Option<usize>,
     tasks: HashMap<usize, Task>,
     sleeping_tasks: HashMap<usize, Instant>,
+    /// Scratch space for [`Executor::step`]'s poll order, kept here so a step
+    /// does not have to allocate one.
+    poll_order: Vec<usize>,
     last_task_id: usize,
     last_now: Instant,
 }
@@ -71,6 +74,7 @@ impl Executor {
             current_task_id: None,
             tasks: HashMap::new(),
             sleeping_tasks: HashMap::new(),
+            poll_order: Vec::new(),
             last_task_id: 0,
             last_now: Instant::from_epoch_millis(0),
         }));
@@ -149,46 +153,72 @@ impl Executor {
     }
 
     fn step(&mut self, now: Instant) -> Result<()> {
-        self.inner.lock().last_now = now;
+        // Polling a task re-enters the executor - `sleep` and `spawn` both take the
+        // lock - so a task has to be out of the map while it is polled. It is taken
+        // out one at a time: draining the whole map and rebuilding it would tear down
+        // and rehash every task on every step, and a step happens many times per tick.
+        let mut poll_order = {
+            let mut inner = self.inner.lock();
+            inner.last_now = now;
 
-        let mut next_tasks = HashMap::new();
-        let tasks = self.inner.lock().tasks.drain().collect::<HashMap<_, _>>();
-        let mut sleeping_tasks = self.inner.lock().sleeping_tasks.drain().collect::<HashMap<_, _>>();
+            let mut poll_order = core::mem::take(&mut inner.poll_order);
+            poll_order.extend(inner.tasks.keys().copied());
+
+            poll_order
+        };
 
         let mut first_error = None;
+        let waker = self.create_waker();
 
-        for (task_id, mut task) in tasks.into_iter() {
-            let item = sleeping_tasks.get(&task_id);
-            if let Some(item) = item {
-                if *item <= now {
-                    sleeping_tasks.remove(&task_id);
-                } else {
-                    next_tasks.insert(task_id, task);
-                    continue;
+        for &task_id in poll_order.iter() {
+            {
+                let mut inner = self.inner.lock();
+                match inner.sleeping_tasks.get(&task_id) {
+                    Some(&until) if until > now => continue,
+                    Some(_) => {
+                        inner.sleeping_tasks.remove(&task_id);
+                    }
+                    None => {}
                 }
             }
 
-            let waker = self.create_waker();
+            let mut task = match self.inner.lock().tasks.remove(&task_id) {
+                Some(task) => task,
+                // Gone since the order was taken - a task another one finished off.
+                None => continue,
+            };
+
             let mut context = Context::from_waker(&waker);
             self.inner.lock().current_task_id = Some(task_id);
 
-            match task.as_mut().poll(&mut context) {
-                Poll::Ready(Ok(())) => {}
-                Poll::Ready(Err(err)) => {
-                    if first_error.is_none() {
+            let poll = task.as_mut().poll(&mut context);
+
+            // `inner` is declared after `task`, so the lock is released before a
+            // finished task is dropped - a drop that reached back into the executor
+            // would deadlock on it otherwise.
+            let mut inner = self.inner.lock();
+            inner.current_task_id = None;
+
+            match poll {
+                Poll::Ready(result) => {
+                    // A task that finished while asleep takes its wake-up with it.
+                    // Left behind, it would count as a sleeper with no task forever.
+                    inner.sleeping_tasks.remove(&task_id);
+
+                    if let Err(err) = result
+                        && first_error.is_none()
+                    {
                         first_error = Some(err);
                     }
                 }
                 Poll::Pending => {
-                    next_tasks.insert(task_id, task);
+                    inner.tasks.insert(task_id, task);
                 }
             }
-
-            self.inner.lock().current_task_id = None;
         }
 
-        self.inner.lock().sleeping_tasks.extend(sleeping_tasks);
-        self.inner.lock().tasks.extend(next_tasks);
+        poll_order.clear();
+        self.inner.lock().poll_order = poll_order;
 
         if let Some(err) = first_error { Err(err) } else { Ok(()) }
     }
@@ -300,6 +330,24 @@ mod tests {
 
         executor.tick(advancing_clock(200)).unwrap();
         assert!(completed.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_finished_task_leaves_no_wakeup_behind() {
+        let mut executor = Executor::new();
+
+        // A task is free to finish while it still has a sleep pending. The wake-up
+        // has to go with it: `tick` counts the runnable tasks by taking the sleepers
+        // off the total, and a sleeper with no task makes that count nonsense.
+        let executor_clone = executor.clone();
+        executor.spawn(move || async move {
+            executor_clone.sleep(100);
+        });
+
+        executor.tick(advancing_clock(0)).unwrap();
+        executor.tick(advancing_clock(200)).unwrap();
+
+        assert!(!executor.is_idle());
     }
 
     #[test]
