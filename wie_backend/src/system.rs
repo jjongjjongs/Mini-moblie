@@ -4,7 +4,7 @@ mod file_system;
 mod input_method;
 
 use alloc::{borrow::ToOwned, boxed::Box, string::String, sync::Arc};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use spin::{RwLock, RwLockWriteGuard};
 
@@ -50,6 +50,9 @@ pub struct System {
     /// Whether this title lays its screens out below a status strip.
     /// See [`System::title_expects_annunciator`].
     title_expects_annunciator: Arc<AtomicBool>,
+    /// How many rows that strip takes, or zero for the size table's own answer.
+    /// See [`System::title_annunciator_rows`].
+    title_annunciator_rows: Arc<AtomicU32>,
 }
 
 impl System {
@@ -85,6 +88,7 @@ impl System {
             title_drives_lcd: Arc::new(AtomicBool::new(false)),
             title_draws_sideways: Arc::new(AtomicBool::new(false)),
             title_expects_annunciator: Arc::new(AtomicBool::new(false)),
+            title_annunciator_rows: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -198,6 +202,19 @@ impl System {
 
     pub fn set_title_expects_annunciator(&self, expects: bool) {
         self.title_expects_annunciator.store(expects, Ordering::SeqCst);
+    }
+
+    /// How tall that strip is for this title, or `None` to take the height the
+    /// platform's own size table gives the panel's width.
+    pub fn title_annunciator_rows(&self) -> Option<u32> {
+        match self.title_annunciator_rows.load(Ordering::SeqCst) {
+            0 => None,
+            rows => Some(rows),
+        }
+    }
+
+    pub fn set_title_annunciator_rows(&self, rows: Option<u32>) {
+        self.title_annunciator_rows.store(rows.unwrap_or(0), Ordering::SeqCst);
     }
 
     pub fn current_input_mode(&self) -> u32 {

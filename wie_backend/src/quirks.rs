@@ -44,6 +44,11 @@ pub struct TitleQuirks {
     /// whole panel.
     pub expects_annunciator: bool,
 
+    /// How many rows that strip takes, when the size table's answer for the
+    /// panel's width is not the one the title was drawn under. `None` leaves
+    /// the table standing.
+    pub annunciator_rows: Option<u32>,
+
     /// Whether the title draws its picture a quarter turn clockwise into an
     /// upright panel, because it was meant to be played with the handset held
     /// sideways.
@@ -58,6 +63,7 @@ const fn panel(width: u32, height: u32) -> TitleQuirks {
     TitleQuirks {
         screen_size: Some((width, height)),
         expects_annunciator: false,
+        annunciator_rows: None,
         drawn_sideways: false,
     }
 }
@@ -66,6 +72,17 @@ const fn annunciator() -> TitleQuirks {
     TitleQuirks {
         screen_size: None,
         expects_annunciator: true,
+        annunciator_rows: None,
+        drawn_sideways: false,
+    }
+}
+
+/// A strip of a height the size table does not give for this panel.
+const fn annunciator_of(rows: u32) -> TitleQuirks {
+    TitleQuirks {
+        screen_size: None,
+        expects_annunciator: true,
+        annunciator_rows: Some(rows),
         drawn_sideways: false,
     }
 }
@@ -74,6 +91,7 @@ const fn sideways() -> TitleQuirks {
     TitleQuirks {
         screen_size: None,
         expects_annunciator: false,
+        annunciator_rows: None,
         drawn_sideways: true,
     }
 }
@@ -103,7 +121,17 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // 만귀토벌전: lays every screen out below the strip and inside the rows
     // left under it. Without one its menus and its battle scene sat a strip's
     // worth short of the bottom, over whatever the frame before had left there.
-    (TitlePlatform::Ktf, "0102A356", annunciator()),
+    //
+    // Sixteen rows rather than the twenty the size table gives a 176-wide
+    // panel: the title clears 204 rows of its 220-row panel and puts everything
+    // inside them, and 204 + 16 is the panel exactly. Under a twenty-row strip
+    // its last four rows - the bottom of the portrait and of the KARMA gauge -
+    // went off the end.
+    (TitlePlatform::Ktf, "0102A356", annunciator_of(16)),
+    // 셔터2 데스트니: the same SDK and the same arithmetic - it clips every
+    // screen to 176x204 on its 176x220 panel - so the rows below its inventory
+    // bar kept the frame before until the strip was put back above it.
+    (TitlePlatform::Ktf, "01037EBF", annunciator_of(16)),
     // 겟앰프드: its descriptor says 240*320, but every full-screen picture it
     // carries - title, menu, each map - is 240x296, and it centres its popup
     // frame in whatever height the screen reports. Told 320 it put the frame at

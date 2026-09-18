@@ -270,7 +270,7 @@ impl AnnunciatorComponent {
         Err(jvm.exception("java/lang/IllegalStateException", "cannot remove component").await)
     }
 
-    async fn layout(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<AnnunciatorComponent>) -> JvmResult<()> {
+    async fn layout(jvm: &Jvm, context: &mut WieJvmContext, this: ClassInstanceRef<AnnunciatorComponent>) -> JvmResult<()> {
         // Native @ 0x20ef28:
         // configure(0, 0, getWorkComponent().getWidth(), sizes[sizeIndex], 2)
         let work: ClassInstanceRef<()> = jvm
@@ -300,6 +300,13 @@ impl AnnunciatorComponent {
         // and ran off the end of the array.
         let heights: alloc::vec::Vec<i32> = jvm.load_array(&sizes, size_index as usize, 1).await?;
         let height = heights.first().copied().unwrap_or(0);
+
+        // A title drawn under a strip of another height says so, and what it
+        // was drawn under is what it has to have: 만귀토벌전 keeps 204 rows of
+        // its 220-row panel for itself, which leaves sixteen where the table
+        // gives a 176-wide panel twenty, and under twenty its last four rows
+        // ran off the bottom. See `wie_backend::quirks`.
+        let height = context.system().title_annunciator_rows().map_or(height, |rows| rows as i32);
 
         let _: () = jvm
             .invoke_virtual(&this, "configure", "(IIIII)V", (0i32, 0i32, width, height, 2i32))

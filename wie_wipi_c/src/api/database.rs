@@ -1760,17 +1760,28 @@ pub async fn get_number_of_records_ktf(context: &mut dyn WIPICContext, db_id: i3
     Ok(db.get_record_ids().await.len() as i32)
 }
 
-/// KTF `MC_dbGetRecordSize(handle)`.
+/// KTF slot 11: the size of an open record, or the storage still free.
 ///
-/// KTF's database is one record read and written as a byte stream, so its size
-/// is how many bytes that stream holds. The handle's mirror is the answer rather
-/// than the stored record because the two are kept equal - `stream_write` writes
-/// through on every call - and the mirror is what a read would return.
+/// With a handle it is `MC_dbGetRecordSize(handle)`. KTF's database is one
+/// record read and written as a byte stream, so its size is how many bytes that
+/// stream holds. The handle's mirror is the answer rather than the stored record
+/// because the two are kept equal - `stream_write` writes through on every call
+/// - and the mirror is what a read would return.
+///
+/// Without one it is a space query, the way slot 12 is. This table is the
+/// filesystem as much as it is the database, and a title that calls the slot for
+/// the filesystem meaning passes no argument at all: 셔터 영혼의울림 arrives here
+/// with a leftover function pointer in r0, before it has opened anything, and
+/// reads what comes back as the room it has. Told `M_E_INVALIDHANDLE` it painted
+/// `저장공간이 부족 합니다.` across its title screen and went no further; told
+/// the space, it starts. The two are told apart the way `get_access_mode_ktf`
+/// tells its two callers apart - by whether the argument is one of this
+/// runtime's handles - rather than by guessing which meaning the slot has.
 pub async fn get_record_size_ktf(context: &mut dyn WIPICContext, db_id: i32) -> Result<i32> {
     tracing::debug!("MC_dbGetRecordSize({db_id:#x}) [KTF]");
 
     let Some(handle) = load_handle(context, db_id)? else {
-        return Ok(-25); // M_E_INVALIDHANDLE
+        return available_storage_ktf(context).await;
     };
 
     Ok(handle.buffer_len as i32)
@@ -2895,7 +2906,19 @@ mod tests {
         let mut context = database_test_context();
 
         assert_eq!(get_number_of_records_ktf(&mut context, 0x2000).await.unwrap(), -25);
-        assert_eq!(get_record_size_ktf(&mut context, 0x2000).await.unwrap(), -25);
+    }
+
+    /// Slot 11 called for its filesystem meaning - no handle, whatever was left
+    /// in r0 - answers the space left rather than refusing. 셔터 영혼의울림 reads
+    /// what comes back as the room it has before it opens anything.
+    #[futures_test::test]
+    async fn ktf_record_size_without_a_handle_is_the_space_left() {
+        let mut context = database_test_context();
+
+        let space = get_record_size_ktf(&mut context, 0x2000).await.unwrap();
+
+        assert_eq!(space, available_storage_ktf(&mut context).await.unwrap());
+        assert!(space > 0, "a title reads this as the room it has");
     }
 
     /// The access mode answers both shapes: a handle reports what the title
