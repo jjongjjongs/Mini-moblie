@@ -712,47 +712,46 @@ impl Display {
         Ok(())
     }
 
+    /// What the handset answers for a key, taken from the firmware's own table
+    /// (`getGameAction` @0x178590, a jump table over `keyCode + 0x10`).
+    ///
+    /// Every key it names and nothing else: the four pad directions, fire, the
+    /// two soft keys, the side keys, CLEAR - and four keys on the pad itself,
+    /// `7`, `9`, `*` and `#`, which carry actions 9 to 12. Everything else
+    /// answers 0, digits included.
+    ///
+    /// Those four pad keys are what this cost. 드래곤하트 names a character with
+    /// `*` for delete and the firmware hands it action 11 for that key;
+    /// answering 42, the key's own code, left the title with no delete at all.
+    /// Nor did 뒤로가기 erase anything: CLEAR had been folded into the same "no
+    /// action" zero as the keys that really have none.
+    ///
+    /// A game action is also an index. 영웅전설3 and 4 gate every press on
+    /// `keyTable[getGameAction(key)]` and pass what comes back straight into
+    /// that `byte[]`, so the firmware's zero for a key it does not name is also
+    /// what keeps that read inside the array.
     async fn get_game_action(_jvm: &Jvm, _: &mut WieJvmContext, key: i32) -> JvmResult<i32> {
         tracing::debug!("org.kwis.msp.lcdui.Display::getGameAction({key})");
 
-        let action = match WIPIKeyCode::from_raw(key) {
-            Some(WIPIKeyCode::UP) => 1,
-            Some(WIPIKeyCode::DOWN) => 6,
-            Some(WIPIKeyCode::LEFT) => 2,
-            Some(WIPIKeyCode::RIGHT) => 5,
-            Some(WIPIKeyCode::FIRE) => 8,
-            Some(WIPIKeyCode::LEFT_SOFT_KEY) => 90,
-            Some(WIPIKeyCode::RIGHT_SOFT_KEY) => 91,
-            // The rest of the handset's own keys, which sit between the pad
-            // keys and the soft keys in the same run of negative codes.
-            // `get_key_code` below already names every one of these pairs; the
-            // two directions have to agree.
-            Some(WIPIKeyCode::VOLUME_UP) => 96,
-            Some(WIPIKeyCode::VOLUME_DOWN) => 97,
-            Some(WIPIKeyCode::CLEAR) => 99,
-            None if key == -8 => 92,
-            None if key == -15 => 98,
-            // A key the handset does not give an action to.
-            //
-            // A game action is an index: 영웅전설3 and 4 gate every press on
-            // `keyTable[getGameAction(key)]`, and pass whatever comes back
-            // straight into that `byte[]`. The Android frontend's 저장 button
-            // is the handset's CALL key (-10), which has no action, and
-            // handing the title -10 back made it read `keyTable[-10]` and die
-            // on ArrayIndexOutOfBoundsException the moment the button was
-            // pressed - on the title screen, four seconds into a run.
-            //
-            // No negative number is an index, so no key the handset reserves
-            // for itself can answer as itself. Zero is what MIDP's
-            // `getGameAction` returns for a key with no game action and what
-            // these titles read as "this key does nothing", so the press is
-            // ignored the way it is on the handset.
-            //
-            // Positive codes still answer as themselves: a digit is not a
-            // game action either, but titles read the digit back from here and
-            // compare it against '0'..'9', so it has to survive the trip.
-            _ if key < 0 => 0,
-            _ => key,
+        let action = match key {
+            -1 => 1,  // UP
+            -2 => 6,  // DOWN
+            -3 => 2,  // LEFT
+            -4 => 5,  // RIGHT
+            -5 => 8,  // FIRE
+            -6 => 90, // LEFT_SOFT_KEY
+            -7 => 91, // RIGHT_SOFT_KEY
+            -8 => 92,
+            -11 => 100, // HANGUP
+            -13 => 96,  // VOLUME_UP
+            -14 => 97,  // VOLUME_DOWN
+            -15 => 98,
+            -16 => 99, // CLEAR
+            55 => 9,   // '7'
+            57 => 10,  // '9'
+            42 => 11,  // '*'
+            35 => 12,  // '#'
+            _ => 0,
         };
 
         Ok(action)
@@ -774,6 +773,12 @@ impl Display {
             97 => WIPIKeyCode::VOLUME_DOWN as i32,
             98 => -15,
             99 => WIPIKeyCode::CLEAR as i32,
+            // The four pad keys that carry an action of their own, which
+            // `get_game_action` answers for and this has to answer back.
+            9 => WIPIKeyCode::NUM7 as i32,
+            10 => WIPIKeyCode::NUM9 as i32,
+            11 => WIPIKeyCode::STAR as i32,
+            12 => WIPIKeyCode::HASH as i32,
             _ => 0,
         };
 
@@ -853,6 +858,8 @@ mod test {
             let side_select: i32 = jvm.invoke_static("org/kwis/msp/lcdui/Display", "getKeyCode", "(I)I", (98,)).await?;
             let clear: i32 = jvm.invoke_static("org/kwis/msp/lcdui/Display", "getKeyCode", "(I)I", (99,)).await?;
             let game_a: i32 = jvm.invoke_static("org/kwis/msp/lcdui/Display", "getKeyCode", "(I)I", (9,)).await?;
+            let star: i32 = jvm.invoke_static("org/kwis/msp/lcdui/Display", "getKeyCode", "(I)I", (11,)).await?;
+            let hash: i32 = jvm.invoke_static("org/kwis/msp/lcdui/Display", "getKeyCode", "(I)I", (12,)).await?;
             let invalid: i32 = jvm.invoke_static("org/kwis/msp/lcdui/Display", "getKeyCode", "(I)I", (1234,)).await?;
 
             assert_eq!(up, -1);
@@ -867,7 +874,10 @@ mod test {
             assert_eq!(side_down, -14);
             assert_eq!(side_select, -15);
             assert_eq!(clear, -16);
-            assert_eq!(game_a, 0);
+            // Actions 9 to 12 are four keys on the pad itself.
+            assert_eq!(game_a, '7' as i32);
+            assert_eq!(star, '*' as i32);
+            assert_eq!(hash, '#' as i32);
             assert_eq!(invalid, 0);
 
             Ok(())
@@ -891,22 +901,29 @@ mod test {
             // `keyTable[getGameAction(key)]` and died on the CALL key (-10)
             // when it answered as itself.
             let mut reserved = alloc::vec::Vec::new();
-            for key in [-9i32, -10, -11, -12, -17] {
+            for key in [-9i32, -10, -12, -17] {
                 let action: i32 = jvm.invoke_static("org/kwis/msp/lcdui/Display", "getGameAction", "(I)I", (key,)).await?;
                 reserved.push(action);
             }
 
-            assert_eq!(reserved, [0, 0, 0, 0, 0]);
+            assert_eq!(reserved, [0, 0, 0, 0]);
 
-            // A digit is not a game action either, but titles read it back from
-            // here and compare it against '0'..'9', so it survives the trip.
-            let mut printable = alloc::vec::Vec::new();
-            for key in ['0' as i32, '9' as i32, '#' as i32, '*' as i32] {
+            // Four keys on the pad carry an action of their own, and the rest
+            // of the pad carries none. 드래곤하트 deletes a character with `*`,
+            // which the firmware answers 11 for; answered with the key's own
+            // code the title had no delete key at all.
+            let mut pad = alloc::vec::Vec::new();
+            for key in ['7' as i32, '9' as i32, '*' as i32, '#' as i32, '0' as i32, '5' as i32] {
                 let action: i32 = jvm.invoke_static("org/kwis/msp/lcdui/Display", "getGameAction", "(I)I", (key,)).await?;
-                printable.push(action);
+                pad.push(action);
             }
 
-            assert_eq!(printable, ['0' as i32, '9' as i32, '#' as i32, '*' as i32]);
+            assert_eq!(pad, [9, 10, 11, 12, 0, 0]);
+
+            // HANGUP is the one key the two directions disagree about: the
+            // firmware gives it an action and takes none back.
+            let hangup: i32 = jvm.invoke_static("org/kwis/msp/lcdui/Display", "getGameAction", "(I)I", (-11,)).await?;
+            assert_eq!(hangup, 100);
 
             Ok(())
         })
