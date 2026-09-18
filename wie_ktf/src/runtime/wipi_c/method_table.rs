@@ -407,9 +407,17 @@ pub fn get_net_method_table() -> Vec<WIPICMethodBody> {
     ]
 }
 
+/// A slot in a table whose meaning nothing has shown yet.
+///
+/// It takes four arguments and writes them down. A slot like this is only ever
+/// identified by what a title hands it - there is no name for it anywhere in
+/// the title's own code, which reaches it by index - so the arguments are the
+/// whole of the evidence, and a line that says only that the slot was reached
+/// throws that evidence away. Four is what the ARM calling convention passes in
+/// registers, so they cost nothing to read and are the ones always there.
 fn gen_unk_stub(id: u32, index: u32) -> WIPICMethodBody {
-    let body = move |_: &mut dyn WIPICContext| async move {
-        tracing::warn!("stub unk{id}-{index}");
+    let body = move |_: &mut dyn WIPICContext, a0: WIPICWord, a1: WIPICWord, a2: WIPICWord, a3: WIPICWord| async move {
+        tracing::warn!("stub unk{id}-{index}({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
         Ok::<u32, _>(0)
     };
 
