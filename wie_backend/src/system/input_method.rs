@@ -152,8 +152,7 @@ impl InputMethod {
         }
 
         match self.current_mode {
-            0 | 1 => self.handle_english(key, now),
-            2 => Self::handle_numeric(key),
+            0..=2 => self.handle_multi_tap(key, now),
             3 => self.handle_korean(key),
             _ => InputMethodOutput::default(),
         }
@@ -180,7 +179,127 @@ impl InputMethod {
         now.raw().saturating_sub(last.raw()) >= COMMIT_DELAY_MS
     }
 
-    fn handle_english(&mut self, key: i8, now: Instant) -> InputMethodOutput {
+    /// What a key types in a given mode, exactly as the handset's own table
+    /// spells it out.
+    ///
+    /// The table is six words per key in the firmware - key code, how many
+    /// characters the numeric mode cycles and the string, then the same for the
+    /// letter modes with a lower and an upper spelling (the pointer array at
+    /// 0x347ed0, strings from 0x2aaf58). `0` and `1` carry punctuation rather
+    /// than letters and carry the same spelling in either case, and the two keys
+    /// below the pad are the other way around from the rest: in the numeric mode
+    /// `*` cycles `*-)(` and `#` cycles `#PT`, while in the letter modes each
+    /// types only itself.
+    fn multi_tap_ring(mode: u32, key: i8) -> Option<&'static [u8]> {
+        let upper = mode == 1;
+        let numeric = mode == 2;
+
+        Some(match key {
+            48 => {
+                if numeric {
+                    b"0"
+                } else {
+                    b".,?!"
+                }
+            }
+            49 => {
+                if numeric {
+                    b"1"
+                } else {
+                    b"@:/"
+                }
+            }
+            50 => {
+                if numeric {
+                    b"2"
+                } else if upper {
+                    b"ABC"
+                } else {
+                    b"abc"
+                }
+            }
+            51 => {
+                if numeric {
+                    b"3"
+                } else if upper {
+                    b"DEF"
+                } else {
+                    b"def"
+                }
+            }
+            52 => {
+                if numeric {
+                    b"4"
+                } else if upper {
+                    b"GHI"
+                } else {
+                    b"ghi"
+                }
+            }
+            53 => {
+                if numeric {
+                    b"5"
+                } else if upper {
+                    b"JKL"
+                } else {
+                    b"jkl"
+                }
+            }
+            54 => {
+                if numeric {
+                    b"6"
+                } else if upper {
+                    b"MNO"
+                } else {
+                    b"mno"
+                }
+            }
+            55 => {
+                if numeric {
+                    b"7"
+                } else if upper {
+                    b"PQRS"
+                } else {
+                    b"pqrs"
+                }
+            }
+            56 => {
+                if numeric {
+                    b"8"
+                } else if upper {
+                    b"TUV"
+                } else {
+                    b"tuv"
+                }
+            }
+            57 => {
+                if numeric {
+                    b"9"
+                } else if upper {
+                    b"WXYZ"
+                } else {
+                    b"wxyz"
+                }
+            }
+            42 => {
+                if numeric {
+                    b"*-)("
+                } else {
+                    b"*"
+                }
+            }
+            35 => {
+                if numeric {
+                    b"#PT"
+                } else {
+                    b"#"
+                }
+            }
+            _ => return None,
+        })
+    }
+
+    fn handle_multi_tap(&mut self, key: i8, now: Instant) -> InputMethodOutput {
         if key == -99 {
             let Some(current) = self.eng_char.take() else {
                 return InputMethodOutput::default();
@@ -196,75 +315,35 @@ impl InputMethod {
             return output;
         }
 
-        let upper = self.current_mode == 1;
-        let chars: &[u8] = match key {
-            48 => b".,?!",
-            49 => b"@:/",
-            50 => {
-                if upper {
-                    b"ABC"
-                } else {
-                    b"abc"
-                }
-            }
-            51 => {
-                if upper {
-                    b"DEF"
-                } else {
-                    b"def"
-                }
-            }
-            52 => {
-                if upper {
-                    b"GHI"
-                } else {
-                    b"ghi"
-                }
-            }
-            53 => {
-                if upper {
-                    b"JKL"
-                } else {
-                    b"jkl"
-                }
-            }
-            54 => {
-                if upper {
-                    b"MNO"
-                } else {
-                    b"mno"
-                }
-            }
-            55 => {
-                if upper {
-                    b"PQRS"
-                } else {
-                    b"pqrs"
-                }
-            }
-            56 => {
-                if upper {
-                    b"TUV"
-                } else {
-                    b"tuv"
-                }
-            }
-            57 => {
-                if upper {
-                    b"WXYZ"
-                } else {
-                    b"wxyz"
-                }
-            }
-            42 => b"*",
-            35 => b"#",
-            _ => return InputMethodOutput::default(),
+        let Some(chars) = Self::multi_tap_ring(self.current_mode, key) else {
+            return InputMethodOutput::default();
         };
 
         let mut output = InputMethodOutput {
             handled: true,
             ..InputMethodOutput::default()
         };
+
+        // A ring of one has nothing to cycle through, so the key types its
+        // character and is done with it. Holding it as the character in progress
+        // instead would make the same key pressed twice overwrite itself, and
+        // the two keys below the pad are rings of one in the letter modes - so
+        // `**` was not typable there at all.
+        if chars.len() == 1 {
+            if let Some(previous) = self.eng_char.take() {
+                output.output0[0] = previous;
+                output.output0_len = 1;
+            }
+
+            output.output0[output.output0_len] = chars[0];
+            output.output0_len += 1;
+
+            self.eng_key = None;
+            self.eng_index = 0;
+            self.eng_last_press = None;
+
+            return output;
+        }
 
         // The same key cycles only while the last press is still recent. Once
         // the delay has run out the character it was building is finished and
@@ -882,21 +961,6 @@ impl InputMethod {
 
         output
     }
-
-    fn handle_numeric(key: i8) -> InputMethodOutput {
-        let byte = match key {
-            48..=57 | 42 | 35 => key as u8,
-            _ => return InputMethodOutput::default(),
-        };
-
-        let mut output = InputMethodOutput {
-            handled: true,
-            ..InputMethodOutput::default()
-        };
-        output.output0[0] = byte;
-        output.output0_len = 1;
-        output
-    }
 }
 
 #[cfg(test)]
@@ -904,21 +968,63 @@ mod tests {
     use super::InputMethod;
 
     #[test]
-    fn numeric_mode_matches_native_key_filtering() {
+    fn the_numeric_pad_types_what_the_handset_table_says() {
         let mut input = InputMethod::new();
         input.set_current_mode(2);
 
-        for key in [b'0', b'1', b'9', b'*', b'#'] {
+        // A digit is a ring of one, so it is typed and finished.
+        for key in [b'0', b'1', b'9'] {
             let output = input.press(key as i8, 2);
             assert!(output.handled);
-            assert_eq!(output.output0_len, 1);
-            assert_eq!(output.output0[0], key);
+            assert_eq!(output.output0[..output.output0_len], [key]);
             assert_eq!(output.output1_len, 0);
+        }
+
+        // The two keys below the pad are not. Here they carry the rings the
+        // handset's table gives them, as characters still being built.
+        for (key, ring) in [(b'*', b"*-)(".as_slice()), (b'#', b"#PT".as_slice())] {
+            for expected in ring {
+                let output = input.press(key as i8, 2);
+
+                assert!(output.handled);
+                assert_eq!(output.output0_len, 0);
+                assert_eq!(output.output1[..output.output1_len], [*expected], "cycling {}", key as char);
+            }
+
+            // Round the ring and back to its first character.
+            let wrapped = input.press(key as i8, 2);
+            assert_eq!(wrapped.output1[..wrapped.output1_len], [ring[0]]);
+
+            let finished = input.press(-99, 2);
+            assert_eq!(finished.output0[..finished.output0_len], [ring[0]]);
         }
 
         assert!(!input.press(-99, 2).handled);
         assert!(!input.press(b'A' as i8, 2).handled);
         assert!(!input.press(b'1' as i8, 3).handled);
+    }
+
+    #[test]
+    fn a_letter_mode_types_the_keys_below_the_pad_as_themselves() {
+        let mut input = InputMethod::new();
+        input.set_current_mode(0);
+
+        // `0` and `1` carry punctuation rather than letters here, and cycle.
+        let punctuation = input.press(b'0' as i8, 2);
+        assert_eq!(punctuation.output1[..punctuation.output1_len], [b'.']);
+
+        // A letter left in progress is finished by the key that follows it.
+        let star = input.press(b'*' as i8, 2);
+        assert_eq!(star.output0[..star.output0_len], [b'.', b'*']);
+        assert_eq!(star.output1_len, 0);
+
+        // And the key types itself again rather than writing over what it just
+        // typed, which is the whole of what a ring of one means.
+        let again = input.press(b'*' as i8, 2);
+        assert_eq!(again.output0[..again.output0_len], [b'*']);
+
+        let hash = input.press(b'#' as i8, 2);
+        assert_eq!(hash.output0[..hash.output0_len], [b'#']);
     }
 }
 
