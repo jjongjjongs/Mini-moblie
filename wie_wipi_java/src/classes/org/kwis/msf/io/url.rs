@@ -198,10 +198,18 @@ fn scheme_of(url: &str) -> &str {
 }
 
 /// Whether `url` names the carrier's billing gateway rather than a server of
-/// the title's own. The scheme is spelled `BillSocket` by every title here, but
+/// the title's own. The scheme is spelled `BillSocket` by most titles here, but
 /// schemes are not case sensitive.
+///
+/// `TestBillSocket` is the same gateway reached through the platform's test
+/// billing socket - WIPI-C names the pair `MC_netBillSocket` and
+/// `MC_netTestBillSocket` - and is as unreachable as the other. Reading it as
+/// an ordinary connection left the one title that opens it dialling a host
+/// that has not answered in years, and it put up "서버에 접속할수 없습니다"
+/// rather than going on.
 fn is_billing_scheme(url: &str) -> bool {
-    url.split_once("://").is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("billsocket"))
+    url.split_once("://")
+        .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("billsocket") || scheme.eq_ignore_ascii_case("testbillsocket"))
 }
 
 #[cfg(test)]
@@ -212,6 +220,10 @@ mod tests {
     fn tells_the_billing_gateway_from_a_title_s_own_server() {
         assert!(is_billing_scheme("BillSocket://218.50.3.88:2508"));
         assert!(is_billing_scheme("billsocket://218.38.12.48:5200"));
+
+        // The test gateway is the same gateway.
+        assert!(is_billing_scheme("TestBillSocket://218.38.12.48:5121"));
+        assert!(is_billing_scheme("testbillsocket://218.38.12.48:5121"));
 
         assert!(!is_billing_scheme("socket://218.38.12.48:5100"));
         assert!(!is_billing_scheme("BillSocket:218.50.3.88:2508"));
