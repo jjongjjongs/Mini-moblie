@@ -8488,6 +8488,107 @@ fn nexon_subscriber_body(record: &[u8]) -> Vec<u8> {
     body
 }
 
+/// What the billcom download server told a KTF title it had to fetch.
+///
+/// Several titles - 블레이드마스터2 (`010351D5`), 판타지포에버2 (`010374F1`),
+/// 열혈고사전설2 (`01037982`) and 다이어트 (`01034DCD`) - carry the same SDK,
+/// which signs itself `powered by billcom` in their string tables. Before a
+/// title will start, the SDK opens `BillSocket://218.38.12.48` and offers the
+/// server an inventory of the data directory the handset already holds:
+///
+/// ```text
+/// 14|BM2_KTF_240|main1.png|17084|main2.png|17659|title.png|51687|...
+/// ```
+///
+/// - the number of files, the package's own tag, and then every file's name
+///   with the size the handset has of it. A file the handset does not have is
+///   offered at size zero, so the whole listing is what the server needs to
+///   decide what is out of date.
+///
+/// The answer is framed: a `u16` big-endian length and that many bytes. The
+/// SDK reads the length as two separate `read()` calls combined `(hi << 8) |
+/// lo` and then fills a buffer until it has the whole body, so a short answer
+/// leaves it reading for ever - which is the 연결시도중.. these titles sat on.
+///
+/// Measured against 블레이드마스터2, the body has to be at least eight bytes and
+/// its leading big-endian `u32` is how much there is to fetch:
+///
+/// | leading word | what the title does                       |
+/// |---|---|
+/// | 0 | nothing to fetch: it goes straight to its title screen |
+/// | 1, 2, 0xffff, 1000000 | waits for the listing that would follow |
+/// | 0x41414141 | 현재 단말기내 저장공간이 부족합니다 |
+/// | 0xffffffff | taken as nothing, same as zero |
+///
+/// The four bytes after it are not read - setting any of them changes nothing -
+/// so what this answers with is the smallest true one: there is nothing to
+/// fetch. And there is not: what a title would have downloaded is in its
+/// archive already, under the `P/` directory the package ships, which is the
+/// handset's own copy of what arrived the first time. The inventory proves it -
+/// every size in it is the size of the file in that directory.
+///
+/// `None` for anything that is not one of these listings.
+pub fn ktf_local_download_response(request: &[u8]) -> Option<Vec<u8>> {
+    /// The body: the leading word, and the four bytes the title never reads.
+    const NOTHING_TO_FETCH: [u8; 8] = [0; 8];
+
+    if !is_download_inventory(request) {
+        return None;
+    }
+
+    let mut response = Vec::with_capacity(2 + NOTHING_TO_FETCH.len());
+    response.extend_from_slice(&(NOTHING_TO_FETCH.len() as u16).to_be_bytes());
+    response.extend_from_slice(&NOTHING_TO_FETCH);
+
+    Some(response)
+}
+
+/// Whether `request` is one of those listings.
+///
+/// It is recognised by its shape, the way everything else here is: printable
+/// ASCII throughout, a count and a package tag ahead of at least one file, and
+/// a size after every name. That is specific enough that no other protocol in
+/// this file can be read as one - they all carry a binary header - and loose
+/// enough to hold for a package this has not seen.
+fn is_download_inventory(request: &[u8]) -> bool {
+    if !request.iter().all(|byte| byte.is_ascii_graphic() || *byte == b' ') {
+        return false;
+    }
+
+    let mut fields = request.split(|byte| *byte == b'|');
+
+    if !fields.next().is_some_and(is_number) {
+        return false;
+    }
+
+    // The package tag, which is a name rather than a number.
+    if fields.next().is_none_or(<[u8]>::is_empty) {
+        return false;
+    }
+
+    // Then name and size, over and over. A trailing empty field is the
+    // separator a title left after the last size, and ends the listing.
+    let mut files = 0;
+    while let Some(name) = fields.next() {
+        if name.is_empty() {
+            break;
+        }
+
+        if !fields.next().is_some_and(is_number) {
+            return false;
+        }
+
+        files += 1;
+    }
+
+    files > 0
+}
+
+/// Whether `field` is a number the way this listing writes one.
+fn is_number(field: &[u8]) -> bool {
+    !field.is_empty() && field.iter().all(u8::is_ascii_digit)
+}
+
 pub fn response(request: &[u8]) -> Option<Vec<u8>> {
     lgt_local_granted_response(request)
         .or_else(|| lgt_local_cash_response(request))
@@ -8526,6 +8627,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_soul_hunter_raki_response(request))
         .or_else(|| lgt_local_soul_hunter_raki_catalogue_response(request))
         .or_else(|| lgt_local_nexon_mobile_response(request))
+        .or_else(|| ktf_local_download_response(request))
 }
 
 #[cfg(test)]
@@ -12243,5 +12345,80 @@ mod nexon_mobile_tests {
 
         // And nothing at all.
         assert_eq!(lgt_local_nexon_mobile_response(&[]), None);
+    }
+}
+
+#[cfg(test)]
+mod ktf_download_tests {
+    use super::*;
+
+    /// What 블레이드마스터2 offers, cut after the third file - the rest is more
+    /// of the same pairs.
+    const BLADEMASTER2_INVENTORY: &[u8] = b"14|BM2_KTF_240|main1.png|17084|main2.png|17659|title.png|51687|";
+
+    /// What 다이어트 offers when it has none of its data, which is what the
+    /// lowercase `p/` its package ships used to leave it with.
+    const DIET_EMPTY_INVENTORY: &[u8] = b"39|Diet_KTF_240|bg0.png|0|bg1.png|0|brick.png|0|";
+
+    #[test]
+    fn an_inventory_is_answered_with_nothing_to_fetch() {
+        let reply = ktf_local_download_response(BLADEMASTER2_INVENTORY).expect("the listing is answered");
+
+        assert_eq!(reply.len(), 10, "a two byte length and the body it declares");
+        assert_eq!(
+            u16::from_be_bytes(reply[..2].try_into().unwrap()),
+            8,
+            "the length the SDK reads a byte at a time"
+        );
+        assert_eq!(u32::from_be_bytes(reply[2..6].try_into().unwrap()), 0, "nothing to fetch");
+    }
+
+    /// A handset that holds none of the files is told the same: there is
+    /// nothing on the other end to fetch from either way, and the archive's own
+    /// copy is what the title reads.
+    #[test]
+    fn a_handset_that_has_nothing_is_answered_too() {
+        assert_eq!(
+            ktf_local_download_response(DIET_EMPTY_INVENTORY),
+            ktf_local_download_response(BLADEMASTER2_INVENTORY)
+        );
+    }
+
+    /// The listing is recognised by its shape, so a package this has not seen
+    /// is answered on the same terms.
+    #[test]
+    fn a_package_not_seen_before_is_still_a_listing() {
+        assert!(ktf_local_download_response(b"1|SOMETHING_KTF_176|a.png|1|").is_some());
+    }
+
+    /// And nothing else is. The other protocols here all lead with a binary
+    /// header, and a listing with no file in it says nothing to answer.
+    #[test]
+    fn only_a_listing_is_answered() {
+        assert_eq!(
+            ktf_local_download_response(b"CASH|0|demon|05590091|00029B60004|500|2034517541"),
+            None,
+            "a cash purchase"
+        );
+        assert_eq!(
+            ktf_local_download_response(&[0xff, 0xff, 0x13, 0x00, 0x68, 0x00]),
+            None,
+            "a framed request"
+        );
+        assert_eq!(ktf_local_download_response(b"14|BM2_KTF_240|"), None, "no files");
+        assert_eq!(ktf_local_download_response(b"14|BM2_KTF_240|main1.png|"), None, "a name with no size");
+        assert_eq!(
+            ktf_local_download_response(b"14|BM2_KTF_240|main1.png|big|"),
+            None,
+            "a size that is not one"
+        );
+        assert_eq!(ktf_local_download_response(b"|BM2_KTF_240|main1.png|17084|"), None, "no count");
+        assert_eq!(ktf_local_download_response(b""), None);
+    }
+
+    /// The whole chain answers it, not only the matcher on its own.
+    #[test]
+    fn the_gateway_answers_a_listing() {
+        assert_eq!(response(BLADEMASTER2_INVENTORY), ktf_local_download_response(BLADEMASTER2_INVENTORY));
     }
 }
