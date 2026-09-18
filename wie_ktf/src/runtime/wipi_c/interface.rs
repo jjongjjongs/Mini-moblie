@@ -81,8 +81,25 @@ fn write_interface<T: Pod>(core: &mut ArmCore, context: &mut dyn WIPICContext, t
     Ok(address)
 }
 
+/// Writes the `MXUserMemInterf` extension library and records it under the name
+/// a title asks `MC_knlGetDLLInterface` for.
+///
+/// It is not one of the tables the guest is handed at startup - it is fetched
+/// by name - but building one needs SVC stubs, and only a platform can make
+/// those. So it is built here alongside the rest and left in the kernel state
+/// for the call to find.
+fn register_mxusermem_interface(core: &mut ArmCore, context: &mut dyn WIPICContext) -> Result<()> {
+    let address = write_methods(core, context, WIPICTableId::MxUserMem)?;
+
+    wie_wipi_c::api::kernel::register_dll_interface(&context.kernel_state(), wie_wipi_c::api::mxusermem::INTERFACE_NAME, address);
+
+    Ok(())
+}
+
 pub async fn get_wipic_interfaces(core: &mut ArmCore, context: &mut dyn WIPICContext) -> Result<u32> {
     tracing::trace!("get_wipic_interfaces");
+
+    register_mxusermem_interface(core, context)?;
 
     let graphics_interface = get_graphics_interface(core)?;
     let database_interface = get_database_interface(core)?;

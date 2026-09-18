@@ -9,7 +9,7 @@ use wie_core_arm::ArmCore;
 use wie_util::{Result, WieError};
 use wie_wipi_c::{
     MethodImpl, WIPICContext, WIPICMethodBody,
-    api::{database, filesystem, graphics, im, kernel, media, misc, net, record_database, shared_buf, uic, util},
+    api::{database, filesystem, graphics, im, kernel, media, misc, mxusermem, net, record_database, shared_buf, uic, util},
 };
 
 use crate::runtime::{
@@ -474,7 +474,7 @@ pub fn get_served_method_body(table_id: WIPICTableId, function_id: u16) -> Optio
             WIPICKernelMethodId::Reserved1 => None,
             WIPICKernelMethodId::Reserved2 => Some(gen_stub(34, "MC_knlReserved2")),
             WIPICKernelMethodId::Reserved3 => Some(gen_stub(35, "MC_knlReserved3")),
-            WIPICKernelMethodId::Reserved4 => Some(gen_stub(36, "MC_knlReserved4")),
+            WIPICKernelMethodId::Reserved4 => Some(kernel::get_dll_interface.into_body()),
             WIPICKernelMethodId::Reserved5 => Some(gen_stub(37, "MC_knlReserved5")),
             WIPICKernelMethodId::Reserved6 => Some(gen_stub(38, "MC_knlReserved6")),
             WIPICKernelMethodId::Reserved7 => Some(gen_stub(39, "MC_knlReserved7")),
@@ -590,6 +590,15 @@ pub fn get_served_method_body(table_id: WIPICTableId, function_id: u16) -> Optio
             _ => (function_id < WIPIC_TABLE_FUNCTIONS).then(|| gen_stub(function_id as _, "table 5 (record database)")),
         },
         WIPICTableId::Interface5 => (function_id < WIPIC_TABLE_FUNCTIONS).then(|| gen_stub(function_id as _, "table 6")),
+        // The extension library's four calls, in the order the reference
+        // writes them and the order 마스터오브소드4 indexes them.
+        WIPICTableId::MxUserMem => match function_id {
+            0 => Some(mxusermem::add.into_body()),
+            1 => Some(mxusermem::alloc.into_body()),
+            2 => Some(mxusermem::realloc.into_body()),
+            3 => Some(mxusermem::free.into_body()),
+            _ => (function_id < WIPIC_TABLE_FUNCTIONS).then(|| gen_missing(WIPICTableId::MxUserMem, function_id)),
+        },
         WIPICTableId::Database => match WIPICDatabaseMethodId::try_from(function_id).ok()? {
             WIPICDatabaseMethodId::OpenDatabase => Some(database::open_database.into_body()),
             WIPICDatabaseMethodId::StreamRead => Some(database::stream_read.into_body()),

@@ -5,6 +5,7 @@ pub mod im;
 pub mod kernel;
 pub mod media;
 pub mod misc;
+pub mod mxusermem;
 pub mod net;
 pub mod phone;
 pub mod record_database;

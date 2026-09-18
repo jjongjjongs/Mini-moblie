@@ -472,6 +472,11 @@ pub enum WIPICTableId {
     Interface14 = 15,
     Interface15 = 16,
     Interface16 = 17,
+    /// Not one of the guest's own tables. It is the `MXUserMemInterf`
+    /// extension library, which a title reaches through
+    /// `MC_knlGetDLLInterface` rather than by index, so it needs an id of its
+    /// own only to route its four stubs back here.
+    MxUserMem = 18,
 }
 
 impl WIPICTableId {
@@ -503,6 +508,7 @@ impl TryFrom<u32> for WIPICTableId {
             15 => Self::Interface14,
             16 => Self::Interface15,
             17 => Self::Interface16,
+            18 => Self::MxUserMem,
             _ => return Err(wie_util::WieError::FatalError(alloc::format!("Unknown KTF WIPIC table id {value}"))),
         })
     }

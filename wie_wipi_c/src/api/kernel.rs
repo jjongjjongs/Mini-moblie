@@ -315,12 +315,78 @@ pub async fn free(context: &mut dyn WIPICContext, memory: WIPICIndirectPtr) -> R
 pub struct KernelState {
     resource_names: BTreeMap<WIPICWord, String>,
     resource_ids: BTreeMap<String, WIPICWord>,
+    /// The extension libraries `MC_knlGetDLLInterface` can hand out, by the
+    /// name a title asks for. A platform fills this in while it is writing its
+    /// interface tables, because building one needs to make guest-side stubs
+    /// and only the platform can do that.
+    dll_interfaces: BTreeMap<String, WIPICWord>,
 }
 
 pub type SharedKernelState = Arc<Mutex<KernelState>>;
 
 pub fn new_state() -> SharedKernelState {
     Arc::new(Mutex::new(KernelState::default()))
+}
+
+/// Records an extension library's interface table so `MC_knlGetDLLInterface`
+/// can answer with it.
+pub fn register_dll_interface(state: &SharedKernelState, name: &str, address: WIPICWord) {
+    state.lock().dll_interfaces.insert(name.to_string(), address);
+}
+
+/// `MC_knlGetDLLInterface(name, major, minor, outMajor, outMinor)` — the
+/// extension library a title asks for by name, or 0 when this runtime has
+/// none of that name.
+///
+/// 마스터오브소드4 opens with
+/// `MC_knlGetDLLInterface("MXUserMemInterf", -1, -1, 0, 0)` and dereferences
+/// what comes back without looking at it first - `ldr r3, [r0]` on the
+/// instruction after the call - so answering 0 for a library it needs is a
+/// fault in the title, not a refusal it can act on. What it needs is
+/// [`crate::api::mxusermem`].
+///
+/// The version arguments are a floor, not a match: the reference serves the
+/// library when the caller asks for major 0 or below, or for exactly 1.0, and
+/// answers 0 for anything higher. A title that passes -1, as this one does, is
+/// saying it will take whatever is there.
+///
+/// `outMajor` and `outMinor` are where the version served is written back, when
+/// the caller passes somewhere to put it.
+pub async fn get_dll_interface(
+    context: &mut dyn WIPICContext,
+    ptr_name: WIPICWord,
+    major: i32,
+    minor: i32,
+    out_major: WIPICWord,
+    out_minor: WIPICWord,
+) -> Result<WIPICWord> {
+    let name_bytes = read_null_terminated_string_bytes(context, ptr_name)?;
+    let name = encoding_rs::EUC_KR.decode(&name_bytes).0.to_string();
+
+    tracing::debug!("MC_knlGetDLLInterface({name:?}, {major}.{minor}, {out_major:#x}, {out_minor:#x})");
+
+    if major > 0 && (major != 1 || minor > 0) {
+        tracing::warn!("MC_knlGetDLLInterface({name:?}) asked for {major}.{minor}, which is past what is served");
+        return Ok(0);
+    }
+
+    let address = context.kernel_state().lock().dll_interfaces.get(&name).copied();
+
+    let Some(address) = address else {
+        tracing::warn!("MC_knlGetDLLInterface({name:?}) is not a library this runtime has");
+        return Ok(0);
+    };
+
+    if out_major != 0 {
+        write_generic(context, out_major, 1u32)?;
+    }
+    if out_minor != 0 {
+        write_generic(context, out_minor, 0u32)?;
+    }
+
+    tracing::debug!("MC_knlGetDLLInterface({name:?}) -> {address:#x}");
+
+    Ok(address)
 }
 
 pub async fn get_resource_id(context: &mut dyn WIPICContext, ptr_name: WIPICWord, ptr_size: WIPICWord) -> Result<i32> {
