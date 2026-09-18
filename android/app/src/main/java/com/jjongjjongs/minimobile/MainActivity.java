@@ -111,16 +111,68 @@ public final class MainActivity extends Activity {
     // The handset keys a gamepad can reach, by the code the emulator takes.
     // These are the same codes the keypad below sends; a pad is another way of
     // pressing the same keys, not a second input path with its own numbering.
-    private static final int CODE_UP = 0;
-    private static final int CODE_DOWN = 1;
-    private static final int CODE_LEFT = 2;
-    private static final int CODE_RIGHT = 3;
-    private static final int CODE_OK = 4;
-    private static final int CODE_SOFT_L = 5;
-    private static final int CODE_SOFT_R = 6;
-    private static final int CODE_CLEAR = 7;
-    private static final int CODE_STAR = 18;
-    private static final int CODE_HASH = 19;
+    static final int CODE_UP = 0;
+    static final int CODE_DOWN = 1;
+    static final int CODE_LEFT = 2;
+    static final int CODE_RIGHT = 3;
+    static final int CODE_OK = 4;
+    static final int CODE_SOFT_L = 5;
+    static final int CODE_SOFT_R = 6;
+    static final int CODE_CLEAR = 7;
+    static final int CODE_STAR = 18;
+    static final int CODE_HASH = 19;
+    /** 저장 - the key a handset marked SEND, which is how titles reach their save screen. */
+    static final int CODE_SAVE = 20;
+
+    /**
+     * The groups the key-mapping screen breaks its rows into.
+     *
+     * <p>The rows are the keypad's own key set, because a key the pad cannot
+     * reach is a key the player has to put the pad down for.
+     */
+    private static final String[] KEY_GROUP_TITLES = {"방향키 · 확인", "기능키", "숫자키", "기호키"};
+
+    /** The handset key codes of each group, in row order. */
+    private static final int[][] KEY_GROUPS = {
+            {CODE_UP, CODE_DOWN, CODE_LEFT, CODE_RIGHT, CODE_OK},
+            {CODE_SOFT_L, CODE_SOFT_R, CODE_SAVE, CODE_CLEAR},
+            {9, 10, 11, 12, 13, 14, 15, 16, 17},
+            {CODE_STAR, 8, CODE_HASH},
+    };
+
+    /** The badge on the left of a row, by handset key code. */
+    private static final String[] KEY_BADGES = new String[21];
+
+    /** What a row is called, by handset key code. */
+    private static final String[] KEY_NAMES = new String[21];
+
+    static {
+        put(CODE_UP, "▲", "위");
+        put(CODE_DOWN, "▼", "아래");
+        put(CODE_LEFT, "◀", "왼쪽");
+        put(CODE_RIGHT, "▶", "오른쪽");
+        put(CODE_OK, "OK", "확인 (OK)");
+        put(CODE_SOFT_L, "L", "좌상단 (L)");
+        put(CODE_SOFT_R, "R", "우상단 (R)");
+        put(CODE_SAVE, "SV", "저장");
+        put(CODE_CLEAR, "BK", "뒤로가기");
+        put(8, "0", "0 번");
+        for (int digit = 1; digit <= 9; digit++) {
+            put(8 + digit, String.valueOf(digit), digit + " 번");
+        }
+        put(CODE_STAR, "✱", "✱ (별표)");
+        put(CODE_HASH, "#", "# (샵)");
+    }
+
+    private static void put(int code, String badge, String name) {
+        KEY_BADGES[code] = badge;
+        KEY_NAMES[code] = name;
+    }
+
+    /** Whether a code names a handset key a pad may be pointed at. */
+    static boolean isHandsetKey(int code) {
+        return code >= 0 && code < KEY_NAMES.length && KEY_NAMES[code] != null;
+    }
 
     private static final int KEY_PLAIN = 0;
     private static final int KEY_SAVE = 1;
@@ -235,6 +287,7 @@ public final class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
 
         audioOutput = new AndroidAudioOutput(this);
+        padMapping = PadMapping.load(this);
 
         gamesDir = new File(getFilesDir(), "games");
         if (!gamesDir.exists()) {
@@ -316,42 +369,18 @@ public final class MainActivity extends Activity {
      */
     private static final float STICK_THRESHOLD = 0.5f;
 
-    /** The handset key a gamepad button stands for, or -1 for one it does not. */
-    private static int handsetKeyFor(int keyCode) {
-        switch (keyCode) {
-            case KeyEvent.KEYCODE_DPAD_UP:
-                return CODE_UP;
-            case KeyEvent.KEYCODE_DPAD_DOWN:
-                return CODE_DOWN;
-            case KeyEvent.KEYCODE_DPAD_LEFT:
-                return CODE_LEFT;
-            case KeyEvent.KEYCODE_DPAD_RIGHT:
-                return CODE_RIGHT;
-            // A and B sit where a handset's centre and C keys do, which is what
-            // a player reaches for without being told.
-            case KeyEvent.KEYCODE_BUTTON_A:
-            case KeyEvent.KEYCODE_DPAD_CENTER:
-                return CODE_OK;
-            case KeyEvent.KEYCODE_BUTTON_B:
-                return CODE_CLEAR;
-            // Either pair reaches the soft keys. A pad puts them where it
-            // likes and the reference lets a player pick between the two, so
-            // taking both is the nearest thing to that without a setting.
-            case KeyEvent.KEYCODE_BUTTON_L1:
-            case KeyEvent.KEYCODE_BUTTON_L2:
-                return CODE_SOFT_L;
-            case KeyEvent.KEYCODE_BUTTON_R1:
-            case KeyEvent.KEYCODE_BUTTON_R2:
-                return CODE_SOFT_R;
-            // The two keys left over go where a handset put its other two:
-            // games that use them use them for a menu or a mode switch.
-            case KeyEvent.KEYCODE_BUTTON_X:
-                return CODE_STAR;
-            case KeyEvent.KEYCODE_BUTTON_Y:
-                return CODE_HASH;
-            default:
-                return -1;
-        }
+    /**
+     * The player's key mapping, which every pad event is read through.
+     *
+     * <p>Loaded once and kept: a pad event arrives on the UI thread and must
+     * not wait on storage, and the settings screen edits a copy and hands the
+     * result back here when it is saved.
+     */
+    private PadMapping padMapping;
+
+    /** The handset key a gamepad button presses, or -1 for one it does not. */
+    private int handsetKeyFor(int keyCode) {
+        return padMapping == null ? -1 : padMapping.handsetKeyForKeyCode(keyCode);
     }
 
     /**
@@ -432,16 +461,20 @@ public final class MainActivity extends Activity {
             y = event.getAxisValue(MotionEvent.AXIS_Y);
         }
 
-        padKey(CODE_LEFT, x <= -STICK_THRESHOLD);
-        padKey(CODE_RIGHT, x >= STICK_THRESHOLD);
-        padKey(CODE_UP, y <= -STICK_THRESHOLD);
-        padKey(CODE_DOWN, y >= STICK_THRESHOLD);
+        // An axis presses whatever its button was pointed at, so a player who
+        // moves the D-pad somewhere else takes the stick with it.
+        padKey(padMapping.handsetKeyOf(PadMapping.PAD_DPAD_LEFT), x <= -STICK_THRESHOLD);
+        padKey(padMapping.handsetKeyOf(PadMapping.PAD_DPAD_RIGHT), x >= STICK_THRESHOLD);
+        padKey(padMapping.handsetKeyOf(PadMapping.PAD_DPAD_UP), y <= -STICK_THRESHOLD);
+        padKey(padMapping.handsetKeyOf(PadMapping.PAD_DPAD_DOWN), y >= STICK_THRESHOLD);
 
         // Many pads report a trigger only as an axis, never as a button, so
-        // the soft keys would be unreachable on them without this. A trigger
-        // rests at zero and runs to one, so half travel is a press.
-        padKey(CODE_SOFT_L, event.getAxisValue(MotionEvent.AXIS_LTRIGGER) >= STICK_THRESHOLD);
-        padKey(CODE_SOFT_R, event.getAxisValue(MotionEvent.AXIS_RTRIGGER) >= STICK_THRESHOLD);
+        // L2 and R2 would be unreachable on them without this. A trigger rests
+        // at zero and runs to one, so half travel is a press.
+        padKey(padMapping.handsetKeyOf(PadMapping.PAD_L2),
+                event.getAxisValue(MotionEvent.AXIS_LTRIGGER) >= STICK_THRESHOLD);
+        padKey(padMapping.handsetKeyOf(PadMapping.PAD_R2),
+                event.getAxisValue(MotionEvent.AXIS_RTRIGGER) >= STICK_THRESHOLD);
 
         return true;
     }
@@ -457,6 +490,13 @@ public final class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
+        if (keyMapVisible) {
+            // The screen keeps its own working copy, so back is the same
+            // question its own arrow asks.
+            leaveKeyMap(editingMapping);
+            return;
+        }
+
         if (!playerVisible) {
             super.onBackPressed();
             return;
@@ -489,6 +529,7 @@ public final class MainActivity extends Activity {
     private void showLibrary() {
         running = false;
         playerVisible = false;
+        keyMapVisible = false;
         keypad = null;
         landscapeMode = false;
         // The library is always upright, whichever way the player was left.
@@ -527,7 +568,16 @@ public final class MainActivity extends Activity {
         name.setTextSize(19f);
         name.setTypeface(Typeface.DEFAULT_BOLD);
         name.setTextColor(LIB_INK);
-        nameRow.addView(name);
+        nameRow.addView(name, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        // The way into the key mapping, at the end of the name row where there
+        // was nothing but space.
+        View padEntry = new PadGlyphView(this);
+        padEntry.setBackground(roundedRect(LIB_GREEN_SOFT, LIB_GREEN_LINE, 1, 12));
+        padEntry.setContentDescription("게임패드 키매핑");
+        padEntry.setOnClickListener(v -> showKeyMap());
+        nameRow.addView(padEntry, new LinearLayout.LayoutParams(dp(40), dp(40)));
+
         content.addView(nameRow);
 
         // Every header line the mockup keeps, just at smaller sizes.
@@ -598,6 +648,390 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f);
         params.leftMargin = leftMargin;
         return params;
+    }
+
+    // --- gamepad key mapping ---------------------------------------------
+
+    /** Whether the key-mapping screen is the one on show. */
+    private boolean keyMapVisible;
+
+    /** The copy that screen is editing, which the system back button leaves through. */
+    private PadMapping editingMapping;
+
+    /**
+     * The gamepad glyph on the home screen's entry button.
+     *
+     * <p>Drawn rather than shipped as an asset: it is one rounded body, a cross
+     * and two dots, and a drawable file for that would be one more thing to
+     * keep in step with the palette.
+     */
+    private final class PadGlyphView extends View {
+        private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+        PadGlyphView(Activity activity) {
+            super(activity);
+            stroke.setStyle(Paint.Style.STROKE);
+            stroke.setColor(LIB_GREEN_DEEP);
+            stroke.setStrokeCap(Paint.Cap.ROUND);
+            fill.setColor(LIB_GREEN_DEEP);
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            float w = getWidth();
+            float h = getHeight();
+            float body = Math.min(w, h) * 0.62f;
+            float tall = body * 0.62f;
+            float cx = w / 2f;
+            float cy = h / 2f;
+            float thickness = Math.max(dp(1), body / 12f);
+
+            stroke.setStrokeWidth(thickness);
+            RectF shell = new RectF(cx - body / 2f, cy - tall / 2f, cx + body / 2f, cy + tall / 2f);
+            canvas.drawRoundRect(shell, tall / 2f, tall / 2f, stroke);
+
+            float arm = body / 9f;
+            float dx = cx - body / 4f;
+            canvas.drawLine(dx - arm, cy, dx + arm, cy, stroke);
+            canvas.drawLine(dx, cy - arm, dx, cy + arm, stroke);
+
+            float bx = cx + body / 4f;
+            float dot = Math.max(dp(1), body / 13f);
+            canvas.drawCircle(bx - arm, cy, dot, fill);
+            canvas.drawCircle(bx + arm, cy, dot, fill);
+        }
+    }
+
+    /** Opens the key mapping on a copy, so leaving it keeps what was saved. */
+    private void showKeyMap() {
+        showKeyMap(padMapping.copy());
+    }
+
+    private void showKeyMap(PadMapping working) {
+        keyMapVisible = true;
+        editingMapping = working;
+        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+        setLightStatusBar(true);
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(LIB_BG);
+
+        TextView bar = new TextView(this);
+        bar.setText("Mini Mobile");
+        bar.setTextSize(16f);
+        bar.setTypeface(Typeface.DEFAULT_BOLD);
+        bar.setTextColor(LIB_INK);
+        bar.setPadding(dp(18), dp(12), dp(18), dp(6));
+        root.addView(bar);
+
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(16), dp(4), dp(16), dp(24));
+
+        LinearLayout titleRow = new LinearLayout(this);
+        titleRow.setOrientation(LinearLayout.HORIZONTAL);
+        titleRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
+
+        TextView back = new TextView(this);
+        back.setText("‹");
+        back.setTextSize(22f);
+        back.setTypeface(Typeface.DEFAULT_BOLD);
+        back.setTextColor(LIB_GREEN_DEEP);
+        back.setGravity(android.view.Gravity.CENTER);
+        back.setBackground(roundedRect(LIB_GREEN_SOFTER, LIB_LINE, 1, 12));
+        back.setOnClickListener(v -> leaveKeyMap(working));
+        titleRow.addView(back, new LinearLayout.LayoutParams(dp(38), dp(38)));
+
+        TextView title = new TextView(this);
+        title.setText("게임패드 키매핑");
+        title.setTextSize(19f);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setTextColor(LIB_INK);
+        title.setPadding(dp(12), 0, 0, 0);
+        titleRow.addView(title);
+        content.addView(titleRow);
+
+        TextView pad = new TextView(this);
+        pad.setText("연결된 패드: " + connectedPadName());
+        pad.setTextSize(11.5f);
+        pad.setTextColor(LIB_MUTED);
+        pad.setPadding(0, dp(10), 0, 0);
+        content.addView(pad);
+
+        TextView how = new TextView(this);
+        how.setText("키를 눌러 그 키를 누를 패드 버튼을 고릅니다.");
+        how.setTextSize(11.5f);
+        how.setTextColor(LIB_MUTED);
+        how.setPadding(0, dp(2), 0, dp(14));
+        content.addView(how);
+
+        LinearLayout actions = new LinearLayout(this);
+        Button reset = flatButton("기본값으로");
+        reset.setOnClickListener(v -> {
+            working.resetToDefaults();
+            showKeyMap(working);
+        });
+        actions.addView(reset, buttonParams(0));
+
+        Button save = flatButton("저장");
+        save.setTextColor(LIB_BG);
+        save.setBackground(roundedRect(LIB_GREEN, LIB_GREEN, 1, 15));
+        save.setOnClickListener(v -> {
+            padMapping.copyFrom(working);
+            padMapping.save(this);
+            Toast.makeText(this, "키매핑을 저장했습니다.", Toast.LENGTH_SHORT).show();
+            showLibrary();
+        });
+        actions.addView(save, buttonParams(dp(10)));
+        content.addView(actions, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(42)));
+
+        for (int group = 0; group < KEY_GROUPS.length; group++) {
+            TextView heading = new TextView(this);
+            heading.setText(KEY_GROUP_TITLES[group]);
+            heading.setTextSize(11.5f);
+            heading.setTypeface(Typeface.DEFAULT_BOLD);
+            heading.setTextColor(LIB_MUTED);
+            heading.setPadding(dp(2), dp(16), 0, dp(8));
+            content.addView(heading);
+
+            LinearLayout card = new LinearLayout(this);
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setBackground(roundedRect(LIB_SURFACE, LIB_LINE, 1, 14));
+            card.setPadding(0, dp(4), 0, dp(4));
+
+            int[] codes = KEY_GROUPS[group];
+            for (int index = 0; index < codes.length; index++) {
+                card.addView(keyMapRow(working, codes[index]));
+                if (index < codes.length - 1) {
+                    View line = new View(this);
+                    line.setBackgroundColor(LIB_DIVIDER);
+                    LinearLayout.LayoutParams lineParams =
+                            new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, dp(1) / 2));
+                    lineParams.leftMargin = dp(12);
+                    lineParams.rightMargin = dp(12);
+                    card.addView(line, lineParams);
+                }
+            }
+
+            content.addView(card);
+        }
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.setVerticalScrollBarEnabled(false);
+        scroll.addView(content);
+        root.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        applyStatusBarInset(root);
+        setContentView(root);
+    }
+
+    /** One handset key: its badge, its name, and the pad buttons pressing it. */
+    private View keyMapRow(PadMapping working, int handsetKey) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(12), dp(7), dp(12), dp(7));
+        row.setOnClickListener(v -> showPadPicker(working, handsetKey));
+
+        TextView badge = new TextView(this);
+        badge.setText(KEY_BADGES[handsetKey]);
+        badge.setTextSize(12f);
+        badge.setTypeface(Typeface.DEFAULT_BOLD);
+        badge.setTextColor(LIB_GREEN_DEEP);
+        badge.setGravity(android.view.Gravity.CENTER);
+        badge.setBackground(roundedRect(LIB_GREEN_SOFTER, LIB_LINE, 1, 9));
+        row.addView(badge, new LinearLayout.LayoutParams(dp(32), dp(32)));
+
+        TextView name = new TextView(this);
+        name.setText(KEY_NAMES[handsetKey]);
+        name.setTextSize(13.5f);
+        name.setTextColor(LIB_INK);
+        name.setPadding(dp(12), 0, dp(8), 0);
+        row.addView(name, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        boolean assigned = !working.padsFor(handsetKey).isEmpty();
+        TextView chip = new TextView(this);
+        chip.setText(working.labelFor(handsetKey) + "  ▾");
+        chip.setTextSize(12f);
+        chip.setTypeface(assigned ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+        chip.setTextColor(assigned ? LIB_GREEN_DEEP : LIB_MUTED);
+        chip.setGravity(android.view.Gravity.CENTER);
+        chip.setMinWidth(dp(86));
+        chip.setPadding(dp(10), dp(6), dp(10), dp(6));
+        chip.setBackground(assigned
+                ? roundedRect(LIB_GREEN_SOFT, LIB_GREEN_LINE, 1, 11)
+                : roundedRect(LIB_SURFACE, LIB_LINE, 1, 11));
+        row.addView(chip);
+
+        return row;
+    }
+
+    /**
+     * Picks the pad buttons that press one handset key.
+     *
+     * <p>Choosing a button that another key had takes it from that key, because
+     * a button pressing two keys at once is not something a game asks for. The
+     * small line under a button is the key it is on now, so what a choice costs
+     * is readable before it is made.
+     */
+    private void showPadPicker(PadMapping working, int handsetKey) {
+        LinearLayout sheet = new LinearLayout(this);
+        sheet.setOrientation(LinearLayout.VERTICAL);
+        sheet.setBackgroundColor(LIB_BG);
+        sheet.setPadding(dp(20), dp(20), dp(20), dp(16));
+
+        TextView title = new TextView(this);
+        title.setText(KEY_NAMES[handsetKey] + " 키를 누를 패드 버튼");
+        title.setTextSize(15f);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setTextColor(LIB_INK);
+        title.setGravity(android.view.Gravity.CENTER);
+        sheet.addView(title);
+
+        TextView hint = new TextView(this);
+        hint.setText("여러 개를 고를 수 있습니다");
+        hint.setTextSize(10.5f);
+        hint.setTextColor(LIB_MUTED);
+        hint.setGravity(android.view.Gravity.CENTER);
+        hint.setPadding(0, dp(4), 0, dp(14));
+        sheet.addView(hint);
+
+        final LinearLayout[] cells = new LinearLayout[PadMapping.PAD_COUNT];
+        final TextView[] cellLabels = new TextView[PadMapping.PAD_COUNT];
+        final TextView[] cellNotes = new TextView[PadMapping.PAD_COUNT];
+
+        final int columns = 4;
+        for (int first = 0; first < PadMapping.PAD_COUNT; first += columns) {
+            LinearLayout rowView = new LinearLayout(this);
+            rowView.setOrientation(LinearLayout.HORIZONTAL);
+
+            for (int column = 0; column < columns; column++) {
+                final int pad = first + column;
+                LinearLayout.LayoutParams params =
+                        new LinearLayout.LayoutParams(0, dp(58), 1f);
+                params.leftMargin = column == 0 ? 0 : dp(8);
+                params.bottomMargin = dp(8);
+
+                if (pad >= PadMapping.PAD_COUNT) {
+                    View filler = new View(this);
+                    rowView.addView(filler, params);
+                    continue;
+                }
+
+                LinearLayout cell = new LinearLayout(this);
+                cell.setOrientation(LinearLayout.VERTICAL);
+                cell.setGravity(android.view.Gravity.CENTER);
+
+                TextView label = new TextView(this);
+                label.setText(PadMapping.PAD_LABELS[pad]);
+                label.setTextSize(PadMapping.PAD_LABELS[pad].length() > 2 ? 11f : 15f);
+                label.setGravity(android.view.Gravity.CENTER);
+                cell.addView(label);
+
+                TextView note = new TextView(this);
+                note.setTextSize(8.5f);
+                note.setGravity(android.view.Gravity.CENTER);
+                cell.addView(note);
+
+                cells[pad] = cell;
+                cellLabels[pad] = label;
+                cellNotes[pad] = note;
+                rowView.addView(cell, params);
+            }
+
+            sheet.addView(rowView);
+        }
+
+        final Runnable refresh = () -> {
+            for (int pad = 0; pad < PadMapping.PAD_COUNT; pad++) {
+                int on = working.handsetKeyOf(pad);
+                boolean mine = on == handsetKey;
+
+                cells[pad].setBackground(mine
+                        ? roundedRect(LIB_GREEN_SOFT, LIB_GREEN, 2, 13)
+                        : roundedRect(LIB_SURFACE, LIB_LINE, 1, 13));
+                cellLabels[pad].setTextColor(mine ? LIB_GREEN_DEEP : LIB_INK);
+                cellLabels[pad].setTypeface(mine ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+
+                // Under the button: the key it is on now, or the warning a
+                // button carries when the system may never hand it over.
+                String under = mine ? KEY_BADGES[handsetKey]
+                        : isHandsetKey(on) ? KEY_NAMES[on]
+                        : PadMapping.PAD_NOTES[pad];
+                cellNotes[pad].setText(under == null ? "" : under);
+                cellNotes[pad].setTextColor(mine ? LIB_GREEN : LIB_MUTED);
+                cellNotes[pad].setVisibility(under == null ? View.GONE : View.VISIBLE);
+            }
+        };
+
+        for (int pad = 0; pad < PadMapping.PAD_COUNT; pad++) {
+            final int which = pad;
+            cells[pad].setOnClickListener(v -> {
+                boolean mine = working.handsetKeyOf(which) == handsetKey;
+                working.assign(which, mine ? PadMapping.UNASSIGNED : handsetKey);
+                refresh.run();
+            });
+        }
+
+        refresh.run();
+
+        TextView moved = new TextView(this);
+        moved.setText("작은 글씨 = 그 버튼이 지금 맡은 키. 고르면 이쪽으로 옮겨옵니다.\n"
+                + "왼쪽 스틱은 언제나 방향키와 같이 동작합니다.");
+        moved.setTextSize(10f);
+        moved.setTextColor(LIB_MUTED);
+        moved.setPadding(dp(2), dp(4), dp(2), dp(14));
+        sheet.addView(moved);
+
+        AlertDialog dialog = new AlertDialog.Builder(this).setView(sheet).create();
+
+        Button done = flatButton("완료");
+        done.setTextColor(LIB_BG);
+        done.setBackground(roundedRect(LIB_GREEN, LIB_GREEN, 1, 15));
+        done.setOnClickListener(v -> dialog.dismiss());
+        sheet.addView(done, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(42)));
+
+        // The rows behind carry the pad buttons that were just moved about, so
+        // the screen is built again rather than left saying what was true.
+        dialog.setOnDismissListener(d -> showKeyMap(working));
+        dialog.show();
+    }
+
+    /** What the pad calls itself, or that there is none. */
+    private String connectedPadName() {
+        for (int id : InputDevice.getDeviceIds()) {
+            InputDevice device = InputDevice.getDevice(id);
+            if (device == null) {
+                continue;
+            }
+
+            int source = device.getSources();
+            boolean isPad = (source & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD
+                    || (source & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK;
+
+            if (isPad && !device.isVirtual()) {
+                return device.getName();
+            }
+        }
+
+        return "없음 (지금 연결된 패드가 없습니다)";
+    }
+
+    /** Leaves the key mapping, asking first if it would drop a change. */
+    private void leaveKeyMap(PadMapping working) {
+        if (working.sameAs(padMapping)) {
+            showLibrary();
+            return;
+        }
+
+        new AlertDialog.Builder(this)
+                .setTitle("저장하지 않고 나가기")
+                .setMessage("바꾼 키매핑이 저장되지 않습니다.")
+                .setPositiveButton("나가기", (dialog, which) -> showLibrary())
+                .setNegativeButton("계속 편집", null)
+                .show();
     }
 
     /** The rounded list card, or the empty state when nothing is imported. */
