@@ -355,8 +355,9 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
             let result = match pixel_op::apply(kind, destination, source) {
                 Some(result) => result,
                 None => {
+                    // Source first, as in `draw_image` - see the note there.
                     context
-                        .call_function(function, &[destination as WIPICWord, source as WIPICWord, gctx.param1])
+                        .call_function(function, &[source as WIPICWord, destination as WIPICWord, gctx.param1])
                         .await? as u16
                 }
             };
@@ -831,8 +832,16 @@ pub async fn draw_image(
         let result = match pixel_op::apply(kind, destination, source_pixel) {
             Some(result) => result,
             None => {
+                // The source first, then the destination. 마스터오브소드4's
+                // operation @0x10c89c is `if (a != white) return a; else return
+                // textColour` - it recolours the one white the glyph strips are
+                // drawn in - and `a` can only be the source: a destination test
+                // would leave every glyph pixel as the box it lands on, which is
+                // exactly the empty dialogue box it drew here. The two
+                // operations recognised in Rust are commutative, so the order
+                // only ever showed up in one a title is asked for.
                 context
-                    .call_function(function, &[destination as WIPICWord, source_pixel as WIPICWord, grp_ctx.param1])
+                    .call_function(function, &[source_pixel as WIPICWord, destination as WIPICWord, grp_ctx.param1])
                     .await? as u16
             }
         };
@@ -878,7 +887,12 @@ fn blend_pairs(canvas: &dyn Canvas, dx: i32, dy: i32, w: i32, h: i32, src: &dyn 
             }
 
             let source = src.get_pixel(sx_px as i32, sy_px as i32);
-            if keyed && is_transparent_key(source) {
+            // A pixel the image does not have is not a pixel the operation is
+            // asked about. Drawing through an operation used to write the whole
+            // rectangle, transparent corners included, so 마스터오브소드4's
+            // glyphs came down as magenta blocks the moment they came down at
+            // all - the plain path has always skipped these.
+            if source.a == 0 || (keyed && is_transparent_key(source)) {
                 continue;
             }
 
@@ -2358,6 +2372,113 @@ mod tests {
 
         let out = drawn.get_pixel(0, 0);
         assert_eq!((out.r, out.g, out.b), (expected.r, expected.g, expected.b));
+    }
+
+    /// The operation is asked about the source first, then the destination.
+    ///
+    /// 마스터오브소드4 writes its Korean by blitting jamo out of white-on-magenta
+    /// strips through an operation that reads `if (a != white) return a; else
+    /// return textColour` - it recolours the one white the strips are drawn in.
+    /// `a` can only be the source: asked about the destination it answers the
+    /// box the glyph lands on, unchanged, and the title's dialogue came out
+    /// empty.
+    #[futures_test::test]
+    async fn a_pixel_operation_is_asked_about_the_source_first() {
+        let mut context = test_context();
+
+        // The shape 마스터오브소드4 plants: the first argument decides, and a
+        // white one is answered with a colour neither side carries.
+        const RECOLOURED: u32 = 0x001f; // pure blue in RGB565
+        context.set_guest_function(|_, args| if args[0] == 0xffff { RECOLOURED } else { args[0] });
+
+        // An address of its own: what an operation turned out to be is
+        // remembered across calls, and the whole suite shares that memory.
+
+        let pgc_handle = context.alloc(core::mem::size_of::<super::WIPICGraphicsContext>() as u32).unwrap();
+        let pgc = context.data_ptr(pgc_handle).unwrap();
+        init_context(&mut context, pgc).await.unwrap();
+
+        let destination = framebuffer_of(&mut context, 1, 1, &[0xff20_2020]).await;
+        let source = framebuffer_of(&mut context, 1, 1, &[0xffff_ffff]).await;
+
+        let image_handle = context.alloc(core::mem::size_of::<wipi_types::wipic::WIPICImage>() as u32).unwrap();
+        let image_address = context.data_ptr(image_handle).unwrap();
+        let image = wipi_types::wipic::WIPICImage {
+            img: read_generic(&context, context.data_ptr(source).unwrap()).unwrap(),
+            mask: super::FrameBuffer::empty().0,
+            loop_count: 0,
+            delay: 0,
+            animated: 0,
+            buf: super::WIPICIndirectPtr(0),
+            offset: 0,
+            current: 0,
+            len: 0,
+        };
+        write_generic(&mut context, image_address, image).unwrap();
+
+        set_context(&mut context, pgc, Idx::PixelopIdx, 0x5678).await.unwrap();
+
+        draw_image(&mut context, destination, 0, 0, 1, 1, image_handle, 0, 0, pgc).await.unwrap();
+
+        let handle = read_generic(&context, context.data_ptr(destination).unwrap()).unwrap();
+        let drawn = super::FrameBuffer(handle).image(&mut context).unwrap();
+
+        let expected = Rgb565Pixel::to_color(RECOLOURED as u16);
+        let out = drawn.get_pixel(0, 0);
+        assert_eq!((out.r, out.g, out.b), (expected.r, expected.g, expected.b));
+    }
+
+    /// A pixel the image does not have is not a pixel the operation is asked
+    /// about.
+    ///
+    /// Drawing through an operation used to write the whole rectangle, so
+    /// 마스터오브소드4's glyphs arrived as blocks of the magenta their strips are
+    /// keyed on. The plain path has always skipped these.
+    #[futures_test::test]
+    async fn a_blit_through_an_operation_leaves_a_transparent_pixel_alone() {
+        let mut context = test_context();
+
+        context.set_guest_function(|_, args| args[0]);
+
+        let pgc_handle = context.alloc(core::mem::size_of::<super::WIPICGraphicsContext>() as u32).unwrap();
+        let pgc = context.data_ptr(pgc_handle).unwrap();
+        init_context(&mut context, pgc).await.unwrap();
+
+        let destination = framebuffer_of(&mut context, 2, 1, &[0xff20_2020, 0xff20_2020]).await;
+        // The colour plane carries both pixels; the mask says only the first is
+        // there, the way a decoded glyph strip does.
+        let colour = framebuffer_of(&mut context, 2, 1, &[0xffff_ffff, 0xffff_00ff]).await;
+        let mask = framebuffer_of(&mut context, 2, 1, &[0xffff_ffff, 0x0000_0000]).await;
+
+        let image_handle = context.alloc(core::mem::size_of::<wipi_types::wipic::WIPICImage>() as u32).unwrap();
+        let image_address = context.data_ptr(image_handle).unwrap();
+        let image = wipi_types::wipic::WIPICImage {
+            img: read_generic(&context, context.data_ptr(colour).unwrap()).unwrap(),
+            mask: read_generic(&context, context.data_ptr(mask).unwrap()).unwrap(),
+            loop_count: 0,
+            delay: 0,
+            animated: 0,
+            buf: super::WIPICIndirectPtr(0),
+            offset: 0,
+            current: 0,
+            len: 0,
+        };
+        write_generic(&mut context, image_address, image).unwrap();
+
+        set_context(&mut context, pgc, Idx::PixelopIdx, 0x9abc).await.unwrap();
+
+        draw_image(&mut context, destination, 0, 0, 2, 1, image_handle, 0, 0, pgc).await.unwrap();
+
+        let handle = read_generic(&context, context.data_ptr(destination).unwrap()).unwrap();
+        let drawn = super::FrameBuffer(handle).image(&mut context).unwrap();
+
+        let written = drawn.get_pixel(0, 0);
+        assert_eq!((written.r, written.g, written.b), (0xff, 0xff, 0xff));
+
+        // Untouched, so it is still exactly what was there rather than what a
+        // round trip through RGB565 would have left.
+        let untouched = drawn.get_pixel(1, 0);
+        assert_eq!((untouched.r, untouched.g, untouched.b), (0x20, 0x20, 0x20));
     }
 
     /// A fill goes through the operation too, not only a blit.
