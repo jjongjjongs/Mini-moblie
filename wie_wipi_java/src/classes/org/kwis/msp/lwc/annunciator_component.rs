@@ -9,7 +9,7 @@ use wie_midp::classes::javax::microedition::lcdui::Image as MidpImage;
 
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 
-use crate::classes::org::kwis::msp::lcdui::{Display, Graphics, Image};
+use crate::classes::org::kwis::msp::lcdui::{Card, Display, Graphics, Image};
 
 // class org.kwis.msp.lwc.AnnunciatorComponent
 pub struct AnnunciatorComponent;
@@ -29,6 +29,7 @@ impl AnnunciatorComponent {
                 JavaMethodProto::new("<init>", "(Z)V", Self::init, Default::default()),
                 JavaMethodProto::new("<init>", "(Lorg/kwis/msp/lcdui/Display;Z)V", Self::init_with_display, Default::default()),
                 JavaMethodProto::new("show", "()V", Self::show, Default::default()),
+                JavaMethodProto::new("getHeight", "()I", Self::get_height, Default::default()),
                 JavaMethodProto::new("hide", "()V", Self::hide, Default::default()),
                 JavaMethodProto::new("layout", "()V", Self::layout, Default::default()),
                 JavaMethodProto::new(
@@ -183,6 +184,44 @@ impl AnnunciatorComponent {
             .await?;
 
         Ok(())
+    }
+
+    /// The rows the strip takes from the title.
+    ///
+    /// `show` leaves the strip's card undocked, so every card a title pushes
+    /// gets the whole panel from its first row. A title that then asks the
+    /// strip how tall it is and keeps the rest for itself hands back rows
+    /// nothing draws: 블레이드마스터2 asks its card for 240x320, asks this for
+    /// 24 and paints `(0, 0, 240, 296)` from then on - and the panel's last 24
+    /// rows kept whatever a full-screen picture had left there. 다이어트타이쿤
+    /// and 열혈고사전설2 do the same, and the band under each of them was the
+    /// title screen it had drawn before.
+    ///
+    /// So the answer follows where the card is. Undocked - which is how `show`
+    /// leaves it - the strip is nowhere on the screen and takes nothing, and
+    /// the title draws the whole panel. Docked, by a title that put the card
+    /// there itself, it takes its rows as it always did and `CardCanvas` moves
+    /// what is pushed below it, so the two answers agree either way.
+    ///
+    /// Nothing else about the component changes: it is laid out, its card is
+    /// the size the table says, and `paint` still draws the bar.
+    async fn get_height(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<AnnunciatorComponent>) -> JvmResult<i32> {
+        let height: i32 = jvm.get_field(&this, "h", "I").await?;
+
+        let display: ClassInstanceRef<Display> = jvm.get_field(&this, "display", "Lorg/kwis/msp/lcdui/Display;").await?;
+        let docked: ClassInstanceRef<Card> = jvm.invoke_virtual(&display, "getDockedCard", "()Lorg/kwis/msp/lcdui/Card;", ()).await?;
+
+        let shown = if docked.is_null() {
+            false
+        } else {
+            let card: ClassInstanceRef<Card> = jvm.invoke_virtual(&this, "getCard", "()Lorg/kwis/msp/lcdui/Card;", ()).await?;
+            !card.is_null() && jvm.invoke_virtual(&docked, "equals", "(Ljava/lang/Object;)Z", (card,)).await?
+        };
+
+        let height = if shown { height } else { 0 };
+        tracing::debug!("org.kwis.msp.lwc.AnnunciatorComponent::getHeight({this:?}) -> {height}");
+
+        Ok(height)
     }
 
     async fn hide(jvm: &Jvm, _: &mut WieJvmContext) -> JvmResult<()> {
