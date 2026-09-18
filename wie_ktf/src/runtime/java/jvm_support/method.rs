@@ -129,7 +129,28 @@ impl JavaMethod {
 
         let ptr_raw = Allocator::alloc(core, size_of::<RawJavaMethod>() as u32)?;
 
-        let access_flags = proto.access_flags;
+        // A title reads these flags back and acts on them, so the record has to
+        // say what the method is rather than only what a proto happened to
+        // declare. A proto carries a flag when this side needs one - STATIC to
+        // decide whether there is a receiver, NATIVE to pick an entry point -
+        // and carries nothing otherwise, which as a method record reads as a
+        // method that is not even public.
+        //
+        // Every method a proto stands for is a public one: these are the
+        // platform's own classes, and a title only ever reaches their public
+        // API. So a proto that does not say otherwise describes a public
+        // method, and the record says so.
+        //
+        // The SDK these titles are built with checks it before every call it
+        // makes this way - `flags & (PUBLIC | STATIC | ABSTRACT)` has to come
+        // out PUBLIC - and throws `java.lang.Error` when it does not. Four of
+        // these five stopped on their download screen there, one instruction
+        // after finding `Socket.getOutputStream`, having never called it.
+        let access_flags = if proto.access_flags.intersects(MethodAccessFlags::PRIVATE | MethodAccessFlags::PROTECTED) {
+            proto.access_flags
+        } else {
+            proto.access_flags | MethodAccessFlags::PUBLIC
+        };
         let proto = SharedMethodProto::from(proto);
 
         // Every method gets two entry points, because the callers that reach it
