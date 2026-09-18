@@ -268,9 +268,11 @@ public final class MainActivity extends Activity {
      * Whether the player is held in one orientation rather than following the
      * phone.
      *
-     * <p>Only meaningful while the phone's own auto-rotate is on: with it off
-     * there is nothing to be held against, and the button is the two-way switch
-     * it has always been.
+     * <p>What the rotate button offers while the phone's own auto-rotate is on.
+     * With it off the player is held either way - there is nothing to follow -
+     * and the button is the two-way switch it has always been; the flag is
+     * still kept true there, so that turning auto-rotate on afterwards finds
+     * the player held rather than loose.
      */
     private boolean orientationPinned;
 
@@ -1999,25 +2001,33 @@ public final class MainActivity extends Activity {
     }
 
     /**
-     * Turns the player, or gives it back to the phone.
+     * Turns the player, or holds it where it is - whichever the phone has left
+     * for it to do.
      *
      * <p>While the phone's auto-rotate is off the player only ever turns
      * because this was pressed, so it is the two-way switch it has always
-     * been. While auto-rotate is on the player is already following the phone,
-     * and what this offers instead is to hold it still - for playing lying
-     * down, where the phone's idea of upright is not the player's. Pressed
-     * again it hands the player back.
+     * been: it asks for the orientation the player is not in.
+     *
+     * <p>While auto-rotate is on the phone is already turning the player, and
+     * turning it from here would only be undone by the next time the phone
+     * moved. So the button stops being about which way and becomes about
+     * whether: it holds the player in the orientation it is already in, for
+     * playing lying down where the phone's idea of upright is not the
+     * player's, and pressed again it hands the player back. It never turns
+     * anything.
      *
      * <p>The window turning is what fires onConfigurationChanged, which flips
      * {@code landscapeMode} and relays the player out, so that callback stays
-     * the one place the mode changes. A press that asks for the orientation the
-     * window is already in turns nothing, so the button is redrawn here too.
+     * the one place the mode changes. Holding the player where it is turns
+     * nothing, so the button is redrawn here too.
      */
     private void toggleOrientation() {
-        if (autoRotateOn() && orientationPinned) {
-            orientationPinned = false;
-            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_USER);
+        if (autoRotateOn()) {
+            orientationPinned = !orientationPinned;
+            setRequestedOrientation(orientationPinned ? heldOrientation() : ActivityInfo.SCREEN_ORIENTATION_USER);
         } else {
+            // Pinned either way, so the player stays put if auto-rotate is
+            // turned on later and the button becomes 해제 rather than 고정.
             orientationPinned = true;
             setRequestedOrientation(landscapeMode
                     ? ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
@@ -2027,21 +2037,35 @@ public final class MainActivity extends Activity {
         showRotateState();
     }
 
+    /** The orientation the player is in, asked for as an orientation to keep. */
+    private int heldOrientation() {
+        return landscapeMode
+                ? ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                : ActivityInfo.SCREEN_ORIENTATION_PORTRAIT;
+    }
+
     /** Whether the phone would turn its own screen if it were moved. */
     private boolean autoRotateOn() {
         return Settings.System.getInt(getContentResolver(), Settings.System.ACCELEROMETER_ROTATION, 0) == 1;
     }
 
     /**
-     * What the rotate button says: 자동 to hand the player back to the phone,
-     * and otherwise the orientation the press would turn it to.
+     * What the rotate button says, which is what pressing it would do.
+     *
+     * <p>With the phone turning the player, that is 고정 to hold it where it is
+     * and 해제 to give it back. With the phone not turning it, it is the
+     * orientation the press would turn it to.
      */
     private void showRotateState() {
         if (rotateButton == null) {
             return;
         }
 
-        rotateButton.setText(autoRotateOn() && orientationPinned ? "자동" : landscapeMode ? "세로" : "가로");
+        String label = autoRotateOn()
+                ? orientationPinned ? "해제" : "고정"
+                : landscapeMode ? "세로" : "가로";
+
+        rotateButton.setText(label);
     }
 
     @Override
