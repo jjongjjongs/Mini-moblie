@@ -44,6 +44,14 @@ const fn total_size() -> usize {
     region_offset(BUCKETS.len() - 1) + region_size(BUCKETS.len() - 1)
 }
 
+/// How much of a bucket header is read at a time.
+///
+/// The header is a bitmap of the whole bucket - 128 KB of it for the smallest
+/// slots - and reading all of it to find one free bit made an allocation cost
+/// what the bucket is big, whether the heap held two objects or two million.
+/// A chunk is read instead, starting where the last allocation left off.
+const HEADER_CHUNK: usize = 512;
+
 pub struct BucketAllocator;
 
 impl BucketAllocator {
@@ -65,6 +73,8 @@ impl BucketAllocator {
             core.write_bytes(header_address, &vec![0xff; header_len])?;
         }
 
+        core.inner.lock().bucket_cursors = [0; BUCKETS.len()];
+
         Ok(())
     }
 
@@ -74,21 +84,49 @@ impl BucketAllocator {
         let header_address = base_address + region_offset(bucket_index) as u32;
         let header_len = header_length(bucket_index);
 
-        let mut header = vec![0u8; header_len];
-        core.read_bytes(header_address, &mut header)?;
+        // Where the last allocation out of this bucket found room. Everything
+        // below it was full when it was passed, and a slot that has since been
+        // freed pulls the cursor back to itself, so nothing is skipped by
+        // starting here - only rescanned bytes are skipped. Without it a title
+        // that allocates as it runs pays for every object it has ever kept on
+        // every object it allocates next, which is what turned 에스테반루크's
+        // opening - a line of dialogue typed out one `substring` at a time -
+        // into a hang.
+        let mut at = (core.inner.lock().bucket_cursors[bucket_index] as usize).min(header_len);
 
-        for (i, item) in header.iter_mut().enumerate() {
-            if *item == 0 {
-                continue;
+        let mut buffer = [0u8; HEADER_CHUNK];
+        let mut scanned = 0;
+
+        while scanned < header_len {
+            let length = HEADER_CHUNK.min(header_len - at);
+            let chunk = &mut buffer[..length];
+            core.read_bytes(header_address + at as u32, chunk)?;
+
+            for (i, item) in chunk.iter_mut().enumerate() {
+                if *item == 0 {
+                    continue;
+                }
+
+                let bit = item.trailing_zeros();
+                *item &= !(1 << bit);
+                let index = (at + i) as u32;
+                let address = header_address + header_len as u32 + (index * 8 + bit) * slot_size as u32;
+
+                core.write_bytes(header_address + index, &[*item])?;
+                // This byte may hold free bits still, so the next allocation
+                // starts on it rather than after it.
+                core.inner.lock().bucket_cursors[bucket_index] = index;
+
+                return Ok(address);
             }
 
-            let bit = item.trailing_zeros();
-            *item &= !(1 << bit);
-            let address = header_address + header_len as u32 + (i as u32 * 8 + bit) * slot_size as u32;
-
-            core.write_bytes(header_address + i as u32, &[*item])?;
-
-            return Ok(address);
+            scanned += length;
+            at += length;
+            // Round the end once, so slots freed below where this started are
+            // still found before the bucket is called full.
+            if at >= header_len {
+                at = 0;
+            }
         }
 
         Err(WieError::AllocationFailure)
@@ -161,6 +199,13 @@ impl BucketAllocator {
 
         core.write_bytes(header_address + index, &[header[index as usize]])?;
 
+        // The next allocation scans from the cursor, so a slot freed below it
+        // has to bring it back down or it would not be handed out again until
+        // the bucket filled and the scan wrapped.
+        let mut inner = core.inner.lock();
+        let cursor = &mut inner.bucket_cursors[bucket_index];
+        *cursor = (*cursor).min(index);
+
         Ok(())
     }
 
@@ -175,7 +220,7 @@ mod tests {
 
     use crate::ArmCore;
 
-    use super::BucketAllocator;
+    use super::{BucketAllocator, HEADER_CHUNK};
 
     // Bucket 0 (4-byte): header_length = 0x100000 / 8 = 0x20000.
     //   First slot at base + 0x20000 = 0x40020000.
@@ -261,6 +306,50 @@ mod tests {
         // it is still held.
         assert_eq!(BucketAllocator::alloc(&mut core, 0x40000000, 8)?, a);
         assert_ne!(BucketAllocator::alloc(&mut core, 0x40000000, 8)?, b);
+
+        Ok(())
+    }
+
+    /// The scan starts where the last allocation left off, so a slot freed
+    /// behind it has to pull it back. Thousands of allocations put the cursor
+    /// well past the front of the bitmap first, which is the state a running
+    /// title is in and the one the old whole-bitmap scan hid.
+    #[test]
+    fn a_slot_freed_behind_the_cursor_is_handed_out_again() -> Result<()> {
+        let mut core = ArmCore::new(false, None).unwrap();
+        core.map(0x40000000, 0x8000000)?;
+        BucketAllocator::init(&mut core, 0x40000000, 0x8000000)?;
+
+        let first = BucketAllocator::alloc(&mut core, 0x40000000, 4)?;
+        // Far enough to carry the cursor over several header chunks.
+        for _ in 0..20000 {
+            BucketAllocator::alloc(&mut core, 0x40000000, 4)?;
+        }
+
+        BucketAllocator::free(&mut core, 0x40000000, first, 4)?;
+
+        assert_eq!(BucketAllocator::alloc(&mut core, 0x40000000, 4)?, first);
+
+        Ok(())
+    }
+
+    /// Slots stay contiguous across a header chunk boundary: nothing is skipped
+    /// where one read of the bitmap ends and the next begins.
+    #[test]
+    fn allocation_runs_straight_through_a_header_chunk_boundary() -> Result<()> {
+        let mut core = ArmCore::new(false, None).unwrap();
+        core.map(0x40000000, 0x8000000)?;
+        BucketAllocator::init(&mut core, 0x40000000, 0x8000000)?;
+
+        // One chunk of header describes HEADER_CHUNK * 8 slots.
+        let slots = HEADER_CHUNK * 8;
+        let mut previous = BucketAllocator::alloc(&mut core, 0x40000000, 4)?;
+
+        for _ in 0..slots + 16 {
+            let next = BucketAllocator::alloc(&mut core, 0x40000000, 4)?;
+            assert_eq!(next, previous + 4);
+            previous = next;
+        }
 
         Ok(())
     }

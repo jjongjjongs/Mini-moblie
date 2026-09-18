@@ -83,6 +83,11 @@ pub(crate) struct ArmCoreInner {
     /// these fast; recycling the allocation keeps that churn from fragmenting
     /// the heap into sub-stack-sized holes.
     stack_pool: Vec<u32>,
+    /// Where the next allocation out of each bucket starts looking. See
+    /// [`crate::allocator::bucket::BucketAllocator::alloc`]; it lives on the
+    /// core because the allocator is stateless otherwise and the bitmap it
+    /// scans is guest memory this core owns.
+    pub(crate) bucket_cursors: [u32; 8],
     /// Whether an SVC handler chose the address to resume at, rather than
     /// returning to the instruction after the `svc`. Set by
     /// [`ArmCore::set_next_pc`] and cleared before each handler runs.
@@ -176,6 +181,7 @@ impl ArmCore {
             next_pc_chosen: false,
             thread_local_defaults: BTreeMap::new(),
             stack_pool: Vec::new(),
+            bucket_cursors: [0; 8],
             next_stub_address: FUNCTIONS_BASE,
             profile,
             write_once_metadata: BTreeMap::new(),
