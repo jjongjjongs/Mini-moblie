@@ -1,7 +1,7 @@
 use alloc::vec;
 
 use java_class_proto::{JavaFieldProto, JavaMethodProto};
-use java_constants::FieldAccessFlags;
+use java_constants::{FieldAccessFlags, MethodAccessFlags};
 use java_runtime::classes::java::lang::String;
 use jvm::{Array, ClassInstanceRef, JavaChar, Jvm, Result as JvmResult, runtime::JavaLangString};
 
@@ -29,7 +29,7 @@ impl InputMethodHandler {
             parent_class: Some("java/lang/Object"),
             interfaces: vec![],
             methods: vec![
-                JavaMethodProto::new("<clinit>", "()V", Self::cl_init, Default::default()),
+                JavaMethodProto::new("<clinit>", "()V", Self::cl_init, MethodAccessFlags::STATIC),
                 JavaMethodProto::new("<init>", "(I)V", Self::init, Default::default()),
                 JavaMethodProto::new("setCurrentMode", "(I)Z", Self::set_current_mode, Default::default()),
                 JavaMethodProto::new("setCurrentMode", "(I[C)Z", Self::set_current_mode_with_chars, Default::default()),

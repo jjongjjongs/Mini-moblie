@@ -994,4 +994,48 @@ mod test {
             Ok(())
         })
     }
+
+    /// The keys the input method compares against are read from the handset
+    /// before the first key arrives.
+    ///
+    /// `InputMethodHandler`'s five key codes are filled in by its `<clinit>`,
+    /// and a `<clinit>` the JVM can find has to say it is static - ours did not,
+    /// so the table stayed at zero and every comparison in `notifyKeyInput`
+    /// missed. That is what cost 드래곤하트 its delete key: the title puts the
+    /// 뒤로가기 key through `TextComponent.keyNotify` and the handler answers to
+    /// CLEAR by taking a character back, except it was answering to 0.
+    #[test]
+    fn the_handset_key_table_is_read_before_the_first_key() -> Result<()> {
+        run_jvm_test(Box::new([wie_midp::get_protos().into(), get_protos().into()]), |jvm| async move {
+            let _midlet = jvm.new_class("net/wie/WIPIMIDlet", "()V", ()).await?;
+            let _jlet = jvm.new_class("org/kwis/msp/lcdui/Jlet", "()V", ()).await?;
+
+            let display: ClassInstanceRef<Display> = jvm
+                .invoke_static("org/kwis/msp/lcdui/Display", "getDefaultDisplay", "()Lorg/kwis/msp/lcdui/Display;", ())
+                .await?;
+
+            let empty = JavaLangString::from_rust_string(&jvm, "").await?;
+            let _text_box = jvm
+                .new_class(
+                    "org/kwis/msp/lwc/TextBoxComponent",
+                    "(Lorg/kwis/msp/lcdui/Display;Ljava/lang/String;I)V",
+                    (display, empty, 0),
+                )
+                .await?;
+
+            for (field, expected) in [
+                ("__wieKeyUp", -1),
+                ("__wieKeyDown", -2),
+                ("__wieKeyLeft", -3),
+                ("__wieKeyRight", -4),
+                ("__wieKeyClear", -16),
+            ] {
+                let value: i32 = jvm.get_static_field("org/kwis/msp/lcdui/InputMethodHandler", field, "I").await?;
+
+                assert_eq!(value, expected, "{field}");
+            }
+
+            Ok(())
+        })
+    }
 }
