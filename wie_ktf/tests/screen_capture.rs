@@ -568,9 +568,25 @@ fn run_once(
             }
         }
 
+        let tick_started = std::time::Instant::now();
+        let before = (
+            wie_core_arm::EXECUTED_INSTRUCTIONS.load(core::sync::atomic::Ordering::Relaxed),
+            wie_core_arm::SVC_COUNT.load(core::sync::atomic::Ordering::Relaxed),
+            wie_core_arm::RUN_CALLS.load(core::sync::atomic::Ordering::Relaxed),
+        );
         if let Err(error) = emulator.tick() {
             stopped = Some(error);
             break;
+        }
+        let tick_took = tick_started.elapsed();
+        if tick_took > core::time::Duration::from_millis(200) {
+            let insns = wie_core_arm::EXECUTED_INSTRUCTIONS.load(core::sync::atomic::Ordering::Relaxed) - before.0;
+            let svcs = wie_core_arm::SVC_COUNT.load(core::sync::atomic::Ordering::Relaxed) - before.1;
+            let runs = wie_core_arm::RUN_CALLS.load(core::sync::atomic::Ordering::Relaxed) - before.2;
+            eprintln!(
+                "[probe] slow tick {ticks} (guest_ms={}) took {tick_took:?}: {insns} insns, {svcs} svcs, {runs} run-calls",
+                tick_clock.now_ms()
+            );
         }
         tick_clock.advance();
         ticks += 1;
