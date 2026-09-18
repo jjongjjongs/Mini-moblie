@@ -52,8 +52,15 @@ pub const WIPIC_TABLE_FUNCTIONS: u16 = 64;
 /// The call is named where it is dispatched rather than here - see
 /// `describe_unserved_call`, which has the registers and the memory they point
 /// at, and this has neither.
-fn gen_missing(_table_id: WIPICTableId, _function_id: u16) -> WIPICMethodBody {
-    let body = move |_: &mut dyn WIPICContext| async move { Ok::<i32, WieError>(-1) };
+fn gen_missing(table_id: WIPICTableId, function_id: u16) -> WIPICMethodBody {
+    let body = move |_: &mut dyn WIPICContext| async move {
+        // Named, because a slot that answers in silence is a slot a title can
+        // call six hundred times with nothing in the log to say so. 마스터오브
+        // 소드4 draws no text and the run records no text call at all - the
+        // only place the number it reached is ever written down is here.
+        tracing::warn!("unserved {table_id:?}-{function_id}");
+        Ok::<i32, WieError>(-1)
+    };
 
     body.into_body()
 }

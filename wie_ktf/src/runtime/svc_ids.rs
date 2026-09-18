@@ -451,7 +451,7 @@ impl TryFrom<u16> for WIPICDatabaseMethodId {
     }
 }
 
-#[derive(Copy, Clone, Eq, PartialEq)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[repr(u32)]
 pub enum WIPICTableId {
     Kernel = 0,
