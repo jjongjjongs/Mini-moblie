@@ -59,7 +59,7 @@ fn guard_string(env: &JNIEnv, f: impl FnOnce() -> String) -> jstring {
             let message = "에뮬레이터 내부 오류가 발생했습니다.";
             tracing::error!("{message}");
 
-            with_runner(|runner| runner.stop());
+            runner::request_stop();
 
             to_java_string(env, message)
         }
@@ -70,7 +70,7 @@ fn guard(f: impl FnOnce()) {
     if std::panic::catch_unwind(AssertUnwindSafe(f)).is_err() {
         tracing::error!("Panic caught at the JNI boundary");
 
-        let _ = std::panic::catch_unwind(AssertUnwindSafe(|| with_runner(|runner| runner.stop())));
+        let _ = std::panic::catch_unwind(AssertUnwindSafe(runner::request_stop));
     }
 }
 
@@ -141,7 +141,7 @@ pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativ
 pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativeStop(_env: JNIEnv, _class: JClass) {
     tracing::info!("nativeStop");
 
-    guard(|| with_runner(|runner| runner.stop()));
+    guard(runner::request_stop);
 }
 
 /// `nativeRunning() -> int`
@@ -150,9 +150,7 @@ pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativ
 /// Called by the JVM with a valid `env` reference.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativeRunning(_env: JNIEnv, _class: JClass) -> jint {
-    std::panic::catch_unwind(AssertUnwindSafe(|| with_runner(|runner| runner.is_running())))
-        .unwrap_or(false)
-        .into()
+    std::panic::catch_unwind(AssertUnwindSafe(runner::is_running)).unwrap_or(false).into()
 }
 
 /// `nativeLastError() -> String`
@@ -161,7 +159,7 @@ pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativ
 /// Called by the JVM with a valid `env` reference.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativeLastError(env: JNIEnv, _class: JClass) -> jstring {
-    guard_string(&env, || with_runner(|runner| runner.last_error()))
+    guard_string(&env, runner::last_error)
 }
 
 /// `nativeExitedByTitle() -> int`
@@ -173,7 +171,7 @@ pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativ
 /// Called by the JVM with a valid `env` reference.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativeExitedByTitle(_env: JNIEnv, _class: JClass) -> jint {
-    std::panic::catch_unwind(AssertUnwindSafe(|| with_runner(|runner| runner.exited_by_title())))
+    std::panic::catch_unwind(AssertUnwindSafe(runner::exited_by_title))
         .unwrap_or(false)
         .into()
 }
@@ -187,7 +185,7 @@ pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativ
 /// Called by the JVM with a valid `env` reference.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativeKey(_env: JNIEnv, _class: JClass, index: jint, pressed: jint) {
-    guard(|| with_runner(|runner| runner.key(index, pressed != 0)));
+    guard(|| runner::key(index, pressed != 0));
 }
 
 /// `nativeFrame() -> short[]`

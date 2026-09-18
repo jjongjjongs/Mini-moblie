@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     fmt::Write as _,
     path::PathBuf,
-    sync::Mutex,
+    sync::{Mutex, TryLockError},
     time::{Duration, Instant},
 };
 
@@ -97,13 +97,22 @@ fn packaged_jar(files: &BTreeMap<String, Vec<u8>>) -> Option<Vec<u8>> {
 struct Instance {
     emulator: Box<dyn Emulator + Send>,
     shared: Shared,
-    /// Input arrives on the UI thread and is drained by the emulator thread,
-    /// so a touch never blocks behind a tick.
-    pending_input: VecDeque<Event>,
 }
 
-pub struct Runner {
-    instance: Option<Instance>,
+/// What every caller other than the emulator thread reads and writes.
+///
+/// [`RUNNER`] is held for the whole of a tick, and a tick is as long as the
+/// emulated title makes it: a guest loop that never yields never ends, and
+/// every caller waiting on that lock waits as long. That is how one hung title
+/// used to take the whole app down - the UI thread blocked on the first key
+/// press, and the log the hang was worth could not be written, because writing
+/// it asked the same lock. So none of it goes through that lock any more. What
+/// a key press, a status query or a stop needs is here instead, behind a lock
+/// nothing holds for longer than a push or a pop.
+struct Inbox {
+    /// Key events waiting for the next tick to hand them to the emulator.
+    input: VecDeque<Event>,
+    running: bool,
     last_error: String,
     /// Whether the run that just ended was the title's own doing.
     ///
@@ -115,13 +124,116 @@ pub struct Runner {
     /// outside - the game is no longer running - and it is not the same thing:
     /// one is worth a saved log and a message, the other is worth neither.
     exited_by_title: bool,
+    /// The running title's audio, so a stop can silence a title the emulator
+    /// thread is still inside.
+    shared: Option<Shared>,
+    /// A stop asked for while the emulator thread held [`RUNNER`]; the next
+    /// tick to start honours it.
+    stop_requested: bool,
 }
 
-static RUNNER: Mutex<Runner> = Mutex::new(Runner {
-    instance: None,
+static INBOX: Mutex<Inbox> = Mutex::new(Inbox {
+    input: VecDeque::new(),
+    running: false,
     last_error: String::new(),
     exited_by_title: false,
+    shared: None,
+    stop_requested: false,
 });
+
+fn with_inbox<T>(f: impl FnOnce(&mut Inbox) -> T) -> T {
+    let mut inbox = INBOX.lock().unwrap_or_else(|x| x.into_inner());
+
+    f(&mut inbox)
+}
+
+/// Queues a key press or release for the next tick.
+///
+/// Called from the UI thread, and so never takes [`RUNNER`]: a touch has to be
+/// answered whatever the emulator thread is doing.
+pub fn key(index: i32, pressed: bool) {
+    let Some(key_code) = key_code(index) else {
+        tracing::warn!("Unknown key index {index}");
+        return;
+    };
+
+    // Every press and release, at info, because a key nobody pressed is a
+    // question no capture could answer otherwise: the floods a trace carries
+    // fill a bounded window in a fraction of a second, and the moment a phantom
+    // key fired has always already scrolled out of it by the time the log is
+    // taken. At info it survives any filter, and it says which side to look at
+    // - a press that is here came from the panel, and one that is not was
+    // invented further in.
+    tracing::info!("input: {key_code:?} {}", if pressed { "down" } else { "up" });
+
+    with_inbox(|inbox| {
+        if !inbox.running {
+            return;
+        }
+
+        inbox
+            .input
+            .push_back(if pressed { Event::Keydown(key_code) } else { Event::Keyup(key_code) });
+    });
+}
+
+/// Whether a game is loaded.
+pub fn is_running() -> bool {
+    with_inbox(|inbox| inbox.running)
+}
+
+/// The message that stopped the last run, or empty.
+pub fn last_error() -> String {
+    with_inbox(|inbox| inbox.last_error.clone())
+}
+
+/// Whether the run that just ended was the title ending itself.
+pub fn exited_by_title() -> bool {
+    with_inbox(|inbox| inbox.exited_by_title)
+}
+
+/// Ends the run, without waiting for a tick that may never end.
+///
+/// The run is reported stopped and silenced at once, so the player leaves the
+/// game and the library is not played over. The emulator itself is torn down
+/// here when the emulator thread is between ticks, and by the next tick to
+/// start otherwise - which is never, for a title that has hung, so the memory
+/// it holds is not given back until the process goes. That is the price of not
+/// making the person wait on it, and it is the right way round: a hang they can
+/// leave and report is worth more than one that holds the app until Android
+/// kills it.
+pub fn request_stop() {
+    let shared = with_inbox(|inbox| {
+        inbox.input.clear();
+        inbox.running = false;
+        // The player asked for this one, so there is nothing for the caller to
+        // tell them about it.
+        inbox.exited_by_title = false;
+        inbox.stop_requested = true;
+
+        inbox.shared.take()
+    });
+
+    // Otherwise whatever the sequence was holding goes on sounding after the
+    // game it belongs to has gone.
+    if let Some(shared) = shared {
+        shared.mixer().silence();
+    }
+
+    match RUNNER.try_lock() {
+        Ok(mut runner) => runner.stop(),
+        Err(TryLockError::Poisoned(error)) => error.into_inner().stop(),
+        // Mid-tick. The tick that is running holds it, and the next one to
+        // start will find `stop_requested` and do this itself.
+        Err(TryLockError::WouldBlock) => tracing::info!("stop asked for during a tick; the emulator is torn down when it returns"),
+    }
+}
+
+pub struct Runner {
+    instance: Option<Instance>,
+}
+
+static RUNNER: Mutex<Runner> = Mutex::new(Runner { instance: None });
 
 pub fn with_runner<T>(f: impl FnOnce(&mut Runner) -> T) -> T {
     let mut runner = RUNNER.lock().unwrap_or_else(|x| x.into_inner());
@@ -160,19 +272,28 @@ impl Runner {
 
         match build_emulator(platform, &data, options) {
             Ok(emulator) => {
-                self.instance = Some(Instance {
-                    emulator,
-                    shared,
-                    pending_input: VecDeque::new(),
+                with_inbox(|inbox| {
+                    inbox.input.clear();
+                    inbox.running = true;
+                    inbox.last_error.clear();
+                    inbox.exited_by_title = false;
+                    inbox.shared = Some(shared.clone());
+                    inbox.stop_requested = false;
                 });
-                self.last_error.clear();
-                self.exited_by_title = false;
+
+                self.instance = Some(Instance { emulator, shared });
 
                 String::new()
             }
             Err(error) => {
-                self.last_error = error.clone();
-                self.exited_by_title = false;
+                with_inbox(|inbox| {
+                    inbox.input.clear();
+                    inbox.running = false;
+                    inbox.last_error = error.clone();
+                    inbox.exited_by_title = false;
+                    inbox.shared = None;
+                    inbox.stop_requested = false;
+                });
 
                 error
             }
@@ -186,33 +307,34 @@ impl Runner {
             instance.shared.mixer().silence();
         }
 
+        with_inbox(|inbox| {
+            inbox.input.clear();
+            inbox.running = false;
+            inbox.exited_by_title = false;
+            inbox.shared = None;
+            inbox.stop_requested = false;
+        });
+
         self.instance = None;
-        // The player asked for this one, so there is nothing for the caller to
-        // tell them about it.
-        self.exited_by_title = false;
-    }
-
-    pub fn is_running(&self) -> bool {
-        self.instance.is_some()
-    }
-
-    pub fn last_error(&self) -> String {
-        self.last_error.clone()
-    }
-
-    /// Whether the title ended the run itself. See [`Runner::exited_by_title`].
-    pub fn exited_by_title(&self) -> bool {
-        self.exited_by_title
     }
 
     /// Runs the emulator for up to `budget`. Returns a status line for the
     /// player, empty while everything is fine.
     pub fn tick(&mut self, budget: Duration) -> String {
+        // A stop the UI asked for while the previous tick was running. It is
+        // answered before anything else, so the tick after a stop never runs
+        // the title a person has already left.
+        let (stop_requested, input) = with_inbox(|inbox| (inbox.stop_requested, inbox.input.drain(..).collect::<Vec<_>>()));
+        if stop_requested {
+            self.stop();
+            return String::new();
+        }
+
         let Some(instance) = self.instance.as_mut() else {
             return String::new();
         };
 
-        for event in instance.pending_input.drain(..) {
+        for event in input {
             instance.emulator.handle_event(event);
         }
 
@@ -230,8 +352,14 @@ impl Runner {
                 let message = error.to_string();
                 tracing::error!("Emulator stopped: {message}");
 
-                self.last_error = message.clone();
-                self.exited_by_title = false;
+                with_inbox(|inbox| {
+                    inbox.input.clear();
+                    inbox.running = false;
+                    inbox.last_error = message.clone();
+                    inbox.exited_by_title = false;
+                    inbox.shared = None;
+                });
+
                 instance.shared.mixer().silence();
                 self.instance = None;
 
@@ -241,8 +369,14 @@ impl Runner {
             if instance.shared.has_exited() {
                 tracing::info!("Application exited");
 
-                self.last_error.clear();
-                self.exited_by_title = true;
+                with_inbox(|inbox| {
+                    inbox.input.clear();
+                    inbox.running = false;
+                    inbox.last_error.clear();
+                    inbox.exited_by_title = true;
+                    inbox.shared = None;
+                });
+
                 // As on every other path out: a sequence the title left playing
                 // would otherwise go on sounding over the library.
                 instance.shared.mixer().silence();
@@ -264,29 +398,6 @@ impl Runner {
                 return String::new();
             }
         }
-    }
-
-    pub fn key(&mut self, index: i32, pressed: bool) {
-        let Some(instance) = self.instance.as_mut() else {
-            return;
-        };
-        let Some(key_code) = key_code(index) else {
-            tracing::warn!("Unknown key index {index}");
-            return;
-        };
-
-        // Every press and release, at info, because a key nobody pressed is a
-        // question no capture could answer otherwise: the floods a trace
-        // carries fill a bounded window in a fraction of a second, and the
-        // moment a phantom key fired has always already scrolled out of it by
-        // the time the log is taken. At info it survives any filter, and it
-        // says which side to look at - a press that is here came from the
-        // panel, and one that is not was invented further in.
-        tracing::info!("input: {key_code:?} {}", if pressed { "down" } else { "up" });
-
-        instance
-            .pending_input
-            .push_back(if pressed { Event::Keydown(key_code) } else { Event::Keyup(key_code) });
     }
 
     pub fn take_frame(&mut self) -> Option<Frame> {

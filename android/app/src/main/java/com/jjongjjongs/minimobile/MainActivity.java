@@ -24,6 +24,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.provider.OpenableColumns;
 import android.provider.Settings;
 import android.util.Log;
@@ -99,6 +100,18 @@ public final class MainActivity extends Activity {
 
     /** Ticks without a frame before the status line shows what tick reported. */
     private static final int STATUS_TICKS = 60;
+
+    /**
+     * How long one tick may run before the player says the game has hung.
+     *
+     * <p>A healthy tick returns within {@link #TICK_BUDGET_MS}, so anything
+     * near a second is already a title that has stopped yielding; four seconds
+     * is far enough past a slow load or a long garbage collection to mean it.
+     */
+    private static final long WEDGE_MS = 4000;
+
+    /** How often the watchdog looks. */
+    private static final long WEDGE_POLL_MS = 1000;
 
     /** How the player splits its height between the screen and the keypad. */
     private static final float GAME_WEIGHT = 2.3f;
@@ -301,6 +314,48 @@ public final class MainActivity extends Activity {
      * game's name flicker in and out of it.
      */
     private volatile boolean framePainted;
+
+    /**
+     * When the tick now running started, on the elapsed-real-time clock, or
+     * zero between ticks. Written by the emulator thread, read by the watchdog.
+     */
+    private volatile long tickStartedAt;
+
+    /** Whether the player is currently saying the game has stopped answering. */
+    private boolean wedgeReported;
+
+    private final Handler wedgeWatch = new Handler(Looper.getMainLooper());
+
+    /**
+     * Says so when a single tick has run far past its budget.
+     *
+     * <p>A tick is as long as the emulated title makes it: a guest loop that
+     * never yields never ends, and the emulator thread stays inside it. The
+     * screen then stops changing and nothing else about the app does, which
+     * looks like the app having died rather than the game having hung - so the
+     * person has no reason to think the log button would still work. It does,
+     * and this is what tells them.
+     */
+    private final Runnable watchForWedge = new Runnable() {
+        @Override
+        public void run() {
+            long started = tickStartedAt;
+            boolean wedged = started != 0 && SystemClock.elapsedRealtime() - started >= WEDGE_MS;
+
+            if (wedged != wedgeReported) {
+                wedgeReported = wedged;
+                if (playerStatus != null) {
+                    playerStatus.setText(wedged
+                            ? "게임이 응답하지 않습니다 - 로그 저장을 누르면 여기까지가 저장됩니다"
+                            : (currentGameName != null ? currentGameName : ""));
+                }
+            }
+
+            if (playerVisible) {
+                wedgeWatch.postDelayed(this, WEDGE_POLL_MS);
+            }
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -565,6 +620,9 @@ public final class MainActivity extends Activity {
     private void showLibrary() {
         running = false;
         playerVisible = false;
+        wedgeWatch.removeCallbacks(watchForWedge);
+        wedgeReported = false;
+        tickStartedAt = 0;
         keyMapVisible = false;
         rotateButton = null;
         keypad = null;
@@ -1420,7 +1478,14 @@ public final class MainActivity extends Activity {
 
         withDownloadPermission(() -> {
             Toast.makeText(this, "로그를 저장하는 중...", Toast.LENGTH_SHORT).show();
-            emulatorThread.execute(() -> writeLogToDownloads(null, true));
+            // Its own thread, not the emulator's. The log a person presses this
+            // for is most often the log of a title that has hung, and the
+            // emulator thread is inside that hang: anything queued behind it
+            // waits as long as the hang lasts, which is why the one log worth
+            // having was the one that could never be written. Nothing here
+            // needs the emulator - the capture and the run's status are read
+            // through their own locks.
+            new Thread(() -> writeLogToDownloads(null, true), "log-save").start();
         });
     }
 
@@ -1880,6 +1945,10 @@ public final class MainActivity extends Activity {
         setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_USER);
         buildPlayerContent();
 
+        wedgeReported = false;
+        wedgeWatch.removeCallbacks(watchForWedge);
+        wedgeWatch.postDelayed(watchForWedge, WEDGE_POLL_MS);
+
         emulatorThread.execute(() -> startGame(game));
     }
 
@@ -2131,7 +2200,9 @@ public final class MainActivity extends Activity {
         }
 
         PerformanceTuner.beforeNativeTick();
+        tickStartedAt = SystemClock.elapsedRealtime();
         String status = NativeBridge.nativeTick(TICK_BUDGET_MS);
+        tickStartedAt = 0;
         PerformanceTuner.afterNativeTick();
 
         for (int i = 0; i < MAX_AUDIO_PER_TICK; i++) {
