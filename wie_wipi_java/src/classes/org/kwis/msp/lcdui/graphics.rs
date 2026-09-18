@@ -1330,8 +1330,22 @@ impl Graphics {
             return Err(jvm.exception("java/lang/NullPointerException", "pixels is null.").await);
         }
 
+        // `bpl` is the bytes one line of the picture needs, the same argument
+        // `setRGBPixels` beside this reads and divides by four - "한 줄의
+        // 이미지가 저장되기 위해서 필요한 바이트 수", four bytes to a pixel.
+        // The destination is an `int[]`, so the room a line needs, and the step
+        // from one line to the next, are that count divided by four.
+        //
+        // Comparing the array's element count against a byte count is four
+        // times too strict, and it refused every call a title made: 다크슬레이어2
+        // reads back a 120-pixel line into an `int[120]` with `bpl` 480, which
+        // is exactly the room it needs, and the check threw instead. The title
+        // caught the throw and drew the same frame again, so it sat in its first
+        // room with the music playing and nothing else happening.
+        let line_elements = bpl / 4;
+
         let array_length = jvm.array_length(&pixels).await? as i32;
-        let required_length = height.wrapping_mul(bpl);
+        let required_length = height.wrapping_mul(line_elements);
 
         if array_length < required_length {
             return Err(jvm.exception("java/lang/ArrayIndexOutOfBoundsException", "").await);
@@ -1361,7 +1375,10 @@ impl Graphics {
 
         let copied_width = (right - x) as usize;
         let copied_height = (bottom - y) as usize;
-        let row_stride = width as usize;
+        // The line the caller asked for, not the part of it that existed: a row
+        // is written at the start of its own line and the next line begins a
+        // whole `bpl` further on, the same way `setRGBPixels` reads it.
+        let row_stride = line_elements.max(0) as usize;
 
         // For int[] the native bridge's offset<<2 is the normal four-byte
         // element addressing, so offset is an ordinary Java int[] index.
@@ -1948,7 +1965,7 @@ mod test {
             // Request width 3 starting at x=1. Only source x=1..2 exists,
             // so the third destination element must remain untouched.
             let _: () = jvm
-                .invoke_virtual(&graphics, "getRGBPixels", "(IIII[III)V", (1, 0, 3, 1, pixels.clone(), 2, 3))
+                .invoke_virtual(&graphics, "getRGBPixels", "(IIII[III)V", (1, 0, 3, 1, pixels.clone(), 2, 12))
                 .await?;
 
             let out: alloc::vec::Vec<i32> = jvm.load_array(&pixels, 0, 8).await?;
@@ -1962,11 +1979,54 @@ mod test {
             // Negative x is rejected by native get_rgb_data(). The Java
             // bridge ignores the native error code, leaving the array intact.
             let _: () = jvm
-                .invoke_virtual(&graphics, "getRGBPixels", "(IIII[III)V", (-1, 0, 1, 1, pixels.clone(), 0, 1))
+                .invoke_virtual(&graphics, "getRGBPixels", "(IIII[III)V", (-1, 0, 1, 1, pixels.clone(), 0, 4))
                 .await?;
 
             let after_negative: alloc::vec::Vec<i32> = jvm.load_array(&pixels, 0, 8).await?;
             assert_eq!(after_negative, out);
+
+            Ok(())
+        })
+    }
+
+    /// `getRGBPixels` counts its `bpl` in bytes, the way `setRGBPixels` beside
+    /// it does - so an `int[]` that exactly holds what was asked for is room
+    /// enough, and one line begins a whole `bpl` after the last.
+    ///
+    /// Counting the array's elements against a byte count is four times too
+    /// strict and refused every call: 다크슬레이어2 reads a 120-pixel line back
+    /// into an `int[120]` with `bpl` 480 and was thrown out of, every frame, so
+    /// it never left its first room.
+    #[test]
+    fn a_line_read_back_is_measured_and_stepped_in_bytes() -> Result<()> {
+        run_jvm_test(Box::new([wie_midp::get_protos().into(), get_protos().into()]), |jvm| async move {
+            let image: ClassInstanceRef<Image> = jvm
+                .invoke_static("org/kwis/msp/lcdui/Image", "createImage", "(II)Lorg/kwis/msp/lcdui/Image;", (4, 2))
+                .await?;
+
+            let graphics: ClassInstanceRef<Graphics> = jvm.invoke_virtual(&image, "getGraphics", "()Lorg/kwis/msp/lcdui/Graphics;", ()).await?;
+
+            for (row, color) in [(0, 0xff_00_00), (1, 0x00_ff_00)] {
+                let _: () = jvm.invoke_virtual(&graphics, "setColor", "(I)V", (color,)).await?;
+                let _: () = jvm.invoke_virtual(&graphics, "fillRect", "(IIII)V", (0, row, 4, 1)).await?;
+            }
+
+            let mut pixels = jvm.instantiate_array("I", 8).await?;
+            jvm.store_array(&mut pixels, 0, [0x5555_5555i32; 8]).await?;
+
+            // Two pixels of each row into lines of four: sixteen bytes a line,
+            // which the eight elements exactly hold.
+            let _: () = jvm
+                .invoke_virtual(&graphics, "getRGBPixels", "(IIII[III)V", (0, 0, 2, 2, pixels.clone(), 0, 16))
+                .await?;
+
+            let out: alloc::vec::Vec<i32> = jvm.load_array(&pixels, 0, 8).await?;
+
+            // The second row starts a whole line in, not right after the first.
+            assert_eq!(&out[0..2], &[0x00f8_0000i32; 2]);
+            assert_eq!(&out[2..4], &[0x5555_5555i32; 2]);
+            assert_eq!(&out[4..6], &[0x0000_fc00i32; 2]);
+            assert_eq!(&out[6..8], &[0x5555_5555i32; 2]);
 
             Ok(())
         })
