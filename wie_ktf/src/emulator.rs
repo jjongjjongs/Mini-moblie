@@ -40,6 +40,27 @@ fn descriptor_directory(files: &BTreeMap<String, Vec<u8>>) -> Option<String> {
     }
 }
 
+/// A packaged file's name as the title asks for it.
+///
+/// What a KTF archive ships beside the jar is the handset's own copy of the
+/// title's data directory, and the title asks for a name inside that directory
+/// rather than for the directory itself - `main1.png`, not `P/main1.png`. The
+/// descriptor names the directory (`/W/apps/010351D5/P/`), so the prefix is
+/// what has to come off.
+///
+/// Dumps disagree on its case: 블레이드마스터2 and 판타지포에버2 ship `P/`,
+/// 다이어트 and 아수라 ship `p/`. A handset's own storage does not tell the two
+/// apart, and a title that carries the lowercase spelling found none of its
+/// data with the prefix left on - 다이어트 asked its download server for all
+/// thirty-nine files at size zero, which is what "I have none of these" looks
+/// like on the wire.
+///
+/// `None` for anything not under that directory, which is the jar and the
+/// descriptors beside it.
+fn packaged_name(path: &str) -> Option<&str> {
+    path.strip_prefix("P/").or_else(|| path.strip_prefix("p/"))
+}
+
 /// Moves an archive whose descriptor sits in a subdirectory back to the root.
 ///
 /// What lies under the descriptor's directory is the title. What lies beside it
@@ -172,7 +193,7 @@ impl KtfEmulator {
         system.set_title_draws_sideways(title_quirks(TitlePlatform::Ktf, aid).drawn_sideways);
 
         for (path, data) in files {
-            let path = path.trim_start_matches("P/");
+            let path = packaged_name(path).unwrap_or(path);
             system.filesystem().add_virtual(path, data.clone());
 
             // A package ships some of its data gzipped and the handset's
@@ -198,7 +219,7 @@ impl KtfEmulator {
         // answered out of it. See `wie_backend::local_network::funter`.
         let packaged = files
             .iter()
-            .filter_map(|(path, data)| Some((path.strip_prefix("P/")?.to_owned(), data.clone())))
+            .filter_map(|(path, data)| Some((packaged_name(path)?.to_owned(), data.clone())))
             .filter(|(path, _)| !path.is_empty())
             .collect::<BTreeMap<_, _>>();
         let funter = wie_backend::FunterEndpoint::new(packaged);
@@ -381,7 +402,7 @@ mod tests {
         vec::Vec,
     };
 
-    use super::{KtfEmulator, descriptor_directory, reroot_archive};
+    use super::{KtfEmulator, descriptor_directory, packaged_name, reroot_archive};
 
     fn archive(paths: &[&str]) -> BTreeMap<String, Vec<u8>> {
         paths.iter().map(|path| ((*path).to_string(), vec![0u8; 1])).collect()
@@ -430,5 +451,27 @@ mod tests {
         assert_eq!(descriptor_directory(&files), None);
         assert!(!KtfEmulator::loadable_archive(&files));
         assert_eq!(reroot_archive(files.clone()).keys().count(), files.len(), "left as it was");
+    }
+
+    /// The data directory comes off a packaged file's name whichever case the
+    /// dump spelled it in, and nothing else does.
+    #[test]
+    fn the_data_directory_comes_off_in_either_case() {
+        assert_eq!(packaged_name("P/main1.png"), Some("main1.png"));
+        assert_eq!(packaged_name("p/bg0.png"), Some("bg0.png"));
+        assert_eq!(packaged_name("P/snd/B1.mmf"), Some("snd/B1.mmf"));
+
+        // The jar and the descriptors beside it are not in it.
+        assert_eq!(packaged_name("010351D5.jar"), None);
+        assert_eq!(packaged_name("__adf__"), None);
+        // Nor is a name that only starts with the letter.
+        assert_eq!(packaged_name("Progress.dat"), None);
+    }
+
+    /// Only the one prefix, so a title that really does keep a `P/` inside its
+    /// data directory still finds it there.
+    #[test]
+    fn only_the_outermost_directory_comes_off() {
+        assert_eq!(packaged_name("P/P/save0"), Some("P/save0"));
     }
 }
