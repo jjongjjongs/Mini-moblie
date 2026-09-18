@@ -265,6 +265,17 @@ impl EventQueue {
                     let _: () = jvm.invoke_virtual(&event, "run", "()V", ()).await?;
                 }
 
+                // A repaint the title asked for during a stand-down was kept
+                // rather than served; once the stand-down is over it is owed,
+                // and this is where it comes due. Nothing else would ask for it
+                // again - the title asked once.
+                if Self::take_owed_paint(jvm, context).await? {
+                    jvm.store_array(&mut event, 0, vec![EventQueueEvent::RepaintEvent as i32, 0, 0, 0])
+                        .await?;
+
+                    break;
+                }
+
                 context.system().sleep(16).await; // TODO we need to wait for events
 
                 for event in pending_timer_events.drain(..) {
@@ -292,6 +303,38 @@ impl EventQueue {
         }
 
         Ok(())
+    }
+
+    /// Whether a paint kept through a stand-down is now due, taking it if so.
+    ///
+    /// `false` before a title has a display, which is every event the platform
+    /// delivers before its first card.
+    async fn take_owed_paint(jvm: &Jvm, context: &mut WieJvmContext) -> JvmResult<bool> {
+        let current_midlet: ClassInstanceRef<MIDlet> = jvm
+            .get_static_field("javax/microedition/midlet/MIDlet", "currentMIDlet", "Ljavax/microedition/midlet/MIDlet;")
+            .await?;
+        if current_midlet.is_null() {
+            return Ok(false);
+        }
+
+        let mut display = MIDlet::display(jvm, &current_midlet).await?;
+        if display.is_null() {
+            return Ok(false);
+        }
+
+        let owed: bool = jvm.get_field(&display, "__wiePaintOwed", "Z").await?;
+        if !owed {
+            return Ok(false);
+        }
+
+        let until: i64 = jvm.get_field(&display, "__wieStandDownUntil", "J").await?;
+        if (context.system().platform().now().raw() as i64) < until {
+            return Ok(false);
+        }
+
+        jvm.put_field(&mut display, "__wiePaintOwed", "Z", false).await?;
+
+        Ok(true)
     }
 
     async fn dispatch_event(
@@ -330,9 +373,19 @@ impl EventQueue {
                 // way for a few rounds; one that has handed the screen back gets
                 // it straight back. See `HOST_PAINT_STAND_DOWN`.
                 let until: i64 = jvm.get_field(&display, "__wieStandDownUntil", "J").await?;
+                let mut display = display;
                 if (_context.system().platform().now().raw() as i64) < until {
-                    tracing::debug!("host paint stood down until {until}");
+                    // Kept rather than dropped. A frontend asks for a host paint
+                    // only when the title asked for one, so a request thrown
+                    // away here is a screen that never comes back: 열혈고사전설2
+                    // answers its last character-creation question, swaps the
+                    // card, asks once and settles into a sleep loop - and that
+                    // one request landed inside a stand-down, so the question it
+                    // had already left stayed on the screen for good.
+                    tracing::debug!("host paint stood down until {until}, kept");
+                    jvm.put_field(&mut display, "__wiePaintOwed", "Z", true).await?;
                 } else {
+                    jvm.put_field(&mut display, "__wiePaintOwed", "Z", false).await?;
                     let _: () = jvm.invoke_virtual(&display, "handlePaintEvent", "()V", ()).await?;
                 }
             }

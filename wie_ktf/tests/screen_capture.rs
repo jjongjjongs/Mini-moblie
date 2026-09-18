@@ -37,6 +37,9 @@
 //!   it is sent. Only the second launch is captured.
 //! - `WIE_TICKS2` - the second launch's tick budget, when it needs a different
 //!   one from the first (default: the same).
+//! - `WIE_REDRAW_ON_REQUEST` - feed a host paint only when the title asks for
+//!   one, which is what the Android frontend does. Off, a paint arrives every
+//!   forty ticks regardless, and a repaint the runtime loses is covered up.
 
 use std::{
     collections::BTreeMap,
@@ -68,12 +71,17 @@ struct Captured {
 #[derive(Default, Clone)]
 struct CaptureScreen {
     captured: Arc<Mutex<Captured>>,
+    /// Set by `request_redraw`, taken by the run loop under
+    /// `WIE_REDRAW_ON_REQUEST`.
+    requested: Arc<AtomicBool>,
     /// The panel the archive under capture names for itself, when it names one.
     native_size: Option<(u32, u32)>,
 }
 
 impl Screen for CaptureScreen {
     fn request_redraw(&self) -> Result<()> {
+        self.requested.store(true, Ordering::SeqCst);
+
         Ok(())
     }
 
@@ -511,10 +519,20 @@ fn run_once(
     // `request_redraw` only asks; the host is what paints. `wie_cli` turns the
     // request into a window redraw, so a probe that never feeds one back sees
     // a title paint nothing however well it runs.
+    // The shipped Android frontend feeds a host paint only when the title asked
+    // for one, where this probe feeds one every forty ticks whether or not it
+    // did. That difference hides a whole class of fault - a repaint the runtime
+    // drops is invisible here and permanent there - so it can be turned off.
+    let redraw_on_request = std::env::var("WIE_REDRAW_ON_REQUEST").is_ok();
+
     let mut ticks = 0;
     let mut stopped = None;
     while ticks < ticks_limit && !exited.load(Ordering::SeqCst) {
-        if ticks % 40 == 0 {
+        if redraw_on_request {
+            if screen.requested.swap(false, Ordering::SeqCst) {
+                emulator.handle_event(Event::Redraw);
+            }
+        } else if ticks % 40 == 0 {
             emulator.handle_event(Event::Redraw);
         }
         for (step, (tick, key)) in script.iter().enumerate() {

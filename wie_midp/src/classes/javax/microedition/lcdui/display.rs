@@ -95,6 +95,10 @@ impl Display {
                 // that calls it from inside its own paint recursing.
                 JavaFieldProto::new("__wiePainting", "Z", Default::default()),
                 JavaFieldProto::new("__wieStandDownUntil", "J", Default::default()),
+                // A repaint the title asked for while the host paint was stood
+                // down, kept until the stand-down is over. See
+                // `net.wie.EventQueue.getNextEvent`.
+                JavaFieldProto::new("__wiePaintOwed", "Z", Default::default()),
             ],
             access_flags: Default::default(),
         }
