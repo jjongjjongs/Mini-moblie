@@ -441,6 +441,16 @@ pub fn get_unk3_method_table() -> Vec<WIPICMethodBody> {
     ]
 }
 
+/// Table 12 - what a title asks about the handset it is running on.
+///
+/// Not a drawing table, which is worth writing down because its traffic looks
+/// like drawing traffic: 마스터오브소드4 calls slot 1 three hundred times in a
+/// session, once per frame, and slot 0 once at startup. Following what its
+/// arguments point at settles it - slot 0 is handed the handset's phone
+/// number, `"01046119269"`, and both slots are handed this table's own array
+/// of function pointers as their last argument, the way a C interface passes
+/// itself. The words in the registers never change between calls; everything
+/// that does is behind them.
 pub fn get_unk12_method_table() -> Vec<WIPICMethodBody> {
     vec![gen_unk_stub(12, 0), gen_unk_stub(12, 1), gen_unk_stub(12, 2)]
 }
