@@ -723,7 +723,35 @@ impl Display {
             Some(WIPIKeyCode::FIRE) => 8,
             Some(WIPIKeyCode::LEFT_SOFT_KEY) => 90,
             Some(WIPIKeyCode::RIGHT_SOFT_KEY) => 91,
+            // The rest of the handset's own keys, which sit between the pad
+            // keys and the soft keys in the same run of negative codes.
+            // `get_key_code` below already names every one of these pairs; the
+            // two directions have to agree.
+            Some(WIPIKeyCode::VOLUME_UP) => 96,
+            Some(WIPIKeyCode::VOLUME_DOWN) => 97,
             Some(WIPIKeyCode::CLEAR) => 99,
+            None if key == -8 => 92,
+            None if key == -15 => 98,
+            // A key the handset does not give an action to.
+            //
+            // A game action is an index: 영웅전설3 and 4 gate every press on
+            // `keyTable[getGameAction(key)]`, and pass whatever comes back
+            // straight into that `byte[]`. The Android frontend's 저장 button
+            // is the handset's CALL key (-10), which has no action, and
+            // handing the title -10 back made it read `keyTable[-10]` and die
+            // on ArrayIndexOutOfBoundsException the moment the button was
+            // pressed - on the title screen, four seconds into a run.
+            //
+            // No negative number is an index, so no key the handset reserves
+            // for itself can answer as itself. Zero is what MIDP's
+            // `getGameAction` returns for a key with no game action and what
+            // these titles read as "this key does nothing", so the press is
+            // ignored the way it is on the handset.
+            //
+            // Positive codes still answer as themselves: a digit is not a
+            // game action either, but titles read the digit back from here and
+            // compare it against '0'..'9', so it has to survive the trip.
+            _ if key < 0 => 0,
             _ => key,
         };
 
@@ -841,6 +869,44 @@ mod test {
             assert_eq!(clear, -16);
             assert_eq!(game_a, 0);
             assert_eq!(invalid, 0);
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_get_game_action() -> Result<()> {
+        run_jvm_test(Box::new([wie_midp::get_protos().into(), get_protos().into()]), |jvm| async move {
+            let mut actions = alloc::vec::Vec::new();
+            for key in [-1i32, -2, -3, -4, -5, -6, -7, -8, -13, -14, -15, -16] {
+                let action: i32 = jvm.invoke_static("org/kwis/msp/lcdui/Display", "getGameAction", "(I)I", (key,)).await?;
+                actions.push(action);
+            }
+
+            // Every pair `getKeyCode` names, read the other way.
+            assert_eq!(actions, [1, 6, 2, 5, 8, 90, 91, 92, 96, 97, 98, 99]);
+
+            // The keys the handset keeps for itself have no game action, and a
+            // title indexes an array with what comes back: 영웅전설3 and 4 read
+            // `keyTable[getGameAction(key)]` and died on the CALL key (-10)
+            // when it answered as itself.
+            let mut reserved = alloc::vec::Vec::new();
+            for key in [-9i32, -10, -11, -12, -17] {
+                let action: i32 = jvm.invoke_static("org/kwis/msp/lcdui/Display", "getGameAction", "(I)I", (key,)).await?;
+                reserved.push(action);
+            }
+
+            assert_eq!(reserved, [0, 0, 0, 0, 0]);
+
+            // A digit is not a game action either, but titles read it back from
+            // here and compare it against '0'..'9', so it survives the trip.
+            let mut printable = alloc::vec::Vec::new();
+            for key in ['0' as i32, '9' as i32, '#' as i32, '*' as i32] {
+                let action: i32 = jvm.invoke_static("org/kwis/msp/lcdui/Display", "getGameAction", "(I)I", (key,)).await?;
+                printable.push(action);
+            }
+
+            assert_eq!(printable, ['0' as i32, '9' as i32, '#' as i32, '*' as i32]);
 
             Ok(())
         })

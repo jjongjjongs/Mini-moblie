@@ -358,6 +358,11 @@ fn key_by_name(name: &str) -> Option<KeyCode> {
         "LSK" | "LEFT_SOFT_KEY" => KeyCode::LEFT_SOFT_KEY,
         "RSK" | "RIGHT_SOFT_KEY" => KeyCode::RIGHT_SOFT_KEY,
         "CLEAR" => KeyCode::CLEAR,
+        // The keys the handset printed above the pad. The Android frontend's
+        // 저장 button is CALL, which is how several titles reach their save
+        // screen, so a walk has to be able to press it.
+        "CALL" | "SEND" => KeyCode::CALL,
+        "HANGUP" | "END" => KeyCode::HANGUP,
         "NUM0" => KeyCode::NUM0,
         "NUM1" => KeyCode::NUM1,
         "NUM2" => KeyCode::NUM2,
