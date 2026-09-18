@@ -69,7 +69,9 @@ fn supported(op: FastOp) -> bool {
         | FastOp::MovPc { .. }
         | FastOp::BlockXfer { .. } => true,
         FastOp::HiReg { op, .. } => op != 3,
-        FastOp::AluOp { op, .. } => matches!(op, 0x0 | 0x1 | 0x2 | 0x3 | 0x4 | 0x7 | 0xC | 0xE | 0xF | 0x8 | 0xA | 0xB | 0x9 | 0xD),
+        // Every data-processing op, ADC and SBC included: the whole sixteen
+        // compile, so none of them sends a block to the interpreter any more.
+        FastOp::AluOp { .. } => true,
     }
 }
 
@@ -1302,6 +1304,26 @@ fn emit_alu(a: &mut Asm, op: u8, rd: u8, rs: u8) {
             emit_flags_nzcv(a, false);
             dynasm!(a ; mov [rbx + ro(rd)], r8d);
         }
+        0x5 => {
+            // ADC: rd + rs + C, full NZCV, writeback. `adc` takes its carry-in
+            // from the host flag, so ARM's C is put there first: `neg` sets the
+            // host carry when its operand is non-zero, which for a value already
+            // narrowed to 0 or 1 is the bit itself. `mov` does not disturb flags,
+            // so loading rd in between is safe.
+            emit_arm_carry_in(a, rd, false);
+            dynasm!(a ; adc eax, [rbx + ro(rs)]);
+            emit_flags_nzcv(a, true);
+            dynasm!(a ; mov [rbx + ro(rd)], r8d);
+        }
+        0x6 => {
+            // SBC: rd - rs - (1 - C), full NZCV, writeback. `sbb` borrows by the
+            // host carry, and the borrow ARM wants is the inverse of its C - which
+            // is what comparing the bit against one leaves behind.
+            emit_arm_carry_in(a, rd, true);
+            dynasm!(a ; sbb eax, [rbx + ro(rs)]);
+            emit_flags_nzcv(a, false);
+            dynasm!(a ; mov [rbx + ro(rd)], r8d);
+        }
         0xD => {
             // MUL: rd * rs (low 32 bits); N,Z from result, C forced to 0, V kept.
             dynasm!(a ; mov eax, [rbx + ro(rd)] ; imul eax, [rbx + ro(rs)] ; mov [rbx + ro(rd)], eax ; xor ecx, ecx);
@@ -1330,7 +1352,29 @@ fn emit_alu(a: &mut Asm, op: u8, rd: u8, rs: u8) {
             );
             emit_flags_nzc(a);
         }
-        _ => unreachable!(), // ADC/SBC
+        _ => unreachable!(),
+    }
+}
+
+/// Loads `rd` into `eax` and leaves the host carry holding ARM's C flag, or the
+/// borrow `sbb` wants - its inverse - when `invert`.
+///
+/// `neg` sets the host carry when its operand is non-zero, which for a bit
+/// already narrowed to 0 or 1 is that bit; `cmp x, 1` borrows exactly when the
+/// bit is clear, which is its inverse. `rd` is loaded before either, because
+/// nothing may touch the flags between them and the caller's `adc`/`sbb`, and
+/// `mov` does not.
+fn emit_arm_carry_in(a: &mut Asm, rd: u8, invert: bool) {
+    dynasm!(a
+        ; mov ecx, [rbx + CPSR]
+        ; shr ecx, 29
+        ; and ecx, 1
+        ; mov eax, [rbx + ro(rd)]
+    );
+    if invert {
+        dynasm!(a ; cmp ecx, 1);
+    } else {
+        dynasm!(a ; neg ecx);
     }
 }
 

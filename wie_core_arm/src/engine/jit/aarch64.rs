@@ -85,7 +85,9 @@ fn supported(op: FastOp) -> bool {
         | FastOp::MovPc { .. }
         | FastOp::BlockXfer { .. } => true,
         FastOp::HiReg { op, .. } => op != 3,
-        FastOp::AluOp { op, .. } => matches!(op, 0x0 | 0x1 | 0x2 | 0x3 | 0x4 | 0x7 | 0xC | 0xE | 0xF | 0x8 | 0xA | 0xB | 0x9 | 0xD),
+        // Every data-processing op, ADC and SBC included: the whole sixteen
+        // compile, so none of them sends a block to the interpreter any more.
+        FastOp::AluOp { .. } => true,
     }
 }
 
@@ -1156,6 +1158,25 @@ fn emit_alu(a: &mut Asm, op: u8, rd: u8, rs: u8) {
             emit_flags_nzcv(a);
             a64!(a ; str w8, [x19, #ro(rd)]);
         }
+        0x5 => {
+            // ADC: rd + rs + C, full NZCV, writeback. `adcs` carries in the host
+            // C flag, so ARM's is put there first - see `emit_arm_carry_in`.
+            a64!(a ; ldr w0, [x19, #ro(rd)] ; ldr w1, [x19, #ro(rs)]);
+            emit_arm_carry_in(a);
+            a64!(a ; adcs w0, w0, w1);
+            emit_flags_nzcv(a);
+            a64!(a ; str w8, [x19, #ro(rd)]);
+        }
+        0x6 => {
+            // SBC: rd - rs - (1 - C), full NZCV, writeback. A64's `sbcs` is
+            // `Rn + NOT(Rm) + C`, which is that same expression, and its carry
+            // out is ARM's - so once C is in the host flag the two agree.
+            a64!(a ; ldr w0, [x19, #ro(rd)] ; ldr w1, [x19, #ro(rs)]);
+            emit_arm_carry_in(a);
+            a64!(a ; sbcs w0, w0, w1);
+            emit_flags_nzcv(a);
+            a64!(a ; str w8, [x19, #ro(rd)]);
+        }
         0xD => {
             // MUL: rd * rs (low 32 bits); N,Z from result, C forced to 0, V kept.
             a64!(a ; ldr w0, [x19, #ro(rd)] ; ldr w2, [x19, #ro(rs)] ; mul w0, w0, w2 ; str w0, [x19, #ro(rd)] ; mov w1, wzr);
@@ -1182,6 +1203,20 @@ fn emit_alu(a: &mut Asm, op: u8, rd: u8, rs: u8) {
         }
         _ => unreachable!(),
     }
+}
+
+/// Leaves the host carry holding ARM's C flag, for the `adcs`/`sbcs` that
+/// follows.
+///
+/// `subs wzr, w3, #1` borrows exactly when the bit is clear, so it sets the host
+/// carry to the bit itself. Nothing may touch the flags between this and the
+/// instruction that consumes them, so the operands are loaded before it.
+fn emit_arm_carry_in(a: &mut Asm) {
+    a64!(a
+        ; ldr w3, [x19, #CPSR]
+        ; ubfx w3, w3, #29, #1
+        ; subs wzr, w3, #1
+    );
 }
 
 /// Flags set by a preceding `adds`/`subs` with the result in `w0`: save it to

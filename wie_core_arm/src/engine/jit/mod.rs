@@ -1398,6 +1398,64 @@ mod tests {
         assert_same_arm(&code, &regs, CODE + 0x14);
     }
 
+    /// ADC and SBC carry the C flag in and out, so a chain of them is how a
+    /// Thumb title does 64-bit arithmetic. The JIT used to decline both and hand
+    /// every one to the interpreter - a million of them in eight seconds, on
+    /// 에스테반루크's opening - so what matters is that compiling them keeps the
+    /// interpreter's answer, flags included.
+    #[test]
+    fn jit_thumb_adc_sbc_match_the_interpreter() {
+        // adcs r0, r1 ; sbcs r2, r3 ; adcs r4, r5 ; sbcs r6, r7
+        let code = thumb(&[0x4148, 0x419a, 0x41ec, 0x41be]);
+
+        // Every interesting carry-in/carry-out corner: a pair that carries out,
+        // one that does not, a borrow, and the signed-overflow edges.
+        for regs in [
+            [0xffff_ffff, 1, 0, 0, 0x7fff_ffff, 1, 0, 0, 0, 0, 0, 0, 0, DATA + 0x8000, 0],
+            [0, 0, 0, 1, 0x8000_0000, 0x8000_0000, 5, 5, 0, 0, 0, 0, 0, DATA + 0x8000, 0],
+            [
+                0x1234_5678,
+                0x8765_4321,
+                0xffff_ffff,
+                0xffff_ffff,
+                1,
+                0xffff_ffff,
+                0x8000_0000,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                DATA + 0x8000,
+                0,
+            ],
+        ] {
+            assert_same(&code, &regs, CODE + 8);
+        }
+    }
+
+    /// The 64-bit add and subtract a title actually writes: the low halves set
+    /// the carry, the high halves take it. Wrong carry plumbing shows up here as
+    /// a high word off by one, which a single instruction in isolation hides.
+    #[test]
+    fn jit_thumb_carry_chains_a_64_bit_add_and_subtract() {
+        // adds r0, r0, r2 ; adcs r1, r3   (r1:r0 += r3:r2)
+        // subs r4, r4, r6 ; sbcs r5, r7   (r5:r4 -= r7:r6)
+        let code = thumb(&[0x1880, 0x4159, 0x1ba4, 0x41bd]);
+
+        for regs in [
+            // low halves carry into the high ones
+            [0xffff_ffff, 0, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, DATA + 0x8000, 0],
+            // they do not
+            [1, 0, 1, 0, 9, 1, 1, 0, 0, 0, 0, 0, 0, DATA + 0x8000, 0],
+            // the subtract borrows all the way out
+            [0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, DATA + 0x8000, 0],
+        ] {
+            assert_same(&code, &regs, CODE + 8);
+        }
+    }
+
     #[test]
     fn jit_arm_fault() {
         // ARM ldr r0,[r5] with r5 unmapped: both engines must fault identically.
