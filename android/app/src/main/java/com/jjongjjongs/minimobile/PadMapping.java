@@ -27,8 +27,8 @@ final class PadMapping {
     static final int UNASSIGNED = -1;
 
     // Pad buttons, in the order the picker lays them out: the D-pad, the four
-    // face buttons, the shoulders and triggers, then the three a pad puts
-    // around its middle.
+    // face buttons, the shoulders and triggers, the two sticks pressed in, then
+    // the three a pad puts around its middle.
     static final int PAD_DPAD_UP = 0;
     static final int PAD_DPAD_DOWN = 1;
     static final int PAD_DPAD_LEFT = 2;
@@ -37,7 +37,7 @@ final class PadMapping {
     static final int PAD_L2 = 9;
     static final int PAD_R2 = 11;
 
-    static final int PAD_COUNT = 15;
+    static final int PAD_COUNT = 17;
 
     /** The Android key code each pad button arrives as. */
     private static final int[] PAD_KEY_CODES = {
@@ -53,6 +53,8 @@ final class PadMapping {
             KeyEvent.KEYCODE_BUTTON_L2,
             KeyEvent.KEYCODE_BUTTON_R1,
             KeyEvent.KEYCODE_BUTTON_R2,
+            KeyEvent.KEYCODE_BUTTON_THUMBL,
+            KeyEvent.KEYCODE_BUTTON_THUMBR,
             KeyEvent.KEYCODE_BUTTON_START,
             KeyEvent.KEYCODE_BUTTON_SELECT,
             KeyEvent.KEYCODE_BUTTON_MODE,
@@ -63,7 +65,8 @@ final class PadMapping {
             "D▲", "D▼", "D◀", "D▶",
             "A", "B", "X", "Y",
             "L1", "L2", "R1", "R2",
-            "START", "SELECT", "HOME",
+            "L3", "R3", "START", "SELECT",
+            "HOME",
     };
 
     /** A word of warning under a button, or null for one that needs none. */
@@ -71,14 +74,17 @@ final class PadMapping {
             null, null, null, null,
             null, null, null, null,
             null, null, null, null,
-            null, null, "기기따라 제한",
+            "스틱 누름", "스틱 누름", null, null,
+            "기기따라 제한",
     };
 
     /**
      * Where the pad starts out, which is where it has always been: the D-pad on
      * the directions, A on the confirm key, B on back, X and Y on the two keys
      * a handset put below its pad, and each shoulder pair on the soft key over
-     * it. `기본값으로` puts exactly this back.
+     * it. The sticks pressed in and the three around the middle start on
+     * nothing, so they are there to be spent on whatever a game needs.
+     * `기본값으로` puts exactly this back.
      */
     private static final int[] DEFAULTS = {
             MainActivity.CODE_UP, MainActivity.CODE_DOWN,
@@ -87,7 +93,8 @@ final class PadMapping {
             MainActivity.CODE_STAR, MainActivity.CODE_HASH,
             MainActivity.CODE_SOFT_L, MainActivity.CODE_SOFT_L,
             MainActivity.CODE_SOFT_R, MainActivity.CODE_SOFT_R,
-            UNASSIGNED, UNASSIGNED, UNASSIGNED,
+            UNASSIGNED, UNASSIGNED, UNASSIGNED, UNASSIGNED,
+            UNASSIGNED,
     };
 
     private static final String PREFS = "pad_mapping";
