@@ -606,6 +606,35 @@ mod tests {
     /// was still building is already gone. Writing over it from there is a
     /// replace at position -1, which threw out of the component and killed the
     /// title the moment a direction key reached a field it had set.
+    /// The class the input method reaches for has to be one the runtime can
+    /// load.
+    ///
+    /// 드래곤하트 asks for the next input mode from the key its name entry
+    /// marks 지우기. `InputMethodHandler` names
+    /// `org/kwis/msp/lcdui/CandidateWindow` in a field and instantiates it on
+    /// the way, and the class was written but left out of the list this
+    /// runtime registers - so every press of that key died on
+    /// `NoClassDefFoundError: org/kwis/msp/lcdui/CandidateWindow` out of
+    /// `TextComponent.keyNotify`, and the mode could never move, which is why
+    /// the name came out in English with 한글 one press away.
+    ///
+    /// A class written and not registered is invisible until a title asks for
+    /// it by name, so the list is what the test holds to.
+    #[test]
+    fn the_candidate_window_is_a_class_this_runtime_registers() -> Result<()> {
+        let names = get_protos().iter().map(|proto| proto.name).collect::<Vec<_>>();
+
+        for name in [
+            "org/kwis/msp/lcdui/CandidateWindow",
+            "org/kwis/msp/lcdui/InputMethodHandler",
+            "org/kwis/msp/lcdui/InputMethodListener",
+        ] {
+            assert!(names.contains(&name), "{name} has to be registered");
+        }
+
+        Ok(())
+    }
+
     #[test]
     fn a_flush_with_nothing_to_write_over_does_not_reach_back() -> Result<()> {
         run_jvm_test(
