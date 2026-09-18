@@ -8,6 +8,7 @@ import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
+import android.database.ContentObserver;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -21,7 +22,10 @@ import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.OpenableColumns;
+import android.provider.Settings;
 import android.util.Log;
 import android.util.SparseArray;
 import android.view.InputDevice;
@@ -258,6 +262,20 @@ public final class MainActivity extends Activity {
     private Button collectButton;
 
     private Button stopButton;
+    private Button rotateButton;
+
+    /**
+     * Whether the player is held in one orientation rather than following the
+     * phone.
+     *
+     * <p>Only meaningful while the phone's own auto-rotate is on: with it off
+     * there is nothing to be held against, and the button is the two-way switch
+     * it has always been.
+     */
+    private boolean orientationPinned;
+
+    /** Redraws the rotate button when the phone's auto-rotate setting changes. */
+    private ContentObserver autoRotateObserver;
     private String currentGameName;
     /** The game the player is showing, kept so a rotation can relay it out. */
     private File currentGame;
@@ -293,6 +311,18 @@ public final class MainActivity extends Activity {
         if (!gamesDir.exists()) {
             gamesDir.mkdirs();
         }
+
+        // The rotate button says one thing while the phone turns its own screen
+        // and another while it does not, and the player can be left running
+        // while that setting is changed from the notification shade.
+        autoRotateObserver = new ContentObserver(new Handler(Looper.getMainLooper())) {
+            @Override
+            public void onChange(boolean selfChange) {
+                showRotateState();
+            }
+        };
+        getContentResolver().registerContentObserver(
+                Settings.System.getUriFor(Settings.System.ACCELEROMETER_ROTATION), false, autoRotateObserver);
 
         showLibrary();
 
@@ -482,6 +512,10 @@ public final class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         running = false;
+        if (autoRotateObserver != null) {
+            getContentResolver().unregisterContentObserver(autoRotateObserver);
+            autoRotateObserver = null;
+        }
         NativeBridge.nativeStop();
         audioOutput.release();
         emulatorThread.shutdownNow();
@@ -530,6 +564,7 @@ public final class MainActivity extends Activity {
         running = false;
         playerVisible = false;
         keyMapVisible = false;
+        rotateButton = null;
         keypad = null;
         landscapeMode = false;
         // The library is always upright, whichever way the player was left.
@@ -1823,7 +1858,10 @@ public final class MainActivity extends Activity {
         currentGame = game;
         currentGameName = displayName(game);
         framePainted = false;
-        landscapeMode = false;
+        // Whichever way the phone is being held: the player opens the way the
+        // window already is, not the way the last one was.
+        landscapeMode = getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
+        orientationPinned = false;
         // The player is a dark device again, so restore light status-bar icons.
         setLightStatusBar(false);
 
@@ -1832,9 +1870,12 @@ public final class MainActivity extends Activity {
         gameView = new GameView(this);
         keypad = new KeypadView(this);
 
-        // Button-driven rotation only: lock to portrait so the sensor cannot
-        // turn the player on its own, then let the title-bar toggle switch it.
-        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+        // The phone decides, the way it decides for everything else:
+        // SCREEN_ORIENTATION_USER follows the sensor while the phone's
+        // auto-rotate is on and holds the orientation the user locked while it
+        // is off. The title-bar toggle then only has to say what the phone is
+        // not already saying - see `toggleOrientation`.
+        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_USER);
         buildPlayerContent();
 
         emulatorThread.execute(() -> startGame(game));
@@ -1925,11 +1966,12 @@ public final class MainActivity extends Activity {
 
         showCollectState();
 
-        Button rotate = navyButton(landscapeMode ? "세로" : "가로");
-        rotate.setOnClickListener(v -> toggleOrientation());
+        rotateButton = navyButton("");
+        rotateButton.setOnClickListener(v -> toggleOrientation());
+        showRotateState();
         LinearLayout.LayoutParams rotateParams = new LinearLayout.LayoutParams(dp(56), dp(34));
         rotateParams.rightMargin = dp(10);
-        bar.addView(rotate, rotateParams);
+        bar.addView(rotateButton, rotateParams);
 
         return bar;
     }
@@ -1957,14 +1999,49 @@ public final class MainActivity extends Activity {
     }
 
     /**
-     * Asks for the other orientation. The window turning is what fires
-     * onConfigurationChanged, which flips {@code landscapeMode} and relays the
-     * player out - so that callback stays the one place the mode changes.
+     * Turns the player, or gives it back to the phone.
+     *
+     * <p>While the phone's auto-rotate is off the player only ever turns
+     * because this was pressed, so it is the two-way switch it has always
+     * been. While auto-rotate is on the player is already following the phone,
+     * and what this offers instead is to hold it still - for playing lying
+     * down, where the phone's idea of upright is not the player's. Pressed
+     * again it hands the player back.
+     *
+     * <p>The window turning is what fires onConfigurationChanged, which flips
+     * {@code landscapeMode} and relays the player out, so that callback stays
+     * the one place the mode changes. A press that asks for the orientation the
+     * window is already in turns nothing, so the button is redrawn here too.
      */
     private void toggleOrientation() {
-        setRequestedOrientation(landscapeMode
-                ? ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-                : ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
+        if (autoRotateOn() && orientationPinned) {
+            orientationPinned = false;
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_USER);
+        } else {
+            orientationPinned = true;
+            setRequestedOrientation(landscapeMode
+                    ? ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                    : ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
+        }
+
+        showRotateState();
+    }
+
+    /** Whether the phone would turn its own screen if it were moved. */
+    private boolean autoRotateOn() {
+        return Settings.System.getInt(getContentResolver(), Settings.System.ACCELEROMETER_ROTATION, 0) == 1;
+    }
+
+    /**
+     * What the rotate button says: 자동 to hand the player back to the phone,
+     * and otherwise the orientation the press would turn it to.
+     */
+    private void showRotateState() {
+        if (rotateButton == null) {
+            return;
+        }
+
+        rotateButton.setText(autoRotateOn() && orientationPinned ? "자동" : landscapeMode ? "세로" : "가로");
     }
 
     @Override
