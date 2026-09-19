@@ -73,8 +73,18 @@ impl MIDlet {
             .await
     }
 
-    async fn notify_destroyed(_jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<()> {
-        tracing::warn!("stub javax.microedition.midlet.MIDlet::notifyDestroyed({this:?})");
+    /// The title saying it is finished and asking to be shut down.
+    ///
+    /// This is how a title quits of its own accord, and doing nothing about it
+    /// left the app sitting on whatever frame was last painted, with the title's
+    /// threads gone and only the event pump still turning. 아르덴전기 answers
+    /// 아니오 to its 추가다운로드 offer by tearing its own threads down and
+    /// calling this, so the offer stayed on screen for good - the same hang a
+    /// person reports as the game having frozen, when in fact it had ended.
+    async fn notify_destroyed(_jvm: &Jvm, context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<()> {
+        tracing::debug!("javax.microedition.midlet.MIDlet::notifyDestroyed({this:?})");
+
+        context.system().platform().exit();
 
         Ok(())
     }
