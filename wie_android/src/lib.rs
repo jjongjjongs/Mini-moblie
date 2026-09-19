@@ -24,7 +24,7 @@ use std::{panic::AssertUnwindSafe, path::PathBuf, time::Duration};
 use jni::{
     JNIEnv,
     objects::{JByteArray, JClass, JShortArray, JString},
-    sys::{jbyteArray, jint, jshortArray, jstring},
+    sys::{jbyteArray, jint, jlong, jshortArray, jstring},
 };
 
 use crate::{platform::AndroidHandsetInformation, runner::with_runner};
@@ -151,6 +151,25 @@ pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativ
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativeRunning(_env: JNIEnv, _class: JClass) -> jint {
     std::panic::catch_unwind(AssertUnwindSafe(runner::is_running)).unwrap_or(false).into()
+}
+
+/// `nativeGuestProgress() -> long`
+///
+/// Guest instructions retired so far. It climbs while the title is running and
+/// stops dead when it is not, which is what separates a title doing a long
+/// piece of work - a loading screen is one tick that can last seconds - from
+/// one that has stopped answering. Elapsed tick time alone cannot tell those
+/// apart, and calling a loading title hung is how the player came to say
+/// "게임이 응답하지 않습니다" over 에스테반루크's 새로하기, which was working.
+///
+/// Reads one atomic and takes no lock, so the UI thread can ask while a tick
+/// is in flight.
+///
+/// # Safety
+/// Called by the JVM with a valid `env` reference.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativeGuestProgress(_env: JNIEnv, _class: JClass) -> jlong {
+    wie_core_arm::EXECUTED_INSTRUCTIONS.load(std::sync::atomic::Ordering::Relaxed) as jlong
 }
 
 /// `nativeLastError() -> String`

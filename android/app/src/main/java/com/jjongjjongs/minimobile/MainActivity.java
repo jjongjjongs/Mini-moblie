@@ -324,30 +324,56 @@ public final class MainActivity extends Activity {
     /** Whether the player is currently saying the game has stopped answering. */
     private boolean wedgeReported;
 
+    /** Whether the player is currently saying the game is busy loading. */
+    private boolean busyReported;
+
+    /** `nativeGuestProgress` as of the last watchdog poll, to compare against. */
+    private long lastGuestProgress;
+
     private final Handler wedgeWatch = new Handler(Looper.getMainLooper());
 
     /**
-     * Says so when a single tick has run far past its budget.
+     * Says what a tick running far past its budget is actually doing.
      *
-     * <p>A tick is as long as the emulated title makes it: a guest loop that
-     * never yields never ends, and the emulator thread stays inside it. The
-     * screen then stops changing and nothing else about the app does, which
-     * looks like the app having died rather than the game having hung - so the
-     * person has no reason to think the log button would still work. It does,
-     * and this is what tells them.
+     * <p>A tick is as long as the emulated title makes it: guest code runs
+     * until it awaits, so a loading routine that never yields is one tick, and
+     * the emulator thread stays inside it. The screen stops changing and
+     * nothing else about the app does, which looks like the app having died -
+     * so the person has no reason to think the log button would still work.
+     *
+     * <p>But how long a tick has run does not say whether the title is stuck:
+     * 에스테반루크's 새로하기 is a single tick of several seconds that then goes
+     * on to the game perfectly well, and calling that "응답하지 않습니다" told a
+     * person their game had hung when it was loading. What separates the two is
+     * whether the guest is still retiring instructions, so that is what is
+     * asked, and a title that is working says so.
      */
     private final Runnable watchForWedge = new Runnable() {
         @Override
         public void run() {
             long started = tickStartedAt;
-            boolean wedged = started != 0 && SystemClock.elapsedRealtime() - started >= WEDGE_MS;
+            boolean overrunning = started != 0 && SystemClock.elapsedRealtime() - started >= WEDGE_MS;
 
-            if (wedged != wedgeReported) {
+            long progress = NativeBridge.nativeGuestProgress();
+            boolean advancing = progress != lastGuestProgress;
+            lastGuestProgress = progress;
+
+            boolean busy = overrunning && advancing;
+            boolean wedged = overrunning && !advancing;
+
+            if (wedged != wedgeReported || busy != busyReported) {
                 wedgeReported = wedged;
+                busyReported = busy;
                 if (playerStatus != null) {
-                    playerStatus.setText(wedged
-                            ? "게임이 응답하지 않습니다 - 로그 저장을 누르면 여기까지가 저장됩니다"
-                            : (currentGameName != null ? currentGameName : ""));
+                    String text;
+                    if (wedged) {
+                        text = "게임이 응답하지 않습니다 - 로그 저장을 누르면 여기까지가 저장됩니다";
+                    } else if (busy) {
+                        text = "불러오는 중입니다 - 잠시만 기다려 주세요";
+                    } else {
+                        text = currentGameName != null ? currentGameName : "";
+                    }
+                    playerStatus.setText(text);
                 }
             }
 
@@ -622,6 +648,8 @@ public final class MainActivity extends Activity {
         playerVisible = false;
         wedgeWatch.removeCallbacks(watchForWedge);
         wedgeReported = false;
+        busyReported = false;
+        lastGuestProgress = 0;
         tickStartedAt = 0;
         keyMapVisible = false;
         rotateButton = null;
@@ -1946,6 +1974,10 @@ public final class MainActivity extends Activity {
         buildPlayerContent();
 
         wedgeReported = false;
+        busyReported = false;
+        // Seeded from the counter as it stands, so the first poll compares
+        // against this run rather than reading a jump from zero as progress.
+        lastGuestProgress = NativeBridge.nativeGuestProgress();
         wedgeWatch.removeCallbacks(watchForWedge);
         wedgeWatch.postDelayed(watchForWedge, WEDGE_POLL_MS);
 

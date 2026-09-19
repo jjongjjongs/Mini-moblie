@@ -43,6 +43,17 @@ final class NativeBridge {
     /** Non-zero while a game is loaded. */
     static native int nativeRunning();
 
+    /**
+     * Guest instructions retired so far. It climbs while the title is running
+     * and stops dead when it is not, which is what tells a title doing a long
+     * piece of work - a loading screen is one tick that can last seconds -
+     * apart from one that has stopped answering.
+     *
+     * <p>Reads one atomic and takes no lock, so it is safe to ask from the UI
+     * thread while a tick is in flight.
+     */
+    static native long nativeGuestProgress();
+
     /** The message that stopped the last run, or empty. */
     static native String nativeLastError();
 

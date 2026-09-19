@@ -22,6 +22,7 @@ libc = { workspace = true }
 tracing-subscriber = { version = "^0.3", features = ["env-filter"] }
 
 wie_backend = { workspace = true }
+wie_core_arm = { workspace = true }
 wie_util = { workspace = true }
 wie_j2me = { path = "../wie_j2me" }
 wie_ktf = { path = "../wie_ktf" }
