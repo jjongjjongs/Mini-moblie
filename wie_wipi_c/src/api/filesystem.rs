@@ -90,6 +90,58 @@ impl FilesystemState {
     }
 }
 
+/// The `MC_fsOpen` mode that only ever reads: the one a title uses for the data
+/// it shipped with. See [`packaged_copy`].
+const MODE_READ_ONLY: i32 = 1;
+
+/// Brings a file the title ships inside its own package into the filesystem.
+///
+/// A handset unpacks a downloaded title into its own directory, so the files
+/// that came with it and the files it writes later live side by side and
+/// `MC_fsOpen` reaches both. Here the two arrive by different doors: the
+/// package's entries are served as resources, through the class loader, and
+/// only what a title writes is in the filesystem. A title that reads its own
+/// art with `MC_fsOpen` therefore found nothing.
+///
+/// 지크2 does: its sprite loader opens `img/c/mon<n>.idam`, the file is right
+/// there in the jar, and the open answered `M_E_NOENT`. The engine then draws
+/// the monster from an offscreen surface it never filled - the boss dragon in
+/// the opening is simply absent from the hall, and a field monster is a bare
+/// shadow. Every other asset it loads goes through `MC_knlGetResource` and has
+/// always been fine, which is why only some of the art went missing.
+///
+/// The copy is made on demand rather than at load: mounting a whole package
+/// would duplicate megabytes for every title to serve the handful that read
+/// themselves this way. Once copied it is an ordinary entry, so the size,
+/// attribute and existence calls that follow an open see it too.
+///
+/// This can only turn a lookup that finds nothing into one that finds
+/// something. It is not consulted for the modes that may write, where the
+/// package's copy and the title's own writes would otherwise be two halves of
+/// one file.
+async fn packaged_copy(context: &mut dyn WIPICContext, path: &str) -> bool {
+    let filesystem = context.system().filesystem().clone();
+    if filesystem.exists(path).await {
+        return true;
+    }
+
+    // `get_resource_size` answers for the filesystem too, so ask it only after
+    // the filesystem has already said no - what it reports here is the
+    // package's own entry or nothing.
+    if !matches!(context.get_resource_size(path).await, Ok(Some(_))) {
+        return false;
+    }
+
+    let Ok(data) = context.read_resource(path).await else {
+        return false;
+    };
+
+    tracing::info!("{path:?} read from the title's own package, {} bytes", data.len());
+    filesystem.add_virtual(path, data);
+
+    true
+}
+
 /// WIPI-C MC_fsOpen (service 0x190).
 ///
 /// Native LGT modes:
@@ -124,7 +176,13 @@ pub async fn open(context: &mut dyn WIPICContext, path: WIPICWord, mode: i32, ac
     }
 
     let filesystem = context.system().filesystem().clone();
-    let exists = filesystem.exists(&path).await;
+    // A read-only open is the one a title uses for the art and data it shipped
+    // with, so it is the one that looks in the package. See `packaged_copy`.
+    let exists = if mode == MODE_READ_ONLY {
+        packaged_copy(context, &path).await
+    } else {
+        filesystem.exists(&path).await
+    };
 
     // Logged at info: a start-up auth/DRM check often hinges on a license or
     // save file, and whether the game finds it (and what it reads back) is the
@@ -505,6 +563,10 @@ pub async fn file_attribute(context: &mut dyn WIPICContext, path: WIPICWord, out
         return Ok(-1);
     }
 
+    // What a title asks about is usually what it is about to open, so this
+    // answers for a packaged file too. See `packaged_copy`.
+    packaged_copy(context, &path).await;
+
     let filesystem = context.system().filesystem().clone();
 
     let (is_directory, size) = if let Some(size) = filesystem.size(&path).await {
@@ -802,6 +864,10 @@ pub async fn is_exist(context: &mut dyn WIPICContext, path: WIPICWord, access: W
         return Ok(-11);
     }
     let path = encoding_rs::EUC_KR.decode(&path_bytes).0.into_owned();
+
+    // A packaged file is present as far as a title is concerned, so say so.
+    // See `packaged_copy`.
+    packaged_copy(context, &path).await;
 
     let filesystem = context.system().filesystem().clone();
 
@@ -1103,6 +1169,47 @@ mod tests {
         assert_eq!((e2.path.as_str(), e2.mode, e2.cursor), ("save/append.dat", 2, 0));
         assert_eq!((e3.path.as_str(), e3.mode, e3.cursor), ("save/truncate.dat", 4, 0));
         assert_eq!((e4.path.as_str(), e4.mode, e4.cursor), ("save/readwrite.dat", 8, 0));
+    }
+
+    /// 지크2 opens `img/c/mon17.idam`, the boss dragon's sprite sheet, which
+    /// ships in its own jar and was never in the filesystem. See
+    /// `packaged_copy`.
+    #[futures_test::test]
+    async fn fs_open_reads_a_file_the_title_shipped_with() {
+        let system = System::new(Box::new(TestPlatform::new()), "test-pid", "test-aid", DefaultTaskRunner);
+        let mut context = TestContext::with_system(system).with_resource("img/c/mon17.idam", b"dragon");
+        context.write_bytes(0x1000, b"img/c/mon17.idam\0").unwrap();
+
+        // Present, readable, and its size is the package's.
+        assert_eq!(is_exist(&mut context, 0x1000, 1).await.unwrap(), 0);
+
+        let fd = open(&mut context, 0x1000, 1, 1).await.unwrap();
+        assert!(fd > 0);
+        assert_eq!(read(&mut context, fd, 0x2000, 6).await.unwrap(), 6);
+
+        let mut buffer = [0u8; 6];
+        context.read_bytes(0x2000, &mut buffer).unwrap();
+        assert_eq!(&buffer, b"dragon");
+
+        assert_eq!(file_attribute(&mut context, 0x1000, 0x3000, 1).await.unwrap(), 0);
+        let mut size = [0u8; 4];
+        context.read_bytes(0x3008, &mut size).unwrap();
+        assert_eq!(u32::from_le_bytes(size), 6);
+    }
+
+    /// A packaged file answers a read, and nothing else: an open that may write
+    /// would leave the title's own writes and the package's copy as two halves
+    /// of one file.
+    #[futures_test::test]
+    async fn fs_open_to_write_does_not_reach_into_the_package() {
+        let system = System::new(Box::new(TestPlatform::new()), "test-pid", "test-aid", DefaultTaskRunner);
+        let mut context = TestContext::with_system(system).with_resource("img/c/mon17.idam", b"dragon");
+        context.write_bytes(0x1000, b"img/c/mon17.idam\0").unwrap();
+
+        // Mode 4 truncates, so it starts the title's own empty copy instead.
+        let fd = open(&mut context, 0x1000, 4, 1).await.unwrap();
+        assert!(fd > 0);
+        assert_eq!(context.system().filesystem().size("img/c/mon17.idam").await, Some(0));
     }
 
     #[futures_test::test]
