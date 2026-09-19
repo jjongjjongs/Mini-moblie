@@ -131,35 +131,45 @@ async fn store_lgt_metadata(db: &mut dyn Database, metadata: &LgtDatabaseMetadat
     db.set(LGT_METADATA_RECORD_ID, &metadata.encode()).await
 }
 
-/// KTF `MC_dbOpenDataBase(name, recordSize, create)`.
+/// The mode a title opens a database with when it only wants one that is
+/// already there. Every other mode this entry is called with may bring one
+/// into being.
+const MODE_OPEN_EXISTING: i32 = 1;
+
+/// KTF `MC_dbOpenDataBase(name, mode, type)`.
 ///
-/// The two arguments after the name are a record size and a create flag - the
-/// same pair `open_database_lgt` below reads off the LGT native, and the same
-/// pair the reference takes off this call: its database dispatch derives
-/// `create` from the third argument (`cmp w9, #0; cset x3, ne`) and checks the
-/// second against `1..=0x100000` as a record size before opening anything.
+/// The second argument is a mode, and the title's own shim layer is what says
+/// so. 던전앤파이터 격투가 carries two wrappers around this call, and the one
+/// at `0x107b20` translates its caller's mode into the platform's before
+/// passing it on:
 ///
-/// This entry used to read the second as a mode and the third as a type, and
-/// that reading broke titles in two different directions. Measured across six
-/// KTF archives, every open passes `create = 1` and a record size of 1, 4 or
-/// 8:
+/// ```text
+///     cmp r1, #3 ; movs r1, #1      caller 3 -> 1
+///     cmp r1, #1 ; movs r1, #8      caller 1 -> 8
+///     cmp r1, #2 ; movs r1, #4      caller 2 -> 4
+///     cmp r1, #4 ; movs r1, #2      caller 4 -> 2
+/// ```
 ///
-/// - a record size of 1 hit the old `mode == 1` branch, which answered
-///   `M_E_NOENT` whenever the database was not already there - so those titles
-///   could never create one at all;
-/// - a record size of 4 hit the old `mode == 4` branch, which deleted record 1
-///   before handing back the handle - so opening a save wiped it;
-/// - a record size of 8 matched nothing, so the database was never created:
-///   던파 귀검사편 leaves its options screen with
-///   `MC_dbOpenDataBase("option.txt", 8, 1)`, then asks `MC_dbExists` whether
-///   it arrived and is still told no.
+/// A record size is not renumbered between 1, 2, 4 and 8 on its way through a
+/// wrapper; a set of mode flags is. The third argument is a type, and both
+/// wrappers pass a constant 1.
 ///
-/// There is no fourth argument. The word after `create` is the same trailing
-/// self pointer KTF's other database slots carry - it reads `0x71000fe1`, one
-/// of this runtime's own stubs, in every one of those archives - so it is not
-/// read here.
-pub async fn open_database(context: &mut dyn WIPICContext, ptr_name: WIPICWord, record_size: i32, create: i32) -> Result<i32> {
-    tracing::debug!("MC_dbOpenDataBase({ptr_name:#x}, record_size={record_size}, create={create})");
+/// Mode 1 opens a database that exists and answers `M_E_NOENT` for one that
+/// does not, which is what the title's other wrapper at `0x107b98` is built
+/// on: it opens with mode 1, closes the handle if it got one, and answers 1
+/// or -1 - an existence test written as an open. Creating the database for
+/// that probe makes it answer yes for a file that was never written, and
+/// 격투가 then loads sixty-eight bytes of options out of a database with
+/// nothing in it and draws a white screen for the rest of the run.
+///
+/// Mode 8 is the mode a title opens with to write, and it does create: it is
+/// what 던파 귀검사편 leaves its options screen with, and what its 이어하기
+/// reads back afterwards.
+///
+/// What this entry must not do, whatever the mode, is delete on the way in.
+/// An earlier reading of mode 4 did, and opening a save wiped it.
+pub async fn open_database(context: &mut dyn WIPICContext, ptr_name: WIPICWord, mode: i32, r#type: i32) -> Result<i32> {
+    tracing::debug!("MC_dbOpenDataBase({ptr_name:#x}, mode={mode}, type={type})");
 
     // Guest-provided C string — invalid UTF-8 must not bring down the
     // emulator. Treat it as a bad parameter and return -22, matching the
@@ -179,7 +189,7 @@ pub async fn open_database(context: &mut dyn WIPICContext, ptr_name: WIPICWord, 
 
     // KTF has no access argument to report back, and `MC_dbGetAccessMode`
     // answers 1 for a name that exists, so a handle answers the same.
-    open_database_named(context, &name, create != 0, 1).await
+    open_database_named(context, &name, mode != MODE_OPEN_EXISTING, 1).await
 }
 
 /// The body of an open, once the name is known and the caller has made the
@@ -1996,6 +2006,7 @@ mod tests {
 
     use alloc::borrow::ToOwned as _;
 
+    use super::MODE_OPEN_EXISTING;
     use crate::context::test::TestContext;
 
     use super::{
@@ -2961,33 +2972,55 @@ mod tests {
         assert!(space > 0, "a title reads this as the room it has");
     }
 
-    /// A KTF open reads a record size and a create flag, not a mode.
+    /// A KTF open reads a mode, and every mode but 1 brings a database that is
+    /// not there into being.
     ///
-    /// Every KTF archive measured passes `create = 1` with a record size of 1,
-    /// 4 or 8. Read as a mode, `1` answered `M_E_NOENT` and the title could
-    /// never make its database, `4` deleted record 1 on the way in, and `8`
-    /// matched nothing so the database was never created at all.
+    /// 던파 귀검사편 leaves its options screen having opened and closed one and
+    /// written nothing, and expects to find it afterwards.
     #[futures_test::test]
-    async fn ktf_open_reads_a_record_size_and_a_create_flag() {
-        for record_size in [1i32, 4, 8] {
+    async fn ktf_open_to_write_creates_a_database_that_is_not_there() {
+        for mode in [2i32, 4, 8] {
             let mut context = database_test_context();
             context.write_bytes(0x1000, b"option.txt\0").unwrap();
 
             // Nothing there yet, and the title asks for it.
             assert_eq!(exists_database_ktf(&mut context, 0x1000, 1, 0).await.unwrap(), -12);
 
-            let db_id = open_database(&mut context, 0x1000, record_size, 1).await.unwrap();
-            assert!(db_id > 0, "record size {record_size} has to open");
+            let db_id = open_database(&mut context, 0x1000, mode, 1).await.unwrap();
+            assert!(db_id > 0, "mode {mode} has to open");
             assert_eq!(close_database(&mut context, db_id).await.unwrap(), 0);
 
-            // 던파 귀검사편 asks exactly this after leaving its options screen,
-            // having written nothing in between.
             assert_eq!(
                 exists_database_ktf(&mut context, 0x1000, 1, 0).await.unwrap(),
                 0,
-                "record size {record_size} has to leave the database behind"
+                "mode {mode} has to leave the database behind"
             );
         }
+    }
+
+    /// Mode 1 opens a database that is already there and answers `M_E_NOENT`
+    /// for one that is not, which is what an existence test written as an open
+    /// depends on.
+    ///
+    /// 던전앤파이터 격투가 has one: the wrapper at `0x107b98` opens with mode 1,
+    /// closes the handle if it got one, and answers 1 or -1. Creating the
+    /// database for that probe makes it answer yes for a file nothing ever
+    /// wrote, and the title then loads its options out of an empty database and
+    /// draws a white screen for the rest of the run.
+    #[futures_test::test]
+    async fn ktf_open_existing_refuses_a_database_that_is_not_there() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"option.txt\0").unwrap();
+
+        assert_eq!(open_database(&mut context, 0x1000, MODE_OPEN_EXISTING, 1).await.unwrap(), -12);
+
+        // And the probe leaves nothing behind for the next caller to find.
+        assert_eq!(exists_database_ktf(&mut context, 0x1000, 1, 0).await.unwrap(), -12);
+
+        // One a write mode made is there for mode 1 to open.
+        let created = open_database(&mut context, 0x1000, 8, 1).await.unwrap();
+        assert_eq!(close_database(&mut context, created).await.unwrap(), 0);
+        assert!(open_database(&mut context, 0x1000, MODE_OPEN_EXISTING, 1).await.unwrap() > 0);
     }
 
     /// Opening a database does not empty it, whatever record size it is opened
@@ -3011,14 +3044,18 @@ mod tests {
         assert_eq!(&read_back, b"saved");
     }
 
-    /// Without the create flag a database that is not there is still an error.
+    /// The third argument is a type, not a create flag: it is a constant 1 in
+    /// both of 격투가's wrappers, and what decides whether a database may be
+    /// made is the mode beside it.
     #[futures_test::test]
-    async fn ktf_open_without_create_refuses_a_database_that_is_not_there() {
+    async fn ktf_open_takes_the_create_decision_from_the_mode_not_the_type() {
         let mut context = database_test_context();
         context.write_bytes(0x1000, b"save.txt\0").unwrap();
 
-        assert_eq!(open_database(&mut context, 0x1000, 8, 0).await.unwrap(), -12);
-        assert_eq!(exists_database_ktf(&mut context, 0x1000, 1, 0).await.unwrap(), -12);
+        let db_id = open_database(&mut context, 0x1000, 8, 0).await.unwrap();
+        assert!(db_id > 0);
+        assert_eq!(close_database(&mut context, db_id).await.unwrap(), 0);
+        assert_eq!(exists_database_ktf(&mut context, 0x1000, 1, 0).await.unwrap(), 0);
     }
 
     /// The access mode answers both shapes, and both answer the same thing:
