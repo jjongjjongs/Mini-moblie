@@ -23,6 +23,21 @@ pub(crate) fn buffer_size(width: u32, height: u32, bytes_per_pixel: u32) -> Resu
     Ok((size, bpl))
 }
 
+/// `source` composed over `under`, exactly as `ImageBufferCanvas::blend_pixel`
+/// composes them - the same f32 factor and the same truncation, so a blit that
+/// goes the direct way lands on the same byte as one that went through the
+/// canvas.
+fn blend(source: Color, under: Color) -> Color {
+    let factor = source.a as f32 / 255.0;
+
+    Color {
+        a: 0xff,
+        r: (source.r as f32 * factor + under.r as f32 * (1.0 - factor)) as u8,
+        g: (source.g as f32 * factor + under.g as f32 * (1.0 - factor)) as u8,
+        b: (source.b as f32 * factor + under.b as f32 * (1.0 - factor)) as u8,
+    }
+}
+
 pub struct FrameBuffer(pub WIPICFramebuffer);
 
 impl FrameBuffer {
@@ -228,6 +243,126 @@ impl FrameBuffer {
         Ok(true)
     }
 
+    /// Blits `src` onto this surface touching only the rows the blit covers.
+    ///
+    /// The canvas path stages the whole surface for every primitive, and for a
+    /// blit it stages the whole source as well: both read out of guest memory,
+    /// both collected into pixel buffers, a snapshot of the destination kept,
+    /// and the destination compared back byte for byte. That cost is set by
+    /// the surfaces, not by the sprite, which is why 드래곤하트2 spends the same
+    /// hundred microseconds on a 10x7 sprite as on a 29x28 one while a fill of
+    /// similar size next to it in the same log costs eleven. In combat it asks
+    /// for three thousand of them a second, and a Y700 holds its AP at the top
+    /// clock for as long as the fight lasts.
+    ///
+    /// Only the rows of the overlap are read, from each surface, and only
+    /// those rows are written back.
+    ///
+    /// Two shapes are covered, matching `MC_grpDrawImage`'s two:
+    ///
+    /// - `keyed`: an image with no alpha draws from its 16bpp colour plane and
+    ///   the magenta key stands in for transparency, pixel stored rather than
+    ///   composed. Both surfaces being RGB565, the pixel is copied raw: the
+    ///   565 round trip through `Color` is exact, so the copy is what the
+    ///   canvas would have written.
+    /// - otherwise: an image carrying alpha draws from its 32bpp mask plane,
+    ///   composed onto the destination the way `blend_pixel` composes it.
+    ///
+    /// `false` for any other combination of depths, or geometry this cannot
+    /// address; the caller should take the canvas path. Nothing has been
+    /// written when it returns `false`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_image_direct(
+        &self,
+        context: &mut dyn WIPICContext,
+        dx: i32,
+        dy: i32,
+        w: i32,
+        h: i32,
+        src: &FrameBuffer,
+        sx: i32,
+        sy: i32,
+        keyed: bool,
+    ) -> Result<bool> {
+        if self.0.bpp != 16 || (keyed && src.0.bpp != 16) || (!keyed && src.0.bpp != 32) {
+            return Ok(false);
+        }
+
+        let (dst_bpl, src_bpl) = (self.0.bpl as i64, src.0.bpl as i64);
+        let src_bytes = (src.0.bpp / 8) as i64;
+        if dst_bpl <= 0 || src_bpl <= 0 || src.0.buf.0 == 0 {
+            return Ok(false);
+        }
+
+        // The overlap of destination, source and blit rectangle, worked out
+        // exactly as `Canvas::draw` works it out. `MC_grpDrawImage` passes the
+        // blit rectangle itself as the clip, so the clip narrows nothing
+        // further and is not applied again here.
+        let x_start = 0i64.max(-(dx as i64)).max(-(sx as i64));
+        let x_end = (w as i64).min(self.0.width as i64 - dx as i64).min(src.0.width as i64 - sx as i64);
+        let y_start = 0i64.max(-(dy as i64)).max(-(sy as i64));
+        let y_end = (h as i64).min(self.0.height as i64 - dy as i64).min(src.0.height as i64 - sy as i64);
+        if x_start >= x_end || y_start >= y_end {
+            return Ok(true);
+        }
+
+        let cols = (x_end - x_start) as usize;
+        let dst_row_bytes = cols * 2;
+        let src_row_bytes = cols * src_bytes as usize;
+
+        // The furthest byte either side would touch, checked before anything is
+        // written so a surface this cannot address is refused whole.
+        let dst_last = (dy as i64 + y_end - 1) * dst_bpl + (dx as i64 + x_end) * 2;
+        let src_last = (sy as i64 + y_end - 1) * src_bpl + (sx as i64 + x_end) * src_bytes;
+        if u32::try_from(dst_last).is_err() || u32::try_from(src_last).is_err() {
+            return Ok(false);
+        }
+
+        let dst_base = context.data_ptr(self.0.buf)?;
+        let src_base = context.data_ptr(src.0.buf)?;
+
+        let mut dst_row = vec![0u8; dst_row_bytes];
+        let mut src_row = vec![0u8; src_row_bytes];
+
+        for y in y_start..y_end {
+            let dst_off = ((dy as i64 + y) * dst_bpl + (dx as i64 + x_start) * 2) as u32;
+            let src_off = ((sy as i64 + y) * src_bpl + (sx as i64 + x_start) * src_bytes) as u32;
+
+            context.read_bytes(src_base + src_off, &mut src_row)?;
+            context.read_bytes(dst_base + dst_off, &mut dst_row)?;
+
+            let mut touched = false;
+            for i in 0..cols {
+                if keyed {
+                    let raw = u16::from_le_bytes([src_row[i * 2], src_row[i * 2 + 1]]);
+                    // `is_transparent_key` in 565 terms: red and blue at full
+                    // scale, green no higher than the 7 it lets through - which
+                    // is the bottom two of its six bits.
+                    if (raw >> 11) == 0x1f && (raw & 0x1f) == 0x1f && ((raw >> 5) & 0x3f) <= 1 {
+                        continue;
+                    }
+                    dst_row[i * 2] = src_row[i * 2];
+                    dst_row[i * 2 + 1] = src_row[i * 2 + 1];
+                } else {
+                    let raw = u32::from_le_bytes([src_row[i * 4], src_row[i * 4 + 1], src_row[i * 4 + 2], src_row[i * 4 + 3]]);
+                    let source = ArgbPixel::to_color(raw);
+                    let under = Rgb565Pixel::to_color(u16::from_le_bytes([dst_row[i * 2], dst_row[i * 2 + 1]]));
+                    let blended = blend(source, under);
+                    let packed = Rgb565Pixel::from_color(blended).to_le_bytes();
+                    dst_row[i * 2] = packed[0];
+                    dst_row[i * 2 + 1] = packed[1];
+                }
+                touched = true;
+            }
+
+            if touched {
+                context.write_bytes(dst_base + dst_off, &dst_row)?;
+            }
+        }
+
+        Ok(true)
+    }
+
     /// The byte a pixel starts at, or `None` when it is off the surface or the
     /// surface cannot be addressed this way.
     fn byte_offset(&self, x: i32, y: i32, bytes_per_pixel: usize) -> Option<u32> {
@@ -406,6 +541,7 @@ mod test {
     use crate::context::test::TestContext;
 
     use super::FrameBuffer;
+    use wie_backend::canvas::{PixelType, Rgb565Pixel};
 
     /// write_diff restages only the pixels a primitive changed, so a byte the
     /// title wrote straight into the framebuffer after the canvas snapshot (its
@@ -488,6 +624,117 @@ mod test {
             staged.read_bytes(base, &mut want).unwrap();
             assert_eq!(got, want, "fill ({x}, {y}, {w}, {h})");
         }
+    }
+
+    /// Fills `fb` with a pattern and returns the bytes, so the direct blit and
+    /// the canvas blit start from identical surfaces.
+    fn seed(context: &mut TestContext, fb: &FrameBuffer, seed: u8) -> Vec<u8> {
+        let (size, _) = super::buffer_size(fb.0.width, fb.0.height, fb.0.bpp / 8).unwrap();
+        let bytes: Vec<u8> = (0..size as usize).map(|i| (i as u8).wrapping_mul(7).wrapping_add(seed)).collect();
+        let base = context.data_ptr(fb.0.buf).unwrap();
+        context.write_bytes(base, &bytes).unwrap();
+        bytes
+    }
+
+    /// A blit that goes the direct way has to land on the same bytes as one
+    /// that went through the canvas - the sprite inside the surface, hanging
+    /// off each edge, and entirely off it.
+    ///
+    /// Both shapes are checked: the keyed one, where an image without alpha
+    /// draws from its 16bpp colour plane and magenta stands in for
+    /// transparency, and the composed one, where an image with alpha draws
+    /// from its 32bpp mask plane.
+    #[test]
+    fn draw_image_direct_matches_the_canvas_it_replaces() {
+        for keyed in [true, false] {
+            for (dx, dy, w, h, sx, sy) in [
+                (1i32, 1i32, 3i32, 3i32, 0i32, 0i32),
+                (-2, 1, 4, 3, 0, 0),
+                (6, 0, 4, 3, 0, 0),
+                (1, -2, 3, 4, 0, 0),
+                (1, 1, 3, 3, 1, 1),
+                (-9, -9, 3, 3, 0, 0),
+                (9, 9, 2, 2, 0, 0),
+                (0, 0, 8, 6, 0, 0),
+            ] {
+                let src_bpp = if keyed { 16 } else { 32 };
+
+                let mut direct = TestContext::new();
+                let dst = FrameBuffer::new(&mut direct, 8, 6, 16).unwrap();
+                let src = FrameBuffer::new(&mut direct, 4, 4, src_bpp).unwrap();
+                let dst_base = direct.data_ptr(dst.0.buf).unwrap();
+                seed(&mut direct, &dst, 0x20);
+                let src_bytes = seed(&mut direct, &src, 0x91);
+                if keyed {
+                    // One magenta pixel, so the key is exercised rather than
+                    // just asserted about.
+                    let key = Rgb565Pixel::from_color(Color {
+                        a: 0xff,
+                        r: 0xff,
+                        g: 0,
+                        b: 0xff,
+                    });
+                    let sb = direct.data_ptr(src.0.buf).unwrap();
+                    direct.write_bytes(sb + 2, &key.to_le_bytes()).unwrap();
+                }
+                assert!(
+                    dst.draw_image_direct(&mut direct, dx, dy, w, h, &src, sx, sy, keyed).unwrap(),
+                    "direct blit refused ({dx}, {dy}, {w}, {h}) keyed={keyed}"
+                );
+
+                let mut staged = TestContext::new();
+                let dst2 = FrameBuffer::new(&mut staged, 8, 6, 16).unwrap();
+                let src2 = FrameBuffer::new(&mut staged, 4, 4, src_bpp).unwrap();
+                seed(&mut staged, &dst2, 0x20);
+                let sb2 = staged.data_ptr(src2.0.buf).unwrap();
+                staged.write_bytes(sb2, &src_bytes).unwrap();
+                if keyed {
+                    let key = Rgb565Pixel::from_color(Color {
+                        a: 0xff,
+                        r: 0xff,
+                        g: 0,
+                        b: 0xff,
+                    });
+                    staged.write_bytes(sb2 + 2, &key.to_le_bytes()).unwrap();
+                }
+                let src_image = src2.image(&mut staged).unwrap();
+                let mut canvas = dst2.canvas(&mut staged).unwrap();
+                if keyed {
+                    crate::api::graphics::blit_magenta_keyed(&mut **canvas, dx, dy, w, h, &*src_image, sx, sy);
+                } else {
+                    let clip = Clip {
+                        x: dx,
+                        y: dy,
+                        width: w as _,
+                        height: h as _,
+                    };
+                    canvas.draw(dx, dy, w as _, h as _, &*src_image, sx, sy, clip);
+                }
+                canvas.flush().unwrap();
+
+                let mut got = [0u8; 8 * 6 * 2];
+                let mut want = [0u8; 8 * 6 * 2];
+                direct.read_bytes(dst_base, &mut got).unwrap();
+                staged.read_bytes(dst_base, &mut want).unwrap();
+                assert_eq!(got, want, "blit ({dx}, {dy}, {w}, {h}) from ({sx}, {sy}) keyed={keyed}");
+            }
+        }
+    }
+
+    /// A depth the direct blit cannot address is refused rather than written
+    /// wrong, so the caller still has the canvas to fall back to.
+    #[test]
+    fn draw_image_direct_refuses_a_depth_it_cannot_address() {
+        let mut context = TestContext::new();
+        let dst32 = FrameBuffer::new(&mut context, 4, 4, 32).unwrap();
+        let src16 = FrameBuffer::new(&mut context, 4, 4, 16).unwrap();
+        assert!(!dst32.draw_image_direct(&mut context, 0, 0, 4, 4, &src16, 0, 0, true).unwrap());
+
+        // Keyed wants a 16bpp colour plane, composed wants a 32bpp mask plane;
+        // neither takes the other's.
+        let dst16 = FrameBuffer::new(&mut context, 4, 4, 16).unwrap();
+        assert!(!dst16.draw_image_direct(&mut context, 0, 0, 4, 4, &src16, 0, 0, false).unwrap());
+        assert!(!dst16.draw_image_direct(&mut context, 0, 0, 4, 4, &dst32, 0, 0, true).unwrap());
     }
 
     /// One pixel, written as one pixel, has to land exactly where the canvas

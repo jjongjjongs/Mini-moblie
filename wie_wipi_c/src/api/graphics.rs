@@ -842,7 +842,15 @@ pub async fn draw_image(
     };
 
     let Some((kind, function)) = operation else {
-        let src_image = FrameBuffer(source).image(context)?;
+        // Only the rows the sprite covers, rather than staging both surfaces
+        // whole for every blit. Refused for a depth or geometry it cannot
+        // address, and the canvas takes it then.
+        let src_fb = FrameBuffer(source);
+        if framebuffer.draw_image_direct(context, dx, dy, w, h, &src_fb, sx, sy, keyed)? {
+            return Ok(());
+        }
+
+        let src_image = src_fb.image(context)?;
         let mut canvas = framebuffer.canvas(context)?;
 
         if keyed {
@@ -1512,7 +1520,7 @@ fn is_transparent_key(color: Color) -> bool {
 /// graphics context carries no transparent pixel for these blits, so the
 /// convention is honoured here rather than read from it.
 #[allow(clippy::too_many_arguments)]
-fn blit_magenta_keyed(canvas: &mut dyn Canvas, dx: i32, dy: i32, w: i32, h: i32, src: &dyn Image, sx: i32, sy: i32) {
+pub(crate) fn blit_magenta_keyed(canvas: &mut dyn Canvas, dx: i32, dy: i32, w: i32, h: i32, src: &dyn Image, sx: i32, sy: i32) {
     let src_w = src.width() as i64;
     let src_h = src.height() as i64;
     let dst_w = canvas.image().width() as i64;
