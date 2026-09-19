@@ -15,6 +15,59 @@ use crate::{WIPICResult, context::WIPICContext, method::MethodBody};
 /// own reads back as.
 const FULL_VOLUME: u8 = 100;
 
+/// The level each clip is set to, by the clip's own address.
+///
+/// The level belongs to the clip, not to the load. `MC_mdaClipPutData` mints a
+/// fresh audio handle every time a title hands it data, and routing a level
+/// only to the handle that existed when it was set means a title that reloads
+/// the clip loses it.
+///
+/// 이노티아1's volume screen does exactly that, once per step of its slider:
+///
+/// ```text
+/// PutData -> handle 0x4 ; Play(0x4) ; SetVolume(0x4, 60)
+/// ClipFree ; ClipCreate ; PutData -> handle 0x5 ; Play(0x5) ; SetVolume(0x5, 80)
+/// ```
+///
+/// Every beep it plays is a clip loaded a moment earlier, so every one of them
+/// played at full scale and the setting reached no sound at all - the first
+/// step did not even have a handle to route to (`handle=0x0`, the clip's data
+/// was not in yet). 붉은보석, whose volume has always worked, is the same calls
+/// in the other order: it sets the level after `PutData` and before `Play`.
+///
+/// So the level is kept here and put back on whatever handle the clip is next
+/// loaded under. The record is keyed by address and outlives the clip's own
+/// free and re-create: a title tears the clip down and builds it again at the
+/// same slot between two sounds, which is the very gap the level has to cross.
+static CLIP_LEVELS: Mutex<Vec<(WIPICWord, u8)>> = Mutex::new(Vec::new());
+
+/// How many clips carry a level, so a title that allocates without end cannot
+/// grow this without end either. Titles here use one or two clip slots.
+const CLIP_LEVELS_LIMIT: usize = 64;
+
+/// Remembers the level `clip` is set to. See [`CLIP_LEVELS`].
+fn remember_clip_level(clip: WIPICWord, level: u8) {
+    let mut levels = CLIP_LEVELS.lock();
+
+    if let Some(entry) = levels.iter_mut().find(|(candidate, _)| *candidate == clip) {
+        entry.1 = level;
+        return;
+    }
+    if levels.len() >= CLIP_LEVELS_LIMIT {
+        levels.remove(0);
+    }
+    levels.push((clip, level));
+}
+
+/// The level `clip` was last set to, if it was set at all.
+fn remembered_clip_level(clip: WIPICWord) -> Option<u8> {
+    CLIP_LEVELS
+        .lock()
+        .iter()
+        .find(|(candidate, _)| *candidate == clip)
+        .map(|(_, level)| *level)
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct MdaClip {
@@ -159,6 +212,13 @@ pub async fn clip_put_data(context: &mut dyn WIPICContext, ptr_clip: WIPICWord, 
     // implicit clip 0; bind the loaded handle to the default player so the
     // clip-0 play/volume/stop paths can reach it (otherwise every such effect is
     // silent). Titles that use real clip objects store the handle in the object.
+    // The level the title set on this clip belongs to the clip, so put it on
+    // the handle the data just arrived under. See `CLIP_LEVELS`.
+    if let Some(level) = remembered_clip_level(ptr_clip) {
+        tracing::info!("[media] clip {ptr_clip:#x} carries level {level} onto handle {handle:#x}");
+        let _ = context.system().audio().set_volume(handle, level);
+    }
+
     if ptr_clip == 0 {
         context.system().audio().set_default_clip(handle);
         return Ok(buf_size as _);
@@ -203,8 +263,10 @@ pub async fn clip_get_volume(context: &mut dyn WIPICContext, clip: WIPICWord) ->
         (mda_clip.handle != 0).then_some(mda_clip.handle)
     };
 
-    let level = handle
-        .and_then(|handle| context.system().audio().get_volume(handle).ok())
+    // The clip's own level first: a title that sets one before loading anything
+    // reads back what it set, not the full scale an absent handle would give.
+    let level = remembered_clip_level(clip)
+        .or_else(|| handle.and_then(|handle| context.system().audio().get_volume(handle).ok()))
         .unwrap_or(FULL_VOLUME);
 
     tracing::info!("[media] MC_mdaClipGetVolume(clip={clip:#x}) handle={handle:?} level={level}");
@@ -213,11 +275,16 @@ pub async fn clip_get_volume(context: &mut dyn WIPICContext, clip: WIPICWord) ->
 }
 
 pub async fn clip_set_volume(context: &mut dyn WIPICContext, clip: WIPICWord, volume: WIPICWord) -> Result<WIPICWord> {
+    let level = (volume & 0xFF).min(FULL_VOLUME as WIPICWord) as u8;
+
+    // The clip keeps the level whether or not it has anything loaded right now,
+    // so the next load plays at it. See `CLIP_LEVELS`.
+    remember_clip_level(clip, level);
+
     if clip == 0 {
         // Default-player titles set the volume of the clip-0 handle.
         let default = context.system().audio().default_clip();
         if let Some(handle) = default {
-            let level = (volume & 0xFF).min(FULL_VOLUME as WIPICWord) as u8;
             let _ = context.system().audio().set_volume(handle, level);
         }
         return Ok(0);
@@ -231,7 +298,6 @@ pub async fn clip_set_volume(context: &mut dyn WIPICContext, clip: WIPICWord, vo
     // sounding harsh.
     let mda_clip: MdaClip = read_generic(context, clip)?;
     let handle = mda_clip.handle;
-    let level = (volume & 0xFF).min(FULL_VOLUME as WIPICWord) as u8;
     tracing::info!("[media] MC_mdaClipSetVolume(clip={clip:#x}, volume={volume:#x}) handle={handle:#x} level={level}");
 
     let _ = context.system().audio().set_volume(handle, level);
@@ -633,13 +699,13 @@ mod tests {
     use wie_backend::{DefaultTaskRunner, System};
     use wie_util::ByteWrite;
 
-    use crate::context::test::TestContext;
+    use crate::context::{WIPICContext, test::TestContext};
 
     use core::sync::atomic::AtomicBool;
 
     use alloc::sync::Arc;
 
-    use super::{FULL_VOLUME, WatchedPlayback, clip_create, clip_get_volume, clip_put_data, clip_set_volume, play, stop};
+    use super::{FULL_VOLUME, MdaClip, WatchedPlayback, clip_create, clip_get_volume, clip_put_data, clip_set_volume, play, read_generic, stop};
 
     /// What the clip callback was called with. A static, because the test
     /// context takes a plain function rather than a closure.
@@ -652,8 +718,67 @@ mod tests {
     }
 
     fn test_context() -> TestContext {
+        // Every context here hands out the same first clip address, and the
+        // clip levels are process-wide, so one test's level would otherwise be
+        // the next one's starting point.
+        super::CLIP_LEVELS.lock().clear();
+
         let system = System::new(Box::new(TestPlatform::new()), "test-pid", "test-aid", DefaultTaskRunner);
         TestContext::with_system(system)
+    }
+
+    /// The audio handle a clip's data is loaded under.
+    fn handle_of(context: &TestContext, clip: u32) -> u32 {
+        let clip: MdaClip = read_generic(context, clip).unwrap();
+
+        clip.handle
+    }
+
+    /// 이노티아1's volume screen, in the order it actually calls: it sets the
+    /// level on the clip it has just played, then tears that clip down and
+    /// loads the next beep into a fresh one. The level used to live on the
+    /// audio handle `MC_mdaClipPutData` minted, so every beep played at full
+    /// scale and the setting reached no sound at all.
+    #[futures_test::test]
+    async fn a_clip_keeps_its_level_when_its_data_is_loaded_again() {
+        let mut context = test_context();
+
+        let clip = clip_create(&mut context, 0, 0x793, 0).await.unwrap();
+        context.write_bytes(0x1000, b"MMMD\0\0\0\0").unwrap();
+        clip_put_data(&mut context, clip, 0x1000, 8).await.unwrap();
+        clip_set_volume(&mut context, clip, 20).await.unwrap();
+
+        let played_at = handle_of(&context, clip);
+        assert_eq!(context.system().audio().get_volume(played_at).unwrap(), 20);
+
+        // The next beep: the same clip slot, loaded again, behind a new handle.
+        clip_put_data(&mut context, clip, 0x1000, 8).await.unwrap();
+
+        let reloaded = handle_of(&context, clip);
+        assert_ne!(reloaded, played_at, "a reload mints a new handle");
+        assert_eq!(
+            context.system().audio().get_volume(reloaded).unwrap(),
+            20,
+            "the level the title set on this clip has to follow it onto the handle it is loaded under"
+        );
+    }
+
+    /// And a level set before the clip holds anything reaches the load that
+    /// follows: 이노티아1's first step sets one while the clip is still empty,
+    /// which had no handle to route to at all.
+    #[futures_test::test]
+    async fn a_level_set_before_a_clip_holds_anything_still_takes() {
+        let mut context = test_context();
+
+        let clip = clip_create(&mut context, 0, 0x793, 0).await.unwrap();
+        clip_set_volume(&mut context, clip, 40).await.unwrap();
+        assert_eq!(handle_of(&context, clip), 0, "nothing is loaded yet");
+
+        context.write_bytes(0x1000, b"MMMD\0\0\0\0").unwrap();
+        clip_put_data(&mut context, clip, 0x1000, 8).await.unwrap();
+
+        let loaded = handle_of(&context, clip);
+        assert_eq!(context.system().audio().get_volume(loaded).unwrap(), 40);
     }
 
     /// 영웅서기5's own sequence: it sets an effect's level, reads it back, and
