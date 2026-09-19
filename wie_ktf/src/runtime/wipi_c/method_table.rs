@@ -431,13 +431,30 @@ fn gen_unk_stub(id: u32, index: u32) -> WIPICMethodBody {
     body.into_body()
 }
 
+/// Table 3 - the input method, the same five calls this runtime already serves
+/// at graphics slots 37 to 41 and in the same order.
+///
+/// A title can reach typing through either door. LOA-혼돈의 서곡 uses this one,
+/// and with all five stubbed its name-entry screen took every keypress and
+/// showed nothing: the keys arrive, `CardCanvas::keyPressed` hands them on, the
+/// title asks slot 0 what they spell and is told nothing.
+///
+/// What the slots are is settled by what the title hands them. Slot 0 is given
+/// the typed character - NUM0 arrives as 0x30, NUM8 as 0x38 - and then 157 a
+/// second time, which is the key native's own composition flush uses
+/// (`MC_imHandleInput(157, 502)`, and `provider_key` takes 157 to the -99 this
+/// runtime's UIC text path already flushes with). Slot 1 is given 3, which is
+/// KO in `SUPPORTED_MODES` and what a screen asking for a Korean name would
+/// select. Slots 2, 3 and 4 are called with nothing - their registers still
+/// hold the leftovers of the call before, 0xffffffff and a method address -
+/// which is the shape of the three getters.
 pub fn get_unk3_method_table() -> Vec<WIPICMethodBody> {
     vec![
-        gen_unk_stub(3, 0),
-        gen_unk_stub(3, 1),
-        gen_unk_stub(3, 2),
-        gen_unk_stub(3, 3),
-        gen_unk_stub(3, 4),
+        im::handle_input.into_body(),
+        im::set_current_mode.into_body(),
+        im::get_current_mode.into_body(),
+        im::get_support_mode_count.into_body(),
+        im::get_supported_modes.into_body(),
     ]
 }
 

@@ -154,9 +154,14 @@ pub async fn handle_input(
 ) -> Result<WIPICWord> {
     tracing::debug!("MC_imHandleInput({key:#x}, {event}, {output0:#x}, {output0_len:#x}, {output1:#x}, {output1_len:#x})");
 
+    // 502 and 504 are the public WIPI press and release. The table-3 door is
+    // given the provider's own 2 and 4 instead - LOA-혼돈의 서곡 types with
+    // `(key, 2)` and calls only on the way down, never on the way up - so both
+    // spellings of each are taken. 503, a repeat, is still ignored whichever
+    // way it is written, and so is anything else.
     let provider_event = match event {
-        502 => 2,
-        504 => 4,
+        502 | 2 => 2,
+        504 | 4 => 4,
         _ => return Ok(0),
     };
 
@@ -290,6 +295,52 @@ mod tests {
         let mut committed = [0u8; 1];
         context.read_bytes(0x1000, &mut committed).unwrap();
         assert_eq!(&committed, b"7");
+    }
+
+    /// The table-3 door spells a press 2 rather than 502, and types on the way
+    /// down only. A digit sent that way has to come back the same as one sent
+    /// the public way.
+    ///
+    /// LOA-혼돈의 서곡's name entry is all of these: `(0x30, 2)` for the digit and
+    /// `(157, 2)` behind it to flush what was composed.
+    #[futures_test::test]
+    async fn a_press_counts_written_either_way() {
+        for event in [502, 2] {
+            let mut context = im_context();
+            set_current_mode(&mut context, 2).await.unwrap();
+
+            let handled = handle_input(&mut context, b'7' as WIPICWord, event, 0x1000, 0x1100, 0x1200, 0x1300)
+                .await
+                .unwrap();
+            assert_eq!(handled, 1, "event {event}");
+
+            let committed_len: u32 = read_generic(&context, 0x1100).unwrap();
+            assert_eq!(committed_len, 1, "event {event}");
+
+            let mut committed = [0u8; 1];
+            context.read_bytes(0x1000, &mut committed).unwrap();
+            assert_eq!(&committed, b"7", "event {event}");
+        }
+
+        // The flush key native uses, written the same way, is still taken.
+        let mut context = im_context();
+        set_current_mode(&mut context, 2).await.unwrap();
+        handle_input(&mut context, b'7' as WIPICWord, 2, 0x1000, 0x1100, 0x1200, 0x1300)
+            .await
+            .unwrap();
+        handle_input(&mut context, 157, 2, 0x1000, 0x1100, 0x1200, 0x1300).await.unwrap();
+
+        // A repeat is still nothing, whichever way it is spelled.
+        for event in [503, 3] {
+            let mut context = im_context();
+            assert_eq!(
+                handle_input(&mut context, b'7' as WIPICWord, event, 0x1000, 0x1100, 0x1200, 0x1300)
+                    .await
+                    .unwrap(),
+                0,
+                "event {event}"
+            );
+        }
     }
 
     /// An event that is not a press or a release leaves the caller's buffers
