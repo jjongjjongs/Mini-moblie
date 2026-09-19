@@ -523,6 +523,62 @@ mod test {
         }
     }
 
+    /// A line along an axis, written as a run, has to land exactly where the
+    /// canvas's Bresenham walk put it - including when it hangs off an edge,
+    /// runs backwards, or is a single point.
+    #[test]
+    fn an_axis_aligned_line_written_as_a_run_matches_the_canvas() {
+        for (x1, y1, x2, y2) in [
+            (1i32, 2i32, 6i32, 2i32),
+            (6, 2, 1, 2),
+            (3, 0, 3, 5),
+            (3, 5, 3, 0),
+            (-3, 2, 4, 2),
+            (2, -4, 2, 3),
+            (4, 1, 20, 1),
+            (1, 1, 1, 20),
+            (3, 3, 3, 3),
+            (-5, -5, -5, 2),
+            (0, 7, 7, 7),
+        ] {
+            let color = Color {
+                a: 0xff,
+                r: 0x12,
+                g: 0x34,
+                b: 0x56,
+            };
+
+            let mut direct = TestContext::new();
+            let fb = FrameBuffer::new(&mut direct, 8, 6, 16).unwrap();
+            let base = direct.data_ptr(fb.0.buf).unwrap();
+            direct.write_bytes(base, &[0x5au8; 8 * 6 * 2]).unwrap();
+
+            let (left, top) = (x1.min(x2), y1.min(y2));
+            let width = (x1.max(x2) - left + 1) as u32;
+            let height = (y1.max(y2) - top + 1) as u32;
+            assert!(fb.fill_rect_direct(&mut direct, left, top, width, height, color).unwrap());
+
+            let mut staged = TestContext::new();
+            let other = FrameBuffer::new(&mut staged, 8, 6, 16).unwrap();
+            staged.write_bytes(base, &[0x5au8; 8 * 6 * 2]).unwrap();
+            let mut canvas = other.canvas(&mut staged).unwrap();
+            let clip = Clip {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 6,
+            };
+            canvas.draw_line(x1, y1, x2, y2, color, clip);
+            canvas.flush().unwrap();
+
+            let mut got = [0u8; 8 * 6 * 2];
+            let mut want = [0u8; 8 * 6 * 2];
+            direct.read_bytes(base, &mut got).unwrap();
+            staged.read_bytes(base, &mut want).unwrap();
+            assert_eq!(got, want, "line ({x1}, {y1}) -> ({x2}, {y2})");
+        }
+    }
+
     #[test]
     fn put_pixel_direct_refuses_a_depth_it_cannot_pack() {
         let mut context = TestContext::new();

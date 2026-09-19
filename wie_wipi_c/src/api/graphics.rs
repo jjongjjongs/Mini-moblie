@@ -2178,6 +2178,29 @@ pub async fn draw_line(context: &mut dyn WIPICContext, dst: WIPICIndirectPtr, x1
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst)?)?);
     let gctx: WIPICGraphicsContext = read_generic(context, pgc)?;
+    let color = context_color(&framebuffer, &gctx);
+
+    // A line along an axis is a one-pixel-thick rectangle, and writing it as
+    // one skips staging the surface. This is the call a C engine draws its
+    // sprites with - it lays each row of a sprite as a run - and 지크2 makes
+    // fifty thousand of them a second. Bresenham on a line with no slope walks
+    // exactly the pixels between its ends and nothing else, which is what a
+    // fill of that span covers, so the two agree pixel for pixel.
+    //
+    // A sloped line still goes through the canvas: its pixels are the
+    // rasteriser's to choose, and standing in for it would be guessing at them.
+    if color.a == 0xff && (x1 == x2 || y1 == y2) {
+        let (left, top) = (x1.min(x2), y1.min(y2));
+        let width = (x1.max(x2) as i64 - left as i64) + 1;
+        let height = (y1.max(y2) as i64 - top as i64) + 1;
+
+        if let (Ok(width), Ok(height)) = (u32::try_from(width), u32::try_from(height))
+            && framebuffer.fill_rect_direct(context, left, top, width, height, color)?
+        {
+            return Ok(());
+        }
+    }
+
     let mut canvas = framebuffer.canvas(context)?;
 
     let clip = Clip {
@@ -2187,7 +2210,6 @@ pub async fn draw_line(context: &mut dyn WIPICContext, dst: WIPICIndirectPtr, x1
         height: framebuffer.0.height as _,
     };
 
-    let color = context_color(&framebuffer, &gctx);
     canvas.draw_line(x1 as _, y1 as _, x2 as _, y2 as _, color, clip);
     canvas.flush()?;
 
