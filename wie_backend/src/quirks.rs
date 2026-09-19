@@ -138,6 +138,9 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // screen to 176x204 on its 176x220 panel - and it answers the same way,
     // 57 colours down to 6 without the strip.
     (TitlePlatform::Ktf, "01037EBF", annunciator_of(16)),
+    // 던전앤파이터 격투가: draws 296 rows into the 320 its descriptor asks for
+    // and leaves the rest alone, so the panel is the 296 it draws.
+    (TitlePlatform::Ktf, "0103BF27", panel(240, 296)),
     // 겟앰프드: its descriptor says 240*320, but every full-screen picture it
     // carries - title, menu, each map - is 240x296, and it centres its popup
     // frame in whatever height the screen reports. Told 320 it put the frame at
