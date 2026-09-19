@@ -1154,6 +1154,14 @@ pub fn decode_image(data: &[u8]) -> Result<Box<dyn Image>> {
     };
     let mut rgba = image.into_rgba8();
 
+    if bmp_keys_out_the_sheet_colour(data) {
+        for pixel in rgba.pixels_mut() {
+            if pixel.0[..3] == SPRITE_SHEET_KEY {
+                pixel.0[3] = 0;
+            }
+        }
+    }
+
     if rgba.width() <= 15 && rgba.height() <= 15 && png_is_single_index0_tile(data) {
         for pixel in rgba.pixels_mut() {
             pixel.0[3] = 0;
@@ -1215,6 +1223,41 @@ fn png_with_repaired_crcs(data: &[u8]) -> Option<Vec<u8>> {
     }
 
     repaired_any.then_some(repaired)
+}
+
+/// The colour a paletted BMP that says it is keyed reserves as transparent,
+/// as `(r, g, b)`.
+const SPRITE_SHEET_KEY: [u8; 3] = [32, 144, 32];
+
+/// Whether a paletted BMP is one whose `SPRITE_SHEET_KEY` pixels are the
+/// background rather than a colour it draws.
+///
+/// A BMP carries no alpha, so a WIPI sprite sheet holds its transparency as a
+/// reserved colour and the toolchain sets `bfReserved1` on the sheets that use
+/// one - the field is otherwise nothing, and Windows leaves it zero. Across the
+/// 1252 paletted BMPs the handset dumps here ship, the flag and that one green
+/// agree 1231 times: 1099 sheets set the flag and hold the colour, 132
+/// backgrounds set neither. It is the sheets' background too, covering the
+/// border of 1048 of the 1099.
+///
+/// Read only off a flag the file sets for itself, so a title whose art happens
+/// to use the colour is untouched unless its own toolchain marked it keyed. The
+/// remaining sixteen files hold the colour without the flag, all from one
+/// title, and stay opaque - the flag is what says the colour is background, and
+/// keying a file that never asked would punch holes in it.
+///
+/// Without this LOA 혼돈의 서곡's logos, its avatars and every one of its map
+/// tiles came down as the green rectangle they are cut from.
+fn bmp_keys_out_the_sheet_colour(data: &[u8]) -> bool {
+    let Some(header) = data.get(..30) else {
+        return false;
+    };
+
+    // `bfReserved1` at 6, and `biBitCount` at 28 - the depths that read their
+    // colours out of a palette, which is all the flag is ever seen on.
+    header.starts_with(b"BM")
+        && u16::from_le_bytes(header[6..8].try_into().unwrap()) == 1
+        && matches!(u16::from_le_bytes(header[28..30].try_into().unwrap()), 1 | 2 | 4 | 8)
 }
 
 /// The same BMP with `biClrUsed` cut down to the palette that actually fits
@@ -1453,6 +1496,56 @@ mod tests {
         let honest = decode_image(&sheet_bmp(17, 24, 64, 64)).unwrap();
         let components = |image: &dyn Image| image.colors().iter().map(|x| (x.r, x.g, x.b, x.a)).collect::<Vec<_>>();
         assert_eq!(components(&*decoded), components(&*honest));
+    }
+
+    /// A 2x1 8bpp BMP whose left pixel is the sheet key and whose right pixel
+    /// is white, with `bfReserved1` set to `reserved1`.
+    fn keyed_pair_bmp(reserved1: u16) -> Vec<u8> {
+        let mut bmp = b"BM".to_vec();
+        bmp.extend(66u32.to_le_bytes());
+        bmp.extend(reserved1.to_le_bytes());
+        bmp.extend(0u16.to_le_bytes());
+        bmp.extend(62u32.to_le_bytes()); // bfOffBits: 14 + 40 + two entries
+        bmp.extend(40u32.to_le_bytes());
+        bmp.extend(2u32.to_le_bytes());
+        bmp.extend(1u32.to_le_bytes());
+        bmp.extend(1u16.to_le_bytes());
+        bmp.extend(8u16.to_le_bytes());
+        bmp.extend([0u32; 4].iter().flat_map(|x| x.to_le_bytes()));
+        bmp.extend(2u32.to_le_bytes()); // biClrUsed
+        bmp.extend(0u32.to_le_bytes());
+
+        // Palette entries are stored blue, green, red, reserved.
+        let [r, g, b] = super::SPRITE_SHEET_KEY;
+        bmp.extend([b, g, r, 0]);
+        bmp.extend([0xff, 0xff, 0xff, 0]);
+        // One row, padded to four bytes.
+        bmp.extend([0, 1, 0, 0]);
+
+        bmp
+    }
+
+    /// A BMP carries no alpha, so a sprite sheet holds its transparency as a
+    /// reserved colour and sets `bfReserved1` to say so. Left opaque, every one
+    /// of LOA 혼돈의 서곡's logos, avatars and map tiles came down as the green
+    /// rectangle it is cut from.
+    #[test]
+    fn the_key_colour_of_a_sheet_that_says_it_is_keyed_is_transparent() {
+        let alphas = |data: &[u8]| {
+            decode_image(data)
+                .unwrap()
+                .colors()
+                .iter()
+                .map(|x| (x.r, x.g, x.b, x.a))
+                .collect::<Vec<_>>()
+        };
+        let [r, g, b] = super::SPRITE_SHEET_KEY;
+
+        assert_eq!(alphas(&keyed_pair_bmp(1)), [(r, g, b, 0x00), (0xff, 0xff, 0xff, 0xff)]);
+
+        // The same two pixels in a file that never set the flag stay opaque:
+        // the flag is what says the colour is background rather than art.
+        assert_eq!(alphas(&keyed_pair_bmp(0)), [(r, g, b, 0xff), (0xff, 0xff, 0xff, 0xff)]);
     }
 
     #[test]
