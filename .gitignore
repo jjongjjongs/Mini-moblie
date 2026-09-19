@@ -22,3 +22,6 @@ third_party/**/target/
 *.jks
 *.keystore
 android/keystore.properties
+
+# Icon generator previews
+tools/icon/preview/
