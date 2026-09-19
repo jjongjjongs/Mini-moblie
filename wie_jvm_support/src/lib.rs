@@ -2,6 +2,7 @@
 extern crate alloc;
 
 mod context;
+mod fields;
 mod jvm_implementation;
 mod runtime;
 
@@ -14,6 +15,7 @@ use wie_backend::System;
 use wie_util::{Result, WieError};
 
 pub use context::{WieJavaClassProto, WieJvmContext};
+pub use fields::{declared_field, put_declared_field};
 pub use jvm_implementation::{JvmImplementation, RustJavaJvmImplementation};
 use runtime::JvmRuntime;
 

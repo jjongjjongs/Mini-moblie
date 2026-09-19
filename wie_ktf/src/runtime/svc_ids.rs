@@ -395,11 +395,19 @@ pub enum WIPICDatabaseMethodId {
     UpdateRecord = 5,
     DeleteRecord = 6,
     ListRecord = 7,
-    SortRecords = 8,
+    /// `MC_fsMkDir(name, area)`. This table is the filesystem as much as it is
+    /// the database - the two share every slot up to here - and nothing in this
+    /// runtime holds a directory, so making one is a name that now exists.
+    /// 이타루스전기 makes `res`, `res/img`, `res/img/f` and `res/img/open`
+    /// before it unpacks what it downloaded into them.
+    MakeDirectory = 8,
     GetAccessMode = 9,
     GetNumberOfRecords = 10,
     GetRecordSize = 11,
-    ListDatabases = 12,
+    /// `MC_fsAvailable()`, the storage still free, in bytes. A title reads the
+    /// return as a figure to compare with what it is about to write, not as a
+    /// list of names.
+    Available = 12,
     Unk13 = 13,
     Unk14 = 14,
     Unk15 = 15,
@@ -425,11 +433,11 @@ impl TryFrom<u16> for WIPICDatabaseMethodId {
             5 => Self::UpdateRecord,
             6 => Self::DeleteRecord,
             7 => Self::ListRecord,
-            8 => Self::SortRecords,
+            8 => Self::MakeDirectory,
             9 => Self::GetAccessMode,
             10 => Self::GetNumberOfRecords,
             11 => Self::GetRecordSize,
-            12 => Self::ListDatabases,
+            12 => Self::Available,
             13 => Self::Unk13,
             14 => Self::Unk14,
             15 => Self::Unk15,
@@ -443,7 +451,7 @@ impl TryFrom<u16> for WIPICDatabaseMethodId {
     }
 }
 
-#[derive(Copy, Clone, Eq, PartialEq)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[repr(u32)]
 pub enum WIPICTableId {
     Kernel = 0,
@@ -464,6 +472,11 @@ pub enum WIPICTableId {
     Interface14 = 15,
     Interface15 = 16,
     Interface16 = 17,
+    /// Not one of the guest's own tables. It is the `MXUserMemInterf`
+    /// extension library, which a title reaches through
+    /// `MC_knlGetDLLInterface` rather than by index, so it needs an id of its
+    /// own only to route its four stubs back here.
+    MxUserMem = 18,
 }
 
 impl WIPICTableId {
@@ -495,6 +508,7 @@ impl TryFrom<u32> for WIPICTableId {
             15 => Self::Interface14,
             16 => Self::Interface15,
             17 => Self::Interface16,
+            18 => Self::MxUserMem,
             _ => return Err(wie_util::WieError::FatalError(alloc::format!("Unknown KTF WIPIC table id {value}"))),
         })
     }

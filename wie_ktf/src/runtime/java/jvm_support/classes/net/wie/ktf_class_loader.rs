@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, vec};
+use alloc::{boxed::Box, format, vec};
 
 use bytemuck::cast_slice;
 use java_class_proto::{JavaClassProto, JavaFieldProto, JavaMethodProto};
@@ -67,15 +67,18 @@ impl KtfClassLoader {
             .await?;
 
         // load client.bin
-        let name_rust = JavaLangString::to_rust_string(jvm, &binary_name).await.unwrap();
+        let name_rust = JavaLangString::to_rust_string(jvm, &binary_name).await?;
         let data_stream = jvm
             .invoke_virtual(&this, "getResourceAsStream", "(Ljava/lang/String;)Ljava/io/InputStream;", (binary_name,))
-            .await
-            .unwrap();
-        let data = JavaIoInputStream::read_until_end(jvm, &data_stream).await.unwrap();
+            .await?;
+        let data = JavaIoInputStream::read_until_end(jvm, &data_stream).await?;
 
-        // load binary
-        let native_functions = load_native(
+        // load binary. The title's own WIPI init runs in here and fails if a class
+        // it asks for is one we do not have, so this is the first place a missing
+        // class shows up - as a failure, not a bug in the loader. Raising it as an
+        // exception carrying the code keeps that diagnosable; unwrapping turned
+        // every one of them into a panic reported only as "에뮬레이터 내부 오류".
+        let native_functions = match load_native(
             &mut context.core,
             &mut context.system,
             jvm,
@@ -85,7 +88,10 @@ impl KtfClassLoader {
             ptr_jvm_exception_context as _,
         )
         .await
-        .unwrap();
+        {
+            Ok(x) => x,
+            Err(e) => return Err(jvm.exception("net/wie/WieError", &format!("loading {name_rust} failed: {e}")).await),
+        };
 
         jvm.put_field(&mut this, "fnGetClass", "I", native_functions.fn_get_class as i32).await?;
 
@@ -109,15 +115,7 @@ impl KtfClassLoader {
         // find from client.bin
         let name = JavaLangString::to_rust_string(jvm, &name).await?;
 
-        let ptr_name_size = (name.len() + 1) as u32;
-        let ptr_name = Allocator::alloc(&mut context.core, ptr_name_size).unwrap();
-        write_null_terminated_string_bytes(&mut context.core, ptr_name, name.as_bytes()).unwrap();
-
-        let ptr_raw = context.core.run_function(fn_get_class as _, &[ptr_name]).await.unwrap();
-        Allocator::free(&mut context.core, ptr_name, ptr_name_size).unwrap();
-
-        if ptr_raw != 0 {
-            let class = JavaClassDefinition::from_raw(ptr_raw, &context.core);
+        if let Some(class) = module_class(&mut context.core, fn_get_class as _, &name).await? {
             jvm.register_class(Box::new(class), Some(this.into())).await?;
 
             Ok(jvm.resolve_class(&name).await?.java_class().into())
@@ -125,4 +123,35 @@ impl KtfClassLoader {
             Ok(None.into())
         }
     }
+
+    /// What the loader was handed for `fnGetClass`, or `None` before there is a
+    /// module to ask.
+    pub async fn module_entry_point(jvm: &Jvm) -> Option<u32> {
+        let this: ClassInstanceRef<Self> = jvm
+            .get_static_field("net/wie/KtfClassLoader", "instance", "Lnet/wie/KtfClassLoader;")
+            .await
+            .ok()?;
+        if this.is_null() {
+            return None;
+        }
+
+        let fn_get_class: i32 = jvm.get_field(&this, "fnGetClass", "I").await.ok()?;
+
+        (fn_get_class != 0).then_some(fn_get_class as _)
+    }
+}
+
+/// The class the title's own module answers to `name`, if it has one.
+///
+/// This is the only place a KTF class comes from: the module holds every class
+/// the title was compiled from, and hands them over one at a time.
+pub async fn module_class(core: &mut ArmCore, fn_get_class: u32, name: &str) -> JvmResult<Option<JavaClassDefinition>> {
+    let ptr_name_size = (name.len() + 1) as u32;
+    let ptr_name = Allocator::alloc(core, ptr_name_size).unwrap();
+    write_null_terminated_string_bytes(core, ptr_name, name.as_bytes()).unwrap();
+
+    let ptr_raw = core.run_function(fn_get_class, &[ptr_name]).await.unwrap();
+    Allocator::free(core, ptr_name, ptr_name_size).unwrap();
+
+    Ok((ptr_raw != 0).then(|| JavaClassDefinition::from_raw(ptr_raw, core)))
 }

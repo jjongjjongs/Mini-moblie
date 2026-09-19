@@ -1,13 +1,13 @@
 use alloc::vec;
 
-use java_class_proto::JavaMethodProto;
+use java_class_proto::{JavaFieldProto, JavaMethodProto};
 use java_constants::ClassAccessFlags;
 use jvm::{ClassInstanceRef, Jvm, Result as JvmResult};
 
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 
 use crate::classes::{
-    javax::microedition::lcdui::{Display, Graphics},
+    javax::microedition::lcdui::{Display, Graphics, display::HOST_PAINT_STAND_DOWN_MS},
     net::wie::{KeyboardEventType, MIDPKeyCode},
 };
 
@@ -41,7 +41,17 @@ impl Canvas {
                     Default::default(),
                 ),
             ],
-            fields: vec![],
+            fields: vec![
+                // The region a title asked to have repainted, in canvas
+                // coordinates, unioned across the `repaint` calls made since
+                // the last paint. A width at or below zero means "the whole
+                // canvas": either nothing has been asked for, or a caller asked
+                // for everything. See `take_dirty_region`.
+                JavaFieldProto::new("__wieDirtyX", "I", Default::default()),
+                JavaFieldProto::new("__wieDirtyY", "I", Default::default()),
+                JavaFieldProto::new("__wieDirtyWidth", "I", Default::default()),
+                JavaFieldProto::new("__wieDirtyHeight", "I", Default::default()),
+            ],
             access_flags: ClassAccessFlags::ABSTRACT,
         }
     }
@@ -59,8 +69,68 @@ impl Canvas {
     async fn repaint(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<()> {
         tracing::debug!("javax.microedition.lcdui.Canvas::repaint({this:?})");
 
-        let display = jvm.get_field(&this, "currentDisplay", "Ljavax/microedition/lcdui/Display;").await?;
+        Self::mark_dirty(jvm, &this, 0, 0, -1, -1).await?;
+
+        let display: ClassInstanceRef<Display> = jvm.get_field(&this, "currentDisplay", "Ljavax/microedition/lcdui/Display;").await?;
+        if display.is_null() {
+            // Not on the screen yet, so there is nobody to ask - the region
+            // just recorded is what the first paint will cover. 바이러스's card
+            // asks for one from `showNotify`, which `pushCard` calls before the
+            // canvas has been made current.
+            return Ok(());
+        }
+
         let _: () = jvm.invoke_virtual(&display, "repaint", "(IIII)V", (0, 0, -1, -1)).await?;
+
+        Ok(())
+    }
+
+    /// Adds one requested region to what the next paint has to cover.
+    ///
+    /// A paint pass is asynchronous - `repaint` only wakes the event queue - so
+    /// several requests can pile up before it runs, and it has to cover all of
+    /// them. A request that is not a positive rectangle means "everything", and
+    /// once everything is pending nothing narrows it again.
+    async fn mark_dirty(jvm: &Jvm, this: &ClassInstanceRef<Self>, x: i32, y: i32, width: i32, height: i32) -> JvmResult<()> {
+        let mut this = this.clone();
+
+        let pending_width: i32 = jvm.get_field(&this, "__wieDirtyWidth", "I").await?;
+        let pending_height: i32 = jvm.get_field(&this, "__wieDirtyHeight", "I").await?;
+        let everything_pending = pending_width <= 0 || pending_height <= 0;
+
+        if width <= 0 || height <= 0 {
+            jvm.put_field(&mut this, "__wieDirtyWidth", "I", -1).await?;
+            jvm.put_field(&mut this, "__wieDirtyHeight", "I", -1).await?;
+
+            return Ok(());
+        }
+
+        if everything_pending {
+            // Nothing was pending: this request is the whole of it. (A pending
+            // "everything" stays that way, and is handled by the branch below.)
+            let nothing_pending = pending_width == 0 && pending_height == 0;
+            if nothing_pending {
+                jvm.put_field(&mut this, "__wieDirtyX", "I", x).await?;
+                jvm.put_field(&mut this, "__wieDirtyY", "I", y).await?;
+                jvm.put_field(&mut this, "__wieDirtyWidth", "I", width).await?;
+                jvm.put_field(&mut this, "__wieDirtyHeight", "I", height).await?;
+            }
+
+            return Ok(());
+        }
+
+        let pending_x: i32 = jvm.get_field(&this, "__wieDirtyX", "I").await?;
+        let pending_y: i32 = jvm.get_field(&this, "__wieDirtyY", "I").await?;
+
+        let left = pending_x.min(x);
+        let top = pending_y.min(y);
+        let right = pending_x.saturating_add(pending_width).max(x.saturating_add(width));
+        let bottom = pending_y.saturating_add(pending_height).max(y.saturating_add(height));
+
+        jvm.put_field(&mut this, "__wieDirtyX", "I", left).await?;
+        jvm.put_field(&mut this, "__wieDirtyY", "I", top).await?;
+        jvm.put_field(&mut this, "__wieDirtyWidth", "I", right - left).await?;
+        jvm.put_field(&mut this, "__wieDirtyHeight", "I", bottom - top).await?;
 
         Ok(())
     }
@@ -76,16 +146,55 @@ impl Canvas {
     ) -> JvmResult<()> {
         tracing::debug!("javax.microedition.lcdui.Canvas::repaint({this:?}, {x}, {y}, {width}, {height})");
 
-        let display = jvm.get_field(&this, "currentDisplay", "Ljavax/microedition/lcdui/Display;").await?;
+        Self::mark_dirty(jvm, &this, x, y, width, height).await?;
+
+        let display: ClassInstanceRef<Display> = jvm.get_field(&this, "currentDisplay", "Ljavax/microedition/lcdui/Display;").await?;
+        if display.is_null() {
+            // See `repaint`: a canvas that is not on the screen has nothing to
+            // ask, and keeps the region for its first paint.
+            return Ok(());
+        }
+
         let _: () = jvm.invoke_virtual(&display, "repaint", "(IIII)V", (x, y, width, height)).await?;
 
         Ok(())
     }
 
-    async fn service_repaints(jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<()> {
-        tracing::warn!("stub javax.microedition.lcdui.Canvas::serviceRepaints({this:?})");
+    /// Service what is already pending, and block until it is done.
+    ///
+    /// 액션퍼즐패밀리1 draws a frame, calls `repaint(0, 0, 240, 320)` and then
+    /// this, which is the ordinary MIDP idiom for "and put it on the screen
+    /// before I go on". Two things were wrong with answering it by asking for
+    /// another repaint: the request went through `repaint()` with an empty
+    /// rectangle, which `mark_dirty` reads as a demand for the whole canvas, so
+    /// the region the title asked for was thrown away; and it returned without
+    /// painting, so the title ran ahead of the display and drew its next frame
+    /// over one that had never been shown. That is what the flicker was.
+    async fn service_repaints(jvm: &Jvm, context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<()> {
+        tracing::debug!("javax.microedition.lcdui.Canvas::serviceRepaints({this:?})");
 
-        jvm.invoke_virtual(&this, "repaint", "(IIII)V", (0, 0, 0, 0)).await
+        let display: ClassInstanceRef<Display> = jvm.get_field(&this, "currentDisplay", "Ljavax/microedition/lcdui/Display;").await?;
+        if display.is_null() {
+            return Ok(());
+        }
+
+        // Painting here and now is what "service" means: the title draws a
+        // frame, asks for it, and carries on only once it is on the screen.
+        // Returning without painting let it run ahead of the display, drawing
+        // the next frame over one that had not been shown yet.
+        let painting: bool = jvm.get_field(&display, "__wiePainting", "Z").await?;
+        if painting {
+            // Called from inside a paint. Servicing it here would re-enter that
+            // paint, so the pending request is left for the one already running.
+            return Ok(());
+        }
+
+        let _: () = jvm.invoke_virtual(&display, "handlePaintEvent", "()V", ()).await?;
+
+        // The guest is painting its own frames, so the host's paint stands down
+        // for a while - beside this one it would be a step the title did not take.
+        let until = context.system().platform().now().raw() + HOST_PAINT_STAND_DOWN_MS;
+        jvm.put_field(&mut display.clone(), "__wieStandDownUntil", "J", until as i64).await
     }
 
     async fn get_game_action(_: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, key: i32) -> JvmResult<i32> {
