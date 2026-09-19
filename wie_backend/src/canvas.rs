@@ -1141,7 +1141,9 @@ pub fn decode_image(data: &[u8]) -> Result<Box<dyn Image>> {
     let image = match decoded {
         Ok(image) => image,
         Err(error) => {
-            let repaired = png_with_repaired_crcs(data).ok_or_else(|| WieError::FatalError(error.to_string()))?;
+            let repaired = png_with_repaired_crcs(data)
+                .or_else(|| bmp_with_palette_ending_at_offbits(data))
+                .ok_or_else(|| WieError::FatalError(error.to_string()))?;
 
             ImageReader::new(Cursor::new(&repaired))
                 .with_guessed_format()
@@ -1215,6 +1217,66 @@ fn png_with_repaired_crcs(data: &[u8]) -> Option<Vec<u8>> {
     repaired_any.then_some(repaired)
 }
 
+/// The same BMP with `biClrUsed` cut down to the palette that actually fits
+/// between the DIB header and `bfOffBits`, or `None` if it is not a BMP that
+/// declares more than it stores.
+///
+/// A WIPI sprite sheet is one paletted BMP that a title slices into single
+/// frames at run time, and it slices by copying the sheet's whole 14+40+palette
+/// header out in front of the rows it wants and patching the width, the height
+/// and `bfSize`. The sheet's own `biClrUsed` rides along untouched, so a frame
+/// cut from a sheet whose palette was written short - LOA 혼돈의 서곡's `fx.bmp`
+/// stores 64 entries and claims 256 - claims a palette four times the one it
+/// carries. `bfOffBits` still points at the rows, and the sheet itself decodes
+/// because the entries past the 64th are only ever read, never used. A 17x24
+/// frame is 790 bytes in total and does not reach the 1078 the claim asks for,
+/// so reading the palette runs off the end and the decode fails - which killed
+/// the whole VM on the first frame of the game's own weapon effects.
+///
+/// Only reached once a strict decode has already refused the bytes, so a sound
+/// BMP never takes this path, and only `biClrUsed` is rewritten: a BMP short of
+/// the rows `bfOffBits` and the dimensions call for still fails.
+fn bmp_with_palette_ending_at_offbits(data: &[u8]) -> Option<Vec<u8>> {
+    /// `bfOffBits` sits at 10, and the DIB header the palette follows at 14.
+    const FILE_HEADER: usize = 14;
+    /// A `BITMAPINFOHEADER`, the smallest that carries `biBitCount` and
+    /// `biClrUsed`; the later headers are this one with fields appended.
+    const INFO_HEADER: usize = 40;
+    /// `biClrUsed`, as an offset into the DIB header.
+    const CLR_USED: usize = 32;
+
+    let word = |at: usize| -> Option<u32> { Some(u32::from_le_bytes(data.get(at..at + 4)?.try_into().unwrap())) };
+
+    if !data.starts_with(b"BM") {
+        return None;
+    }
+
+    let dib_size = word(FILE_HEADER)? as usize;
+    if dib_size < INFO_HEADER {
+        return None;
+    }
+
+    // Only a paletted depth has a palette to be wrong about.
+    let bit_count = u16::from_le_bytes(data.get(FILE_HEADER + 14..FILE_HEADER + 16)?.try_into().unwrap());
+    if !matches!(bit_count, 1 | 2 | 4 | 8) {
+        return None;
+    }
+
+    let palette_at = FILE_HEADER.checked_add(dib_size)?;
+    let stored = (word(10)? as usize).checked_sub(palette_at)? / 4;
+    let declared = match word(FILE_HEADER + CLR_USED)? as usize {
+        0 => 1usize << bit_count,
+        count => count,
+    };
+    if stored == 0 || declared <= stored {
+        return None;
+    }
+
+    let mut clamped = data.to_vec();
+    clamped[FILE_HEADER + CLR_USED..FILE_HEADER + CLR_USED + 4].copy_from_slice(&(stored as u32).to_le_bytes());
+    Some(clamped)
+}
+
 /// A tiny degenerate indexed PNG - one whose palette holds a single entry and
 /// which declares no `tRNS` - is entirely palette index 0. KTF/WIPI titles treat
 /// that index as the transparent colour, so such a tile is a fully transparent
@@ -1271,8 +1333,8 @@ mod tests {
     use crate::canvas::{Clip, Image, ImageBufferCanvas};
 
     use super::{
-        ArgbPixel, Canvas, Color, Font, Rgb332Pixel, ScaleFont, TextAlignment, VecImageBuffer, baseline_px, decode_image, pixel_face,
-        png_with_repaired_crcs, scaled_face,
+        ArgbPixel, Canvas, Color, Font, Rgb332Pixel, ScaleFont, TextAlignment, VecImageBuffer, baseline_px, bmp_with_palette_ending_at_offbits,
+        decode_image, pixel_face, png_with_repaired_crcs, scaled_face,
     };
 
     /// A 1x1 indexed PNG, which is the smallest thing that has a palette to
@@ -1336,6 +1398,80 @@ mod tests {
 
         // Repaired back to exactly the bytes a correct encoder would have written.
         assert_eq!(png_with_repaired_crcs(&patched).as_deref(), Some(sound.as_slice()));
+    }
+
+    /// An 8bpp BMP laid out the way a WIPI sprite sheet and the frames cut from
+    /// it are: `stored` palette entries between the DIB header and `bfOffBits`,
+    /// and a `biClrUsed` that says `declared`. Entry `i` is the grey `(i, i, i)`
+    /// and pixel `(x, y)` is index `(x + y) % stored`.
+    fn sheet_bmp(width: u32, height: u32, stored: u32, declared: u32) -> Vec<u8> {
+        let stride = width.div_ceil(4) * 4;
+        let off_bits = 14 + 40 + stored * 4;
+
+        let mut bmp = b"BM".to_vec();
+        bmp.extend((off_bits + stride * height).to_le_bytes());
+        bmp.extend(1u16.to_le_bytes()); // bfReserved1, as the sheets carry it
+        bmp.extend(0u16.to_le_bytes());
+        bmp.extend(off_bits.to_le_bytes());
+        bmp.extend(40u32.to_le_bytes());
+        bmp.extend(width.to_le_bytes());
+        bmp.extend(height.to_le_bytes());
+        bmp.extend(1u16.to_le_bytes());
+        bmp.extend(8u16.to_le_bytes());
+        bmp.extend([0u32; 4].iter().flat_map(|x| x.to_le_bytes())); // compression, size, both densities
+        bmp.extend(declared.to_le_bytes());
+        bmp.extend(0u32.to_le_bytes());
+
+        for i in 0..stored {
+            bmp.extend([i as u8, i as u8, i as u8, 0]);
+        }
+        // Bottom-up, as a positive height means.
+        for y in (0..height).rev() {
+            for x in 0..stride {
+                bmp.push(if x < width { ((x + y) % stored) as u8 } else { 0 });
+            }
+        }
+
+        bmp
+    }
+
+    /// A frame a title cut out of a sprite sheet carries the sheet's own
+    /// `biClrUsed`, which on LOA 혼돈의 서곡's `fx.bmp` claims four times the
+    /// palette the sheet stores. The sheet is big enough that reading the claim
+    /// only runs into its rows; a 790-byte frame is not, and strict decoding
+    /// ran off the end of it and took the whole VM with it.
+    #[test]
+    fn a_frame_whose_palette_stops_at_offbits_still_decodes() {
+        let frame = sheet_bmp(17, 24, 64, 256);
+        assert_eq!(frame.len(), 790, "the frame the title died on");
+
+        let decoded = decode_image(&frame).expect("a palette that stops at bfOffBits must not lose the image");
+        assert_eq!((decoded.width(), decoded.height()), (17, 24));
+
+        // Pixel for pixel what the same frame decodes to when its claim is
+        // honest: only the count is rewritten, never a palette entry or a row.
+        let honest = decode_image(&sheet_bmp(17, 24, 64, 64)).unwrap();
+        let components = |image: &dyn Image| image.colors().iter().map(|x| (x.r, x.g, x.b, x.a)).collect::<Vec<_>>();
+        assert_eq!(components(&*decoded), components(&*honest));
+    }
+
+    #[test]
+    fn a_sound_bmp_is_left_exactly_as_it_is() {
+        // The clamp only ever runs behind a decode that already failed, but a
+        // BMP whose palette is the one it claims must come back untouched even
+        // so - as must a file that is no BMP at all.
+        assert_eq!(bmp_with_palette_ending_at_offbits(&sheet_bmp(17, 24, 64, 64)), None);
+        assert_eq!(bmp_with_palette_ending_at_offbits(&indexed_png()), None);
+        assert_eq!(bmp_with_palette_ending_at_offbits(b"BM"), None);
+    }
+
+    #[test]
+    fn a_bmp_short_of_its_rows_is_still_refused() {
+        // Nothing but `biClrUsed` is rewritten, so a frame that really is
+        // missing pixel data fails the way it should.
+        let frame = sheet_bmp(17, 24, 64, 256);
+
+        assert!(decode_image(&frame[..frame.len() - 40]).is_err());
     }
 
     #[test]
