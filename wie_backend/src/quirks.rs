@@ -77,6 +77,16 @@ const fn annunciator() -> TitleQuirks {
     }
 }
 
+/// A strip of a height the size table does not give for this panel.
+const fn annunciator_of(rows: u32) -> TitleQuirks {
+    TitleQuirks {
+        screen_size: None,
+        expects_annunciator: true,
+        annunciator_rows: Some(rows),
+        drawn_sideways: false,
+    }
+}
+
 const fn sideways() -> TitleQuirks {
     TitleQuirks {
         screen_size: None,
@@ -93,12 +103,13 @@ const fn sideways() -> TitleQuirks {
 /// `wie_lgt`'s `title_expects_annunciator`, the quarter turn at
 /// `wie_backend::present`.
 ///
-/// No KTF title is listed for a status strip. Three were - 던전앤파이터 격투가,
-/// 만귀토벌전 and 셔터2 데스트니 - and are not any more: KTF titles are shown
-/// the whole panel, the way LGT titles that ask for no strip are. 만귀토벌전
-/// and 셔터2 lay their screens out inside 204 of their 220 rows and leave the
-/// rest holding whatever the frame before put there; that band is accepted
-/// rather than papered over with a strip the handset does not show.
+/// A KTF title is shown the whole panel unless it lays itself out around a
+/// strip. 던전앤파이터 격투가 was listed for one and is not any more - it draws
+/// 296 rows into a 320-row panel and what it leaves under them is its own
+/// business, and it draws the same either way. 만귀토벌전 and 셔터2 데스트니
+/// stay listed: they place every screen inside 204 of their 220 rows, so the
+/// strip's height is what their layout is measured from, and without it they
+/// lose the screen rather than a band at the bottom.
 const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // 미니게임 히어로즈2 터치: repaints a 240x80 sponsor banner along the
     // bottom of whatever height it is told, so its 320 rows of screen need a
@@ -112,6 +123,21 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     (TitlePlatform::Lgt, "0002A52B", annunciator()),
     // 알바타이쿤2: every screen it draws lands exactly one strip down.
     (TitlePlatform::Lgt, "0002D4D0", annunciator()),
+    // 만귀토벌전: lays every screen out below the strip and inside the rows
+    // left under it, so the rows the strip takes off the top are also what
+    // lines that layout up. Taken away with the rest of KTF's strips, its last
+    // frame fell from 66 colours to 15 - the screen, not a band at the bottom.
+    //
+    // Sixteen rows rather than the twenty the size table gives a 176-wide
+    // panel: the title clears 204 rows of its 220-row panel and puts everything
+    // inside them, and 204 + 16 is the panel exactly. Under a twenty-row strip
+    // its last four rows - the bottom of the portrait and of the KARMA gauge -
+    // went off the end.
+    (TitlePlatform::Ktf, "0102A356", annunciator_of(16)),
+    // 셔터2 데스트니: the same SDK and the same arithmetic - it clips every
+    // screen to 176x204 on its 176x220 panel - and it answers the same way,
+    // 57 colours down to 6 without the strip.
+    (TitlePlatform::Ktf, "01037EBF", annunciator_of(16)),
     // 겟앰프드: its descriptor says 240*320, but every full-screen picture it
     // carries - title, menu, each map - is 240x296, and it centres its popup
     // frame in whatever height the screen reports. Told 320 it put the frame at
