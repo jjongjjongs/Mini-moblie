@@ -194,6 +194,117 @@ impl FrameBuffer {
         Ok(true)
     }
 
+    /// Sets one pixel by writing that pixel, and nothing else.
+    ///
+    /// The canvas path stages the whole surface for every primitive - the
+    /// bytes out of guest memory, a pixel buffer collected from them, and a
+    /// whole-surface comparison back. For a single pixel that is four passes
+    /// over a quarter of a megabyte to move two bytes. 드래곤하트2's menus draw
+    /// that way, two and a half thousand `MC_grpPutPixel` a second beside two
+    /// thousand fills, and a Y700 held its AP at 3.2GHz for as long as one was
+    /// open while the same title in play sat at its floor.
+    ///
+    /// The colour is stored rather than composed, as `fill_rect_direct` stores
+    /// it - the caller checks it is fully opaque first. Outside the surface is
+    /// no-op, the way drawing on a canvas is.
+    ///
+    /// `false` when the surface's depth or geometry is not one this can
+    /// address; the caller should take the canvas path. Nothing has been
+    /// written when it returns `false`.
+    pub fn put_pixel_direct(&self, context: &mut dyn WIPICContext, x: i32, y: i32, color: Color) -> Result<bool> {
+        let pixel: Vec<u8> = match self.0.bpp {
+            16 => Rgb565Pixel::from_color(color).to_le_bytes().to_vec(),
+            32 => ArgbPixel::from_color(color).to_le_bytes().to_vec(),
+            _ => return Ok(false),
+        };
+
+        let Some(offset) = self.byte_offset(x, y, pixel.len()) else {
+            return Ok(true);
+        };
+
+        let base = context.data_ptr(self.0.buf)?;
+        context.write_bytes(base + offset, &pixel)?;
+
+        Ok(true)
+    }
+
+    /// The byte a pixel starts at, or `None` when it is off the surface or the
+    /// surface cannot be addressed this way.
+    fn byte_offset(&self, x: i32, y: i32, bytes_per_pixel: usize) -> Option<u32> {
+        let bpp = (self.0.bpp / 8).max(1) as i64;
+        let bpl = self.0.bpl as i64;
+        if bpl <= 0 || bytes_per_pixel as i64 != bpp {
+            return None;
+        }
+        if x < 0 || y < 0 || x as i64 >= self.0.width as i64 || y as i64 >= self.0.height as i64 {
+            return None;
+        }
+
+        u32::try_from(y as i64 * bpl + x as i64 * bpp).ok()
+    }
+
+    /// The part of `x, y, w, h` that is on this 16-bit surface, and its pixels,
+    /// read row by row rather than by staging the whole surface.
+    ///
+    /// `None` when the surface is not 16-bit or cannot be addressed this way,
+    /// and an empty rectangle when none of it is on the surface. Pixels come
+    /// back row-major, `cols` to a row.
+    #[allow(clippy::type_complexity)]
+    pub fn read_rect_rgb565(&self, context: &dyn WIPICContext, x: i32, y: i32, w: i32, h: i32) -> Result<Option<(i32, i32, i32, i32, Vec<u16>)>> {
+        if self.0.bpp != 16 {
+            return Ok(None);
+        }
+
+        let bpl = self.0.bpl as i64;
+        if bpl <= 0 {
+            return Ok(None);
+        }
+
+        let left = (x as i64).max(0);
+        let right = (x as i64 + w as i64).min(self.0.width as i64);
+        let top = (y as i64).max(0);
+        let bottom = (y as i64 + h as i64).min(self.0.height as i64);
+        if left >= right || top >= bottom {
+            return Ok(Some((0, 0, 0, 0, Vec::new())));
+        }
+
+        let cols = (right - left) as usize;
+        let last = (bottom - 1) * bpl + right * 2;
+        if u32::try_from(last).is_err() {
+            return Ok(None);
+        }
+
+        let base = context.data_ptr(self.0.buf)?;
+        let mut pixels = Vec::with_capacity(cols * (bottom - top) as usize);
+        let mut row = vec![0u8; cols * 2];
+
+        for py in top..bottom {
+            context.read_bytes(base + (py * bpl + left * 2) as u32, &mut row)?;
+            pixels.extend(row.chunks_exact(2).map(|x| u16::from_le_bytes([x[0], x[1]])));
+        }
+
+        Ok(Some((left as i32, top as i32, cols as i32, (bottom - top) as i32, pixels)))
+    }
+
+    /// Writes back what [`Self::read_rect_rgb565`] read, over the same
+    /// rectangle.
+    pub fn write_rect_rgb565(&self, context: &mut dyn WIPICContext, left: i32, top: i32, cols: i32, rows: i32, pixels: &[u16]) -> Result<()> {
+        if cols <= 0 || rows <= 0 {
+            return Ok(());
+        }
+
+        let bpl = self.0.bpl as i64;
+        let base = context.data_ptr(self.0.buf)?;
+
+        for (index, row) in pixels.chunks_exact(cols as usize).take(rows as usize).enumerate() {
+            let bytes: Vec<u8> = row.iter().flat_map(|pixel| pixel.to_le_bytes()).collect();
+            let offset = ((top as i64 + index as i64) * bpl + left as i64 * 2) as u32;
+            context.write_bytes(base + offset, &bytes)?;
+        }
+
+        Ok(())
+    }
+
     pub fn write_diff(&self, context: &mut dyn WIPICContext, snapshot: &[u8], drawn: &[u8]) -> Result<()> {
         let bpl = self.0.bpl as usize;
         let bpp = (self.0.bpp / 8).max(1) as usize;
@@ -285,6 +396,8 @@ impl DerefMut for FramebufferCanvas<'_> {
 
 #[cfg(test)]
 mod test {
+    use alloc::{vec, vec::Vec};
+
     use wie_util::{ByteRead, ByteWrite, WieError};
 
     use wie_backend::canvas::{Clip, Color};
@@ -375,6 +488,90 @@ mod test {
             staged.read_bytes(base, &mut want).unwrap();
             assert_eq!(got, want, "fill ({x}, {y}, {w}, {h})");
         }
+    }
+
+    /// One pixel, written as one pixel, has to land exactly where the canvas
+    /// would have put it - and nowhere else.
+    #[test]
+    fn put_pixel_direct_matches_the_canvas_it_replaces() {
+        for (x, y) in [(0i32, 0i32), (3, 2), (7, 5), (-1, 2), (2, -1), (8, 2), (2, 6)] {
+            let mut direct = TestContext::new();
+            let fb = FrameBuffer::new(&mut direct, 8, 6, 16).unwrap();
+            let base = direct.data_ptr(fb.0.buf).unwrap();
+            direct.write_bytes(base, &[0x5au8; 8 * 6 * 2]).unwrap();
+
+            let color = Color {
+                a: 0xff,
+                r: 0x12,
+                g: 0x34,
+                b: 0x56,
+            };
+            assert!(fb.put_pixel_direct(&mut direct, x, y, color).unwrap());
+
+            let mut staged = TestContext::new();
+            let other = FrameBuffer::new(&mut staged, 8, 6, 16).unwrap();
+            staged.write_bytes(base, &[0x5au8; 8 * 6 * 2]).unwrap();
+            let mut canvas = other.canvas(&mut staged).unwrap();
+            canvas.put_pixel(x, y, color);
+            canvas.flush().unwrap();
+
+            let mut got = [0u8; 8 * 6 * 2];
+            let mut want = [0u8; 8 * 6 * 2];
+            direct.read_bytes(base, &mut got).unwrap();
+            staged.read_bytes(base, &mut want).unwrap();
+            assert_eq!(got, want, "pixel ({x}, {y})");
+        }
+    }
+
+    #[test]
+    fn put_pixel_direct_refuses_a_depth_it_cannot_pack() {
+        let mut context = TestContext::new();
+        let fb = FrameBuffer::new(&mut context, 4, 2, 8).unwrap();
+
+        let color = Color { a: 0xff, r: 0, g: 0, b: 0 };
+        assert!(!fb.put_pixel_direct(&mut context, 0, 0, color).unwrap());
+    }
+
+    /// Reading a rectangle row by row and writing it back has to leave the
+    /// surface exactly as reading the whole thing and putting each pixel back
+    /// would - including for a rectangle that hangs off an edge.
+    #[test]
+    fn a_rect_read_and_written_back_is_the_pixels_it_covers() {
+        for (x, y, w, h) in [(1i32, 1i32, 2i32, 2i32), (-2, 1, 4, 2), (6, 0, 4, 3), (1, -3, 2, 5), (9, 9, 2, 2)] {
+            let mut context = TestContext::new();
+            let fb = FrameBuffer::new(&mut context, 8, 6, 16).unwrap();
+            let base = context.data_ptr(fb.0.buf).unwrap();
+
+            // A surface where every pixel is different, so a misplaced row or
+            // column cannot pass unnoticed.
+            let original: Vec<u8> = (0..8u16 * 6).flat_map(|pixel| pixel.to_le_bytes()).collect();
+            context.write_bytes(base, &original).unwrap();
+
+            let (left, top, cols, rows, pixels) = fb.read_rect_rgb565(&context, x, y, w, h).unwrap().unwrap();
+
+            // What it read is what is there.
+            for row in 0..rows {
+                for col in 0..cols {
+                    let expected = (top + row) as u16 * 8 + (left + col) as u16;
+                    assert_eq!(pixels[(row * cols + col) as usize], expected, "rect ({x}, {y}, {w}, {h})");
+                }
+            }
+
+            // And writing it back changes nothing at all.
+            fb.write_rect_rgb565(&mut context, left, top, cols, rows, &pixels).unwrap();
+
+            let mut out = vec![0u8; original.len()];
+            context.read_bytes(base, &mut out).unwrap();
+            assert_eq!(out, original, "rect ({x}, {y}, {w}, {h})");
+        }
+    }
+
+    #[test]
+    fn a_rect_read_refuses_a_depth_it_cannot_pack() {
+        let mut context = TestContext::new();
+        let fb = FrameBuffer::new(&mut context, 4, 2, 32).unwrap();
+
+        assert!(fb.read_rect_rgb565(&context, 0, 0, 4, 2).unwrap().is_none());
     }
 
     #[test]

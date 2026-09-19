@@ -305,9 +305,17 @@ pub async fn put_pixel(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst_fb)?)?);
     let gctx: WIPICGraphicsContext = read_generic(context, p_gctx)?;
+    let color = context_color(&framebuffer, &gctx);
+
+    // One pixel is two bytes; staging the surface to move them is what held a
+    // handset's AP at its top clock through 드래곤하트2's menus. A colour that
+    // is not opaque is composed with what is under it, which is the canvas
+    // path's business. See `FrameBuffer::put_pixel_direct`.
+    if color.a == 0xff && framebuffer.put_pixel_direct(context, x, y, color)? {
+        return Ok(());
+    }
 
     let mut canvas = framebuffer.canvas(context)?;
-    let color = context_color(&framebuffer, &gctx);
     canvas.put_pixel(x as _, y as _, color);
     canvas.flush()?;
 
@@ -330,6 +338,33 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
     // meets what is already there rather than covering it.
     if let Some((kind, function)) = pixel_op::of_context(context, gctx.pixel_op_func_ptr, gctx.param1, gctx.xor_mode).await? {
         let source = Rgb565Pixel::from_color(color);
+
+        // Read and write back only the rectangle. The two canvas round trips
+        // this used to make - one to look at what was under the fill, one to
+        // put the result back - staged the whole surface twice for a rectangle
+        // that is usually a few pixels across, and 드래곤하트2 lays two
+        // thousand of these a second in its menus. See
+        // `FrameBuffer::read_rect_rgb565`.
+        if let Some((left, top, cols, rows, mut pixels)) = framebuffer.read_rect_rgb565(context, x, y, w, h)? {
+            for destination in pixels.iter_mut() {
+                *destination = match pixel_op::apply(kind, *destination, source) {
+                    Some(result) => result,
+                    None => {
+                        let pixels = if context.pixel_op_takes_source_first() {
+                            [source as WIPICWord, *destination as WIPICWord]
+                        } else {
+                            [*destination as WIPICWord, source as WIPICWord]
+                        };
+
+                        context.call_function(function, &[pixels[0], pixels[1], gctx.param1]).await? as u16
+                    }
+                };
+            }
+
+            framebuffer.write_rect_rgb565(context, left, top, cols, rows, &pixels)?;
+
+            return Ok(());
+        }
 
         let existing = {
             let canvas = framebuffer.canvas(context)?;
