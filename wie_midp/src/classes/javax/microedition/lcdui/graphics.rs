@@ -204,9 +204,17 @@ impl Graphics {
     async fn set_color(jvm: &Jvm, _: &mut WieJvmContext, mut this: ClassInstanceRef<Self>, rgb: i32) -> JvmResult<()> {
         tracing::debug!("javax.microedition.lcdui.Graphics::setColor({this:?}, {rgb})");
 
-        jvm.put_field(&mut this, "color", "I", rgb).await?;
+        Self::put_color(jvm, &mut this, rgb).await
+    }
 
-        Ok(())
+    /// Sets the drawing colour, for a caller already inside the platform.
+    ///
+    /// The WIPI `Graphics` wraps one of these and forwards every call to it. A
+    /// title plotting a pixel at a time sets the colour once per pixel, so the
+    /// wrapper reaches the field through here rather than paying a JVM method
+    /// dispatch to arrive at the same write.
+    pub async fn put_color(jvm: &Jvm, this: &mut ClassInstanceRef<Self>, rgb: i32) -> JvmResult<()> {
+        jvm.put_field(this, "color", "I", rgb).await
     }
 
     async fn set_color_by_rgb(jvm: &Jvm, _: &mut WieJvmContext, mut this: ClassInstanceRef<Graphics>, r: i32, g: i32, b: i32) -> JvmResult<()> {
@@ -607,20 +615,28 @@ impl Graphics {
     async fn draw_line(jvm: &Jvm, _: &mut WieJvmContext, mut this: ClassInstanceRef<Self>, x1: i32, y1: i32, x2: i32, y2: i32) -> JvmResult<()> {
         tracing::debug!("javax.microedition.lcdui.Graphics::drawLine({this:?}, {x1}, {y1}, {x2}, {y2})");
 
-        let color: i32 = jvm.get_field(&this, "color", "I").await?;
-        let translate_x: i32 = jvm.get_field(&this, "translateX", "I").await?;
-        let translate_y: i32 = jvm.get_field(&this, "translateY", "I").await?;
+        Self::line(jvm, &mut this, x1, y1, x2, y2).await
+    }
 
-        let x1 = x1 + translate_x;
-        let y1 = y1 + translate_y;
-        let x2 = x2 + translate_x;
-        let y2 = y2 + translate_y;
+    /// Draws a line, for a caller already inside the platform.
+    ///
+    /// Reads the translation, clip and mode in the single pass [`Self::state`]
+    /// makes rather than resolving each field on its own, and the colour beside
+    /// them. This is the call a title plotting its screen a pixel at a time
+    /// makes twice per pixel - once as `drawLine`, once as WIPI's `setPixel`,
+    /// which is a line of no length - so the difference between one pass and
+    /// eight is the difference the loading screen is made of.
+    pub async fn line(jvm: &Jvm, this: &mut ClassInstanceRef<Self>, x1: i32, y1: i32, x2: i32, y2: i32) -> JvmResult<()> {
+        let color: i32 = declared_field(jvm, &*this.class_definition(), this, "color", "I").await?;
+        let state = Self::state(jvm, this).await?;
+        let mut canvas = Self::canvas_in_mode(jvm, this, state.xor_mode).await?;
 
-        let mut canvas = Self::canvas(jvm, &mut this).await?;
+        let x1 = x1 + state.translate_x;
+        let y1 = y1 + state.translate_y;
+        let x2 = x2 + state.translate_x;
+        let y2 = y2 + state.translate_y;
 
-        let clip = Self::clip(jvm, &this).await?;
-
-        canvas.draw_line(x1 as _, y1 as _, x2 as _, y2 as _, Rgb8Pixel::to_color(color as _), clip);
+        canvas.draw_line(x1 as _, y1 as _, x2 as _, y2 as _, Rgb8Pixel::to_color(color as _), state.clip);
 
         Ok(())
     }

@@ -686,7 +686,7 @@ impl Image {
 
         let midp_image: ClassInstanceRef<MidpImage> = jvm.get_field(&this, "midpImage", "Ljavax/microedition/lcdui/Image;").await?;
 
-        jvm.invoke_virtual(&midp_image, "getWidth", "()I", ()).await
+        MidpImage::width(jvm, &midp_image).await
     }
 
     async fn get_height(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Image>) -> JvmResult<i32> {
@@ -694,7 +694,7 @@ impl Image {
 
         let midp_image: ClassInstanceRef<MidpImage> = jvm.get_field(&this, "midpImage", "Ljavax/microedition/lcdui/Image;").await?;
 
-        jvm.invoke_virtual(&midp_image, "getHeight", "()I", ()).await
+        MidpImage::height(jvm, &midp_image).await
     }
 
     async fn is_mutable(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Image>) -> JvmResult<bool> {

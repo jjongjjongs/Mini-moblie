@@ -183,13 +183,28 @@ impl Image {
     async fn get_width(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<i32> {
         tracing::debug!("javax.microedition.lcdui.Image::getWidth({this:?})");
 
-        jvm.get_field(&this, "w", "I").await
+        Self::width(jvm, &this).await
     }
 
     async fn get_height(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<i32> {
         tracing::debug!("javax.microedition.lcdui.Image::getHeight({this:?})");
 
-        jvm.get_field(&this, "h", "I").await
+        Self::height(jvm, &this).await
+    }
+
+    /// This image's width, for a caller already inside the platform.
+    ///
+    /// The WIPI `Image` wraps one of these and is asked for its size by titles
+    /// that plot a pixel at a time - 에스테반루크's 새로하기 asks 418591 times in
+    /// one loading routine - so the wrapper reaches the field through here
+    /// rather than paying a JVM method dispatch to arrive at the same read.
+    pub async fn width(jvm: &Jvm, this: &ClassInstanceRef<Self>) -> JvmResult<i32> {
+        jvm.get_field(this, "w", "I").await
+    }
+
+    /// This image's height; see [`Self::width`].
+    pub async fn height(jvm: &Jvm, this: &ClassInstanceRef<Self>) -> JvmResult<i32> {
+        jvm.get_field(this, "h", "I").await
     }
 
     pub async fn image(jvm: &Jvm, this: &ClassInstanceRef<Self>) -> JvmResult<Box<dyn BackendImage>> {
