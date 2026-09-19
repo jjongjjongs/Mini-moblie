@@ -157,6 +157,19 @@ impl Emulator for SktEmulator {
         self.system.event_queue().push(event)
     }
 
+    /// Whether nothing is runnable until a timer fires. See
+    /// [`wie_backend::Emulator::is_idle`].
+    ///
+    /// Without this the emulator inherits the trait's conservative "never
+    /// idle", and a host that runs `tick` to a time budget spins the whole
+    /// budget out however little the title is doing - so every title on this
+    /// platform held a CPU at its top clock for as long as it ran. LGT titles
+    /// answered this from the start and stayed cool; KTF ones did not, which is
+    /// what a Y700 measured as 3.2GHz on every KTF game and 0.8GHz on the rest.
+    fn is_idle(&self) -> bool {
+        self.system.is_idle()
+    }
+
     fn tick(&mut self) -> Result<()> {
         self.system.tick()
     }

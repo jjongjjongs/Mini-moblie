@@ -121,7 +121,7 @@ impl System {
     }
 
     pub fn yield_now(&self) -> YieldFuture {
-        YieldFuture::new()
+        YieldFuture::waiting(&self.executor)
     }
 
     /// Unified filesystem view. Reads consult the persistent platform

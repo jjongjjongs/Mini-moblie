@@ -23,6 +23,12 @@ pub struct ExecutorInner {
     poll_order: Vec<usize>,
     last_task_id: usize,
     last_now: Instant,
+    /// Tasks that have yielded during the step now running. See
+    /// [`Executor::note_yield`].
+    yielded_tasks: Vec<usize>,
+    /// Whether the last step did nothing but pass the CPU around. See
+    /// [`Executor::note_yield`].
+    last_step_only_yielded: bool,
 }
 
 pub trait AsyncCallable<R>: Send
@@ -77,6 +83,8 @@ impl Executor {
             poll_order: Vec::new(),
             last_task_id: 0,
             last_now: Instant::from_epoch_millis(0),
+            yielded_tasks: Vec::new(),
+            last_step_only_yielded: false,
         }));
 
         Self { inner }
@@ -132,6 +140,12 @@ impl Executor {
             }
 
             self.step(now)?;
+
+            // A step that only passed the CPU around will do the same again for
+            // the rest of the budget. See `note_yield`.
+            if self.inner.lock().last_step_only_yielded {
+                break;
+            }
         }
 
         Ok(())
@@ -148,6 +162,14 @@ impl Executor {
     /// instead of busy-waiting through the idle remainder of every tick.
     pub fn is_idle(&self) -> bool {
         let inner = self.inner.lock();
+
+        // Or every task that is awake is only spinning, which is idle in every
+        // way that matters to a host deciding whether to sleep. See
+        // `note_yield`.
+        if inner.last_step_only_yielded {
+            return true;
+        }
+
         let running = inner.tasks.len() - inner.sleeping_tasks.len();
         running == 0 && inner.sleeping_tasks.values().min().is_some_and(|&wakeup| inner.last_now < wakeup)
     }
@@ -157,15 +179,20 @@ impl Executor {
         // lock - so a task has to be out of the map while it is polled. It is taken
         // out one at a time: draining the whole map and rebuilding it would tear down
         // and rehash every task on every step, and a step happens many times per tick.
-        let mut poll_order = {
+        let (mut poll_order, task_count) = {
             let mut inner = self.inner.lock();
             inner.last_now = now;
+            inner.yielded_tasks.clear();
+            inner.last_step_only_yielded = false;
 
             let mut poll_order = core::mem::take(&mut inner.poll_order);
             poll_order.extend(inner.tasks.keys().copied());
 
-            poll_order
+            let task_count = inner.tasks.len();
+
+            (poll_order, task_count)
         };
+        let mut polled = 0usize;
 
         let mut first_error = None;
         let waker = self.create_waker();
@@ -196,6 +223,7 @@ impl Executor {
 
             let mut context = Context::from_waker(&waker);
 
+            polled += 1;
             let poll = task.as_mut().poll(&mut context);
 
             // `inner` is declared after `task`, so the lock is released before a
@@ -223,9 +251,39 @@ impl Executor {
         }
 
         poll_order.clear();
-        self.inner.lock().poll_order = poll_order;
+        {
+            let mut inner = self.inner.lock();
+            inner.poll_order = poll_order;
+
+            // Only when every task that ran did nothing but yield, and no task
+            // appeared while they did - one that has not been polled yet is
+            // work waiting to happen.
+            inner.last_step_only_yielded = polled > 0 && inner.yielded_tasks.len() == polled && inner.tasks.len() <= task_count;
+        }
 
         if let Some(err) = first_error { Err(err) } else { Ok(()) }
+    }
+
+    /// Records that the task now running is yielding - handing the CPU on
+    /// rather than waiting for anything this executor can deliver.
+    ///
+    /// A step in which every task polled did only this made no progress, and
+    /// stepping again cannot change that: what those tasks are waiting for is a
+    /// sleeping task's timer, or something the host will bring in. So such a
+    /// step ends the tick and reads as idle, and the host sleeps its budget
+    /// instead of spinning it out.
+    ///
+    /// A title that waits by spinning is otherwise indistinguishable from one
+    /// doing work. 판타지포에버2 waits that way - a bare `while (...) yield();`
+    /// game thread, fifty thousand turns a second - and held a Y700's CPU at
+    /// its top clock for as long as it ran.
+    pub(crate) fn note_yield(&self) {
+        let mut inner = self.inner.lock();
+        if let Some(task_id) = inner.current_task_id
+            && !inner.yielded_tasks.contains(&task_id)
+        {
+            inner.yielded_tasks.push(task_id);
+        }
     }
 
     pub(crate) fn sleep(&self, timeout: u64) {
@@ -259,14 +317,14 @@ mod tests {
         cell::Cell,
         future::Future,
         pin::Pin,
-        sync::atomic::{AtomicBool, Ordering},
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
         task::{Context, Poll},
     };
 
     use wie_util::WieError;
 
     use super::Executor;
-    use crate::time::Instant;
+    use crate::{task::YieldFuture, time::Instant};
 
     struct YieldOnce(bool);
 
@@ -290,6 +348,63 @@ mod tests {
             time.set(now + 1);
             Instant::from_epoch_millis(now)
         }
+    }
+
+    /// A title that waits by spinning does not hold the host's CPU.
+    ///
+    /// 판타지포에버2's game thread is a bare `while (...) yield();` - fifty
+    /// thousand turns a second in a capture, with nothing else between them.
+    /// Turning them as fast as the host can is no more progress than turning
+    /// one, so a step that only passes the CPU around ends the tick and reads
+    /// as idle, and the host sleeps the rest of its budget.
+    #[test]
+    fn a_tick_stops_once_every_task_is_only_spinning() {
+        let mut executor = Executor::new();
+
+        let turns = Arc::new(AtomicUsize::new(0));
+        let spinner = executor.clone();
+        let counted = turns.clone();
+        executor.spawn(move || async move {
+            for _ in 0..10_000 {
+                counted.fetch_add(1, Ordering::Relaxed);
+                YieldFuture::waiting(&spinner).await;
+            }
+        });
+
+        // The clock advances a millisecond per read, so a tick that does not
+        // stop early runs its whole 8ms budget out.
+        executor.tick(advancing_clock(0)).unwrap();
+
+        assert_eq!(turns.load(Ordering::Relaxed), 1, "spinning is not a reason to keep stepping");
+        assert!(executor.is_idle(), "a task that is only spinning leaves the host free to sleep");
+    }
+
+    /// And a task that is doing something keeps the tick going, however much
+    /// another one spins beside it.
+    #[test]
+    fn a_tick_keeps_going_while_a_task_is_working() {
+        let mut executor = Executor::new();
+
+        let spinner = executor.clone();
+        executor.spawn(move || async move {
+            for _ in 0..10_000 {
+                YieldFuture::waiting(&spinner).await;
+            }
+        });
+
+        let turns = Arc::new(AtomicUsize::new(0));
+        let counted = turns.clone();
+        executor.spawn(move || async move {
+            for _ in 0..10_000 {
+                counted.fetch_add(1, Ordering::Relaxed);
+                YieldOnce(false).await;
+            }
+        });
+
+        executor.tick(advancing_clock(0)).unwrap();
+
+        assert!(turns.load(Ordering::Relaxed) > 1, "the working task has to keep being polled");
+        assert!(!executor.is_idle());
     }
 
     #[test]
