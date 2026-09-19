@@ -51,17 +51,7 @@ final class SaveExporter {
      * @throws Exception if reading or writing failed; the message is shown as-is
      */
     static Result export(Context context, File archive, String title) throws Exception {
-        String[] ids = readIds(archive);
-        List<File> roots = new ArrayList<>();
-
-        File runtime = new File(context.getFilesDir(), "runtime");
-        addIfPresent(roots, new File(new File(runtime, "db"), ids[0]));
-        // The two ids are equal for the formats that carry only one, and the
-        // same directory must not go in twice.
-        if (!ids[1].equals(ids[0])) {
-            addIfPresent(roots, new File(new File(runtime, "fs"), ids[1]));
-        }
-        addIfPresent(roots, new File(new File(runtime, "fs"), ids[0]));
+        List<File> roots = roots(context, archive);
 
         if (roots.isEmpty()) {
             return null;
@@ -86,6 +76,31 @@ final class SaveExporter {
         Downloads.write(context, name, "application/zip", buffer.toByteArray());
 
         return new Result(name, files);
+    }
+
+    /**
+     * Every directory a title's saved data lives in, newest-first order not
+     * being meaningful - a title may use either the record stores or its own
+     * files, or both.
+     *
+     * <p>Shared with {@link SaveEraser} on purpose: what the player can take
+     * out and what 초기화 removes have to be the same set, or a backup taken
+     * before erasing would not hold everything the erase took away.
+     */
+    static List<File> roots(Context context, File archive) throws Exception {
+        String[] ids = readIds(archive);
+        List<File> roots = new ArrayList<>();
+
+        File runtime = new File(context.getFilesDir(), "runtime");
+        addIfPresent(roots, new File(new File(runtime, "db"), ids[0]));
+        // The two ids are equal for the formats that carry only one, and the
+        // same directory must not go in twice.
+        if (!ids[1].equals(ids[0])) {
+            addIfPresent(roots, new File(new File(runtime, "fs"), ids[1]));
+        }
+        addIfPresent(roots, new File(new File(runtime, "fs"), ids[0]));
+
+        return roots;
     }
 
     private static String[] readIds(File archive) throws Exception {

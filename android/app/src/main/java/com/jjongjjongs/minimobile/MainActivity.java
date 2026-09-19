@@ -1362,21 +1362,60 @@ public final class MainActivity extends Activity {
         getWindow().setStatusBarColor(light ? LIB_BG : COLOR_PANEL);
     }
 
-    /** What a long press offers: get the saves out, or drop the game. */
+    /** What a long press offers: move the saves about, or drop the game. */
     private void showGameMenu(File game) {
         new AlertDialog.Builder(this)
                 .setTitle(displayName(game))
-                .setItems(new CharSequence[]{"세이브 파일 꺼내기", "세이브 불러오기", "목록에서 삭제"}, (dialog, which) -> {
+                .setItems(new CharSequence[]{"세이브 파일 꺼내기", "세이브 불러오기", "게임 데이터 초기화", "목록에서 삭제"}, (dialog, which) -> {
                     if (which == 0) {
                         exportSaves(game);
                     } else if (which == 1) {
                         importSaves(game);
+                    } else if (which == 2) {
+                        confirmErase(game);
                     } else {
                         confirmDelete(game);
                     }
                 })
                 .setNegativeButton("취소", null)
                 .show();
+    }
+
+    /**
+     * Offers to take a title's storage away so it starts as it would on a phone
+     * that had never run it.
+     *
+     * <p>It is here because a title can be left unable to start by what an
+     * earlier build wrote for it, and nothing at runtime can tell such a file
+     * from one the title meant to write. 던전앤파이터 격투가 drew a white screen
+     * on every run until its options file went; the run that made that file is
+     * fixed, and the file it made is not something a fix can reach.
+     *
+     * <p>The saves go with it, which is why it asks first and why 꺼내기 sits
+     * above it in the same menu.
+     */
+    private void confirmErase(File game) {
+        new AlertDialog.Builder(this)
+                .setTitle(displayName(game))
+                .setMessage("이 게임이 저장한 내용을 모두 지웁니다.\n세이브도 함께 지워지고, 되돌릴 수 없습니다.\n\n남겨두려면 먼저 \"세이브 파일 꺼내기\"로 백업하세요.")
+                .setNegativeButton("취소", null)
+                .setPositiveButton("초기화", (dialog, which) -> eraseSavesNow(game))
+                .show();
+    }
+
+    private void eraseSavesNow(File game) {
+        emulatorThread.execute(() -> {
+            try {
+                int removed = SaveEraser.erase(this, game);
+
+                runOnUiThread(() -> Toast.makeText(
+                        this,
+                        removed == 0 ? "저장된 내용이 없습니다." : "게임 데이터를 초기화했습니다 (" + removed + "개).",
+                        Toast.LENGTH_LONG).show());
+            } catch (Exception e) {
+                runOnUiThread(() -> Toast.makeText(this, "초기화 실패: " + e.getMessage(), Toast.LENGTH_LONG).show());
+            }
+        });
     }
 
     private void confirmDelete(File game) {
