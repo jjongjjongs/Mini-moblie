@@ -25,6 +25,12 @@ pub struct Audio {
     sink: Arc<Box<dyn AudioSink>>,
     files: BTreeMap<AudioHandle, AudioFile>,
     volumes: BTreeMap<AudioHandle, Arc<AtomicU8>>,
+    /// The handset's own media level, which scales every clip's.
+    ///
+    /// Distinct from a clip's volume, which is the clip's alone: this is the
+    /// one the user sets in the handset's sound menu, and the reference applies
+    /// it over whatever a title set per sound. See [`Self::set_master_volume`].
+    master: u8,
     playing: BTreeMap<AudioHandle, Arc<AtomicBool>>,
     last_audio_handle: AudioHandle,
     default_clip_handle: Option<AudioHandle>,
@@ -111,6 +117,7 @@ impl Audio {
             // from a real handle - otherwise a clip with no data reads back the
             // first-ever clip's volume instead of its own default.
             last_audio_handle: 1,
+            master: FULL_VOLUME,
             default_clip_handle: None,
             active: None,
             reaper_started: false,
@@ -180,7 +187,7 @@ impl Audio {
             // on, so the volume has to go there rather than to the fresh handle
             // the title just allocated - see `ActiveSmaf::sink_handle`.
             let sink_handle = active.sink_handle;
-            self.sink.set_clip_volume(sink_handle, volume.load(Ordering::Relaxed));
+            self.sink.set_clip_volume(sink_handle, self.effective(volume.load(Ordering::Relaxed)));
             self.playing.insert(audio_handle, playback.stopped.clone());
             return Ok(playback);
         }
@@ -194,7 +201,7 @@ impl Audio {
         }
 
         self.stop(audio_handle);
-        self.sink.set_clip_volume(audio_handle, volume.load(Ordering::Relaxed));
+        self.sink.set_clip_volume(audio_handle, self.effective(volume.load(Ordering::Relaxed)));
 
         let stop_flag = Arc::new(AtomicBool::new(false));
         let completed = Arc::new(AtomicBool::new(false));
@@ -303,9 +310,44 @@ impl Audio {
         let volume = volume.min(FULL_VOLUME);
         state.store(volume, Ordering::Relaxed);
 
-        self.sink.set_clip_volume(self.sink_handle_of(audio_handle), volume);
+        self.sink.set_clip_volume(self.sink_handle_of(audio_handle), self.effective(volume));
 
         Ok(())
+    }
+
+    /// A clip's level scaled by the handset's, which is what the sink plays at.
+    fn effective(&self, clip_volume: u8) -> u8 {
+        ((clip_volume as u16 * self.master as u16) / FULL_VOLUME as u16) as u8
+    }
+
+    /// Sets the handset's own media level, scaling every clip rather than
+    /// replacing what any of them was set to.
+    ///
+    /// `MC_mdaClipSetVolume` must not come here - a clip's volume is the
+    /// clip's alone, and routing it to a master is what once let a title that
+    /// turned one sound down turn everything down with it. This is the other
+    /// control, `MC_mdaSetVolume`, which genuinely is handset-wide: 드래곤로드's
+    /// sound menu drives only this one, never a clip's, so with nothing behind
+    /// it every step of its slider changed nothing at all.
+    ///
+    /// Clips already sounding are re-levelled, so a slider moved while the
+    /// music plays is heard on the music rather than at the next track.
+    pub fn set_master_volume(&mut self, volume: u8) {
+        self.master = volume.min(FULL_VOLUME);
+
+        let levels: Vec<(AudioHandle, u8)> = self
+            .volumes
+            .iter()
+            .map(|(handle, state)| (*handle, state.load(Ordering::Relaxed)))
+            .collect();
+        for (handle, clip_volume) in levels {
+            self.sink.set_clip_volume(self.sink_handle_of(handle), self.effective(clip_volume));
+        }
+    }
+
+    /// The handset's own media level.
+    pub fn master_volume(&self) -> u8 {
+        self.master
     }
 
     /// The handle the sink knows a clip by.
@@ -916,6 +958,56 @@ mod tests {
     /// it was playing - so a title that muted an effect muted the music under
     /// it. It was also dropped entirely unless the clip happened to be sounding
     /// at the time, which lost a volume set before a play.
+
+    /// The handset's own level scales a clip's rather than replacing it, so a
+    /// title that sets both is heard at the product of the two - and one that
+    /// sets only the handset's is heard at all.
+    ///
+    /// 드래곤로드's sound menu drives only `MC_mdaSetVolume`; with nothing behind
+    /// that control every step of its slider changed nothing.
+    #[test]
+    fn the_handsets_level_scales_a_clips_own() {
+        let sink = VolumeRecordingSink::default();
+        let mut audio = super::Audio::new(Box::new(sink.clone()));
+
+        let music = audio.load_smaf(b"music").unwrap();
+        let effect = audio.load_smaf(b"effect").unwrap();
+
+        // Nothing has set the handset's level, so a clip is heard at its own.
+        assert_eq!(audio.master_volume(), super::FULL_VOLUME);
+        audio.set_volume(music, 80).unwrap();
+        assert_eq!(sink.volumes.lock().last(), Some(&(music, 80)));
+
+        // Halving the handset's halves what every clip already sounding is
+        // heard at, and leaves what each was set to alone.
+        sink.volumes.lock().clear();
+        audio.set_master_volume(50);
+        assert_eq!(audio.master_volume(), 50);
+        assert_eq!(
+            sink.volumes.lock().as_slice(),
+            &[(music, 40), (effect, 50)],
+            "every live clip is re-levelled, each by its own volume"
+        );
+        assert_eq!(audio.get_volume(music).unwrap(), 80, "the clip's own level is untouched");
+
+        // A level set afterwards is scaled the same way.
+        sink.volumes.lock().clear();
+        audio.set_volume(effect, 60).unwrap();
+        assert_eq!(sink.volumes.lock().as_slice(), &[(effect, 30)]);
+        assert_eq!(audio.get_volume(effect).unwrap(), 60);
+
+        // A title that only ever drives the handset's control still gets the
+        // whole range out of it, because a clip it never set is at full scale.
+        sink.volumes.lock().clear();
+        let bare = audio.load_smaf(b"bare").unwrap();
+        audio.set_master_volume(20);
+        assert!(sink.volumes.lock().contains(&(bare, 20)));
+
+        // Over 100 is held at 100, as a clip's own level is.
+        audio.set_master_volume(250);
+        assert_eq!(audio.master_volume(), 100);
+    }
+
     #[test]
     fn a_volume_belongs_to_one_clip() {
         let sink = VolumeRecordingSink::default();

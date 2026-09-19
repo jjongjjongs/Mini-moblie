@@ -305,15 +305,16 @@ pub async fn clip_set_volume(context: &mut dyn WIPICContext, clip: WIPICWord, vo
     Ok(0)
 }
 
-/// The handset's media volume, which nothing here models.
+/// The handset's media volume.
 ///
-/// Answer full scale for the same reason [`clip_get_volume`] does: a title that
-/// reads this reads it to restore it, or to decide whether there is any point
-/// playing at all, and a zero tells it the handset is muted.
-pub async fn get_volume(_context: &mut dyn WIPICContext) -> Result<WIPICWord> {
-    tracing::debug!("MC_mdaGetVolume -> {FULL_VOLUME}");
+/// A title reads this to restore it, or to decide whether there is any point
+/// playing at all, so before anything sets it the answer is full scale rather
+/// than the zero that would read as muted.
+pub async fn get_volume(context: &mut dyn WIPICContext) -> Result<WIPICWord> {
+    let level = context.system().audio().master_volume();
+    tracing::debug!("MC_mdaGetVolume -> {level}");
 
-    Ok(FULL_VOLUME as WIPICWord)
+    Ok(level as WIPICWord)
 }
 
 /// `MC_mdaSetVolume(level)`, the handset's overall media volume.
@@ -323,13 +324,18 @@ pub async fn get_volume(_context: &mut dyn WIPICContext) -> Result<WIPICWord> {
 /// this slot answering "unimplemented" ended the run there with the title
 /// screen never drawn.
 ///
-/// Nothing here models a handset-wide level, and what reaches the sink is each
-/// clip's own volume (`MC_mdaClipSetVolume`), which a title sets per sound
-/// right after loading it. Applying this to every clip would overwrite that a
-/// moment before the title asks for it, so the level is taken and left alone -
-/// the same answer [`get_volume`] gives from the other side.
-pub async fn set_volume(_context: &mut dyn WIPICContext, level: WIPICWord) -> Result<WIPICWord> {
+/// This is the handset's own level, not a clip's, so it scales what a title
+/// set per sound rather than replacing it - the level a clip plays at is its
+/// own times this one. Taken and dropped, as it used to be, a title whose sound
+/// menu drives only this control has no volume at all: 드래곤로드's slider walks
+/// 20, 30, 40 ... 90, stopping and replaying a sample at each step to let you
+/// hear it, and never once sets a clip's own volume. Every one of those steps
+/// sounded the same.
+pub async fn set_volume(context: &mut dyn WIPICContext, level: WIPICWord) -> Result<WIPICWord> {
+    let level = (level & 0xFF).min(FULL_VOLUME as WIPICWord) as u8;
     tracing::debug!("MC_mdaSetVolume({level})");
+
+    context.system().audio().set_master_volume(level);
 
     Ok(0)
 }
