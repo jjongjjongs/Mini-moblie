@@ -25,10 +25,16 @@
 //!   character, at tick 200 and 260 and it walks the multi-tap ring.
 //! - `WIE_SHOT` - where to write the last painted frame, as a binary PPM.
 //! - `WIE_KEY`/`WIE_PRESS_TICK` - one key press, to get past a title's notice.
-//! - `WIE_SCRIPT` - a walk into the title instead: `tick:KEY` pairs separated
-//!   by commas, e.g. `1500:OK,3000:OK,4500:NUM1`. Each press is held 20 ticks.
-//! - `WIE_SHOT_DIR` - a frame written ~400 ticks after each scripted press, so
-//!   every step of the walk is visible rather than only where it ended.
+//! - `WIE_SCRIPT` - a walk into the title instead: `at:KEY` pairs separated by
+//!   commas, e.g. `12000:OK,24000:OK,36000:NUM1`, where `at` is milliseconds of
+//!   guest time. A tick is not a fixed amount of guest time - each one runs to
+//!   a host budget - so a tick-numbered script presses at a different moment of
+//!   the title's own time on every run, and a walk of any length stops being
+//!   repeatable. Write `1500t:OK` for the old axis where a script wants it.
+//!   Each press is held 160ms of guest time, or 20 ticks.
+//! - `WIE_SHOT_DIR` - a frame written 3.2s of guest time after each scripted
+//!   press (400 ticks for a tick-numbered one), so every step of the walk is
+//!   visible rather than only where it ended.
 //! - `WIE_SCRIPT2` - launch the archive twice over one handset's storage,
 //!   `WIE_SCRIPT` driving the first launch and this the second. A title that
 //!   installs itself on its first run and asks to be started again needs this
@@ -380,7 +386,62 @@ fn key_by_name(name: &str) -> Option<KeyCode> {
 }
 
 /// Parses `WIE_SCRIPT`: `tick:KEY` pairs separated by commas.
-fn parse_script(script: Option<&str>) -> Vec<(u32, KeyCode)> {
+/// When a scripted press happens.
+///
+/// Guest time, not ticks, because a tick is not a fixed amount of either. The
+/// emulator runs each one to a host time budget, so how much guest work lands
+/// inside it depends on how fast the machine underneath is at that moment - the
+/// probe prints a `slow tick` line whenever one runs long, and those are common.
+/// Two runs of the same tick-numbered script therefore press at two different
+/// moments of the title's own time: LOA-혼돈의 서곡's menu took two DOWNs and
+/// reached the third item on one run and the second on the next, from the same
+/// script, which is no use for reproducing anything.
+#[derive(Clone, Copy)]
+enum At {
+    /// Milliseconds of guest time, which is what a title measures.
+    Ms(u64),
+    /// Ticks, kept for a script that wants the old axis.
+    Tick(u32),
+}
+
+#[derive(Clone, Copy)]
+struct Step {
+    at: At,
+    key: KeyCode,
+}
+
+/// How long a scripted press is held.
+const HOLD_MS: u64 = 160;
+const HOLD_TICKS: u32 = 20;
+
+/// How long after a press its screen is given to settle before it is captured.
+const SETTLE_MS: u64 = 3_200;
+const SETTLE_TICKS: u32 = 400;
+
+impl At {
+    /// Whether this moment has arrived. `>=`, not `==`: guest time moves in
+    /// whatever jump the tick just made, so an exact match would step over a
+    /// deadline and the press would never happen at all.
+    /// Roughly when this is, for putting a mixed script in order. Only the
+    /// numbering of the steps rides on it - each deadline stands on its own.
+    fn order_key(self) -> u64 {
+        match self {
+            At::Ms(ms) => ms,
+            At::Tick(tick) => tick as u64 * MS_PER_TICK,
+        }
+    }
+
+    fn reached(self, ticks: u32, guest_ms: u64, hold_ms: u64, hold_ticks: u32) -> bool {
+        match self {
+            At::Ms(ms) => guest_ms >= ms.saturating_add(hold_ms),
+            At::Tick(tick) => ticks >= tick.saturating_add(hold_ticks),
+        }
+    }
+}
+
+/// `at:KEY` pairs, where `at` is milliseconds of guest time - or ticks, written
+/// with a `t` suffix.
+fn parse_script(script: Option<&str>) -> Vec<Step> {
     let Some(script) = script else {
         return Vec::new();
     };
@@ -388,9 +449,18 @@ fn parse_script(script: Option<&str>) -> Vec<(u32, KeyCode)> {
     script
         .split(',')
         .filter_map(|step| {
-            let (tick, key) = step.trim().split_once(':')?;
+            let (at, key) = step.trim().split_once(':')?;
+            let at = at.trim();
 
-            Some((tick.trim().parse().ok()?, key_by_name(key.trim())?))
+            let at = match at.strip_suffix('t') {
+                Some(ticks) => At::Tick(ticks.trim().parse().ok()?),
+                None => At::Ms(at.parse().ok()?),
+            };
+
+            Some(Step {
+                at,
+                key: key_by_name(key.trim())?,
+            })
         })
         .collect()
 }
@@ -447,9 +517,9 @@ fn ktf_archive_probe() {
     if let Some(key) = std::env::var("WIE_KEY").ok().and_then(|name| key_by_name(&name))
         && let Some(tick) = std::env::var("WIE_PRESS_TICK").ok().and_then(|x| x.parse().ok())
     {
-        script.push((tick, key));
+        script.push(Step { at: At::Tick(tick), key });
     }
-    script.sort_by_key(|(tick, _)| *tick);
+    script.sort_by_key(|step| step.at.order_key());
 
     // One handset's storage, so a title that installs itself on its first run
     // finds what it wrote when it is started again.
@@ -461,7 +531,7 @@ fn ktf_archive_probe() {
         run_once(&files, &state, &script, ticks_limit, None, None, native_size);
 
         let mut second_script = parse_script(Some(second.as_str()));
-        second_script.sort_by_key(|(tick, _)| *tick);
+        second_script.sort_by_key(|step| step.at.order_key());
         let second_ticks: u32 = std::env::var("WIE_TICKS2").ok().and_then(|x| x.parse().ok()).unwrap_or(ticks_limit);
 
         eprintln!("[probe] second launch");
@@ -494,7 +564,7 @@ fn ktf_archive_probe() {
 fn run_once(
     files: &BTreeMap<String, Vec<u8>>,
     state: &TestPlatformState,
-    script: &[(u32, KeyCode)],
+    script: &[Step],
     ticks_limit: u32,
     shot_dir: Option<&str>,
     shot: Option<&str>,
@@ -542,6 +612,14 @@ fn run_once(
     // drops is invisible here and permanent there - so it can be turned off.
     let redraw_on_request = std::env::var("WIE_REDRAW_ON_REQUEST").is_ok();
 
+    #[derive(Default, Clone, Copy)]
+    struct Fired {
+        pressed: bool,
+        released: bool,
+        captured: bool,
+    }
+    let mut fired = vec![Fired::default(); script.len()];
+
     let mut ticks = 0;
     let mut stopped = None;
     while ticks < ticks_limit && !exited.load(Ordering::SeqCst) {
@@ -552,18 +630,26 @@ fn run_once(
         } else if ticks % 40 == 0 {
             emulator.handle_event(Event::Redraw);
         }
-        for (step, (tick, key)) in script.iter().enumerate() {
-            if ticks == *tick {
-                eprintln!("[probe] step {step}: pressing {key:?} at tick {ticks}");
-                emulator.handle_event(Event::Keydown(*key));
+        // Each deadline fires once, on the first tick to reach it, rather than
+        // on the tick that matches it exactly.
+        let guest_ms = tick_clock.now_ms();
+        for (step, Step { at, key }) in script.iter().copied().enumerate() {
+            if !fired[step].pressed && at.reached(ticks, guest_ms, 0, 0) {
+                fired[step].pressed = true;
+                eprintln!("[probe] step {step}: pressing {key:?} at tick {ticks} (guest_ms={guest_ms})");
+                emulator.handle_event(Event::Keydown(key));
             }
-            if ticks == tick.saturating_add(20) {
-                emulator.handle_event(Event::Keyup(*key));
+            if fired[step].pressed && !fired[step].released && at.reached(ticks, guest_ms, HOLD_MS, HOLD_TICKS) {
+                fired[step].released = true;
+                emulator.handle_event(Event::Keyup(key));
             }
             // Far enough past the press that the screen it opened has settled.
             if let Some(dir) = shot_dir
-                && ticks == tick.saturating_add(400)
+                && fired[step].pressed
+                && !fired[step].captured
+                && at.reached(ticks, guest_ms, SETTLE_MS, SETTLE_TICKS)
             {
+                fired[step].captured = true;
                 write_ppm(&format!("{dir}/step_{step}.ppm"), &screen);
             }
         }
