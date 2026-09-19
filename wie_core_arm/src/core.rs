@@ -511,7 +511,7 @@ impl ArmCore {
             return Ok(result);
         }
 
-        {
+        let setup = {
             let mut inner = self.inner.lock();
 
             if !params.is_empty() {
@@ -526,11 +526,16 @@ impl ArmCore {
             if params.len() > 3 {
                 inner.engine.reg_write(ArmRegister::R3, params[3]);
             }
+
+            let mut stacked = Ok(());
             if params.len() > 4 {
                 for param in params[4..].iter().rev() {
                     let sp: u32 = inner.engine.reg_read(ArmRegister::SP) - 4;
 
-                    inner.engine.mem_write(sp, &param.to_le_bytes())?;
+                    if let Err(err) = inner.engine.mem_write(sp, &param.to_le_bytes()) {
+                        stacked = Err(err);
+                        break;
+                    }
                     inner.engine.reg_write(ArmRegister::SP, sp);
                 }
             }
@@ -541,6 +546,12 @@ impl ArmCore {
             let cpsr = inner.engine.reg_read(ArmRegister::Cpsr);
             let new_cpsr = (cpsr & !0x3f) | 0x1f | ((address & 1) << 5);
             inner.engine.reg_write(ArmRegister::Cpsr, new_cpsr);
+
+            stacked
+        };
+        if let Err(err) = setup {
+            self.restore_context(&previous_context);
+            return Err(err);
         }
 
         loop {
@@ -650,8 +661,13 @@ impl ArmCore {
                     // skipping the async handler dispatch and its allocations.
                     if let Some(fast_svc) = fast_svc {
                         let mut core = self.clone();
-                        if fast_svc(&mut core, category, lr)? {
-                            continue;
+                        match fast_svc(&mut core, category, lr) {
+                            Ok(true) => continue,
+                            Ok(false) => {}
+                            Err(err) => {
+                                self.restore_context(&previous_context);
+                                return Err(err);
+                            }
                         }
                     }
 
@@ -665,7 +681,25 @@ impl ArmCore {
                     };
 
                     let mut self1 = self.clone();
-                    function.call(&mut self1).await?;
+                    if let Err(err) = function.call(&mut self1).await {
+                        // The registers this call found are this call's to put
+                        // back, and an error is not an exception to that. A
+                        // Java throw leaves through here as
+                        // `JavaExceptionUnwind`, and whoever catches it resumes
+                        // the guest by calling in again at the handler's own
+                        // restore routine, with the frame to restore named in
+                        // the error - so the resumed call does not need, and
+                        // must not inherit, the throwing frame's register file.
+                        // Left behind, it became that call's `previous_context`
+                        // and was written back over the caller's on the way
+                        // out: 원더즈 영웅의 길 threw an IOException out of a
+                        // `<clinit>` run by `RegisterClass`, and the resumed
+                        // continuation handed the class-registration helper the
+                        // thrower's r4 - a static-field offset, not a pointer -
+                        // which it then dereferenced.
+                        self.restore_context(&previous_context);
+                        return Err(err);
+                    }
                 }
             }
         }
@@ -1186,6 +1220,73 @@ mod tests {
         *seen_id = Some(id.0);
 
         Ok(())
+    }
+
+    async fn throwing_svc_handler(core: &mut ArmCore, _: &mut Option<u32>, _id: crate::SvcId) -> Result<()> {
+        // Stands in for the guest frames a throw runs through: by the time the
+        // unwind leaves the handler, the engine holds the thrower's register
+        // file rather than the caller's.
+        let mut thrower = core.save_context();
+        thrower.r4 = 0x184160;
+        thrower.r7 = 0x1;
+        thrower.sp = 0x1f00;
+        core.restore_context(&thrower);
+
+        Err(WieError::JavaExceptionUnwind {
+            context_base: 0x1100,
+            target: 0x40,
+            next_pc: 0x1200,
+            frame_sp: 0x1ff0,
+        })
+    }
+
+    /// A call that ends in an error still owes its caller the register file it
+    /// borrowed. A Java throw leaves a guest call as `JavaExceptionUnwind`, and
+    /// the catch resumes by calling in again at the handler's restore routine,
+    /// which takes the frame to restore as an argument - so the thrower's
+    /// registers are no part of what the resumed call needs. Left in the engine
+    /// they became the resumed call's own saved context and were written back
+    /// over the caller's when it returned, which is how 원더즈 영웅의 길 came out
+    /// of `RegisterClass` holding a static-field offset where a class pointer
+    /// belonged.
+    #[test]
+    fn a_call_that_unwinds_puts_the_callers_registers_back() {
+        use core::{
+            future::Future,
+            task::{Context, Poll},
+        };
+        use futures_test::task::new_count_waker;
+
+        let mut core = ArmCore::new(false, None).unwrap();
+        core.map(0x1000, 0x1000).unwrap();
+        core.register_svc_handler(1, throwing_svc_handler, &None).unwrap();
+        let stub = core.make_svc_stub(1, 0u32).unwrap();
+
+        let mut caller = core.save_context();
+        caller.sp = 0x2000;
+        caller.r4 = 0x910;
+        caller.r7 = 0x184160;
+        core.restore_context(&caller);
+
+        let mut runner = core.clone();
+        let mut call = Box::pin(async move { runner.run_function::<u32>(stub, &[]).await });
+
+        let (waker, _) = new_count_waker();
+        let mut cx = Context::from_waker(&waker);
+        let result = match call.as_mut().poll(&mut cx) {
+            Poll::Ready(x) => x,
+            Poll::Pending => panic!("the handler answers without waiting"),
+        };
+
+        assert!(
+            matches!(result, Err(WieError::JavaExceptionUnwind { .. })),
+            "the unwind reaches the caller"
+        );
+
+        let after = core.save_context();
+        assert_eq!(after.r4, caller.r4);
+        assert_eq!(after.r7, caller.r7);
+        assert_eq!(after.sp, caller.sp);
     }
 
     #[test]
