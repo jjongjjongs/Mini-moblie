@@ -87,9 +87,32 @@ const DEFAULT_LOG_DIRECTIVE: &str = "debug,wie_lgt=trace,wie_lgt::hot=warn,wie_l
 ///   79% `jvm::jvm` trace and covered two tenths of a second, which is not
 ///   long enough to contain anything a person noticed. Its debug lines, which
 ///   name the classes and methods rather than the steps, are kept.
+/// - KTF's own per-call echo, which is the same flood on the other platform and
+///   was not held back here: `jvm_support::method`'s `Calling method` line per
+///   Java call and `class_instance`'s line per instantiation. Two windows taken
+///   of 던전앤파이터 격투가 to find out whether its C engine ever initialises
+///   its LCD threw away 59,837 and 77,728 lines before the first line kept, and
+///   both times what they threw away was the startup the capture was for. Those
+///   two targets alone were 43% of what they kept. Their debug lines stay.
+/// - `wie_core_arm::binary_patches`, a line per patched `memcpy`/`memset` -
+///   another per-frame flood in a title that blits through them. The `Hook
+///   installed` lines that say what was patched are at info and stay.
+/// - the Java drawing wrappers' per-op lines, held at info exactly as the
+///   default holds them: `lcdui::graphics` and `lcdui::font` on both the MIDP
+///   and the WIPI side. `wie_wipi_c::api::graphics` is *not* among them - the C
+///   engine's own drawing is often the thing a capture is taken to see.
 ///
 /// Everything else still arrives at trace, which is the point of the window.
-const COLLECT_LOG_DIRECTIVE: &str = "trace,arm32_cpu=warn,jni=warn,jvm=debug,wie_lgt::hot=info,wie_core_arm::function=debug";
+const COLLECT_LOG_DIRECTIVE: &str = concat!(
+    "trace,arm32_cpu=warn,jni=warn,jvm=debug,wie_lgt::hot=info,wie_core_arm::function=debug",
+    ",wie_core_arm::binary_patches=debug",
+    ",wie_ktf::runtime::java::jvm_support::method=debug",
+    ",wie_ktf::runtime::java::jvm_support::class_instance=debug",
+    ",wie_midp::classes::javax::microedition::lcdui::graphics=info",
+    ",wie_midp::classes::javax::microedition::lcdui::font=info",
+    ",wie_wipi_java::classes::org::kwis::msp::lcdui::graphics=info",
+    ",wie_wipi_java::classes::org::kwis::msp::lcdui::font=info",
+);
 
 /// Lets the player swap the log filter at runtime, so capturing a module's
 /// debug/trace detail no longer means editing the default above and rebuilding.
