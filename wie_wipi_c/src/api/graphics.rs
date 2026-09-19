@@ -895,8 +895,55 @@ pub async fn draw_image(
         blended.push((x, y, result));
     }
 
+    write_blended(context, &framebuffer, &blended)?;
+
+    Ok(())
+}
+
+/// Stores the results of a pixel operation over the rows they fall in.
+///
+/// The canvas path this replaces staged the whole surface to put the pixels
+/// back - out of guest memory, into a pixel buffer, kept a third time as the
+/// snapshot - and compared the whole of it back afterwards. `blend_pairs` has
+/// just staged the same surface for the same call, so a blit through an
+/// operation paid for the destination twice over, plus the source whole. LOA-
+/// 혼돈의 서곡's opening asks for 224 of them a second on a 240x320 screen and
+/// its scroll stops dead.
+///
+/// The rows the results fall in are read once, the results are placed into
+/// them, and those rows go back. Pixels the operation was never asked about -
+/// the transparent ones `blend_pairs` skips - keep what they already held,
+/// because what is written back is what was read.
+///
+/// Falls back to the canvas for a surface `read_rect_rgb565` cannot address.
+fn write_blended(context: &mut dyn WIPICContext, framebuffer: &FrameBuffer, blended: &[(i32, i32, u16)]) -> Result<()> {
+    let Some((&(first_x, first_y, _), rest)) = blended.split_first() else {
+        return Ok(());
+    };
+
+    let (mut left, mut right) = (first_x, first_x);
+    let (mut top, mut bottom) = (first_y, first_y);
+    for &(x, y, _) in rest {
+        left = left.min(x);
+        right = right.max(x);
+        top = top.min(y);
+        bottom = bottom.max(y);
+    }
+    let (cols, rows) = (right - left + 1, bottom - top + 1);
+
+    if let Some((read_left, read_top, read_cols, read_rows, mut pixels)) = framebuffer.read_rect_rgb565(context, left, top, cols, rows)?
+        && (read_left, read_top, read_cols, read_rows) == (left, top, cols, rows)
+    {
+        for &(x, y, pixel) in blended {
+            pixels[((y - top) * cols + (x - left)) as usize] = pixel;
+        }
+        framebuffer.write_rect_rgb565(context, left, top, cols, rows, &pixels)?;
+
+        return Ok(());
+    }
+
     let mut canvas = framebuffer.canvas(context)?;
-    for (x, y, pixel) in blended {
+    for &(x, y, pixel) in blended {
         canvas.put_pixel(x, y, Rgb565Pixel::to_color(pixel));
     }
     canvas.flush()?;
