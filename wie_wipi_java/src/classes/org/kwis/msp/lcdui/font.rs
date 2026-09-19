@@ -2,7 +2,7 @@ use alloc::vec;
 
 use java_class_proto::{JavaFieldProto, JavaMethodProto};
 use java_constants::{FieldAccessFlags, MethodAccessFlags};
-use java_runtime::classes::java::lang::String;
+use java_runtime::classes::java::{lang::String, util::Vector};
 use jvm::{Array, ClassInstanceRef, JavaChar, Jvm, Result as JvmResult};
 
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
@@ -47,6 +47,7 @@ impl Font {
                 JavaFieldProto::new("face", "I", Default::default()),
                 JavaFieldProto::new("style", "I", Default::default()),
                 JavaFieldProto::new("size", "I", Default::default()),
+                JavaFieldProto::new("cache", "Ljava/util/Vector;", FieldAccessFlags::STATIC),
                 JavaFieldProto::new("FACE_SYSTEM", "I", FieldAccessFlags::STATIC),
                 JavaFieldProto::new("FACE_MONOSPACE", "I", FieldAccessFlags::STATIC),
                 JavaFieldProto::new("FACE_PROPORTIONAL", "I", FieldAccessFlags::STATIC),
@@ -75,6 +76,10 @@ impl Font {
         let size_small: i32 = jvm.get_static_field("javax/microedition/lcdui/Font", "SIZE_SMALL", "I").await?;
         let size_medium: i32 = jvm.get_static_field("javax/microedition/lcdui/Font", "SIZE_MEDIUM", "I").await?;
         let size_large: i32 = jvm.get_static_field("javax/microedition/lcdui/Font", "SIZE_LARGE", "I").await?;
+
+        let cache = jvm.new_class("java/util/Vector", "()V", []).await?;
+        jvm.put_static_field("org/kwis/msp/lcdui/Font", "cache", "Ljava/util/Vector;", cache)
+            .await?;
 
         jvm.put_static_field("org/kwis/msp/lcdui/Font", "FACE_SYSTEM", "I", face_system).await?;
         jvm.put_static_field("org/kwis/msp/lcdui/Font", "FACE_MONOSPACE", "I", face_monospace)
@@ -176,18 +181,40 @@ impl Font {
     async fn get_default_font(jvm: &Jvm, _: &mut WieJvmContext) -> JvmResult<ClassInstanceRef<Self>> {
         tracing::debug!("org.kwis.msp.lcdui.Font::getDefaultFont");
 
-        let midp_font: ClassInstanceRef<MidpFont> = jvm
-            .invoke_static("javax/microedition/lcdui/Font", "getDefaultFont", "()Ljavax/microedition/lcdui/Font;", ())
-            .await?;
-
-        Ok(jvm
-            .new_class("org/kwis/msp/lcdui/Font", "(Ljavax/microedition/lcdui/Font;)V", (midp_font,))
-            .await?
-            .into())
+        // The MIDP default font's own values: FACE_SYSTEM, STYLE_PLAIN,
+        // SIZE_MEDIUM, all zero.
+        Self::shared(jvm, 0, 0, 0).await
     }
 
     async fn get_font(jvm: &Jvm, _: &mut WieJvmContext, face: i32, style: i32, size: i32) -> JvmResult<ClassInstanceRef<Font>> {
         tracing::debug!("org.kwis.msp.lcdui.Font::getFont({face:?}, {style:?}, {size:?})");
+
+        Self::shared(jvm, face, style, size).await
+    }
+
+    /// The font for `face, style, size`, made once and handed back after that.
+    ///
+    /// A font here has no setters either, and each one made wraps a MIDP font -
+    /// so a title that asks per string was paying for two objects a call.
+    /// 판타지포에버2 leaves a conversation and settles into a loop that throws
+    /// away 88 of the two kinds a second between them.
+    ///
+    /// Held in a static `Vector` so the collector can see they are reachable.
+    async fn shared(jvm: &Jvm, face: i32, style: i32, size: i32) -> JvmResult<ClassInstanceRef<Font>> {
+        let cache: ClassInstanceRef<Vector> = jvm.get_static_field("org/kwis/msp/lcdui/Font", "cache", "Ljava/util/Vector;").await?;
+
+        let count: i32 = jvm.invoke_virtual(&cache, "size", "()I", ()).await?;
+        for i in 0..count {
+            let candidate: ClassInstanceRef<Font> = jvm.invoke_virtual(&cache, "elementAt", "(I)Ljava/lang/Object;", (i,)).await?;
+            let (candidate_face, candidate_style, candidate_size): (i32, i32, i32) = (
+                jvm.get_field(&candidate, "face", "I").await?,
+                jvm.get_field(&candidate, "style", "I").await?,
+                jvm.get_field(&candidate, "size", "I").await?,
+            );
+            if (candidate_face, candidate_style, candidate_size) == (face, style, size) {
+                return Ok(candidate);
+            }
+        }
 
         let midp_font: ClassInstanceRef<MidpFont> = jvm
             .invoke_static(
@@ -205,6 +232,10 @@ impl Font {
         jvm.put_field(&mut instance, "face", "I", face).await?;
         jvm.put_field(&mut instance, "style", "I", style).await?;
         jvm.put_field(&mut instance, "size", "I", size).await?;
+
+        let _: () = jvm
+            .invoke_virtual(&cache, "addElement", "(Ljava/lang/Object;)V", (instance.clone(),))
+            .await?;
 
         Ok(instance)
     }

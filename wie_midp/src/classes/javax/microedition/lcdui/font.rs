@@ -2,7 +2,7 @@ use alloc::{string::String as RustString, vec};
 
 use java_class_proto::{JavaFieldProto, JavaMethodProto};
 use java_constants::{FieldAccessFlags, MethodAccessFlags};
-use java_runtime::classes::java::lang::String;
+use java_runtime::classes::java::{lang::String, util::Vector};
 use jvm::{Array, ClassInstanceRef, JavaChar, Jvm, Result as JvmResult, runtime::JavaLangString};
 
 use wie_backend::canvas;
@@ -42,6 +42,7 @@ impl Font {
                 JavaFieldProto::new("face", "I", Default::default()),
                 JavaFieldProto::new("style", "I", Default::default()),
                 JavaFieldProto::new("size", "I", Default::default()),
+                JavaFieldProto::new("cache", "Ljava/util/Vector;", FieldAccessFlags::STATIC),
                 JavaFieldProto::new("FACE_SYSTEM", "I", FieldAccessFlags::STATIC),
                 JavaFieldProto::new("FACE_MONOSPACE", "I", FieldAccessFlags::STATIC),
                 JavaFieldProto::new("FACE_PROPORTIONAL", "I", FieldAccessFlags::STATIC),
@@ -87,6 +88,10 @@ impl Font {
     async fn cl_init(jvm: &Jvm, _: &mut WieJvmContext) -> JvmResult<()> {
         tracing::debug!("javax.microedition.lcdui.Font::<clinit>");
 
+        let cache = jvm.new_class("java/util/Vector", "()V", []).await?;
+        jvm.put_static_field("javax/microedition/lcdui/Font", "cache", "Ljava/util/Vector;", cache)
+            .await?;
+
         jvm.put_static_field("javax/microedition/lcdui/Font", "FACE_SYSTEM", "I", 0).await?;
         jvm.put_static_field("javax/microedition/lcdui/Font", "FACE_MONOSPACE", "I", 32).await?;
         jvm.put_static_field("javax/microedition/lcdui/Font", "FACE_PROPORTIONAL", "I", 64)
@@ -128,19 +133,56 @@ impl Font {
     async fn get_default_font(jvm: &Jvm, _: &mut WieJvmContext) -> JvmResult<ClassInstanceRef<Self>> {
         tracing::debug!("javax.microedition.lcdui.Font::getDefaultFont");
 
-        let instance = jvm.new_class("javax/microedition/lcdui/Font", "()V", []).await?;
-
-        Ok(instance.into())
+        // The no-argument constructor's own values: FACE_SYSTEM, STYLE_PLAIN,
+        // SIZE_MEDIUM, all zero. Going through `shared` means the default font
+        // is the same object every time, as the one `getFont` hands out is.
+        Self::shared(jvm, 0, 0, 0).await
     }
 
     async fn get_font(jvm: &Jvm, _: &mut WieJvmContext, face: i32, style: i32, size: i32) -> JvmResult<ClassInstanceRef<Font>> {
         tracing::debug!("javax.microedition.lcdui.Font::getFont({face:?}, {style:?}, {size:?})");
 
-        let mut instance: ClassInstanceRef<Font> = jvm.new_class("javax/microedition/lcdui/Font", "()V", []).await?.into();
+        Self::shared(jvm, face, style, size).await
+    }
 
+    /// The font for `face, style, size`, made once and handed back after that.
+    ///
+    /// MIDP fonts are immutable and shared - there is no public constructor and
+    /// nothing that can change one once it exists - so `getFont` is specified to
+    /// return the same instance for the same three values. Minting a fresh one
+    /// per call put that cost on every string a title measures or draws:
+    /// 판타지포에버2 leaves a conversation and settles into a loop that throws
+    /// away 88 fonts a second, an allocation, a constructor and a class-init
+    /// check each, with the collector walking them all again afterwards.
+    ///
+    /// The instances are held in a static `Vector` rather than on this side, so
+    /// the collector can see that they are still reachable.
+    async fn shared(jvm: &Jvm, face: i32, style: i32, size: i32) -> JvmResult<ClassInstanceRef<Font>> {
+        let cache: ClassInstanceRef<Vector> = jvm
+            .get_static_field("javax/microedition/lcdui/Font", "cache", "Ljava/util/Vector;")
+            .await?;
+
+        let count: i32 = jvm.invoke_virtual(&cache, "size", "()I", ()).await?;
+        for i in 0..count {
+            let candidate: ClassInstanceRef<Font> = jvm.invoke_virtual(&cache, "elementAt", "(I)Ljava/lang/Object;", (i,)).await?;
+            let (candidate_face, candidate_style, candidate_size): (i32, i32, i32) = (
+                jvm.get_field(&candidate, "face", "I").await?,
+                jvm.get_field(&candidate, "style", "I").await?,
+                jvm.get_field(&candidate, "size", "I").await?,
+            );
+            if (candidate_face, candidate_style, candidate_size) == (face, style, size) {
+                return Ok(candidate);
+            }
+        }
+
+        let mut instance: ClassInstanceRef<Font> = jvm.new_class("javax/microedition/lcdui/Font", "()V", []).await?.into();
         jvm.put_field(&mut instance, "face", "I", face).await?;
         jvm.put_field(&mut instance, "style", "I", style).await?;
         jvm.put_field(&mut instance, "size", "I", size).await?;
+
+        let _: () = jvm
+            .invoke_virtual(&cache, "addElement", "(Ljava/lang/Object;)V", (instance.clone(),))
+            .await?;
 
         Ok(instance)
     }
@@ -240,6 +282,64 @@ mod tests {
                     assert_eq!(alone, in_a_string, "{character:?} at size {size}");
                 }
             }
+
+            Ok(())
+        })
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use alloc::{boxed::Box, vec};
+
+    use jvm::{ClassInstanceRef, Result as JvmResult};
+
+    use test_utils::run_jvm_test;
+    use wie_util::Result;
+
+    use crate::{classes::javax::microedition::lcdui::Font, get_protos};
+
+    /// A MIDP font is immutable and shared: there is no public constructor and
+    /// nothing that can change one, so `getFont` is specified to hand back the
+    /// same instance for the same three values rather than mint one per call.
+    ///
+    /// A title that measures or draws per string asks for one every time.
+    #[test]
+    fn a_font_is_the_same_object_every_time_it_is_asked_for() -> Result<()> {
+        run_jvm_test(Box::new([get_protos().into()]), |jvm| async move {
+            let get = async |face: i32, style: i32, size: i32| -> JvmResult<ClassInstanceRef<Font>> {
+                jvm.invoke_static(
+                    "javax/microedition/lcdui/Font",
+                    "getFont",
+                    "(III)Ljavax/microedition/lcdui/Font;",
+                    (face, style, size),
+                )
+                .await
+            };
+
+            let id = |font: &ClassInstanceRef<Font>| font.as_ref().identity();
+
+            let plain = get(0, 0, 0).await?;
+            let again = get(0, 0, 0).await?;
+            assert_eq!(id(&plain), id(&again), "the same font is the same object");
+
+            // A different face, style or size is a different font.
+            let bold = get(0, 1, 0).await?;
+            let large = get(0, 0, 16).await?;
+            assert_ne!(id(&plain), id(&bold));
+            assert_ne!(id(&plain), id(&large));
+            assert_eq!(id(&bold), id(&get(0, 1, 0).await?), "and it is shared in its turn");
+
+            // Each still reads back what it was asked for.
+            let style: i32 = jvm.get_field(&bold, "style", "I").await?;
+            let size: i32 = jvm.get_field(&large, "size", "I").await?;
+            assert_eq!((style, size), (1, 16));
+
+            // The default font is the shared plain one, not a fresh object.
+            let default: ClassInstanceRef<Font> = jvm
+                .invoke_static("javax/microedition/lcdui/Font", "getDefaultFont", "()Ljavax/microedition/lcdui/Font;", ())
+                .await?;
+            assert_eq!(id(&plain), id(&default));
 
             Ok(())
         })
