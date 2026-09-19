@@ -15,6 +15,7 @@ use wie_util::{Result, WieError, read_generic, read_null_terminated_string_bytes
 
 use crate::{WIPICResult, context::WIPICContext, method::MethodBody};
 
+pub use self::sprintf::format as format_varargs;
 use self::sprintf::sprintf;
 
 #[repr(C, packed)]
@@ -30,17 +31,60 @@ pub async fn current_time(context: &mut dyn WIPICContext) -> Result<u64> {
 }
 
 pub async fn get_system_property(context: &mut dyn WIPICContext, ptr_id: WIPICWord, p_out: WIPICWord, buf_size: WIPICWord) -> Result<i32> {
-    tracing::debug!("MC_knlGetSystemProperty({ptr_id:#x}, {p_out:#x}, {buf_size:#x})");
-
     let id_bytes = read_null_terminated_string_bytes(context, ptr_id)?;
     let id = encoding_rs::EUC_KR.decode(&id_bytes).0;
 
+    // Logged at info: start-up/auth checks read these, and a wrong value is a
+    // common reason a title bails, so the query and its result belong in a
+    // normal log capture.
+    //
+    // `recovered` backs the subscriber-number arms; it lives out here so the
+    // owned string it holds outlives the borrow the `match` yields.
+    let recovered;
     let value = match id.as_ref() {
         "RSSILEVEL" => "30",
         "BATTERYLEVEL" => "100",
         "PHONEMODEL" => "Emulator",
-        "PHONENUMBER" => "", // putting this cause some game to fail authentication
-        "MIN" => "01000000000",
+        // The handset's volume step count, answered the same here as through
+        // `HandsetProperty.getSystemProperty` so a title that reads it by
+        // either door is told the same handset. See that arm for what a title
+        // does with it.
+        "VOLUMELEVEL" => "5",
+        "MAXSERIALNUM" | "MAXSOCKETNUM" => "4",
+        // LGT ez-i cert.c2s DRM keys on the subscriber phone number: cert.c2s
+        // encodes "<appID><phoneNumber><checksums>" encrypted with the phone
+        // number, and the title reads PHONENUMBER, decrypts, and rejects a
+        // mismatch (error 3100, observed in 이노티아 연대기 2). We recover the
+        // exact number the certificate was issued for from cert.c2s itself, so
+        // an unmodified title authenticates without a per-game value. When no
+        // certificate is recoverable we fall back to a valid placeholder.
+        "PHONENUMBER" => {
+            recovered = subscriber_number(context).await;
+            recovered.as_str()
+        }
+        // MIN carries the same number, so a title that cross-checks the two
+        // agrees with itself - unless its own certificate names a MIN, which
+        // outranks it. 액션퍼즐패밀리4 GS2 ships a cert.c2s encrypted with a key
+        // of its own whose first field is the MIN it was issued for, reads MIN
+        // here, and stops at error 5001 when the two differ; the certificate
+        // names an empty one, and that is what the handset it was issued for
+        // reported.
+        "MIN" => {
+            recovered = match handset_identity(context).await {
+                Some(identity) => identity.min,
+                None => subscriber_number(context).await,
+            };
+            recovered.as_str()
+        }
+        // The media types the handset can play, which a title reads to decide
+        // whether to load its music at all: 판타지포에버3 asks for this and looks
+        // for `Yamaha_MA3` in the answer, and got `-9` - so it created no clip,
+        // played nothing and ran silent. The reference asks the handset and
+        // reports what its chip does; ours reports what its audio path does,
+        // which is SMAF, so it names the SMAF profiles and nothing else. A
+        // title that finds one of these here goes on to hand us SMAF data,
+        // which is exactly what `MC_mdaClipPutData` decodes.
+        "MEDIADEVICES" => "Yamaha_MA1,Yamaha_MA2,Yamaha_MA3,Yamaha_MA5,Yamaha_SMAF",
         "ANNUN_CALL" => "0",
         "ANNUN_SMS" => "0",
         "ANNUN_SILENT" => "0",
@@ -51,23 +95,60 @@ pub async fn get_system_property(context: &mut dyn WIPICContext, ptr_id: WIPICWo
         "ROAMING_AREA" => "0",
         "DS_LOCK" => "0",
         _ => {
-            tracing::warn!("unknown system property id: {id}");
+            tracing::info!("MC_knlGetSystemProperty({id:?}) -> -9 (unknown property)");
             return Ok(-9); // M_E_INVALID
         }
     };
 
     let bytes = value.as_bytes();
     if bytes.len() + 1 > buf_size as usize {
+        tracing::info!("MC_knlGetSystemProperty({id:?}) -> -18 (buffer {buf_size} too small for {:?})", value);
         return Ok(-18); // M_E_SHORTBUF
     }
 
+    tracing::info!("MC_knlGetSystemProperty({id:?}) -> {value:?}");
     write_null_terminated_string_bytes(context, p_out, value.as_bytes())?;
 
     Ok(0)
 }
 
-pub async fn set_system_property(_context: &mut dyn WIPICContext, ptr_id: WIPICWord, ptr_value: WIPICWord) -> Result<()> {
-    tracing::warn!("stub MC_knlSetSystemProperty({ptr_id:#x}, {ptr_value:#x})");
+/// The subscriber number to report for PHONENUMBER / MIN.
+///
+/// Recovered from the archive by [`wie_backend::subscriber`], which the
+/// WIPI-Java `HandsetProperty` path uses too so the two always agree.
+pub(crate) async fn subscriber_number(context: &mut dyn WIPICContext) -> String {
+    let cert = context.read_resource("cert.c2s").await.ok();
+    let certification = context.read_resource("certification").await.ok();
+    let app_info = context.read_resource("app_info").await.ok();
+
+    wie_backend::subscriber::subscriber_number(cert.as_deref(), certification.as_deref(), app_info.as_deref())
+}
+
+/// The handset identity a title's own-key `cert.c2s` was issued for, or `None`
+/// when the archive has no such certificate.
+async fn handset_identity(context: &mut dyn WIPICContext) -> Option<wie_backend::subscriber::HandsetIdentity> {
+    let cert = context.read_resource("cert.c2s").await.ok()?;
+
+    wie_backend::subscriber::identity_from_cert(&cert)
+}
+
+pub async fn set_system_property(context: &mut dyn WIPICContext, ptr_id: WIPICWord, ptr_value: WIPICWord) -> Result<()> {
+    // Decoded and logged at info: a title that sets a property and reads it back
+    // expects the value to survive, so seeing what it set (and not persisting it
+    // yet) helps explain a later mismatch. Persistence is a follow-up.
+    let id = encoding_rs::EUC_KR
+        .decode(&read_null_terminated_string_bytes(context, ptr_id)?)
+        .0
+        .into_owned();
+    let value = if ptr_value != 0 {
+        encoding_rs::EUC_KR
+            .decode(&read_null_terminated_string_bytes(context, ptr_value)?)
+            .0
+            .into_owned()
+    } else {
+        String::new()
+    };
+    tracing::info!("MC_knlSetSystemProperty({id:?}, {value:?}) [not persisted]");
 
     Ok(())
 }
@@ -108,10 +189,17 @@ pub async fn set_timer(
     }
 
     let now = context.system().platform().now();
-    let timeout = (((timeout_high as u64) << 32) | (timeout_low as u64)) as _;
+
+    // Raptor represents the delay as a signed 64-bit value split into two
+    // words. Legacy runtimes schedule a negative delay on the next scheduler
+    // tick instead of interpreting it as a very large unsigned duration.
+    let raw_timeout = ((timeout_high as u64) << 32) | timeout_low as u64;
+    let timeout = if (raw_timeout as i64) < 0 { 1 } else { raw_timeout };
+
     let timer: WIPICTimer = read_generic(context, ptr_timer)?;
 
     context.set_timer(
+        ptr_timer,
         now + timeout,
         Box::new(TimerCallback {
             ptr_timer,
@@ -123,8 +211,10 @@ pub async fn set_timer(
     Ok(())
 }
 
-pub async fn unset_timer(_: &mut dyn WIPICContext, a0: WIPICWord) -> Result<()> {
-    tracing::warn!("stub MC_knlUnsetTimer({a0:#x})");
+pub async fn unset_timer(context: &mut dyn WIPICContext, ptr_timer: WIPICWord) -> Result<()> {
+    tracing::debug!("MC_knlUnsetTimer({ptr_timer:#x})");
+
+    context.unset_timer(ptr_timer);
 
     Ok(())
 }
@@ -142,13 +232,16 @@ pub async fn alloc(context: &mut dyn WIPICContext, size: WIPICWord) -> Result<WI
 pub async fn calloc(context: &mut dyn WIPICContext, size: WIPICWord) -> Result<WIPICIndirectPtr> {
     tracing::debug!("MC_knlCalloc({size:#x})");
 
-    if size == 0 {
-        return Ok(WIPICIndirectPtr(0));
-    }
+    // A zero-size request still returns a unique, freeable non-null pointer, as
+    // the reference allocator does. A title's font loader callocs a
+    // zero-length buffer and treats a null result as failure, unwinding into a
+    // state it then dereferences through a -1 handle; handing back null there
+    // faulted it. Allocate a minimal block so the pointer is non-null.
+    let alloc_size = size.max(1);
 
-    let memory = context.alloc(size)?;
+    let memory = context.alloc(alloc_size)?;
 
-    let zero = iter::repeat_n(0, size as _).collect::<Vec<_>>();
+    let zero = iter::repeat_n(0, alloc_size as _).collect::<Vec<_>>();
     context.write_bytes(context.data_ptr(memory)?, &zero)?;
 
     Ok(memory)
@@ -170,10 +263,31 @@ pub async fn get_resource_id(context: &mut dyn WIPICContext, ptr_name: WIPICWord
     tracing::debug!("MC_knlGetResourceID({ptr_name:#x}, {ptr_size:#x})");
 
     let raw_name = read_null_terminated_string_bytes(context, ptr_name)?;
-    let name = encoding_rs::EUC_KR.decode(&raw_name).0;
+    let mut name = encoding_rs::EUC_KR.decode(&raw_name).0;
     tracing::debug!("  resource name: {name}");
 
-    let size = context.get_resource_size(&name).await?;
+    let mut size = context.get_resource_size(&name).await?;
+
+    // A title can hand us a path that is not NUL-terminated: it copies the
+    // characters into a scratch buffer and trusts the byte past the last one to
+    // already be zero. That holds on the reference's heap, whose freshly handed
+    // out (and internally recycled) blocks are zeroed, but not here, where the
+    // block still carries the bytes an earlier use left - MapleStory 도적편
+    // builds "png/mainmenu/menu.dat" over stale RGB565 pixels, so the read runs
+    // on into garbage and the lookup misses. A resource path is plain ASCII, so
+    // when the full read misses, retry with the leading printable-ASCII run,
+    // which is exactly the path the title meant.
+    if size.is_none() {
+        let ascii_len = raw_name.iter().position(|&b| !(0x20..=0x7e).contains(&b)).unwrap_or(raw_name.len());
+        if ascii_len < raw_name.len() && ascii_len > 0 {
+            let trimmed = encoding_rs::EUC_KR.decode(&raw_name[..ascii_len]).0.into_owned();
+            if let Some(found) = context.get_resource_size(&trimmed).await? {
+                tracing::debug!("  resource name resolved to {trimmed:?} after trimming a non-path tail");
+                size = Some(found);
+                name = trimmed.into();
+            }
+        }
+    }
 
     if size.is_none() {
         if ptr_size != 0 {
@@ -243,7 +357,7 @@ pub async fn sprintk(
     a4: WIPICWord,
     a5: WIPICWord,
 ) -> Result<WIPICWord> {
-    tracing::debug!("MC_knlSprintk({dest:#x}, {ptr_format:#x}, {a1}, {a2}, {a3}, {a4}, {a5})",);
+    tracing::debug!("MC_knlSprintk({dest:#x}, {ptr_format:#x}, {a0}, {a1}, {a2}, {a3}, {a4}, {a5})",);
 
     let format_string = read_null_terminated_string_bytes(context, ptr_format)?;
     let format_string = encoding_rs::EUC_KR.decode(&format_string).0;
@@ -254,19 +368,26 @@ pub async fn sprintk(
 
     write_null_terminated_string_bytes(context, dest, &result_bytes)?;
 
-    Ok(result.len() as _)
+    // What `sprintf` returns is what it wrote, and what it wrote is the encoded
+    // bytes - which is not the same count as the characters they came from once
+    // any of them is Korean.
+    Ok(result_bytes.len() as _)
 }
 
 pub async fn get_total_memory(_context: &mut dyn WIPICContext) -> Result<i32> {
-    tracing::warn!("stub MC_knlGetTotalMemory()");
+    // A handset reported tens of MiB here; the old 1 MiB made memory-probing
+    // titles believe the heap was already full and refuse to load.
+    const TOTAL_MEMORY: i32 = 32 * 1024 * 1024;
+    tracing::debug!("MC_knlGetTotalMemory() -> {TOTAL_MEMORY:#x}");
 
-    Ok(0x100000) // TODO hardcoded
+    Ok(TOTAL_MEMORY)
 }
 
 pub async fn get_free_memory(_context: &mut dyn WIPICContext) -> Result<i32> {
-    tracing::warn!("stub MC_knlGetFreeMemory()");
+    const FREE_MEMORY: i32 = 24 * 1024 * 1024;
+    tracing::debug!("MC_knlGetFreeMemory() -> {FREE_MEMORY:#x}");
 
-    Ok(0x100000) // TODO hardcoded
+    Ok(FREE_MEMORY)
 }
 
 pub async fn exit(context: &mut dyn WIPICContext, code: i32) -> Result<()> {
@@ -347,6 +468,42 @@ mod test {
 
         assert_eq!(get_system_property(&mut context, id, out, 16).await.unwrap(), 0);
         let result = read_null_terminated_string_bytes(&context, out).unwrap();
+        assert_eq!(String::from_utf8(result).unwrap(), "01046119269");
+
+        Ok(())
+    }
+
+    #[futures_test::test]
+    async fn test_get_system_property_media_devices() -> Result<()> {
+        // 판타지포에버3 reads this and looks for `Yamaha_MA3` before it will
+        // create a clip at all, so the answer has to name the SMAF profiles the
+        // audio path plays and fit the buffer a title hands over.
+        let mut context = TestContext::new();
+        let id = context.alloc_raw(16).unwrap();
+        let out = context.alloc_raw(128).unwrap();
+
+        write_null_terminated_string_bytes(&mut context, id, b"MEDIADEVICES").unwrap();
+
+        assert_eq!(get_system_property(&mut context, id, out, 128).await.unwrap(), 0);
+        let result = String::from_utf8(read_null_terminated_string_bytes(&context, out).unwrap()).unwrap();
+        assert!(result.contains("Yamaha_MA3"), "{result}");
+
+        Ok(())
+    }
+
+    #[futures_test::test]
+    async fn test_phonenumber_from_certification_file() -> Result<()> {
+        // A title whose `certification` file is the subscriber number as ASCII
+        // digits should see PHONENUMBER report exactly that, so its own
+        // strcmp(certification, PHONENUMBER) authentication passes.
+        let mut context = TestContext::new().with_resource("certification", b"01000000000\0");
+        let id = context.alloc_raw(16).unwrap();
+        let out = context.alloc_raw(16).unwrap();
+
+        write_null_terminated_string_bytes(&mut context, id, b"PHONENUMBER").unwrap();
+
+        assert_eq!(get_system_property(&mut context, id, out, 16).await.unwrap(), 0);
+        let result = read_null_terminated_string_bytes(&context, out).unwrap();
         assert_eq!(String::from_utf8(result).unwrap(), "01000000000");
 
         Ok(())
@@ -357,7 +514,11 @@ mod test {
         let mut context = TestContext::new();
 
         assert_eq!(alloc(&mut context, 0).await.unwrap().0, 0);
-        assert_eq!(calloc(&mut context, 0).await.unwrap().0, 0);
+        // calloc of zero returns a unique, freeable non-null pointer, matching
+        // the reference allocator that a font loader relies on.
+        let zero = calloc(&mut context, 0).await.unwrap();
+        assert_ne!(zero.0, 0);
+        free(&mut context, zero).await.unwrap();
         assert_eq!(free(&mut context, wipi_types::wipic::WIPICIndirectPtr(0)).await.unwrap().0, 0);
 
         Ok(())
