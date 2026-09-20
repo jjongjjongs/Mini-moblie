@@ -25,6 +25,8 @@
 
 use alloc::vec::Vec;
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
 use spin::Mutex;
 use wie_util::{Result, WieError};
 use wipi_types::wipic::WIPICWord;
@@ -51,6 +53,10 @@ pub enum PixelOp {
     /// eight-bit components `MC_grpGetRGBFromPixel` hands out - a fade to white
     /// or to black. See [`fade`].
     Fade { target: i32, weight: i32 },
+    /// The first pixel taken `level` quarters towards black or white, then
+    /// mixed in quarters with the second - `weight` of it and `4 - weight` of
+    /// the other. See [`blend`].
+    Blend { level: i32, weight: u32 },
     /// Something else. The title is asked for every pixel.
     Guest,
 }
@@ -107,6 +113,56 @@ fn components(pixel: u16) -> (i32, i32, i32) {
 /// truncation `MC_grpGetPixelFromRGB` does on its arguments are what the
 /// handset's own arithmetic does with the result. Matching it exactly is the
 /// point; tidying it up here would draw something the handset never drew.
+/// One pixel scaled by `numerator` quarters, each RGB565 field held inside
+/// itself - the way a handset does it, with one multiply and one shift over the
+/// packed pixel rather than a pass per channel.
+fn quarters(pixel: u16, numerator: u32) -> u32 {
+    const RED_AND_BLUE: u32 = 0xf81f;
+    const GREEN: u32 = 0x07e0;
+
+    let pixel = pixel as u32;
+
+    ((((pixel & RED_AND_BLUE) * numerator) >> 2) & RED_AND_BLUE) | ((((pixel & GREEN) * numerator) >> 2) & GREEN)
+}
+
+/// Two pixels mixed in quarters: `weight` of the first and `4 - weight` of the
+/// second.
+///
+/// Each side is scaled and truncated on its own before the two are added, which
+/// is not the same as scaling their sum - 헬싱's operation is written that way
+/// and the low bits differ.
+fn mix(first: u16, second: u16, weight: u32) -> u16 {
+    (quarters(first, weight) + quarters(second, 4 - weight)) as u16
+}
+
+/// One pixel taken `level` quarters towards black (below zero) or white
+/// (above).
+fn towards(pixel: u16, level: i32) -> u16 {
+    let quarter = level.unsigned_abs().min(4);
+    let target = if level < 0 { 0x0000 } else { 0xffff };
+
+    mix(pixel, target, 4 - quarter)
+}
+
+/// The first pixel taken towards black or white, then mixed with the second.
+///
+/// This is 헬싱's whole operation, which is how it draws every pixel it draws.
+/// At `0x108ce8` it answers with the other pixel when the one it was given is
+/// the context's transparent one, and otherwise takes it through two helpers,
+/// each a jump table over a level it keeps in a global of its own:
+///
+/// - `0x108a5c`, nine entries, the pixel a quarter at a time towards black or
+///   towards white - so `level` runs from -4 (black) through 0 (as it was) to
+///   +4 (white);
+/// - `0x108820`, five entries, the two pixels in quarters - so `weight` runs
+///   from 0 (the second whole) to 4 (the first whole).
+///
+/// Both levels are the title's own state and it changes them, which is why a
+/// remembered answer is held to a pair each frame - see [`frame_passed`].
+pub fn blend(first: u16, second: u16, level: i32, weight: u32) -> u16 {
+    mix(towards(first, level), second, weight)
+}
+
 pub fn fade(first: u16, _second: u16, target: i32, weight: i32) -> u16 {
     let (r, g, b) = components(first);
     let mix = |component: i32| ((component * (255 - weight) + target * weight) / 255) as u32 & 0xff;
@@ -190,7 +246,21 @@ const WIDE_PROBES: [(u16, u16); 32] = {
 /// What has already been asked, so a title that sets its operation on every
 /// draw - 드래곤하트2 sets one eight thousand times in a capture - is asked
 /// once per function rather than once per call.
-static KNOWN: Mutex<Vec<((WIPICWord, WIPICWord), PixelOp)>> = Mutex::new(Vec::new());
+static KNOWN: Mutex<Vec<((WIPICWord, WIPICWord), PixelOp, u32)>> = Mutex::new(Vec::new());
+
+/// Which frame it is, for holding a remembered answer to.
+static FRAME: AtomicU32 = AtomicU32::new(0);
+
+/// A frame has been put on the panel.
+///
+/// An operation is the title's own code and is free to look at state of its
+/// own, so what it did once is not what it does for ever. A remembered answer
+/// is therefore held to one pair again on the first draw of each frame - one
+/// call per operation per frame, against the thousands of draws a frame is
+/// made of.
+pub fn frame_passed() {
+    FRAME.fetch_add(1, Ordering::Relaxed);
+}
 
 /// Operations that turned out not to be ours to call. Kept so one is asked
 /// once: asking is a branch to it, and where that faults, faulting again on
@@ -206,10 +276,60 @@ static UNCALLABLE: Mutex<Vec<WIPICWord>> = Mutex::new(Vec::new());
 /// walks its parameter through a handful of steps, so the room is for those.
 const KNOWN_LIMIT: usize = 64;
 
+/// Whether `operation` is still what `function` answers, held to one pair.
+///
+/// The pair is the first of the fixed probes, asked in the handset's own
+/// argument order, and the model is replayed through the same one - so this
+/// compares what the operation says against what we would have said for it.
+async fn still_answers(context: &mut dyn WIPICContext, function: WIPICWord, param: WIPICWord, operation: PixelOp) -> Result<bool> {
+    let Some(&(destination, source)) = PROBES.first() else {
+        return Ok(true);
+    };
+
+    let source_first = context.pixel_op_takes_source_first();
+    let Some(expected) = apply(operation, destination, source, source_first) else {
+        // `Guest` has no model to hold it to; it is asked for every pixel
+        // anyway.
+        return Ok(true);
+    };
+
+    let (a, b) = arguments(source_first, destination, source);
+    let answer = context.call_function(function, &[a as WIPICWord, b as WIPICWord, param]).await? as u16;
+
+    Ok(answer == expected)
+}
+
 /// Asks the title's operation what it does, and remembers the answer.
 pub async fn classify(context: &mut dyn WIPICContext, function: WIPICWord, param: WIPICWord) -> Result<PixelOp> {
-    if let Some(known) = KNOWN.lock().iter().find(|(key, _)| *key == (function, param)) {
-        return Ok(known.1);
+    let frame = FRAME.load(Ordering::Relaxed);
+    let remembered = KNOWN
+        .lock()
+        .iter()
+        .find(|(key, ..)| *key == (function, param))
+        .map(|(_, operation, confirmed)| (*operation, *confirmed));
+
+    if let Some((remembered, confirmed)) = remembered {
+        // Confirmed this frame already: the answer stands.
+        if confirmed == frame {
+            return Ok(remembered);
+        }
+
+        // 헬싱's operation, at `0x108ce8`, answers with the pixel it was given
+        // until one of two globals of its own is set and then blends instead -
+        // asked before either is, it reads as a plain copy, and it stops being
+        // one while the model says it still is. So the first draw of each frame
+        // holds the remembered answer to one pair. See [`frame_passed`].
+        if still_answers(context, function, param, remembered).await? {
+            let mut known = KNOWN.lock();
+            if let Some((.., confirmed)) = known.iter_mut().find(|(key, ..)| *key == (function, param)) {
+                *confirmed = frame;
+            }
+
+            return Ok(remembered);
+        }
+
+        tracing::debug!("pixel operation at {function:#x} param {param} no longer answers as {remembered:?}; asking again");
+        KNOWN.lock().retain(|(key, ..)| *key != (function, param));
     }
 
     let source_first = context.pixel_op_takes_source_first();
@@ -245,6 +365,11 @@ pub async fn classify(context: &mut dyn WIPICContext, function: WIPICWord, param
             PixelOp::Second
         } else if let Some((target, weight)) = fit_fade(&|model| matches(&asked, model)) {
             PixelOp::Fade { target, weight }
+        } else if let Some((level, weight)) = (-4..=4)
+            .flat_map(|level| (0..=4).map(move |weight| (level, weight)))
+            .find(|&(level, weight)| matches(&asked, &|a, b| blend(a, b, level, weight)))
+        {
+            PixelOp::Blend { level, weight }
         } else {
             PixelOp::Guest
         }
@@ -254,7 +379,7 @@ pub async fn classify(context: &mut dyn WIPICContext, function: WIPICWord, param
 
     let mut known = KNOWN.lock();
     if known.len() < KNOWN_LIMIT {
-        known.push(((function, param), operation));
+        known.push(((function, param), operation, frame));
     }
 
     Ok(operation)
@@ -343,12 +468,53 @@ pub fn apply(operation: PixelOp, destination: u16, source: u16, source_first: bo
         PixelOp::Invert => Some(invert(a, b)),
         PixelOp::Second => Some(second(a, b)),
         PixelOp::Fade { target, weight } => Some(fade(a, b, target, weight)),
+        PixelOp::Blend { level, weight } => Some(blend(a, b, level, weight)),
         PixelOp::Guest => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::blend;
+
+    /// The five mixes and the nine levels 헬싱's operation is built from, held
+    /// to what its own helpers compute.
+    ///
+    /// `0x108820` takes quarters of each pixel and adds them, each side
+    /// truncated on its own; `0x108a5c` takes one pixel towards black or white
+    /// the same way. The ends are exact - no level is the pixel itself, four
+    /// quarters towards black is black, towards white is white - and the whole
+    /// of one pixel or the other is the mix at its ends.
+    #[test]
+    fn the_ends_of_the_blend_are_the_pixels_themselves() {
+        for pixel in [0x0000u16, 0xffff, 0xf800, 0x07e0, 0x001f, 0x8410, 0x39e7] {
+            for other in [0x0000u16, 0xffff, 0x4208] {
+                assert_eq!(blend(pixel, other, 0, 4), pixel, "level 0, all of the first");
+                assert_eq!(blend(pixel, other, 0, 0), other, "level 0, all of the second");
+                assert_eq!(blend(pixel, other, -4, 4), 0x0000, "four quarters towards black");
+                assert_eq!(blend(pixel, other, 4, 4), 0xffff, "four quarters towards white");
+            }
+        }
+    }
+
+    /// Each field stays inside itself: a blend never carries out of red into
+    /// green, or out of green into blue.
+    ///
+    /// Full red against full blue, and no level that would put white in, so
+    /// neither pixel has any green to give and the result can have none. Done
+    /// on the packed pixel with one multiply and one shift, a carry out of the
+    /// blue field is exactly what goes wrong.
+    #[test]
+    fn a_blend_never_carries_between_the_fields() {
+        for level in -4..=0 {
+            for weight in 0..=4 {
+                let out = blend(0xf800, 0x001f, level, weight);
+
+                assert_eq!((out >> 5) & 0x3f, 0, "level {level} weight {weight} carried into green: {out:#06x}");
+            }
+        }
+    }
+
     use super::{PixelOp, additive, apply, invert, pack, screen};
 
     /// The channels add and stop at their maximum rather than wrapping past it.

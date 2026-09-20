@@ -1124,6 +1124,11 @@ pub async fn flush_lcd(
 ) -> Result<()> {
     tracing::debug!("MC_grpFlushLcd({i:#x}, {:#x}, {x:#x}, {y:#x}, {w:#x}, {h:#x})", framebuffer.0);
 
+    // A frame's worth of drawing has gone by, so what a title's pixel operation
+    // answered for the last one is held to a pair again on the next draw. See
+    // `pixel_op::frame_passed`.
+    pixel_op::frame_passed();
+
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(framebuffer)?)?);
 
     let src_canvas = framebuffer.image(context)?;
