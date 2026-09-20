@@ -13,7 +13,8 @@
 use alloc::format;
 use core::mem::size_of;
 
-use wie_util::{Result, WieError};
+use wie_core_arm::ArmCore;
+use wie_util::{Result, WieError, read_generic, write_generic};
 
 /// The header a relocated module carries: a bss size, a relocation count, a
 /// reserved word, and then the relocations.
@@ -22,29 +23,26 @@ const HEADER_WORDS: usize = 3;
 /// A module the loader is expected to relocate itself.
 ///
 /// The header is three words - the bss size, how many relocations follow, and
-/// a word that is zero in the one archive that has this - then that many
-/// byte offsets into the image, then the image.
+/// a word that is zero in the one archive that has this - then that many byte
+/// offsets into the image, then the image. wfeature, which runs 텐가이, agrees:
+/// it refuses a `client.binN` whose first word does not match the suffix
+/// ("KTF client image %q suffix names BSS %d but image specifies %d") and
+/// biases every word the table names by where the image lands.
 ///
-/// What is known of the image, from 텐가이's (offsets are the image's own):
+/// What is known of the image, offsets its own:
 ///
-/// | word | value    | what it is                                          |
-/// |------|----------|-----------------------------------------------------|
-/// | +00  | 0        |                                                     |
-/// | +04  | 0x5f2c0  | a word past the image - bss                          |
-/// | +08  | 0x57344  | the imported names, NUL separated                    |
-/// | +0c  | 0x5772c  | pointers into the constant pool                      |
-/// | +10  | 0x480    | where the code starts                                |
-/// | +14  | 0x5ed6c  | a table of name and target pairs                     |
-/// | +18  | 0x5f2a4  | bss again                                            |
-/// | +20  | 0x52745  | Thumb, and the only odd word: an entry               |
+/// | word | 텐가이's | what it is                                    |
+/// |------|-----------|-----------------------------------------------|
+/// | +00  | 0         |                                               |
+/// | +04  | 0x5f2c0   | a word past the image - bss                    |
+/// | +08  | 0x57344   | the imported names, NUL separated              |
+/// | +0c  | 0x5772c   | pointers into the constant pool                |
+/// | +10  | 0x480     | where the code starts                          |
+/// | +14  | 0x5ed6c   | the module field table                         |
+/// | +18  | 0x5f2a4   | bss again                                      |
+/// | +20  | 0x52745   | Thumb, and the only odd word: the entry        |
 ///
 /// Everything but `+00`, `+04` and `+20` is relocated.
-///
-/// It is not a WIPI exe. It carries neither `WIPI_exe` nor `ExeInterface` -
-/// the two names every other module here has - and the first name in its
-/// import table is `MNInterface`, which nothing else asks for. So running it
-/// needs a second module ABI and not only a second container, and until that
-/// is written, saying so is the useful thing to do.
 pub struct RelocatedModule {
     pub bss_size: u32,
     pub relocations: usize,
@@ -106,11 +104,76 @@ impl RelocatedModule {
         })
     }
 
+    /// The relocations, as byte offsets into the image.
+    pub fn offsets<'a>(&'a self, data: &'a [u8]) -> impl Iterator<Item = u32> + 'a {
+        (0..self.relocations).map(move |index| {
+            let at = (HEADER_WORDS + index) * size_of::<u32>();
+
+            u32::from_le_bytes(data[at..at + size_of::<u32>()].try_into().unwrap())
+        })
+    }
+
+    /// Where the image lands, when the file is loaded at `load_address`.
+    ///
+    /// The whole file goes in - header, table and image - so the image itself
+    /// sits behind the two, and that is the bias, not the load address.
+    pub fn base(&self, load_address: u32) -> u32 {
+        load_address + self.image_offset as u32
+    }
+
+    /// Adds the image's own base to every word the table names.
+    ///
+    /// This is wfeature's loop at `0x3f71cc`, which reads the word at
+    /// `image + offset`, adds `image_offset + load address` and writes it
+    /// back.
+    pub fn relocate(&self, core: &mut ArmCore, data: &[u8], load_address: u32) -> Result<()> {
+        let base = self.base(load_address);
+
+        for offset in self.offsets(data) {
+            let at = base + offset;
+            let word: u32 = read_generic(core, at)?;
+
+            write_generic(core, at, word.wrapping_add(base))?;
+        }
+
+        Ok(())
+    }
+
+    /// The word the image keeps its entry in, at `+0x20`.
+    ///
+    /// Not in the relocation table: the loader is what biases it, the same way
+    /// it biases every word the table does name.
+    pub const ENTRY_OFFSET: usize = 0x20;
+
+    /// Where the image's entry is, once the image is at its base.
+    pub fn entry(&self, data: &[u8], load_address: u32) -> Result<u32> {
+        let at = self.image_offset + Self::ENTRY_OFFSET;
+        let word = data
+            .get(at..at + size_of::<u32>())
+            .ok_or_else(|| WieError::FatalError(format!("a relocated module with no entry word at {at:#x}")))?;
+
+        Ok(self.base(load_address).wrapping_add(u32::from_le_bytes(word.try_into().unwrap())))
+    }
+
     /// What to tell the user, since this runtime cannot run one yet.
+    ///
+    /// What is left is named rather than guessed at. The table does not cover
+    /// the words from `+0x5ed64` to the end of 텐가이's image, and its entry
+    /// reads one of them the moment it runs - 333 of those 335 words are
+    /// image offsets, so they are rebased too, by something else. wfeature has
+    /// that something: `rebaseModuleFields`, which reads six words of a module
+    /// field table (the `+0x14` word) and refuses a client that is not one of
+    /// these ("KTF client is not a relocatable module").
+    ///
+    /// Past that, the entry takes a pointer to a table of the host's own
+    /// functions and calls the first of them with a name and two `-1`s, which
+    /// is `get_interface` - the same call this runtime already serves at
+    /// `InitSvcId::GetInterface`. The name it asks for is `MNInterface`, which
+    /// nothing else here asks for.
     pub fn unsupported(&self, filename: &str) -> WieError {
         WieError::FatalError(format!(
-            "{filename} is a relocated module - {} relocations, image at {:#x}, bss {:#x} - and not the self-rebasing kind this runtime loads. \
-             It is not a WIPI exe either: it carries no ExeInterface and asks for an interface named MNInterface. See wie_ktf::module.",
+            "{filename} is a relocated module - {} relocations, image at {:#x}, bss {:#x} - and this runtime relocates one but cannot yet \
+             rebase its module fields or serve the MNInterface its entry asks for. See wie_ktf::module.",
             self.relocations, self.image_offset, self.bss_size
         ))
     }
@@ -185,5 +248,32 @@ mod tests {
         assert!(RelocatedModule::parse(&relocated(&[8, 0x400], &[0u8; 0x40])).is_none());
         // Nor is an unaligned one.
         assert!(RelocatedModule::parse(&relocated(&[8, 0xd], &[0u8; 0x40])).is_none());
+    }
+
+    /// The image's base is behind the header and the table, and the entry is
+    /// behind that.
+    ///
+    /// The numbers are 텐가이's: loaded at 0x100000, its image lands at
+    /// 0x103328 and its entry - the word at `+0x20` - at 0x155a6d, Thumb bit
+    /// and all.
+    #[test]
+    fn the_entry_is_behind_the_header_and_the_table() {
+        let mut image = vec![0u8; 0x40];
+        image[0x20..0x24].copy_from_slice(&0x52745u32.to_le_bytes());
+
+        let data = relocated(&[8, 0xc], &image);
+        let module = RelocatedModule::parse(&data).expect("a relocated module");
+
+        assert_eq!(module.base(0x100000), 0x100000 + (3 + 2) * 4);
+        assert_eq!(module.entry(&data, 0x100000).unwrap(), 0x100000 + (3 + 2) * 4 + 0x52745);
+    }
+
+    /// The offsets come back in the order the table holds them.
+    #[test]
+    fn the_offsets_are_the_table() {
+        let data = relocated(&[0x10, 0x20, 0x2c], &[0u8; 0x40]);
+        let module = RelocatedModule::parse(&data).expect("a relocated module");
+
+        assert_eq!(module.offsets(&data).collect::<Vec<_>>(), vec![0x10, 0x20, 0x2c]);
     }
 }
