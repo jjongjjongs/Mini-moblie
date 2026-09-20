@@ -11,6 +11,7 @@ use wie_backend::System;
 use wie_core_arm::{ArmCore, EmulatedFunction, EmulatedFunctionParam, ResultWriter, SvcId};
 use wie_jvm_support::JvmSupport;
 use wie_util::{Result, read_generic, write_generic, write_null_terminated_string_bytes};
+use wie_wipi_c::api::graphics::WIPICGraphicsContextIdx;
 use wie_wipi_c::{
     MethodImpl, WIPICContext, WIPICMethodBody, WIPICResult,
     api::{database, filesystem, graphics, im, kernel, media, misc, net, phone, serial, shared_buf, system, uic, util},
@@ -427,12 +428,53 @@ pub(crate) fn try_fast_wipic_getter(core: &mut ArmCore) -> Result<bool> {
     const ID_GET_FRAMEBUFFER_HEIGHT: u32 = WIPICSvcId::GetFramebufferHeight as u32;
     const ID_GET_FRAMEBUFFER_BPP: u32 = WIPICSvcId::GetFramebufferBpp as u32;
 
+    const ID_INIT_CONTEXT: u32 = WIPICSvcId::InitContext as u32;
+    const ID_SET_CONTEXT: u32 = WIPICSvcId::SetContext as u32;
+    const ID_GET_CONTEXT: u32 = WIPICSvcId::GetContext as u32;
+
     let id = core.read_svc_id();
     if !matches!(
         id,
-        ID_GET_FRAMEBUFFER_POINTER | ID_GET_IMAGE_FRAMEBUFFER | ID_GET_FRAMEBUFFER_WIDTH | ID_GET_FRAMEBUFFER_HEIGHT | ID_GET_FRAMEBUFFER_BPP
+        ID_GET_FRAMEBUFFER_POINTER
+            | ID_GET_IMAGE_FRAMEBUFFER
+            | ID_GET_FRAMEBUFFER_WIDTH
+            | ID_GET_FRAMEBUFFER_HEIGHT
+            | ID_GET_FRAMEBUFFER_BPP
+            | ID_INIT_CONTEXT
+            | ID_SET_CONTEXT
+            | ID_GET_CONTEXT
     ) {
         return Ok(false);
+    }
+
+    // The three graphics-context calls, which a title's own blitter drives
+    // harder than anything else here: 드래곤하트2's inventory screen asks for
+    // 27,000 SetContext and 26,000 InitContext a second, together 78% of all
+    // its WIPI-C traffic, against 8,700 PutPixel and 4,400 FillRect. Each one
+    // reads a 0x38-byte struct out of the title's own memory, changes one word
+    // and writes it back - the async round trip around that costs more than the
+    // work. The rules are not repeated here: these call the same bodies the
+    // generic handler does.
+    if matches!(id, ID_INIT_CONTEXT | ID_SET_CONTEXT | ID_GET_CONTEXT) {
+        WIPIC_SVC_COUNT[(id as usize).min(WIPIC_ID_MAX - 1)].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let (_, ret) = core.read_pc_lr()?;
+        let p_grp_ctx = core.read_param(0)?;
+        match id {
+            ID_INIT_CONTEXT => graphics::init_context_in(core, p_grp_ctx)?,
+            ID_SET_CONTEXT => {
+                let op = WIPICGraphicsContextIdx::from_raw(core.read_param(1)?);
+                let pv = core.read_param(2)?;
+                graphics::set_context_in(core, p_grp_ctx, op, pv)?;
+            }
+            _ => {
+                let op = WIPICGraphicsContextIdx::from_raw(core.read_param(1)?);
+                let out_ptr = core.read_param(2)?;
+                graphics::get_context_in(core, p_grp_ctx, op, out_ptr)?;
+            }
+        }
+        // These three report nothing; the generic handler returns unit too.
+        core.set_next_pc(ret)?;
+        return Ok(true);
     }
     WIPIC_SVC_COUNT[(id as usize).min(WIPIC_ID_MAX - 1)].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     // Return straight to the caller, exactly as the generic handler does:

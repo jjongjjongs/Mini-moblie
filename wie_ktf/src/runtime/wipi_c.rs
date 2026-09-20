@@ -4,9 +4,10 @@ use jvm::Jvm;
 use wie_backend::System;
 use wie_core_arm::{ArmCore, EmulatedFunction, EmulatedFunctionParam, ResultWriter, SvcId};
 use wie_util::{Result, WieError, write_generic};
+use wie_wipi_c::api::graphics::WIPICGraphicsContextIdx;
 use wie_wipi_c::{
     WIPICMethodBody, WIPICResult,
-    api::{filesystem, im, kernel, net, serial, shared_buf},
+    api::{filesystem, graphics, im, kernel, net, serial, shared_buf},
 };
 
 use crate::runtime::SVC_CATEGORY_WIPIC;
@@ -180,6 +181,9 @@ fn try_fast_wipic_call(core: &mut ArmCore) -> Result<bool> {
     const GET_PIXEL_FROM_RGB: u32 = ((WIPICTableId::Graphics as u32) << 16) | WIPICGraphicsMethodId::GetPixelFromRgb as u32;
     const GET_RGB_FROM_PIXEL: u32 = ((WIPICTableId::Graphics as u32) << 16) | WIPICGraphicsMethodId::GetRgbFromPixel as u32;
     const GET_IMAGE_FRAMEBUFFER: u32 = ((WIPICTableId::Graphics as u32) << 16) | WIPICGraphicsMethodId::GetImageFramebuffer as u32;
+    const INIT_CONTEXT: u32 = ((WIPICTableId::Graphics as u32) << 16) | WIPICGraphicsMethodId::InitContext as u32;
+    const SET_CONTEXT: u32 = ((WIPICTableId::Graphics as u32) << 16) | WIPICGraphicsMethodId::SetContext as u32;
+    const GET_CONTEXT: u32 = ((WIPICTableId::Graphics as u32) << 16) | WIPICGraphicsMethodId::GetContext as u32;
 
     #[cfg(feature = "wipic-probe")]
     {
@@ -187,6 +191,38 @@ fn try_fast_wipic_call(core: &mut ArmCore) -> Result<bool> {
         if id == GET_PIXEL_FROM_RGB || id == GET_RGB_FROM_PIXEL || id == GET_IMAGE_FRAMEBUFFER {
             tracing::warn!("svc fast-path {:#x}", id);
         }
+    }
+
+    // The graphics context: read a 0x38-byte struct out of the title's own
+    // memory, change one word, write it back. Nothing else is touched, which is
+    // what lets it be answered here - and the rules are not copied here either,
+    // these are the bodies the generic handler runs. A title's own blitter
+    // drives these harder than anything else it calls: 드래곤하트2's inventory
+    // screen asks for 27,000 SetContext and 26,000 InitContext a second,
+    // together 78% of all its WIPI-C traffic, against 8,700 PutPixel.
+    if matches!(core.read_svc_id(), INIT_CONTEXT | SET_CONTEXT | GET_CONTEXT) {
+        let id = core.read_svc_id();
+        let p_grp_ctx = core.read_param(0)?;
+        match id {
+            INIT_CONTEXT => graphics::init_context_in(core, p_grp_ctx)?,
+            SET_CONTEXT => {
+                let op = WIPICGraphicsContextIdx::from_raw(core.read_param(1)?);
+                let pv = core.read_param(2)?;
+                graphics::set_context_in(core, p_grp_ctx, op, pv)?;
+            }
+            _ => {
+                let op = WIPICGraphicsContextIdx::from_raw(core.read_param(1)?);
+                let out_ptr = core.read_param(2)?;
+                graphics::get_context_in(core, p_grp_ctx, op, out_ptr)?;
+            }
+        }
+
+        // These three report nothing, so there is no return value to write -
+        // the generic path returns unit for them too.
+        let (_, lr) = core.read_pc_lr()?;
+        core.set_next_pc(lr)?;
+
+        return Ok(true);
     }
 
     let result = match core.read_svc_id() {

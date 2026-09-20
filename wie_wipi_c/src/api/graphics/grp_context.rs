@@ -65,14 +65,43 @@ pub enum WIPICGraphicsContextIdx {
     Invalid = 0xff,
 }
 
-impl ParamConverter<WIPICGraphicsContextIdx> for WIPICGraphicsContextIdx {
-    fn convert(_context: &mut dyn WIPICContext, raw: WIPICWord) -> WIPICGraphicsContextIdx {
+impl WIPICGraphicsContextIdx {
+    /// The op a raw argument names, or `Invalid` for one that names none.
+    ///
+    /// Taken apart from the `ParamConverter` so the emulator's synchronous
+    /// fast path, which has the guest's registers but no `WIPICContext`, reads
+    /// the argument the same way the generic dispatch does.
+    pub fn from_raw(raw: WIPICWord) -> Self {
         if raw >= (Self::ClipIdx as WIPICWord) && raw <= (Self::OutlineIdx as WIPICWord) {
             // SAFETY: WIPICGraphicsContextIdx has CWord repr and is unit only.
-            let x: Self = unsafe { mem::transmute(raw) };
-            x
+            unsafe { mem::transmute(raw) }
         } else {
             Self::Invalid
+        }
+    }
+}
+
+impl ParamConverter<WIPICGraphicsContextIdx> for WIPICGraphicsContextIdx {
+    fn convert(_context: &mut dyn WIPICContext, raw: WIPICWord) -> WIPICGraphicsContextIdx {
+        Self::from_raw(raw)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::WIPICGraphicsContextIdx;
+
+    /// Every op the reference has, and nothing else.
+    ///
+    /// The fast path reads its op straight out of a register, so this is the
+    /// only thing standing between a wild argument and a transmute.
+    #[test]
+    fn an_op_outside_the_table_is_invalid() {
+        for raw in 0..=11u32 {
+            assert_eq!(WIPICGraphicsContextIdx::from_raw(raw) as u32, raw);
+        }
+        for raw in [12u32, 0xff, 0x1000, u32::MAX] {
+            assert!(matches!(WIPICGraphicsContextIdx::from_raw(raw), WIPICGraphicsContextIdx::Invalid));
         }
     }
 }
