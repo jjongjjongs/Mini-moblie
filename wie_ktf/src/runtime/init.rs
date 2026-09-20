@@ -1,17 +1,17 @@
-use alloc::{format, string::String, vec::Vec};
+use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
 use core::mem::{offset_of, size_of};
 use jvm::Jvm;
 
 use wie_backend::System;
 use wie_core_arm::{Allocator, ArmCore, EmulatedFunction, ResultWriter, SvcId};
 use wie_jvm_support::JvmSupport;
-use wie_util::{Result, WieError, read_generic, read_null_terminated_string_bytes, write_generic};
+use wie_util::{Result, WieError, read_generic, read_null_terminated_string_bytes, read_null_terminated_table, write_generic};
 
-use java_constants::MethodAccessFlags;
+use java_constants::{FieldAccessFlags, MethodAccessFlags};
 use jvm::JavaType;
 use wipi_types::ktf::{
     ExeInterface, ExeInterfaceFunctions, InitParam0, InitParam1, InitParam3, InitParam4, WipiExe,
-    java::{JavaClass, JavaClassDescriptor, JavaMethodDefinition},
+    java::{JavaClass, JavaClassDescriptor, JavaFieldDefinition, JavaMethodDefinition},
 };
 
 use crate::{
@@ -498,6 +498,83 @@ fn module_classes(core: &mut ArmCore, descriptor: u32) -> Result<Vec<u32>> {
     Ok(classes)
 }
 
+/// Puts each of a module's classes behind the fields of its parent.
+///
+/// A class's field records name offsets into its own block only - 텐가이's
+/// `Tengai` keeps its three at 0, 4 and 8 and calls that twelve bytes - and
+/// where the parent's fields go is not the module's to decide: the parent is
+/// this runtime's class, whose own layout it cannot know. The ordinary module
+/// settles that inside `fn_init`, reading the parent's size out of the record
+/// this runtime handed it and moving its own fields behind it. A relocated one
+/// has no `fn_init`, and it reads the offsets back out of these records
+/// whenever it touches a field, so moving them here is the same answer.
+///
+/// A parent in this module is moved first, so what it says about its size is
+/// the whole of it by the time a child asks.
+fn rebase_module_class_fields(core: &mut ArmCore, descriptor: u32, ptr_class: u32, done: &mut BTreeSet<u32>) -> Result<u16> {
+    let class: JavaClass = read_generic(core, ptr_class)?;
+    let mut class_descriptor: JavaClassDescriptor = read_generic(core, class.ptr_descriptor)?;
+
+    if done.contains(&ptr_class) {
+        return Ok(class_descriptor.fields_size);
+    }
+    done.insert(ptr_class);
+
+    let parent_size = if class_descriptor.ptr_parent_class != 0 {
+        rebase_module_class_fields(core, descriptor, class_descriptor.ptr_parent_class, done)?
+    } else {
+        0
+    };
+
+    // A class of this runtime's own is already laid out behind its parent, and
+    // its records are shared with every other title. Only a module's are moved.
+    if !module_classes(core, descriptor)?.contains(&ptr_class) {
+        return Ok(class_descriptor.fields_size);
+    }
+
+    let name = KtfJvmSupport::class_from_raw(core, ptr_class).name()?;
+
+    // An array class keeps its element type where another keeps its fields.
+    if !name.starts_with('[') && class_descriptor.ptr_fields_or_element_type != 0 {
+        for ptr_field in read_null_terminated_table(core, class_descriptor.ptr_fields_or_element_type)? {
+            let mut field: JavaFieldDefinition = read_generic(core, ptr_field)?;
+
+            // A static keeps its value in that word, not an offset. What it
+            // keeps there before the class's initializer has run is the
+            // compiler's own: 텐가이's `TengaiClient.SERVER_IP` holds
+            // `0x579fa20`, which is no address in this image and no object.
+            // A static of a reference type starts as null, and the
+            // initializer - which the module asks for before it reads one -
+            // puts the real thing there.
+            if FieldAccessFlags::from_bits_truncate(field.access_flags as u16).contains(FieldAccessFlags::STATIC) {
+                let descriptor = KtfJvmSupport::read_name(core, field.ptr_name)?.descriptor.clone();
+
+                if descriptor.starts_with('L') || descriptor.starts_with('[') {
+                    field.offset_or_value = 0;
+                    write_generic(core, ptr_field, field)?;
+                }
+
+                continue;
+            }
+
+            if parent_size != 0 {
+                field.offset_or_value += parent_size as u32;
+                write_generic(core, ptr_field, field)?;
+            }
+        }
+    }
+
+    class_descriptor.fields_size += parent_size;
+    write_generic(core, class.ptr_descriptor, class_descriptor)?;
+
+    tracing::debug!(
+        "{name} keeps its fields behind {parent_size:#x}, so it is {:#x}",
+        class_descriptor.fields_size
+    );
+
+    Ok(class_descriptor.fields_size)
+}
+
 /// Gives each of a module's classes the vtable its own records do not carry.
 ///
 /// The ordinary module builds these inside `fn_init` and hands them over with
@@ -780,6 +857,12 @@ pub async fn load_native(
         // call, so the same step is made here.
         let pool = module.base(IMAGE_BASE) + module.constant_pool(data)?;
         resolve_module_imports(core, jvm, descriptor, pool).await?;
+
+        let mut rebased = BTreeSet::new();
+        for ptr_class in module_classes(core, descriptor)? {
+            rebase_module_class_fields(core, descriptor, ptr_class, &mut rebased)?;
+        }
+
         build_module_vtables(core, descriptor)?;
 
         return Ok(ExeInterfaceFunctions {
