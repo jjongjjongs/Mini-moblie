@@ -45,7 +45,7 @@ const HEADER_WORDS: usize = 2;
 /// | +14  | 0x480       | the six words the host fills in               |
 /// | +18  | 0x5ed6c     | the module field table                        |
 /// | +1c  | 0x5f2a4     | bss again                                     |
-/// | +20  | 0x13580001  |                                             |
+/// | +20  | 0x13580001  | where the VM context goes, until it is there  |
 /// | +24  | 0x52745     | Thumb, and the only odd word: the entry       |
 ///
 /// Everything but `+04` and `+20` is relocated, the entry included.
@@ -173,6 +173,15 @@ impl RelocatedModule {
     pub fn module_fields(&self, data: &[u8]) -> Result<u32> {
         self.header_word(data, Self::MODULE_FIELDS_OFFSET)
     }
+
+    /// The word the host writes the module's VM context into, at `+0x20`.
+    ///
+    /// One of the two words the relocation table leaves alone, and the module
+    /// reads it through a field of its own: the epilogue of a method with a
+    /// `try` in it puts the handler chain back through `+0x2c` of whatever is
+    /// here. The `0x13580001` it holds in the file is nobody's address - it is
+    /// what an unfilled one looks like.
+    pub const VM_CONTEXT_OFFSET: usize = 0x20;
 
     /// The word the image keeps its jump table in, at `+0x14`.
     pub const JUMP_TABLE_OFFSET: usize = 0x14;

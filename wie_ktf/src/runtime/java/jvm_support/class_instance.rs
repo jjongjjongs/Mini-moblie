@@ -38,10 +38,32 @@ impl JavaClassInstance {
         Ok(instance)
     }
 
+    /// The class this object is one of.
+    ///
+    /// An object this runtime made keeps it in the word beside its fields. One
+    /// that a title's own compiled image carries - a string constant, the char
+    /// array behind it - has no such word: it is one word holding the address
+    /// of the fields that follow it, and the class is what the first of those
+    /// fields says, the index of its vtable. So the word beside the fields is
+    /// taken only where it really is a class record, which is a record whose
+    /// first word is its own address plus four - the same mark
+    /// `get_java_method` tests - and the index answers for the rest.
     pub fn class(&self) -> Result<JavaClassDefinition> {
         let raw = self.read_raw()?;
 
-        Ok(JavaClassDefinition::from_raw(raw.ptr_class, &self.core))
+        let mark: Result<u32> = read_generic(&self.core, raw.ptr_class);
+        let is_record = mark.is_ok_and(|mark| mark == raw.ptr_class + 4);
+        if is_record {
+            return Ok(JavaClassDefinition::from_raw(raw.ptr_class, &self.core));
+        }
+
+        let vtable_word: u32 = read_generic(&self.core, raw.ptr_fields)?;
+        let ptr_class = KtfJvmSupport::class_by_vtable_word(&mut self.core.clone(), vtable_word)?;
+        if ptr_class == 0 {
+            tracing::warn!("no class for {:#x} by vtable word {vtable_word:#x}", self.ptr_raw);
+        }
+
+        Ok(JavaClassDefinition::from_raw(ptr_class, &self.core))
     }
 
     pub(super) fn field_address(&self, offset: u32) -> Result<u32> {

@@ -108,7 +108,7 @@ pub async fn java_throw(core: &mut ArmCore, jvm: &mut Jvm, ptr_error: KtfJvmWord
 /// unwind travels on rather than being resumed here - the next call out asks the
 /// same question of its own entry, and the outermost guest call owns the whole
 /// stack.
-fn map_jump_result(entry_sp: u32, result: core::result::Result<u32, WieError>) -> Result<JavaMethodResult> {
+pub(crate) fn map_jump_result(entry_sp: u32, result: core::result::Result<u32, WieError>) -> Result<JavaMethodResult> {
     match result {
         Ok(result) => Ok(JavaMethodResult::new(vec![result], None)),
         Err(WieError::JavaExceptionUnwind {
