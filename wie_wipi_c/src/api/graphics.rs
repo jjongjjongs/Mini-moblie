@@ -338,6 +338,7 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
     // meets what is already there rather than covering it.
     if let Some((kind, function)) = pixel_op::of_context(context, gctx.pixel_op_func_ptr, gctx.param1, gctx.xor_mode).await? {
         let source = Rgb565Pixel::from_color(color);
+        let source_first = context.pixel_op_takes_source_first();
 
         // Read and write back only the rectangle. The two canvas round trips
         // this used to make - one to look at what was under the fill, one to
@@ -347,16 +348,12 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
         // `FrameBuffer::read_rect_rgb565`.
         if let Some((left, top, cols, rows, mut pixels)) = framebuffer.read_rect_rgb565(context, x, y, w, h)? {
             for destination in pixels.iter_mut() {
-                *destination = match pixel_op::apply(kind, *destination, source) {
+                *destination = match pixel_op::apply(kind, *destination, source, source_first) {
                     Some(result) => result,
                     None => {
-                        let pixels = if context.pixel_op_takes_source_first() {
-                            [source as WIPICWord, *destination as WIPICWord]
-                        } else {
-                            [*destination as WIPICWord, source as WIPICWord]
-                        };
+                        let (a, b) = pixel_op::arguments(source_first, *destination, source);
 
-                        context.call_function(function, &[pixels[0], pixels[1], gctx.param1]).await? as u16
+                        context.call_function(function, &[a as WIPICWord, b as WIPICWord, gctx.param1]).await? as u16
                     }
                 };
             }
@@ -387,16 +384,12 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
 
         let mut filled = Vec::with_capacity(existing.len());
         for &(col, row, destination) in &existing {
-            let result = match pixel_op::apply(kind, destination, source) {
+            let result = match pixel_op::apply(kind, destination, source, source_first) {
                 Some(result) => result,
                 None => {
-                    let pixels = if context.pixel_op_takes_source_first() {
-                        [source as WIPICWord, destination as WIPICWord]
-                    } else {
-                        [destination as WIPICWord, source as WIPICWord]
-                    };
+                    let (a, b) = pixel_op::arguments(source_first, destination, source);
 
-                    context.call_function(function, &[pixels[0], pixels[1], gctx.param1]).await? as u16
+                    context.call_function(function, &[a as WIPICWord, b as WIPICWord, gctx.param1]).await? as u16
                 }
             };
 
@@ -855,6 +848,7 @@ pub async fn draw_image(
     // Asked before anything takes the context, because asking runs the title's
     // own code. Without it 드래곤하트2's glow lands as an opaque disc.
     let operation = pixel_op::of_context(context, grp_ctx.pixel_op_func_ptr, grp_ctx.param1, grp_ctx.xor_mode).await?;
+    let source_first = context.pixel_op_takes_source_first();
 
     let clip = Clip {
         x: dx as _,
@@ -892,20 +886,17 @@ pub async fn draw_image(
     // time, which is what the reference does for all of them.
     let mut blended = Vec::with_capacity(pairs.len());
     for &(x, y, destination, source_pixel) in &pairs {
-        let result = match pixel_op::apply(kind, destination, source_pixel) {
+        let result = match pixel_op::apply(kind, destination, source_pixel, source_first) {
             Some(result) => result,
             None => {
                 // Which pixel goes first is the handset's, not ours - see
-                // `pixel_op_takes_source_first`. The two operations recognised
-                // in Rust are commutative, so the order only ever shows up in
-                // one a title is asked for.
-                let pixels = if context.pixel_op_takes_source_first() {
-                    [source_pixel as WIPICWord, destination as WIPICWord]
-                } else {
-                    [destination as WIPICWord, source_pixel as WIPICWord]
-                };
+                // `pixel_op_takes_source_first`. The recognised operations are
+                // replayed through the same ordering, so an operation that
+                // reads only one of the two is answered the same way whether it
+                // was recognised or asked.
+                let (a, b) = pixel_op::arguments(source_first, destination, source_pixel);
 
-                context.call_function(function, &[pixels[0], pixels[1], grp_ctx.param1]).await? as u16
+                context.call_function(function, &[a as WIPICWord, b as WIPICWord, grp_ctx.param1]).await? as u16
             }
         };
 
@@ -2659,6 +2650,99 @@ mod tests {
         let expected = Rgb565Pixel::to_color(RECOLOURED as u16);
         let out = drawn.get_pixel(0, 0);
         assert_eq!((out.r, out.g, out.b), (expected.r, expected.g, expected.b));
+    }
+
+    /// A fade of the title's own is recognised and done here, not asked about
+    /// per pixel.
+    ///
+    /// This is the shape LOA-혼돈의 서곡 plants for its story transitions: its
+    /// operation @0x122104 unpacks the pixel with `MC_grpGetRGBFromPixel`,
+    /// mixes each component towards white or black and packs it again. Asked
+    /// once per pixel it cost that title two platform calls and an emulated
+    /// call for each of the ~38,000 pixels it blended per frame, which is where
+    /// its story screen stopped looking like it was moving.
+    ///
+    /// The count is what this is really about: forty calls is the probing, and
+    /// the four pixels of the blit add none of their own.
+    #[futures_test::test]
+    async fn a_fade_of_the_titles_own_is_recognised_rather_than_asked_per_pixel() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        static ASKED: AtomicUsize = AtomicUsize::new(0);
+
+        /// Half of the way to black, written the way the title writes it.
+        fn faded(pixel: u16) -> u16 {
+            let component = |value: u32, max: u32| (value * 255 + max / 2) / max;
+
+            let r = component(((pixel >> 11) & 0x1f) as u32, 0x1f) * 127 / 255;
+            let g = component(((pixel >> 5) & 0x3f) as u32, 0x3f) * 127 / 255;
+            let b = component((pixel & 0x1f) as u32, 0x1f) * 127 / 255;
+
+            (((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)) as u16
+        }
+
+        let mut context = test_context();
+
+        // KTF, which is where this title ran: the operation is handed the
+        // source first, so that is the pixel the fade acts on.
+        context.set_pixel_op_takes_source_first(true);
+
+        ASKED.store(0, Ordering::SeqCst);
+        context.set_guest_function(|_, args| {
+            ASKED.fetch_add(1, Ordering::SeqCst);
+
+            faded(args[0] as u16) as u32
+        });
+
+        let pgc_handle = context.alloc(core::mem::size_of::<super::WIPICGraphicsContext>() as u32).unwrap();
+        let pgc = context.data_ptr(pgc_handle).unwrap();
+        init_context(&mut context, pgc).await.unwrap();
+
+        let destination = framebuffer_of(&mut context, 2, 2, &[0xff40_4040; 4]).await;
+        let source = framebuffer_of(&mut context, 2, 2, &[0xffc0_8040; 4]).await;
+
+        let image_handle = context.alloc(core::mem::size_of::<wipi_types::wipic::WIPICImage>() as u32).unwrap();
+        let image_address = context.data_ptr(image_handle).unwrap();
+        let image = wipi_types::wipic::WIPICImage {
+            img: read_generic(&context, context.data_ptr(source).unwrap()).unwrap(),
+            mask: super::FrameBuffer::empty().0,
+            loop_count: 0,
+            delay: 0,
+            animated: 0,
+            buf: super::WIPICIndirectPtr(0),
+            offset: 0,
+            current: 0,
+            len: 0,
+        };
+        write_generic(&mut context, image_address, image).unwrap();
+
+        // An address of its own: what an operation turned out to be is
+        // remembered across calls, and the whole suite shares that memory.
+        set_context(&mut context, pgc, Idx::PixelopIdx, 0x0fade1).await.unwrap();
+
+        draw_image(&mut context, destination, 0, 0, 2, 2, image_handle, 0, 0, pgc).await.unwrap();
+
+        let probed = ASKED.load(Ordering::SeqCst);
+        assert_eq!(probed, 40, "the probing, and nothing per pixel");
+
+        let handle = read_generic(&context, context.data_ptr(destination).unwrap()).unwrap();
+        let drawn = super::FrameBuffer(handle).image(&mut context).unwrap();
+
+        // The destination is the second pixel here and has no part in it; what
+        // lands is the source, faded.
+        let expected = Rgb565Pixel::to_color(faded(Rgb565Pixel::from_color(Color {
+            a: 0xff,
+            r: 0xc0,
+            g: 0x80,
+            b: 0x40,
+        })));
+
+        let out = drawn.get_pixel(0, 0);
+        assert_eq!((out.r, out.g, out.b), (expected.r, expected.g, expected.b));
+
+        // And a second blit asks nothing at all - the answer is remembered.
+        draw_image(&mut context, destination, 0, 0, 2, 2, image_handle, 0, 0, pgc).await.unwrap();
+        assert_eq!(ASKED.load(Ordering::SeqCst), probed);
     }
 
     /// A pixel the image does not have is not a pixel the operation is asked

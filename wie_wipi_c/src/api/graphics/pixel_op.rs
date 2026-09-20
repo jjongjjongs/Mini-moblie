@@ -39,11 +39,18 @@ pub enum PixelOp {
     /// `out = max - (max - dst) * (max - src) / max` per channel - a wash that
     /// lightens without ever darkening.
     Screen,
-    /// The destination inverted, which is what the reference plants when a
+    /// The first argument inverted, which is what the reference plants when a
     /// title turns XOR mode on: `WPGrp_PutXorPixel` is `mvn r0, r0` and a
-    /// return, so the source has no part in it. Drawing the same thing twice
-    /// puts back what was there, which is what the mode is for.
+    /// return, so the other pixel has no part in it. Drawing the same thing
+    /// twice puts back what was there, which is what the mode is for.
     Invert,
+    /// The second argument, unchanged. A title whose operation covers a range
+    /// of strengths needs one that means "as it was", and this is it.
+    Second,
+    /// The first argument mixed `weight`/255 of the way towards a grey, on the
+    /// eight-bit components `MC_grpGetRGBFromPixel` hands out - a fade to white
+    /// or to black. See [`fade`].
+    Fade { target: i32, weight: i32 },
     /// Something else. The title is asked for every pixel.
     Guest,
 }
@@ -73,9 +80,49 @@ pub fn additive(destination: u16, source: u16) -> u16 {
     )
 }
 
-/// Every bit of the destination flipped, the source ignored.
-pub fn invert(destination: u16, _source: u16) -> u16 {
-    !destination
+/// Every bit of the first pixel flipped, the second ignored.
+pub fn invert(first: u16, _second: u16) -> u16 {
+    !first
+}
+
+/// The second pixel, whatever the first was.
+pub fn second(_first: u16, second: u16) -> u16 {
+    second
+}
+
+/// The eight-bit components `MC_grpGetRGBFromPixel` answers with, which spread
+/// each field back over 0..255 with rounding rather than by shifting.
+fn components(pixel: u16) -> (i32, i32, i32) {
+    let spread = |value: u16, max: i32| (value as i32 * 255 + max / 2) / max;
+
+    (spread(red(pixel), 0x1f), spread(green(pixel), 0x3f), spread(blue(pixel), 0x1f))
+}
+
+/// The first pixel mixed towards a grey, the way a title writes a fade when the
+/// API has no blend mode: unpack with `MC_grpGetRGBFromPixel`, mix each
+/// component, pack with `MC_grpGetPixelFromRGB`.
+///
+/// `weight` is out of 255 and is deliberately not clamped - a title is free to
+/// run it past either end, and the truncating signed divide and the eight-bit
+/// truncation `MC_grpGetPixelFromRGB` does on its arguments are what the
+/// handset's own arithmetic does with the result. Matching it exactly is the
+/// point; tidying it up here would draw something the handset never drew.
+pub fn fade(first: u16, _second: u16, target: i32, weight: i32) -> u16 {
+    let (r, g, b) = components(first);
+    let mix = |component: i32| ((component * (255 - weight) + target * weight) / 255) as u32 & 0xff;
+
+    ((((mix(r) >> 3) << 11) | ((mix(g) >> 2) << 5) | (mix(b) >> 3)) & 0xffff) as u16
+}
+
+/// The two pixels in the order the title's own operation receives them.
+///
+/// The two handsets disagree about which comes first - see
+/// `WIPICContext::pixel_op_takes_source_first` - and an operation that reads
+/// only one of them cannot be recognised, or replayed, without getting that
+/// right. Both the probing below and [`apply`] go through here, so they cannot
+/// drift apart.
+pub fn arguments(source_first: bool, destination: u16, source: u16) -> (u16, u16) {
+    if source_first { (source, destination) } else { (destination, source) }
 }
 
 /// The inverses multiplied and inverted back, which is what the title's own
@@ -110,54 +157,123 @@ const PROBES: [(u16, u16); 8] = [
     (0x8410, 0x8410),
 ];
 
+/// A wider set, for the models that are fitted rather than fixed.
+///
+/// A family with free parameters can be talked into agreeing with eight
+/// answers by accident - 마스터오브소드4's operation hands back its first pixel
+/// for every one of them and only does something for a white one, which reads
+/// as a fade of no strength at all. So the fitted models are held to these as
+/// well: sixteen colours, each one appearing as the first pixel and as the
+/// second, including the extremes an operation is most likely to special-case.
+///
+/// They are only asked for when the fixed models have already said no, so the
+/// titles those cover still pay eight calls and not forty.
+const WIDE_PROBES: [(u16, u16); 32] = {
+    const COLOURS: [u16; 16] = [
+        0x0000, 0xffff, 0xf800, 0x07e0, 0x001f, 0x8410, 0x4208, 0xc618, 0x18c3, 0x39e7, 0x7bef, 0x2145, 0x6b4a, 0xfc00, 0x03ff, 0xfd20,
+    ];
+
+    let mut pairs = [(0u16, 0u16); 32];
+    let mut index = 0;
+    while index < 16 {
+        let other = COLOURS[(index + 5) % 16];
+
+        pairs[index * 2] = (COLOURS[index], other);
+        pairs[index * 2 + 1] = (other, COLOURS[index]);
+
+        index += 1;
+    }
+
+    pairs
+};
+
 /// What has already been asked, so a title that sets its operation on every
 /// draw - 드래곤하트2 sets one eight thousand times in a capture - is asked
 /// once per function rather than once per call.
-static KNOWN: Mutex<Vec<(WIPICWord, PixelOp)>> = Mutex::new(Vec::new());
+static KNOWN: Mutex<Vec<((WIPICWord, WIPICWord), PixelOp)>> = Mutex::new(Vec::new());
 
 /// A title that keeps planting new functions must not grow this without end.
-const KNOWN_LIMIT: usize = 32;
+///
+/// Keyed by the parameter as well as the function, because an operation is
+/// free to do something different for each - LOA-혼돈의 서곡's fades to white
+/// below one value, hides the draw at another and fades to black above it - so
+/// one answer per function would be the wrong answer for most of them. A fade
+/// walks its parameter through a handful of steps, so the room is for those.
+const KNOWN_LIMIT: usize = 64;
 
 /// Asks the title's operation what it does, and remembers the answer.
 pub async fn classify(context: &mut dyn WIPICContext, function: WIPICWord, param: WIPICWord) -> Result<PixelOp> {
-    if let Some(known) = KNOWN.lock().iter().find(|(address, _)| *address == function) {
+    if let Some(known) = KNOWN.lock().iter().find(|(key, _)| *key == (function, param)) {
         return Ok(known.1);
     }
 
-    let mut answers = Vec::with_capacity(PROBES.len());
-    for (destination, source) in PROBES {
-        let answer = context
-            .call_function(function, &[destination as WIPICWord, source as WIPICWord, param])
-            .await?;
+    let source_first = context.pixel_op_takes_source_first();
 
-        answers.push(answer as u16);
-    }
+    let mut asked: Vec<((u16, u16), u16)> = Vec::with_capacity(PROBES.len() + WIDE_PROBES.len());
+    let ask = async |context: &mut dyn WIPICContext, asked: &mut Vec<((u16, u16), u16)>, pairs: &[(u16, u16)]| -> Result<()> {
+        for &(destination, source) in pairs {
+            let (a, b) = arguments(source_first, destination, source);
+            let answer = context.call_function(function, &[a as WIPICWord, b as WIPICWord, param]).await?;
 
-    let matches = |model: fn(u16, u16) -> u16| {
-        PROBES
-            .iter()
-            .zip(answers.iter())
-            .all(|(&(destination, source), &answer)| model(destination, source) == answer)
+            asked.push(((a, b), answer as u16));
+        }
+
+        Ok(())
     };
 
-    let operation = if matches(additive) {
+    ask(context, &mut asked, &PROBES).await?;
+
+    let matches = |asked: &[((u16, u16), u16)], model: &dyn Fn(u16, u16) -> u16| asked.iter().all(|&((a, b), answer)| model(a, b) == answer);
+
+    let operation = if matches(&asked, &additive) {
         PixelOp::Additive
-    } else if matches(screen) {
+    } else if matches(&asked, &screen) {
         PixelOp::Screen
-    } else if matches(invert) {
+    } else if matches(&asked, &invert) {
         PixelOp::Invert
     } else {
-        PixelOp::Guest
+        // Nothing fixed fits, so the fitted models get their turn - and they
+        // answer to the wider set as well as this one.
+        ask(context, &mut asked, &WIDE_PROBES).await?;
+
+        if matches(&asked, &second) {
+            PixelOp::Second
+        } else if let Some((target, weight)) = fit_fade(&|model| matches(&asked, model)) {
+            PixelOp::Fade { target, weight }
+        } else {
+            PixelOp::Guest
+        }
     };
 
-    tracing::debug!("pixel operation at {function:#x} is {operation:?}");
+    tracing::debug!("pixel operation at {function:#x} param {param} is {operation:?}");
 
     let mut known = KNOWN.lock();
     if known.len() < KNOWN_LIMIT {
-        known.push((function, operation));
+        known.push(((function, param), operation));
     }
 
     Ok(operation)
+}
+
+/// Whether a model answers every probe that has been asked.
+type Matches<'a> = dyn Fn(&dyn Fn(u16, u16) -> u16) -> bool + 'a;
+
+/// Finds the fade, if the answers are one.
+///
+/// Only the two greys a fade is ever towards are tried - white and black - and
+/// the weight is swept well past either end because a title is free to run it
+/// there. Nothing is taken on trust: a candidate is kept only when it answers
+/// every probe exactly, and anything that does not is still asked per pixel.
+fn fit_fade(matches: &Matches) -> Option<(i32, i32)> {
+    for target in [0, 255] {
+        for weight in -1024..=1024 {
+            if matches(&move |first, second| fade(first, second, target, weight)) {
+                return Some((target, weight));
+            }
+        }
+    }
+
+    None
 }
 
 /// What a context draws through, if anything.
@@ -184,11 +300,18 @@ pub async fn of_context(
 }
 
 /// Applies a recognised operation. `Guest` has no answer here - it is asked.
-pub fn apply(operation: PixelOp, destination: u16, source: u16) -> Option<u16> {
+///
+/// `source_first` is the handset's argument order, the same one the probing
+/// used; see [`arguments`].
+pub fn apply(operation: PixelOp, destination: u16, source: u16, source_first: bool) -> Option<u16> {
+    let (a, b) = arguments(source_first, destination, source);
+
     match operation {
-        PixelOp::Additive => Some(additive(destination, source)),
-        PixelOp::Screen => Some(screen(destination, source)),
-        PixelOp::Invert => Some(invert(destination, source)),
+        PixelOp::Additive => Some(additive(a, b)),
+        PixelOp::Screen => Some(screen(a, b)),
+        PixelOp::Invert => Some(invert(a, b)),
+        PixelOp::Second => Some(second(a, b)),
+        PixelOp::Fade { target, weight } => Some(fade(a, b, target, weight)),
         PixelOp::Guest => None,
     }
 }
@@ -274,9 +397,60 @@ mod tests {
 
     #[test]
     fn a_guest_operation_has_no_answer_of_its_own() {
-        assert_eq!(apply(PixelOp::Additive, 0x1084, 0x1084), Some(0x2108));
-        assert_eq!(apply(PixelOp::Screen, 0x0000, 0x39e7), Some(screen(0x0000, 0x39e7)));
-        assert_eq!(apply(PixelOp::Invert, 0x0000, 0x1084), Some(0xffff));
-        assert_eq!(apply(PixelOp::Guest, 0x1084, 0x1084), None);
+        assert_eq!(apply(PixelOp::Additive, 0x1084, 0x1084, false), Some(0x2108));
+        assert_eq!(apply(PixelOp::Screen, 0x0000, 0x39e7, false), Some(screen(0x0000, 0x39e7)));
+        assert_eq!(apply(PixelOp::Invert, 0x0000, 0x1084, false), Some(0xffff));
+        assert_eq!(apply(PixelOp::Guest, 0x1084, 0x1084, false), None);
+    }
+
+    /// Which pixel an operation reads is the handset's business, so the two
+    /// orderings answer differently for one that reads only its first.
+    ///
+    /// The commutative ones cannot show this, which is why nothing caught the
+    /// probing and the drawing having drifted apart on it.
+    #[test]
+    fn the_argument_order_reaches_the_answer() {
+        assert_eq!(apply(PixelOp::Invert, 0x0000, 0xffff, false), Some(0xffff));
+        assert_eq!(apply(PixelOp::Invert, 0x0000, 0xffff, true), Some(0x0000));
+
+        assert_eq!(apply(PixelOp::Second, 0x1234, 0x4321, false), Some(0x4321));
+        assert_eq!(apply(PixelOp::Second, 0x1234, 0x4321, true), Some(0x1234));
+
+        // And a commutative one reads the same either way, which is why it
+        // stayed right while the order was wrong.
+        for source_first in [false, true] {
+            assert_eq!(apply(PixelOp::Additive, 0x1084, 0x2108, source_first), Some(additive(0x1084, 0x2108)));
+        }
+    }
+
+    /// A full-weight fade is the grey it fades to, and a zero-weight one is
+    /// what it started as.
+    #[test]
+    fn a_fade_runs_from_the_pixel_to_the_grey() {
+        for pixel in [0x0000u16, 0x18c3, 0x39e7, 0x7bef, 0xf81f, 0xffff] {
+            assert_eq!(super::fade(pixel, 0, 0, 255), 0x0000, "{pixel:#06x} to black");
+            assert_eq!(super::fade(pixel, 0, 255, 255), 0xffff, "{pixel:#06x} to white");
+            assert_eq!(super::fade(pixel, 0, 0, 0), pixel, "{pixel:#06x} unmoved");
+            assert_eq!(super::fade(pixel, 0, 255, 0), pixel, "{pixel:#06x} unmoved");
+        }
+    }
+
+    /// The other pixel has no part in a fade, whatever it is.
+    #[test]
+    fn a_fade_reads_only_the_pixel_it_fades() {
+        for other in [0x0000u16, 0x39e7, 0xffff] {
+            assert_eq!(super::fade(0x7bef, other, 0, 128), super::fade(0x7bef, 0x1234, 0, 128));
+        }
+    }
+
+    /// Halfway to black is about half as bright, in each channel, on the
+    /// eight-bit components the API hands out rather than on the packed word.
+    #[test]
+    fn a_half_fade_is_about_half() {
+        let faded = super::fade(0xffff, 0, 0, 128);
+
+        assert!((super::red(faded) as i32 - 15).abs() <= 1, "{faded:#06x}");
+        assert!((super::green(faded) as i32 - 31).abs() <= 1, "{faded:#06x}");
+        assert!((super::blue(faded) as i32 - 15).abs() <= 1, "{faded:#06x}");
     }
 }

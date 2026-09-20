@@ -3,7 +3,7 @@ use alloc::{boxed::Box, sync::Arc, vec};
 use jvm::Jvm;
 use wie_backend::System;
 use wie_core_arm::{ArmCore, EmulatedFunction, EmulatedFunctionParam, ResultWriter, SvcId};
-use wie_util::{Result, WieError};
+use wie_util::{Result, WieError, write_generic};
 use wie_wipi_c::{
     WIPICMethodBody, WIPICResult,
     api::{filesystem, im, kernel, net, serial, shared_buf},
@@ -178,12 +178,13 @@ pub fn register_wipic_svc_handler(core: &mut ArmCore, system: &System, jvm: &Jvm
 /// that the generic handler should take it.
 fn try_fast_wipic_call(core: &mut ArmCore) -> Result<bool> {
     const GET_PIXEL_FROM_RGB: u32 = ((WIPICTableId::Graphics as u32) << 16) | WIPICGraphicsMethodId::GetPixelFromRgb as u32;
+    const GET_RGB_FROM_PIXEL: u32 = ((WIPICTableId::Graphics as u32) << 16) | WIPICGraphicsMethodId::GetRgbFromPixel as u32;
     const GET_IMAGE_FRAMEBUFFER: u32 = ((WIPICTableId::Graphics as u32) << 16) | WIPICGraphicsMethodId::GetImageFramebuffer as u32;
 
     #[cfg(feature = "wipic-probe")]
     {
         let id = core.read_svc_id();
-        if id == GET_PIXEL_FROM_RGB || id == GET_IMAGE_FRAMEBUFFER {
+        if id == GET_PIXEL_FROM_RGB || id == GET_RGB_FROM_PIXEL || id == GET_IMAGE_FRAMEBUFFER {
             tracing::warn!("svc fast-path {:#x}", id);
         }
     }
@@ -198,6 +199,34 @@ fn try_fast_wipic_call(core: &mut ArmCore) -> Result<bool> {
             let b = core.read_param(2)? & 0xff;
 
             ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+        }
+        // `MC_grpGetRGBFromPixel`, the unpacking side of the same pair, spread
+        // back over the full 0..255 range the way
+        // `wie_backend::canvas::Rgb565Pixel::to_color` rounds it. It writes its
+        // three components through the caller's pointers and answers with the
+        // pixel it was given.
+        //
+        // It comes in pairs with the packing call above and is the more
+        // expensive half to leave behind: LOA-혼돈의 서곡 fades its story screen
+        // by unpacking each pixel, lerping the three components towards a
+        // target and packing them again (its helper is at `0x122104`), so a
+        // 240x320 pass is 76,800 of each. With only the packing side answered
+        // here the fade ran at about 14,000 calls a second and a single pass
+        // took better than five seconds, which is what "the screen does not
+        // move" looked like.
+        GET_RGB_FROM_PIXEL => {
+            let pixel = core.read_param(0)?;
+            let ptr_r = core.read_param(1)?;
+            let ptr_g = core.read_param(2)?;
+            let ptr_b = core.read_param(3)?;
+
+            let (r, g, b) = rgb565_components(pixel);
+
+            write_generic(core, ptr_r, r)?;
+            write_generic(core, ptr_g, g)?;
+            write_generic(core, ptr_b, b)?;
+
+            pixel
         }
         // `MC_grpGetImageFrameBuffer`: a WIPICImage begins with its own
         // framebuffer, so the image handle is already the answer.
@@ -214,6 +243,23 @@ fn try_fast_wipic_call(core: &mut ArmCore) -> Result<bool> {
     core.set_next_pc(lr)?;
 
     Ok(true)
+}
+
+/// The three components `MC_grpGetRGBFromPixel` writes for an RGB565 pixel.
+///
+/// The generic body reads the pixel as a `u16`, so whatever a caller left in
+/// the top half is not part of the colour, and it spreads each field back over
+/// 0..255 with rounding rather than by shifting - `wie_backend`'s
+/// `Rgb565Pixel::to_color` is the definition and the test below holds this to
+/// it for every pixel there is.
+fn rgb565_components(pixel: u32) -> (i32, i32, i32) {
+    let raw = pixel as u16 as u32;
+
+    let r = ((raw >> 11) & 0x1f) * 255;
+    let g = ((raw >> 5) & 0x3f) * 255;
+    let b = (raw & 0x1f) * 255;
+
+    (((r + 15) / 31) as i32, ((g + 31) / 63) as i32, ((b + 15) / 31) as i32)
 }
 
 /// Names a call to a slot no function stands behind.
@@ -273,4 +319,39 @@ fn buffer_preview(core: &ArmCore, address: u32, length: u32) -> alloc::string::S
         .collect();
 
     alloc::format!(" [{read} of {length}: {text:?}]")
+}
+
+#[cfg(test)]
+mod tests {
+    use wie_backend::canvas::{PixelType, Rgb565Pixel};
+
+    use super::rgb565_components;
+
+    /// The fast path answers what the body in `wie_wipi_c` would have, for
+    /// every pixel a caller can hand it.
+    ///
+    /// The two are written out separately - one on `Color`, one on the raw
+    /// word - so nothing but a check like this keeps them in step, and a fade
+    /// done per pixel would show the drift a shade at a time.
+    #[test]
+    fn the_fast_path_unpacks_a_pixel_the_way_the_generic_body_does() {
+        for raw in 0..=u16::MAX {
+            let color = Rgb565Pixel::to_color(raw);
+
+            assert_eq!(
+                rgb565_components(raw as u32),
+                (color.r as i32, color.g as i32, color.b as i32),
+                "pixel {raw:#06x}"
+            );
+        }
+    }
+
+    /// And it ignores anything above the low half-word, which is where a
+    /// caller's own sign extension lands.
+    #[test]
+    fn the_fast_path_reads_only_the_pixel() {
+        for raw in [0x0000u16, 0x1234, 0xf81f, 0xffff] {
+            assert_eq!(rgb565_components(raw as u32), rgb565_components(0xdead_0000 | raw as u32));
+        }
+    }
 }
