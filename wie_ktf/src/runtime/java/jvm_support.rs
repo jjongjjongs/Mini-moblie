@@ -30,6 +30,7 @@ use wipi_types::ktf::InitParam2;
 use self::{
     array_class_instance::JavaArrayClassInstance,
     classes::{
+        com::ktf::kfc::{GForm, GMenubarForm, GMsgBox, GTextField, GTextListener},
         net::wie::{ClassLoaderContext, KtfClassLoader},
         wec::DMInfo,
     },
@@ -130,7 +131,14 @@ impl KtfJvmSupport {
 
         // KTF's own vendor classes go alongside the shared WIPI-Java and MIDP
         // ones: an LGT or SKT title loads the shared two and not these.
-        let ktf_protos: Box<[_]> = Box::new([DMInfo::as_proto()]);
+        let ktf_protos: Box<[_]> = Box::new([
+            DMInfo::as_proto(),
+            GForm::as_proto(),
+            GMenubarForm::as_proto(),
+            GMsgBox::as_proto(),
+            GTextField::as_proto(),
+            GTextListener::as_proto(),
+        ]);
         let protos = [wie_wipi_java::get_protos().into(), wie_midp::get_protos().into(), ktf_protos];
         let jvm_implementation = KtfJvmImplementation::new(core);
         let jvm = JvmSupport::new_jvm(system, jar_name, Box::new(protos), &[], jvm_implementation.clone()).await?;
