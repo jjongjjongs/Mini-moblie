@@ -6,7 +6,7 @@ pub mod classes;
 
 use wie_jvm_support::WieJavaClassProto;
 
-pub fn get_protos() -> [WieJavaClassProto; 69] {
+pub fn get_protos() -> [WieJavaClassProto; 70] {
     [
         crate::classes::org::kwis::msf::io::Message::as_proto(),
         crate::classes::org::kwis::msf::io::Network::as_proto(),
@@ -75,6 +75,7 @@ pub fn get_protos() -> [WieJavaClassProto; 69] {
         crate::classes::org::kwis::msp::media::Vibrator::as_proto(),
         crate::classes::org::kwis::msp::media::Volume::as_proto(),
         crate::classes::net::wie::CardCanvas::as_proto(),
+        crate::classes::net::wie::WIPIFileInputStream::as_proto(),
         crate::classes::net::wie::WIPIFileOutputStream::as_proto(),
         crate::classes::net::wie::WIPIMIDlet::as_proto(),
     ]
