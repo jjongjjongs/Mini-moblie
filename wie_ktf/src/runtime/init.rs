@@ -46,6 +46,12 @@ pub async fn load_native(
     ptr_jvm_context: u32,
     ptr_jvm_exception_context: u32,
 ) -> Result<ExeInterfaceFunctions> {
+    // A module this runtime cannot run is said so here rather than branched
+    // into: loading one of the other kind and calling `IMAGE_BASE + 1` runs
+    // its header as Thumb, and what comes out is `Invalid memory access` at
+    // whatever the header happened to say. See `crate::module`.
+    crate::module::reject_if_relocated(filename, data)?;
+
     let bss_size = parse_bss_size(filename)?;
 
     core.load(data, IMAGE_BASE, data.len() + bss_size as usize)?;
