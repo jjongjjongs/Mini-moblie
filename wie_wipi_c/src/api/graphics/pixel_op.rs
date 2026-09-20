@@ -192,8 +192,9 @@ const WIDE_PROBES: [(u16, u16); 32] = {
 /// once per function rather than once per call.
 static KNOWN: Mutex<Vec<((WIPICWord, WIPICWord), PixelOp)>> = Mutex::new(Vec::new());
 
-/// Operations that turned out not to be ours to call, so the reason is given
-/// once rather than on every fill.
+/// Operations that turned out not to be ours to call. Kept so one is asked
+/// once: asking is a branch to it, and where that faults, faulting again on
+/// every draw costs more than the draw.
 static UNCALLABLE: Mutex<Vec<WIPICWord>> = Mutex::new(Vec::new());
 
 /// A title that keeps planting new functions must not grow this without end.
@@ -293,6 +294,14 @@ pub async fn of_context(
     xor_mode: WIPICWord,
 ) -> Result<Option<(PixelOp, WIPICWord)>> {
     if function != 0 {
+        // Asked once. A title draws through its context on every blit - 헬싱
+        // makes 2,478 of them in one capture, all through the same context - and
+        // asking again means faulting again, which is not free even when it is
+        // caught.
+        if UNCALLABLE.lock().iter().any(|&known| known == function) {
+            return Ok(None);
+        }
+
         return match classify(context, function, param).await {
             Ok(operation) => Ok(Some((operation, function))),
             // A pixel operation we cannot call is not one we can apply.
@@ -309,10 +318,8 @@ pub async fn of_context(
             // Answered with no operation, the fill is the colour the context
             // names - which is what a fill is without one.
             Err(WieError::InvalidMemoryAccess(address)) => {
-                if UNCALLABLE.lock().iter().all(|&known| known != function) {
-                    tracing::warn!("pixel operation at {function:#x} is not ours to call (reading {address:#x}); filling without one");
-                    UNCALLABLE.lock().push(function);
-                }
+                tracing::warn!("pixel operation at {function:#x} is not ours to call (reading {address:#x}); drawing without one");
+                UNCALLABLE.lock().push(function);
 
                 Ok(None)
             }
