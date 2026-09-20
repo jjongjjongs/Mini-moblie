@@ -558,7 +558,7 @@ impl ArmCore {
             let result = {
                 let mut inner = self.inner.lock();
                 match inner.engine.run(RUN_FUNCTION_LR, RUN_INSTRUCTION_BUDGET) {
-                    Ok(result) => result,
+                    Ok(result) => Ok(result),
                     Err(error) => {
                         let regs = [
                             ArmRegister::R0,
@@ -635,8 +635,22 @@ impl ArmCore {
                         }
                         tracing::warn!("engine fault frame chain: {:#x}{chain}", regs[15]);
 
-                        return Err(error);
+                        Err(error)
                     }
+                }
+            };
+
+            // The caller's registers back, the same as every other way out of
+            // here. A fault used to be the one path that left the faulted file
+            // behind, so a caller that handles the error - a graphics context
+            // whose pixel operation turns out to be the handset's own firmware,
+            // which is not here to run - carried on with the dead call's.
+            let result = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    self.restore_context(&previous_context);
+
+                    return Err(error);
                 }
             };
             crate::RUN_CALLS.fetch_add(1, ::core::sync::atomic::Ordering::Relaxed);

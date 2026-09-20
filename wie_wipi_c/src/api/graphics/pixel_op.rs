@@ -26,7 +26,7 @@
 use alloc::vec::Vec;
 
 use spin::Mutex;
-use wie_util::Result;
+use wie_util::{Result, WieError};
 use wipi_types::wipic::WIPICWord;
 
 use crate::WIPICContext;
@@ -192,6 +192,10 @@ const WIDE_PROBES: [(u16, u16); 32] = {
 /// once per function rather than once per call.
 static KNOWN: Mutex<Vec<((WIPICWord, WIPICWord), PixelOp)>> = Mutex::new(Vec::new());
 
+/// Operations that turned out not to be ours to call, so the reason is given
+/// once rather than on every fill.
+static UNCALLABLE: Mutex<Vec<WIPICWord>> = Mutex::new(Vec::new());
+
 /// A title that keeps planting new functions must not grow this without end.
 ///
 /// Keyed by the parameter as well as the function, because an operation is
@@ -289,7 +293,31 @@ pub async fn of_context(
     xor_mode: WIPICWord,
 ) -> Result<Option<(PixelOp, WIPICWord)>> {
     if function != 0 {
-        return Ok(Some((classify(context, function, param).await?, function)));
+        return match classify(context, function, param).await {
+            Ok(operation) => Ok(Some((operation, function))),
+            // A pixel operation we cannot call is not one we can apply.
+            //
+            // 헬싱 keeps a graphics context of its own at `0x11dfe0` whose
+            // operation slot holds `0xf81f` - below the title's image, so it is
+            // the handset's own firmware, which we do not have. Everything else
+            // in that context reads perfectly (its clip is the 176x220 screen,
+            // its alpha 0xff), and the title never calls `MC_grpSetContext`:
+            // it fills the struct itself with an operation the handset
+            // provided. Asking what it does meant branching to it, and the
+            // title died on its first frame.
+            //
+            // Answered with no operation, the fill is the colour the context
+            // names - which is what a fill is without one.
+            Err(WieError::InvalidMemoryAccess(address)) => {
+                if UNCALLABLE.lock().iter().all(|&known| known != function) {
+                    tracing::warn!("pixel operation at {function:#x} is not ours to call (reading {address:#x}); filling without one");
+                    UNCALLABLE.lock().push(function);
+                }
+
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        };
     }
 
     if xor_mode != 0 {
