@@ -23,6 +23,10 @@ use crate::{WIPICContext, method::ParamConverter};
 ///
 /// Op 3 (`TransPixelIdx`) has no field: the reference neither stores nor
 /// reports it.
+///
+/// The two handsets do not agree about the two colour words - see
+/// [`ContextLayout`] - so a context is read and written through
+/// [`WIPICGraphicsContext::in_layout`] rather than straight off the wire.
 #[repr(C)]
 #[derive(Default, Clone, Copy, Pod, Zeroable)]
 pub struct WIPICGraphicsContext {
@@ -36,22 +40,28 @@ pub struct WIPICGraphicsContext {
     ///
     /// Nothing here writes it: a title that names one does so through
     /// `MC_grpSetContext`, which the reference neither stores nor reads back,
-    /// and our blits key on magenta. It is named because a clet's own pixel
-    /// operation reads it out of the context - 헬싱's, at `0x108ce8`, loads
-    /// `[context + 0x1c]`, compares the pixel it was given against it and
-    /// answers with the other one when they match, which is the transparency
-    /// test the whole title draws through.
+    /// and our blits key on magenta. It is named because 헬싱 fills this
+    /// struct itself and leaves `0xf81f` here - magenta, the key it draws
+    /// everything against - which is what says the word is a colour and not
+    /// the operation LGT keeps at this offset. See [`ContextLayout`].
     pub transparent: WIPICWord,
     pub param1: WIPICWord,
     pub font: WIPICWord,
     pub style: WIPICWord,
     /// `MC_GrpPixelOpProc`, which the reference also plants for XOR mode.
     ///
-    /// At `+0x2c`, after the style. 헬싱 is what says so: it fills this struct
-    /// itself rather than through `MC_grpSetContext`, and what it leaves there
-    /// is `0x108ce9` - the address of its own operation, inside its own image.
+    /// At `+0x2c` on KTF. 헬싱 is what says so: it fills this struct itself
+    /// rather than through `MC_grpSetContext`, and what it leaves there is
+    /// `0x108ce9` - the address of its own operation, inside its own image.
     /// Taken from `+0x1c` instead, the transparent pixel `0xf81f` read as an
     /// operation, and calling it took the title down on its first frame.
+    ///
+    /// LGT keeps it at `+0x1c` and a flag at `+0x2c` instead:
+    /// `wipic_grpContext_to_dgraphics` (@0x1aa2e8) installs `[ctx + 0x1c]`
+    /// with `[ctx + 0x20]` as its parameter and tests `[ctx + 0x2c]` for XOR
+    /// mode. No LGT title reaches those words except through
+    /// `MC_grpSetContext`, which stores and reads back whichever offset this
+    /// names, so the two are not told apart here yet.
     ///
     /// XOR mode has no word of its own: it is this slot holding
     /// [`BUILT_IN_XOR`].
@@ -67,6 +77,51 @@ pub struct WIPICGraphicsContext {
 /// that operation, so this stands in its place: recognised here, and never
 /// handed back to a title that reads the slot.
 pub const BUILT_IN_XOR: WIPICWord = 0xffff_ffff;
+
+/// Which handset's field order a context on the wire is in.
+///
+/// The struct is the API's, not a runtime's, so nearly all of it is the same
+/// on both: the clip first with its corner decremented, then two colours, the
+/// alpha, a word, the parameter, the font, the style, a word and the offset -
+/// 0x38 bytes in all. The two colours are where they part.
+///
+/// LGT puts the foreground first. Its firmware says so twice:
+/// `MC_grpSetContext` (@0x1aaba8) stores op 1 at `+0x10` and op 2 at `+0x14`,
+/// and `MC_grpPutPixel` (@0x1ad240) draws with `[ctx + 0x10]`.
+///
+/// KTF puts the background first. 헬싱 is what says so, because it never
+/// calls `MC_grpInitContext` or `MC_grpSetContext` at all: it fills its own
+/// 0x38 bytes at `0x11dfe0` and hands that to every draw, so those words are
+/// the handset's own layout and nothing of this runtime's. What it leaves is
+/// `[0, 0, 175, 219]` for its 176x220 screen, then `0` and the colour it is
+/// drawing with, `0xff` alpha, `0xf81f` magenta, `0xff` parameter, `12` font,
+/// `0` style and its own operation - every other field exactly where the API
+/// puts it, and the colour it draws with in the *second* word.
+///
+/// Read the LGT way that colour is the background and the foreground is black,
+/// so every fill 헬싱 lays comes out black - which is how it draws its
+/// Korean text, and why none of it could be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextLayout {
+    /// Foreground at `+0x10`, background at `+0x14`.
+    ForegroundFirst,
+    /// Background at `+0x10`, foreground at `+0x14`.
+    BackgroundFirst,
+}
+
+impl WIPICGraphicsContext {
+    /// The same context with its two colour words in the handset's order.
+    ///
+    /// Used on the way in and on the way out - swapping twice is the identity,
+    /// so one function serves both and they cannot drift apart.
+    pub fn in_layout(mut self, layout: ContextLayout) -> Self {
+        if layout == ContextLayout::BackgroundFirst {
+            mem::swap(&mut self.fgpxl, &mut self.bgpxl);
+        }
+
+        self
+    }
+}
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy)]
@@ -114,7 +169,7 @@ impl ParamConverter<WIPICGraphicsContextIdx> for WIPICGraphicsContextIdx {
 
 #[cfg(test)]
 mod test {
-    use super::WIPICGraphicsContextIdx;
+    use super::{ContextLayout, WIPICGraphicsContext, WIPICGraphicsContextIdx};
 
     /// Every op the reference has, and nothing else.
     ///
@@ -127,6 +182,61 @@ mod test {
         }
         for raw in [12u32, 0xff, 0x1000, u32::MAX] {
             assert!(matches!(WIPICGraphicsContextIdx::from_raw(raw), WIPICGraphicsContextIdx::Invalid));
+        }
+    }
+
+    /// KTF's two colour words are the other way round, and nothing else moves.
+    ///
+    /// The words are 헬싱's own, read out of the context it fills at
+    /// `0x11dfe0` and hands to every draw: `0` and then `0x6da0`, the colour it
+    /// is drawing with. Read LGT's way round the colour is the background and
+    /// every fill comes out black.
+    #[test]
+    fn ktf_keeps_the_background_in_the_first_colour_word() {
+        let on_the_wire = WIPICGraphicsContext {
+            clip: [0, 0, 175, 219],
+            fgpxl: 0,
+            bgpxl: 0x6da0,
+            alpha: 0xff,
+            transparent: 0xf81f,
+            param1: 0xff,
+            font: 12,
+            style: 0,
+            pixel_op_func_ptr: 0x108ce9,
+            offset: [0, 0],
+        };
+
+        let ktf = on_the_wire.in_layout(ContextLayout::BackgroundFirst);
+        assert_eq!(ktf.fgpxl, 0x6da0, "the colour it draws with is the foreground");
+        assert_eq!(ktf.bgpxl, 0);
+
+        // Everything else is the API's and is where the API puts it.
+        assert_eq!(ktf.clip, [0, 0, 175, 219]);
+        assert_eq!(ktf.alpha, 0xff);
+        assert_eq!(ktf.transparent, 0xf81f);
+        assert_eq!(ktf.param1, 0xff);
+        assert_eq!(ktf.font, 12);
+        assert_eq!(ktf.pixel_op_func_ptr, 0x108ce9);
+
+        let lgt = on_the_wire.in_layout(ContextLayout::ForegroundFirst);
+        assert_eq!(lgt.fgpxl, 0);
+        assert_eq!(lgt.bgpxl, 0x6da0);
+    }
+
+    /// The swap is its own inverse, which is what lets one function serve the
+    /// read and the write.
+    #[test]
+    fn a_context_put_into_a_layout_twice_is_itself_again() {
+        for layout in [ContextLayout::ForegroundFirst, ContextLayout::BackgroundFirst] {
+            let context = WIPICGraphicsContext {
+                fgpxl: 0x1234,
+                bgpxl: 0x5678,
+                ..Default::default()
+            };
+
+            let round_trip = context.in_layout(layout).in_layout(layout);
+            assert_eq!(round_trip.fgpxl, 0x1234);
+            assert_eq!(round_trip.bgpxl, 0x5678);
         }
     }
 }

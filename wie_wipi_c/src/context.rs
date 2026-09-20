@@ -8,8 +8,8 @@ use wie_util::{ByteRead, ByteWrite, Result};
 use crate::{
     WIPICMethodBody,
     api::{
-        filesystem::SharedFilesystemState, im::SharedImState, kernel::SharedKernelState, net::SharedNetworkState, serial::SharedSerialState,
-        shared_buf::SharedSharedBufState,
+        filesystem::SharedFilesystemState, graphics::ContextLayout, im::SharedImState, kernel::SharedKernelState, net::SharedNetworkState,
+        serial::SharedSerialState, shared_buf::SharedSharedBufState,
     },
     method::{ParamConverter, ResultConverter},
 };
@@ -54,6 +54,14 @@ pub trait WIPICContext: ByteRead + ByteWrite + Send + Sync {
     /// draws no text anywhere.
     fn pixel_op_takes_source_first(&self) -> bool {
         false
+    }
+
+    /// The order this handset keeps a graphics context's two colour words in.
+    ///
+    /// See `ContextLayout`. LGT's is the one the API is usually written down
+    /// with, so it is the default and KTF is what overrides it.
+    fn graphics_context_layout(&self) -> ContextLayout {
+        ContextLayout::ForegroundFirst
     }
 }
 
@@ -123,6 +131,7 @@ pub mod test {
     use super::{WIPICContext, WIPICMethodBody};
     use crate::api::{
         filesystem::{SharedFilesystemState, new_state as new_filesystem_state},
+        graphics::ContextLayout,
         im::{SharedImState, new_state as new_im_state},
         kernel::{SharedKernelState, new_state as new_kernel_state},
         net::{SharedNetworkState, new_state as new_network_state},
@@ -160,6 +169,8 @@ pub mod test {
         /// Which handset the test is standing in for, where that decides what
         /// an API does - so far only the order a pixel operation is asked in.
         pixel_op_takes_source_first: bool,
+        /// The order this handset keeps a context's two colour words in.
+        graphics_context_layout: ContextLayout,
     }
 
     impl TestContext {
@@ -172,6 +183,12 @@ pub mod test {
         /// source first.
         pub fn set_pixel_op_takes_source_first(&mut self, source_first: bool) {
             self.pixel_op_takes_source_first = source_first;
+        }
+
+        /// Stands in for a handset that keeps a context's colour words in the
+        /// given order - see `ContextLayout`.
+        pub fn set_graphics_context_layout(&mut self, layout: ContextLayout) {
+            self.graphics_context_layout = layout;
         }
 
         #[allow(clippy::new_without_default)]
@@ -192,6 +209,7 @@ pub mod test {
                 spawned: Vec::new(),
                 guest_function: None,
                 pixel_op_takes_source_first: false,
+                graphics_context_layout: ContextLayout::ForegroundFirst,
             }
         }
 
@@ -212,6 +230,7 @@ pub mod test {
                 spawned: Vec::new(),
                 guest_function: None,
                 pixel_op_takes_source_first: false,
+                graphics_context_layout: ContextLayout::ForegroundFirst,
             }
         }
 
@@ -297,6 +316,10 @@ pub mod test {
 
         fn pixel_op_takes_source_first(&self) -> bool {
             self.pixel_op_takes_source_first
+        }
+
+        fn graphics_context_layout(&self) -> ContextLayout {
+            self.graphics_context_layout
         }
 
         fn system(&mut self) -> &mut System {

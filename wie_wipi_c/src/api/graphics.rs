@@ -30,7 +30,7 @@ use self::{
     image::create_wipi_image,
 };
 
-pub use self::grp_context::WIPICGraphicsContextIdx;
+pub use self::grp_context::{ContextLayout, WIPICGraphicsContextIdx};
 
 pub use self::bitmap_font::{clear as clear_bios_font, install_from_bios as install_bios_font};
 
@@ -126,7 +126,9 @@ const WHOLE_PLANE_CLIP: [u32; 4] = [0, 0, 0x7fff, 0x7fff];
 pub async fn init_context(context: &mut dyn WIPICContext, p_grp_ctx: WIPICWord) -> Result<()> {
     tracing::debug!("MC_grpInitContext({p_grp_ctx:#x})");
 
-    init_context_in(context, p_grp_ctx)
+    let layout = context.graphics_context_layout();
+
+    init_context_in(context, layout, p_grp_ctx)
 }
 
 /// `MC_grpInitContext` against guest memory alone.
@@ -135,7 +137,30 @@ pub async fn init_context(context: &mut dyn WIPICContext, p_grp_ctx: WIPICWord) 
 /// and touch nothing else, which is what lets the emulator answer them on its
 /// synchronous fast path without a second copy of the rules living there. See
 /// `wie_lgt::runtime::wipi_c::try_fast_wipic_getter`.
-pub fn init_context_in<M>(memory: &mut M, p_grp_ctx: WIPICWord) -> Result<()>
+/// A context read out of guest memory and put into this runtime's field order.
+///
+/// Everything below reads a context through here rather than through
+/// `read_generic`, because the two handsets do not keep the same word first -
+/// see [`ContextLayout`].
+fn read_context<M>(memory: &M, layout: ContextLayout, p_grp_ctx: WIPICWord) -> Result<WIPICGraphicsContext>
+where
+    M: ByteRead + ?Sized,
+{
+    let grp_ctx: WIPICGraphicsContext = read_generic(memory, p_grp_ctx)?;
+
+    Ok(grp_ctx.in_layout(layout))
+}
+
+/// A context written back in the handset's own field order - see
+/// [`read_context`].
+fn write_context<M>(memory: &mut M, layout: ContextLayout, p_grp_ctx: WIPICWord, grp_ctx: WIPICGraphicsContext) -> Result<()>
+where
+    M: ByteWrite + ?Sized,
+{
+    write_generic(memory, p_grp_ctx, grp_ctx.in_layout(layout))
+}
+
+pub fn init_context_in<M>(memory: &mut M, layout: ContextLayout, p_grp_ctx: WIPICWord) -> Result<()>
 where
     M: ByteRead + ByteWrite + ?Sized,
 {
@@ -157,22 +182,24 @@ where
         font: font_size_px(0) as WIPICWord,
         ..Default::default()
     };
-    write_generic(memory, p_grp_ctx, grp_ctx)?;
+    write_context(memory, layout, p_grp_ctx, grp_ctx)?;
     Ok(())
 }
 
 pub async fn set_context(context: &mut dyn WIPICContext, p_grp_ctx: WIPICWord, op: WIPICGraphicsContextIdx, pv: WIPICWord) -> Result<()> {
     tracing::trace!("MC_grpSetContext({p_grp_ctx:#x}, {op:?}, {pv:#x})");
 
-    set_context_in(context, p_grp_ctx, op, pv)
+    let layout = context.graphics_context_layout();
+
+    set_context_in(context, layout, p_grp_ctx, op, pv)
 }
 
 /// `MC_grpSetContext` against guest memory alone - see [`init_context_in`].
-pub fn set_context_in<M>(memory: &mut M, p_grp_ctx: WIPICWord, op: WIPICGraphicsContextIdx, pv: WIPICWord) -> Result<()>
+pub fn set_context_in<M>(memory: &mut M, layout: ContextLayout, p_grp_ctx: WIPICWord, op: WIPICGraphicsContextIdx, pv: WIPICWord) -> Result<()>
 where
     M: ByteRead + ByteWrite + ?Sized,
 {
-    let mut grp_ctx: WIPICGraphicsContext = read_generic(memory, p_grp_ctx)?;
+    let mut grp_ctx = read_context(memory, layout, p_grp_ctx)?;
     match op {
         WIPICGraphicsContextIdx::ClipIdx => {
             // The clip rectangle is passed as four 32-bit words (x1, y1, x2, y2),
@@ -251,7 +278,7 @@ where
             tracing::warn!("MC_grpSetContext({p_grp_ctx:#x}, {op:?}, {pv:#x}): ignoring invalid op");
         }
     }
-    write_generic(memory, p_grp_ctx, grp_ctx)?;
+    write_context(memory, layout, p_grp_ctx, grp_ctx)?;
 
     Ok(())
 }
@@ -271,11 +298,13 @@ where
 pub async fn get_context(context: &mut dyn WIPICContext, p_grp_ctx: WIPICWord, op: WIPICGraphicsContextIdx, out_ptr: WIPICWord) -> Result<()> {
     tracing::trace!("MC_grpGetContext({p_grp_ctx:#x}, {op:?}, {out_ptr:#x})");
 
-    get_context_in(context, p_grp_ctx, op, out_ptr)
+    let layout = context.graphics_context_layout();
+
+    get_context_in(context, layout, p_grp_ctx, op, out_ptr)
 }
 
 /// `MC_grpGetContext` against guest memory alone - see [`init_context_in`].
-pub fn get_context_in<M>(memory: &mut M, p_grp_ctx: WIPICWord, op: WIPICGraphicsContextIdx, out_ptr: WIPICWord) -> Result<()>
+pub fn get_context_in<M>(memory: &mut M, layout: ContextLayout, p_grp_ctx: WIPICWord, op: WIPICGraphicsContextIdx, out_ptr: WIPICWord) -> Result<()>
 where
     M: ByteRead + ByteWrite + ?Sized,
 {
@@ -283,7 +312,7 @@ where
         return Ok(());
     }
 
-    let grp_ctx: WIPICGraphicsContext = read_generic(memory, p_grp_ctx)?;
+    let grp_ctx = read_context(memory, layout, p_grp_ctx)?;
     match op {
         WIPICGraphicsContextIdx::ClipIdx => {
             let clip = grp_ctx.clip;
@@ -348,7 +377,7 @@ pub async fn put_pixel(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
     tracing::debug!("MC_grpPutPixel({:#x}, {x}, {y}, {p_gctx:?})", dst_fb.0);
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst_fb)?)?);
-    let gctx: WIPICGraphicsContext = read_generic(context, p_gctx)?;
+    let gctx = read_context(context, context.graphics_context_layout(), p_gctx)?;
     let color = context_color(&framebuffer, &gctx);
 
     // One pixel is two bytes; staging the surface to move them is what held a
@@ -374,7 +403,7 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
     }
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst_fb)?)?);
-    let gctx: WIPICGraphicsContext = read_generic(context, p_gctx)?;
+    let gctx = read_context(context, context.graphics_context_layout(), p_gctx)?;
     let color = context_color(&framebuffer, &gctx);
 
     // A fill goes through the title's own operation too - 드래곤하트2 lays two
@@ -495,7 +524,7 @@ pub async fn draw_arc(
     }
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst)?)?);
-    let gctx: WIPICGraphicsContext = read_generic(context, p_gctx)?;
+    let gctx = read_context(context, context.graphics_context_layout(), p_gctx)?;
     let mut canvas = framebuffer.canvas(context)?;
 
     let clip = Clip {
@@ -540,7 +569,7 @@ pub async fn fill_arc(
     }
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst)?)?);
-    let gctx: WIPICGraphicsContext = read_generic(context, p_gctx)?;
+    let gctx = read_context(context, context.graphics_context_layout(), p_gctx)?;
     let mut canvas = framebuffer.canvas(context)?;
 
     let clip = Clip {
@@ -616,7 +645,7 @@ pub async fn draw_polygon(
     }
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst)?)?);
-    let gctx: WIPICGraphicsContext = read_generic(context, p_gctx)?;
+    let gctx = read_context(context, context.graphics_context_layout(), p_gctx)?;
     let points = read_polygon_points(context, x_points, y_points, n_points as usize)?;
 
     let bounds = polygon_bounds(&points);
@@ -649,7 +678,7 @@ pub async fn fill_polygon(
     }
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst)?)?);
-    let gctx: WIPICGraphicsContext = read_generic(context, p_gctx)?;
+    let gctx = read_context(context, context.graphics_context_layout(), p_gctx)?;
     let points = read_polygon_points(context, x_points, y_points, n_points as usize)?;
 
     let bounds = polygon_bounds(&points);
@@ -887,7 +916,7 @@ pub async fn draw_image(
     let source = if keyed { image.img } else { image.mask };
     // A title's own pixel operation decides what every pixel becomes, and it is
     // read before the canvas takes the context.
-    let grp_ctx: WIPICGraphicsContext = read_generic(context, graphics_context)?;
+    let grp_ctx = read_context(context, context.graphics_context_layout(), graphics_context)?;
 
     // Asked before anything takes the context, because asking runs the title's
     // own code. Without it 드래곤하트2's glow lands as an opaque disc.
@@ -2070,7 +2099,7 @@ async fn draw_text(context: &mut dyn WIPICContext, dst: WIPICIndirectPtr, x: i32
     }
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst)?)?);
-    let gctx: WIPICGraphicsContext = read_generic(context, pgc)?;
+    let gctx = read_context(context, context.graphics_context_layout(), pgc)?;
 
     let clip = Clip {
         x: 0,
@@ -2459,7 +2488,7 @@ pub async fn draw_rect(context: &mut dyn WIPICContext, dst: WIPICIndirectPtr, x:
     }
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst)?)?);
-    let gctx: WIPICGraphicsContext = read_generic(context, pgc)?;
+    let gctx = read_context(context, context.graphics_context_layout(), pgc)?;
     let mut canvas = framebuffer.canvas(context)?;
 
     let clip = Clip {
@@ -2480,7 +2509,7 @@ pub async fn draw_line(context: &mut dyn WIPICContext, dst: WIPICIndirectPtr, x1
     tracing::debug!("MC_grpDrawLine({:#x}, {x1}, {y1}, {x2}, {y2}, {pgc:#x})", dst.0);
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst)?)?);
-    let gctx: WIPICGraphicsContext = read_generic(context, pgc)?;
+    let gctx = read_context(context, context.graphics_context_layout(), pgc)?;
     let color = context_color(&framebuffer, &gctx);
 
     // A line along an axis is a one-pixel-thick rectangle, and writing it as
@@ -2636,6 +2665,7 @@ mod tests {
 
     use wie_backend::canvas::{ArgbPixel, Color, Image, PixelType, Rgb565Pixel, VecImageBuffer};
 
+    use super::ContextLayout;
     use super::WIPICGraphicsContextIdx as Idx;
     use super::{
         create_image, destination_stride, destroy_image, draw_image, draw_string, get_context, get_image_property, get_string_width,
@@ -3185,6 +3215,47 @@ mod tests {
         set_context(&mut context, pgc, Idx::PixelopIdx, 0x5678).await.unwrap();
         assert_eq!(read_generic::<u32, _>(&context, pgc + OPERATION).unwrap(), 0x5678);
         assert_eq!(read_generic::<u32, _>(&context, pgc + TRANSPARENT).unwrap(), 0xf81f);
+    }
+
+    /// A KTF title fills with the second of the two colour words.
+    ///
+    /// 헬싱 never calls `MC_grpInitContext` or `MC_grpSetContext`: it fills
+    /// its own 0x38 bytes and hands them to every draw, with `0` in the first
+    /// colour word and the colour it wants in the second. Read the LGT way
+    /// round that is a background it is not drawing with, the foreground is
+    /// black, and every fill - which is how the title draws its Korean text -
+    /// comes out black on black.
+    ///
+    /// The same bytes on an LGT handset mean the other thing, so both are
+    /// asked here.
+    #[futures_test::test]
+    async fn a_ktf_title_fills_with_the_second_colour_word() {
+        /// The two colour words, as a title writes them.
+        const FIRST: u32 = 0x10;
+        const SECOND: u32 = 0x14;
+
+        for (layout, wanted) in [(ContextLayout::BackgroundFirst, 0x6da0u32), (ContextLayout::ForegroundFirst, 0x0000)] {
+            let mut context = test_context();
+            context.set_graphics_context_layout(layout);
+
+            let destination = framebuffer_of(&mut context, 2, 2, &[0xff00_0000; 4]).await;
+
+            let pgc_handle = context.alloc(core::mem::size_of::<super::WIPICGraphicsContext>() as u32).unwrap();
+            let pgc = context.data_ptr(pgc_handle).unwrap();
+            init_context(&mut context, pgc).await.unwrap();
+            write_generic(&mut context, pgc + FIRST, 0x0000u32).unwrap();
+            write_generic(&mut context, pgc + SECOND, 0x6da0u32).unwrap();
+
+            super::fill_rect(&mut context, destination, 0, 0, 2, 2, pgc).await.unwrap();
+
+            let handle = read_generic(&context, context.data_ptr(destination).unwrap()).unwrap();
+            let framebuffer = super::FrameBuffer(handle);
+            let expected = framebuffer.pixel_to_color(wanted);
+            let filled = framebuffer.image(&mut context).unwrap();
+
+            let out = filled.get_pixel(0, 0);
+            assert_eq!((out.r, out.g, out.b), (expected.r, expected.g, expected.b), "{layout:?}");
+        }
     }
 
     /// XOR mode lives in the operation slot, and a title reading that slot back

@@ -12,8 +12,8 @@ use wie_util::{ByteRead, ByteWrite, Result, WieError, read_generic, write_generi
 use wie_wipi_c::{
     WIPICContext, WIPICMethodBody,
     api::{
-        filesystem::SharedFilesystemState, im::SharedImState, kernel::SharedKernelState, net::SharedNetworkState, serial::SharedSerialState,
-        shared_buf::SharedSharedBufState,
+        filesystem::SharedFilesystemState, graphics::ContextLayout, im::SharedImState, kernel::SharedKernelState, net::SharedNetworkState,
+        serial::SharedSerialState, shared_buf::SharedSharedBufState,
     },
 };
 
@@ -63,6 +63,13 @@ impl WIPICContext for KtfWIPICContext {
     /// the trait method.
     fn pixel_op_takes_source_first(&self) -> bool {
         true
+    }
+
+    /// KTF keeps the background pixel in the first of a context's two colour
+    /// words and the foreground in the second - see `ContextLayout`. 헬싱 is
+    /// what says so: it fills its own context and draws with the second.
+    fn graphics_context_layout(&self) -> ContextLayout {
+        ContextLayout::BackgroundFirst
     }
 
     fn alloc_raw(&mut self, size: WIPICWord) -> Result<WIPICWord> {
