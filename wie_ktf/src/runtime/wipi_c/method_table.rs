@@ -414,6 +414,57 @@ pub fn get_net_method_table() -> Vec<WIPICMethodBody> {
     ]
 }
 
+/// Writes down what an argument points at, for a slot whose meaning is unknown.
+///
+/// A slot like this is identified by what a title hands it and nothing else -
+/// there is no name for it anywhere in the title's own code, which reaches it
+/// by index. The address alone rarely settles anything; what is behind it
+/// usually does. Table 12 slot 0 turned out to take a buffer and its length,
+/// which is only visible once the buffer is read: the length argument is 8 and
+/// the eight bytes at the pointer are `00 01 02 03 04 03 02 01`.
+///
+/// An argument under `PROBE_MIN_POINTER` is a small number rather than an
+/// address and is left alone, and one that cannot be read is said to be
+/// unreadable rather than skipped - LOA-혼돈의 서곡 hands slot 1 the value
+/// 0x1cd4e, which looks like an address until it is tried.
+///
+/// Compiled in only under the `wipic-probe` feature, because it reads guest
+/// memory on every call to a stub and writes a line per argument.
+#[cfg(feature = "wipic-probe")]
+fn probe_args(context: &dyn WIPICContext, name: &str, args: &[(&str, WIPICWord)]) {
+    use alloc::string::String;
+
+    /// Below this an argument is a number, not an address.
+    const PROBE_MIN_POINTER: WIPICWord = 0x1000;
+    /// How much of what an argument points at to write down.
+    const PROBE_BYTES: usize = 64;
+
+    let mut line = format!("probe {name}");
+    for &(label, address) in args {
+        if address < PROBE_MIN_POINTER {
+            continue;
+        }
+
+        let mut buf = [0u8; PROBE_BYTES];
+        match context.read_bytes(address, &mut buf) {
+            Ok(_) => {
+                let hex: String = buf.iter().map(|byte| format!("{byte:02x}")).collect();
+                let ascii: String = buf
+                    .iter()
+                    .map(|&byte| if (0x20..0x7f).contains(&byte) { byte as char } else { '.' })
+                    .collect();
+                line.push_str(&format!("\n    {label}@{address:#x} {hex} |{ascii}|"));
+            }
+            Err(_) => line.push_str(&format!("\n    {label}@{address:#x} unreadable")),
+        }
+    }
+
+    tracing::warn!("{line}");
+}
+
+#[cfg(not(feature = "wipic-probe"))]
+fn probe_args(_: &dyn WIPICContext, _: &str, _: &[(&str, WIPICWord)]) {}
+
 /// A slot in a table whose meaning nothing has shown yet.
 ///
 /// It takes four arguments and writes them down. A slot like this is only ever
@@ -468,8 +519,34 @@ pub fn get_unk3_method_table() -> Vec<WIPICMethodBody> {
 /// of function pointers as their last argument, the way a C interface passes
 /// itself. The words in the registers never change between calls; everything
 /// that does is behind them.
+
+/// Table 12's slots, which answer nothing and write down what they were given.
+///
+/// Separate functions rather than [`gen_unk_stub`] so the probe can reach guest
+/// memory: a closure that hands its `&mut dyn WIPICContext` to the future it
+/// returns cannot be written without naming the lifetime, which a closure
+/// cannot do.
+async fn unk12_slot(index: u32, context: &mut dyn WIPICContext, a0: WIPICWord, a1: WIPICWord, a2: WIPICWord, a3: WIPICWord) -> Result<u32> {
+    tracing::warn!("stub unk12-{index}({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
+    probe_args(context, &format!("unk12-{index}"), &[("a0", a0), ("a1", a1), ("a2", a2), ("a3", a3)]);
+
+    Ok(0)
+}
+
+async fn unk12_slot_0(context: &mut dyn WIPICContext, a0: WIPICWord, a1: WIPICWord, a2: WIPICWord, a3: WIPICWord) -> Result<u32> {
+    unk12_slot(0, context, a0, a1, a2, a3).await
+}
+
+async fn unk12_slot_1(context: &mut dyn WIPICContext, a0: WIPICWord, a1: WIPICWord, a2: WIPICWord, a3: WIPICWord) -> Result<u32> {
+    unk12_slot(1, context, a0, a1, a2, a3).await
+}
+
+async fn unk12_slot_2(context: &mut dyn WIPICContext, a0: WIPICWord, a1: WIPICWord, a2: WIPICWord, a3: WIPICWord) -> Result<u32> {
+    unk12_slot(2, context, a0, a1, a2, a3).await
+}
+
 pub fn get_unk12_method_table() -> Vec<WIPICMethodBody> {
-    vec![gen_unk_stub(12, 0), gen_unk_stub(12, 1), gen_unk_stub(12, 2)]
+    vec![unk12_slot_0.into_body(), unk12_slot_1.into_body(), unk12_slot_2.into_body()]
 }
 
 pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPICMethodBody> {
