@@ -691,13 +691,35 @@ pub async fn destroy_image(context: &mut dyn WIPICContext, image: WIPICIndirectP
     // carried alpha. Freeing just the WIPICImage struct - as this did before -
     // leaks both planes, and a title that creates and destroys a scratch image
     // every frame (MapleStory 도적편 does this ~100x/frame) then exhausts the
-    // heap. The `buf` field is the caller's own encoded bytes and is not ours.
+    // heap.
     let wipi_image: WIPICImage = read_generic(context, context.data_ptr(image)?)?;
     if wipi_image.img.buf.0 != 0 {
         context.free(wipi_image.img.buf)?;
     }
     if wipi_image.mask.buf.0 != 0 {
         context.free(wipi_image.mask.buf)?;
+    }
+
+    // And the encoded bytes the title handed `MC_grpCreateImage`, which the
+    // image has owned since that call reported it was done.
+    //
+    // The title's own code says where the boundary is: LOA-혼돈의 서곡's
+    // image loader @0x123a20 callocs a block, copies the encoded bytes into it,
+    // calls `MC_grpCreateImage`, and frees the block *only on the branch the
+    // call failed on* - a success hands the block over and the title never
+    // names it again. The platform needs it for as long as the image lives
+    // anyway, because `MC_grpDecodeNextImage` reads an animation's later frames
+    // back out of `buf` at `current`.
+    //
+    // Leaving it behind leaks: one 50-second capture of that title's story
+    // screen made 7911 `MC_knlCalloc` calls, 6645 of them from that one loader,
+    // against 701 `MC_knlFree` calls in the whole run. The free is not fatal if
+    // it fails - the block is the title's to begin with, and a title that has
+    // already freed it itself should not lose the rest of the teardown.
+    if wipi_image.buf.0 != 0
+        && let Err(error) = context.free(wipi_image.buf)
+    {
+        tracing::warn!("MC_grpDestroyImage: could not free the source buffer {:#x}: {error}", wipi_image.buf.0);
     }
 
     context.free(image)?;
@@ -2437,16 +2459,55 @@ pub async fn get_framebuffer_bpp(_context: &mut dyn WIPICContext, framebuffer: W
 
 #[cfg(test)]
 mod tests {
-    use wie_util::{read_generic, write_generic};
+    use wie_util::{ByteWrite, read_generic, write_generic};
 
     use wie_backend::canvas::{ArgbPixel, Color, Image, PixelType, Rgb565Pixel, VecImageBuffer};
 
     use super::WIPICGraphicsContextIdx as Idx;
     use super::{
-        destination_stride, draw_image, draw_string, get_context, get_image_property, get_string_width, get_unicode_string_width, init_context,
-        set_context, surface_content, surface_thumbnail,
+        create_image, destination_stride, destroy_image, draw_image, draw_string, get_context, get_image_property, get_string_width,
+        get_unicode_string_width, init_context, set_context, surface_content, surface_thumbnail,
     };
     use crate::context::{WIPICContext, test::TestContext};
+
+    /// A 2x2 red PNG, the smallest thing `create_image` will take.
+    const TINY_PNG: [u8; 73] = [
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
+        0x02, 0x08, 0x02, 0x00, 0x00, 0x00, 0xfd, 0xd4, 0x9a, 0x73, 0x00, 0x00, 0x00, 0x10, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf,
+        0xc0, 0x00, 0x44, 0x0c, 0x10, 0x0a, 0x00, 0x1f, 0xee, 0x03, 0xfd, 0x8b, 0x5f, 0x14, 0xd4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44,
+        0xae, 0x42, 0x60, 0x82,
+    ];
+
+    /// Destroying an image gives back everything creating it took, the encoded
+    /// bytes the title handed over included.
+    ///
+    /// A title that keeps loading sprites - LOA-혼돈의 서곡 does, 6645 times in
+    /// one 50-second capture - only frees that block itself when the create
+    /// failed, so a create that succeeded and a destroy that keeps the block
+    /// leak one buffer per image for as long as the title runs.
+    #[futures_test::test]
+    async fn destroying_an_image_gives_back_the_bytes_it_was_made_from() {
+        let mut context = TestContext::new();
+
+        let source = context.alloc(TINY_PNG.len() as u32).unwrap();
+        let ptr_source = context.data_ptr(source).unwrap();
+        context.write_bytes(ptr_source, &TINY_PNG).unwrap();
+
+        let ptr_image = context.alloc_raw(4).unwrap();
+
+        let before = context.live_allocations().len();
+        assert_eq!(create_image(&mut context, ptr_image, source, 0, TINY_PNG.len() as u32).await.unwrap(), 1);
+        assert!(context.live_allocations().len() > before);
+
+        let image: super::WIPICWord = read_generic(&context, ptr_image).unwrap();
+        destroy_image(&mut context, super::WIPICIndirectPtr(image)).await.unwrap();
+
+        // Only the source and the caller's own image slot were left standing
+        // before the create, and both are accounted for now: the slot is still
+        // the title's, and the source went with the image.
+        assert_eq!(context.live_allocations().len(), before - 1);
+        assert!(!context.live_allocations().iter().any(|&(address, _)| address == source.0));
+    }
 
     /// An image slot a title never filled measures as nothing and draws as
     /// nothing, rather than faulting on the read from address zero.

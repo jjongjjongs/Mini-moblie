@@ -220,6 +220,11 @@ pub mod test {
             self.spawned.len()
         }
 
+        /// The allocations this context has handed out and not taken back.
+        pub fn live_allocations(&self) -> Vec<(WIPICWord, WIPICWord)> {
+            self.raw_allocations.clone()
+        }
+
         /// Takes the spawned bodies, for a test that wants to run the deferred
         /// work itself.
         pub fn take_spawned(&mut self) -> Vec<WIPICMethodBody> {
@@ -246,7 +251,14 @@ pub mod test {
             Ok(WIPICIndirectPtr(Self::alloc_raw(self, size)?))
         }
 
-        fn free(&mut self, _memory: WIPICIndirectPtr) -> Result<()> {
+        fn free(&mut self, memory: WIPICIndirectPtr) -> Result<()> {
+            // Forget it the way `free_raw` does, so a test can ask what a call
+            // gave back: `alloc` and `alloc_raw` hand out the same addresses
+            // here, and a leak is a row left in `raw_allocations`.
+            if let Some(index) = self.raw_allocations.iter().position(|&(candidate, _)| candidate == memory.0) {
+                self.raw_allocations.remove(index);
+            }
+
             Ok(())
         }
 

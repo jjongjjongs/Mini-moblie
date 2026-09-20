@@ -465,23 +465,6 @@ fn probe_args(context: &dyn WIPICContext, name: &str, args: &[(&str, WIPICWord)]
 #[cfg(not(feature = "wipic-probe"))]
 fn probe_args(_: &dyn WIPICContext, _: &str, _: &[(&str, WIPICWord)]) {}
 
-/// A slot in a table whose meaning nothing has shown yet.
-///
-/// It takes four arguments and writes them down. A slot like this is only ever
-/// identified by what a title hands it - there is no name for it anywhere in
-/// the title's own code, which reaches it by index - so the arguments are the
-/// whole of the evidence, and a line that says only that the slot was reached
-/// throws that evidence away. Four is what the ARM calling convention passes in
-/// registers, so they cost nothing to read and are the ones always there.
-fn gen_unk_stub(id: u32, index: u32) -> WIPICMethodBody {
-    let body = move |_: &mut dyn WIPICContext, a0: WIPICWord, a1: WIPICWord, a2: WIPICWord, a3: WIPICWord| async move {
-        tracing::warn!("stub unk{id}-{index}({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
-        Ok::<u32, _>(0)
-    };
-
-    body.into_body()
-}
-
 /// Table 3 - the input method, the same five calls this runtime already serves
 /// at graphics slots 37 to 41 and in the same order.
 ///
@@ -509,23 +492,29 @@ pub fn get_unk3_method_table() -> Vec<WIPICMethodBody> {
     ]
 }
 
-/// Table 12 - what a title asks about the handset it is running on.
-///
-/// Not a drawing table, which is worth writing down because its traffic looks
-/// like drawing traffic: 마스터오브소드4 calls slot 1 three hundred times in a
-/// session, once per frame, and slot 0 once at startup. Following what its
-/// arguments point at settles it - slot 0 is handed the handset's phone
-/// number, `"01046119269"`, and both slots are handed this table's own array
-/// of function pointers as their last argument, the way a C interface passes
-/// itself. The words in the registers never change between calls; everything
-/// that does is behind them.
-
 /// Table 12's slots, which answer nothing and write down what they were given.
 ///
-/// Separate functions rather than [`gen_unk_stub`] so the probe can reach guest
-/// memory: a closure that hands its `&mut dyn WIPICContext` to the future it
-/// returns cannot be written without naming the lifetime, which a closure
-/// cannot do.
+/// The words they write down are not arguments, whatever they look like. A
+/// title reaches these slots through a veneer - LOA-혼돈의 서곡's is at
+/// `0x121630` - that loads the slot's address into `r0` and branches through
+/// it, so `r0` is this runtime's own SVC stub and `r1`, `r2` and `r3` hold
+/// whatever the caller last left there. The callers settle the arity: the one
+/// at `0x1227e0` moves all four of its own arguments into `r4`, `r5`, `r6` and
+/// `r8` *before* the call and reads them back after, which is what a compiler
+/// writes around a call that takes nothing and clobbers everything. Neither
+/// caller reads the result either.
+///
+/// So a capture of these lines is evidence about the caller, not about the
+/// call, and answering something other than zero changes nothing: answering
+/// slot 1 with `1` eighty-eight times left LOA's frame byte-identical. An
+/// earlier reading here had slot 0 being handed the handset's phone number and
+/// both slots being handed this table's own function pointers - that was the
+/// leftovers, read as arguments.
+///
+/// These are separate functions rather than one generated stub so the probe can
+/// reach guest memory: a closure that hands its `&mut dyn WIPICContext` to the
+/// future it returns cannot be written without naming the lifetime, which a
+/// closure cannot do.
 async fn unk12_slot(index: u32, context: &mut dyn WIPICContext, a0: WIPICWord, a1: WIPICWord, a2: WIPICWord, a3: WIPICWord) -> Result<u32> {
     tracing::warn!("stub unk12-{index}({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
     probe_args(context, &format!("unk12-{index}"), &[("a0", a0), ("a1", a1), ("a2", a2), ("a3", a3)]);
