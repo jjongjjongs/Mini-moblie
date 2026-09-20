@@ -25,8 +25,6 @@
 
 use alloc::vec::Vec;
 
-use core::sync::atomic::{AtomicU32, Ordering};
-
 use spin::Mutex;
 use wie_util::{Result, WieError};
 use wipi_types::wipic::WIPICWord;
@@ -246,21 +244,7 @@ const WIDE_PROBES: [(u16, u16); 32] = {
 /// What has already been asked, so a title that sets its operation on every
 /// draw - 드래곤하트2 sets one eight thousand times in a capture - is asked
 /// once per function rather than once per call.
-static KNOWN: Mutex<Vec<((WIPICWord, WIPICWord), PixelOp, u32)>> = Mutex::new(Vec::new());
-
-/// Which frame it is, for holding a remembered answer to.
-static FRAME: AtomicU32 = AtomicU32::new(0);
-
-/// A frame has been put on the panel.
-///
-/// An operation is the title's own code and is free to look at state of its
-/// own, so what it did once is not what it does for ever. A remembered answer
-/// is therefore held to one pair again on the first draw of each frame - one
-/// call per operation per frame, against the thousands of draws a frame is
-/// made of.
-pub fn frame_passed() {
-    FRAME.fetch_add(1, Ordering::Relaxed);
-}
+static KNOWN: Mutex<Vec<((WIPICWord, WIPICWord), PixelOp)>> = Mutex::new(Vec::new());
 
 /// Operations that turned out not to be ours to call. Kept so one is asked
 /// once: asking is a branch to it, and where that faults, faulting again on
@@ -301,35 +285,30 @@ async fn still_answers(context: &mut dyn WIPICContext, function: WIPICWord, para
 
 /// Asks the title's operation what it does, and remembers the answer.
 pub async fn classify(context: &mut dyn WIPICContext, function: WIPICWord, param: WIPICWord) -> Result<PixelOp> {
-    let frame = FRAME.load(Ordering::Relaxed);
     let remembered = KNOWN
         .lock()
         .iter()
-        .find(|(key, ..)| *key == (function, param))
-        .map(|(_, operation, confirmed)| (*operation, *confirmed));
+        .find(|(key, _)| *key == (function, param))
+        .map(|(_, operation)| *operation);
 
-    if let Some((remembered, confirmed)) = remembered {
-        // Confirmed this frame already: the answer stands.
-        if confirmed == frame {
-            return Ok(remembered);
-        }
-
+    if let Some(remembered) = remembered {
         // 헬싱's operation, at `0x108ce8`, answers with the pixel it was given
-        // until one of two globals of its own is set and then blends instead -
-        // asked before either is, it reads as a plain copy, and it stops being
-        // one while the model says it still is. So the first draw of each frame
-        // holds the remembered answer to one pair. See [`frame_passed`].
+        // until one of two levels it keeps in globals of its own is set, and
+        // then takes that pixel towards black or white and mixes it with the
+        // other. It changes those levels between draws - a shadow pass and the
+        // glyph over it are two draws of one frame - so a remembered answer is
+        // held to a pair before each draw that would use it, not once and then
+        // trusted.
+        //
+        // That is one call per draw, against the pixels a draw is made of: a
+        // fade over a 240x320 screen is 76,800 of them, which is what the
+        // models are here to save.
         if still_answers(context, function, param, remembered).await? {
-            let mut known = KNOWN.lock();
-            if let Some((.., confirmed)) = known.iter_mut().find(|(key, ..)| *key == (function, param)) {
-                *confirmed = frame;
-            }
-
             return Ok(remembered);
         }
 
         tracing::debug!("pixel operation at {function:#x} param {param} no longer answers as {remembered:?}; asking again");
-        KNOWN.lock().retain(|(key, ..)| *key != (function, param));
+        KNOWN.lock().retain(|(key, _)| *key != (function, param));
     }
 
     let source_first = context.pixel_op_takes_source_first();
@@ -379,7 +358,7 @@ pub async fn classify(context: &mut dyn WIPICContext, function: WIPICWord, param
 
     let mut known = KNOWN.lock();
     if known.len() < KNOWN_LIMIT {
-        known.push(((function, param), operation, frame));
+        known.push(((function, param), operation));
     }
 
     Ok(operation)

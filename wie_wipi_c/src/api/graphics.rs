@@ -1124,11 +1124,6 @@ pub async fn flush_lcd(
 ) -> Result<()> {
     tracing::debug!("MC_grpFlushLcd({i:#x}, {:#x}, {x:#x}, {y:#x}, {w:#x}, {h:#x})", framebuffer.0);
 
-    // A frame's worth of drawing has gone by, so what a title's pixel operation
-    // answered for the last one is held to a pair again on the next draw. See
-    // `pixel_op::frame_passed`.
-    pixel_op::frame_passed();
-
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(framebuffer)?)?);
 
     let src_canvas = framebuffer.image(context)?;
@@ -3025,9 +3020,11 @@ mod tests {
         let out = drawn.get_pixel(0, 0);
         assert_eq!((out.r, out.g, out.b), (expected.r, expected.g, expected.b));
 
-        // And a second blit asks nothing at all - the answer is remembered.
+        // And a second blit asks once: the remembered answer is held to a pair
+        // before it is used again, because an operation is the title's own code
+        // and is free to change what it does. One call, not the four pixels.
         draw_image(&mut context, destination, 0, 0, 2, 2, image_handle, 0, 0, pgc).await.unwrap();
-        assert_eq!(ASKED.load(Ordering::SeqCst), probed);
+        assert_eq!(ASKED.load(Ordering::SeqCst), probed + 1);
     }
 
     /// A pixel the image does not have is not a pixel the operation is asked
