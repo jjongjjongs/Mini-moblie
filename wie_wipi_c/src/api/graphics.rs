@@ -864,12 +864,7 @@ pub async fn draw_image(
     };
 
     let source = FrameBuffer(source);
-    let pairs = {
-        let src_image = source.image(context)?;
-        let canvas = framebuffer.canvas(context)?;
-
-        blend_pairs(&**canvas, dx, dy, w, h, &*src_image, sx, sy, keyed)
-    };
+    let pairs = pixel_op_pairs(context, &framebuffer, dx, dy, w, h, &source, sx, sy, keyed)?;
 
     // A recognised operation is done here; anything else is asked, a pixel at a
     // time, which is what the reference does for all of them.
@@ -951,18 +946,78 @@ fn write_blended(context: &mut dyn WIPICContext, framebuffer: &FrameBuffer, blen
     Ok(())
 }
 
+/// What the title's pixel operation will be asked about, with the destination
+/// read over the rows the blit covers.
+///
+/// The canvas this replaces staged the whole surface - read out of guest
+/// memory, collected into a pixel buffer, kept a third time as a snapshot -
+/// only to read back the pixels under a sprite. `write_blended` already puts
+/// the answers back a row at a time; this is the same surface, read the same
+/// way, on the way in.
+///
+/// Falls back to the canvas for a surface `read_rect_rgb565` cannot address.
+#[allow(clippy::too_many_arguments)]
+fn pixel_op_pairs(
+    context: &mut dyn WIPICContext,
+    framebuffer: &FrameBuffer,
+    dx: i32,
+    dy: i32,
+    w: i32,
+    h: i32,
+    source: &FrameBuffer,
+    sx: i32,
+    sy: i32,
+    keyed: bool,
+) -> Result<Vec<(i32, i32, u16, u16)>> {
+    let src_image = source.image(context)?;
+    let (dst_w, dst_h) = (framebuffer.0.width as i64, framebuffer.0.height as i64);
+
+    if let Some((left, top, cols, rows, pixels)) = framebuffer.read_rect_rgb565(context, dx, dy, w, h)? {
+        let read = move |x: i32, y: i32| -> u16 {
+            // Outside what was read is outside the blit, and `blend_pairs`
+            // never asks about it.
+            if x < left || y < top || x >= left + cols || y >= top + rows {
+                return 0;
+            }
+            pixels[((y - top) * cols + (x - left)) as usize]
+        };
+
+        return Ok(blend_pairs(read, dst_w, dst_h, dx, dy, w, h, &*src_image, sx, sy, keyed));
+    }
+
+    let canvas = framebuffer.canvas(context)?;
+    let image = canvas.image();
+    let read = |x: i32, y: i32| Rgb565Pixel::from_color(image.get_pixel(x, y));
+
+    Ok(blend_pairs(read, dst_w, dst_h, dx, dy, w, h, &*src_image, sx, sy, keyed))
+}
+
 /// The destination and source pixel of everything a blit would write, as
 /// RGB565 and in the order it would write them.
 ///
 /// Gathered in one pass because asking the title what a pixel becomes needs the
-/// canvas let go of first.
+/// destination let go of first.
+///
+/// `destination` answers for one pixel of the surface being drawn on. It is a
+/// reader rather than the surface itself so that the caller can serve it from
+/// the rows the blit covers, read on their own, instead of staging the whole
+/// surface for every call - see [`pixel_op_pairs`].
 #[allow(clippy::too_many_arguments)]
-fn blend_pairs(canvas: &dyn Canvas, dx: i32, dy: i32, w: i32, h: i32, src: &dyn Image, sx: i32, sy: i32, keyed: bool) -> Vec<(i32, i32, u16, u16)> {
+fn blend_pairs(
+    destination: impl Fn(i32, i32) -> u16,
+    dst_w: i64,
+    dst_h: i64,
+    dx: i32,
+    dy: i32,
+    w: i32,
+    h: i32,
+    src: &dyn Image,
+    sx: i32,
+    sy: i32,
+    keyed: bool,
+) -> Vec<(i32, i32, u16, u16)> {
     let src_w = src.width() as i64;
     let src_h = src.height() as i64;
-    let destination = canvas.image();
-    let dst_w = destination.width() as i64;
-    let dst_h = destination.height() as i64;
 
     let mut pairs = Vec::new();
 
@@ -992,7 +1047,7 @@ fn blend_pairs(canvas: &dyn Canvas, dx: i32, dy: i32, w: i32, h: i32, src: &dyn 
             pairs.push((
                 dx_px as i32,
                 dy_px as i32,
-                Rgb565Pixel::from_color(destination.get_pixel(dx_px as i32, dy_px as i32)),
+                destination(dx_px as i32, dy_px as i32),
                 Rgb565Pixel::from_color(source),
             ));
         }
