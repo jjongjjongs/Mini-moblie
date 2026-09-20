@@ -8,7 +8,7 @@ use wie_jvm_support::JvmSupport;
 use wie_util::{Result, WieError, read_generic, read_null_terminated_string_bytes, read_null_terminated_table, write_generic};
 
 use java_constants::{FieldAccessFlags, MethodAccessFlags};
-use jvm::JavaType;
+use jvm::{JavaType, JavaValue};
 use wipi_types::ktf::{
     ExeInterface, ExeInterfaceFunctions, InitParam0, InitParam1, InitParam3, InitParam4, WipiExe,
     java::{JavaClass, JavaClassDescriptor, JavaFieldDefinition, JavaMethodDefinition},
@@ -63,8 +63,65 @@ const MODULE_ARRAY_NEW: u32 = 0x3c / size_of::<u32>() as u32;
 /// names its element by its letter, and goes straight to the make.
 const MODULE_ARRAY_CLASS: u32 = 0x6c / size_of::<u32>() as u32;
 
-/// `MNInterface`'s other array make, at `+0x74`, which takes the same two.
+/// `MNInterface`'s array make of many dimensions, at `+0x74`, which takes the
+/// array's own class and how many dimensions to fill in.
+///
+/// The lengths are not in registers: the stub that reaches this runtime pushes
+/// them and leaves the stack it pushed them on in the VM context, because it
+/// steps onto the runtime's stack before calling. 텐가이 asks for
+/// `new short[2][12]` this way - two dimensions, `0x14` and `0xa` at one of
+/// its call sites - and then reads `enemyType[0][0]` straight away, so filling
+/// only the outer one leaves it dereferencing a null.
 const MODULE_ARRAY_NEW_OF_CLASS: u32 = 0x74 / size_of::<u32>() as u32;
+
+/// An array of `dimensions` dimensions, each filled with the next.
+async fn module_multi_array_new(core: &mut ArmCore, jvm: &Jvm, ptr_class: u32, dimensions: u32) -> Result<u32> {
+    let saved_stack: u32 = read_generic(core, core.save_context().fp + VM_CONTEXT_SAVED_STACK)?;
+
+    let mut lengths = Vec::with_capacity(dimensions as usize);
+    for dimension in 0..dimensions {
+        let length: u32 = read_generic(core, saved_stack + dimension * size_of::<u32>() as u32)?;
+        lengths.push(length);
+    }
+
+    let name = KtfJvmSupport::class_from_raw(core, ptr_class).name()?;
+    let element = name
+        .strip_prefix('[')
+        .ok_or_else(|| WieError::FatalError(format!("a module asked for an array of {name}, which is not an array class")))?;
+    let element = String::from(element);
+
+    let array = match jvm.instantiate_array(&element, lengths[0] as _).await {
+        Ok(x) => x,
+        Err(e) => return Err(JvmSupport::to_wie_err(jvm, e).await),
+    };
+
+    tracing::trace!("module array {name} {lengths:?}");
+
+    if dimensions > 1 {
+        let inner = element
+            .strip_prefix('[')
+            .ok_or_else(|| WieError::FatalError(format!("a module asked for {dimensions} dimensions of {name}")))?;
+
+        let mut array = array;
+        for index in 0..lengths[0] as usize {
+            // Only the second dimension is filled, which is as many as the
+            // stub that gets here can push. A module wanting a third would
+            // have to hand it over some other way, and none has.
+            let sub = match jvm.instantiate_array(inner, lengths[1] as _).await {
+                Ok(x) => x,
+                Err(e) => return Err(JvmSupport::to_wie_err(jvm, e).await),
+            };
+
+            if let Err(e) = jvm.store_array(&mut array, index, [JavaValue::Object(Some(sub))]).await {
+                return Err(JvmSupport::to_wie_err(jvm, e).await);
+            }
+        }
+
+        return Ok(KtfJvmSupport::class_instance_raw(&array));
+    }
+
+    Ok(KtfJvmSupport::class_instance_raw(&array))
+}
 
 /// `MNInterface`'s primitive array make, at `+0x70`, which takes a type and a
 /// length. The type is where that type's letter sits in `InitParam3` - the
@@ -224,10 +281,12 @@ const MODULE_CLASS_LOAD: u32 = 0x40 / size_of::<u32>() as u32;
 async fn handle_module_svc(core: &mut ArmCore, jvm: &mut Jvm, id: SvcId) -> Result<()> {
     let (_, lr) = core.read_pc_lr()?;
     tracing::trace!(
-        "MNInterface-{} ({:#x}, {:#x}) from lr={lr:#x}",
+        "MNInterface-{} ({:#x}, {:#x}, {:#x}, {:#x}) from lr={lr:#x}",
         id.0,
         core.read_param(0)?,
-        core.read_param(1)?
+        core.read_param(1)?,
+        core.read_param(2)?,
+        core.read_param(3)?
     );
 
     match id.0 {
@@ -244,7 +303,11 @@ async fn handle_module_svc(core: &mut ArmCore, jvm: &mut Jvm, id: SvcId) -> Resu
 
             module_is_instance(core, ptr_class, ptr_instance)?.write(core, lr)
         }
-        MODULE_ARRAY_NEW_OF_CLASS => EmulatedFunction::call(&java_array_new, core, jvm).await?.write(core, lr),
+        MODULE_ARRAY_NEW_OF_CLASS => {
+            let (ptr_class, dimensions) = (core.read_param(0)?, core.read_param(1)?);
+
+            module_multi_array_new(core, jvm, ptr_class, dimensions).await?.write(core, lr)
+        }
         MODULE_PRIMITIVE_ARRAY_NEW => {
             let element = module_primitive_element(core.read_param(0)?)?;
             let count = core.read_param(1)?;
@@ -286,9 +349,13 @@ const VM_CONTEXT_SIZE: u32 = 0x40;
 /// `+0x34`.
 const VM_CONTEXT_STACK_SIZE: u32 = 0x10000;
 
-/// The word the module takes its runtime stack from. The two it writes -
-/// `+0x24` for the stack it stepped off, `+0x2c` for the head of its handler
-/// chain - it writes itself, and both start zero like the rest.
+/// The word the module leaves the stack it stepped off in, which is also
+/// where the arguments a call could not fit in registers are. It writes it
+/// itself, as it does `+0x2c` for the head of its handler chain, and both
+/// start zero like the rest.
+const VM_CONTEXT_SAVED_STACK: u32 = 0x24;
+
+/// The word the module takes its runtime stack from.
 const VM_CONTEXT_STACK: u32 = 0x34;
 
 /// The word the module reads the JVM context from, which is where it finds a

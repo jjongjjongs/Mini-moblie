@@ -148,6 +148,12 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // `(296 - 168) / 2 = 64`, so a notice's title sat across the bottom of its
     // own title bar and its first line across the bottom of the message box.
     (TitlePlatform::Ktf, "01031C0A", panel(240, 296)),
+    // 텐가이: its descriptor names no panel, and the pictures it carries say
+    // which one it was drawn for. Its intro background is 88x204 and it paints
+    // it twice, at 0 and at half the width the screen reports, which tiles a
+    // 176-wide panel exactly and leaves a 32-column gap of the screen before it
+    // on a 240-wide one. 204 rows and a 16-row strip is the 220 of that panel.
+    (TitlePlatform::Ktf, "01031C47", panel(176, 220)),
     // 소울게이트: takes a 240x320 screen, composes every frame into a 320x240
     // off-screen buffer of its own, and copies that onto the screen a quarter
     // turn clockwise - the handset was meant to be turned sideways to play it.
