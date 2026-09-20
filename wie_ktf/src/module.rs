@@ -154,6 +154,21 @@ impl RelocatedModule {
         Ok(u32::from_le_bytes(word.try_into().unwrap()))
     }
 
+    /// The word the image keeps its module descriptor in, at `+0x00`.
+    pub const DESCRIPTOR_OFFSET: usize = 0x00;
+
+    /// Where the module descriptor is, as an image offset.
+    ///
+    /// Six words, and the sixth is the descriptor's own address - which is how
+    /// wfeature knows it is holding one, and what it refuses a client for
+    /// ("KTF client is not a relocatable module"). The first three are the
+    /// class table: the buckets, how many classes are in them, and how many
+    /// buckets there are. 텐가이's are 22 and 32, and its buckets sit in the
+    /// 0x80 bytes immediately before the descriptor.
+    pub fn descriptor(&self, data: &[u8]) -> Result<u32> {
+        self.header_word(data, Self::DESCRIPTOR_OFFSET)
+    }
+
     /// Where the module field table is, as an image offset.
     pub fn module_fields(&self, data: &[u8]) -> Result<u32> {
         self.header_word(data, Self::MODULE_FIELDS_OFFSET)

@@ -8,5 +8,6 @@ const SVC_CATEGORY_JAVA_INTERFACE: u32 = 2;
 const SVC_CATEGORY_WIPIC: u32 = 3;
 const SVC_CATEGORY_JAVA: u32 = 4;
 const SVC_CATEGORY_MODULE: u32 = 5;
+const SVC_CATEGORY_MODULE_CLASS: u32 = 6;
 
 pub use self::java::jvm_support::KtfJvmSupport;

@@ -6,13 +6,16 @@ use wie_backend::System;
 use wie_core_arm::{Allocator, ArmCore, EmulatedFunction, ResultWriter, SvcId};
 use wie_util::{Result, WieError, read_generic, read_null_terminated_string_bytes, write_generic};
 
-use wipi_types::ktf::{ExeInterface, ExeInterfaceFunctions, InitParam0, InitParam1, InitParam3, InitParam4, WipiExe};
+use wipi_types::ktf::{
+    ExeInterface, ExeInterfaceFunctions, InitParam0, InitParam1, InitParam3, InitParam4, WipiExe,
+    java::{JavaClass, JavaClassDescriptor},
+};
 
 use crate::{
     adf::parse_bss_size,
     emulator::IMAGE_BASE,
     runtime::{
-        SVC_CATEGORY_INIT, SVC_CATEGORY_MODULE,
+        SVC_CATEGORY_INIT, SVC_CATEGORY_MODULE, SVC_CATEGORY_MODULE_CLASS,
         java::interface::{get_wipi_jb_interface, java_array_new, java_check_type, java_class_load, java_new, java_throw},
         svc_ids::InitSvcId,
         wipi_c::{interface::get_wipic_knl_interface, register_wipic_svc_handler},
@@ -21,6 +24,7 @@ use crate::{
 
 pub fn register_init_svc_handler(core: &mut ArmCore, jvm: &Jvm) -> Result<()> {
     core.register_svc_handler(SVC_CATEGORY_MODULE, handle_module_svc, &())?;
+    core.register_svc_handler(SVC_CATEGORY_MODULE_CLASS, handle_module_class_svc, &())?;
     core.register_svc_handler(SVC_CATEGORY_INIT, handle_init_svc, jvm)
 }
 
@@ -48,6 +52,83 @@ async fn handle_module_svc(core: &mut ArmCore, _: &mut (), id: SvcId) -> Result<
     );
 
     0u32.write(core, lr)
+}
+
+/// A relocated module's `fn_get_class`, which this runtime writes for it.
+///
+/// The ordinary module hands out a function of its own that answers a
+/// `JavaClass` for a name. A relocated one has no such function - it has a
+/// class table, in its module descriptor - so the table is read here and
+/// handed back through a stub that looks like the function the rest of this
+/// runtime already asks. The descriptor's address rides in the stub's own SVC
+/// id, so there is no state to keep beside it.
+///
+/// The table is 텐가이's `JavaClass` records, the same ones
+/// `KtfJvmSupport::class_from_raw` reads: each bucket holds one, whose first
+/// word is its own address plus four - the mark this runtime already tests for
+/// in `get_java_method`. Its 22 classes land in 22 of its 32 buckets, so a
+/// bucket holding more than one has not been seen; the scan takes whatever a
+/// bucket holds and compares the name.
+async fn handle_module_class_svc(core: &mut ArmCore, _: &mut (), id: SvcId) -> Result<()> {
+    let (_, lr) = core.read_pc_lr()?;
+    let ptr_name = core.read_param(0)?;
+
+    let name_bytes = read_null_terminated_string_bytes(core, ptr_name)?;
+    let name = encoding_rs::EUC_KR.decode(&name_bytes).0;
+
+    let class = module_class_by_name(core, id.0, &name)?;
+    tracing::debug!("module class {name} -> {class:#x}");
+
+    class.write(core, lr)
+}
+
+/// The first parent in a module's class table that is not a class, if any.
+///
+/// A parent is a `JavaClass` address once the module has resolved its
+/// imports. Anything below where the image was loaded is not one.
+fn first_unresolved_parent(core: &mut ArmCore, descriptor: u32) -> Result<Option<u32>> {
+    let buckets: u32 = read_generic(core, descriptor)?;
+    let bucket_count: u32 = read_generic(core, descriptor + 2 * size_of::<u32>() as u32)?;
+
+    for bucket in 0..bucket_count {
+        let ptr_class: u32 = read_generic(core, buckets + bucket * size_of::<u32>() as u32)?;
+        if ptr_class == 0 {
+            continue;
+        }
+
+        let class: JavaClass = read_generic(core, ptr_class)?;
+        let class_descriptor: JavaClassDescriptor = read_generic(core, class.ptr_descriptor)?;
+
+        // `java/lang/Object` has no parent, and nothing is wrong with that.
+        if class_descriptor.ptr_parent_class != 0 && class_descriptor.ptr_parent_class < IMAGE_BASE {
+            return Ok(Some(class_descriptor.ptr_parent_class));
+        }
+    }
+
+    Ok(None)
+}
+
+/// Walks a module descriptor's class table for `name`.
+fn module_class_by_name(core: &mut ArmCore, descriptor: u32, name: &str) -> Result<u32> {
+    let buckets: u32 = read_generic(core, descriptor)?;
+    let bucket_count: u32 = read_generic(core, descriptor + 2 * size_of::<u32>() as u32)?;
+
+    for bucket in 0..bucket_count {
+        let ptr_class: u32 = read_generic(core, buckets + bucket * size_of::<u32>() as u32)?;
+        if ptr_class == 0 {
+            continue;
+        }
+
+        let class: JavaClass = read_generic(core, ptr_class)?;
+        let descriptor: JavaClassDescriptor = read_generic(core, class.ptr_descriptor)?;
+        let class_name = read_null_terminated_string_bytes(core, descriptor.ptr_name)?;
+
+        if encoding_rs::EUC_KR.decode(&class_name).0 == name {
+            return Ok(ptr_class);
+        }
+    }
+
+    Ok(0)
 }
 
 /// The interface a relocated module asks for by name.
@@ -182,16 +263,48 @@ pub async fn load_native(
 
     let entry_result = core.run_function::<u32>(entry, &[argument]).await?;
 
-    // The two kinds answer differently: the ordinary module hands back its
-    // `WipiExe`, a relocated one answers zero for "the interface I asked for
-    // was there" and keeps what it built to itself.
+    // The two kinds answer differently. The ordinary module hands back its
+    // `WipiExe`, whose `ExeInterface` carries the functions below. A relocated
+    // one answers zero - "the interface I asked for was there" - and keeps
+    // what it built in its module descriptor, so the one function the rest of
+    // this runtime asks of a module, `fn_get_class`, is written for it here.
     if let Some(module) = &relocated {
-        return Err(WieError::FatalError(format!(
-            "{filename} is a relocated module, and this runtime now loads, relocates and starts one - its entry answered {entry_result:#x} \
-             after taking MNInterface - but does not yet read the executable record a relocated module keeps instead of answering with a \
-             WipiExe. Its module field table is at {:#x}. See wie_ktf::module.",
-            module.base(IMAGE_BASE) + module.module_fields(data)?
-        )));
+        if entry_result != 0 {
+            return Err(WieError::FatalError(format!("{filename} refused to start: {entry_result:#x}")));
+        }
+
+        let descriptor = module.base(IMAGE_BASE) + module.descriptor(data)?;
+        let classes: u32 = read_generic(core, descriptor + size_of::<u32>() as u32)?;
+        tracing::debug!("{filename} started: module descriptor at {descriptor:#x}, {classes} classes");
+
+        // A class's parent is a pointer once the module has resolved its
+        // imports, and something far too small to be one before. 텐가이's
+        // `Tengai` names `0x75` and its `[LEnemy;` names `0x4b`, which are
+        // neither addresses nor indices into any table here - so the step that
+        // turns them into classes has not been made, and registering one of
+        // these would read a parent out of low memory.
+        //
+        // The ordinary module resolves its imports inside `fn_init`, calling
+        // back through `java_class_load`. A relocated one has no `fn_init` to
+        // call; wfeature has a step of its own for it, beside the entry -
+        // "execute KTF interface init" - and that is what is missing.
+        if let Some(unresolved) = first_unresolved_parent(core, descriptor)? {
+            return Err(WieError::FatalError(format!(
+                "{filename} is a relocated module: it loads, relocates, starts and answers with its {classes} classes, but their imports are \
+                 unresolved - {unresolved:#x} where a parent class should be - so the interface init a relocated module takes instead of \
+                 `fn_init` is still missing. Module descriptor at {descriptor:#x}. See wie_ktf::module."
+            )));
+        }
+
+        return Ok(ExeInterfaceFunctions {
+            unk1: 0,
+            unk2: 0,
+            fn_init: 0,
+            fn_get_default_dll: 0,
+            fn_get_class: core.make_svc_stub(SVC_CATEGORY_MODULE_CLASS, descriptor)?,
+            fn_unk2: 0,
+            fn_unk3: 0,
+        });
     }
 
     let wipi_exe = entry_result;
