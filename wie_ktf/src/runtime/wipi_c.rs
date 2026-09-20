@@ -75,6 +75,14 @@ async fn handle_wipic_svc(
     let table_id = WIPICTableId::try_from(id.0 >> 16)?;
     let function_id = id.0 as u16;
     let (_, lr) = core.read_pc_lr()?;
+
+    // A census of every WIPI-C call, named whether or not the body that serves
+    // it writes anything down. A handler that answers in silence is invisible
+    // at any log level, and so is the fast path, which never reaches a body at
+    // all - so a screen that waits on one of those looks, in a capture, like a
+    // screen that asks for nothing.
+    #[cfg(feature = "wipic-probe")]
+    tracing::warn!("svc {table_id:?}-{function_id} from lr={lr:#x}");
     if table_id == WIPICTableId::Kernel && function_id == WIPICKernelMethodId::Reserved1 as u16 {
         return interface::get_wipic_interfaces(
             core,
@@ -171,6 +179,14 @@ pub fn register_wipic_svc_handler(core: &mut ArmCore, system: &System, jvm: &Jvm
 fn try_fast_wipic_call(core: &mut ArmCore) -> Result<bool> {
     const GET_PIXEL_FROM_RGB: u32 = ((WIPICTableId::Graphics as u32) << 16) | WIPICGraphicsMethodId::GetPixelFromRgb as u32;
     const GET_IMAGE_FRAMEBUFFER: u32 = ((WIPICTableId::Graphics as u32) << 16) | WIPICGraphicsMethodId::GetImageFramebuffer as u32;
+
+    #[cfg(feature = "wipic-probe")]
+    {
+        let id = core.read_svc_id();
+        if id == GET_PIXEL_FROM_RGB || id == GET_IMAGE_FRAMEBUFFER {
+            tracing::warn!("svc fast-path {:#x}", id);
+        }
+    }
 
     let result = match core.read_svc_id() {
         // `MC_grpGetPixelFromRGB`, the same RGB565 packing
