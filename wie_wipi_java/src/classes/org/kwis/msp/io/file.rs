@@ -104,9 +104,12 @@ impl File {
         mode: i32,
         flag: i32,
     ) -> JvmResult<()> {
-        tracing::debug!("org.kwis.msp.io.File::<init>({this:?}, {filename:?}, {mode:?}, {flag:?})");
-
         let name = JavaLangString::to_rust_string(jvm, &filename).await?;
+
+        // Named: which file a title opened is what a capture of its reads needs
+        // to be read at all, and a handle says nothing.
+        tracing::debug!("org.kwis.msp.io.File::<init>({this:?}, {name:?}, {mode:?}, {flag:?})");
+
         if name.is_empty() {
             return Err(jvm.exception("java/io/IOException", "Invalid filename").await);
         }
@@ -209,7 +212,29 @@ impl File {
         tracing::debug!("org.kwis.msp.io.File::read({this:?}, {buf:?})");
 
         let raf = jvm.get_field(&this, "raf", "Ljava/io/RandomAccessFile;").await?;
-        let read = jvm.invoke_virtual(&raf, "read", "([BII)I", (buf, offset, length)).await?;
+        let read: i32 = jvm.invoke_virtual(&raf, "read", "([BII)I", (buf, offset, length)).await?;
+
+        // Reading where there is nothing left is an error here, not a value.
+        //
+        // This is not `InputStream.read`, whose -1 a caller is expected to
+        // test. 강철의 연금술사2 streams its event files as `[length][block]`
+        // pairs and has no test at all: it reads until a read fails, and its
+        // inner loop is `offset += read(buf, offset, want - offset)` with
+        // nothing looking at what came back. Told 0 it never moves; told -1 it
+        // walks backwards; either way the tick never ends, and because the
+        // emulator is torn down when a tick returns, one title stuck like that
+        // holds every title started after it. An exception is the only answer
+        // that ends the loop, and it is the answer the title is written
+        // around - with it, the reads on that file fall from 105,676 to 73 and
+        // the screen it was stuck on goes from one colour to 308.
+        //
+        // A read that returns something short is not this: the last record of
+        // that title's file really is shorter than the length its header
+        // claims, and the short count is what lets it take the record and move
+        // on to the read that ends the loop.
+        if read < 0 {
+            return Err(jvm.exception("java/io/IOException", "Read past the end of the file").await);
+        }
 
         Ok(read)
     }
@@ -352,6 +377,50 @@ mod test {
     use crate::{classes::net::wie::WIPIFileOutputStream, get_protos};
 
     use super::{File, Mode};
+
+    /// Reading where there is nothing left throws; reading part of what was
+    /// asked for does not.
+    ///
+    /// 강철의 연금술사2 streams its event files as `[length][block]` pairs with
+    /// no end test of its own - `offset += read(buf, offset, want - offset)`
+    /// and nothing looking at the answer - so a value, any value, leaves it
+    /// looping. The short count is what lets it take a last record that is
+    /// smaller than its header claims; the exception is what ends the loop
+    /// after it.
+    #[test]
+    fn reading_past_the_end_throws_but_a_short_read_does_not() -> Result<()> {
+        run_jvm_test(
+            Box::new([get_protos().into(), [WIPIFileOutputStream::as_proto()].into()]),
+            |jvm| async move {
+                let filename: ClassInstanceRef<String> = JavaLangString::from_rust_string(&jvm, "ends.bin").await?.into();
+                let file: ClassInstanceRef<File> = jvm
+                    .new_class("org/kwis/msp/io/File", "(Ljava/lang/String;I)V", (filename, Mode::WRITE_TRUNC as i32))
+                    .await?
+                    .into();
+
+                let written: i32 = jvm.invoke_virtual(&file, "write", "(I)I", (0x11,)).await?;
+                assert_eq!(written, 1);
+                let written: i32 = jvm.invoke_virtual(&file, "write", "(I)I", (0x22,)).await?;
+                assert_eq!(written, 1);
+
+                let _: () = jvm.invoke_virtual(&file, "seek", "(I)V", (0,)).await?;
+
+                // Four asked for, two there: the two come back.
+                let buf = jvm.instantiate_array("B", 4).await?;
+                let read: i32 = jvm.invoke_virtual(&file, "read", "([BII)I", (buf.clone(), 0, 4)).await?;
+                assert_eq!(read, 2, "a short read is a count, not an error");
+
+                // Nothing left: the next one throws rather than answering.
+                let past_the_end: JvmResult<i32> = jvm.invoke_virtual(&file, "read", "([BII)I", (buf, 0, 4)).await;
+                let Err(JavaError::JavaException(exception)) = past_the_end else {
+                    panic!("a read past the end answered instead of throwing");
+                };
+                assert!(jvm.is_instance(&*exception, "java/io/IOException"));
+
+                Ok(())
+            },
+        )
+    }
 
     #[test]
     fn test_byte_io_tell_and_output_streams() -> Result<()> {
