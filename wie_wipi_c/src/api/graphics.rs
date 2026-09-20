@@ -23,7 +23,12 @@ use crate::context::WIPICContext;
 
 use self::framebuffer::buffer_size;
 
-use self::{bitmap_font::BitmapFace, framebuffer::FrameBuffer, grp_context::WIPICGraphicsContext, image::create_wipi_image};
+use self::{
+    bitmap_font::BitmapFace,
+    framebuffer::FrameBuffer,
+    grp_context::{BUILT_IN_XOR, WIPICGraphicsContext},
+    image::create_wipi_image,
+};
 
 pub use self::grp_context::WIPICGraphicsContextIdx;
 
@@ -221,18 +226,18 @@ where
         WIPICGraphicsContextIdx::StyleIdx => {
             grp_ctx.style = pv;
         }
-        // XOR mode is a flag of its own, and the reference drives the pixel-op
-        // slot from it: turning it on zeroes the alpha and installs its built-in
-        // XOR operation, turning it off clears both. We have no pixel-op path to
-        // install, so the slot is cleared either way - a title reading it back
-        // sees no operation rather than a pointer it could not call here.
+        // XOR mode is not a flag of its own: the reference drives the pixel-op
+        // slot from it, zeroing the alpha and installing its built-in XOR
+        // operation, and turning it off clears the slot again. We have no guest
+        // address for that operation, so `BUILT_IN_XOR` stands in the slot -
+        // recognised where an operation is read, and answered as no operation
+        // to a title that reads the slot back, which is what it saw before.
         WIPICGraphicsContextIdx::XorModeIdx => {
-            grp_ctx.pixel_op_func_ptr = 0;
             if pv == 0 {
-                grp_ctx.xor_mode = 0;
+                grp_ctx.pixel_op_func_ptr = 0;
             } else {
                 grp_ctx.alpha = 0;
-                grp_ctx.xor_mode = 1;
+                grp_ctx.pixel_op_func_ptr = BUILT_IN_XOR;
             }
         }
         WIPICGraphicsContextIdx::OffsetIdx => {
@@ -292,11 +297,16 @@ where
         // The reference reads nothing back for op 3.
         WIPICGraphicsContextIdx::TransPixelIdx => {}
         WIPICGraphicsContextIdx::AlphaIdx => write_generic(memory, out_ptr, grp_ctx.alpha)?,
-        WIPICGraphicsContextIdx::PixelopIdx => write_generic(memory, out_ptr, grp_ctx.pixel_op_func_ptr)?,
+        // The stand-in for XOR mode is ours, not an address: a title reading
+        // the slot is told there is no operation, the same as before.
+        WIPICGraphicsContextIdx::PixelopIdx => {
+            let function = grp_ctx.pixel_op_func_ptr;
+            write_generic(memory, out_ptr, if function == BUILT_IN_XOR { 0 } else { function })?
+        }
         WIPICGraphicsContextIdx::PixelParam1Idx => write_generic(memory, out_ptr, grp_ctx.param1)?,
         WIPICGraphicsContextIdx::FontIdx => write_generic(memory, out_ptr, grp_ctx.font)?,
         WIPICGraphicsContextIdx::StyleIdx => write_generic(memory, out_ptr, grp_ctx.style)?,
-        WIPICGraphicsContextIdx::XorModeIdx => write_generic(memory, out_ptr, grp_ctx.xor_mode)?,
+        WIPICGraphicsContextIdx::XorModeIdx => write_generic(memory, out_ptr, u32::from(grp_ctx.pixel_op_func_ptr == BUILT_IN_XOR))?,
         WIPICGraphicsContextIdx::OffsetIdx => {
             let offset = grp_ctx.offset;
             write_generic(memory, out_ptr, offset[0])?;
@@ -327,7 +337,7 @@ where
 fn context_color(framebuffer: &FrameBuffer, gctx: &WIPICGraphicsContext) -> Color {
     let mut color = framebuffer.pixel_to_color(gctx.fgpxl);
 
-    if gctx.xor_mode == 0 && gctx.alpha <= 0xff {
+    if gctx.pixel_op_func_ptr != BUILT_IN_XOR && gctx.alpha <= 0xff {
         color.a = gctx.alpha as u8;
     }
 
@@ -370,7 +380,7 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
     // A fill goes through the title's own operation too - 드래곤하트2 lays two
     // hundred of them through a live one in a single capture - so the colour
     // meets what is already there rather than covering it.
-    if let Some((kind, function)) = pixel_op::of_context(context, gctx.pixel_op_func_ptr, gctx.param1, gctx.xor_mode).await? {
+    if let Some((kind, function)) = pixel_op::of_context(context, gctx.pixel_op_func_ptr, gctx.param1).await? {
         let source = Rgb565Pixel::from_color(color);
         let source_first = context.pixel_op_takes_source_first();
 
@@ -881,7 +891,7 @@ pub async fn draw_image(
 
     // Asked before anything takes the context, because asking runs the title's
     // own code. Without it 드래곤하트2's glow lands as an opaque disc.
-    let operation = pixel_op::of_context(context, grp_ctx.pixel_op_func_ptr, grp_ctx.param1, grp_ctx.xor_mode).await?;
+    let operation = pixel_op::of_context(context, grp_ctx.pixel_op_func_ptr, grp_ctx.param1).await?;
     let source_first = context.pixel_op_takes_source_first();
 
     let clip = Clip {
@@ -3142,6 +3152,61 @@ mod tests {
             out.g,
             out.b
         );
+    }
+
+    /// Where the operation and the transparent pixel sit in the struct.
+    ///
+    /// A clet that fills its own context - 헬싱 does, and never calls
+    /// `MC_grpSetContext` once - puts its operation at `+0x2c` and its
+    /// transparent pixel at `+0x1c`. Read the other way round, `0xf81f`
+    /// (magenta, the key) was taken for the operation and calling it took the
+    /// title down on its first frame.
+    #[futures_test::test]
+    async fn a_context_a_title_filled_itself_is_read_at_the_right_words() {
+        let mut context = test_context();
+
+        let pgc_handle = context.alloc(core::mem::size_of::<super::WIPICGraphicsContext>() as u32).unwrap();
+        let pgc = context.data_ptr(pgc_handle).unwrap();
+        init_context(&mut context, pgc).await.unwrap();
+
+        // The two words as a title writes them, not through the API.
+        const TRANSPARENT: u32 = 0x1c;
+        const OPERATION: u32 = 0x2c;
+        write_generic(&mut context, pgc + TRANSPARENT, 0xf81fu32).unwrap();
+        write_generic(&mut context, pgc + OPERATION, 0x1234u32).unwrap();
+
+        let gctx: super::WIPICGraphicsContext = read_generic(&context, pgc).unwrap();
+        assert_eq!(gctx.transparent, 0xf81f);
+        assert_eq!(gctx.pixel_op_func_ptr, 0x1234);
+
+        // And the API's own words land where the struct says they do.
+        set_context(&mut context, pgc, Idx::PixelopIdx, 0x5678).await.unwrap();
+        assert_eq!(read_generic::<u32, _>(&context, pgc + OPERATION).unwrap(), 0x5678);
+        assert_eq!(read_generic::<u32, _>(&context, pgc + TRANSPARENT).unwrap(), 0xf81f);
+    }
+
+    /// XOR mode lives in the operation slot, and a title reading that slot back
+    /// is told there is no operation rather than handed our stand-in.
+    #[futures_test::test]
+    async fn xor_mode_is_the_operation_slot_and_is_not_handed_back() {
+        let mut context = test_context();
+
+        let pgc_handle = context.alloc(core::mem::size_of::<super::WIPICGraphicsContext>() as u32).unwrap();
+        let pgc = context.data_ptr(pgc_handle).unwrap();
+        init_context(&mut context, pgc).await.unwrap();
+
+        let out = context.alloc_raw(4).unwrap();
+
+        set_context(&mut context, pgc, Idx::XorModeIdx, 1).await.unwrap();
+        get_context(&mut context, pgc, Idx::XorModeIdx, out).await.unwrap();
+        assert_eq!(read_generic::<u32, _>(&context, out).unwrap(), 1);
+        get_context(&mut context, pgc, Idx::PixelopIdx, out).await.unwrap();
+        assert_eq!(read_generic::<u32, _>(&context, out).unwrap(), 0, "the stand-in is not an address");
+
+        // Turning it off clears the slot.
+        set_context(&mut context, pgc, Idx::XorModeIdx, 0).await.unwrap();
+        get_context(&mut context, pgc, Idx::XorModeIdx, out).await.unwrap();
+        assert_eq!(read_generic::<u32, _>(&context, out).unwrap(), 0);
     }
 
     /// A string a title has not set yet is the empty one, and measuring or

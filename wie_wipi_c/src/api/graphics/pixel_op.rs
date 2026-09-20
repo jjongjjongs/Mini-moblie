@@ -29,7 +29,7 @@ use spin::Mutex;
 use wie_util::{Result, WieError};
 use wipi_types::wipic::WIPICWord;
 
-use crate::WIPICContext;
+use crate::{WIPICContext, api::graphics::grp_context::BUILT_IN_XOR};
 
 /// What a title's pixel operation turned out to be.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -287,12 +287,12 @@ fn fit_fade(matches: &Matches) -> Option<(i32, i32)> {
 /// mode on instead gets the built-in the reference plants for it: WIE has no
 /// guest address to report back for that one, so the slot a title reads stays
 /// empty while the drawing still inverts.
-pub async fn of_context(
-    context: &mut dyn WIPICContext,
-    function: WIPICWord,
-    param: WIPICWord,
-    xor_mode: WIPICWord,
-) -> Result<Option<(PixelOp, WIPICWord)>> {
+pub async fn of_context(context: &mut dyn WIPICContext, function: WIPICWord, param: WIPICWord) -> Result<Option<(PixelOp, WIPICWord)>> {
+    // XOR mode, which the reference keeps in this slot too - see `BUILT_IN_XOR`.
+    if function == BUILT_IN_XOR {
+        return Ok(Some((PixelOp::Invert, 0)));
+    }
+
     if function != 0 {
         // Asked once. A title draws through its context on every blit - 헬싱
         // makes 2,478 of them in one capture, all through the same context - and
@@ -325,10 +325,6 @@ pub async fn of_context(
             }
             Err(error) => Err(error),
         };
-    }
-
-    if xor_mode != 0 {
-        return Ok(Some((PixelOp::Invert, 0)));
     }
 
     Ok(None)

@@ -32,16 +32,41 @@ pub struct WIPICGraphicsContext {
     pub fgpxl: WIPICWord,
     pub bgpxl: WIPICWord,
     pub alpha: WIPICWord,
-    /// `MC_GrpPixelOpProc`, which the reference also plants for XOR mode.
-    pub pixel_op_func_ptr: WIPICWord,
+    /// The pixel a blit treats as transparent - op 3.
+    ///
+    /// Nothing here writes it: a title that names one does so through
+    /// `MC_grpSetContext`, which the reference neither stores nor reads back,
+    /// and our blits key on magenta. It is named because a clet's own pixel
+    /// operation reads it out of the context - 헬싱's, at `0x108ce8`, loads
+    /// `[context + 0x1c]`, compares the pixel it was given against it and
+    /// answers with the other one when they match, which is the transparency
+    /// test the whole title draws through.
+    pub transparent: WIPICWord,
     pub param1: WIPICWord,
     pub font: WIPICWord,
     pub style: WIPICWord,
-    /// Whether XOR mode is on, which op 9 turns on and off.
-    pub xor_mode: WIPICWord,
+    /// `MC_GrpPixelOpProc`, which the reference also plants for XOR mode.
+    ///
+    /// At `+0x2c`, after the style. 헬싱 is what says so: it fills this struct
+    /// itself rather than through `MC_grpSetContext`, and what it leaves there
+    /// is `0x108ce9` - the address of its own operation, inside its own image.
+    /// Taken from `+0x1c` instead, the transparent pixel `0xf81f` read as an
+    /// operation, and calling it took the title down on its first frame.
+    ///
+    /// XOR mode has no word of its own: it is this slot holding
+    /// [`BUILT_IN_XOR`].
+    pub pixel_op_func_ptr: WIPICWord,
     /// x, y
     pub offset: [WIPICWord; 2],
 }
+
+/// What stands in the operation slot for XOR mode.
+///
+/// Op 9 does not set a flag - the reference installs its own built-in
+/// operation, and the slot is where that goes. We have no guest address for
+/// that operation, so this stands in its place: recognised here, and never
+/// handed back to a title that reads the slot.
+pub const BUILT_IN_XOR: WIPICWord = 0xffff_ffff;
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy)]
