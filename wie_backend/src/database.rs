@@ -13,8 +13,11 @@ pub trait Database: Send {
     async fn get_record_ids(&self) -> Vec<RecordId>;
 }
 
+/// `Send + Sync` because a repository is reached through the shared `Platform`
+/// and used from the emulator's own task, which has to be able to move between
+/// threads. Every implementation is already behind a lock.
 #[async_trait::async_trait]
-pub trait DatabaseRepository {
+pub trait DatabaseRepository: Send + Sync {
     async fn open(&self, name: &str, app_id: &str) -> Box<dyn Database>;
     async fn exists(&self, name: &str, app_id: &str) -> bool;
     async fn delete(&self, name: &str, app_id: &str) -> bool;

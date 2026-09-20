@@ -16,6 +16,7 @@ use wie_util::{Result, WieError, write_generic};
 
 use crate::{
     adf::{KtfAdf, find_client_bin},
+    packaged_database::{PackagedDatabase, packaged_databases},
     runtime::KtfJvmSupport,
 };
 
@@ -224,6 +225,10 @@ impl KtfEmulator {
             .filter_map(|(path, data)| Some((packaged_name(path)?.to_owned(), data.clone())))
             .filter(|(path, _)| !path.is_empty())
             .collect::<BTreeMap<_, _>>();
+        // The databases that download left on the handset, which the same `P/`
+        // directory carries. See `crate::packaged_database`.
+        let databases = packaged_databases(&packaged);
+
         let funter = wie_backend::FunterEndpoint::new(packaged);
         if !funter.is_empty() {
             system.local_network().register(Box::new(funter));
@@ -259,7 +264,11 @@ impl KtfEmulator {
         let mut system_clone = system.clone();
         let jar_filename_clone = jar_filename.to_owned();
 
-        system.spawn(async move || Self::start(&mut core_clone, &mut system_clone, jar_filename_clone, main_class_name).await);
+        system.spawn(async move || {
+            Self::install_packaged_databases(&system_clone, databases).await;
+
+            Self::start(&mut core_clone, &mut system_clone, jar_filename_clone, main_class_name).await
+        });
 
         Ok(Self {
             core,
@@ -267,6 +276,31 @@ impl KtfEmulator {
             lcd_digest: None,
             lcd_seen: None,
         })
+    }
+
+    /// Puts the package's own databases where the title will look for them,
+    /// once.
+    ///
+    /// Only a database the handset has nothing of: a title that has been played
+    /// here has written its own records, and those are the ones it means. This
+    /// is why it is not done again on the next launch - the packaged copy is
+    /// what the handset started from, not what it holds now.
+    async fn install_packaged_databases(system: &System, databases: Vec<PackagedDatabase>) {
+        let pid = system.pid().to_owned();
+        let repository = system.platform().database_repository();
+
+        for database in databases {
+            if repository.exists(&database.name, &pid).await {
+                continue;
+            }
+
+            let mut store = repository.open(&database.name, &pid).await;
+            for record in &database.records {
+                store.add(record).await;
+            }
+
+            tracing::debug!("installed packaged database {} with {} records", database.name, database.records.len());
+        }
     }
 
     #[tracing::instrument(name = "start", skip_all)]

@@ -161,10 +161,15 @@ impl FileSystem {
     }
 
     async fn exists_with_flag(jvm: &Jvm, _context: &mut WieJvmContext, name: ClassInstanceRef<String>, flag: i32) -> JvmResult<bool> {
-        tracing::debug!("org.kwis.msp.io.FileSystem::exists({name:?}, {flag:?})");
+        // The path and the answer, not the handle: a title that asks whether
+        // its data is installed and then goes to a download server is telling
+        // us which directory it looked for. 파랜드택틱스 asks for `D`.
+        let path = JavaLangString::to_rust_string(jvm, &name).await?;
 
         let file = jvm.new_class("java/io/File", "(Ljava/lang/String;)V", (name,)).await?;
-        let exists = jvm.invoke_virtual(&file, "exists", "()Z", ()).await?;
+        let exists: bool = jvm.invoke_virtual(&file, "exists", "()Z", ()).await?;
+
+        tracing::debug!("org.kwis.msp.io.FileSystem::exists({path:?}, {flag:?}) -> {exists}");
 
         Ok(exists)
     }

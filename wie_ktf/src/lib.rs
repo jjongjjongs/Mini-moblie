@@ -4,6 +4,7 @@ extern crate alloc;
 mod adf;
 mod dump;
 mod emulator;
+mod packaged_database;
 mod runtime;
 
 pub use dump::dump_image;

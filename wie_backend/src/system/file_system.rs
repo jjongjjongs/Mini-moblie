@@ -169,6 +169,38 @@ impl FilesystemOverlay {
         self.virtual_files.lock().contains_key(&normalized)
     }
 
+    /// Whether `path` names a directory.
+    ///
+    /// A packaged archive is a flat list of file paths - there is no entry for
+    /// a directory of its own - so a directory is whatever some file is under.
+    /// 파랜드택틱스 is what asks: the data it would download lives in the
+    /// package's `P/D` and `P/I`, and before it will play it checks
+    /// `FileSystem.exists("D")`. Told no, it decides its data is missing and
+    /// goes to the download server for it, which is not there any more.
+    ///
+    /// Only the packaged layer is walked. The platform's own storage has no
+    /// listing to ask, so a directory holding nothing but files the title
+    /// itself wrote is still not one here.
+    pub async fn is_directory(&self, path: &str) -> bool {
+        let Some(normalized) = normalize_guest_path(path) else {
+            // The root, which `normalize_guest_path` refuses: "" and "/" are a
+            // directory whatever is under them.
+            return path.chars().all(|character| character == '/');
+        };
+
+        if normalized.is_empty() {
+            return true;
+        }
+
+        if self.platform.filesystem().exists(&self.aid, &normalized).await {
+            // A file of that name, not a directory.
+            return false;
+        }
+
+        let prefix = alloc::format!("{normalized}/");
+        self.virtual_files.lock().keys().any(|key| key.starts_with(&prefix))
+    }
+
     pub async fn size(&self, path: &str) -> Option<usize> {
         let normalized = normalize_guest_path(path)?;
 
@@ -675,6 +707,39 @@ mod tests {
 
         fs.write("written", 0, &[9]).await;
         assert!(fs.exists("written").await);
+    }
+
+    /// A packaged archive lists files, not directories, so what a file is
+    /// under is one. 파랜드택틱스 asks whether `D` is there before it decides
+    /// its data needs downloading again.
+    #[futures_test::test]
+    async fn a_directory_is_whatever_a_packaged_file_is_under() {
+        let fs = setup();
+        fs.add_virtual("D/FConfig.db", vec![1]);
+        fs.add_virtual("I/title.png", vec![2]);
+
+        assert!(fs.is_directory("D").await);
+        assert!(fs.is_directory("/D").await);
+        assert!(fs.is_directory("I").await);
+        assert!(fs.is_directory("").await);
+        assert!(fs.is_directory("/").await);
+
+        // A file is not a directory, and neither is a name nothing is under -
+        // including one that is only a prefix of a name.
+        assert!(!fs.is_directory("D/FConfig.db").await);
+        assert!(!fs.is_directory("E").await);
+        assert!(!fs.is_directory("D/FConfig").await);
+    }
+
+    /// The writable layer is the one a file of that name would be in, and a
+    /// file is not a directory whatever the packaged layer holds.
+    #[futures_test::test]
+    async fn a_written_file_is_not_a_directory() {
+        let fs = setup();
+        fs.add_virtual("D/FConfig.db", vec![1]);
+        fs.write("D", 0, &[9]).await;
+
+        assert!(!fs.is_directory("D").await);
     }
 
     #[futures_test::test]

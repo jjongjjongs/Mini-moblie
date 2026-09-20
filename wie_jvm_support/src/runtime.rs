@@ -229,12 +229,24 @@ where
             });
         }
 
-        let size = self.system.filesystem().size(path).await.ok_or(IOError::NotFound)?;
+        if let Some(size) = self.system.filesystem().size(path).await {
+            return Ok(FileStat {
+                size: size as _,
+                r#type: FileType::File,
+            });
+        }
 
-        Ok(FileStat {
-            size: size as _,
-            r#type: FileType::File,
-        })
+        // No file of that name, but the packaged archive may still hold files
+        // under it - a directory, which is what a title asking whether its data
+        // is installed is asking about. See `FilesystemOverlay::is_directory`.
+        if self.system.filesystem().is_directory(path).await {
+            return Ok(FileStat {
+                size: 0,
+                r#type: FileType::Directory,
+            });
+        }
+
+        Err(IOError::NotFound)
     }
 
     async fn find_rustjar_class(&self, jvm: &Jvm, classpath: &str, class: &str) -> JvmResult<Option<Box<dyn ClassDefinition>>> {
