@@ -7,7 +7,7 @@ mod pixel_op;
 use core::mem::size_of;
 
 use bytemuck::pod_collect_to_vec;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
 
@@ -88,8 +88,10 @@ pub async fn get_screen_framebuffer(context: &mut dyn WIPICContext, a0: WIPICWor
     OFFSCREEN_SURFACES.lock().clear();
 
     // And the panel, for the same reason: what the last title left on it is not
-    // under this one's first frame.
+    // under this one's first frame. Whether the title flushes is the last
+    // title's answer too.
     forget_panel();
+    TITLE_FLUSHES_LCD.store(false, Ordering::Relaxed);
 
     let (width, height) = {
         let platform = context.system().platform();
@@ -1122,6 +1124,14 @@ pub async fn flush_lcd(
         }
     }
 
+    TITLE_FLUSHES_LCD.store(true, Ordering::Relaxed);
+
+    // A title that flushes is driving the LCD, which is what keeps the MIDP
+    // layer from flushing its own screen image over the top - see
+    // `javax.microedition.lcdui.Display`. `KtfEmulator::present_lcd` used to be
+    // the only thing that said so, and it stands down for a title that flushes.
+    context.system().set_title_drives_lcd();
+
     present_region(context.system(), &*src_canvas, x as i32, y as i32, w as i32, h as i32);
 
     // What is on the surfaces the title drew into but never handed back. After
@@ -1131,6 +1141,21 @@ pub async fn flush_lcd(
     trace_offscreen_surfaces(context);
 
     Ok(())
+}
+
+/// Whether the title has flushed the LCD itself.
+///
+/// A platform has two ways of learning that a frame is ready. A title that
+/// composes through the `MC_grp*` calls says so with `MC_grpFlushLcd`; one
+/// whose C engine writes the frame buffer directly says nothing at all, and
+/// `KtfEmulator::present_lcd` watches the buffer for it instead. Once a title
+/// has flushed, it is the first kind, and the watcher must stand down: it shows
+/// the whole buffer, which is exactly what a partial flush is asking it not to.
+static TITLE_FLUSHES_LCD: AtomicBool = AtomicBool::new(false);
+
+/// Whether `MC_grpFlushLcd` has been called since the title started.
+pub fn title_flushes_lcd() -> bool {
+    TITLE_FLUSHES_LCD.load(Ordering::Relaxed)
 }
 
 /// The panel, as the last flush left it.

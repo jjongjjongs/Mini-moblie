@@ -321,6 +321,16 @@ impl KtfEmulator {
     /// that has been taken but not drawn into is all one value and is left alone
     /// too, so taking the pointer alone does not blank a title.
     fn present_lcd(&mut self) {
+        // A title that flushes has said when its frame is ready and which part
+        // of it to show, and this shows the whole buffer - see
+        // `wie_wipi_c::api::graphics::title_flushes_lcd`. LOA-혼돈의 서곡 flushes
+        // `240x295` on the frames it leaves its status bar alone, and this
+        // painting the whole `240x320` over the top is what put the bar back to
+        // whatever the frame buffer held, which is nothing.
+        if wie_wipi_c::api::graphics::title_flushes_lcd() {
+            return;
+        }
+
         let core = self.core.clone();
         let data_ptr = |memory: u32| -> Result<u32> {
             let base: u32 = wie_util::read_generic(&core, memory)?;
