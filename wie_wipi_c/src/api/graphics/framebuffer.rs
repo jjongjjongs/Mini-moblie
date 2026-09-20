@@ -506,7 +506,20 @@ impl Drop for FramebufferCanvas<'_> {
             return;
         }
 
-        tracing::warn!("framebuffer canvas dropped without explicit flush; write-back errors will be lost");
+        // Named, because this is the one line that says a surface was staged
+        // whole. A canvas reads every pixel of its surface out of guest memory,
+        // collects them, keeps a snapshot, and here reads them back and diffs
+        // the lot - and the paths that reach it are the ones a rectangle-sized
+        // read refused. Which surface refused is the whole question, and a
+        // bare line could not answer it: 드래곤하트2's menus produce twelve
+        // hundred of these a second and nothing said what they were staging.
+        tracing::warn!(
+            "framebuffer canvas dropped without explicit flush: {}x{} at {}bpp, bpl {}; write-back errors will be lost",
+            self.framebuffer.0.width,
+            self.framebuffer.0.height,
+            self.framebuffer.0.bpp,
+            self.framebuffer.0.bpl,
+        );
 
         let drawn = self.canvas.image().raw();
         if let Err(err) = self.framebuffer.write_diff(self.context, &self.snapshot, &drawn) {
