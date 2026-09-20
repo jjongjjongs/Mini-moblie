@@ -5,13 +5,15 @@ mod image;
 mod pixel_op;
 
 use core::mem::size_of;
+
+use bytemuck::pod_collect_to_vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use alloc::{string::String, vec, vec::Vec};
+use alloc::{boxed::Box, string::String, vec, vec::Vec};
 
 use wie_backend::{
-    Event,
-    canvas::{Canvas, Clip, Color, Image, PixelType, Rgb8Pixel, Rgb565Pixel, TextAlignment, string_width_px},
+    Event, System,
+    canvas::{Canvas, Clip, Color, Image, PixelType, Rgb8Pixel, Rgb332Pixel, Rgb565Pixel, TextAlignment, VecImageBuffer, string_width_px},
 };
 use wie_util::{ByteRead, Result, WieError, read_generic, read_null_terminated_string_bytes, write_generic};
 
@@ -84,6 +86,10 @@ pub async fn get_screen_framebuffer(context: &mut dyn WIPICContext, a0: WIPICWor
     // forgets them; left behind, they name allocations this title now owns for
     // something else.
     OFFSCREEN_SURFACES.lock().clear();
+
+    // And the panel, for the same reason: what the last title left on it is not
+    // under this one's first frame.
+    forget_panel();
 
     let (width, height) = {
         let platform = context.system().platform();
@@ -1116,7 +1122,7 @@ pub async fn flush_lcd(
         }
     }
 
-    wie_backend::present(context.system(), &*src_canvas);
+    present_region(context.system(), &*src_canvas, x as i32, y as i32, w as i32, h as i32);
 
     // What is on the surfaces the title drew into but never handed back. After
     // the paint, so the frame is on its way before this reads anything, and the
@@ -1125,6 +1131,119 @@ pub async fn flush_lcd(
     trace_offscreen_surfaces(context);
 
     Ok(())
+}
+
+/// The panel, as the last flush left it.
+///
+/// Width, height, bytes per pixel and the pixels themselves. A title's frame
+/// buffer and the panel are two surfaces on a handset, and `MC_grpFlushLcd`
+/// moves a rectangle from the one to the other - so what the call does not name
+/// stays on the panel. This is that panel.
+static PANEL: spin::Mutex<Option<Panel>> = spin::Mutex::new(None);
+
+/// Width, height, bytes per pixel, and the pixels.
+type Panel = (u32, u32, u32, Vec<u8>);
+
+/// Forgets the panel, so a title starting does not inherit the last one's.
+fn forget_panel() {
+    *PANEL.lock() = None;
+}
+
+/// Shows `image`, with only `(x, y, w, h)` of it reaching the panel.
+///
+/// LOA-혼돈의 서곡 is why this is not the whole frame every time. It composes
+/// its scene in a back buffer, copies the whole 240x320 of it over the screen
+/// buffer, draws the HP and SP bars, and then flushes `240x295` - the rows it
+/// changed. The status bar below them it drew on an earlier frame and flushed
+/// in full, and it expects the panel to still be holding it. Shown the whole
+/// frame buffer instead, the bar came and went with whichever frame had last
+/// redrawn it, which on the handset is a row of item icons and an experience
+/// bar that flicker.
+///
+/// A rectangle that covers the frame, or one that names nothing at all, goes
+/// straight through: the first has nothing to keep and the second is a title
+/// whose arguments this cannot read, which is better shown its frame than an
+/// empty panel.
+fn present_region(system: &mut System, image: &dyn Image, x: i32, y: i32, w: i32, h: i32) {
+    let (width, height, bpp) = (image.width(), image.height(), image.bytes_per_pixel());
+
+    let kept = {
+        let mut panel = PANEL.lock();
+
+        panel_after_flush(&mut panel, &image.raw(), width, height, bpp, x, y, w, h)
+    };
+
+    let Some(pixels) = kept else {
+        wie_backend::present(system, image);
+
+        return;
+    };
+
+    let shown: Box<dyn Image> = match bpp {
+        1 => Box::new(VecImageBuffer::<Rgb332Pixel>::from_raw(width, height, pod_collect_to_vec(&pixels))),
+        2 => Box::new(VecImageBuffer::<Rgb565Pixel>::from_raw(width, height, pod_collect_to_vec(&pixels))),
+        4 => Box::new(VecImageBuffer::<Rgb8Pixel>::from_raw(width, height, pod_collect_to_vec(&pixels))),
+        _ => {
+            wie_backend::present(system, image);
+
+            return;
+        }
+    };
+
+    wie_backend::present(system, &*shown);
+}
+
+/// Lays `(x, y, w, h)` of a frame onto the panel and answers with the panel, or
+/// with `None` where the frame is what should be shown as it is.
+///
+/// `None` covers a rectangle that spans the frame - nothing is kept, so there
+/// is no panel to build - and the cases this cannot read: a depth it cannot
+/// address, a rectangle that names nothing, a frame whose bytes do not amount
+/// to the size it reports. Each of those forgets the panel, because what it was
+/// holding is no longer known to line up with what is being shown.
+#[allow(clippy::too_many_arguments)]
+fn panel_after_flush(panel: &mut Option<Panel>, raw: &[u8], width: u32, height: u32, bpp: u32, x: i32, y: i32, w: i32, h: i32) -> Option<Vec<u8>> {
+    let covers_all = x <= 0 && y <= 0 && x.saturating_add(w) >= width as i32 && y.saturating_add(h) >= height as i32;
+    let addressable = matches!(bpp, 1 | 2 | 4);
+
+    let stride = width as usize * bpp as usize;
+    if w <= 0 || h <= 0 || !addressable || raw.len() < stride * height as usize {
+        *panel = None;
+
+        return None;
+    }
+
+    // A frame that covers the panel becomes the panel and is shown as it is.
+    // Keeping it is the whole point: the rows a later partial flush does not
+    // name are the rows this one left there.
+    if covers_all {
+        *panel = Some((width, height, bpp, raw.to_vec()));
+
+        return None;
+    }
+
+    // A panel of another shape is another title's, or another screen size:
+    // nothing on it belongs under this frame.
+    let fits = matches!(panel.as_ref(), Some((panel_width, panel_height, panel_bpp, _)) if (*panel_width, *panel_height, *panel_bpp) == (width, height, bpp));
+    if !fits {
+        *panel = Some((width, height, bpp, vec![0; stride * height as usize]));
+    }
+
+    let pixels = &mut panel.as_mut().unwrap().3;
+
+    let left = x.max(0) as usize;
+    let right = x.saturating_add(w).clamp(0, width as i32) as usize;
+    let top = y.max(0) as usize;
+    let bottom = y.saturating_add(h).clamp(0, height as i32) as usize;
+
+    for row in top..bottom {
+        let from = row * stride + left * bpp as usize;
+        let to = row * stride + right * bpp as usize;
+
+        pixels[from..to].copy_from_slice(&raw[from..to]);
+    }
+
+    Some(pixels.clone())
 }
 
 pub async fn get_pixel_from_rgb(_context: &mut dyn WIPICContext, r: i32, g: i32, b: i32) -> Result<WIPICWord> {
@@ -2450,6 +2569,8 @@ pub async fn get_framebuffer_bpp(_context: &mut dyn WIPICContext, framebuffer: W
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec::Vec;
+
     use wie_util::{ByteWrite, read_generic, write_generic};
 
     use wie_backend::canvas::{ArgbPixel, Color, Image, PixelType, Rgb565Pixel, VecImageBuffer};
@@ -2460,6 +2581,104 @@ mod tests {
         get_unicode_string_width, init_context, set_context, surface_content, surface_thumbnail,
     };
     use crate::context::{WIPICContext, test::TestContext};
+
+    /// A flush that names part of the frame leaves the rest of the panel
+    /// standing.
+    ///
+    /// LOA-혼돈의 서곡's gameplay loop is the case: it copies a whole 240x320
+    /// back buffer over the screen buffer, redraws the HP and SP bars, and
+    /// flushes `240x295`. Its status bar lives in the rows below that and was
+    /// drawn and flushed in full on an earlier frame, so the panel is where it
+    /// still is. Shown the whole frame buffer, it flickered at whatever rate
+    /// the title happened to redraw it.
+    #[test]
+    fn a_flush_that_names_part_of_the_frame_keeps_the_rest_of_the_panel() {
+        let mut panel = None;
+
+        // Two rows of a 4x2 16bpp frame, each pixel numbered so a row that
+        // moved is visible.
+        let first: Vec<u8> = (0..16u8).collect();
+        let shown = super::panel_after_flush(&mut panel, &first, 4, 2, 2, 0, 0, 4, 2);
+
+        // The first flush covers the frame, so the frame itself is what goes up
+        // - and is what the panel now holds.
+        assert_eq!(shown, None);
+
+        // Now a frame whose every byte differs, flushed one row high.
+        let second: Vec<u8> = (0..16u8).map(|byte| byte + 100).collect();
+        let shown = super::panel_after_flush(&mut panel, &second, 4, 2, 2, 0, 0, 4, 1).expect("a panel");
+
+        assert_eq!(&shown[..8], &second[..8], "the flushed row is the new frame's");
+        assert_eq!(&shown[8..], &first[8..], "and the row below it is what the full flush left");
+
+        // A third frame, flushed the same way, leaves that row alone again.
+        let third: Vec<u8> = (0..16u8).map(|byte| byte + 200).collect();
+        let shown = super::panel_after_flush(&mut panel, &third, 4, 2, 2, 0, 0, 4, 1).expect("a panel");
+
+        assert_eq!(&shown[..8], &third[..8]);
+        assert_eq!(&shown[8..], &first[8..]);
+    }
+
+    /// A flush that covers the frame becomes the panel, and is what a later
+    /// partial flush keeps.
+    ///
+    /// This is the half the first attempt at it got wrong: a full flush threw
+    /// the panel away instead of storing it, so every partial flush after one
+    /// built on a blank panel and the band stayed as black as before.
+    #[test]
+    fn a_full_flush_becomes_the_panel() {
+        let mut panel = None;
+
+        let full: Vec<u8> = (0..16u8).collect();
+        assert_eq!(
+            super::panel_after_flush(&mut panel, &full, 4, 2, 2, 0, 0, 4, 2),
+            None,
+            "a frame that covers the panel is shown as it is"
+        );
+        assert!(panel.is_some(), "and is kept, for the flush after it");
+
+        let partial: Vec<u8> = (0..16u8).map(|byte| byte + 100).collect();
+        let shown = super::panel_after_flush(&mut panel, &partial, 4, 2, 2, 0, 0, 4, 1).expect("a panel");
+
+        assert_eq!(&shown[..8], &partial[..8], "the flushed row");
+        assert_eq!(&shown[8..], &full[8..], "and the row the full flush left there");
+    }
+
+    /// A rectangle this cannot read shows the frame rather than an empty panel.
+    #[test]
+    fn an_unreadable_flush_shows_the_frame() {
+        let frame: Vec<u8> = (0..16u8).collect();
+
+        for (x, y, w, h) in [(0, 0, 0, 2), (0, 0, 4, 0), (0, 0, -1, 2)] {
+            let mut panel = None;
+            assert_eq!(
+                super::panel_after_flush(&mut panel, &frame, 4, 2, 2, x, y, w, h),
+                None,
+                "({x},{y},{w},{h})"
+            );
+        }
+
+        // A depth with no pixel type behind it, and a frame shorter than it says.
+        let mut panel = None;
+        assert_eq!(super::panel_after_flush(&mut panel, &frame, 4, 2, 3, 0, 0, 4, 1), None);
+        assert_eq!(super::panel_after_flush(&mut panel, &frame[..4], 4, 2, 2, 0, 0, 4, 1), None);
+    }
+
+    /// A frame of another shape is another title's, and the panel goes with it.
+    #[test]
+    fn a_panel_of_another_shape_is_not_kept_under_this_frame() {
+        let mut panel = None;
+
+        let wide: Vec<u8> = (0..16u8).collect();
+        super::panel_after_flush(&mut panel, &wide, 4, 2, 2, 0, 0, 4, 1).expect("a panel");
+
+        let tall: Vec<u8> = (0..16u8).map(|byte| byte + 100).collect();
+        let shown = super::panel_after_flush(&mut panel, &tall, 2, 4, 2, 0, 0, 2, 1).expect("a panel");
+
+        assert_eq!(shown.len(), 16);
+        assert_eq!(&shown[..4], &tall[..4]);
+        assert_eq!(&shown[4..], &[0; 12], "the rest is a fresh panel, not the last title's rows");
+    }
 
     /// A 2x2 red PNG, the smallest thing `create_image` will take.
     const TINY_PNG: [u8; 73] = [
