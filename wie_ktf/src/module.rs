@@ -16,33 +16,39 @@ use core::mem::size_of;
 use wie_core_arm::ArmCore;
 use wie_util::{Result, WieError, read_generic, write_generic};
 
-/// The header a relocated module carries: a bss size, a relocation count, a
-/// reserved word, and then the relocations.
-const HEADER_WORDS: usize = 3;
+/// The header a relocated module carries: a bss size and a relocation count,
+/// and then the relocations.
+///
+/// Two words and not three. A third would leave the last offset out of order -
+/// it would read the image's own first word as a relocation - and wfeature
+/// reads the entry at `image + 0x24`, which is only the odd word when the
+/// image starts here.
+const HEADER_WORDS: usize = 2;
 
 /// A module the loader is expected to relocate itself.
 ///
-/// The header is three words - the bss size, how many relocations follow, and
-/// a word that is zero in the one archive that has this - then that many byte
-/// offsets into the image, then the image. wfeature, which runs 텐가이, agrees:
+/// The header is two words - the bss size and how many relocations follow -
+/// then that many byte offsets into the image, then the image. wfeature, which runs 텐가이, agrees:
 /// it refuses a `client.binN` whose first word does not match the suffix
 /// ("KTF client image %q suffix names BSS %d but image specifies %d") and
 /// biases every word the table names by where the image lands.
 ///
 /// What is known of the image, offsets its own:
 ///
-/// | word | 텐가이's | what it is                                    |
-/// |------|-----------|-----------------------------------------------|
-/// | +00  | 0         |                                               |
-/// | +04  | 0x5f2c0   | a word past the image - bss                    |
-/// | +08  | 0x57344   | the imported names, NUL separated              |
-/// | +0c  | 0x5772c   | pointers into the constant pool                |
-/// | +10  | 0x480     | where the code starts                          |
-/// | +14  | 0x5ed6c   | the module field table                         |
-/// | +18  | 0x5f2a4   | bss again                                      |
-/// | +20  | 0x52745   | Thumb, and the only odd word: the entry        |
+/// | word | 텐가이's    | what it is                                  |
+/// |------|-------------|---------------------------------------------|
+/// | +00  | 0x5e7bc     |                                             |
+/// | +04  | 0           |                                             |
+/// | +08  | 0x5f2c0     | a word past the image - bss                  |
+/// | +0c  | 0x57344     | the imported names, NUL separated             |
+/// | +10  | 0x5772c     | pointers into the constant pool               |
+/// | +14  | 0x480       | where the code starts                         |
+/// | +18  | 0x5ed6c     | the module field table                        |
+/// | +1c  | 0x5f2a4     | bss again                                     |
+/// | +20  | 0x13580001  |                                             |
+/// | +24  | 0x52745     | Thumb, and the only odd word: the entry       |
 ///
-/// Everything but `+00`, `+04` and `+20` is relocated.
+/// Everything but `+04` and `+20` is relocated, the entry included.
 pub struct RelocatedModule {
     pub bss_size: u32,
     pub relocations: usize,
@@ -66,7 +72,7 @@ impl RelocatedModule {
 
         let bss_size = word(0)?;
         let relocations = word(1)? as usize;
-        if word(2)? != 0 || relocations == 0 {
+        if relocations == 0 {
             return None;
         }
 
@@ -76,25 +82,21 @@ impl RelocatedModule {
             return None;
         }
 
-        let mut highest = 0;
-        let mut climbing = 0;
+        // Sorted, word aligned, and every one of them inside the image that
+        // follows. A module of the ordinary kind starts with Thumb code, whose
+        // first words are far too small to be a count that fits, so it never
+        // gets this far.
+        let mut previous = None;
         for index in 0..relocations {
             let offset = word(HEADER_WORDS + index)?;
             if offset as usize >= image_size || offset % size_of::<u32>() as u32 != 0 {
                 return None;
             }
 
-            if offset >= highest {
-                climbing += 1;
+            if previous.is_some_and(|previous| offset < previous) {
+                return None;
             }
-            highest = highest.max(offset);
-        }
-
-        // One of 텐가이's 3,271 offsets goes backwards, so this is "climbs"
-        // rather than "is sorted" - but a table of anything else would not
-        // climb at all.
-        if climbing * 100 < relocations * 99 {
-            return None;
+            previous = Some(offset);
         }
 
         Some(Self {
@@ -139,11 +141,66 @@ impl RelocatedModule {
         Ok(())
     }
 
-    /// The word the image keeps its entry in, at `+0x20`.
+    /// The word the image keeps its module field table in, at `+0x18`.
+    pub const MODULE_FIELDS_OFFSET: usize = 0x18;
+
+    /// One word of the image's header, as it is on the wire.
+    fn header_word(&self, data: &[u8], offset: usize) -> Result<u32> {
+        let at = self.image_offset + offset;
+        let word = data
+            .get(at..at + size_of::<u32>())
+            .ok_or_else(|| WieError::FatalError(format!("a relocated module with no word at {offset:#x}")))?;
+
+        Ok(u32::from_le_bytes(word.try_into().unwrap()))
+    }
+
+    /// Where the module field table is, as an image offset.
+    pub fn module_fields(&self, data: &[u8]) -> Result<u32> {
+        self.header_word(data, Self::MODULE_FIELDS_OFFSET)
+    }
+
+    /// Adds the image's base to every word of the module field table.
     ///
-    /// Not in the relocation table: the loader is what biases it, the same way
-    /// it biases every word the table does name.
-    pub const ENTRY_OFFSET: usize = 0x20;
+    /// The relocation table stops short of it - 텐가이's last offset is
+    /// `0x5ed60` and its table starts at `0x5ed6c` - and the module reads one
+    /// of those words the moment its entry runs, so something else has to
+    /// bias them. wfeature has that something, as `rebaseModuleFields`, and
+    /// what it rebases is this: the table runs from the word at `+0x18` to the
+    /// end of the image, 334 words of 텐가이's, and every one of them is an
+    /// offset into the image.
+    ///
+    /// Done after [`RelocatedModule::relocate`], because the word that says
+    /// where the table is is itself one the relocation table names.
+    pub fn rebase_module_fields(&self, core: &mut ArmCore, data: &[u8], load_address: u32) -> Result<()> {
+        let base = self.base(load_address);
+        let table = self.module_fields(data)?;
+        let image_size = (data.len() - self.image_offset) as u32;
+
+        if table >= image_size {
+            return Err(WieError::FatalError(format!(
+                "a relocated module whose field table at {table:#x} is past its {image_size:#x} bytes"
+            )));
+        }
+
+        for at in (table..image_size).step_by(size_of::<u32>()) {
+            if at + size_of::<u32>() as u32 > image_size {
+                break;
+            }
+
+            let word: u32 = read_generic(core, base + at)?;
+            write_generic(core, base + at, word.wrapping_add(base))?;
+        }
+
+        Ok(())
+    }
+
+    /// The word the image keeps its entry in, at `+0x24`, which is where
+    /// wfeature reads it.
+    ///
+    /// It is in the relocation table too, so the image's own copy is biased as
+    /// well - but the loader needs it before it has run anything, so it takes
+    /// it off the wire and biases it itself.
+    pub const ENTRY_OFFSET: usize = 0x24;
 
     /// Where the image's entry is, once the image is at its base.
     pub fn entry(&self, data: &[u8], load_address: u32) -> Result<u32> {
@@ -198,7 +255,6 @@ mod tests {
         let mut data = Vec::new();
         data.extend_from_slice(&64u32.to_le_bytes());
         data.extend_from_slice(&(relocations.len() as u32).to_le_bytes());
-        data.extend_from_slice(&0u32.to_le_bytes());
         for offset in relocations {
             data.extend_from_slice(&offset.to_le_bytes());
         }
@@ -214,7 +270,7 @@ mod tests {
         let module = RelocatedModule::parse(&data).expect("a relocated module");
         assert_eq!(module.bss_size, 64);
         assert_eq!(module.relocations, 4);
-        assert_eq!(module.image_offset, (3 + 4) * 4);
+        assert_eq!(module.image_offset, (2 + 4) * 4);
     }
 
     /// The module every other archive carries, which starts with its own Thumb
@@ -259,13 +315,13 @@ mod tests {
     #[test]
     fn the_entry_is_behind_the_header_and_the_table() {
         let mut image = vec![0u8; 0x40];
-        image[0x20..0x24].copy_from_slice(&0x52745u32.to_le_bytes());
+        image[0x24..0x28].copy_from_slice(&0x52745u32.to_le_bytes());
 
         let data = relocated(&[8, 0xc], &image);
         let module = RelocatedModule::parse(&data).expect("a relocated module");
 
-        assert_eq!(module.base(0x100000), 0x100000 + (3 + 2) * 4);
-        assert_eq!(module.entry(&data, 0x100000).unwrap(), 0x100000 + (3 + 2) * 4 + 0x52745);
+        assert_eq!(module.base(0x100000), 0x100000 + (2 + 2) * 4);
+        assert_eq!(module.entry(&data, 0x100000).unwrap(), 0x100000 + (2 + 2) * 4 + 0x52745);
     }
 
     /// The offsets come back in the order the table holds them.
