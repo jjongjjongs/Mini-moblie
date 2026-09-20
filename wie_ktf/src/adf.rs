@@ -5,7 +5,7 @@ use alloc::{
     vec::Vec,
 };
 
-use wie_backend::{extract_zip, protected_container};
+use wie_backend::{extract_zip, protected_container, zip_entry_names};
 use wie_util::{Result, WieError, descriptor_value};
 
 pub struct KtfAdf {
@@ -87,6 +87,20 @@ pub fn find_client_bin(jar: &[u8]) -> Result<(String, Vec<u8>)> {
         .ok_or_else(|| WieError::FatalError("client.bin* not found in jar".to_string()))
 }
 
+/// The jar's `client.bin*` by name, without unpacking anything.
+///
+/// The JVM can find it too - open `java/util/jar/JarFile`, walk `entries()`
+/// and ask each one its name - and that is what this runtime used to do. Every
+/// step of that walk is a JarEntry, a ZipEntry, a String and two char arrays
+/// built through the KTF bridge, which writes each one into guest memory and
+/// runs the title\'s own ARM to do it. 헬싱\'s jar holds 915 entries and
+/// keeps its `client.bin17108` last, so its first tick spent fifteen thousand
+/// method calls walking past nine hundred images to read one name this side
+/// already had.
+pub fn client_bin_name(jar: &[u8]) -> Option<String> {
+    zip_entry_names(jar).ok()?.into_iter().find(|name| name.starts_with("client.bin"))
+}
+
 pub fn parse_bss_size(filename: &str) -> Result<u32> {
     filename
         .strip_prefix("client.bin")
@@ -97,7 +111,8 @@ pub fn parse_bss_size(filename: &str) -> Result<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{KtfAdf, parse_bss_size};
+    use super::{KtfAdf, client_bin_name, find_client_bin, parse_bss_size};
+    use wie_backend::extract_zip;
 
     #[test]
     fn parse_adf_full() {
@@ -175,5 +190,30 @@ mod tests {
     #[test]
     fn parse_bss_size_non_numeric() {
         assert!(parse_bss_size("client.binABC").is_err());
+    }
+
+    /// The name off the jar's directory is the one unpacking it finds.
+    ///
+    /// This is the whole point of the fast path: the two have to agree, or a
+    /// title starts the wrong module - or, worse, quietly falls back to the
+    /// walk that 헬싱\'s jar makes cost seconds.
+    #[test]
+    fn the_name_off_the_directory_is_the_one_unpacking_finds() {
+        let archive = extract_zip(include_bytes!("../../test_data/helloworld_ktf.zip")).unwrap();
+        let jar = archive.get("00000000.jar").unwrap();
+
+        let (unpacked, _) = find_client_bin(jar).unwrap();
+        assert_eq!(client_bin_name(jar).as_deref(), Some(unpacked.as_str()));
+        assert!(unpacked.starts_with("client.bin"));
+    }
+
+    /// An archive with no module in it has no name to give, and the caller
+    /// falls back to asking the JVM rather than starting nothing.
+    #[test]
+    fn a_jar_without_a_module_names_none() {
+        let outer = include_bytes!("../../test_data/helloworld_ktf.zip");
+
+        assert_eq!(client_bin_name(outer), None, "the outer archive holds a jar, not a module");
+        assert_eq!(client_bin_name(b"not a zip at all"), None);
     }
 }

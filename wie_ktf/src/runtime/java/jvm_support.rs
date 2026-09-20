@@ -84,7 +84,16 @@ const SUPPORT_CONTEXT_BASE: u32 = 0x7fff0000;
 pub struct KtfJvmSupport;
 
 impl KtfJvmSupport {
-    pub async fn init(core: &mut ArmCore, system: &mut System, jar_name: Option<&str>) -> Result<(Jvm, Box<dyn ClassInstance>)> {
+    /// `binary_name` is the jar's `client.bin*`, when the caller already knows
+    /// it - see `crate::adf::client_bin_name`. Without one the jar is walked
+    /// through the JVM to find it, which is what this used to do always and
+    /// what cost a title with a large jar seconds of its first tick.
+    pub async fn init(
+        core: &mut ArmCore,
+        system: &mut System,
+        jar_name: Option<&str>,
+        binary_name: Option<&str>,
+    ) -> Result<(Jvm, Box<dyn ClassInstance>)> {
         let jvm_context = InitParam2 {
             unk1: 0,
             unk2: 0,
@@ -138,26 +147,9 @@ impl KtfJvmSupport {
         }
 
         // find client.bin
-        let jar_name_java = JavaLangString::from_rust_string(&jvm, jar_name.unwrap()).await.unwrap();
-        let jar_file = jvm
-            .new_class("java/util/jar/JarFile", "(Ljava/lang/String;)V", (jar_name_java,))
-            .await
-            .unwrap();
-        let entries: ClassInstanceRef<Enumeration> = jvm.invoke_virtual(&jar_file, "entries", "()Ljava/util/Enumeration;", []).await.unwrap();
-
-        let binary_name = loop {
-            let has_more_elements: bool = jvm.invoke_virtual(&entries, "hasMoreElements", "()Z", []).await.unwrap();
-            if !has_more_elements {
-                return Err(WieError::FatalError("client.bin not found".into()));
-            }
-
-            let entry: ClassInstanceRef<JarEntry> = jvm.invoke_virtual(&entries, "nextElement", "()Ljava/lang/Object;", []).await.unwrap();
-            let name = jvm.invoke_virtual(&entry, "getName", "()Ljava/lang/String;", []).await.unwrap();
-            let name_rust = JavaLangString::to_rust_string(&jvm, &name).await.unwrap();
-
-            if name_rust.starts_with("client.bin") {
-                break name;
-            }
+        let binary_name = match binary_name {
+            Some(name) => JavaLangString::from_rust_string(&jvm, name).await.unwrap(),
+            None => Self::find_client_bin(&jvm, jar_name.unwrap()).await?,
         };
 
         let class_loader_class = JavaClassDefinition::new(
@@ -191,6 +183,35 @@ impl KtfJvmSupport {
         };
 
         Ok((jvm, class_loader))
+    }
+
+    /// The jar's `client.bin*`, found by walking it through the JVM.
+    ///
+    /// The slow way, kept for a caller that has no name to give - every step
+    /// builds a JarEntry, a ZipEntry and a String in guest memory. See
+    /// `crate::adf::client_bin_name` for the fast one.
+    async fn find_client_bin(jvm: &Jvm, jar_name: &str) -> Result<Box<dyn ClassInstance>> {
+        let jar_name_java = JavaLangString::from_rust_string(jvm, jar_name).await.unwrap();
+        let jar_file = jvm
+            .new_class("java/util/jar/JarFile", "(Ljava/lang/String;)V", (jar_name_java,))
+            .await
+            .unwrap();
+        let entries: ClassInstanceRef<Enumeration> = jvm.invoke_virtual(&jar_file, "entries", "()Ljava/util/Enumeration;", []).await.unwrap();
+
+        loop {
+            let has_more_elements: bool = jvm.invoke_virtual(&entries, "hasMoreElements", "()Z", []).await.unwrap();
+            if !has_more_elements {
+                return Err(WieError::FatalError("client.bin not found".into()));
+            }
+
+            let entry: ClassInstanceRef<JarEntry> = jvm.invoke_virtual(&entries, "nextElement", "()Ljava/lang/Object;", []).await.unwrap();
+            let name = jvm.invoke_virtual(&entry, "getName", "()Ljava/lang/String;", []).await.unwrap();
+            let name_rust = JavaLangString::to_rust_string(jvm, &name).await.unwrap();
+
+            if name_rust.starts_with("client.bin") {
+                return Ok(name);
+            }
+        }
     }
 
     pub fn class_definition_raw(definition: &dyn ClassDefinition) -> Result<u32> {
@@ -300,7 +321,7 @@ mod test {
         context.sp = stack + 0x100;
         core.restore_context(&context);
 
-        let (jvm, _) = KtfJvmSupport::init(&mut core, system, None).await?;
+        let (jvm, _) = KtfJvmSupport::init(&mut core, system, None, None).await?;
 
         Ok((jvm, core))
     }

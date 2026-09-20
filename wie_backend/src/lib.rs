@@ -103,6 +103,33 @@ pub fn protected_container(data: &[u8]) -> Option<&'static str> {
     (data.get(..4)? == b"odcf" && data.get(12..16)? == b"odrm").then_some("OMA DRM (DCF)")
 }
 
+/// The names of an archive's entries, without unpacking any of them.
+///
+/// Only the central directory is read, so this costs nothing next to
+/// [`extract_zip`] - which is the point: finding one entry by name should not
+/// mean decompressing nine hundred others.
+pub fn zip_entry_names(zip: &[u8]) -> Result<Vec<String>> {
+    extern crate std; // XXX
+
+    use std::io::Cursor;
+    use zip::ZipArchive;
+
+    // The same re-read `extract_zip` does, and for the same reason.
+    let patched;
+    let zip = match ZipArchive::new(Cursor::new(zip)) {
+        Ok(_) => zip,
+        Err(error) => {
+            patched = drop_unicode_path_fields(zip).ok_or_else(|| WieError::FatalError(format!("Invalid zip archive: {error}")))?;
+
+            &patched
+        }
+    };
+
+    let archive = ZipArchive::new(Cursor::new(zip)).map_err(|x| WieError::FatalError(format!("Invalid zip archive: {x}")))?;
+
+    Ok(archive.file_names().map(String::from).collect())
+}
+
 pub fn extract_zip(zip: &[u8]) -> Result<BTreeMap<String, Vec<u8>>> {
     extern crate std; // XXX
 

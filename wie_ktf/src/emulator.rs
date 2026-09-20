@@ -15,7 +15,7 @@ use wie_jvm_support::JvmSupport;
 use wie_util::{Result, WieError, write_generic};
 
 use crate::{
-    adf::{KtfAdf, find_client_bin},
+    adf::{KtfAdf, client_bin_name, find_client_bin},
     packaged_database::{PackagedDatabase, packaged_databases},
     runtime::KtfJvmSupport,
 };
@@ -260,6 +260,10 @@ impl KtfEmulator {
             if annunciator { ANNUNCIATOR_ROWS } else { 0 },
         )?;
 
+        // The module to run, read off the jar's own directory rather than
+        // walked to through the JVM. See `crate::adf::client_bin_name`.
+        let binary_name = files.get(jar_filename).and_then(|jar| client_bin_name(jar));
+
         let mut core_clone = core.clone();
         let mut system_clone = system.clone();
         let jar_filename_clone = jar_filename.to_owned();
@@ -267,7 +271,7 @@ impl KtfEmulator {
         system.spawn(async move || {
             Self::install_packaged_databases(&system_clone, databases).await;
 
-            Self::start(&mut core_clone, &mut system_clone, jar_filename_clone, main_class_name).await
+            Self::start(&mut core_clone, &mut system_clone, jar_filename_clone, binary_name, main_class_name).await
         });
 
         Ok(Self {
@@ -304,8 +308,14 @@ impl KtfEmulator {
     }
 
     #[tracing::instrument(name = "start", skip_all)]
-    async fn start(core: &mut ArmCore, system: &mut System, jar_filename: String, main_class_name: Option<String>) -> Result<()> {
-        let (jvm, class_loader) = KtfJvmSupport::init(core, system, Some(&jar_filename)).await?;
+    async fn start(
+        core: &mut ArmCore,
+        system: &mut System,
+        jar_filename: String,
+        binary_name: Option<String>,
+        main_class_name: Option<String>,
+    ) -> Result<()> {
+        let (jvm, class_loader) = KtfJvmSupport::init(core, system, Some(&jar_filename), binary_name.as_deref()).await?;
 
         let main_class_name = if let Some(x) = main_class_name {
             x
