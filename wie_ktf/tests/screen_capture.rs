@@ -81,6 +81,10 @@ fn profile_from_env() -> Option<wie_backend::ProfileCallback> {
             let folded: Vec<String> = sample.stack.iter().rev().map(|pc| format!("{pc:#x}")).collect();
             let _ = writeln!(writer, "{} {}", folded.join(";"), sample.count);
         }
+        // The core keeps its callback alive for the run, so nothing drops this
+        // writer and nothing else would ever flush it - the file came out
+        // empty.
+        let _ = writer.flush();
     }))
 }
 
@@ -231,22 +235,43 @@ impl Network for CaptureNetwork {
 /// fly, one that never asks had it stand still, and nothing measured in those
 /// milliseconds meant anything on a frontend where the clock is real.
 ///
-/// It runs on the guest's own execution now. Within a tick time advances only as
+/// It runs on the guest's own execution now (but see `WIE_REAL_CLOCK`). Within a tick time advances only as
 /// the guest executes, which keeps `Executor::tick`'s own eight-millisecond bound
 /// both reachable and bounded; at the end of a tick the probe folds that
 /// execution into the base and charges at least a tick's worth, so a moment where
 /// every task is asleep still ends. Taking whichever of the two had got further
 /// instead makes the bound "execute until work catches up with the tick count",
 /// which for a title that has been idle is not a bound at all.
+///
+/// `WIE_REAL_CLOCK` hands the guest the host's clock instead, which is what a
+/// frontend gives it. A title that waits by spinning against the clock - í¬ì±
+/// does, from thirty-eight places, ten milliseconds at a time - then waits the
+/// time it asked for rather than the time its spinning buys, and a measurement
+/// of how long a start takes means what it says. It costs the run real
+/// seconds, so it is for measuring a start and not for a sweep.
 #[derive(Default)]
 struct ProbeClock {
     base_ms: AtomicU64,
     anchor: AtomicU64,
     reads: AtomicU64,
+    real: bool,
 }
 
 impl ProbeClock {
+    fn from_env() -> Self {
+        Self {
+            real: std::env::var("WIE_REAL_CLOCK").is_ok(),
+            ..Self::default()
+        }
+    }
+
     fn now_ms(&self) -> u64 {
+        if self.real {
+            return std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_millis() as u64);
+        }
+
         let executed = wie_core_arm::EXECUTED_INSTRUCTIONS.load(Ordering::Relaxed);
         let since = executed.saturating_sub(self.anchor.load(Ordering::SeqCst));
         let reads = self.reads.fetch_add(1, Ordering::SeqCst);
@@ -265,6 +290,10 @@ impl ProbeClock {
     /// Ends a tick: what the guest executed becomes time, and an idle tick still
     /// costs one.
     fn advance(&self) {
+        if self.real {
+            return;
+        }
+
         let executed = wie_core_arm::EXECUTED_INSTRUCTIONS.load(Ordering::Relaxed);
         let worked = executed.saturating_sub(self.anchor.swap(executed, Ordering::SeqCst)) / GUEST_STEPS_PER_MS;
         let read = self.reads.swap(0, Ordering::SeqCst) / READS_PER_MS;
@@ -597,7 +626,7 @@ fn run_once(
         ..Default::default()
     };
 
-    let tick_clock = Arc::new(ProbeClock::default());
+    let tick_clock = Arc::new(ProbeClock::from_env());
     let platform = Box::new(CapturePlatform {
         inner: TestPlatform::with_state_and_event_handler(state.clone(), move |event| match event {
             TestPlatformEvent::Stdout(buf) => eprint!("[stdout] {}", String::from_utf8_lossy(&buf)),
