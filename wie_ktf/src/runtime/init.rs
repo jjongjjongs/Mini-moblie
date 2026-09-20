@@ -4,6 +4,7 @@ use jvm::Jvm;
 
 use wie_backend::System;
 use wie_core_arm::{Allocator, ArmCore, EmulatedFunction, ResultWriter, SvcId};
+use wie_jvm_support::JvmSupport;
 use wie_util::{Result, WieError, read_generic, read_null_terminated_string_bytes, write_generic};
 
 use wipi_types::ktf::{
@@ -15,43 +16,137 @@ use crate::{
     adf::parse_bss_size,
     emulator::IMAGE_BASE,
     runtime::{
-        SVC_CATEGORY_INIT, SVC_CATEGORY_MODULE, SVC_CATEGORY_MODULE_CLASS,
-        java::interface::{get_wipi_jb_interface, java_array_new, java_check_type, java_class_load, java_new, java_throw},
+        SVC_CATEGORY_INIT, SVC_CATEGORY_MODULE, SVC_CATEGORY_MODULE_CLASS, SVC_CATEGORY_MODULE_JUMP,
+        java::{
+            interface::{get_java_method, get_wipi_jb_interface, java_array_new, java_check_type, java_class_load, java_new, java_throw},
+            jvm_support::KtfJvmSupport,
+        },
         svc_ids::InitSvcId,
         wipi_c::{interface::get_wipic_knl_interface, register_wipic_svc_handler},
     },
 };
 
 pub fn register_init_svc_handler(core: &mut ArmCore, jvm: &Jvm) -> Result<()> {
-    core.register_svc_handler(SVC_CATEGORY_MODULE, handle_module_svc, &())?;
+    core.register_svc_handler(SVC_CATEGORY_MODULE, handle_module_svc, jvm)?;
     core.register_svc_handler(SVC_CATEGORY_MODULE_CLASS, handle_module_class_svc, &())?;
+    core.register_svc_handler(SVC_CATEGORY_MODULE_JUMP, handle_module_jump_svc, &())?;
     core.register_svc_handler(SVC_CATEGORY_INIT, handle_init_svc, jvm)
 }
 
 /// How many slots `MNInterface` is handed out with.
 ///
-/// A guess, and deliberately a loud one: nothing has called through it yet, so
-/// nothing says how many there are. Every slot answers with a warning naming
-/// itself and its arguments, so the first title that uses one says what it is
-/// in a single run.
+/// A guess, and deliberately a loud one: the slots below are the ones a title
+/// has asked for, and every other slot answers with a warning naming itself
+/// and its arguments, so the next one says what it is in a single run.
 const MODULE_INTERFACE_SLOTS: u32 = 64;
 
-/// A slot of `MNInterface`, which writes down what it was asked and answers
-/// nothing.
-async fn handle_module_svc(core: &mut ArmCore, _: &mut (), id: SvcId) -> Result<()> {
+/// `MNInterface`'s throw, at `+0x20`, which takes the name of the class to
+/// throw and a word the module leaves zero.
+const MODULE_JAVA_THROW: u32 = 0x20 / size_of::<u32>() as u32;
+
+/// `MNInterface`'s instantiate, at `+0x38`, which takes the class to make one
+/// of and answers the instance, or zero.
+const MODULE_JAVA_NEW: u32 = 0x38 / size_of::<u32>() as u32;
+
+/// `MNInterface`'s method lookup, at `+0x64`, which takes a class and a full
+/// name - descriptor and name in one string - and answers the method.
+const MODULE_GET_METHOD: u32 = 0x64 / size_of::<u32>() as u32;
+
+/// `MNInterface`'s class load, at `+0x40`.
+///
+/// The module's own resolver reads a class reference cell, and where the cell
+/// holds an index rather than an address - the same `(index << 1) | 1` a
+/// class's parent carries, see [`import_index`] - it takes the name the
+/// constant pool keeps at that index and asks for it here, with a word of its
+/// own stack to put the class in. Which is `java_class_load`, the call the
+/// ordinary module makes for the same thing.
+const MODULE_CLASS_LOAD: u32 = 0x40 / size_of::<u32>() as u32;
+
+/// A slot of `MNInterface`.
+async fn handle_module_svc(core: &mut ArmCore, jvm: &mut Jvm, id: SvcId) -> Result<()> {
+    let (_, lr) = core.read_pc_lr()?;
+
+    match id.0 {
+        MODULE_JAVA_THROW => EmulatedFunction::call(&java_throw, core, jvm).await?.write(core, lr),
+        MODULE_JAVA_NEW => EmulatedFunction::call(&java_new, core, jvm).await?.write(core, lr),
+        MODULE_CLASS_LOAD => EmulatedFunction::call(&java_class_load, core, jvm).await?.write(core, lr),
+        MODULE_GET_METHOD => EmulatedFunction::call(&get_java_method, core, &mut ()).await?.write(core, lr),
+        _ => {
+            let args = [core.read_param(0)?, core.read_param(1)?, core.read_param(2)?, core.read_param(3)?];
+
+            tracing::warn!(
+                "stub MNInterface-{} ({:#x}, {:#x}, {:#x}, {:#x}) from lr={lr:#x}",
+                id.0,
+                args[0],
+                args[1],
+                args[2],
+                args[3]
+            );
+
+            0u32.write(core, lr)
+        }
+    }
+}
+
+/// What a relocated module keeps in `fp`, and what it keeps in there.
+///
+/// The module every other archive carries reaches the runtime through the
+/// tables it was handed at `fn_init`. This one reaches it through `fp`, which
+/// it never sets: its compiled code opens a `try` by writing a record of its
+/// own stack into the word at `+0x2c` and chaining the old head behind it, and
+/// steps onto the stack at `+0x34` whenever it calls into the runtime, putting
+/// the stack it left in `+0x24`. Nothing hands that over, so it is made here.
+///
+/// One of these, not one per thread, which is only right while one thread runs
+/// module code: the handler chain and the runtime stack are a thread's own.
+/// 텐가이 has not got far enough to start a second.
+const VM_CONTEXT_SIZE: u32 = 0x40;
+
+/// The stack a module steps onto to call the runtime, whose top goes in
+/// `+0x34`.
+const VM_CONTEXT_STACK_SIZE: u32 = 0x10000;
+
+/// The word the module takes its runtime stack from. The two it writes -
+/// `+0x24` for the stack it stepped off, `+0x2c` for the head of its handler
+/// chain - it writes itself, and both start zero like the rest.
+const VM_CONTEXT_STACK: u32 = 0x34;
+
+fn module_vm_context(core: &mut ArmCore) -> Result<u32> {
+    let context = Allocator::alloc(core, VM_CONTEXT_SIZE)?;
+    for word in (0..VM_CONTEXT_SIZE).step_by(size_of::<u32>()) {
+        write_generic(core, context + word, 0u32)?;
+    }
+
+    let stack = Allocator::alloc(core, VM_CONTEXT_STACK_SIZE)?;
+    write_generic(core, context + VM_CONTEXT_STACK, stack + VM_CONTEXT_STACK_SIZE)?;
+
+    Ok(context)
+}
+
+/// An entry of the table a relocated module tail-jumps through.
+///
+/// See [`crate::module::RelocatedModule::jump_table`]. What each one is, from
+/// where the module jumps to it:
+///
+/// | slot | jumped to after                                  |
+/// |------|--------------------------------------------------|
+/// | 0    | a method reference resolved, receiver in `r1`     |
+/// | 1    | the same, for a method whose flags took the other branch |
+/// | 2    | a class reference resolved                        |
+/// | 3    | a class reference resolved, the other of the pair  |
+/// | 4    | a frame popped                                    |
+/// | 5    | an array index found out of bounds                |
+async fn handle_module_jump_svc(core: &mut ArmCore, _: &mut (), id: SvcId) -> Result<()> {
     let (_, lr) = core.read_pc_lr()?;
     let args = [core.read_param(0)?, core.read_param(1)?, core.read_param(2)?, core.read_param(3)?];
 
-    tracing::warn!(
-        "stub MNInterface-{} ({:#x}, {:#x}, {:#x}, {:#x}) from lr={lr:#x}",
-        id.0,
-        args[0],
-        args[1],
-        args[2],
-        args[3]
-    );
-
-    0u32.write(core, lr)
+    // Nothing here answers one yet, and answering nothing is not an answer: the
+    // module jumped, so whatever is here is the rest of its call. Say which one
+    // it was and stop, rather than return a zero it will branch through.
+    Err(WieError::FatalError(format!(
+        "module jump {} ({:#x}, {:#x}, {:#x}, {:#x}) from lr={lr:#x} is not served yet. See wie_ktf::module.",
+        id.0, args[0], args[1], args[2], args[3]
+    )))
 }
 
 /// A relocated module's `fn_get_class`, which this runtime writes for it.
@@ -82,11 +177,31 @@ async fn handle_module_class_svc(core: &mut ArmCore, _: &mut (), id: SvcId) -> R
     class.write(core, lr)
 }
 
-/// The first parent in a module's class table that is not a class, if any.
+/// Whether a word where a class should be is an import instead.
 ///
-/// A parent is a `JavaClass` address once the module has resolved its
-/// imports. Anything below where the image was loaded is not one.
-fn first_unresolved_parent(core: &mut ArmCore, descriptor: u32) -> Result<Option<u32>> {
+/// A resolved one is a `JavaClass` address, and those are word aligned. An
+/// unresolved one is the index the module's constant pool names it at,
+/// shifted up and marked with the bit an address never has: 텐가이's
+/// `java/lang/Object` is `pool[0x25]`, written `0x4b`.
+fn import_index(value: u32) -> Option<u32> {
+    (value & 1 != 0).then_some(value >> 1)
+}
+
+/// Turns a relocated module's imports into the classes they name.
+///
+/// This is the step the ordinary module makes for itself: its `fn_init` walks
+/// its own imports and calls back through `java_class_load` for each one,
+/// which resolves the name and writes the class's address where the module
+/// kept the name. A relocated module has no `fn_init` - wfeature makes the
+/// step for it, beside the entry - so it is made here, out of the same two
+/// things: the constant pool, and `Jvm::resolve_class`.
+///
+/// What carries an import is a class's parent, and an array class's element
+/// type - which sits in the word another class keeps its fields in. Both hold
+/// a class whose image is not this one: `java/lang/Object`,
+/// `org/kwis/msp/lcdui/Jlet`, `java/lang/Thread`. A class of this module's own
+/// is already an address, written when the image was relocated.
+async fn resolve_module_imports(core: &mut ArmCore, jvm: &Jvm, descriptor: u32, pool: u32) -> Result<()> {
     let buckets: u32 = read_generic(core, descriptor)?;
     let bucket_count: u32 = read_generic(core, descriptor + 2 * size_of::<u32>() as u32)?;
 
@@ -97,15 +212,54 @@ fn first_unresolved_parent(core: &mut ArmCore, descriptor: u32) -> Result<Option
         }
 
         let class: JavaClass = read_generic(core, ptr_class)?;
-        let class_descriptor: JavaClassDescriptor = read_generic(core, class.ptr_descriptor)?;
+        let mut class_descriptor: JavaClassDescriptor = read_generic(core, class.ptr_descriptor)?;
+        let name_bytes = read_null_terminated_string_bytes(core, class_descriptor.ptr_name)?;
+        let name = encoding_rs::EUC_KR.decode(&name_bytes).0.into_owned();
 
-        // `java/lang/Object` has no parent, and nothing is wrong with that.
-        if class_descriptor.ptr_parent_class != 0 && class_descriptor.ptr_parent_class < IMAGE_BASE {
-            return Ok(Some(class_descriptor.ptr_parent_class));
+        let mut resolved = false;
+
+        // `java/lang/Object` has no parent, and nothing is waiting for it.
+        if let Some(index) = import_index(class_descriptor.ptr_parent_class) {
+            class_descriptor.ptr_parent_class = module_import(core, jvm, pool, index, &name, "parent").await?;
+            resolved = true;
+        }
+
+        if name.starts_with('[')
+            && let Some(index) = import_index(class_descriptor.ptr_fields_or_element_type)
+        {
+            class_descriptor.ptr_fields_or_element_type = module_import(core, jvm, pool, index, &name, "element type").await?;
+            resolved = true;
+        }
+
+        if resolved {
+            write_generic(core, class.ptr_descriptor, class_descriptor)?;
         }
     }
 
-    Ok(None)
+    Ok(())
+}
+
+/// The class a module's constant pool names at `index`, as an address the
+/// module can hold.
+async fn module_import(core: &mut ArmCore, jvm: &Jvm, pool: u32, index: u32, class: &str, what: &str) -> Result<u32> {
+    let ptr_name: u32 = read_generic(core, pool + index * size_of::<u32>() as u32)?;
+    let name_bytes = read_null_terminated_string_bytes(core, ptr_name)?;
+    let name = encoding_rs::EUC_KR.decode(&name_bytes).0.into_owned();
+
+    let resolved = match jvm.resolve_class(&name).await {
+        Ok(x) => KtfJvmSupport::class_definition_raw(&*x.definition)?,
+        Err(e) => {
+            let reason = JvmSupport::to_wie_err(jvm, e).await;
+
+            return Err(WieError::FatalError(format!(
+                "{class} imports {name} as its {what}, which did not load: {reason}"
+            )));
+        }
+    };
+
+    tracing::trace!("{class}'s {what} is pool[{index:#x}] {name} at {resolved:#x}");
+
+    Ok(resolved)
 }
 
 /// Walks a module descriptor's class table for `name`.
@@ -277,24 +431,23 @@ pub async fn load_native(
         let classes: u32 = read_generic(core, descriptor + size_of::<u32>() as u32)?;
         tracing::debug!("{filename} started: module descriptor at {descriptor:#x}, {classes} classes");
 
-        // A class's parent is a pointer once the module has resolved its
-        // imports, and something far too small to be one before. 텐가이's
-        // `Tengai` names `0x75` and its `[LEnemy;` names `0x4b`, which are
-        // neither addresses nor indices into any table here - so the step that
-        // turns them into classes has not been made, and registering one of
-        // these would read a parent out of low memory.
-        //
-        // The ordinary module resolves its imports inside `fn_init`, calling
-        // back through `java_class_load`. A relocated one has no `fn_init` to
-        // call; wfeature has a step of its own for it, beside the entry -
-        // "execute KTF interface init" - and that is what is missing.
-        if let Some(unresolved) = first_unresolved_parent(core, descriptor)? {
-            return Err(WieError::FatalError(format!(
-                "{filename} is a relocated module: it loads, relocates, starts and answers with its {classes} classes, but their imports are \
-                 unresolved - {unresolved:#x} where a parent class should be - so the interface init a relocated module takes instead of \
-                 `fn_init` is still missing. Module descriptor at {descriptor:#x}. See wie_ktf::module."
-            )));
+        // A class's parent is an address once the module's imports are
+        // resolved, and the index its constant pool names it at before that.
+        // The ordinary module resolves them inside `fn_init`, calling back
+        // through `java_class_load`. A relocated one has no `fn_init` to
+        // call, so the same step is made here.
+        let pool = module.base(IMAGE_BASE) + module.constant_pool(data)?;
+        resolve_module_imports(core, jvm, descriptor, pool).await?;
+
+        let jumps = module.base(IMAGE_BASE) + module.jump_table(data)?;
+        for slot in 0..crate::module::RelocatedModule::JUMP_TABLE_ENTRIES {
+            let stub = core.make_svc_stub(SVC_CATEGORY_MODULE_JUMP, slot)?;
+            write_generic(core, jumps + slot * size_of::<u32>() as u32, stub)?;
         }
+
+        let vm_context = module_vm_context(core)?;
+        core.reserve_fp(vm_context);
+        tracing::debug!("{filename}: jump table at {jumps:#x}, VM context at {vm_context:#x}");
 
         return Ok(ExeInterfaceFunctions {
             unk1: 0,

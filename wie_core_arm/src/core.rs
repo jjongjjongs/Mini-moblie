@@ -98,6 +98,9 @@ pub(crate) struct ArmCoreInner {
     /// What [`ArmCore::write_once_metadata`] has already read, by address and
     /// by what it was read as - one address can describe more than one thing.
     write_once_metadata: BTreeMap<(u32, TypeId), Arc<dyn Any + Send + Sync>>,
+    /// What `fp` holds whenever the guest runs, when something asked for it.
+    /// See [`ArmCore::reserve_fp`].
+    reserved_fp: Option<u32>,
 }
 
 /// Upper bound on pooled thread stacks. Peak concurrency is small (a handful),
@@ -185,6 +188,7 @@ impl ArmCore {
             next_stub_address: FUNCTIONS_BASE,
             profile,
             write_once_metadata: BTreeMap::new(),
+            reserved_fp: None,
         };
 
         let result = Self {
@@ -540,6 +544,10 @@ impl ArmCore {
                 }
             }
 
+            if let Some(fp) = inner.reserved_fp {
+                inner.engine.reg_write(ArmRegister::FP, fp);
+            }
+
             inner.engine.reg_write(ArmRegister::PC, address);
             inner.engine.reg_write(ArmRegister::LR, RUN_FUNCTION_LR);
 
@@ -825,6 +833,16 @@ impl ArmCore {
             self.dump_call_stack(image_base).unwrap(),
             self.dump_stack().unwrap()
         )
+    }
+
+    /// Keeps `fp` at `address` for every call into the guest.
+    ///
+    /// The ARM ABI leaves `fp` to the compiler, and the module every other KTF
+    /// archive carries does not use it. The one 텐가이 carries reserves it: its
+    /// compiled code reaches its VM context through `fp` and nothing hands it
+    /// over, so the runtime that gives it that context puts it here.
+    pub fn reserve_fp(&mut self, address: u32) {
+        self.inner.lock().reserved_fp = Some(address);
     }
 
     pub fn restore_context(&mut self, context: &ArmCoreContext) {

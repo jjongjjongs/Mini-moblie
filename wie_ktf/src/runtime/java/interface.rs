@@ -132,7 +132,7 @@ fn map_jump_result(entry_sp: u32, result: core::result::Result<u32, WieError>) -
     }
 }
 
-async fn get_java_method(core: &mut ArmCore, _: &mut (), ptr_class: u32, ptr_fullname: u32) -> Result<u32> {
+pub async fn get_java_method(core: &mut ArmCore, _: &mut (), ptr_class: u32, ptr_fullname: u32) -> Result<u32> {
     let fullname = KtfJvmSupport::read_name(core, ptr_fullname)?;
 
     tracing::debug!("get_java_method({ptr_class:#x}, {fullname})");
@@ -260,7 +260,7 @@ async fn register_java_string(core: &mut ArmCore, jvm: &mut Jvm, offset: u32, le
     Ok(KtfJvmSupport::class_instance_raw(&instance) as _)
 }
 
-async fn get_field(core: &mut ArmCore, _: &mut (), ptr_class: u32, field_name: u32) -> Result<u32> {
+pub async fn get_field(core: &mut ArmCore, _: &mut (), ptr_class: u32, field_name: u32) -> Result<u32> {
     tracing::debug!("get_field({ptr_class:#x}, {field_name:#x})");
 
     let field_name = KtfJvmSupport::read_name(core, field_name)?;

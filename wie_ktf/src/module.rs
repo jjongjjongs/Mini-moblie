@@ -42,7 +42,7 @@ const HEADER_WORDS: usize = 2;
 /// | +08  | 0x5f2c0     | a word past the image - bss                  |
 /// | +0c  | 0x57344     | the imported names, NUL separated             |
 /// | +10  | 0x5772c     | pointers into the constant pool               |
-/// | +14  | 0x480       | where the code starts                         |
+/// | +14  | 0x480       | the six words the host fills in               |
 /// | +18  | 0x5ed6c     | the module field table                        |
 /// | +1c  | 0x5f2a4     | bss again                                     |
 /// | +20  | 0x13580001  |                                             |
@@ -174,6 +174,40 @@ impl RelocatedModule {
         self.header_word(data, Self::MODULE_FIELDS_OFFSET)
     }
 
+    /// The word the image keeps its jump table in, at `+0x14`.
+    pub const JUMP_TABLE_OFFSET: usize = 0x14;
+
+    /// How many entries that table has.
+    ///
+    /// Six, which is what wfeature reads of it and how many words of 텐가이's
+    /// image are zero there - 0x1037a4 to 0x1037b8, with code either side.
+    pub const JUMP_TABLE_ENTRIES: u32 = 6;
+
+    /// Where the table of host entry points is, as an image offset.
+    ///
+    /// The module tail-jumps through these - `ldr r2, [pc, #n]; mov pc, r2`,
+    /// never a call - so whatever is behind one answers with `lr` the way the
+    /// module's own code would. They are left zero in the file: the host that
+    /// loads the module writes them, and a module whose table is still zero
+    /// branches to zero the first time it invokes a method.
+    pub fn jump_table(&self, data: &[u8]) -> Result<u32> {
+        self.header_word(data, Self::JUMP_TABLE_OFFSET)
+    }
+
+    /// The word the image keeps its constant pool in, at `+0x10`.
+    pub const CONSTANT_POOL_OFFSET: usize = 0x10;
+
+    /// Where the constant pool's pointers are, as an image offset.
+    ///
+    /// An array of pointers into the names at `+0x0c`, and what an unresolved
+    /// import is an index into: a class whose parent is not in this image
+    /// carries `(index << 1) | 1` where the parent's address goes, and the
+    /// name at that index is what it is waiting for. See
+    /// `crate::runtime::init::resolve_module_imports`.
+    pub fn constant_pool(&self, data: &[u8]) -> Result<u32> {
+        self.header_word(data, Self::CONSTANT_POOL_OFFSET)
+    }
+
     /// Adds the image's base to every word of the module field table.
     ///
     /// The relocation table stops short of it - 텐가이's last offset is
@@ -225,37 +259,6 @@ impl RelocatedModule {
             .ok_or_else(|| WieError::FatalError(format!("a relocated module with no entry word at {at:#x}")))?;
 
         Ok(self.base(load_address).wrapping_add(u32::from_le_bytes(word.try_into().unwrap())))
-    }
-
-    /// What to tell the user, since this runtime cannot run one yet.
-    ///
-    /// What is left is named rather than guessed at. The table does not cover
-    /// the words from `+0x5ed64` to the end of 텐가이's image, and its entry
-    /// reads one of them the moment it runs - 333 of those 335 words are
-    /// image offsets, so they are rebased too, by something else. wfeature has
-    /// that something: `rebaseModuleFields`, which reads six words of a module
-    /// field table (the `+0x14` word) and refuses a client that is not one of
-    /// these ("KTF client is not a relocatable module").
-    ///
-    /// Past that, the entry takes a pointer to a table of the host's own
-    /// functions and calls the first of them with a name and two `-1`s, which
-    /// is `get_interface` - the same call this runtime already serves at
-    /// `InitSvcId::GetInterface`. The name it asks for is `MNInterface`, which
-    /// nothing else here asks for.
-    pub fn unsupported(&self, filename: &str) -> WieError {
-        WieError::FatalError(format!(
-            "{filename} is a relocated module - {} relocations, image at {:#x}, bss {:#x} - and this runtime relocates one but cannot yet \
-             rebase its module fields or serve the MNInterface its entry asks for. See wie_ktf::module.",
-            self.relocations, self.image_offset, self.bss_size
-        ))
-    }
-}
-
-/// Reading one is the caller's business; this is only the recogniser.
-pub fn reject_if_relocated(filename: &str, data: &[u8]) -> Result<()> {
-    match RelocatedModule::parse(data) {
-        Some(module) => Err(module.unsupported(filename)),
-        None => Ok(()),
     }
 }
 
