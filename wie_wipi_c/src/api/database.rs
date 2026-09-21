@@ -1750,15 +1750,24 @@ pub async fn select_record_ktf(context: &mut dyn WIPICContext, db_id: i32, rec_i
     // as an image. The whole of its loading screen is images fetched this way;
     // the one it died on is the only one it seeks to twice.
     //
-    // What a mode 1 seek answers is the position it left the cursor at, which
-    // makes `(0, 1)` the tell there is no other slot for. 리얼싸커 2009 walks
-    // the archive it installed with it: `tell()`, then a seek to
+    // What a seek answers is the position it left the cursor at, whichever mode
+    // it was, which is what makes `(0, 1)` the tell this slot has no other call
+    // for. 리얼싸커 2009 needs both halves of that.
+    //
+    // It walks the archive it installed with the tell: `tell()`, then a seek to
     // `tell() + (entry - window)`, once per entry. Answered zero it seeks to
     // the delta alone - `-982`, `-986`, `-984`, positions before the first byte
     // of a 1.7MB file - and the walk that should have crossed the archive stood
     // still on the first entry until the title called its own data a bad
-    // resource file. Answered the cursor it asks for 42, then 5467, then
-    // 1226113, which are entry boundaries.
+    // resource file.
+    //
+    // And it takes each entry's offset from what the seek onto that entry
+    // answered, rather than from what it asked for. Answered zero, every one of
+    // the 94 entries it indexed was written down as starting at byte zero: the
+    // loader read `startup.sh` off the front of the archive, took `PK\x03\x04`
+    // for the name of the module to run, looked for `//PK\x03\x04.dll`, and
+    // put up `Loader Run Failed.` when the archive it had just installed did
+    // not have it.
     let offset = if mode == 1 {
         (handle.read_cursor as i64 + rec_id as i64).clamp(0, handle.buffer_len as i64) as u32
     } else {
@@ -1769,7 +1778,7 @@ pub async fn select_record_ktf(context: &mut dyn WIPICContext, db_id: i32, rec_i
     handle.write_cursor = offset;
     write_generic(context, db_id as _, handle)?;
 
-    Ok(if mode == 1 { offset as i32 } else { 0 })
+    Ok(offset as i32)
 }
 
 /// Slot 5 — KTF custom `db_stat_by_name`. From observed call shape:
@@ -3242,15 +3251,17 @@ mod tests {
         assert_eq!(&landed, b"HIT", "a mode 1 seek is relative to the cursor");
     }
 
-    /// A mode 1 seek answers where it left the cursor, which is the only tell
-    /// this slot has.
+    /// A seek answers where it left the cursor, whichever mode it was.
     ///
-    /// 리얼싸커 2009 walks the archive it installed by reading a window and then
-    /// seeking to `tell() + (entry - window)`. Answered zero it asks for the
-    /// delta alone, which for a window it has already read past is a position
-    /// before the first byte, and the walk never leaves the first entry.
+    /// 리얼싸커 2009 needs both halves. It walks the archive it installed by
+    /// reading a window and then seeking to `tell() + (entry - window)`:
+    /// answered zero the tell makes it ask for the delta alone, which for a
+    /// window it has already read past is a position before the first byte, and
+    /// the walk never leaves the first entry. And it writes each entry's offset
+    /// down from what the seek onto that entry answered, so answered zero every
+    /// entry it indexes starts at byte zero.
     #[futures_test::test]
-    async fn a_ktf_seek_from_the_cursor_answers_where_it_landed() {
+    async fn a_ktf_seek_answers_where_it_landed() {
         let mut shipped = vec![0u8; 512];
         shipped[42..45].copy_from_slice(b"HIT");
 
@@ -3265,8 +3276,11 @@ mod tests {
         let here = select_record_ktf(&mut context, db_id, 0, 1, 0).await.unwrap();
         assert_eq!(here, 256, "a mode 1 seek answers the cursor it left");
 
-        // And the seek it makes from what that told it.
-        select_record_ktf(&mut context, db_id, here + (42 - 256), 0, 0).await.unwrap();
+        // And the seek it makes from what that told it, which answers the entry
+        // it landed on - the offset the title writes down for that entry.
+        let entry = select_record_ktf(&mut context, db_id, here + (42 - 256), 0, 0).await.unwrap();
+        assert_eq!(entry, 42, "a seek answers the position it left the cursor at");
+
         stream_read(&mut context, db_id, 0x2000, 3).await.unwrap();
 
         let mut landed = [0u8; 3];
