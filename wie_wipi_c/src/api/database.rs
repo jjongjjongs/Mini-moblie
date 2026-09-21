@@ -1725,43 +1725,51 @@ pub async fn select_record_ktf(context: &mut dyn WIPICContext, db_id: i32, rec_i
         return Ok(-25); // M_E_INVALIDHANDLE
     };
 
-    // KTF reuses slot 4 as a stream-control op `(handle, offset, mode)`, and
-    // the offset is signed and counted from where the cursor already is -
-    // `SEEK_CUR`, for every mode but 2.
+    // KTF reuses slot 4 as a stream-control op `(handle, offset, mode)`. The
+    // shapes observed across games:
     //
-    // 리얼싸커 2009 is what says so. It installs a zip and then walks it, and
-    // each step is `read(1024)` followed by a move back to the entry that
-    // window began with: `-982`, then `-79`, `-22`, on down the archive. Read
-    // as absolute positions those are not positions at all; refused outright,
-    // as a negative offset was, the walk never moved and the title took its own
-    // archive for corrupt, put up `Data 인스톨에 실패했습니다` and ended the run
-    // on the key that dismissed it. Counted from the cursor the first lands on
-    // 42 - the first entry's data, 30 bytes of local header and a 12-byte name
-    // in - and every one after it on an entry boundary.
+    //   - `(handle, slot_offset, 0)` — multi-slot save files store each
+    //     slot at a known byte offset within record 1; this seeks both
+    //     cursors so the next read/write hits the right slot while
+    //     preserving the bytes belonging to the other slots.
+    //   - `(handle, 0, 0)` and `(handle, 0, 2)` — rewinds both cursors.
+    //     mode=0 vs 2 isn't a length and isn't truncate (truncating on
+    //     mode=2 on the read path destroys a prefetched buffer during a
+    //     subsequent re-open and wipes the saved record). Both are treated
+    //     as plain seek-and-rewind.
+    //   - `(handle, delta, 1)` — seeks from where the cursor already is,
+    //     the way `SEEK_CUR` does, rather than from the start.
     //
-    // It asks for the position before each move, with `(0, 1)`, and works out
-    // the delta from what it already knows: `42 - 1024` is that first one
-    // exactly, which is the same cursor this side keeps after a 1024-byte read.
+    // Mode 1 only tells itself apart from mode 0 once a handle has been read
+    // from: on a freshly opened one both land in the same place, which is why
+    // it went unnoticed. 드래곤아이즈2 is the title that reads first - it takes
+    // a four-byte offset out of `bodyImage.dat`'s table and then seeks by it,
+    // and taking that as absolute left it three bytes short of the resource,
+    // where it read a length out of the middle of the previous one, asked for
+    // 49194 bytes of whatever followed, and handed that to `MC_grpCreateImage`
+    // as an image. The whole of its loading screen is images fetched this way;
+    // the one it died on is the only one it seeks to twice.
     //
-    // 드래곤아이즈2 reads its loading-screen images the same way: a four-byte
-    // offset out of `bodyImage.dat`'s table, then a seek by it with mode 1.
-    // Taken as absolute that left it three bytes short of the resource, where
-    // it read a length out of the middle of the previous one, asked for 49194
-    // bytes of whatever followed, and handed that to `MC_grpCreateImage` as an
-    // image.
-    //
-    // Mode 2 is the one that starts from the beginning: `(0, 2)` is a rewind,
-    // and from the cursor that would not rewind anything. `(0, 0)` rewinds a
-    // handle nothing has read from yet, where the two are the same place, which
-    // is why this went as long as it did without being noticed.
-    let base = if mode == 2 { 0 } else { handle.read_cursor as i64 };
-    let position = (base + rec_id as i64).clamp(0, handle.buffer_len as i64) as u32;
+    // What a mode 1 seek answers is the position it left the cursor at, which
+    // makes `(0, 1)` the tell there is no other slot for. 리얼싸커 2009 walks
+    // the archive it installed with it: `tell()`, then a seek to
+    // `tell() + (entry - window)`, once per entry. Answered zero it seeks to
+    // the delta alone - `-982`, `-986`, `-984`, positions before the first byte
+    // of a 1.7MB file - and the walk that should have crossed the archive stood
+    // still on the first entry until the title called its own data a bad
+    // resource file. Answered the cursor it asks for 42, then 5467, then
+    // 1226113, which are entry boundaries.
+    let offset = if mode == 1 {
+        (handle.read_cursor as i64 + rec_id as i64).clamp(0, handle.buffer_len as i64) as u32
+    } else {
+        rec_id as u32
+    };
 
-    handle.read_cursor = position;
-    handle.write_cursor = position;
+    handle.read_cursor = offset;
+    handle.write_cursor = offset;
     write_generic(context, db_id as _, handle)?;
 
-    Ok(0)
+    Ok(if mode == 1 { offset as i32 } else { 0 })
 }
 
 /// Slot 5 — KTF custom `db_stat_by_name`. From observed call shape:
@@ -3220,13 +3228,13 @@ mod tests {
         let db_id = open_database(&mut context, 0x1000, 4, 1).await.unwrap();
 
         // Seek to the table entry and read it, exactly as the title does.
-        assert_eq!(select_record_ktf(&mut context, db_id, 88, 1, 0).await.unwrap(), 0);
+        assert_eq!(select_record_ktf(&mut context, db_id, 88, 1, 0).await.unwrap(), 88);
         stream_read(&mut context, db_id, 0x2000, 4).await.unwrap();
         assert_eq!(read_generic::<u32, _>(&context, 0x2000).unwrap(), 200);
 
         // Seeking by what it read carries on from the cursor, which is now 92,
         // so the resource is at 292 rather than at 200.
-        assert_eq!(select_record_ktf(&mut context, db_id, 200, 1, 0).await.unwrap(), 0);
+        assert_eq!(select_record_ktf(&mut context, db_id, 200, 1, 0).await.unwrap(), 292);
         stream_read(&mut context, db_id, 0x2000, 3).await.unwrap();
 
         let mut landed = [0u8; 3];
@@ -3234,14 +3242,15 @@ mod tests {
         assert_eq!(&landed, b"HIT", "a mode 1 seek is relative to the cursor");
     }
 
-    /// Mode 0 seeks from the cursor too, and its offset is signed.
+    /// A mode 1 seek answers where it left the cursor, which is the only tell
+    /// this slot has.
     ///
-    /// 리얼싸커 2009 walks the zip it installed by reading a 1024-byte window
-    /// and then moving back to the entry that window began with. A negative
-    /// offset is no absolute position at all, and refused - as it was - the
-    /// walk stands still and the title takes its own archive for corrupt.
+    /// 리얼싸커 2009 walks the archive it installed by reading a window and then
+    /// seeking to `tell() + (entry - window)`. Answered zero it asks for the
+    /// delta alone, which for a window it has already read past is a position
+    /// before the first byte, and the walk never leaves the first entry.
     #[futures_test::test]
-    async fn a_ktf_seek_of_mode_zero_is_from_the_cursor() {
+    async fn a_ktf_seek_from_the_cursor_answers_where_it_landed() {
         let mut shipped = vec![0u8; 512];
         shipped[42..45].copy_from_slice(b"HIT");
 
@@ -3252,26 +3261,17 @@ mod tests {
         // The window the title reads first, which leaves the cursor at 256.
         stream_read(&mut context, db_id, 0x2000, 256).await.unwrap();
 
-        // Back to where the entry it just read began. The title works the
-        // delta out itself - `42 - 256` - from the same cursor this side keeps.
-        select_record_ktf(&mut context, db_id, -214, 0, 0).await.unwrap();
+        // The tell it makes before working out where the entry began.
+        let here = select_record_ktf(&mut context, db_id, 0, 1, 0).await.unwrap();
+        assert_eq!(here, 256, "a mode 1 seek answers the cursor it left");
 
-        // And the move it makes before every read, which moves nothing.
-        select_record_ktf(&mut context, db_id, 0, 0, 0).await.unwrap();
-
+        // And the seek it makes from what that told it.
+        select_record_ktf(&mut context, db_id, here + (42 - 256), 0, 0).await.unwrap();
         stream_read(&mut context, db_id, 0x2000, 3).await.unwrap();
 
         let mut landed = [0u8; 3];
         context.read_bytes(0x2000, &mut landed).unwrap();
-        assert_eq!(&landed, b"HIT", "mode 0 counts from the cursor");
-
-        // Mode 2 is the one that starts from the beginning, which is what makes
-        // `(0, 2)` a rewind.
-        select_record_ktf(&mut context, db_id, 42, 2, 0).await.unwrap();
-        stream_read(&mut context, db_id, 0x2000, 3).await.unwrap();
-
-        context.read_bytes(0x2000, &mut landed).unwrap();
-        assert_eq!(&landed, b"HIT", "mode 2 counts from the start");
+        assert_eq!(&landed, b"HIT", "the seek that tell fed lands on the entry");
     }
 
     /// Slot 12 answers the storage left, in bytes, and the archive's own
