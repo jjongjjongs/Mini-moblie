@@ -943,6 +943,7 @@ where
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct Clip {
     pub x: i32,
     pub y: i32,
@@ -951,6 +952,11 @@ pub struct Clip {
 }
 
 impl Clip {
+    /// Whether the clip lets a pixel through.
+    pub fn allows(&self, x: i32, y: i32) -> bool {
+        x >= self.x && y >= self.y && (x as i64) < self.x as i64 + self.width as i64 && (y as i64) < self.y as i64 + self.height as i64
+    }
+
     pub fn intersect(&self, other: &Clip) -> Clip {
         let x = self.x.max(other.x);
         let y = self.y.max(other.y);

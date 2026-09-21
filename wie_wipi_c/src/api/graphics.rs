@@ -373,11 +373,69 @@ fn context_color(framebuffer: &FrameBuffer, gctx: &WIPICGraphicsContext) -> Colo
     color
 }
 
+/// The rectangle a context's clip lets through.
+///
+/// The reference stores the bottom-right corner decremented - `MC_grpGetContext`
+/// re-adds the 1 - so the corner is inside the rectangle and the width is
+/// `x2 - x1 + 1`. A corner behind its own origin lets nothing through.
+///
+/// Every `MC_grp*` call that takes a context draws through this. A clet does
+/// not always pass the rectangle it wants as the call's own arguments: it sets
+/// the clip to the cell it wants and hands the whole sheet to `MC_grpDrawImage`,
+/// which is how 짜요짜요타이쿤3 picks one label out of the 2x9 grid its menu
+/// is stored as. Ignored, all nine labels landed on the screen at once, five
+/// times over.
+fn context_clip(gctx: &WIPICGraphicsContext) -> Clip {
+    let (x1, y1) = (gctx.clip[0] as i32, gctx.clip[1] as i32);
+    let (x2, y2) = (gctx.clip[2] as i32, gctx.clip[3] as i32);
+
+    Clip {
+        x: x1,
+        y: y1,
+        width: (x2 as i64 - x1 as i64 + 1).clamp(0, u32::MAX as i64) as u32,
+        height: (y2 as i64 - y1 as i64 + 1).clamp(0, u32::MAX as i64) as u32,
+    }
+}
+
+/// A rectangle cut down to what a clip allows, or `None` when nothing is left.
+fn clipped_rect(clip: &Clip, x: i32, y: i32, w: i32, h: i32) -> Option<(i32, i32, i32, i32)> {
+    let left = x.max(clip.x);
+    let top = y.max(clip.y);
+    let right = (x as i64 + w as i64).min(clip.x as i64 + clip.width as i64);
+    let bottom = (y as i64 + h as i64).min(clip.y as i64 + clip.height as i64);
+
+    let width = right - left as i64;
+    let height = bottom - top as i64;
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+
+    Some((left, top, width as i32, height as i32))
+}
+
+/// A blit cut down to what a clip allows: the destination corner, the size and
+/// the source corner it now starts from.
+///
+/// Nothing here scales, so an edge the clip moves in by one moves the source
+/// edge with it and the pixels that survive are the ones that were going to
+/// land inside the rectangle anyway.
+#[allow(clippy::too_many_arguments)]
+fn clipped_blit(clip: &Clip, dx: i32, dy: i32, w: i32, h: i32, sx: i32, sy: i32) -> Option<(i32, i32, i32, i32, i32, i32)> {
+    let (left, top, width, height) = clipped_rect(clip, dx, dy, w, h)?;
+
+    Some((left, top, width, height, sx + (left - dx), sy + (top - dy)))
+}
+
 pub async fn put_pixel(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr, x: i32, y: i32, p_gctx: WIPICWord) -> Result<()> {
     tracing::debug!("MC_grpPutPixel({:#x}, {x}, {y}, {p_gctx:?})", dst_fb.0);
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst_fb)?)?);
     let gctx = read_context(context, context.graphics_context_layout(), p_gctx)?;
+
+    if !context_clip(&gctx).allows(x, y) {
+        return Ok(());
+    }
+
     let color = context_color(&framebuffer, &gctx);
 
     // One pixel is two bytes; staging the surface to move them is what held a
@@ -404,6 +462,14 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst_fb)?)?);
     let gctx = read_context(context, context.graphics_context_layout(), p_gctx)?;
+
+    // Only the part of the rectangle the context's clip allows, so every path
+    // below - the operation, the direct write and the canvas - covers the same
+    // pixels.
+    let Some((x, y, w, h)) = clipped_rect(&context_clip(&gctx), x, y, w, h) else {
+        return Ok(());
+    };
+
     let color = context_color(&framebuffer, &gctx);
 
     // A fill goes through the title's own operation too - 드래곤하트2 lays two
@@ -532,7 +598,8 @@ pub async fn draw_arc(
         y: y as _,
         width: w as _,
         height: h as _,
-    };
+    }
+    .intersect(&context_clip(&gctx));
 
     let color = context_color(&framebuffer, &gctx);
     canvas.draw_arc(
@@ -577,7 +644,8 @@ pub async fn fill_arc(
         y: y as _,
         width: w as _,
         height: h as _,
-    };
+    }
+    .intersect(&context_clip(&gctx));
 
     let color = context_color(&framebuffer, &gctx);
     canvas.fill_arc(
@@ -649,6 +717,7 @@ pub async fn draw_polygon(
     let points = read_polygon_points(context, x_points, y_points, n_points as usize)?;
 
     let bounds = polygon_bounds(&points);
+    let clip = bounds_clip(bounds).intersect(&context_clip(&gctx));
     let color = context_color(&framebuffer, &gctx);
     let mut canvas = framebuffer.canvas(context)?;
 
@@ -656,7 +725,7 @@ pub async fn draw_polygon(
     for i in 0..points.len() {
         let (x1, y1) = points[i];
         let (x2, y2) = points[(i + 1) % points.len()];
-        canvas.draw_line(x1, y1, x2, y2, color, bounds_clip(bounds));
+        canvas.draw_line(x1, y1, x2, y2, color, clip);
     }
     canvas.flush()?;
 
@@ -682,6 +751,7 @@ pub async fn fill_polygon(
     let points = read_polygon_points(context, x_points, y_points, n_points as usize)?;
 
     let bounds = polygon_bounds(&points);
+    let clip = bounds_clip(bounds).intersect(&context_clip(&gctx));
     let color = context_color(&framebuffer, &gctx);
     let (min_y, max_y) = (bounds.1, bounds.3);
     let mut canvas = framebuffer.canvas(context)?;
@@ -704,7 +774,7 @@ pub async fn fill_polygon(
         }
         crossings.sort_unstable();
         for pair in crossings.chunks_exact(2) {
-            canvas.draw_line(pair[0], y, pair[1], y, color, bounds_clip(bounds));
+            canvas.draw_line(pair[0], y, pair[1], y, color, clip);
         }
     }
     canvas.flush()?;
@@ -917,6 +987,13 @@ pub async fn draw_image(
     // A title's own pixel operation decides what every pixel becomes, and it is
     // read before the canvas takes the context.
     let grp_ctx = read_context(context, context.graphics_context_layout(), graphics_context)?;
+
+    // Only the part of the blit the context's clip allows. A clet that wants
+    // one cell of a sprite sheet sets the clip to where that cell is to land
+    // and hands over the whole sheet, so this is what picks the cell out.
+    let Some((dx, dy, w, h, sx, sy)) = clipped_blit(&context_clip(&grp_ctx), dx, dy, w, h, sx, sy) else {
+        return Ok(());
+    };
 
     // Asked before anything takes the context, because asking runs the title's
     // own code. Without it 드래곤하트2's glow lands as an opaque disc.
@@ -1420,6 +1497,11 @@ pub async fn copy_area(
     }
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst)?)?);
+    let gctx = read_context(context, context.graphics_context_layout(), pgc)?;
+
+    let Some((dx, dy, w, h, x, y)) = clipped_blit(&context_clip(&gctx), dx, dy, w, h, x, y) else {
+        return Ok(());
+    };
 
     let image = framebuffer.image(context)?;
     let mut canvas = framebuffer.canvas(context)?;
@@ -1823,6 +1905,11 @@ pub async fn copy_frame_buffer(
     let src_framebuffer = FrameBuffer(read_generic(context, context.data_ptr(src)?)?);
     let dst_framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst)?)?);
 
+    let gctx = read_context(context, context.graphics_context_layout(), pgc)?;
+    let Some((dx, dy, w, h, sx, sy)) = clipped_blit(&context_clip(&gctx), dx, dy, w, h, sx, sy) else {
+        return Ok(());
+    };
+
     let src_image = src_framebuffer.image(context)?;
     let mut dst_canvas = dst_framebuffer.canvas(context)?;
 
@@ -2106,7 +2193,8 @@ async fn draw_text(context: &mut dyn WIPICContext, dst: WIPICIndirectPtr, x: i32
         y: 0,
         width: framebuffer.0.width,
         height: framebuffer.0.height,
-    };
+    }
+    .intersect(&context_clip(&gctx));
 
     let color = context_color(&framebuffer, &gctx);
 
@@ -2383,7 +2471,7 @@ pub async fn set_rgb_pixels(
     h: i32,
     psrc: WIPICWord,
     ibpl: i32,
-    _pgc: WIPICWord,
+    pgc: WIPICWord,
 ) -> Result<()> {
     tracing::debug!("MC_grpSetRGBPixels({:#x}, {x}, {y}, {w}, {h}, {psrc:#x}, {ibpl})", dst.0);
 
@@ -2429,10 +2517,17 @@ pub async fn set_rgb_pixels(
         context.read_bytes(src_addr, &mut buf[off..off + row_bytes])?;
     }
 
+    let gctx = read_context(context, context.graphics_context_layout(), pgc)?;
+    let clip = context_clip(&gctx);
+
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst)?)?);
     let mut canvas = framebuffer.canvas(context)?;
     for dy in 0..h {
         for dx in 0..w {
+            if !clip.allows(x + dx, y + dy) {
+                continue;
+            }
+
             let off = ((dy as usize) * (w as usize) + dx as usize) * 4;
             // WIPI spec: pixels are 0x00RRGGBB.
             let rgb = u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]);
@@ -2496,7 +2591,8 @@ pub async fn draw_rect(context: &mut dyn WIPICContext, dst: WIPICIndirectPtr, x:
         y: y as _,
         width: w as _,
         height: h as _,
-    };
+    }
+    .intersect(&context_clip(&gctx));
 
     let color = context_color(&framebuffer, &gctx);
     canvas.draw_rect(x as _, y as _, w as _, h as _, color, clip);
@@ -2510,6 +2606,7 @@ pub async fn draw_line(context: &mut dyn WIPICContext, dst: WIPICIndirectPtr, x1
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst)?)?);
     let gctx = read_context(context, context.graphics_context_layout(), pgc)?;
+    let context_clip = context_clip(&gctx);
     let color = context_color(&framebuffer, &gctx);
 
     // A line along an axis is a one-pixel-thick rectangle, and writing it as
@@ -2526,10 +2623,16 @@ pub async fn draw_line(context: &mut dyn WIPICContext, dst: WIPICIndirectPtr, x1
         let width = (x1.max(x2) as i64 - left as i64) + 1;
         let height = (y1.max(y2) as i64 - top as i64) + 1;
 
-        if let (Ok(width), Ok(height)) = (u32::try_from(width), u32::try_from(height))
-            && framebuffer.fill_rect_direct(context, left, top, width, height, color)?
-        {
-            return Ok(());
+        if let (Ok(width), Ok(height)) = (i32::try_from(width), i32::try_from(height)) {
+            // The span the clip leaves is a rectangle too, so the fast path
+            // still covers exactly the pixels Bresenham would have.
+            let Some((left, top, width, height)) = clipped_rect(&context_clip, left, top, width, height) else {
+                return Ok(());
+            };
+
+            if framebuffer.fill_rect_direct(context, left, top, width as _, height as _, color)? {
+                return Ok(());
+            }
         }
     }
 
@@ -2540,7 +2643,8 @@ pub async fn draw_line(context: &mut dyn WIPICContext, dst: WIPICIndirectPtr, x1
         y: 0,
         width: framebuffer.0.width as _,
         height: framebuffer.0.height as _,
-    };
+    }
+    .intersect(&context_clip);
 
     canvas.draw_line(x1 as _, y1 as _, x2 as _, y2 as _, color, clip);
     canvas.flush()?;
@@ -3304,6 +3408,116 @@ mod tests {
 
     /// A framebuffer of `pixels` (ARGB, row-major) as the guest holds one: the
     /// indirect pointer a WIPI-C call is handed.
+    /// Sets the context's clip to `(x1, y1)..(x2, y2)` the way a title does -
+    /// four 32-bit words through `MC_grpSetContext`, the corner one past the
+    /// last pixel.
+    async fn set_clip(context: &mut TestContext, pgc: u32, x1: u32, y1: u32, x2: u32, y2: u32) {
+        let rect = context.alloc(16).unwrap();
+        let rect = context.data_ptr(rect).unwrap();
+        for (i, value) in [x1, y1, x2, y2].into_iter().enumerate() {
+            write_generic(context, rect + (i as u32) * 4, value).unwrap();
+        }
+        set_context(context, pgc, Idx::ClipIdx, rect).await.unwrap();
+    }
+
+    /// A blit lands only where the context's clip allows it, and the pixels that
+    /// do land are the ones that were going to land there anyway.
+    ///
+    /// This is how a clet picks one cell out of a sprite sheet: 짜요짜요타이쿤3
+    /// keeps its nine menu labels as a 2x9 grid in a single image, sets the clip
+    /// to where the label is to go, and hands `MC_grpDrawImage` the whole sheet
+    /// with the destination corner moved back so the cell it wants lines up.
+    /// Drawn unclipped, all nine labels landed on the screen at once.
+    #[futures_test::test]
+    async fn a_blit_lands_only_inside_the_contexts_clip() {
+        let mut context = test_context();
+
+        let pgc_handle = context.alloc(core::mem::size_of::<super::WIPICGraphicsContext>() as u32).unwrap();
+        let pgc = context.data_ptr(pgc_handle).unwrap();
+        init_context(&mut context, pgc).await.unwrap();
+
+        // A 2x2 sheet of four distinct colours over a black destination.
+        let destination = framebuffer_of(&mut context, 2, 2, &[0xff00_0000; 4]).await;
+        let source = framebuffer_of(&mut context, 2, 2, &[0xfff8_0000, 0xff00_fc00, 0xff00_00f8, 0xffff_ffff]).await;
+
+        let image_handle = context.alloc(core::mem::size_of::<wipi_types::wipic::WIPICImage>() as u32).unwrap();
+        let image_address = context.data_ptr(image_handle).unwrap();
+        let image = wipi_types::wipic::WIPICImage {
+            img: read_generic(&context, context.data_ptr(source).unwrap()).unwrap(),
+            mask: super::FrameBuffer::empty().0,
+            loop_count: 0,
+            delay: 0,
+            animated: 0,
+            buf: super::WIPICIndirectPtr(0),
+            offset: 0,
+            current: 0,
+            len: 0,
+        };
+        write_generic(&mut context, image_address, image).unwrap();
+
+        // Only the bottom-right pixel of the destination may be written, so the
+        // whole sheet blitted at the origin must leave just its own
+        // bottom-right pixel there.
+        set_clip(&mut context, pgc, 1, 1, 2, 2).await;
+        draw_image(&mut context, destination, 0, 0, 2, 2, image_handle, 0, 0, pgc).await.unwrap();
+
+        let handle = read_generic(&context, context.data_ptr(destination).unwrap()).unwrap();
+        let drawn = super::FrameBuffer(handle).image(&mut context).unwrap();
+
+        for (x, y) in [(0, 0), (1, 0), (0, 1)] {
+            let untouched = drawn.get_pixel(x, y);
+            assert_eq!((untouched.r, untouched.g, untouched.b), (0, 0, 0), "({x}, {y})");
+        }
+
+        let written = drawn.get_pixel(1, 1);
+        assert_eq!((written.r, written.g, written.b), (0xff, 0xff, 0xff));
+    }
+
+    /// The same clip governs a fill, a line and a string - every call that takes
+    /// a context draws through it, not only the blits.
+    #[futures_test::test]
+    async fn a_fill_and_a_line_stop_at_the_contexts_clip() {
+        let mut context = test_context();
+
+        let pgc_handle = context.alloc(core::mem::size_of::<super::WIPICGraphicsContext>() as u32).unwrap();
+        let pgc = context.data_ptr(pgc_handle).unwrap();
+        init_context(&mut context, pgc).await.unwrap();
+
+        let destination = framebuffer_of(&mut context, 2, 2, &[0xff00_0000; 4]).await;
+
+        // White, and a rectangle over the whole surface - only the left column
+        // may take it.
+        set_context(&mut context, pgc, Idx::FgPixelIdx, 0x00ff_ffff).await.unwrap();
+        set_clip(&mut context, pgc, 0, 0, 1, 2).await;
+        super::fill_rect(&mut context, destination, 0, 0, 2, 2, pgc).await.unwrap();
+
+        let handle = read_generic(&context, context.data_ptr(destination).unwrap()).unwrap();
+        {
+            let filled = super::FrameBuffer(handle).image(&mut context).unwrap();
+            for y in 0..2 {
+                let inside = filled.get_pixel(0, y);
+                assert_eq!((inside.r, inside.g, inside.b), (0xff, 0xff, 0xff), "(0, {y})");
+
+                let outside = filled.get_pixel(1, y);
+                assert_eq!((outside.r, outside.g, outside.b), (0, 0, 0), "(1, {y})");
+            }
+        }
+
+        // A horizontal line across the top row, clipped to the right column.
+        set_clip(&mut context, pgc, 1, 0, 2, 1).await;
+        super::draw_line(&mut context, destination, 0, 0, 1, 0, pgc).await.unwrap();
+
+        let drawn = super::FrameBuffer(handle).image(&mut context).unwrap();
+        let outside = drawn.get_pixel(0, 1);
+        assert_eq!((outside.r, outside.g, outside.b), (0xff, 0xff, 0xff), "the fill is still there");
+
+        let written = drawn.get_pixel(1, 0);
+        assert_eq!((written.r, written.g, written.b), (0xff, 0xff, 0xff));
+
+        let untouched = drawn.get_pixel(1, 1);
+        assert_eq!((untouched.r, untouched.g, untouched.b), (0, 0, 0));
+    }
+
     async fn framebuffer_of(context: &mut TestContext, width: u32, height: u32, pixels: &[u32]) -> super::WIPICIndirectPtr {
         let image = VecImageBuffer::<ArgbPixel>::from_raw(width, height, pixels.to_vec());
         let framebuffer = super::FrameBuffer::from_image(context, &image).unwrap();
