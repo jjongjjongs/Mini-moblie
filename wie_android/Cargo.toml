@@ -31,5 +31,6 @@ wie_skt = { path = "../wie_skt" }
 wie_wipi_c = { workspace = true }
 
 [dev-dependencies]
+futures-test = { workspace = true }
 smaf_player = { path = "../third_party/smaf_player" }
 zip = { version = "^8.6", features = ["deflate"], default-features = false }

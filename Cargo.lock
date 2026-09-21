@@ -3491,6 +3491,7 @@ name = "wie_android"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "futures-test",
  "jni 0.21.1",
  "libc",
  "md5",

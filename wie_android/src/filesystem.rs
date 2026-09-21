@@ -22,12 +22,20 @@ impl AndroidFilesystem {
         Self { base_path }
     }
 
-    fn path_for(&self, aid: &str, path: &str) -> Option<PathBuf> {
+    /// The app's own directory, which is this runtime's container rather than
+    /// anything the guest can name.
+    fn app_root(&self, aid: &str) -> Option<PathBuf> {
         let sanitized_aid: String = aid.chars().filter(|c| !matches!(c, '/' | '\\' | '\0')).collect();
         if sanitized_aid.is_empty() || sanitized_aid == "." || sanitized_aid == ".." {
-            tracing::error!(aid, path, "rejected: invalid aid");
+            tracing::error!(aid, "rejected: invalid aid");
             return None;
         }
+
+        Some(self.base_path.join(sanitized_aid))
+    }
+
+    fn path_for(&self, aid: &str, path: &str) -> Option<PathBuf> {
+        let root = self.app_root(aid)?;
 
         let mut normalized = PathBuf::new();
         for component in Path::new(path).components() {
@@ -46,7 +54,7 @@ impl AndroidFilesystem {
             return None;
         }
 
-        Some(self.base_path.join(&sanitized_aid).join(normalized))
+        Some(root.join(normalized))
     }
 }
 
@@ -174,9 +182,25 @@ impl Filesystem for AndroidFilesystem {
     }
 
     async fn mkdir(&self, aid: &str, path: &str) -> core::result::Result<(), FilesystemMkdirError> {
-        let path = self.path_for(aid, path).ok_or(FilesystemMkdirError::Other)?;
+        let disk_path = self.path_for(aid, path).ok_or(FilesystemMkdirError::Other)?;
 
-        fs::create_dir(path).map_err(|error| match error.raw_os_error() {
+        // The app's own directory is this runtime's, not the guest's: on a
+        // handset the storage area is always there. `write` and `truncate`
+        // already make it on demand, and a mkdir has to as well, or the first
+        // filesystem call a title makes is refused for a missing parent that
+        // is ours to have made. 리얼싸커 2009 keeps its data in a database and
+        // never writes a file, so its `/shared` was the first - and the ENOENT
+        // it got back ended the game before it drew anything.
+        //
+        // Only our own directory is made. A missing directory inside it is the
+        // guest's own, and mkdir stays one level, the way POSIX leaves it.
+        if let Some(root) = self.app_root(aid)
+            && let Err(error) = fs::create_dir_all(&root)
+        {
+            tracing::warn!(aid, error = %error, "mkdir: could not make the app directory");
+        }
+
+        fs::create_dir(disk_path).map_err(|error| match error.raw_os_error() {
             Some(17) => FilesystemMkdirError::AlreadyExists, // EEXIST
             Some(2) => FilesystemMkdirError::NotFound,       // ENOENT
             Some(36) => FilesystemMkdirError::NameTooLong,   // ENAMETOOLONG
@@ -315,6 +339,35 @@ mod tests {
     use std::path::PathBuf;
 
     use super::AndroidFilesystem;
+
+    /// The app's own directory has to be made on demand here, the way `write`
+    /// already makes it.
+    ///
+    /// 리얼싸커 2009 keeps its data in a database and never writes a file, so
+    /// nothing had made ours by the time it asked for `/shared` - and the
+    /// ENOENT that answered ended the game before it drew anything.
+    #[futures_test::test]
+    async fn a_mkdir_makes_the_app_directory_it_needs() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        use wie_backend::Filesystem as _;
+
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let base = std::env::temp_dir().join(format!("wie_android_mkdir_{}_{}", std::process::id(), unique));
+        let filesystem = AndroidFilesystem::new(base.clone());
+
+        // Nothing has written a file, so the app's directory is not there yet.
+        assert!(!base.join("010100D3").exists());
+
+        filesystem.mkdir("010100D3", "shared").await.expect("mkdir");
+        assert_eq!(filesystem.list("010100D3", "shared").await, Some(Vec::new()));
+
+        // A directory inside the app's own is the guest's, and mkdir stays one
+        // level: it does not make `deep` on the way to `deep/deeper`.
+        assert!(filesystem.mkdir("010100D3", "deep/deeper").await.is_err());
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
 
     #[test]
     fn path_stays_inside_app_directory() {
