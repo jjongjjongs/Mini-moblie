@@ -154,6 +154,16 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // 176-wide panel exactly and leaves a 32-column gap of the screen before it
     // on a 240-wide one. 204 rows and a 16-row strip is the 220 of that panel.
     (TitlePlatform::Ktf, "01031C47", panel(176, 220)),
+    // KBO 프로야구 2009: its descriptor says 176*220 and every screen it lays
+    // out is 240 wide. It puts 선수명단 and 선수상세설명 side by side, which
+    // only fits in 240 - on a 176-wide panel the right one is cut down the
+    // middle - and its menu header is two strips, `KBO 프로야구 2009` and the
+    // screen's name, which land on top of each other when there is no room for
+    // the second. Its title picture is the same story: the 2009 under the logo
+    // and the rating badge in the corner are both off the bottom and the right
+    // of a 176x220 panel. All 320 rows, not the 296 a strip would leave: its
+    // key bar - `CLR:뒤로 OK:선택 #:도움말` - is on the last of them.
+    (TitlePlatform::Ktf, "01035ACD", panel(240, 320)),
     // 소울게이트: takes a 240x320 screen, composes every frame into a 320x240
     // off-screen buffer of its own, and copies that onto the screen a quarter
     // turn clockwise - the handset was meant to be turned sideways to play it.
@@ -206,6 +216,11 @@ mod tests {
     fn a_title_can_name_a_shorter_panel_than_its_descriptor_does() {
         assert_eq!(title_quirks(TitlePlatform::Ktf, "01031C0A").screen_size, Some((240, 296)));
         assert!(!title_quirks(TitlePlatform::Ktf, "01031C0A").expects_annunciator);
+
+        // A panel taller than its descriptor's, and the whole of it: no strip
+        // comes off the bottom.
+        assert_eq!(title_quirks(TitlePlatform::Ktf, "01035ACD").screen_size, Some((240, 320)));
+        assert!(!title_quirks(TitlePlatform::Ktf, "01035ACD").expects_annunciator);
     }
 
     #[test]
