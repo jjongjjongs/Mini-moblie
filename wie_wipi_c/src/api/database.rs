@@ -175,7 +175,7 @@ pub async fn open_database(context: &mut dyn WIPICContext, ptr_name: WIPICWord, 
     // emulator. Treat it as a bad parameter and return -22, matching the
     // fail-soft behaviour of the other name-keyed entry points in this
     // file (`stat_by_name_ktf`, `exists_database_ktf`).
-    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, ptr_name)?) else {
+    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, ptr_name)?).map(store_name) else {
         tracing::warn!("MC_dbOpenDataBase: invalid utf8 name @ {ptr_name:#x}");
         return Ok(-22);
     };
@@ -305,7 +305,7 @@ pub async fn open_database_lgt(context: &mut dyn WIPICContext, ptr_name: WIPICWo
     // the logical database name in a fixed 32-byte guest handle and uses a
     // UTF-8 host repository key, so these two checks are safety adaptations
     // rather than native MC_dbOpenDataBase error semantics.
-    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, ptr_name)?) else {
+    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, ptr_name)?).map(store_name) else {
         return Ok(-22);
     };
 
@@ -386,7 +386,7 @@ pub async fn open_database_lgt(context: &mut dyn WIPICContext, ptr_name: WIPICWo
     // The LGT wrapper has already made the native create/existence decision
     // above, so the shared body is told the database may be brought into
     // being rather than being asked to decide again.
-    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, ptr_name)?) else {
+    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, ptr_name)?).map(store_name) else {
         return Ok(-9);
     };
 
@@ -433,7 +433,7 @@ pub async fn get_access_mode_lgt(context: &mut dyn WIPICContext, ptr_name: WIPIC
         return Ok(-9);
     }
 
-    let Ok(name) = String::from_utf8(name_bytes) else {
+    let Ok(name) = String::from_utf8(name_bytes).map(store_name) else {
         return Ok(-22);
     };
 
@@ -1267,7 +1267,9 @@ pub async fn list_record(context: &mut dyn WIPICContext, db_id: i32, buf_ptr: WI
     tracing::debug!("MC_dbListRecords({db_id:#x}, {buf_ptr:#x}, {buf_len})");
 
     let Some(db) = get_database_from_db_id(context, db_id).await? else {
-        return Ok(-25); // M_E_INVALIDHANDLE
+        // Not a handle this runtime handed out, so this is the other call this
+        // slot serves. See `rename_store`.
+        return rename_store(context, db_id as WIPICWord, buf_ptr).await;
     };
 
     if buf_ptr == 0 || buf_len == 0 {
@@ -1289,6 +1291,87 @@ pub async fn list_record(context: &mut dyn WIPICContext, db_id: i32, buf_ptr: WI
     }
 
     Ok(ids.len() as _)
+}
+
+/// `MC_fsRename(from, to, access)` - the filesystem's name for this slot.
+///
+/// KTF's storage table is the handset's filesystem as much as it is its
+/// database, and the two share every slot: open, read, write, close, seek,
+/// remove, *rename*, make a directory - the order the filesystem's own calls
+/// come in. Slots 8 and 12 are already read that way here, and this is the
+/// third. Its arguments are `MC_fsRename`'s exactly, down to the access
+/// selector [`filesystem::rename`] documents, which 리얼싸커 2009 passes as 1.
+///
+/// Which of the two readings a call is is settled by its first argument: a
+/// database handle is a block this runtime allocated and stamped, so a name -
+/// which is what the filesystem reading is passed - never looks like one.
+///
+/// 리얼싸커 2009 installs its data the way a careful program writes any file.
+/// It opens a store under a scratch name, streams eighteen resources of 100KB
+/// into it, closes it, and renames it into place. With nothing serving the
+/// rename the store stayed under the scratch name, the title put up `Data
+/// 인스톨에 실패했습니다`, and ended the run on the key that dismissed it.
+///
+/// The repository has no rename of its own, so the records are carried: each
+/// record of the source goes into the destination under its own id, and the
+/// source is then gone. A destination already there is replaced, which is what
+/// renaming onto a name means.
+async fn rename_store(context: &mut dyn WIPICContext, ptr_from: WIPICWord, ptr_to: WIPICWord) -> Result<i32> {
+    if ptr_from == 0 || ptr_to == 0 {
+        return Ok(-22); // M_E_BADRECID - this path's "bad parameter" idiom
+    }
+
+    let (Ok(from), Ok(to)) = (
+        String::from_utf8(read_null_terminated_string_bytes(context, ptr_from)?).map(store_name),
+        String::from_utf8(read_null_terminated_string_bytes(context, ptr_to)?).map(store_name),
+    ) else {
+        return Ok(-22);
+    };
+
+    tracing::debug!("MC_fsRename({from}, {to})");
+
+    if from == to {
+        return Ok(0);
+    }
+
+    let system = context.system();
+    let pid = system.pid().to_owned();
+    let repository = system.platform().database_repository();
+
+    if !repository.exists(&from, &pid).await {
+        return Ok(-12); // M_E_NOENT
+    }
+
+    let records = {
+        let source = repository.open(&from, &pid).await;
+
+        let mut records = Vec::new();
+        for id in source.get_record_ids().await {
+            if let Some(data) = source.get(id).await {
+                records.push((id, data));
+            }
+        }
+
+        records
+    };
+
+    tracing::warn!(
+        "RENAME carrying {} records: {:?}",
+        records.len(),
+        records.iter().map(|(id, d)| (*id, d.len())).collect::<Vec<_>>()
+    );
+    // Gone first, so what ends up under the name is what was renamed onto it
+    // rather than that mixed with whatever was there before.
+    repository.delete(&to, &pid).await;
+
+    let mut destination = repository.open(&to, &pid).await;
+    for (id, data) in records {
+        destination.set(id, &data).await;
+    }
+
+    repository.delete(&from, &pid).await;
+
+    Ok(0)
 }
 
 pub async fn seek_record_single(context: &mut dyn WIPICContext, db_id: i32, offset: i32, origin: i32) -> Result<i32> {
@@ -1315,7 +1398,7 @@ pub async fn seek_record_single(context: &mut dyn WIPICContext, db_id: i32, offs
 pub async fn list_record_info(context: &mut dyn WIPICContext, ptr_name: WIPICWord, buf_ptr: WIPICWord, capacity: WIPICWord) -> Result<i32> {
     tracing::debug!("MC_dbListRecordInfo({ptr_name:#x}, {buf_ptr:#x}, {capacity})");
 
-    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, ptr_name)?) else {
+    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, ptr_name)?).map(store_name) else {
         return Ok(-22);
     };
     let system = context.system();
@@ -1359,7 +1442,7 @@ pub async fn list_record_info(context: &mut dyn WIPICContext, ptr_name: WIPICWor
 pub async fn exists_database(context: &mut dyn WIPICContext, ptr_name: WIPICWord, r#type: i32) -> Result<i32> {
     tracing::debug!("MC_dbExistsDataBase({ptr_name:#x}, {type})");
 
-    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, ptr_name)?) else {
+    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, ptr_name)?).map(store_name) else {
         return Ok(-22);
     };
     if packaged_store_bytes(context, &name).await?.is_some() {
@@ -1519,7 +1602,7 @@ pub async fn delete_database_lgt(context: &mut dyn WIPICContext, ptr_name: WIPIC
 
     // Native treats the name as raw C bytes. WIE repository keys are UTF-8,
     // so invalid encoding is a host-side safety adaptation.
-    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, ptr_name)?) else {
+    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, ptr_name)?).map(store_name) else {
         return Ok(-22);
     };
 
@@ -1540,7 +1623,7 @@ pub async fn delete_database_lgt(context: &mut dyn WIPICContext, ptr_name: WIPIC
 pub async fn delete_database(context: &mut dyn WIPICContext, ptr_name: WIPICWord, flags: i32) -> Result<i32> {
     tracing::debug!("MC_dbDeleteDataBase({ptr_name:#x}, {flags})");
 
-    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, ptr_name)?) else {
+    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, ptr_name)?).map(store_name) else {
         return Ok(-22);
     };
     let system = context.system();
@@ -1642,44 +1725,43 @@ pub async fn select_record_ktf(context: &mut dyn WIPICContext, db_id: i32, rec_i
         return Ok(-25); // M_E_INVALIDHANDLE
     };
 
-    // KTF reuses slot 4 as a stream-control op `(handle, offset, mode)`. The
-    // shapes observed across games:
+    // KTF reuses slot 4 as a stream-control op `(handle, offset, mode)`, and
+    // the offset is signed and counted from where the cursor already is -
+    // `SEEK_CUR`, for every mode but 2.
     //
-    //   - `(handle, slot_offset, 0)` — multi-slot save files store each
-    //     slot at a known byte offset within record 1; this seeks both
-    //     cursors so the next read/write hits the right slot while
-    //     preserving the bytes belonging to the other slots.
-    //   - `(handle, 0, 0)` and `(handle, 0, 2)` — rewinds both cursors.
-    //     mode=0 vs 2 isn't a length and isn't truncate (truncating on
-    //     mode=2 on the read path destroys a prefetched buffer during a
-    //     subsequent re-open and wipes the saved record). Both are treated
-    //     as plain seek-and-rewind.
-    //   - `(handle, delta, 1)` — seeks from where the cursor already is,
-    //     the way `SEEK_CUR` does, rather than from the start.
+    // 리얼싸커 2009 is what says so. It installs a zip and then walks it, and
+    // each step is `read(1024)` followed by a move back to the entry that
+    // window began with: `-982`, then `-79`, `-22`, on down the archive. Read
+    // as absolute positions those are not positions at all; refused outright,
+    // as a negative offset was, the walk never moved and the title took its own
+    // archive for corrupt, put up `Data 인스톨에 실패했습니다` and ended the run
+    // on the key that dismissed it. Counted from the cursor the first lands on
+    // 42 - the first entry's data, 30 bytes of local header and a 12-byte name
+    // in - and every one after it on an entry boundary.
     //
-    // Mode 1 only tells itself apart from mode 0 once a handle has been read
-    // from: on a freshly opened one both land in the same place, which is why
-    // it went unnoticed. 드래곤아이즈2 is the title that reads first - it takes
-    // a four-byte offset out of `bodyImage.dat`'s table and then seeks by it,
-    // and taking that as absolute left it three bytes short of the resource,
-    // where it read a length out of the middle of the previous one, asked for
-    // 49194 bytes of whatever followed, and handed that to `MC_grpCreateImage`
-    // as an image. The whole of its loading screen is images fetched this way;
-    // the one it died on is the only one it seeks to twice.
-    if rec_id >= 0 {
-        let offset = if mode == 1 {
-            handle.read_cursor.saturating_add(rec_id as u32)
-        } else {
-            rec_id as u32
-        };
+    // It asks for the position before each move, with `(0, 1)`, and works out
+    // the delta from what it already knows: `42 - 1024` is that first one
+    // exactly, which is the same cursor this side keeps after a 1024-byte read.
+    //
+    // 드래곤아이즈2 reads its loading-screen images the same way: a four-byte
+    // offset out of `bodyImage.dat`'s table, then a seek by it with mode 1.
+    // Taken as absolute that left it three bytes short of the resource, where
+    // it read a length out of the middle of the previous one, asked for 49194
+    // bytes of whatever followed, and handed that to `MC_grpCreateImage` as an
+    // image.
+    //
+    // Mode 2 is the one that starts from the beginning: `(0, 2)` is a rewind,
+    // and from the cursor that would not rewind anything. `(0, 0)` rewinds a
+    // handle nothing has read from yet, where the two are the same place, which
+    // is why this went as long as it did without being noticed.
+    let base = if mode == 2 { 0 } else { handle.read_cursor as i64 };
+    let position = (base + rec_id as i64).clamp(0, handle.buffer_len as i64) as u32;
 
-        handle.read_cursor = offset;
-        handle.write_cursor = offset;
-        write_generic(context, db_id as _, handle)?;
-        return Ok(0);
-    }
+    handle.read_cursor = position;
+    handle.write_cursor = position;
+    write_generic(context, db_id as _, handle)?;
 
-    Ok(-22) // M_E_BADRECID
+    Ok(0)
 }
 
 /// Slot 5 — KTF custom `db_stat_by_name`. From observed call shape:
@@ -1703,7 +1785,7 @@ pub async fn select_record_ktf(context: &mut dyn WIPICContext, db_id: i32, rec_i
 pub async fn stat_by_name_ktf(context: &mut dyn WIPICContext, name_ptr: WIPICWord, out_buf: WIPICWord, mode: i32, _arg3: i32) -> Result<i32> {
     let name = match read_null_terminated_string_bytes(context, name_ptr) {
         Ok(bytes) => match String::from_utf8(bytes) {
-            Ok(s) => s,
+            Ok(s) => store_name(s),
             Err(_) => return Ok(-22),
         },
         Err(_) => return Ok(-22),
@@ -1763,7 +1845,7 @@ const M_E_NOENT: i32 = -12;
 pub async fn exists_database_ktf(context: &mut dyn WIPICContext, name_ptr: WIPICWord, _arg1: i32, _arg2: i32) -> Result<i32> {
     let name = match read_null_terminated_string_bytes(context, name_ptr) {
         Ok(bytes) => match String::from_utf8(bytes) {
-            Ok(s) => s,
+            Ok(s) => store_name(s),
             Err(_) => {
                 tracing::warn!("MC_dbExists invalid utf8 name @ {name_ptr:#x}, answering not found");
                 return Ok(M_E_NOENT);
@@ -1930,6 +2012,23 @@ pub async fn available_storage_ktf(context: &mut dyn WIPICContext) -> Result<i32
     tracing::debug!("MC_fsAvailable() -> {available} ({used} of {KTF_STORAGE_LIMIT} used) [KTF]");
 
     Ok(available as i32)
+}
+
+/// The store a guest name names.
+///
+/// A name is a path in the handset's own storage area, and a store without a
+/// path already sits at that area's root - so `/lo.dsk` and `lo.dsk` are one
+/// store, not two. 리얼싸커 2009 installs its data under a bare name, renames
+/// it into place under a bare name, and then opens it with the rooted one:
+/// keyed apart, that open found nothing where the title had just put 900KB.
+///
+/// Only a leading separator is taken off. A name with a path inside it is a
+/// name a title made on purpose - 이타루스전기 unpacks into `res/img/f` - and
+/// stays as it is.
+fn store_name(name: String) -> String {
+    let trimmed = name.trim_start_matches('/');
+
+    if trimmed.len() == name.len() { name } else { String::from(trimmed) }
 }
 
 fn load_handle(context: &mut dyn WIPICContext, db_id: i32) -> Result<Option<DatabaseHandle>> {
@@ -3135,25 +3234,44 @@ mod tests {
         assert_eq!(&landed, b"HIT", "a mode 1 seek is relative to the cursor");
     }
 
-    /// Mode 0 is still absolute, which is what the save files that use it need.
+    /// Mode 0 seeks from the cursor too, and its offset is signed.
+    ///
+    /// 리얼싸커 2009 walks the zip it installed by reading a 1024-byte window
+    /// and then moving back to the entry that window began with. A negative
+    /// offset is no absolute position at all, and refused - as it was - the
+    /// walk stands still and the title takes its own archive for corrupt.
     #[futures_test::test]
-    async fn a_ktf_seek_of_mode_zero_is_still_absolute() {
+    async fn a_ktf_seek_of_mode_zero_is_from_the_cursor() {
         let mut shipped = vec![0u8; 512];
-        shipped[200..203].copy_from_slice(b"HIT");
+        shipped[42..45].copy_from_slice(b"HIT");
 
-        let mut context = database_test_context().with_resource("save.dat", &shipped);
-        context.write_bytes(0x1000, b"save.dat\0").unwrap();
+        let mut context = database_test_context().with_resource("lo.dsk", &shipped);
+        context.write_bytes(0x1000, b"lo.dsk\0").unwrap();
         let db_id = open_database(&mut context, 0x1000, 4, 1).await.unwrap();
 
-        select_record_ktf(&mut context, db_id, 88, 0, 0).await.unwrap();
-        stream_read(&mut context, db_id, 0x2000, 4).await.unwrap();
+        // The window the title reads first, which leaves the cursor at 256.
+        stream_read(&mut context, db_id, 0x2000, 256).await.unwrap();
 
-        select_record_ktf(&mut context, db_id, 200, 0, 0).await.unwrap();
+        // Back to where the entry it just read began. The title works the
+        // delta out itself - `42 - 256` - from the same cursor this side keeps.
+        select_record_ktf(&mut context, db_id, -214, 0, 0).await.unwrap();
+
+        // And the move it makes before every read, which moves nothing.
+        select_record_ktf(&mut context, db_id, 0, 0, 0).await.unwrap();
+
         stream_read(&mut context, db_id, 0x2000, 3).await.unwrap();
 
         let mut landed = [0u8; 3];
         context.read_bytes(0x2000, &mut landed).unwrap();
-        assert_eq!(&landed, b"HIT", "mode 0 ignores where the cursor was");
+        assert_eq!(&landed, b"HIT", "mode 0 counts from the cursor");
+
+        // Mode 2 is the one that starts from the beginning, which is what makes
+        // `(0, 2)` a rewind.
+        select_record_ktf(&mut context, db_id, 42, 2, 0).await.unwrap();
+        stream_read(&mut context, db_id, 0x2000, 3).await.unwrap();
+
+        context.read_bytes(0x2000, &mut landed).unwrap();
+        assert_eq!(&landed, b"HIT", "mode 2 counts from the start");
     }
 
     /// Slot 12 answers the storage left, in bytes, and the archive's own
