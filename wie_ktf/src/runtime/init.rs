@@ -1,6 +1,6 @@
-use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
+use alloc::{collections::BTreeSet, format, string::String, vec, vec::Vec};
 use core::mem::{offset_of, size_of};
-use jvm::Jvm;
+use jvm::{ClassInstance, Jvm};
 
 use wie_backend::System;
 use wie_core_arm::{Allocator, ArmCore, EmulatedFunction, ResultWriter, SvcId};
@@ -33,7 +33,7 @@ use crate::{
 pub fn register_init_svc_handler(core: &mut ArmCore, jvm: &Jvm) -> Result<()> {
     core.register_svc_handler(SVC_CATEGORY_MODULE, handle_module_svc, jvm)?;
     core.register_svc_handler(SVC_CATEGORY_MODULE_CLASS, handle_module_class_svc, &())?;
-    core.register_svc_handler(SVC_CATEGORY_MODULE_JUMP, handle_module_jump_svc, &())?;
+    core.register_svc_handler(SVC_CATEGORY_MODULE_JUMP, handle_module_jump_svc, jvm)?;
     core.register_svc_handler(SVC_CATEGORY_INIT, handle_init_svc, jvm)
 }
 
@@ -343,7 +343,80 @@ async fn handle_module_svc(core: &mut ArmCore, jvm: &mut Jvm, id: SvcId) -> Resu
 /// One of these, not one per thread, which is only right while one thread runs
 /// module code: the handler chain and the runtime stack are a thread's own.
 /// 텐가이 has not got far enough to start a second.
-const VM_CONTEXT_SIZE: u32 = 0x40;
+///
+/// The module's own words end at `0x40`; what this runtime keeps for itself
+/// goes after them, where nothing the module compiles can reach.
+const VM_CONTEXT_SIZE: u32 = 0x48;
+
+/// The word the module keeps the head of its `try` chain in.
+///
+/// Its `try` prologue - StarCraft's is at image `+0x72`, and 텐가이 has the
+/// same one - reads this word, puts the record it is building in its place and
+/// chains what was there behind it:
+///
+/// ```text
+/// ldr r3, [fp, #0x2c]     ; the try this one is nested inside
+/// str r2, [fp, #0x2c]     ; and this one becomes the innermost
+/// stm r2!, {r0, r1, r3}   ; method, receiver, the one it is nested inside
+/// ```
+///
+/// A method's epilogue puts the old head back the same way, so the chain is
+/// the module's alone and nothing but a throw has to read it.
+const VM_CONTEXT_HANDLER: u32 = 0x2c;
+
+/// A word the `try` prologue saves into its record and the unwind puts back.
+///
+/// Nothing here knows what the module keeps in it - every capture has it zero
+/// - but the record saves it, which is what says it has to be restored.
+const VM_CONTEXT_TRY_SAVED: u32 = 0x30;
+
+/// Ours: the module's constant pool, so a `try` can be asked what it catches.
+///
+/// A catch class is a pool index until something resolves it, and the throw is
+/// the first thing that ever reads one - long after the load that knew where
+/// the pool was.
+const VM_CONTEXT_POOL: u32 = 0x40;
+
+/// Where a relocated module's `try` record keeps each thing, counted from the
+/// record itself.
+///
+/// The prologue builds the whole of it, and that is where these come from:
+///
+/// ```text
+/// stm r2!, {r0, r1, r3}   ; +0x00 method, +0x04 receiver, +0x08 the outer try
+/// movs r0, #0
+/// stm r2!, {r0}           ; +0x0c what it caught, for the catch block to read
+/// ldr r1, [r4, #0x30]
+/// mov r3, sp
+/// stm r2!, {r0, r1, r3}   ; +0x10 label, +0x14 the saved word, +0x18 sp
+/// mov r3, lr
+/// mov r4, ip
+/// stm r2!, {r3, r4, r5, r6, r7}   ; +0x1c resume, +0x20 r4-r7
+/// mov r1, r8
+/// mov r3, sb
+/// stm r2!, {r1, r3}       ; +0x30 r8, +0x34 sb
+/// mov r3, sl
+/// str r3, [r2, #4]        ; +0x3c sl - and +0x38 is left as it was
+/// ```
+///
+/// The label at `+0x10` is the one word the method keeps writing as it runs:
+/// every protected region starts by storing its own number there, which is
+/// what says where a throw came from.
+const TRY_METHOD: u32 = 0x00;
+const TRY_OUTER: u32 = 0x08;
+const TRY_EXCEPTION: u32 = 0x0c;
+const TRY_LABEL: u32 = 0x10;
+const TRY_SAVED: u32 = 0x14;
+const TRY_SP: u32 = 0x18;
+const TRY_RESUME: u32 = 0x1c;
+const TRY_R4: u32 = 0x20;
+const TRY_R8: u32 = 0x30;
+const TRY_SB: u32 = 0x34;
+const TRY_SL: u32 = 0x3c;
+
+/// How far out a throw looks for a catch before the chain is called corrupt
+/// rather than deep. The same bound the ordinary module's chain is walked with.
+const MAX_MODULE_TRY_RECORDS: usize = 256;
 
 /// The stack a module steps onto to call the runtime, whose top goes in
 /// `+0x34`.
@@ -381,6 +454,198 @@ fn module_vm_context(core: &mut ArmCore, ptr_jvm_context: u32) -> Result<u32> {
     Ok(context)
 }
 
+/// What a module method's `try` blocks catch.
+///
+/// The method record's exception-table word is an array of as many pointers as
+/// it says it has, each to a record of four words: the first label of the
+/// protected region, the first label past it, the label the catch block starts
+/// at, and the class it catches. StarCraft's `Load_Data1` has two of them -
+/// `[0x0e, 0x1d) -> 0x20` and `[0x76, 0x7a) -> 0x7d`, both catching the same
+/// class - which is the `try` around the save it reads at startup.
+fn module_exception_table(core: &mut ArmCore, ptr_method: u32) -> Result<Vec<(u32, u32, u32, u32)>> {
+    let raw: JavaMethodDefinition = read_generic(core, ptr_method)?;
+
+    let mut entries = Vec::with_capacity(raw.exception_table_count as usize);
+    for index in 0..raw.exception_table_count as u32 {
+        let ptr_entry: u32 = read_generic(core, raw.fn_body_native_or_exception_table + index * size_of::<u32>() as u32)?;
+
+        entries.push((
+            read_generic(core, ptr_entry)?,
+            read_generic(core, ptr_entry + size_of::<u32>() as u32)?,
+            read_generic(core, ptr_entry + 2 * size_of::<u32>() as u32)?,
+            read_generic(core, ptr_entry + 3 * size_of::<u32>() as u32)?,
+        ));
+    }
+
+    Ok(entries)
+}
+
+/// The name of the class a `try` catches.
+///
+/// A catch class sits in a table of its own rather than in a class record, so
+/// the pass that resolves a module's imports never reaches one: it is still
+/// the constant-pool index the compiler wrote. A real class record is read as
+/// one, which is what a module catching a class of its own leaves here - and
+/// the two are told apart the way every other module class reference is, by
+/// the bit an index carries and an address cannot.
+fn module_catch_name(core: &mut ArmCore, pool: u32, ptr_class: u32) -> Result<String> {
+    let Some(index) = import_index(ptr_class) else {
+        return KtfJvmSupport::class_from_raw(core, ptr_class).name();
+    };
+
+    let ptr_name: u32 = read_generic(core, pool + index * size_of::<u32>() as u32)?;
+    let name_bytes = read_null_terminated_string_bytes(core, ptr_name)?;
+
+    Ok(encoding_rs::EUC_KR.decode(&name_bytes).0.into_owned())
+}
+
+/// The `try` a relocated module has open that catches this, if it has one.
+///
+/// Answers the long jump back into it - the same unwind the ordinary module's
+/// chain produces, so every caller that already knows how to resume one needs
+/// no second path - or `None` when no `try` in the chain covers the throw.
+///
+/// The two chains are never both live: a module reaches this one through `fp`,
+/// and only a relocated module is handed an `fp` to reach it through.
+pub(crate) async fn module_unwind(core: &mut ArmCore, jvm: &Jvm, exception: &dyn ClassInstance, exception_raw: u32) -> Result<Option<WieError>> {
+    let fp = core.save_context().fp;
+    let pool: u32 = read_generic(core, fp + VM_CONTEXT_POOL)?;
+
+    let mut record: u32 = read_generic(core, fp + VM_CONTEXT_HANDLER)?;
+    let mut visited = Vec::new();
+
+    while record != 0 {
+        if visited.len() >= MAX_MODULE_TRY_RECORDS {
+            return Err(WieError::FatalError(format!(
+                "a module's try chain exceeds {MAX_MODULE_TRY_RECORDS} records"
+            )));
+        }
+        if !record.is_multiple_of(4) {
+            return Err(WieError::FatalError(format!("a module's try record at {record:#x} is not word-aligned")));
+        }
+        if visited.contains(&record) {
+            return Err(WieError::FatalError(format!("a module's try chain cycles at {record:#x}")));
+        }
+        visited.push(record);
+
+        let ptr_method: u32 = read_generic(core, record + TRY_METHOD)?;
+        let label: u32 = read_generic(core, record + TRY_LABEL)?;
+
+        for (from, to, target, ptr_class) in module_exception_table(core, ptr_method)? {
+            // Half-open, as the ordinary module's table is: a region's own
+            // last label is the first one after it.
+            if label < from || label >= to {
+                continue;
+            }
+
+            // No class at all catches anything, which is what a `finally`
+            // leaves here.
+            if ptr_class != 0 {
+                let name = module_catch_name(core, pool, ptr_class)?;
+                if !jvm.is_instance(exception, &name) {
+                    continue;
+                }
+            }
+
+            let frame_sp: u32 = read_generic(core, record + TRY_SP)?;
+            let resume: u32 = read_generic(core, record + TRY_RESUME)?;
+
+            tracing::debug!(
+                "a module's try at {record:#x} catches at label {target:#x}, {} records out, frame {frame_sp:#x}",
+                visited.len() - 1
+            );
+
+            // The records this unwound past are gone, so the one that caught
+            // it is the innermost from here on - and the word its own prologue
+            // saved goes back with it.
+            let saved: u32 = read_generic(core, record + TRY_SAVED)?;
+            write_generic(core, fp + VM_CONTEXT_TRY_SAVED, saved)?;
+            write_generic(core, fp + VM_CONTEXT_HANDLER, record)?;
+
+            // What the catch block reads, and where execution now is. Left as
+            // it was, a throw from inside the catch block matches the entry
+            // the block belongs to and jumps to its own first instruction
+            // again, for as long as the run lasts.
+            write_generic(core, record + TRY_EXCEPTION, exception_raw)?;
+            write_generic(core, record + TRY_LABEL, target)?;
+
+            return Ok(Some(WieError::JavaExceptionUnwind {
+                context_base: record,
+                target,
+                next_pc: resume,
+                frame_sp,
+            }));
+        }
+
+        record = read_generic(core, record + TRY_OUTER)?;
+    }
+
+    Ok(None)
+}
+
+/// An exception a module's own call answered with, as the error to propagate.
+///
+/// The `try` that catches it when one does; the exception itself when none
+/// does, which ends the run with the Java stack trace, exactly as it ends for
+/// a module that never opened a `try`.
+async fn module_exception(core: &mut ArmCore, jvm: &Jvm, exception_raw: u32) -> WieError {
+    let exception = KtfJvmSupport::class_instance_from_raw(core, exception_raw);
+
+    match module_unwind(core, jvm, &exception, exception_raw).await {
+        Ok(Some(unwind)) => unwind,
+        Ok(None) => WieError::JavaException(exception_raw),
+        Err(error) => error,
+    }
+}
+
+/// Puts a caught frame's registers back, so its catch block can run.
+///
+/// The `try` prologue saved the frame it opened in the record; the label the
+/// catch block starts at is not restored but passed, because a compiled method
+/// dispatches on what it gets back from that prologue - resuming is returning
+/// from the call the frame was interrupted in, with the target in `r0`.
+///
+/// `fp` is not restored because it never moves: it is the module's context.
+/// Neither is `+0x38` of the record, which the prologue does not write.
+fn module_restore_frame(core: &mut ArmCore, record: u32) -> Result<()> {
+    let mut registers = core.save_context();
+
+    registers.sp = read_generic(core, record + TRY_SP)?;
+    registers.r4 = read_generic(core, record + TRY_R4)?;
+    registers.r5 = read_generic(core, record + TRY_R4 + size_of::<u32>() as u32)?;
+    registers.r6 = read_generic(core, record + TRY_R4 + 2 * size_of::<u32>() as u32)?;
+    registers.r7 = read_generic(core, record + TRY_R4 + 3 * size_of::<u32>() as u32)?;
+    registers.r8 = read_generic(core, record + TRY_R8)?;
+    registers.sb = read_generic(core, record + TRY_SB)?;
+    registers.sl = read_generic(core, record + TRY_SL)?;
+
+    core.restore_context(&registers);
+
+    Ok(())
+}
+
+/// What a resumed catch block is re-entered with.
+///
+/// An ordinary module resumes through a restore function of its own, which
+/// takes the saved registers and the label it is to continue at. A relocated
+/// module has no such function - its `try` record *is* the saved registers -
+/// so they go back here and the label is all its own resume address takes.
+///
+/// Putting them back here rather than in a stub of this runtime's own is not a
+/// shortcut. A stub runs on the guest stack, and the stack pointer a caught
+/// frame is resumed from sits directly on that frame's saved return address -
+/// so the one word such a stub pushes is the word the frame returns through,
+/// and the frame returns into its own method record.
+pub(crate) fn module_unwound_arguments(core: &mut ArmCore, context_base: u32, target: u32) -> Result<Vec<u32>> {
+    if core.reserved_fp().is_none() {
+        return Ok(vec![context_base, target]);
+    }
+
+    module_restore_frame(core, context_base)?;
+
+    Ok(vec![target])
+}
+
 /// The jump table's first two entries, which are the module's method calls:
 /// the ordinary one, and the one it takes when the method's own record says
 /// the method is native.
@@ -413,7 +678,7 @@ const MODULE_JUMP_PUSHED: u32 = 2;
 /// reading its arguments from registers, one from a block - so this picks the
 /// one the module's own flag test picked and hands the arguments over the way
 /// that entry point reads them.
-async fn module_invoke(core: &mut ArmCore, native: bool) -> Result<JavaMethodResult> {
+async fn module_invoke(core: &mut ArmCore, jvm: &Jvm, native: bool) -> Result<JavaMethodResult> {
     let ptr_method = core.read_param(0)?;
     let raw: JavaMethodDefinition = read_generic(core, ptr_method)?;
 
@@ -436,6 +701,13 @@ async fn module_invoke(core: &mut ArmCore, native: bool) -> Result<JavaMethodRes
 
     registers.sp = entry_sp + MODULE_JUMP_PUSHED * size_of::<u32>() as u32;
     core.restore_context(&registers);
+
+    // What the caller had, to put back after a round that resumed a catch
+    // block. Entering one means loading that block's own frame into the
+    // registers, and `run_function` hands back the registers it was entered
+    // with rather than the ones the caller had - so without this the caller
+    // carries on with the caught frame's stack pointer under it.
+    let caller = core.save_context();
 
     let result = if native {
         let name = KtfJvmSupport::read_name(core, raw.ptr_name)?;
@@ -460,6 +732,61 @@ async fn module_invoke(core: &mut ArmCore, native: bool) -> Result<JavaMethodRes
 
         core.run_function::<u32>(raw.fn_body, &arguments).await
     };
+
+    // A method this runtime implements throws by answering its caller, because
+    // the caller it was given is this runtime rather than guest code. The
+    // caller here *is* guest code, so the throw becomes the module's own: the
+    // `try` it has open is the one that catches it.
+    let mut result = match result {
+        Err(WieError::JavaException(exception)) => Err(module_exception(core, jvm, exception).await),
+        result => result,
+    };
+
+    // A catch block belonging to the frame this call is running has to be
+    // entered *inside* this call, the way `run_with_unwind` enters one for the
+    // ordinary module. The method above is running in a guest call of its own,
+    // and its epilogue ends that call by returning to the address that started
+    // it; resumed a level out instead, the frame runs to its end and then ends
+    // its caller's call rather than its own, and the caller carries on with a
+    // return address that was never meant for it.
+    //
+    // `entry_sp` is where this call was entered, so a frame saved above it
+    // belongs to a caller that has not returned yet: that unwind travels on,
+    // and the next call out asks the same question of its own entry.
+    while let Err(WieError::JavaExceptionUnwind {
+        context_base,
+        target,
+        next_pc,
+        frame_sp,
+    }) = result
+    {
+        if frame_sp > entry_sp {
+            result = Err(WieError::JavaExceptionUnwind {
+                context_base,
+                target,
+                next_pc,
+                frame_sp,
+            });
+            break;
+        }
+
+        let arguments = module_unwound_arguments(core, context_base, target)?;
+        let resumed = core.run_function::<u32>(next_pc, &arguments).await;
+
+        // Not after a fault: the registers it faulted with are what the dump
+        // is read from.
+        if matches!(
+            resumed,
+            Ok(_) | Err(WieError::JavaException(_)) | Err(WieError::JavaExceptionUnwind { .. })
+        ) {
+            core.restore_context(&caller);
+        }
+
+        result = match resumed {
+            Err(WieError::JavaException(exception)) => Err(module_exception(core, jvm, exception).await),
+            result => result,
+        };
+    }
 
     map_jump_result(entry_sp, result)
 }
@@ -490,12 +817,12 @@ fn method_argument_words(descriptor: &str, access_flags: MethodAccessFlags) -> u
 /// | 3    | a class reference resolved, the other of the pair  |
 /// | 4    | a frame popped                                    |
 /// | 5    | an array index found out of bounds                |
-async fn handle_module_jump_svc(core: &mut ArmCore, _: &mut (), id: SvcId) -> Result<()> {
+async fn handle_module_jump_svc(core: &mut ArmCore, jvm: &mut Jvm, id: SvcId) -> Result<()> {
     let (_, lr) = core.read_pc_lr()?;
 
     match id.0 {
-        MODULE_INVOKE => return module_invoke(core, false).await?.write(core, lr),
-        MODULE_INVOKE_NATIVE => return module_invoke(core, true).await?.write(core, lr),
+        MODULE_INVOKE => return module_invoke(core, jvm, false).await?.write(core, lr),
+        MODULE_INVOKE_NATIVE => return module_invoke(core, jvm, true).await?.write(core, lr),
         MODULE_POLL => return 0u32.write(core, lr),
         _ => (),
     }
@@ -879,6 +1206,8 @@ pub async fn load_native(
             // out of the image - a method's epilogue puts the handler chain
             // back through that one.
             let vm_context = module_vm_context(core, ptr_jvm_context)?;
+            let pool = module.base(IMAGE_BASE) + module.constant_pool(data)?;
+            write_generic(core, vm_context + VM_CONTEXT_POOL, pool)?;
             core.reserve_fp(vm_context);
             write_generic(
                 core,

@@ -845,6 +845,14 @@ impl ArmCore {
         self.inner.lock().reserved_fp = Some(address);
     }
 
+    /// The `fp` [`Self::reserve_fp`] reserved, if one was.
+    ///
+    /// Only a module that reaches the runtime through `fp` has one, so its
+    /// presence is what says which kind of module is running.
+    pub fn reserved_fp(&self) -> Option<u32> {
+        self.inner.lock().reserved_fp
+    }
+
     pub fn restore_context(&mut self, context: &ArmCoreContext) {
         let mut inner = self.inner.lock();
 

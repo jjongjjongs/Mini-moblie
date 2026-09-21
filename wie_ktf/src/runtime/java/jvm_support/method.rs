@@ -61,7 +61,11 @@ use wie_core_arm::{
 use wie_util::{ByteWrite, Result, WieError, read_generic, write_generic};
 
 use crate::runtime::java::jvm_support::JavaClassDefinition;
-use crate::runtime::{SVC_CATEGORY_JAVA, java::JavaSvcFunctions};
+use crate::runtime::{
+    SVC_CATEGORY_JAVA,
+    init::{module_unwind, module_unwound_arguments},
+    java::JavaSvcFunctions,
+};
 
 use super::{KtfJvmSupport, class_instance::JavaClassInstance, name::JavaFullName, value::JavaValueExt};
 
@@ -272,9 +276,19 @@ impl JavaMethod {
         /// second throw was the one that had just been resumed, and its frame
         /// sat eight bytes above where the resumed continuation was running.
         async fn run_with_unwind(core: &mut ArmCore, entry_sp: u32, mut pc: u32, mut args: Vec<u32>) -> Result<JavaMethodRunResult> {
+            // What the caller had. Resuming a catch block can mean loading that
+            // block's own frame into the registers first, and `run_function`
+            // hands back the registers it was entered with rather than the ones
+            // the caller had - so they go back here after every round.
+            let caller = core.save_context();
+
             loop {
                 match core.run_function::<JavaMethodRunResult>(pc, &args).await {
-                    Ok(r) => return Ok(r),
+                    Ok(r) => {
+                        core.restore_context(&caller);
+
+                        return Ok(r);
+                    }
                     Err(WieError::JavaExceptionUnwind {
                         context_base,
                         target,
@@ -300,8 +314,9 @@ impl JavaMethod {
                         }
 
                         tracing::debug!("Resuming via exception restore: pc={next_pc:#x}, context_base={context_base:#x}, target={target:#x}");
+                        core.restore_context(&caller);
                         pc = next_pc;
-                        args = vec![context_base, target];
+                        args = module_unwound_arguments(core, context_base, target)?;
                     }
                     Err(e) => return Err(e),
                 }
@@ -373,6 +388,22 @@ impl JavaMethod {
         tracing::warn!("Java exception thrown: {exception:?}");
 
         let exception_raw = KtfJvmSupport::class_instance_raw(&exception);
+
+        // A relocated module keeps its `try` records on a chain of its own,
+        // reached through the `fp` it was handed rather than through the word
+        // this runtime hands an ordinary module at `fn_init`. Only one of the
+        // two is ever live, and having an `fp` reserved is what says which.
+        if core.reserved_fp().is_some() {
+            return match module_unwind(core, jvm, &*exception, exception_raw).await? {
+                Some(unwind) => Err(unwind),
+                None => {
+                    tracing::warn!("No try in the module's chain for {exception:?}");
+
+                    Err(JvmSupport::to_wie_err(jvm, JavaError::JavaException(exception)).await)
+                }
+            };
+        }
+
         let mut handler_address = KtfJvmSupport::current_java_exception_handler(core)?;
 
         // What the search looked at, kept for the case where it finds nothing.
