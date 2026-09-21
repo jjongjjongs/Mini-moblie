@@ -86,7 +86,14 @@ impl BaseClip {
         }
 
         // Native dereferences the byte array here, so a null buffer must
-        // preserve the JVM's normal null-array failure.
+        // preserve the JVM's normal null-array failure - as an exception the
+        // title can catch, which is what the reference raises. Read as an array
+        // instead, a null reference is a `None` unwrapped inside the JVM, and
+        // that is a Rust panic rather than anything a title can answer.
+        if buffer.is_null() {
+            return Err(jvm.exception("java/lang/NullPointerException", "clip buffer is null").await);
+        }
+
         let array_length = jvm.array_length(&buffer).await? as i32;
         let data_size = core::cmp::min(array_length, size);
 

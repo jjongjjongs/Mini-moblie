@@ -146,6 +146,18 @@ impl Clip {
     ) -> JvmResult<()> {
         tracing::debug!("org.kwis.msp.media.Clip::<init>({this:?}, {type:?}, {data:?})");
 
+        // The reference's constructor reaches for the array's length, so a
+        // null one fails the way any null dereference fails - and the title is
+        // what catches that. 절묘한타이밍 builds a clip this way when the sound
+        // it wanted is not there: its own loader answers null, its `catch`
+        // takes over, and the clip it makes carries the null straight through.
+        // Read as an array here, a null reference is a `None` unwrapped inside
+        // the JVM - a Rust panic, so the process died where the title expected
+        // an exception.
+        if data.is_null() {
+            return Err(jvm.exception("java/lang/NullPointerException", "clip data is null").await);
+        }
+
         let _: () = jvm
             .invoke_special(&this, "org/kwis/msp/media/Clip", "<init>", "(Ljava/lang/String;)V", (r#type,))
             .await?;
@@ -388,6 +400,47 @@ mod test {
             let negative_exception = negative_result.expect_err("negative Clip size must throw");
             let JavaError::JavaException(exception) = negative_exception;
             assert!(jvm.is_instance(&*exception, "java/lang/NegativeArraySizeException"));
+
+            Ok(())
+        })
+    }
+
+    /// A clip built from a null array fails the way a null dereference fails,
+    /// as an exception the title catches - not as a panic taking the run with
+    /// it.
+    ///
+    /// 절묘한타이밍 asks for a sound resource, gets nothing back, and its
+    /// `catch` builds the clip from the null it was left holding. The
+    /// reference's constructor reaches for that array's length, so the title is
+    /// catching a `NullPointerException` there and carrying on; read as an
+    /// array instead, the null was a `None` unwrapped inside the JVM and the
+    /// process died where the title expected an exception.
+    #[test]
+    fn a_clip_built_from_a_null_array_throws_rather_than_panicking() -> Result<()> {
+        run_jvm_test(Box::new([wie_midp::get_protos().into(), get_protos().into()]), |jvm| async move {
+            let r#type = JavaLangString::from_rust_string(&jvm, "audio/none").await?;
+            let result = jvm
+                .new_class(
+                    "org/kwis/msp/media/Clip",
+                    "(Ljava/lang/String;[B)V",
+                    (r#type, ClassInstanceRef::<()>::new(None)),
+                )
+                .await;
+
+            let JavaError::JavaException(exception) = result.expect_err("a null clip array must throw");
+            assert!(jvm.is_instance(&*exception, "java/lang/NullPointerException"));
+
+            // The same array reaches `setBuffer` on its own, and answers the
+            // same way.
+            let r#type = JavaLangString::from_rust_string(&jvm, "audio/none").await?;
+            let clip: ClassInstanceRef<Clip> = jvm.new_class("org/kwis/msp/media/Clip", "(Ljava/lang/String;)V", (r#type,)).await?.into();
+
+            let buffered: JvmResult<bool> = jvm
+                .invoke_virtual(&clip, "setBuffer", "([BI)Z", (ClassInstanceRef::<()>::new(None), 0))
+                .await;
+
+            let JavaError::JavaException(exception) = buffered.expect_err("a null buffer must throw");
+            assert!(jvm.is_instance(&*exception, "java/lang/NullPointerException"));
 
             Ok(())
         })
