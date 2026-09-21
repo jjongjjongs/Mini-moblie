@@ -1813,7 +1813,15 @@ pub async fn stat_by_name_ktf(context: &mut dyn WIPICContext, name_ptr: WIPICWor
     let system = context.system();
     let pid = system.pid().to_owned();
     let exists = system.platform().database_repository().exists(&name, &pid).await;
-    if !exists && packaged.is_none() {
+
+    // This slot answers for the handset's filesystem as much as for its
+    // database - the two share every slot in this table - so a name the title
+    // made through `MC_fsMkDir` has to be found here too. 리얼싸커 2009 makes
+    // `/shared` the moment its own module starts and asks for `shared` on the
+    // next line; told it was not there, it quits without a word.
+    let directory = !exists && packaged.is_none() && system.filesystem().list(&name).await.is_some();
+
+    if !exists && packaged.is_none() && !directory {
         tracing::debug!("db.stat_by_name({name:?}, mode={mode}) -> -22 (not found)");
         return Ok(-22);
     }
@@ -3286,6 +3294,30 @@ mod tests {
         let mut landed = [0u8; 3];
         context.read_bytes(0x2000, &mut landed).unwrap();
         assert_eq!(&landed, b"HIT", "the seek that tell fed lands on the entry");
+    }
+
+    /// This slot answers for the handset's filesystem as much as for its
+    /// database - the two share every slot in this table.
+    ///
+    /// 리얼싸커 2009 makes `/shared` the moment its own module starts and asks
+    /// for `shared` on the next line. Told it was not there, it called
+    /// `MC_knlExit` without a word, which on a handset is the game closing the
+    /// instant it is opened.
+    #[futures_test::test]
+    async fn a_directory_the_title_made_is_found_by_name() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"shared\0").unwrap();
+
+        assert_eq!(stat_by_name_ktf(&mut context, 0x1000, 0, 1, 0).await.unwrap(), -22);
+
+        let filesystem = crate::context::WIPICContext::system(&mut context).filesystem().clone();
+        filesystem.mkdir("/shared").await.expect("mkdir");
+
+        assert_eq!(
+            stat_by_name_ktf(&mut context, 0x1000, 0, 1, 0).await.unwrap(),
+            0,
+            "a directory the title made is a name this slot knows"
+        );
     }
 
     /// Slot 12 answers the storage left, in bytes, and the archive's own
