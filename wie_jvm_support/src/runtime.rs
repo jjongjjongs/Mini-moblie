@@ -299,6 +299,10 @@ struct JavaString;
 /// `setCharAt` is the third. 다크슬레이어2 writes its menu through it and died
 /// on its own title screen, before a key was pressed.
 ///
+/// `insert(int, int)` is the fourth, and 코에이삼국지2's - the same idiom with a
+/// number rather than a string, which the runtime spells for `append` and not
+/// for `insert`.
+///
 /// Anything that is not that class is handed back untouched, and so is a method
 /// the runtime has grown since - the runtime's own is the one to keep.
 fn fill_in_string_buffer(mut proto: RuntimeClassProto) -> RuntimeClassProto {
@@ -311,6 +315,12 @@ fn fill_in_string_buffer(mut proto: RuntimeClassProto) -> RuntimeClassProto {
             "insert",
             "(ILjava/lang/String;)Ljava/lang/StringBuffer;",
             string_buffer_insert_string,
+            MethodAccessFlags::empty(),
+        ),
+        JavaMethodProto::new(
+            "insert",
+            "(II)Ljava/lang/StringBuffer;",
+            string_buffer_insert_integer,
             MethodAccessFlags::empty(),
         ),
         JavaMethodProto::new(
@@ -336,18 +346,11 @@ fn fill_in_string_buffer(mut proto: RuntimeClassProto) -> RuntimeClassProto {
 async fn string_buffer_insert_string(
     jvm: &Jvm,
     _: &mut RuntimeContext,
-    mut this: ClassInstanceRef<StringBuffer>,
+    this: ClassInstanceRef<StringBuffer>,
     offset: i32,
     string: ClassInstanceRef<JavaString>,
 ) -> JvmResult<ClassInstanceRef<StringBuffer>> {
     tracing::debug!("java.lang.StringBuffer::insert({this:?}, {offset}, {string:?})");
-
-    let count: i32 = jvm.get_field(&this, "count", "I").await?;
-    if offset < 0 || offset > count {
-        return Err(jvm
-            .exception("java/lang/StringIndexOutOfBoundsException", "insert offset is outside the buffer")
-            .await);
-    }
 
     // A null inserts the four letters, the way every other conversion in this
     // class spells one.
@@ -356,6 +359,43 @@ async fn string_buffer_insert_string(
     } else {
         JavaLangString::to_rust_string(jvm, &string).await?
     };
+
+    string_buffer_insert(jvm, this, offset, &inserted).await
+}
+
+/// `insert(int, int)`, which the runtime does not carry either.
+///
+/// 코에이삼국지2 builds its save-slot lines this way - a number written into a
+/// buffer at a place the line's layout decides - and the thread that draws them
+/// died on `Method insert(II)Ljava/lang/StringBuffer; not found from
+/// java/lang/StringBuffer` while its title screen was still up, so the title
+/// never left it.
+async fn string_buffer_insert_integer(
+    jvm: &Jvm,
+    _: &mut RuntimeContext,
+    this: ClassInstanceRef<StringBuffer>,
+    offset: i32,
+    value: i32,
+) -> JvmResult<ClassInstanceRef<StringBuffer>> {
+    tracing::debug!("java.lang.StringBuffer::insert({this:?}, {offset}, {value})");
+
+    string_buffer_insert(jvm, this, offset, &alloc::format!("{value}")).await
+}
+
+/// Puts `inserted` into the buffer at `offset`.
+async fn string_buffer_insert(
+    jvm: &Jvm,
+    mut this: ClassInstanceRef<StringBuffer>,
+    offset: i32,
+    inserted: &str,
+) -> JvmResult<ClassInstanceRef<StringBuffer>> {
+    let count: i32 = jvm.get_field(&this, "count", "I").await?;
+    if offset < 0 || offset > count {
+        return Err(jvm
+            .exception("java/lang/StringIndexOutOfBoundsException", "insert offset is outside the buffer")
+            .await);
+    }
+
     let inserted = inserted.encode_utf16().collect::<Vec<_>>();
 
     let mut value: ClassInstanceRef<Array<JavaChar>> = jvm.get_field(&this, "value", "[C").await?;
@@ -589,6 +629,31 @@ mod tests {
 
                 assert!(result.is_err(), "{offset} is outside a buffer of 50");
             }
+
+            Ok(())
+        })
+    }
+
+    /// A number inserts as the digits it is written with, at the same places
+    /// and with the same throw as a string.
+    #[test]
+    fn a_string_buffer_inserts_a_number_as_its_digits() -> Result<(), WieError> {
+        run_jvm_test(Box::new([]), async |jvm| {
+            let text = JavaLangString::from_rust_string(&jvm, "slot :").await?;
+            let buffer = jvm.new_class("java/lang/StringBuffer", "(Ljava/lang/String;)V", (text,)).await?;
+
+            for (offset, value) in [(5, 12), (5, -3)] {
+                let _: ClassInstanceRef<StringBuffer> = jvm
+                    .invoke_virtual(&buffer, "insert", "(II)Ljava/lang/StringBuffer;", (offset, value))
+                    .await?;
+            }
+
+            let text = jvm.invoke_virtual(&buffer, "toString", "()Ljava/lang/String;", ()).await?;
+            assert_eq!(JavaLangString::to_rust_string(&jvm, &text).await?, "slot -312:");
+
+            let result: JvmResult<ClassInstanceRef<StringBuffer>> =
+                jvm.invoke_virtual(&buffer, "insert", "(II)Ljava/lang/StringBuffer;", (11, 0)).await;
+            assert!(result.is_err(), "11 is outside a buffer of 10");
 
             Ok(())
         })
