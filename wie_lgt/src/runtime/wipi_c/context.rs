@@ -12,8 +12,8 @@ use wie_util::{ByteRead, ByteWrite, Result, WieError, read_generic, write_generi
 use wie_wipi_c::{
     WIPICContext, WIPICMethodBody,
     api::{
-        filesystem::SharedFilesystemState, im::SharedImState, kernel::SharedKernelState, net::SharedNetworkState, serial::SharedSerialState,
-        shared_buf::SharedSharedBufState,
+        filesystem::SharedFilesystemState, im::SharedImState, kernel::SharedKernelState, media::SharedMediaState, net::SharedNetworkState,
+        serial::SharedSerialState, shared_buf::SharedSharedBufState,
     },
 };
 
@@ -28,6 +28,7 @@ pub struct LgtWIPICContext {
     filesystem_state: SharedFilesystemState,
     shared_buf_state: SharedSharedBufState,
     im_state: SharedImState,
+    media_state: SharedMediaState,
     kernel_state: SharedKernelState,
 }
 
@@ -42,6 +43,7 @@ impl LgtWIPICContext {
         filesystem_state: SharedFilesystemState,
         shared_buf_state: SharedSharedBufState,
         im_state: SharedImState,
+        media_state: SharedMediaState,
         kernel_state: SharedKernelState,
     ) -> Self {
         Self {
@@ -53,6 +55,7 @@ impl LgtWIPICContext {
             filesystem_state,
             shared_buf_state,
             im_state,
+            media_state,
             kernel_state,
         }
     }
@@ -139,6 +142,10 @@ impl WIPICContext for LgtWIPICContext {
 
     fn im_state(&self) -> SharedImState {
         self.im_state.clone()
+    }
+
+    fn media_state(&self) -> SharedMediaState {
+        self.media_state.clone()
     }
 
     fn kernel_state(&self) -> SharedKernelState {

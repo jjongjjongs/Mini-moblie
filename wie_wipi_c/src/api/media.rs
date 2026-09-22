@@ -39,33 +39,57 @@ const FULL_VOLUME: u8 = 100;
 /// loaded under. The record is keyed by address and outlives the clip's own
 /// free and re-create: a title tears the clip down and builds it again at the
 /// same slot between two sounds, which is the very gap the level has to cross.
-static CLIP_LEVELS: Mutex<Vec<(WIPICWord, u8)>> = Mutex::new(Vec::new());
+///
+/// One of these belongs to one run of one title. It used to be a `static`, and
+/// that was wrong twice over: the Android bridge starts and stops titles in a
+/// single process, so a title began with whatever levels the title before it
+/// left at the same addresses; and the tests here, which all build a context
+/// handing out the same first clip address, could only keep out of each other's
+/// way by clearing the `static` as they started - which is no help at all when
+/// two of them run at once, each clearing what the other is midway through
+/// using.
+#[derive(Default)]
+pub struct MediaState {
+    clip_levels: Vec<(WIPICWord, u8)>,
+}
 
 /// How many clips carry a level, so a title that allocates without end cannot
 /// grow this without end either. Titles here use one or two clip slots.
 const CLIP_LEVELS_LIMIT: usize = 64;
 
-/// Remembers the level `clip` is set to. See [`CLIP_LEVELS`].
-fn remember_clip_level(clip: WIPICWord, level: u8) {
-    let mut levels = CLIP_LEVELS.lock();
+impl MediaState {
+    /// Remembers the level `clip` is set to. See [`MediaState`].
+    fn remember_clip_level(&mut self, clip: WIPICWord, level: u8) {
+        if let Some(entry) = self.clip_levels.iter_mut().find(|(candidate, _)| *candidate == clip) {
+            entry.1 = level;
+            return;
+        }
+        if self.clip_levels.len() >= CLIP_LEVELS_LIMIT {
+            self.clip_levels.remove(0);
+        }
+        self.clip_levels.push((clip, level));
+    }
 
-    if let Some(entry) = levels.iter_mut().find(|(candidate, _)| *candidate == clip) {
-        entry.1 = level;
-        return;
+    /// The level `clip` was last set to, if it was set at all.
+    fn remembered_clip_level(&self, clip: WIPICWord) -> Option<u8> {
+        self.clip_levels.iter().find(|(candidate, _)| *candidate == clip).map(|(_, level)| *level)
     }
-    if levels.len() >= CLIP_LEVELS_LIMIT {
-        levels.remove(0);
-    }
-    levels.push((clip, level));
 }
 
-/// The level `clip` was last set to, if it was set at all.
-fn remembered_clip_level(clip: WIPICWord) -> Option<u8> {
-    CLIP_LEVELS
-        .lock()
-        .iter()
-        .find(|(candidate, _)| *candidate == clip)
-        .map(|(_, level)| *level)
+pub type SharedMediaState = Arc<Mutex<MediaState>>;
+
+pub fn new_state() -> SharedMediaState {
+    Arc::new(Mutex::new(MediaState::default()))
+}
+
+/// Remembers the level `clip` is set to, on this run's own state.
+fn remember_clip_level(context: &dyn WIPICContext, clip: WIPICWord, level: u8) {
+    context.media_state().lock().remember_clip_level(clip, level);
+}
+
+/// The level `clip` was last set to on this run, if it was set at all.
+fn remembered_clip_level(context: &dyn WIPICContext, clip: WIPICWord) -> Option<u8> {
+    context.media_state().lock().remembered_clip_level(clip)
 }
 
 #[repr(C)]
@@ -213,8 +237,8 @@ pub async fn clip_put_data(context: &mut dyn WIPICContext, ptr_clip: WIPICWord, 
     // clip-0 play/volume/stop paths can reach it (otherwise every such effect is
     // silent). Titles that use real clip objects store the handle in the object.
     // The level the title set on this clip belongs to the clip, so put it on
-    // the handle the data just arrived under. See `CLIP_LEVELS`.
-    if let Some(level) = remembered_clip_level(ptr_clip) {
+    // the handle the data just arrived under. See `MediaState`.
+    if let Some(level) = remembered_clip_level(context, ptr_clip) {
         tracing::info!("[media] clip {ptr_clip:#x} carries level {level} onto handle {handle:#x}");
         let _ = context.system().audio().set_volume(handle, level);
     }
@@ -265,7 +289,7 @@ pub async fn clip_get_volume(context: &mut dyn WIPICContext, clip: WIPICWord) ->
 
     // The clip's own level first: a title that sets one before loading anything
     // reads back what it set, not the full scale an absent handle would give.
-    let level = remembered_clip_level(clip)
+    let level = remembered_clip_level(context, clip)
         .or_else(|| handle.and_then(|handle| context.system().audio().get_volume(handle).ok()))
         .unwrap_or(FULL_VOLUME);
 
@@ -278,8 +302,8 @@ pub async fn clip_set_volume(context: &mut dyn WIPICContext, clip: WIPICWord, vo
     let level = (volume & 0xFF).min(FULL_VOLUME as WIPICWord) as u8;
 
     // The clip keeps the level whether or not it has anything loaded right now,
-    // so the next load plays at it. See `CLIP_LEVELS`.
-    remember_clip_level(clip, level);
+    // so the next load plays at it. See `MediaState`.
+    remember_clip_level(context, clip, level);
 
     if clip == 0 {
         // Default-player titles set the volume of the clip-0 handle.
@@ -724,11 +748,9 @@ mod tests {
     }
 
     fn test_context() -> TestContext {
-        // Every context here hands out the same first clip address, and the
-        // clip levels are process-wide, so one test's level would otherwise be
-        // the next one's starting point.
-        super::CLIP_LEVELS.lock().clear();
-
+        // Every context here hands out the same first clip address, so the
+        // levels have to belong to the context rather than to the process -
+        // see `MediaState`. Each one built here starts with its own, empty.
         let system = System::new(Box::new(TestPlatform::new()), "test-pid", "test-aid", DefaultTaskRunner);
         TestContext::with_system(system)
     }
@@ -785,6 +807,32 @@ mod tests {
 
         let loaded = handle_of(&context, clip);
         assert_eq!(context.system().audio().get_volume(loaded).unwrap(), 40);
+    }
+
+    /// A level belongs to the run that set it and reaches no other.
+    ///
+    /// The Android bridge starts and stops titles inside one process, and the
+    /// allocator hands the second title the same first clip address as the
+    /// first - so while these levels lived in a `static`, a title opened with
+    /// whatever the title before it had left there.
+    #[futures_test::test]
+    async fn a_level_reaches_no_other_run() {
+        let mut first = test_context();
+
+        let clip = clip_create(&mut first, 0, 0x793, 0).await.unwrap();
+        clip_set_volume(&mut first, clip, 20).await.unwrap();
+        assert_eq!(clip_get_volume(&mut first, clip).await.unwrap(), 20);
+
+        // The next title up, at the address the last one was handed.
+        let mut second = test_context();
+        let same_clip = clip_create(&mut second, 0, 0x793, 0).await.unwrap();
+        assert_eq!(same_clip, clip, "the second run is handed the same address");
+
+        assert_eq!(
+            clip_get_volume(&mut second, same_clip).await.unwrap(),
+            FULL_VOLUME as u32,
+            "a clip nothing has set reads back full scale, not the level another run left"
+        );
     }
 
     /// 영웅서기5's own sequence: it sets an effect's level, reads it back, and

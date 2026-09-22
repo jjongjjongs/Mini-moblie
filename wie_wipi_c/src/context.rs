@@ -8,8 +8,8 @@ use wie_util::{ByteRead, ByteWrite, Result};
 use crate::{
     WIPICMethodBody,
     api::{
-        filesystem::SharedFilesystemState, graphics::ContextLayout, im::SharedImState, kernel::SharedKernelState, net::SharedNetworkState,
-        serial::SharedSerialState, shared_buf::SharedSharedBufState,
+        filesystem::SharedFilesystemState, graphics::ContextLayout, im::SharedImState, kernel::SharedKernelState, media::SharedMediaState,
+        net::SharedNetworkState, serial::SharedSerialState, shared_buf::SharedSharedBufState,
     },
     method::{ParamConverter, ResultConverter},
 };
@@ -30,6 +30,7 @@ pub trait WIPICContext: ByteRead + ByteWrite + Send + Sync {
     fn filesystem_state(&self) -> SharedFilesystemState;
     fn shared_buf_state(&self) -> SharedSharedBufState;
     fn im_state(&self) -> SharedImState;
+    fn media_state(&self) -> SharedMediaState;
     fn kernel_state(&self) -> SharedKernelState;
     fn spawn(&mut self, callback: WIPICMethodBody) -> Result<()>;
     async fn get_resource_size(&self, name: &str) -> Result<Option<usize>>;
@@ -134,6 +135,7 @@ pub mod test {
         graphics::ContextLayout,
         im::{SharedImState, new_state as new_im_state},
         kernel::{SharedKernelState, new_state as new_kernel_state},
+        media::{SharedMediaState, new_state as new_media_state},
         net::{SharedNetworkState, new_state as new_network_state},
         serial::{SharedSerialState, new_state as new_serial_state},
         shared_buf::{SharedSharedBufState, new_state as new_shared_buf_state},
@@ -156,6 +158,7 @@ pub mod test {
         filesystem_state: SharedFilesystemState,
         shared_buf_state: SharedSharedBufState,
         im_state: SharedImState,
+        media_state: SharedMediaState,
         kernel_state: SharedKernelState,
         /// Bodies handed to `spawn`, kept rather than run: a test that drives an
         /// API which defers work can then say the deferral happened without an
@@ -209,6 +212,7 @@ pub mod test {
                 filesystem_state: new_filesystem_state(),
                 shared_buf_state: new_shared_buf_state(),
                 im_state: new_im_state(),
+                media_state: new_media_state(),
                 kernel_state: new_kernel_state(),
                 spawned: Vec::new(),
                 guest_function: None,
@@ -231,6 +235,7 @@ pub mod test {
                 filesystem_state: new_filesystem_state(),
                 shared_buf_state: new_shared_buf_state(),
                 im_state: new_im_state(),
+                media_state: new_media_state(),
                 kernel_state: new_kernel_state(),
                 spawned: Vec::new(),
                 guest_function: None,
@@ -358,6 +363,10 @@ pub mod test {
 
         fn im_state(&self) -> SharedImState {
             self.im_state.clone()
+        }
+
+        fn media_state(&self) -> SharedMediaState {
+            self.media_state.clone()
         }
 
         fn kernel_state(&self) -> SharedKernelState {

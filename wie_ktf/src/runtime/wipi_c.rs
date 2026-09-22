@@ -11,7 +11,7 @@ use wie_wipi_c::api::graphics::{ContextLayout, WIPICGraphicsContextIdx};
 const LAYOUT: ContextLayout = ContextLayout::BackgroundFirst;
 use wie_wipi_c::{
     WIPICMethodBody, WIPICResult,
-    api::{filesystem, graphics, im, kernel, net, serial, shared_buf},
+    api::{filesystem, graphics, im, kernel, media, net, serial, shared_buf},
 };
 
 use crate::runtime::SVC_CATEGORY_WIPIC;
@@ -65,7 +65,7 @@ impl EmulatedFunction<(), WIPICMethodResult, ()> for CMethodProxy {
 
 async fn handle_wipic_svc(
     core: &mut ArmCore,
-    (system, jvm, network_state, serial_state, filesystem_state, shared_buf_state, im_state, kernel_state): &mut (
+    (system, jvm, network_state, serial_state, filesystem_state, shared_buf_state, im_state, media_state, kernel_state): &mut (
         System,
         Jvm,
         net::SharedNetworkState,
@@ -73,6 +73,7 @@ async fn handle_wipic_svc(
         filesystem::SharedFilesystemState,
         shared_buf::SharedSharedBufState,
         im::SharedImState,
+        media::SharedMediaState,
         kernel::SharedKernelState,
     ),
     id: SvcId,
@@ -100,6 +101,7 @@ async fn handle_wipic_svc(
                 filesystem_state.clone(),
                 shared_buf_state.clone(),
                 im_state.clone(),
+                media_state.clone(),
                 kernel_state.clone(),
             ),
         )
@@ -125,6 +127,7 @@ async fn handle_wipic_svc(
                 filesystem_state.clone(),
                 shared_buf_state.clone(),
                 im_state.clone(),
+                media_state.clone(),
                 kernel_state.clone(),
             ),
             body,
@@ -148,6 +151,7 @@ pub fn register_wipic_svc_handler(core: &mut ArmCore, system: &System, jvm: &Jvm
             filesystem::new_state(),
             shared_buf::new_state(),
             im::new_state(),
+            media::new_state(),
             kernel::new_state(),
         ),
     )?;
