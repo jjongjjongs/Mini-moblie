@@ -97,7 +97,17 @@ final class PadMapping {
             UNASSIGNED,
     };
 
-    private static final String PREFS = "pad_mapping";
+    /**
+     * Where both the live mapping and the presets are kept.
+     *
+     * <p>Shared with {@link PadPresets}, which stores each preset's mapping in
+     * this same file under a prefix of its own - one file, so a save is one
+     * commit and a preset can never be half a file behind the mapping the pad
+     * is actually on.
+     */
+    static final String PREFS = "pad_mapping";
+
+    /** The prefix the live mapping - the one the runtime reads - is under. */
     private static final String KEY_PREFIX = "pad.";
 
     private final int[] assignment = DEFAULTS.clone();
@@ -107,11 +117,20 @@ final class PadMapping {
 
     /** The mapping the player last saved, or the default one. */
     static PadMapping load(Context context) {
+        return read(context.getSharedPreferences(PREFS, Context.MODE_PRIVATE), KEY_PREFIX);
+    }
+
+    /**
+     * The mapping stored under `prefix`, with the default where nothing is.
+     *
+     * <p>The live mapping and every preset are the same seventeen words under
+     * different prefixes, so they are read and written the same way.
+     */
+    static PadMapping read(SharedPreferences prefs, String prefix) {
         PadMapping mapping = new PadMapping();
-        SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
 
         for (int pad = 0; pad < PAD_COUNT; pad++) {
-            int stored = prefs.getInt(KEY_PREFIX + PAD_LABELS[pad], DEFAULTS[pad]);
+            int stored = prefs.getInt(prefix + PAD_LABELS[pad], DEFAULTS[pad]);
             mapping.assignment[pad] = MainActivity.isHandsetKey(stored) ? stored : UNASSIGNED;
         }
 
@@ -120,12 +139,28 @@ final class PadMapping {
 
     void save(Context context) {
         SharedPreferences.Editor editor = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit();
-
-        for (int pad = 0; pad < PAD_COUNT; pad++) {
-            editor.putInt(KEY_PREFIX + PAD_LABELS[pad], assignment[pad]);
-        }
-
+        write(editor, KEY_PREFIX);
         editor.apply();
+    }
+
+    /** Writes this mapping under `prefix`, leaving the commit to the caller. */
+    void write(SharedPreferences.Editor editor, String prefix) {
+        for (int pad = 0; pad < PAD_COUNT; pad++) {
+            editor.putInt(prefix + PAD_LABELS[pad], assignment[pad]);
+        }
+    }
+
+    /**
+     * Takes out whatever is stored under `prefix`.
+     *
+     * <p>A preset that is deleted leaves its slot behind, and the slot is
+     * filled again the moment another preset is made. Cleared, nothing a
+     * deleted preset said can come back under a name that is not its own.
+     */
+    static void forget(SharedPreferences.Editor editor, String prefix) {
+        for (int pad = 0; pad < PAD_COUNT; pad++) {
+            editor.remove(prefix + PAD_LABELS[pad]);
+        }
     }
 
     /** A working copy, so a screen can be left without keeping what it changed. */
@@ -152,6 +187,19 @@ final class PadMapping {
         }
 
         return true;
+    }
+
+    /** How many pad buttons press a handset key, for a preset's own line. */
+    int assignedCount() {
+        int count = 0;
+
+        for (int pad = 0; pad < PAD_COUNT; pad++) {
+            if (assignment[pad] != UNASSIGNED) {
+                count++;
+            }
+        }
+
+        return count;
     }
 
     /** The handset key a pad button presses, or {@link #UNASSIGNED}. */

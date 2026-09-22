@@ -27,6 +27,8 @@ import android.os.Looper;
 import android.os.SystemClock;
 import android.provider.OpenableColumns;
 import android.provider.Settings;
+import android.text.InputFilter;
+import android.text.TextUtils;
 import android.util.Log;
 import android.util.SparseArray;
 import android.view.InputDevice;
@@ -389,6 +391,7 @@ public final class MainActivity extends Activity {
 
         audioOutput = new AndroidAudioOutput(this);
         padMapping = PadMapping.load(this);
+        padPresets = PadPresets.load(this, padMapping);
 
         gamesDir = new File(getFilesDir(), "games");
         if (!gamesDir.exists()) {
@@ -782,6 +785,15 @@ public final class MainActivity extends Activity {
     private PadMapping editingMapping;
 
     /**
+     * The named mappings, one of which `padMapping` is a copy of.
+     *
+     * <p>See {@link PadPresets}: the active preset and the live mapping are
+     * kept saying the same thing, which is what makes `working.sameAs(padMapping)`
+     * the answer to "has this screen been changed" here too.
+     */
+    private PadPresets padPresets;
+
+    /**
      * The gamepad glyph on the home screen's entry button.
      *
      * <p>Drawn rather than shipped as an asset: it is one rounded body, a cross
@@ -872,8 +884,14 @@ public final class MainActivity extends Activity {
         title.setTextSize(19f);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setTextColor(LIB_INK);
-        title.setPadding(dp(12), 0, 0, 0);
-        titleRow.addView(title);
+        title.setPadding(dp(12), 0, dp(8), 0);
+        title.setMaxLines(1);
+        title.setEllipsize(TextUtils.TruncateAt.END);
+        // The title gives way, not the chip: a preset's name is the thing on
+        // this row a player cannot work out from anywhere else.
+        titleRow.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        titleRow.addView(presetChip(working), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)));
         content.addView(titleRow);
 
         TextView pad = new TextView(this);
@@ -902,9 +920,13 @@ public final class MainActivity extends Activity {
         save.setTextColor(LIB_BG);
         save.setBackground(roundedRect(LIB_GREEN, LIB_GREEN, 1, 15));
         save.setOnClickListener(v -> {
+            // Both, always: the preset is what the screen was editing, and the
+            // live mapping is what the runtime presses keys through.
             padMapping.copyFrom(working);
             padMapping.save(this);
-            Toast.makeText(this, "키매핑을 저장했습니다.", Toast.LENGTH_SHORT).show();
+            padPresets.active().mapping.copyFrom(working);
+            padPresets.save(this);
+            Toast.makeText(this, "‘" + padPresets.activeName() + "’에 저장했습니다.", Toast.LENGTH_SHORT).show();
             showLibrary();
         });
         actions.addView(save, buttonParams(dp(10)));
@@ -1118,6 +1140,334 @@ public final class MainActivity extends Activity {
 
         // The rows behind carry the pad buttons that were just moved about, so
         // the screen is built again rather than left saying what was true.
+        dialog.setOnDismissListener(d -> showKeyMap(working));
+        dialog.show();
+    }
+
+    /**
+     * The chip that names the preset being edited, and opens the list.
+     *
+     * <p>Two lines rather than one: the name alone beside a title reads as part
+     * of the title, and a chip that only says `기본 ▼` leaves a player to guess
+     * what it is a chip of.
+     */
+    private View presetChip(PadMapping working) {
+        LinearLayout chip = new LinearLayout(this);
+        chip.setOrientation(LinearLayout.VERTICAL);
+        chip.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        chip.setBackground(roundedRect(LIB_GREEN_SOFT, LIB_GREEN_LINE, 1, 12));
+        chip.setPadding(dp(11), 0, dp(11), 0);
+        chip.setContentDescription("프리셋 " + padPresets.activeName() + ", 누르면 목록");
+        chip.setOnClickListener(v -> showPresetSheet(working));
+
+        TextView tag = new TextView(this);
+        tag.setText("프리셋");
+        tag.setTextSize(8.5f);
+        tag.setTextColor(LIB_MUTED);
+        tag.setIncludeFontPadding(false);
+        chip.addView(tag);
+
+        LinearLayout nameRow = new LinearLayout(this);
+        nameRow.setOrientation(LinearLayout.HORIZONTAL);
+        nameRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        nameRow.setPadding(0, dp(2), 0, 0);
+
+        TextView name = new TextView(this);
+        name.setText(padPresets.activeName());
+        name.setTextSize(13f);
+        name.setTypeface(Typeface.DEFAULT_BOLD);
+        name.setTextColor(LIB_GREEN_DEEP);
+        name.setMaxLines(1);
+        name.setEllipsize(TextUtils.TruncateAt.END);
+        name.setMaxWidth(dp(92));
+        name.setIncludeFontPadding(false);
+        nameRow.addView(name);
+
+        TextView caret = new TextView(this);
+        caret.setText("▼");
+        caret.setTextSize(7f);
+        caret.setTextColor(LIB_GREEN_DEEP);
+        caret.setPadding(dp(4), 0, 0, 0);
+        caret.setIncludeFontPadding(false);
+        nameRow.addView(caret);
+
+        chip.addView(nameRow);
+
+        return chip;
+    }
+
+    /** The presets, to pick one from, to rename one, or to keep this one. */
+    private void showPresetSheet(PadMapping working) {
+        LinearLayout sheet = new LinearLayout(this);
+        sheet.setOrientation(LinearLayout.VERTICAL);
+        sheet.setBackgroundColor(LIB_BG);
+        sheet.setPadding(dp(20), dp(20), dp(20), dp(16));
+
+        TextView title = new TextView(this);
+        title.setText("프리셋");
+        title.setTextSize(15f);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setTextColor(LIB_INK);
+        title.setGravity(android.view.Gravity.CENTER);
+        sheet.addView(title);
+
+        TextView hint = new TextView(this);
+        hint.setText("고르면 그 매핑을 불러옵니다. 이름은 연필을 눌러 바꿉니다.");
+        hint.setTextSize(10.5f);
+        hint.setTextColor(LIB_MUTED);
+        hint.setGravity(android.view.Gravity.CENTER);
+        hint.setPadding(0, dp(4), 0, dp(14));
+        sheet.addView(hint);
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.setVerticalScrollBarEnabled(false);
+        scroll.addView(sheet);
+
+        AlertDialog dialog = new AlertDialog.Builder(this).setView(scroll).create();
+
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackground(roundedRect(LIB_SURFACE, LIB_LINE, 1, 14));
+        card.setPadding(0, dp(4), 0, dp(4));
+
+        for (int index = 0; index < padPresets.size(); index++) {
+            card.addView(presetRow(dialog, working, index));
+
+            if (index < padPresets.size() - 1) {
+                View line = new View(this);
+                line.setBackgroundColor(LIB_DIVIDER);
+                LinearLayout.LayoutParams lineParams =
+                        new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, dp(1) / 2));
+                lineParams.leftMargin = dp(12);
+                lineParams.rightMargin = dp(12);
+                card.addView(line, lineParams);
+            }
+        }
+
+        sheet.addView(card);
+
+        Button add = flatButton("＋  지금 설정을 새 프리셋으로");
+        if (padPresets.canAdd()) {
+            add.setOnClickListener(v -> {
+                padPresets.add(padPresets.suggestName(), working);
+                padMapping.copyFrom(working);
+                padMapping.save(this);
+                padPresets.save(this);
+                Toast.makeText(this, "‘" + padPresets.activeName() + "’을(를) 만들었습니다.", Toast.LENGTH_SHORT).show();
+                dialog.dismiss();
+            });
+        } else {
+            add.setEnabled(false);
+            add.setTextColor(LIB_MUTED);
+            add.setBackground(roundedRect(LIB_SURFACE, LIB_LINE, 1, 15));
+        }
+
+        LinearLayout.LayoutParams addParams =
+                new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(42));
+        addParams.topMargin = dp(12);
+        sheet.addView(add, addParams);
+
+        TextView cap = new TextView(this);
+        cap.setText("프리셋은 " + PadPresets.MAX_PRESETS + "개까지 만들 수 있습니다.");
+        cap.setTextSize(10f);
+        cap.setTextColor(LIB_MUTED);
+        cap.setGravity(android.view.Gravity.CENTER);
+        cap.setPadding(0, dp(10), 0, dp(14));
+        sheet.addView(cap);
+
+        Button done = flatButton("완료");
+        done.setTextColor(LIB_BG);
+        done.setBackground(roundedRect(LIB_GREEN, LIB_GREEN, 1, 15));
+        done.setOnClickListener(v -> dialog.dismiss());
+        sheet.addView(done, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(42)));
+
+        // Whatever the sheet did - chose, made, renamed - the screen behind it
+        // is saying something that was true before, so it is built again.
+        dialog.setOnDismissListener(d -> showKeyMap(working));
+        dialog.show();
+    }
+
+    /** One preset: whether it is the one in use, its name, and what it holds. */
+    private View presetRow(AlertDialog sheet, PadMapping working, int index) {
+        PadPresets.Preset preset = padPresets.at(index);
+        boolean inUse = index == padPresets.activeIndex();
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(12), dp(6), dp(8), dp(6));
+        row.setOnClickListener(v -> choosePreset(sheet, working, index));
+
+        TextView mark = new TextView(this);
+        mark.setText(inUse ? "✓" : "");
+        mark.setTextSize(11f);
+        mark.setTypeface(Typeface.DEFAULT_BOLD);
+        mark.setTextColor(LIB_BG);
+        mark.setGravity(android.view.Gravity.CENTER);
+        mark.setBackground(circle(inUse ? LIB_GREEN : LIB_DIVIDER));
+        row.addView(mark, new LinearLayout.LayoutParams(dp(22), dp(22)));
+
+        LinearLayout text = new LinearLayout(this);
+        text.setOrientation(LinearLayout.VERTICAL);
+        text.setPadding(dp(10), dp(2), dp(8), dp(2));
+
+        TextView name = new TextView(this);
+        name.setText(preset.name);
+        name.setTextSize(14f);
+        name.setTypeface(inUse ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+        name.setTextColor(inUse ? LIB_GREEN_DEEP : LIB_INK);
+        name.setMaxLines(1);
+        name.setEllipsize(TextUtils.TruncateAt.END);
+        text.addView(name);
+
+        TextView note = new TextView(this);
+        note.setText("패드 버튼 " + preset.mapping.assignedCount() + "개 지정");
+        note.setTextSize(10f);
+        note.setTextColor(LIB_MUTED);
+        note.setPadding(0, dp(2), 0, 0);
+        text.addView(note);
+
+        row.addView(text, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView rename = new TextView(this);
+        rename.setText("✎");
+        rename.setTextSize(15f);
+        rename.setTextColor(LIB_GREEN_DEEP);
+        rename.setGravity(android.view.Gravity.CENTER);
+        rename.setBackground(roundedRect(LIB_GREEN_SOFTER, LIB_LINE, 1, 10));
+        rename.setContentDescription(preset.name + " 이름 바꾸기");
+        rename.setOnClickListener(v -> {
+            sheet.setOnDismissListener(null);
+            sheet.dismiss();
+            showPresetRename(working, index);
+        });
+        row.addView(rename, new LinearLayout.LayoutParams(dp(36), dp(36)));
+
+        return row;
+    }
+
+    /** Puts the pad on another preset, asking first if it would drop a change. */
+    private void choosePreset(AlertDialog sheet, PadMapping working, int index) {
+        if (index == padPresets.activeIndex()) {
+            sheet.dismiss();
+            return;
+        }
+
+        if (working.sameAs(padMapping)) {
+            loadPreset(sheet, working, index);
+            return;
+        }
+
+        new AlertDialog.Builder(this)
+                .setTitle("프리셋 바꾸기")
+                .setMessage("바꾼 키매핑이 저장되지 않습니다.")
+                .setPositiveButton("바꾸기", (dialog, which) -> loadPreset(sheet, working, index))
+                .setNegativeButton("계속 편집", null)
+                .show();
+    }
+
+    private void loadPreset(AlertDialog sheet, PadMapping working, int index) {
+        padPresets.setActive(index);
+        padMapping.copyFrom(padPresets.active().mapping);
+        padMapping.save(this);
+        padPresets.save(this);
+        working.copyFrom(padMapping);
+
+        Toast.makeText(this, "‘" + padPresets.activeName() + "’을(를) 불러왔습니다.", Toast.LENGTH_SHORT).show();
+        sheet.dismiss();
+    }
+
+    /** The name of one preset, and the one place it can be deleted from. */
+    private void showPresetRename(PadMapping working, int index) {
+        if (!padPresets.holds(index)) {
+            showKeyMap(working);
+            return;
+        }
+
+        PadPresets.Preset preset = padPresets.at(index);
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(22), dp(14), dp(22), dp(4));
+
+        EditText field = new EditText(this);
+        field.setText(preset.name);
+        field.setSelection(field.getText().length());
+        field.setSingleLine(true);
+        field.setTextSize(15f);
+        field.setTextColor(LIB_INK);
+        field.setFilters(new InputFilter[]{new InputFilter.LengthFilter(PadPresets.MAX_NAME)});
+        field.setBackground(roundedRect(LIB_BG, LIB_GREEN, 2, 13));
+        field.setPadding(dp(13), dp(11), dp(13), dp(11));
+        box.addView(field, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        TextView cap = new TextView(this);
+        cap.setText(PadPresets.MAX_NAME + "자까지");
+        cap.setTextSize(10f);
+        cap.setTextColor(LIB_MUTED);
+        cap.setPadding(dp(2), dp(7), 0, 0);
+        box.addView(cap);
+
+        // Set while the delete confirmation is taking over, so the screen is
+        // built once - by whichever dialog the player actually leaves through.
+        final boolean[] handedOver = {false};
+
+        AlertDialog.Builder builder = new AlertDialog.Builder(this)
+                .setTitle("프리셋 이름")
+                .setView(box)
+                .setPositiveButton("저장", (dialog, which) -> {
+                    preset.name = PadPresets.cleanName(field.getText().toString(), index);
+                    padPresets.save(this);
+                })
+                .setNegativeButton("취소", null);
+
+        if (padPresets.canRemove()) {
+            builder.setNeutralButton("삭제", (dialog, which) -> {
+                handedOver[0] = true;
+                confirmPresetRemove(working, index);
+            });
+        }
+
+        AlertDialog dialog = builder.create();
+        dialog.setOnDismissListener(d -> {
+            if (!handedOver[0]) {
+                showKeyMap(working);
+            }
+        });
+        dialog.show();
+    }
+
+    private void confirmPresetRemove(PadMapping working, int index) {
+        if (!padPresets.holds(index) || !padPresets.canRemove()) {
+            showKeyMap(working);
+            return;
+        }
+
+        String name = padPresets.at(index).name;
+        boolean inUse = index == padPresets.activeIndex();
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("‘" + name + "’ 삭제")
+                .setMessage("이 프리셋의 키매핑이 사라집니다.")
+                .setPositiveButton("삭제", (d, which) -> {
+                    padPresets.remove(index);
+
+                    // Deleting the one in use leaves the pad on its neighbour,
+                    // and the screen with it: nothing may be left editing a
+                    // preset that is no longer there.
+                    if (inUse) {
+                        padMapping.copyFrom(padPresets.active().mapping);
+                        padMapping.save(this);
+                        working.copyFrom(padMapping);
+                    }
+
+                    padPresets.save(this);
+                    Toast.makeText(this, "‘" + name + "’을(를) 지웠습니다.", Toast.LENGTH_SHORT).show();
+                })
+                .setNegativeButton("취소", null)
+                .create();
+
         dialog.setOnDismissListener(d -> showKeyMap(working));
         dialog.show();
     }
