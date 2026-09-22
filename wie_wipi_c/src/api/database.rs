@@ -33,7 +33,14 @@ use crate::context::WIPICContext;
 #[repr(C)]
 struct DatabaseHandle {
     magic: u32,
-    name: [u8; 32], // TODO hardcoded max size
+    /// The store's name, held in the handle so every op can find its way back
+    /// to the repository. The field is this runtime's own - the guest never
+    /// reads it, it only carries the pointer - so its length is a choice, and
+    /// a short one turned a name a title uses into a store it cannot open.
+    /// 리얼싸커 2009 keeps a save in `recordStore/rms_KOR_RMS_DATA.sav`, which
+    /// is thirty-two characters and was refused for one over a limit of our
+    /// own making.
+    name: [u8; 128],
     read_cursor: u32,
     write_cursor: u32,
     buffer_ptr: u32,
@@ -49,7 +56,7 @@ const MIN_BUFFER_CAPACITY: u32 = 64;
 // a real DB handle pointer from an unrelated guest pointer (e.g. a C-string
 // name pointer that KTF's slot 6 passes through the same SVC argument slot).
 const DATABASE_HANDLE_MAGIC: u32 = 0x4D434442;
-const MAX_NAME_LEN: usize = 31; // leave a byte for null terminator inside the 32-byte field
+const MAX_NAME_LEN: usize = 127; // leave a byte for the null terminator inside the field above
 
 // LGT's native database keeps fixed-record metadata in the companion `.idx` file.
 // WIE's repository only exposes numbered records, so reserve backend record 0 for
@@ -239,7 +246,7 @@ async fn open_database_named(context: &mut dyn WIPICContext, name: &str, create:
 
     let mut handle = DatabaseHandle {
         magic: DATABASE_HANDLE_MAGIC,
-        name: [0; 32],
+        name: [0; 128],
         read_cursor: 0,
         write_cursor: 0,
         buffer_ptr: 0,
@@ -302,7 +309,7 @@ pub async fn open_database_lgt(context: &mut dyn WIPICContext, ptr_name: WIPICWo
 
     // Native builds the `.db` / `.idx` paths with sprintf/strcat and performs
     // no explicit database-name length or encoding validation here. WIE stores
-    // the logical database name in a fixed 32-byte guest handle and uses a
+    // the logical database name in a fixed-length guest handle and uses a
     // UTF-8 host repository key, so these two checks are safety adaptations
     // rather than native MC_dbOpenDataBase error semantics.
     let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, ptr_name)?).map(store_name) else {
@@ -3294,6 +3301,29 @@ mod tests {
         let mut landed = [0u8; 3];
         context.read_bytes(0x2000, &mut landed).unwrap();
         assert_eq!(&landed, b"HIT", "the seek that tell fed lands on the entry");
+    }
+
+    /// A store's name is the title's to choose, not a length this runtime gets
+    /// to pick: the field that holds it is ours, and the guest only ever
+    /// carries the pointer.
+    ///
+    /// 리얼싸커 2009 keeps a save in `recordStore/rms_KOR_RMS_DATA.sav`, which
+    /// is thirty-two characters. A thirty-one byte field refused it by one, so
+    /// that save could not be opened at all.
+    #[futures_test::test]
+    async fn a_long_store_name_is_still_a_store() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"recordStore/rms_KOR_RMS_DATA.sav\0").unwrap();
+
+        let db_id = open_database(&mut context, 0x1000, 8, 1).await.unwrap();
+        assert!(db_id > 0, "a thirty-two character name opens");
+
+        context.write_bytes(0x2000, b"save").unwrap();
+        assert_eq!(stream_write(&mut context, db_id, 0x2000, 4).await.unwrap(), 4);
+        close_database(&mut context, db_id).await.unwrap();
+
+        // And the name it was stored under is the one it is found by.
+        assert_eq!(stat_by_name_ktf(&mut context, 0x1000, 0, 1, 0).await.unwrap(), 0);
     }
 
     /// This slot answers for the handset's filesystem as much as for its
