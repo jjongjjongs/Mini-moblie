@@ -1,10 +1,13 @@
 use alloc::string::String;
 use chrono::{DateTime, Datelike, FixedOffset, TimeZone, Timelike};
-use core::cmp::min;
+use core::cmp::{Ordering, min};
 
 use wie_backend::System;
 use wie_core_arm::{Allocator, ArmCore, EmulatedFunction, ResultWriter, SvcId, stdlib};
-use wie_util::{ByteRead, ByteWrite, Result, read_generic, read_null_terminated_string_bytes, write_generic, write_null_terminated_string_bytes};
+use wie_util::{
+    ByteRead, ByteWrite, NullTerminatedBytes, Result, read_generic, read_null_terminated_string_bytes, write_generic,
+    write_null_terminated_string_bytes,
+};
 
 use wie_wipi_c::api::kernel::format_varargs;
 
@@ -153,7 +156,54 @@ pub(crate) fn report_hot_stdlib(dt_ms: u64) {
 /// generic dispatch — skips the context clone and the two `async_trait` future
 /// allocations for no change in behaviour. Returns `Ok(true)` when serviced,
 /// `Ok(false)` to defer. The caller has already matched `SVC_CATEGORY_STDLIB`.
-pub(crate) fn try_fast_stdlib_mem(core: &mut ArmCore) -> Result<bool> {
+pub(crate) fn try_fast_stdlib(core: &mut ArmCore) -> Result<bool> {
+    if try_fast_stdlib_compare(core)? {
+        return Ok(true);
+    }
+
+    try_fast_stdlib_mem(core)
+}
+
+/// The four string comparisons, answered without the async handler.
+///
+/// `strcmp` is the single call 데빌메이크라이 makes most: 9,422 a second
+/// against 3,517 for the whole of WIPI-C, 60% of every service it asks for.
+/// Each one was a boxed future, a handler lookup and two `Vec`s for a few bytes
+/// of comparison that nearly always parts on the first one. Here it is a
+/// couple of reads and a loop, on the same [`guest_str_compare`] the async
+/// handlers now call, so both paths answer identically.
+fn try_fast_stdlib_compare(core: &mut ArmCore) -> Result<bool> {
+    let id = core.read_svc_id();
+    let Some((counted, fold)) = compare_svc(id) else {
+        return Ok(false);
+    };
+
+    let left = core.read_param(0)?;
+    let right = core.read_param(1)?;
+
+    // `strncmp` answers for a null pointer rather than refusing, the way its
+    // handler always has; the rest are left to the reader's own refusal.
+    if counted && (left == 0 || right == 0) {
+        STDLIB_SVC_COUNT[(id as usize).min(STDLIB_ID_MAX - 1)].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let (_, ret) = core.read_pc_lr()?;
+        core.write_return_value(&[u32::from(left != right)])?;
+        core.set_next_pc(ret)?;
+
+        return Ok(true);
+    }
+
+    let limit = if counted { Some(core.read_param(2)?) } else { None };
+    let ordering = guest_str_compare(core, left, right, limit, fold)?;
+
+    STDLIB_SVC_COUNT[(id as usize).min(STDLIB_ID_MAX - 1)].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let (_, ret) = core.read_pc_lr()?;
+    core.write_return_value(&[ordering as u32])?;
+    core.set_next_pc(ret)?;
+
+    Ok(true)
+}
+
+fn try_fast_stdlib_mem(core: &mut ArmCore) -> Result<bool> {
     const MEMCPY: u32 = StdlibSvcId::Memcpy as u32;
     const MEMMOVE: u32 = StdlibSvcId::Memmove as u32;
     const MEMSET: u32 = StdlibSvcId::Memset as u32;
@@ -167,17 +217,20 @@ pub(crate) fn try_fast_stdlib_mem(core: &mut ArmCore) -> Result<bool> {
     let a0 = core.read_param(0)?;
     let a1 = core.read_param(1)?;
     let a2 = core.read_param(2)?;
-    // DIAGNOSTIC: a clet blits a decoded background by copying it in bulk. Log
-    // the big copies (dst/src/size) so a device log shows whether the image
-    // lands in the draw buffer (compare dst against the `fb=` in the FRAME line)
-    // or somewhere that never reaches the screen.
+    // A clet blits a decoded background by copying it in bulk, and the copy's
+    // destination is what says whether the image lands in the draw buffer
+    // (compare `dst` against the `fb=` in the FRAME line) or somewhere that
+    // never reaches the screen. Kept at debug: a title that draws this way
+    // makes two of these a frame - 데빌메이크라이 does, a `memset` and a
+    // `memcpy` of 0x25800 apiece - and at info they are a hundred formatted
+    // lines a second that nothing is reading.
     if a2 >= 0x4000 {
         let name = match id {
             MEMCPY => "memcpy",
             MEMMOVE => "memmove",
             _ => "memset",
         };
-        tracing::info!("BIGMEM {name}(dst={a0:#x}, src={a1:#x}, size={a2:#x})");
+        tracing::debug!("BIGMEM {name}(dst={a0:#x}, src={a1:#x}, size={a2:#x})");
     }
     match id {
         MEMCPY => stdlib::mem_copy(core, a0, a1, a2)?,
@@ -337,13 +390,74 @@ async fn strcat(core: &mut ArmCore, _: &mut (), ptr_dst: u32, ptr_src: u32) -> R
     Ok(())
 }
 
+/// Compares two guest strings without lifting either into a `Vec`.
+///
+/// `limit` is `strncmp`'s count, and `fold` lowercases as it goes for the
+/// case-insensitive pair - the four calls are one comparison with two switches,
+/// and they were four copies of read-both-whole-then-compare.
+///
+/// The answer is the `Ordering` the callers have always returned, so the
+/// synchronous fast path and the async handler cannot disagree about what a
+/// comparison means. Reading a byte at a time out of
+/// [`NullTerminatedBytes`] is what makes it worth having: a comparison stops at
+/// the first byte that parts the two, which for 데빌메이크라이's nine thousand
+/// `strcmp` a second is almost always the first one, and neither string is
+/// walked to its end or copied anywhere.
+fn guest_str_compare<R>(reader: &R, left: u32, right: u32, limit: Option<u32>, fold: bool) -> Result<Ordering>
+where
+    R: ?Sized + ByteRead,
+{
+    let mut left = NullTerminatedBytes::new(reader, left)?;
+    let mut right = NullTerminatedBytes::new(reader, right)?;
+    let limit = limit.map(|limit| limit as usize).unwrap_or(usize::MAX);
+
+    for _ in 0..limit {
+        let (left, right) = match (left.next_byte()?, right.next_byte()?) {
+            (None, None) => return Ok(Ordering::Equal),
+            (None, Some(_)) => return Ok(Ordering::Less),
+            (Some(_), None) => return Ok(Ordering::Greater),
+            (Some(left), Some(right)) => (left, right),
+        };
+
+        let (left, right) = if fold {
+            (left.to_ascii_lowercase(), right.to_ascii_lowercase())
+        } else {
+            (left, right)
+        };
+
+        if left != right {
+            return Ok(left.cmp(&right));
+        }
+    }
+
+    Ok(Ordering::Equal)
+}
+
+/// The four comparisons, told apart by their service id.
+///
+/// Each takes two pointers, the counted pair a length behind them, and answers
+/// one word - nothing that needs the async handler, which is why they are also
+/// served from [`try_fast_stdlib`].
+fn compare_svc(id: u32) -> Option<(bool, bool)> {
+    const STRCMP: u32 = StdlibSvcId::Strcmp as u32;
+    const STRNCMP: u32 = StdlibSvcId::Strncmp as u32;
+    const STRICMP: u32 = StdlibSvcId::Stricmp as u32;
+    const STRNICMP: u32 = StdlibSvcId::Strnicmp as u32;
+
+    // (counted, case folded)
+    match id {
+        STRCMP => Some((false, false)),
+        STRNCMP => Some((true, false)),
+        STRICMP => Some((false, true)),
+        STRNICMP => Some((true, true)),
+        _ => None,
+    }
+}
+
 async fn strcmp(core: &mut ArmCore, _: &mut (), ptr_str1: u32, ptr_str2: u32) -> Result<u32> {
     tracing::debug!("strcmp({ptr_str1:#x}, {ptr_str2:#x})");
 
-    let str1 = read_null_terminated_string_bytes(core, ptr_str1)?;
-    let str2 = read_null_terminated_string_bytes(core, ptr_str2)?;
-
-    Ok(str1.cmp(&str2) as u32)
+    Ok(guest_str_compare(core, ptr_str1, ptr_str2, None, false)? as u32)
 }
 
 async fn atoi(core: &mut ArmCore, _: &mut (), ptr_str: u32) -> Result<u32> {
@@ -526,14 +640,7 @@ async fn strncmp(core: &mut ArmCore, _: &mut (), ptr_str1: u32, ptr_str2: u32, s
         return Ok(u32::from(ptr_str1 != ptr_str2));
     }
 
-    let str1 = read_null_terminated_string_bytes(core, ptr_str1)?;
-    let str2 = read_null_terminated_string_bytes(core, ptr_str2)?;
-
-    let size = size as usize;
-    let head1 = &str1[..min(size, str1.len())];
-    let head2 = &str2[..min(size, str2.len())];
-
-    Ok(head1.cmp(head2) as u32)
+    Ok(guest_str_compare(core, ptr_str1, ptr_str2, Some(size), false)? as u32)
 }
 
 /// Returns the address of the first occurrence of `needle` in `haystack`, or
@@ -682,27 +789,13 @@ async fn strncat(core: &mut ArmCore, _: &mut (), ptr_dst: u32, ptr_src: u32, siz
 async fn stricmp(core: &mut ArmCore, _: &mut (), ptr_str1: u32, ptr_str2: u32) -> Result<u32> {
     tracing::debug!("stricmp({ptr_str1:#x}, {ptr_str2:#x})");
 
-    let mut str1 = read_null_terminated_string_bytes(core, ptr_str1)?;
-    let mut str2 = read_null_terminated_string_bytes(core, ptr_str2)?;
-    str1.make_ascii_lowercase();
-    str2.make_ascii_lowercase();
-
-    Ok(str1.cmp(&str2) as u32)
+    Ok(guest_str_compare(core, ptr_str1, ptr_str2, None, true)? as u32)
 }
 
 async fn strnicmp(core: &mut ArmCore, _: &mut (), ptr_str1: u32, ptr_str2: u32, size: u32) -> Result<u32> {
     tracing::debug!("strnicmp({ptr_str1:#x}, {ptr_str2:#x}, {size})");
 
-    let mut str1 = read_null_terminated_string_bytes(core, ptr_str1)?;
-    let mut str2 = read_null_terminated_string_bytes(core, ptr_str2)?;
-    str1.make_ascii_lowercase();
-    str2.make_ascii_lowercase();
-
-    let size = size as usize;
-    let head1 = &str1[..min(size, str1.len())];
-    let head2 = &str2[..min(size, str2.len())];
-
-    Ok(head1.cmp(head2) as u32)
+    Ok(guest_str_compare(core, ptr_str1, ptr_str2, Some(size), true)? as u32)
 }
 
 /// `strchr(s, c)`. Returns the address of the first `c` in `s`, or zero. A zero
@@ -832,7 +925,91 @@ async fn snprintf(core: &mut ArmCore, _: &mut (), dest: u32, size: u32, format: 
 
 #[cfg(test)]
 mod tests {
-    use super::c_atoi;
+    use alloc::{vec, vec::Vec};
+    use core::cmp::{Ordering, min};
+
+    use wie_util::{ByteRead, Result, read_null_terminated_string_bytes};
+
+    use super::{c_atoi, guest_str_compare};
+
+    struct Memory {
+        bytes: Vec<u8>,
+    }
+
+    impl ByteRead for Memory {
+        fn read_bytes(&self, address: u32, result: &mut [u8]) -> Result<usize> {
+            let address = address as usize;
+            let read = result.len().min(self.bytes.len().saturating_sub(address));
+            result[..read].copy_from_slice(&self.bytes[address..address + read]);
+
+            Ok(read)
+        }
+    }
+
+    /// What these four calls did before they were one: read both strings whole,
+    /// cut them to the count, and compare.
+    fn whole_string_compare(memory: &Memory, left: u32, right: u32, limit: Option<u32>, fold: bool) -> Ordering {
+        let mut left = read_null_terminated_string_bytes(memory, left).unwrap();
+        let mut right = read_null_terminated_string_bytes(memory, right).unwrap();
+
+        if fold {
+            left.make_ascii_lowercase();
+            right.make_ascii_lowercase();
+        }
+
+        match limit {
+            Some(limit) => {
+                let limit = limit as usize;
+                left[..min(limit, left.len())].cmp(&right[..min(limit, right.len())])
+            }
+            None => left.cmp(&right),
+        }
+    }
+
+    /// The comparison answers what reading both whole answered, for every
+    /// counted and folded pair - a title reads a `strcmp` the same way whichever
+    /// path served it.
+    #[test]
+    fn a_comparison_answers_what_reading_both_whole_answered() {
+        let words: [&[u8]; 7] = [b"", b"a", b"ab", b"abc", b"ABC", b"abd", b"b"];
+
+        let mut bytes = vec![0u8];
+        let mut at = Vec::new();
+        for word in words {
+            at.push(bytes.len() as u32);
+            bytes.extend_from_slice(word);
+            bytes.push(0);
+        }
+        let memory = Memory { bytes };
+
+        for &left in &at {
+            for &right in &at {
+                for limit in [None, Some(0), Some(1), Some(2), Some(3), Some(64)] {
+                    for fold in [false, true] {
+                        assert_eq!(
+                            guest_str_compare(&memory, left, right, limit, fold).unwrap(),
+                            whole_string_compare(&memory, left, right, limit, fold),
+                            "left {left:#x} right {right:#x} limit {limit:?} fold {fold}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A comparison stops at the byte that parts the two rather than walking
+    /// either string to its end, which is the whole point of not reading them
+    /// whole: the strings here run off the end of what the reader has, and a
+    /// walk to the terminator would go with them.
+    #[test]
+    fn a_comparison_stops_where_the_strings_part() {
+        let memory = Memory {
+            bytes: vec![0, b'a', b'x', b'b', b'y'],
+        };
+
+        assert_eq!(guest_str_compare(&memory, 1, 3, None, false).unwrap(), Ordering::Less);
+        assert_eq!(guest_str_compare(&memory, 3, 1, None, false).unwrap(), Ordering::Greater);
+    }
 
     #[test]
     fn c_atoi_parses_leading_number_and_stops() {

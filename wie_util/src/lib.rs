@@ -154,6 +154,100 @@ where
     }
 }
 
+/// One guest string, read in chunks and handed over a byte at a time.
+///
+/// [`read_null_terminated_string_bytes`] answers what a whole string is, and
+/// that costs a `Vec` per call. A comparison rarely needs the whole of either
+/// side: `strcmp` parts on the first byte far more often than not, and
+/// 데빌메이크라이 asks for nine thousand of them a second - more than it asks
+/// for anything else, WIPI-C included. This walks the same chunks without
+/// keeping them, so the usual answer costs one read of each string and no
+/// allocation at all.
+///
+/// [`Self::next_byte`] yields `None` at the terminator, and never reads past it.
+pub struct NullTerminatedBytes<'a, R: ?Sized> {
+    reader: &'a R,
+    cursor: u32,
+    chunk: [u8; STRING_CHUNK as usize],
+    filled: usize,
+    at: usize,
+    ended: bool,
+}
+
+impl<'a, R> NullTerminatedBytes<'a, R>
+where
+    R: ?Sized + ByteRead,
+{
+    /// A cursor over the string at `address`, which may not be null - the same
+    /// refusal [`read_null_terminated_string_bytes`] gives.
+    pub fn new(reader: &'a R, address: u32) -> Result<Self> {
+        if address == 0 {
+            return Err(WieError::InvalidMemoryAccess(address));
+        }
+
+        Ok(Self {
+            reader,
+            cursor: address,
+            chunk: [0; STRING_CHUNK as usize],
+            filled: 0,
+            at: 0,
+            ended: false,
+        })
+    }
+
+    /// The next byte of the string, or `None` once its terminator is reached.
+    pub fn next_byte(&mut self) -> Result<Option<u8>> {
+        if self.ended {
+            return Ok(None);
+        }
+
+        if self.at == self.filled {
+            self.fill()?;
+            if self.ended {
+                return Ok(None);
+            }
+        }
+
+        let byte = self.chunk[self.at];
+        self.at += 1;
+
+        if byte == 0 {
+            self.ended = true;
+            return Ok(None);
+        }
+
+        Ok(Some(byte))
+    }
+
+    /// Reads the next chunk, stopping inside the page the cursor is in for the
+    /// reason [`read_null_terminated_string_bytes`] does, and falling back to
+    /// the single byte a reader that refused the span still has to answer for.
+    fn fill(&mut self) -> Result<()> {
+        let span = STRING_CHUNK.min(STRING_CHUNK_ALIGNMENT - (self.cursor & (STRING_CHUNK_ALIGNMENT - 1))) as usize;
+        if span > 1
+            && let Ok(read) = self.reader.read_bytes(self.cursor, &mut self.chunk[..span])
+            && read > 0
+        {
+            self.filled = read;
+            self.at = 0;
+            self.cursor += read as u32;
+
+            return Ok(());
+        }
+
+        let read = self.reader.read_bytes(self.cursor, &mut self.chunk[..1])?;
+        if read != 1 {
+            return Err(WieError::FatalError(format!("Short read at {:#x}: expected 1, got {read}", self.cursor)));
+        }
+
+        self.filled = 1;
+        self.at = 0;
+        self.cursor += 1;
+
+        Ok(())
+    }
+}
+
 pub fn write_null_terminated_string_bytes<W>(writer: &mut W, address: u32, bytes: &[u8]) -> Result<()>
 where
     W: ?Sized + ByteWrite,
@@ -318,6 +412,55 @@ mod tests {
 
             Ok(read)
         }
+    }
+
+    /// The cursor spells the same string the whole-string reader does, over a
+    /// reader that serves spans and one that refuses them alike.
+    #[test]
+    fn a_cursor_spells_what_the_whole_string_reader_spells() {
+        fn bytes<R: ?Sized + ByteRead>(reader: &R, address: u32) -> Vec<u8> {
+            let mut cursor = NullTerminatedBytes::new(reader, address).unwrap();
+            let mut out = Vec::new();
+            while let Some(byte) = cursor.next_byte().unwrap() {
+                out.push(byte);
+            }
+            out
+        }
+
+        let paged = PagedMemory {
+            memory: vec![0, b'h', b'e', b'l', b'l', b'o', 0, b'x'],
+        };
+        assert_eq!(bytes(&paged, 1), b"hello");
+        assert_eq!(bytes(&paged, 1), read_null_terminated_string_bytes(&paged, 1).unwrap());
+
+        // A reader that refuses anything but the exact span it is asked for,
+        // which is what sends the whole-string reader down its byte at a time
+        // path - the cursor takes the same one.
+        let strict = StrictMemory {
+            memory: vec![0, b'h', b'i', 0],
+        };
+        assert_eq!(bytes(&strict, 1), b"hi");
+    }
+
+    /// An empty string is the terminator and nothing else, and the cursor stays
+    /// at its end rather than walking into whatever follows.
+    #[test]
+    fn a_cursor_stops_at_the_terminator_and_stays_there() {
+        let memory = PagedMemory {
+            memory: vec![b'x', 0, b'a', b'b', b'c'],
+        };
+
+        let mut cursor = NullTerminatedBytes::new(&memory, 1).unwrap();
+        assert_eq!(cursor.next_byte().unwrap(), None);
+        assert_eq!(cursor.next_byte().unwrap(), None);
+    }
+
+    /// A null pointer is refused, the way the whole-string reader refuses it.
+    #[test]
+    fn a_cursor_refuses_a_null_pointer() {
+        let memory = PagedMemory { memory: vec![0] };
+
+        assert!(NullTerminatedBytes::new(&memory, 0).is_err_and(|error| matches!(error, WieError::InvalidMemoryAccess(0))));
     }
 
     /// The span a read asks for is a saving, not a promise: a reader that hands
