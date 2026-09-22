@@ -811,11 +811,22 @@ async fn mda_get_default_volume(_context: &mut dyn WIPICContext, a0: u32, a1: u3
 
 /// Whether `id` is a high-frequency service excluded from the diagnostic call
 /// trace: the per-frame timer set/unset (0x7a-0x7d) plus framebuffer, graphics,
-/// IME and UIC drawing services. Skipping these keeps the trace to the notable
-/// start-up calls (properties, resources, filesystem, network, exit) instead of
-/// flooding the bounded log with a title's render/timer loop.
+/// IME and UIC drawing services, and the string/heap calls a title's own loop
+/// makes. Skipping these keeps the trace to the notable start-up calls
+/// (properties, resources, filesystem, network, exit) instead of flooding the
+/// bounded log with a title's render/timer loop.
+///
+/// `Sprintk` (0x65) and the heap trio (0x75-0x77) were the four loudest lines
+/// in a 데빌메이크라이 capture - 4,502, 1,116, 1,026 and 2,147 of them across
+/// fifty seconds, nine tenths of every service line in the file. They are a
+/// title formatting and allocating in its frame loop, which says no more than
+/// the render calls beside them already do, and they cost a formatted line
+/// apiece while the frame they belong to is being measured.
 fn is_high_frequency_svc(id: u32) -> bool {
-    matches!(id, 0x7a..=0x7d | 0x32..=0x36 | 0xc8..=0xf3 | 0x12c..=0x130 | 0x320..=0x34a)
+    matches!(
+        id,
+        0x65 | 0x75..=0x77 | 0x7a..=0x7d | 0x32..=0x36 | 0xc8..=0xf3 | 0x12c..=0x130 | 0x320..=0x34a
+    )
 }
 
 /// `MC_knlExit` (service 0x68). The applet is asking to terminate, passing its
