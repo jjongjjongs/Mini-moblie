@@ -2965,14 +2965,14 @@ mod tests {
         assert!(!context.live_allocations().iter().any(|&(address, _)| address == source.0));
     }
 
-    /// A title that frees the block itself keeps it: the platform does not
-    /// give the same block back a second time.
+    /// A block the title took back is given back once, by the title, and the
+    /// platform does not give it back a second time.
     ///
-    /// 겟앰프드 frees it on the very next call after every create, and the
-    /// allocator hands the address straight out again - to that title's own
-    /// next resource, which becomes its next image. Giving it back at destroy
-    /// released a block that was live, and the run died a few frames later on
-    /// a double free of a framebuffer plane.
+    /// 겟앰프드 frees it on the very next call after every create. The
+    /// allocator then hands that address straight out again - to that title's
+    /// own next resource, which becomes its next image - so a second free
+    /// releases a block that is live. Its run died a few frames later on a
+    /// double free of a framebuffer plane, behind 240 warnings about this one.
     #[futures_test::test]
     async fn a_source_the_title_took_back_is_not_freed_twice() {
         let mut context = TestContext::new();
@@ -2986,20 +2986,20 @@ mod tests {
 
         // The title gives the block back itself, the way 겟앰프드 does.
         crate::api::kernel::free(&mut context, source).await.unwrap();
-        assert!(!context.live_allocations().iter().any(|&(address, _)| address == source.0));
-
-        // Whatever the allocator hands out next owns that address now.
-        let reused = context.alloc(TINY_PNG.len() as u32).unwrap();
+        assert_eq!(context.frees_of(source.0), 1);
 
         let image: super::WIPICWord = read_generic(&context, ptr_image).unwrap();
         destroy_image(&mut context, super::WIPICIndirectPtr(image)).await.unwrap();
 
-        // The destroy took back its own planes and its own handle, and left the
-        // block the title had already given back alone.
-        assert!(
-            context.live_allocations().iter().any(|&(address, _)| address == reused.0),
-            "the block the allocator handed out after the title's free is still live"
+        assert_eq!(
+            context.frees_of(source.0),
+            1,
+            "the destroy left the block alone; only the title gave it back"
         );
+
+        // And it still took back everything that was its own: the planes and
+        // the handle it allocated itself.
+        assert_eq!(context.frees_of(image), 1);
     }
 
     /// An image slot a title never filled measures as nothing and draws as

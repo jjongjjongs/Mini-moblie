@@ -171,6 +171,10 @@ pub mod test {
         pixel_op_takes_source_first: bool,
         /// The order this handset keeps a context's two colour words in.
         graphics_context_layout: ContextLayout,
+        /// Every address given back, in the order it was given back. A live
+        /// list only says whether a block is held; this says who let go of it
+        /// and how many times, which is what a test about ownership needs.
+        freed: Vec<WIPICWord>,
     }
 
     impl TestContext {
@@ -210,6 +214,7 @@ pub mod test {
                 guest_function: None,
                 pixel_op_takes_source_first: false,
                 graphics_context_layout: ContextLayout::ForegroundFirst,
+                freed: Vec::new(),
             }
         }
 
@@ -231,6 +236,7 @@ pub mod test {
                 guest_function: None,
                 pixel_op_takes_source_first: false,
                 graphics_context_layout: ContextLayout::ForegroundFirst,
+                freed: Vec::new(),
             }
         }
 
@@ -242,6 +248,11 @@ pub mod test {
         /// The allocations this context has handed out and not taken back.
         pub fn live_allocations(&self) -> Vec<(WIPICWord, WIPICWord)> {
             self.raw_allocations.clone()
+        }
+
+        /// How many times `address` has been given back.
+        pub fn frees_of(&self, address: WIPICWord) -> usize {
+            self.freed.iter().filter(|&&freed| freed == address).count()
         }
 
         /// Takes the spawned bodies, for a test that wants to run the deferred
@@ -277,6 +288,7 @@ pub mod test {
             if let Some(index) = self.raw_allocations.iter().position(|&(candidate, _)| candidate == memory.0) {
                 self.raw_allocations.remove(index);
             }
+            self.freed.push(memory.0);
 
             Ok(())
         }
@@ -285,6 +297,7 @@ pub mod test {
             if let Some(index) = self.raw_allocations.iter().position(|&(candidate, _)| candidate == address) {
                 self.raw_allocations.remove(index);
             }
+            self.freed.push(address);
             Ok(())
         }
 
@@ -292,6 +305,7 @@ pub mod test {
             if let Some(index) = self.raw_allocations.iter().position(|&(candidate, _)| candidate == address) {
                 self.raw_allocations.remove(index);
             }
+            self.freed.push(address);
             Ok(())
         }
 
