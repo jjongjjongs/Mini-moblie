@@ -2274,6 +2274,17 @@ pub fn lgt_local_granted_response(request: &[u8]) -> Option<Vec<u8>> {
 /// 15 00 00 00 ff ff 00 00 "01024417543" 01 00
 /// ```
 ///
+/// 테일즈위버 루시안칼츠편's shop writes the same request with fifteen bytes
+/// more behind it, the thirteen it opens with byte for byte the same:
+///
+/// ```text
+/// 24 00 00 00 ff ff 00 00 "01024417543" 01 00
+///   2c 01 00 00 00 00 b8 0b 00 00 01 1b 00 00 00
+/// ```
+///
+/// So it is the number and the field behind it that say a frame is this
+/// request, not the length of what follows them.
+///
 /// Its answer is command `0x01`, read by `0xe084`:
 ///
 /// ```text
@@ -2325,8 +2336,9 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
     /// itself, and `0xe084` reads the answer of.
     const SESSION_REQUEST: u16 = 0x0000;
     const SESSION_ANSWER: u16 = 0x0001;
-    /// The subscriber's number and the `u16` behind it, which is the whole of
-    /// that request's body.
+    /// The subscriber's number and the `u16` behind it, which is the least a
+    /// body under this command is. 테일즈위버 루시안칼츠편's shop carries
+    /// fifteen bytes more behind them.
     const SESSION_BODY: usize = 11 + 2;
     /// The four bytes `0xe084` takes past the message, and only for a granted
     /// result.
@@ -2400,10 +2412,11 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
 
             (REGISTER_ANSWER, payload)
         }
-        // The subscriber's number and a `u16`, and nothing else. Digits are
-        // what say the frame is that request rather than some other title's
-        // thirteen bytes under a command as plain as zero.
-        SESSION_REQUEST if body.len() == SESSION_BODY && body[..11].iter().all(u8::is_ascii_digit) => {
+        // The subscriber's number and a `u16` behind it, whatever a title
+        // carries after them. Digits leading the body are what say the frame
+        // is that request rather than some other title's bytes under a command
+        // as plain as zero.
+        SESSION_REQUEST if body.len() >= SESSION_BODY && body[..11].iter().all(u8::is_ascii_digit) => {
             let mut payload = vec![0u8; 1 + 2 + SESSION_TRAILER];
             payload[0] = SESSION_GRANTED;
 
@@ -11727,11 +11740,50 @@ mod tests {
         lettered[8] = b'x';
         assert!(lgt_local_marked_command_response(&lettered).is_none());
 
-        // Nor is a body of another length.
-        let mut longer = request.clone();
-        longer.push(0);
-        longer[0] += 1;
-        assert!(lgt_local_marked_command_response(&longer).is_none());
+        // Nor is a body too short to carry the number and the field behind it.
+        let mut shorter = request.clone();
+        shorter.pop();
+        shorter[0] -= 1;
+        assert!(lgt_local_marked_command_response(&shorter).is_none());
+    }
+
+    /// 테일즈위버 루시안칼츠편's shop takes that same step with more behind
+    /// it, and is answered the same way. Left unanswered - the length was held
+    /// to the thirteen bytes 세라샵 writes - the shop sat on a read that never
+    /// came back.
+    #[test]
+    fn the_same_step_is_answered_when_a_shop_carries_more_behind_it() {
+        // The frame the title wrote, byte for byte off the device.
+        let request = [
+            0x24, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, b'0', b'1', b'0', b'2', b'4', b'4', b'1', b'7', b'5', b'4', b'3', 0x01, 0x00, 0x2c, 0x01,
+            0x00, 0x00, 0x00, 0x00, 0xb8, 0x0b, 0x00, 0x00, 0x01, 0x1b, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(request.len(), 0x24);
+
+        let response = lgt_local_marked_command_response(&request).unwrap();
+
+        // The answer 세라샵's step gets, which is the one reader both go
+        // through.
+        assert_eq!(
+            response,
+            vec![0x0f, 0x00, 0x00, 0x00, 0xff, 0xff, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        );
+    }
+
+    /// And the authentication this title opens with, which is what says it
+    /// speaks this protocol at all.
+    #[test]
+    fn the_shop_s_own_authentication_is_answered() {
+        let mut request = vec![0x38, 0x00, 0x00, 0x00, 0xff, 0xff, 0x11, 0x27];
+        for _ in 0..2 {
+            request.extend_from_slice(&(b"TalesWeaverLucianKaltz".len() as u16).to_le_bytes());
+            request.extend_from_slice(b"TalesWeaverLucianKaltz");
+        }
+        assert_eq!(request.len(), 0x38);
+
+        let response = lgt_local_marked_command_response(&request).unwrap();
+
+        assert_eq!(response, vec![0x0b, 0x00, 0x00, 0x00, 0xff, 0xff, 0x12, 0x27, 0x00, 0x00, 0x00]);
     }
 
     /// The errand a screen opened its connection for is answered under its own
