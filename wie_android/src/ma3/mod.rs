@@ -1240,3 +1240,29 @@ mod tests {
         println!("{input} -> {output}, {} bytes", wav.len());
     }
 }
+
+/// Whether every voice a sequence defines is an MA-5 one.
+///
+/// The faithful renderer reads MA-3 voice dumps and nothing else, so a file
+/// that speaks only MA-5 would be rendered entirely on stand ins with its own
+/// instruments unread. This says so, and [`crate::audio`] hands those files to
+/// this synthesiser instead, which does read them.
+///
+/// A file with no voices at all is not one of these - it has nothing either
+/// player could sound differently - and neither is one that mixes the two,
+/// because the renderer can still voice the MA-3 half.
+pub fn only_ma5_voices(data: &[u8]) -> bool {
+    let (mut ma3, mut ma5) = (0usize, 0usize);
+
+    for (_, event) in smaf_player::parse_smaf(data) {
+        if let smaf_player::SmafEvent::MidiSysEx(message) = event {
+            match tone::set_voice_model(&message) {
+                Some(tone::MODEL_MA3_VOICE) => ma3 += 1,
+                Some(_) => ma5 += 1,
+                None => {}
+            }
+        }
+    }
+
+    ma3 == 0 && ma5 > 0
+}

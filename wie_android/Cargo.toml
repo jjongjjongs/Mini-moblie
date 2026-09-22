@@ -29,8 +29,10 @@ wie_ktf = { path = "../wie_ktf" }
 wie_lgt = { path = "../wie_lgt" }
 wie_skt = { path = "../wie_skt" }
 wie_wipi_c = { workspace = true }
+# Already in the graph through wie_backend; named here because the MMF
+# dispatch reads a sequence's voices before deciding which player gets it.
+smaf_player = { path = "../third_party/smaf_player" }
 
 [dev-dependencies]
 futures-test = { workspace = true }
-smaf_player = { path = "../third_party/smaf_player" }
 zip = { version = "^8.6", features = ["deflate"], default-features = false }

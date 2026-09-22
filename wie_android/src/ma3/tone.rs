@@ -250,6 +250,20 @@ fn voice_model(body: &[u8]) -> Option<u8> {
     matches!(body[MODEL_OFFSET], MODEL_MA3 | MODEL_MA5).then(|| body[MODEL_OFFSET])
 }
 
+/// Which chip a message defines a voice for, if it defines one at all.
+///
+/// Wave uploads, resets and the rest carry the same header and are not voices,
+/// so the command has to say `set voice` for this to answer.
+pub fn set_voice_model(message: &[u8]) -> Option<u8> {
+    let body = message.strip_prefix(&[0xF0]).unwrap_or(message);
+    let model = voice_model(body)?;
+
+    (body[COMMAND_OFFSET] == COMMAND_SET_VOICE).then_some(model)
+}
+
+/// The chip whose voices this synthesiser is named for.
+pub const MODEL_MA3_VOICE: u8 = MODEL_MA3;
+
 /// Where a voice message's own fields start, past that header.
 const VOICE_PREFIX_LEN: usize = 5;
 
@@ -677,7 +691,7 @@ fn stand_in(algorithm: u8, modulator: (u8, u8, u8, u8, u8, u8, u8), carrier: (u8
 
 #[cfg(test)]
 mod tests {
-    use super::{Bank, DRUM_CHANNEL, OPERATORS, Tone, VoiceKind, WAVE_DATA_OFFSET, parse_voice, unpack};
+    use super::{Bank, DRUM_CHANNEL, MODEL_MA3_VOICE, MODEL_MA5, OPERATORS, Tone, VoiceKind, WAVE_DATA_OFFSET, parse_voice, set_voice_model, unpack};
 
     /// A four operator voice, as one of the library's own files sends it.
     const FOUR_OPERATOR: &[u8] = &[
@@ -984,5 +998,28 @@ mod tests {
 
             assert!(parse_voice(&short).is_none(), "a {cut} byte message is not a voice");
         }
+    }
+
+    #[test]
+    fn a_voice_message_says_which_chip_it_is_for() {
+        // What decides which player a sequence goes to: the faithful renderer
+        // reads the first of these and none of the others.
+        assert_eq!(set_voice_model(FOUR_OPERATOR), Some(MODEL_MA3_VOICE));
+        assert_eq!(set_voice_model(MA5_FOUR_OPERATOR), Some(MODEL_MA5));
+        assert_eq!(set_voice_model(SAMPLED_VOICE), Some(MODEL_MA5));
+    }
+
+    #[test]
+    fn everything_that_is_not_a_voice_says_nothing() {
+        // An uploaded recording carries the same header under another command,
+        // and a reset carries it under none - counting either as a voice would
+        // send a sequence to the wrong player.
+        assert_eq!(set_voice_model(SAMPLED_WAVE), None);
+        assert_eq!(set_voice_model(&[0xF0, 0x43, 0x79, 0x06, 0x7F, 0x7F, 0xF7]), None);
+
+        // Nor is anything that is not Yamaha's at all.
+        assert_eq!(set_voice_model(&[0xF0, 0x41, 0x10, 0x42, 0x12, 0xF7]), None);
+        assert_eq!(set_voice_model(&[0xF0]), None);
+        assert_eq!(set_voice_model(&[]), None);
     }
 }

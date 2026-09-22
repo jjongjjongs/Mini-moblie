@@ -366,6 +366,17 @@ impl wie_backend::AudioSink for AndroidAudioSink {
             return Some(duration_ms);
         }
 
+        // A sequence whose voices are all MA-5 is not one this renderer can
+        // voice: it reads MA-3 voice dumps only, so every note would sound on
+        // a stand in while the file's own instruments sat unread beside it.
+        // The live synthesiser does read them, so hand it the file. A sequence
+        // with MA-3 voices among them is left here, which is all but four of
+        // the ninety three in the one collection that carries any MA-5.
+        if crate::ma3::only_ma5_voices(data) {
+            tracing::info!("[smaf] oma3 declined (voices are MA-5 only), id={id}; deferring to MIDI player");
+            return None;
+        }
+
         let smaf = crate::oma3::smaf::parse(data).ok()?;
         let analysis = crate::oma3::analysis::analyze(&smaf);
         if analysis.notes.is_empty() && analysis.audio_events.is_empty() {
