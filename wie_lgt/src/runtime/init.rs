@@ -4666,6 +4666,48 @@ fn has_raptor_metadata(data: &[u8], section_headers: &[elf::section::SectionHead
     })
 }
 
+/// The entrypoint a Raptor module names in its own header.
+///
+/// `.raptor` holds the module's real metadata, and its fourth word is the
+/// entrypoint as an offset into the code section, with the Thumb bit set when
+/// the module records one. The ELF header's `e_entry` is a copy of the same
+/// address written by the packer, and across every LGT module to hand the two
+/// agree - except 아빠와나, whose `e_entry` is a bare `0x1000`. That is the
+/// code section's own base address, which is to say the field was never
+/// filled in: `.raptor` names `0x7a1bd`, and `0x1000 + 0x7a1bd & !1` is the
+/// three-store stub that hands the loader its init struct. Called at `0x1000`
+/// instead, the module runs unrelated code, returns having written nothing,
+/// and the loader reads `ptr_init_struct` at zero.
+///
+/// So the header is the entrypoint of record and `e_entry` only a copy of it.
+/// The Thumb bit is dropped here because the caller sets it itself - every one
+/// of these modules is Thumb, `e_entry` never carries the bit, and the handful
+/// of headers that do carry it point at the same address either way.
+fn raptor_entrypoint(data: &[u8], section_headers: &[elf::section::SectionHeader]) -> Option<u32> {
+    const SHF_WRITE: u64 = 0x1;
+    const SHF_ALLOC: u64 = 0x2;
+    const SHF_EXECINSTR: u64 = 0x4;
+    /// The entrypoint's offset within the `.raptor` header.
+    const ENTRYPOINT_OFFSET: usize = 0x0c;
+
+    let header = section_headers.iter().find(|section| {
+        let offset = section.sh_offset as usize;
+
+        section.sh_size as usize >= ENTRYPOINT_OFFSET + 4 && data.get(offset..offset.saturating_add(4)).is_some_and(|magic| magic == b"RAPT")
+    })?;
+
+    // The module's one read-only executable section - `.text`, or `ER_RO` in
+    // the modules that keep the ARM toolchain's own section names.
+    let code = section_headers.iter().find(|section| {
+        section.sh_flags & (SHF_ALLOC | SHF_EXECINSTR) == SHF_ALLOC | SHF_EXECINSTR && section.sh_flags & SHF_WRITE == 0 && section.sh_size != 0
+    })?;
+
+    let offset = read_u32_le(data, header.sh_offset as usize + ENTRYPOINT_OFFSET, "Raptor entrypoint").ok()?;
+    let entrypoint = (code.sh_addr as u32).checked_add(offset)? & !1;
+
+    ((code.sh_addr as u32..(code.sh_addr as u32).checked_add(code.sh_size as u32)?).contains(&entrypoint)).then_some(entrypoint)
+}
+
 fn apply_relocations(core: &mut ArmCore, data: &[u8], section_headers: &[elf::section::SectionHeader]) -> Result<()> {
     const SHT_RELA: u32 = 4;
     const SHT_REL: u32 = 9;
@@ -4928,13 +4970,97 @@ fn load_executable(core: &mut ArmCore, data: &[u8]) -> Result<LoadedImage> {
 
     apply_relocations(core, data, &section_headers)?;
 
-    tracing::debug!("Entrypoint: {:#x}", elf.ehdr.e_entry);
+    let entrypoint = raptor_entrypoint(data, &section_headers).unwrap_or(elf.ehdr.e_entry as u32);
+    if entrypoint != elf.ehdr.e_entry as u32 {
+        tracing::debug!("Raptor header names entrypoint {entrypoint:#x}, ELF header {:#x}", elf.ehdr.e_entry);
+    }
+
+    tracing::debug!("Entrypoint: {entrypoint:#x}");
 
     Ok(LoadedImage {
-        entrypoint: elf.ehdr.e_entry as u32,
+        entrypoint,
         ranges,
         writable_ranges,
     })
+}
+
+#[cfg(test)]
+mod raptor_entrypoint_tests {
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    use super::raptor_entrypoint;
+
+    /// A module with one read-only executable section, one writable one, and a
+    /// `.raptor` header naming an entrypoint.
+    fn module(code_size: u32, raptor_entrypoint_field: u32) -> (Vec<u8>, Vec<elf::section::SectionHeader>) {
+        const SHF_WRITE: u64 = 0x1;
+        const SHF_ALLOC: u64 = 0x2;
+        const SHF_EXECINSTR: u64 = 0x4;
+
+        let mut data = vec![0u8; 0x100];
+        data[0x40..0x44].copy_from_slice(b"RAPT");
+        data[0x4c..0x50].copy_from_slice(&raptor_entrypoint_field.to_le_bytes());
+
+        let section = |flags: u64, addr: u64, offset: u64, size: u64| elf::section::SectionHeader {
+            sh_name: 0,
+            sh_type: 1,
+            sh_flags: flags,
+            sh_addr: addr,
+            sh_offset: offset,
+            sh_size: size,
+            sh_link: 0,
+            sh_info: 0,
+            sh_addralign: 4,
+            sh_entsize: 0,
+        };
+
+        let sections = vec![
+            section(0, 0, 0, 0),
+            // `.data` is executable as well as writable in these modules, so
+            // the code section is the one that is *not* writable.
+            section(SHF_ALLOC | SHF_WRITE | SHF_EXECINSTR, 0x1400000, 0x80, 0x10),
+            section(SHF_ALLOC | SHF_EXECINSTR, 0x1000, 0x34, code_size as u64),
+            section(0, 0, 0x40, 0x58),
+        ];
+
+        (data, sections)
+    }
+
+    /// 아빠와나's header: `0x7a1bd` off a code section at `0x1000`, Thumb bit
+    /// and all. Its `e_entry` is a bare `0x1000` and names nothing.
+    #[test]
+    fn the_header_names_the_entrypoint() {
+        let (data, sections) = module(0x7d130, 0x7a1bd);
+
+        assert_eq!(raptor_entrypoint(&data, &sections), Some(0x7b1bc));
+    }
+
+    /// Legend of Master's header, where `e_entry` says the same thing.
+    #[test]
+    fn a_header_without_the_thumb_bit_names_the_same_address() {
+        let (data, sections) = module(0xf8ab8, 0xf39b4);
+
+        assert_eq!(raptor_entrypoint(&data, &sections), Some(0xf49b4));
+    }
+
+    /// A header that points outside the code it came with is no entrypoint,
+    /// and the ELF header's own answer is used instead.
+    #[test]
+    fn an_entrypoint_outside_the_code_is_not_one() {
+        let (data, sections) = module(0x1000, 0xf39b4);
+
+        assert_eq!(raptor_entrypoint(&data, &sections), None);
+    }
+
+    /// Modules that carry no Raptor header at all keep their `e_entry`.
+    #[test]
+    fn a_module_without_a_header_names_nothing() {
+        let (mut data, sections) = module(0x7d130, 0x7a1bd);
+        data[0x40..0x44].copy_from_slice(b"\0\0\0\0");
+
+        assert_eq!(raptor_entrypoint(&data, &sections), None);
+    }
 }
 
 #[cfg(test)]
