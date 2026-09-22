@@ -284,6 +284,13 @@ pub async fn free(context: &mut dyn WIPICContext, memory: WIPICIndirectPtr) -> R
         return Ok(());
     }
 
+    // A block the title gives back is its own again, whatever it handed the
+    // block to in the meantime. If an image is holding it as the encoded bytes
+    // it was made from, that image stops answering for it here rather than
+    // freeing it a second time once the allocator has handed the address out
+    // again. See `graphics::IMAGE_SOURCES`.
+    crate::api::graphics::forget_image_source(memory.0);
+
     context.free(memory)?;
 
     Ok(())

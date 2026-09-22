@@ -8,6 +8,7 @@ use core::mem::size_of;
 
 use bytemuck::pod_collect_to_vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use spin::Mutex;
 
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
 
@@ -782,6 +783,65 @@ pub async fn fill_polygon(
     Ok(())
 }
 
+/// Which images the platform is still holding a title's encoded bytes for.
+///
+/// `MC_grpCreateImage` is handed a block the title allocated, and the two
+/// titles that say what happens to it next say opposite things. LOA-혼돈의
+/// 서곡's loader at `0x123a20` frees the block only on the branch the call
+/// failed on, so a success hands it over and nothing would ever give it back -
+/// 6645 allocations against 701 frees in one fifty second capture. 겟앰프드
+/// frees it itself, on the very next call, after every single create.
+///
+/// Both are served by remembering which blocks are still the platform's to
+/// free. An image is entered here when it is made, and it is forgotten the
+/// moment the title frees that block itself. `MC_grpDestroyImage` then gives
+/// the block back only if it is still listed - LOA's is, 겟앰프드's is not.
+///
+/// Freeing it unconditionally is what this did before, and the tolerance for
+/// the double free that followed was not enough. The block a title has freed
+/// does not stay free: the allocator hands the same address out again, and
+/// 겟앰프드 reads its next resource into it and makes its next image from it.
+/// The free that came later then released a block that was live, two live
+/// objects shared an address, and the title died on a double free of a
+/// framebuffer plane several frames afterwards - the 240 tolerated warnings in
+/// that run were the harmless half of the same mistake.
+///
+/// Keyed by the image handle, which `create_image` allocates and
+/// `destroy_image` is given, so it names one image for as long as it exists. A
+/// handle entered twice without being destroyed replaces its own entry, so an
+/// address the allocator reuses cannot make one image answer for another.
+static IMAGE_SOURCES: Mutex<Vec<(WIPICWord, WIPICWord)>> = Mutex::new(Vec::new());
+
+/// Remember that `image` is holding `source`, which is the platform's to free.
+fn hold_image_source(image: WIPICWord, source: WIPICWord) {
+    if source == 0 {
+        return;
+    }
+
+    let mut sources = IMAGE_SOURCES.lock();
+    sources.retain(|&(held, _)| held != image);
+    sources.push((image, source));
+}
+
+/// Take `image`'s source back out, and say whether it was still the platform's.
+fn take_image_source(image: WIPICWord) -> Option<WIPICWord> {
+    let mut sources = IMAGE_SOURCES.lock();
+    let at = sources.iter().position(|&(held, _)| held == image)?;
+
+    Some(sources.swap_remove(at).1)
+}
+
+/// The title has freed this block itself, so no image may give it back again.
+///
+/// Called from `MC_knlFree`, which is how a title gives a block back.
+pub fn forget_image_source(source: WIPICWord) {
+    if source == 0 {
+        return;
+    }
+
+    IMAGE_SOURCES.lock().retain(|&(_, held)| held != source);
+}
+
 pub async fn create_image(
     context: &mut dyn WIPICContext,
     ptr_image: WIPICWord,
@@ -812,6 +872,8 @@ pub async fn create_image(
     write_generic(context, ptr_image, memory)?;
     write_generic(context, context.data_ptr(memory)?, image)?;
 
+    hold_image_source(memory.0, image_data.0);
+
     Ok(1) // MC_GRP_IMAGE_DONE
 }
 
@@ -836,26 +898,15 @@ pub async fn destroy_image(context: &mut dyn WIPICContext, image: WIPICIndirectP
         context.free(wipi_image.mask.buf)?;
     }
 
-    // And the encoded bytes the title handed `MC_grpCreateImage`, which the
-    // image has owned since that call reported it was done.
-    //
-    // The title's own code says where the boundary is: LOA-혼돈의 서곡's
-    // image loader @0x123a20 callocs a block, copies the encoded bytes into it,
-    // calls `MC_grpCreateImage`, and frees the block *only on the branch the
-    // call failed on* - a success hands the block over and the title never
-    // names it again. The platform needs it for as long as the image lives
-    // anyway, because `MC_grpDecodeNextImage` reads an animation's later frames
-    // back out of `buf` at `current`.
-    //
-    // Leaving it behind leaks: one 50-second capture of that title's story
-    // screen made 7911 `MC_knlCalloc` calls, 6645 of them from that one loader,
-    // against 701 `MC_knlFree` calls in the whole run. The free is not fatal if
-    // it fails - the block is the title's to begin with, and a title that has
-    // already freed it itself should not lose the rest of the teardown.
-    if wipi_image.buf.0 != 0
-        && let Err(error) = context.free(wipi_image.buf)
+    // And the encoded bytes the title handed `MC_grpCreateImage`, but only
+    // while they are still the platform's to give back. See [`IMAGE_SOURCES`]:
+    // a title that has freed the block itself has been taken off that list, and
+    // the address it had is by now somebody else's.
+    if let Some(source) = take_image_source(image.0)
+        && source != 0
+        && let Err(error) = context.free(WIPICIndirectPtr(source))
     {
-        tracing::warn!("MC_grpDestroyImage: could not free the source buffer {:#x}: {error}", wipi_image.buf.0);
+        tracing::warn!("MC_grpDestroyImage: could not free the source buffer {source:#x}: {error}");
     }
 
     context.free(image)?;
@@ -2912,6 +2963,43 @@ mod tests {
         // the title's, and the source went with the image.
         assert_eq!(context.live_allocations().len(), before - 1);
         assert!(!context.live_allocations().iter().any(|&(address, _)| address == source.0));
+    }
+
+    /// A title that frees the block itself keeps it: the platform does not
+    /// give the same block back a second time.
+    ///
+    /// 겟앰프드 frees it on the very next call after every create, and the
+    /// allocator hands the address straight out again - to that title's own
+    /// next resource, which becomes its next image. Giving it back at destroy
+    /// released a block that was live, and the run died a few frames later on
+    /// a double free of a framebuffer plane.
+    #[futures_test::test]
+    async fn a_source_the_title_took_back_is_not_freed_twice() {
+        let mut context = TestContext::new();
+
+        let source = context.alloc(TINY_PNG.len() as u32).unwrap();
+        let ptr_source = context.data_ptr(source).unwrap();
+        context.write_bytes(ptr_source, &TINY_PNG).unwrap();
+
+        let ptr_image = context.alloc_raw(4).unwrap();
+        assert_eq!(create_image(&mut context, ptr_image, source, 0, TINY_PNG.len() as u32).await.unwrap(), 1);
+
+        // The title gives the block back itself, the way 겟앰프드 does.
+        crate::api::kernel::free(&mut context, source).await.unwrap();
+        assert!(!context.live_allocations().iter().any(|&(address, _)| address == source.0));
+
+        // Whatever the allocator hands out next owns that address now.
+        let reused = context.alloc(TINY_PNG.len() as u32).unwrap();
+
+        let image: super::WIPICWord = read_generic(&context, ptr_image).unwrap();
+        destroy_image(&mut context, super::WIPICIndirectPtr(image)).await.unwrap();
+
+        // The destroy took back its own planes and its own handle, and left the
+        // block the title had already given back alone.
+        assert!(
+            context.live_allocations().iter().any(|&(address, _)| address == reused.0),
+            "the block the allocator handed out after the title's free is still live"
+        );
     }
 
     /// An image slot a title never filled measures as nothing and draws as
