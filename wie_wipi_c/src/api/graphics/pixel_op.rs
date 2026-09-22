@@ -402,7 +402,7 @@ pub async fn of_context(context: &mut dyn WIPICContext, function: WIPICWord, par
         // makes 2,478 of them in one capture, all through the same context - and
         // asking again means faulting again, which is not free even when it is
         // caught.
-        if UNCALLABLE.lock().iter().any(|&known| known == function) {
+        if UNCALLABLE.lock().contains(&function) {
             return Ok(None);
         }
 

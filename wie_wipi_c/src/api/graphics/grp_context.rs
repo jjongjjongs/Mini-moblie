@@ -154,7 +154,7 @@ impl WIPICGraphicsContextIdx {
     pub fn from_raw(raw: WIPICWord) -> Self {
         if raw >= (Self::ClipIdx as WIPICWord) && raw <= (Self::OutlineIdx as WIPICWord) {
             // SAFETY: WIPICGraphicsContextIdx has CWord repr and is unit only.
-            unsafe { mem::transmute(raw) }
+            unsafe { mem::transmute::<WIPICWord, Self>(raw) }
         } else {
             Self::Invalid
         }

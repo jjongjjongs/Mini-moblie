@@ -238,9 +238,9 @@ const CLASS_INITIALIZED: u16 = 8;
 /// Runs a module class's initializer, if the JVM has not run it already.
 ///
 /// The JVM's own initialization is what runs it: this is a class it knows,
-/// registered through `fn_get_class`, and asking it again while it is running
-/// - which is where the module asks from, inside `<clinit>` itself - answers
-/// without running anything a second time.
+/// registered through `fn_get_class`, and asking it again while it is
+/// running - which is where the module asks from, inside `<clinit>` itself -
+/// answers without running anything a second time.
 async fn module_ensure_initialized(core: &mut ArmCore, jvm: &mut Jvm, ptr_class: u32) -> Result<u32> {
     let class = KtfJvmSupport::class_from_raw(core, ptr_class);
     let name = class.name()?;
