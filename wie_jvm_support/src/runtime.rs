@@ -303,6 +303,12 @@ struct JavaString;
 /// number rather than a string, which the runtime spells for `append` and not
 /// for `insert`.
 ///
+/// `insert(int, char)` is the fifth. 피파7 died on `Method
+/// insert(IC)Ljava/lang/StringBuffer; not found from java/lang/StringBuffer`
+/// once the logo was gone, and with its thread down the event queue went on
+/// repainting a screen nothing was writing to - a white screen that never
+/// moved.
+///
 /// Anything that is not that class is handed back untouched, and so is a method
 /// the runtime has grown since - the runtime's own is the one to keep.
 fn fill_in_string_buffer(mut proto: RuntimeClassProto) -> RuntimeClassProto {
@@ -327,6 +333,12 @@ fn fill_in_string_buffer(mut proto: RuntimeClassProto) -> RuntimeClassProto {
             "deleteCharAt",
             "(I)Ljava/lang/StringBuffer;",
             string_buffer_delete_char_at,
+            MethodAccessFlags::empty(),
+        ),
+        JavaMethodProto::new(
+            "insert",
+            "(IC)Ljava/lang/StringBuffer;",
+            string_buffer_insert_character,
             MethodAccessFlags::empty(),
         ),
         JavaMethodProto::new("setCharAt", "(IC)V", string_buffer_set_char_at, MethodAccessFlags::empty()),
@@ -360,7 +372,7 @@ async fn string_buffer_insert_string(
         JavaLangString::to_rust_string(jvm, &string).await?
     };
 
-    string_buffer_insert(jvm, this, offset, &inserted).await
+    string_buffer_insert(jvm, this, offset, &inserted.encode_utf16().collect::<Vec<_>>()).await
 }
 
 /// `insert(int, int)`, which the runtime does not carry either.
@@ -379,15 +391,32 @@ async fn string_buffer_insert_integer(
 ) -> JvmResult<ClassInstanceRef<StringBuffer>> {
     tracing::debug!("java.lang.StringBuffer::insert({this:?}, {offset}, {value})");
 
-    string_buffer_insert(jvm, this, offset, &alloc::format!("{value}")).await
+    string_buffer_insert(jvm, this, offset, &alloc::format!("{value}").encode_utf16().collect::<Vec<_>>()).await
+}
+
+/// `insert(int, char)`, the fifth gap, and 피파7's.
+async fn string_buffer_insert_character(
+    jvm: &Jvm,
+    _: &mut RuntimeContext,
+    this: ClassInstanceRef<StringBuffer>,
+    offset: i32,
+    character: JavaChar,
+) -> JvmResult<ClassInstanceRef<StringBuffer>> {
+    tracing::debug!("java.lang.StringBuffer::insert({this:?}, {offset}, {character})");
+
+    string_buffer_insert(jvm, this, offset, &[character]).await
 }
 
 /// Puts `inserted` into the buffer at `offset`.
+///
+/// Takes UTF-16 units rather than a `&str` so the character form can hand its
+/// one unit straight through: a lone surrogate is a char a title may hold, and
+/// it has no `&str` to be converted to and back from.
 async fn string_buffer_insert(
     jvm: &Jvm,
     mut this: ClassInstanceRef<StringBuffer>,
     offset: i32,
-    inserted: &str,
+    inserted: &[JavaChar],
 ) -> JvmResult<ClassInstanceRef<StringBuffer>> {
     let count: i32 = jvm.get_field(&this, "count", "I").await?;
     if offset < 0 || offset > count {
@@ -395,8 +424,6 @@ async fn string_buffer_insert(
             .exception("java/lang/StringIndexOutOfBoundsException", "insert offset is outside the buffer")
             .await);
     }
-
-    let inserted = inserted.encode_utf16().collect::<Vec<_>>();
 
     let mut value: ClassInstanceRef<Array<JavaChar>> = jvm.get_field(&this, "value", "[C").await?;
     let chars: Vec<JavaChar> = jvm.load_array(&value, 0, count as _).await?;
@@ -654,6 +681,53 @@ mod tests {
             let result: JvmResult<ClassInstanceRef<StringBuffer>> =
                 jvm.invoke_virtual(&buffer, "insert", "(II)Ljava/lang/StringBuffer;", (11, 0)).await;
             assert!(result.is_err(), "11 is outside a buffer of 10");
+
+            Ok(())
+        })
+    }
+
+    /// A character inserts at the places a string does, keeps the buffer's own
+    /// growth, and throws on the same offsets.
+    #[test]
+    fn a_string_buffer_inserts_a_single_character() -> Result<(), WieError> {
+        run_jvm_test(Box::new([]), async |jvm| {
+            let text = JavaLangString::from_rust_string(&jvm, "ac").await?;
+            let buffer = jvm.new_class("java/lang/StringBuffer", "(Ljava/lang/String;)V", (text,)).await?;
+
+            // The middle, the front, and the length - which is where appending
+            // happens and is not outside the buffer.
+            for (offset, character) in [(1, b'b'), (0, b'-'), (4, b'd')] {
+                let _: ClassInstanceRef<StringBuffer> = jvm
+                    .invoke_virtual(&buffer, "insert", "(IC)Ljava/lang/StringBuffer;", (offset, character as u16))
+                    .await?;
+            }
+
+            let text = jvm.invoke_virtual(&buffer, "toString", "()Ljava/lang/String;", ()).await?;
+            assert_eq!(JavaLangString::to_rust_string(&jvm, &text).await?, "-abcd");
+
+            // Past the sixteen a fresh buffer holds, one character at a time.
+            for _ in 0..40 {
+                let _: ClassInstanceRef<StringBuffer> = jvm
+                    .invoke_virtual(&buffer, "insert", "(IC)Ljava/lang/StringBuffer;", (0, b'x' as u16))
+                    .await?;
+            }
+
+            let length: i32 = jvm.invoke_virtual(&buffer, "length", "()I", ()).await?;
+            assert_eq!(length, 45);
+
+            let text = jvm.invoke_virtual(&buffer, "toString", "()Ljava/lang/String;", ()).await?;
+            assert_eq!(
+                JavaLangString::to_rust_string(&jvm, &text).await?,
+                alloc::format!("{}-abcd", "x".repeat(40))
+            );
+
+            for offset in [-1, 46] {
+                let result: JvmResult<ClassInstanceRef<StringBuffer>> = jvm
+                    .invoke_virtual(&buffer, "insert", "(IC)Ljava/lang/StringBuffer;", (offset, b'z' as u16))
+                    .await;
+
+                assert!(result.is_err(), "{offset} is outside a buffer of 45");
+            }
 
             Ok(())
         })
