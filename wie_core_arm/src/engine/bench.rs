@@ -49,21 +49,28 @@ const TRANSPARENT: u32 = 0x0000;
 ///        bne  inner
 ///        subs r5, r5, #1
 ///        bne  outer
-///        nop                 ; <- `end` breakpoint
+///        b    done           ; <- exits to the `end` sentinel
 /// ```
 #[rustfmt::skip]
 const BLIT_CODE: [u8; 28] = [
     0x30, 0x1c, 0x39, 0x1c, 0x4a, 0x46, 0x03, 0x88,
     0xa3, 0x42, 0x00, 0xd0, 0x0b, 0x80, 0x80, 0x1c,
     0x89, 0x1c, 0x52, 0x1e, 0xf7, 0xd1, 0x6d, 0x1e,
-    0xf2, 0xd1, 0xc0, 0x46,
+    0xf2, 0xd1, 0x00, 0xe3,
 ];
 
-/// `end` breakpoint: the first zero-filled halfword just past the program. In a
-/// real dump the run's `end` (a return sentinel) is likewise reached at an
-/// instruction the JIT declines, so the trace compiler stops cleanly there
-/// rather than mid-trace.
-const BLIT_END: u32 = CODE_ADDR + 0x1c;
+/// `end` sentinel: the target of the program's closing unconditional branch.
+///
+/// It has to be an address no compiled block can contain, exactly like the real
+/// [`RUN_FUNCTION_LR`](crate::RUN_FUNCTION_LR) the platform crates pass. The JIT
+/// declines a block whose span covers `end`, and a Thumb trace decodes straight
+/// through conditional branches rather than stopping at them, so an `end` placed
+/// just past the program - where the old `nop` breakpoint sat - lands inside the
+/// very first trace. That silently disabled the JIT for the whole run and made
+/// this benchmark measure the interpreter under JIT dispatch overhead instead.
+/// A trace is at most `MAX_BLOCK_LEN` (256) ops, so 0x61e bytes out is clear of
+/// any block while staying inside the mapped code page.
+const BLIT_END: u32 = CODE_ADDR + 0x61e;
 
 /// Build a source buffer with a representative mix of opaque and transparent
 /// pixels (every fourth pixel transparent), returning it plus the expected
@@ -89,7 +96,7 @@ fn blit_fixture(pixels: usize) -> (Vec<u8>, Vec<u8>) {
 /// Run the blit program on the given engine and return the destination buffer.
 ///
 /// The engine is created fresh, memory mapped, program and source loaded, and
-/// the program run to its `nop` breakpoint. Returns `(dst_bytes, executed)`
+/// the program run to its `end` sentinel. Returns `(dst_bytes, executed)`
 /// where `executed` is the delta of the global instruction counter.
 fn run_blit<E: ArmEngine>(mut engine: E, pixels_per_frame: usize, frames: u32, src: &[u8]) -> (Vec<u8>, u64) {
     // Map code, source and destination pages.

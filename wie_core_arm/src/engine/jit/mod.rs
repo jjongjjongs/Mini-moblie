@@ -1977,10 +1977,10 @@ mod tests {
             while words.len() < OPS {
                 let w = (rng.u32() & 0x0fff_ffff) | 0xe000_0000; // force cond = AL
                 let pc = CODE + (words.len() as u32) * 4;
-                if let Some(op) = decode_arm(w, pc) {
-                    if !arm_ends_trace(&op) {
-                        words.push(w);
-                    }
+                if let Some(op) = decode_arm(w, pc)
+                    && !arm_ends_trace(&op)
+                {
+                    words.push(w);
                 }
             }
             words.push(B_NEXT_ARM);
