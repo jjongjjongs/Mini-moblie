@@ -521,13 +521,13 @@ fn run(label: &str, archive: &[u8], ticks_limit: u32) {
         eprintln!("[{label}]   #{color:06x} x{count}");
     }
 
-    if let Ok(path) = std::env::var("WIE_LAST_PPM") {
-        if !captured.last_pixels.is_empty() {
-            let mut ppm = format!("P6\n{} {}\n255\n", captured.width, captured.height).into_bytes();
-            ppm.extend_from_slice(&captured.last_pixels);
-            let _ = std::fs::write(&path, ppm);
-            eprintln!("[{label}] wrote LAST frame (sig={:016x}) to {path}", captured.last_sig);
-        }
+    if let Ok(path) = std::env::var("WIE_LAST_PPM")
+        && !captured.last_pixels.is_empty()
+    {
+        let mut ppm = format!("P6\n{} {}\n255\n", captured.width, captured.height).into_bytes();
+        ppm.extend_from_slice(&captured.last_pixels);
+        let _ = std::fs::write(&path, ppm);
+        eprintln!("[{label}] wrote LAST frame (sig={:016x}) to {path}", captured.last_sig);
     }
 
     if let Ok(path) = std::env::var("LOM_CAPTURE_PATH") {
@@ -643,12 +643,12 @@ fn run_scripted_over(
 
     let mut ticks = 0u32;
     while !exited.load(Ordering::SeqCst) && ticks < ticks_limit {
-        if ticks % 40 == 0 {
+        if ticks.is_multiple_of(40) {
             emulator.handle_event(Event::Redraw);
         }
 
         if let Some(dir) = &frame_dump
-            && ticks % frame_dump_every == 0
+            && ticks.is_multiple_of(frame_dump_every)
         {
             write_ppm(&format!("{dir}/t{ticks:06}.ppm"), &screen);
         }
@@ -661,11 +661,11 @@ fn run_scripted_over(
             if ticks == at + hold {
                 emulator.handle_event(Event::Keyup(key));
             }
-            if let Some(dir) = &shot_dir {
-                if ticks == at + 300 {
-                    write_ppm(&format!("{dir}/step_{step}.ppm"), &screen);
-                    eprintln!("[{label}] step {step}: shot at tick {ticks}");
-                }
+            if let Some(dir) = &shot_dir
+                && ticks == at + 300
+            {
+                write_ppm(&format!("{dir}/step_{step}.ppm"), &screen);
+                eprintln!("[{label}] step {step}: shot at tick {ticks}");
             }
         }
 

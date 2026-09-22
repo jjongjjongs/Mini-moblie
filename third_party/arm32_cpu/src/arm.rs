@@ -107,7 +107,7 @@ impl Cpu {
         {
             let cflags = cpsr.extract(28, 4);
             trace!(
-                "ARM: pc: {:#010x}, inst: {:#010x}, cond: {:#03x}, cflags: {:04b}",
+                "ARM: pc: {:#010x}, inst: {:#010x}, cond: {:#04x}, cflags: {:04b}",
                 pc,
                 inst,
                 cond,

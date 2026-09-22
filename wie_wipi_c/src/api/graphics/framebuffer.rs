@@ -415,7 +415,7 @@ impl FrameBuffer {
 
         for py in top..bottom {
             context.read_bytes(base + (py * bpl + left * 2) as u32, &mut row)?;
-            pixels.extend(row.chunks_exact(2).map(|x| u16::from_le_bytes([x[0], x[1]])));
+            pixels.extend(row.as_chunks::<2>().0.iter().copied().map(u16::from_le_bytes));
         }
 
         Ok(Some((left as i32, top as i32, cols as i32, (bottom - top) as i32, pixels)))

@@ -500,10 +500,10 @@ mod tests {
 
     fn wait_for_resolved(net: &AndroidNetwork, query_id: u32) -> u32 {
         for _ in 0..400 {
-            if let Some(NetworkEvent::HostResolved { query_id: id, address }) = net.poll_event() {
-                if id == query_id {
-                    return address;
-                }
+            if let Some(NetworkEvent::HostResolved { query_id: id, address }) = net.poll_event()
+                && id == query_id
+            {
+                return address;
             }
             thread::sleep(Duration::from_millis(5));
         }

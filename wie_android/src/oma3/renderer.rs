@@ -1165,7 +1165,12 @@ mod tests {
         let got = super::render_full(analysis, 44100);
 
         let raw = std::fs::read(&ref_path).unwrap();
-        let want: Vec<f32> = raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+        let want: Vec<f32> = raw
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
 
         assert_eq!(got.len(), want.len(), "sample count got {} want {}", got.len(), want.len());
         let mut mismatches = 0;
@@ -1207,7 +1212,12 @@ mod tests {
         let got = super::render_all(analysis, 44100);
 
         let raw = std::fs::read(&ref_path).unwrap();
-        let want: Vec<f32> = raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+        let want: Vec<f32> = raw
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
         if want.len() >= 44100 * 40 * 2 {
             return; // ref hit the 40s cap; render_all is uncapped, lengths differ.
         }

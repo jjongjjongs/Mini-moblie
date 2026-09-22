@@ -1256,7 +1256,7 @@ mod test {
 
         assert_eq!(get_exec_names(&mut context, name, 0, 0, out, 64).await.unwrap(), 1);
 
-        let listing = read_null_terminated_string_bytes(&mut context, out).unwrap();
+        let listing = read_null_terminated_string_bytes(&context, out).unwrap();
         let tail = &listing[listing.len() - 21..];
         for at in 0..8 {
             assert_eq!(tail[at], tail[at + 9], "the token repeats nine apart, at {at}");

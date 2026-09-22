@@ -164,14 +164,11 @@ fn parse_config(bytes: &[u8]) -> SerialConfig {
     let mut config = SerialConfig::default();
     let mut rest = bytes;
 
-    loop {
-        // Native MC_srlOpen searches for both '=' and ',' before parsing the
-        // current option. If either is absent it immediately opens with the
-        // config accumulated so far, so a final option without a trailing
-        // comma is deliberately left unparsed.
-        let Some(eq) = rest.iter().position(|&byte| byte == b'=') else {
-            break;
-        };
+    // Native MC_srlOpen searches for both '=' and ',' before parsing the
+    // current option. If either is absent it immediately opens with the config
+    // accumulated so far, so a final option without a trailing comma is
+    // deliberately left unparsed.
+    while let Some(eq) = rest.iter().position(|&byte| byte == b'=') {
         let Some(comma) = rest.iter().position(|&byte| byte == b',') else {
             break;
         };

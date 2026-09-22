@@ -650,7 +650,12 @@ impl JavaHandles {
         let mut bytes = vec![0u8; length as usize * 2];
         core.read_bytes(data + ARRAY_HEADER_SIZE, &mut bytes)?;
 
-        Ok(bytes.chunks_exact(2).map(|unit| u16::from_le_bytes([unit[0], unit[1]])).collect())
+        Ok(bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|unit| u16::from_le_bytes([unit[0], unit[1]]))
+            .collect())
     }
 
     /// Copies JVM char-array contents back into a guest-side `char[]`.

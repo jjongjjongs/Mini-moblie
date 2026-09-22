@@ -927,10 +927,8 @@ impl<'a> Collector<'a> {
                     state.mono_mode = 1;
                 }
             }
-            127 => {
-                if value == 0 {
-                    state.mono_mode = 0;
-                }
+            127 if value == 0 => {
+                state.mono_mode = 0;
             }
             _ => {}
         }
@@ -1974,7 +1972,7 @@ mod wav_tests {
         let got = to_i16(&super::render(&analysis, smaf.total_ticks, 44100));
 
         let wav = std::fs::read(&ref_path).unwrap();
-        let ref_samples: Vec<i16> = wav[44..].chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
+        let ref_samples: Vec<i16> = wav[44..].as_chunks::<2>().0.iter().map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
 
         assert_eq!(got.len(), ref_samples.len(), "sample count");
         let mut max_diff = 0i32;

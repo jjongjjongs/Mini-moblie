@@ -163,7 +163,7 @@ impl HandsetProperty {
 
 #[cfg(test)]
 mod test {
-    use alloc::{boxed::Box, vec};
+    use alloc::boxed::Box;
 
     use java_runtime::classes::java::lang::String;
     use jvm::{ClassInstanceRef, runtime::JavaLangString};

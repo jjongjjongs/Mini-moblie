@@ -3836,7 +3836,7 @@ mod network_state_tests {
         // MC_netClose is an int-returning API. Binding close(context) itself
         // to Future<Output = Result<i32>> prevents it from regressing to
         // Result<()>, whose generic WIPI-C conversion emits no r0 result word.
-        fn require_close_result<'a>(context: &'a mut dyn WIPICContext) {
+        fn require_close_result(context: &mut dyn WIPICContext) {
             fn require_i32_future<'a, F>(_: F)
             where
                 F: core::future::Future<Output = Result<i32>> + 'a,

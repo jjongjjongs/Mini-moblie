@@ -313,7 +313,7 @@ pub async fn realloc(context: &mut dyn WIPICContext, base: WIPICWord, ptr: WIPIC
 
 #[cfg(test)]
 mod tests {
-    use alloc::{boxed::Box, vec};
+    use alloc::boxed::Box;
 
     use wie_backend::{DefaultTaskRunner, System};
     use wie_util::{ByteRead, ByteWrite, Result};

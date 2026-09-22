@@ -1520,7 +1520,6 @@ mod tests {
     fn a_handler_that_chooses_its_resume_address_keeps_it() {
         use core::{
             future::Future,
-            pin::Pin,
             task::{Context, Poll},
         };
         use futures_test::task::new_count_waker;

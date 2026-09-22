@@ -175,16 +175,8 @@ impl Cpu {
     /// Trigger a CPU exception.
     pub fn exception(&mut self, exc: Exception) {
         match exc {
-            Exception::Interrupt => {
-                if !self.irq_enable() {
-                    return;
-                }
-            }
-            Exception::FastInterrupt => {
-                if !self.fiq_enable() {
-                    return;
-                }
-            }
+            Exception::Interrupt if !self.irq_enable() => return,
+            Exception::FastInterrupt if !self.fiq_enable() => return,
             _ => (),
         }
         // this should already be pointing at the next instruction

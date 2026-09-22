@@ -1686,9 +1686,7 @@ mod tests {
                 Delay::from_numer_denom_ms(40, 1),
             );
 
-            encoder
-                .encode_frames([frame1, frame2].into_iter())
-                .map_err(|x| WieError::FatalError(x.to_string()))?;
+            encoder.encode_frames([frame1, frame2]).map_err(|x| WieError::FatalError(x.to_string()))?;
         }
 
         let animation = decode_gif_animation(&bytes)?.expect("two-frame GIF must be animated");

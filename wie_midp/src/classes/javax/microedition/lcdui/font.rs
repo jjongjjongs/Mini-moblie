@@ -290,7 +290,7 @@ mod tests {
 
 #[cfg(test)]
 mod test {
-    use alloc::{boxed::Box, vec};
+    use alloc::boxed::Box;
 
     use jvm::{ClassInstanceRef, Result as JvmResult};
 

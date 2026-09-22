@@ -973,7 +973,7 @@ mod tests {
         input.set_current_mode(2);
 
         // A digit is a ring of one, so it is typed and finished.
-        for key in [b'0', b'1', b'9'] {
+        for key in *b"019" {
             let output = input.press(key as i8, 2);
             assert!(output.handled);
             assert_eq!(output.output0[..output.output0_len], [key]);
@@ -1589,7 +1589,7 @@ mod korean_scan_tests {
         assert_eq!(InputMethod::korean_consonant_ring(b'*' as i8), None);
 
         // Every jamo on a key is one the composer can place.
-        for key in [b'4', b'5', b'6', b'7', b'8', b'9', b'0'] {
+        for key in *b"4567890" {
             for scan in InputMethod::korean_consonant_ring(key as i8).unwrap() {
                 assert!(InputMethod::korean_cho_index(*scan).is_some(), "{scan} cannot start a syllable");
             }

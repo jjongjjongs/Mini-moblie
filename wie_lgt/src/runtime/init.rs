@@ -273,7 +273,7 @@ pub(crate) fn report_hot_init(dt_ms: u64) {
     if entries.is_empty() {
         return;
     }
-    entries.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+    entries.sort_unstable_by_key(|a| core::cmp::Reverse(a.1));
     entries.truncate(6);
 
     let mut line = String::from("[init]");
@@ -293,7 +293,7 @@ pub(crate) fn report_hot_init(dt_ms: u64) {
     if times.is_empty() {
         return;
     }
-    times.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+    times.sort_unstable_by_key(|a| core::cmp::Reverse(a.1));
     let mut time_line = String::from("[svctime]");
     for (name, ms) in &times {
         let ms_per_s = *ms as f64 * 1000.0 / dt_ms as f64;
@@ -5362,8 +5362,8 @@ mod application_dispatch_tests {
         let root = Allocator::alloc(core, 0x14).unwrap();
         let vtable = Allocator::alloc(core, 4 + u32::from(slots) * 4).unwrap();
 
-        core.write_bytes(metadata, &vec![0; 0x4c]).unwrap();
-        core.write_bytes(root, &vec![0; 0x14]).unwrap();
+        core.write_bytes(metadata, &[0; 0x4c]).unwrap();
+        core.write_bytes(root, &[0; 0x14]).unwrap();
         core.write_bytes(vtable, &vec![0; (4 + u32::from(slots) * 4) as usize]).unwrap();
 
         write_generic(core, root + 8, metadata).unwrap();
@@ -5695,7 +5695,7 @@ mod application_dispatch_tests {
         let (child_root, _) = class_image(&mut core, 12, &[]);
 
         let fallback = Allocator::alloc(&mut core, 4 + 12 * 4).unwrap();
-        core.write_bytes(fallback, &vec![0; 4 + 12 * 4]).unwrap();
+        core.write_bytes(fallback, &[0; 4 + 12 * 4]).unwrap();
         write_generic(&mut core, fallback + 4 + 10 * 4, 0xdead_beefu32).unwrap();
 
         let classes = vec![

@@ -390,7 +390,7 @@ impl Synth {
 
         let mut output = vec![0i16; frames * CHANNELS];
 
-        for frame in output.chunks_exact_mut(CHANNELS) {
+        for frame in output.as_chunks_mut::<CHANNELS>().0 {
             let mut left = 0;
             let mut right = 0;
 
@@ -744,7 +744,7 @@ impl SynthMixer {
         if !self.pcm.is_empty() {
             let acc = accumulator.get_or_insert_with(|| vec![0i32; frames * CHANNELS]);
             self.pcm.retain_mut(|wave| {
-                for frame in acc.chunks_exact_mut(CHANNELS) {
+                for frame in acc.as_chunks_mut::<CHANNELS>().0 {
                     match wave.next_sample() {
                         Some(sample) => {
                             let sample = saturate_pcm(i32::from(sample));

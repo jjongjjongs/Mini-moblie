@@ -421,11 +421,11 @@ impl Graphics {
 
             intersections.sort_unstable();
 
-            for pair in intersections.chunks_exact(2) {
+            for &[from, to] in intersections.as_chunks::<2>().0 {
                 // Match integer raster semantics: left edge rounds upward,
                 // right edge rounds downward.
-                let left = ((pair[0] + FP_ONE - 1) >> FP_SHIFT) as i32;
-                let right = (pair[1] >> FP_SHIFT) as i32;
+                let left = ((from + FP_ONE - 1) >> FP_SHIFT) as i32;
+                let right = (to >> FP_SHIFT) as i32;
 
                 if left <= right {
                     let _: () = jvm
@@ -1100,8 +1100,8 @@ impl Graphics {
 
         let mut rgb = Vec::with_capacity(pixel_count);
 
-        for pair in raw.chunks_exact(2) {
-            let value = (pair[0] as u8 as u16) | ((pair[1] as u8 as u16) << 8);
+        for &[low, high] in raw.as_chunks::<2>().0 {
+            let value = (low as u8 as u16) | ((high as u8 as u16) << 8);
 
             let r5 = ((value >> 11) & 0x1f) as u32;
             let g6 = ((value >> 5) & 0x3f) as u32;

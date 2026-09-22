@@ -302,6 +302,69 @@ impl LocalConnection for GpangConnection {
     }
 }
 
+/// What the shop is answered with, or nothing for a request nobody has read.
+///
+/// Each of the three the title sends is checked by its own parser, and each
+/// parser wants a different amount: the payments compare the answer's first
+/// word and nothing else, where the balance also reads a number out of it.
+fn shop_answer(request: &[u8]) -> Option<String> {
+    if request.starts_with(HANDSET_PAYMENT_REQUEST) {
+        tracing::info!("gpang: granting the handset payment");
+
+        // The parser at 0x12b298 takes four characters and compares them; there
+        // is nothing behind the word for it to read.
+        return Some(String::from_utf8_lossy(HANDSET_PAYMENT_GRANTED).into_owned());
+    }
+
+    if request.starts_with(KOIN_BALANCE_REQUEST) {
+        tracing::info!("gpang: answering the KOIN balance with {KOIN_BALANCE}");
+
+        // The parser at 0x12ab52 splits the answer on `|`, compares the first
+        // field, and reads the **third** as the balance - which it then weighs
+        // against the price in won over a hundred, the rate the shop screen
+        // prints as `100원 = 1 KOIN`.
+        return Some(format!("SKN_C|0|{KOIN_BALANCE}|"));
+    }
+
+    if request.starts_with(KOIN_PAYMENT_REQUEST) {
+        tracing::info!("gpang: granting the KOIN payment");
+
+        // The parser at 0x12af4c splits the same way and reads only the first
+        // field.
+        return Some("SKN_U|0|".into());
+    }
+
+    None
+}
+
+/// One shop answer, behind the two-byte length its reader expects.
+fn shop_frame(payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(2 + payload.len());
+
+    frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    frame.extend_from_slice(payload);
+
+    frame
+}
+
+/// Sixteen bytes to a line, hex then printable ASCII - the shape every other
+/// dump in this project reads in.
+fn hex_dump(bytes: &[u8]) -> String {
+    let mut out = String::new();
+
+    for (index, chunk) in bytes.chunks(16).enumerate() {
+        let hex: Vec<String> = chunk.iter().map(|byte| format!("{byte:02x}")).collect();
+        let text: String = chunk
+            .iter()
+            .map(|&byte| if (0x20..0x7f).contains(&byte) { char::from(byte) } else { '.' })
+            .collect();
+
+        out.push_str(&format!("  {:04x}  {:<47}  {text}\n", index * 16, hex.join(" ")));
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,67 +548,4 @@ mod tests {
         assert!(!endpoint.accepts("socket", "222.237.78.176", AUTHENTICATION_PORT));
         assert!(!endpoint.accepts("http", GPANG_HOST, AUTHENTICATION_PORT));
     }
-}
-
-/// What the shop is answered with, or nothing for a request nobody has read.
-///
-/// Each of the three the title sends is checked by its own parser, and each
-/// parser wants a different amount: the payments compare the answer's first
-/// word and nothing else, where the balance also reads a number out of it.
-fn shop_answer(request: &[u8]) -> Option<String> {
-    if request.starts_with(HANDSET_PAYMENT_REQUEST) {
-        tracing::info!("gpang: granting the handset payment");
-
-        // The parser at 0x12b298 takes four characters and compares them; there
-        // is nothing behind the word for it to read.
-        return Some(String::from_utf8_lossy(HANDSET_PAYMENT_GRANTED).into_owned());
-    }
-
-    if request.starts_with(KOIN_BALANCE_REQUEST) {
-        tracing::info!("gpang: answering the KOIN balance with {KOIN_BALANCE}");
-
-        // The parser at 0x12ab52 splits the answer on `|`, compares the first
-        // field, and reads the **third** as the balance - which it then weighs
-        // against the price in won over a hundred, the rate the shop screen
-        // prints as `100원 = 1 KOIN`.
-        return Some(format!("SKN_C|0|{KOIN_BALANCE}|"));
-    }
-
-    if request.starts_with(KOIN_PAYMENT_REQUEST) {
-        tracing::info!("gpang: granting the KOIN payment");
-
-        // The parser at 0x12af4c splits the same way and reads only the first
-        // field.
-        return Some("SKN_U|0|".into());
-    }
-
-    None
-}
-
-/// One shop answer, behind the two-byte length its reader expects.
-fn shop_frame(payload: &[u8]) -> Vec<u8> {
-    let mut frame = Vec::with_capacity(2 + payload.len());
-
-    frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
-    frame.extend_from_slice(payload);
-
-    frame
-}
-
-/// Sixteen bytes to a line, hex then printable ASCII - the shape every other
-/// dump in this project reads in.
-fn hex_dump(bytes: &[u8]) -> String {
-    let mut out = String::new();
-
-    for (index, chunk) in bytes.chunks(16).enumerate() {
-        let hex: Vec<String> = chunk.iter().map(|byte| format!("{byte:02x}")).collect();
-        let text: String = chunk
-            .iter()
-            .map(|&byte| if (0x20..0x7f).contains(&byte) { char::from(byte) } else { '.' })
-            .collect();
-
-        out.push_str(&format!("  {:04x}  {:<47}  {text}\n", index * 16, hex.join(" ")));
-    }
-
-    out
 }

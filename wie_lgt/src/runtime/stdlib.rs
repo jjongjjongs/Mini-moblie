@@ -128,7 +128,7 @@ pub(crate) fn report_hot_stdlib(dt_ms: u64) {
         let count = slot.swap(0, Relaxed);
         if count > top[5].1 {
             top[5] = (id, count);
-            top.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+            top.sort_unstable_by_key(|a| core::cmp::Reverse(a.1));
         }
     }
     if top[0].1 == 0 {

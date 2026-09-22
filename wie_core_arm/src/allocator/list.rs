@@ -182,7 +182,7 @@ impl ListAllocator {
         }
 
         let mut ranked: Vec<(u32, (u32, u64))> = buckets.into_iter().collect();
-        ranked.sort_by(|a, b| b.1.1.cmp(&a.1.1));
+        ranked.sort_by_key(|a| core::cmp::Reverse(a.1.1));
         let top: Vec<String> = ranked
             .iter()
             .take(8)

@@ -112,80 +112,6 @@ impl LocalConnection for BillingGateway {
     }
 }
 
-#[cfg(test)]
-mod billing_gateway_tests {
-    use alloc::{vec, vec::Vec};
-
-    use spin::Mutex;
-
-    use wie_backend::{LocalConnection, LocalRead};
-
-    use super::BillingGateway;
-
-    /// These drive one gateway each, but the answers they check are the
-    /// title's whole protocol; holding this keeps a failure readable as one
-    /// test's rather than two interleaved.
-    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
-
-    /// The eighteen bytes 서든어택 포켓 writes when a cash purchase is
-    /// confirmed.
-    const SUDDEN_ATTACK_PURCHASE: [u8; 18] = [
-        0x29, 0x10, 0x00, 0x00, 0x00, 0x0b, 0x30, 0x31, 0x30, 0x34, 0x36, 0x31, 0x31, 0x39, 0x32, 0x36, 0x39, 0x00,
-    ];
-
-    /// The medal report that follows it.
-    const SUDDEN_ATTACK_MEDALS: [u8; 18] = [
-        0x3c, 0x10, 0x00, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00, 0x28,
-    ];
-
-    /// Reads a gateway out the way one of these titles does: a length first,
-    /// then the body it describes.
-    fn read_framed(gateway: &mut BillingGateway) -> Vec<u8> {
-        let mut length = [0u8; 4];
-        for byte in length.iter_mut() {
-            let mut one = [0u8; 1];
-            assert!(matches!(gateway.read(&mut one), LocalRead::Data(1)));
-            *byte = one[0];
-        }
-
-        let mut body = vec![0u8; u32::from_be_bytes(length) as usize];
-        assert!(matches!(gateway.read(&mut body), LocalRead::Data(_)));
-
-        body
-    }
-
-    #[test]
-    fn both_of_a_purchases_exchanges_are_answered_in_full() {
-        let _guard = ONE_AT_A_TIME.lock();
-
-        // The shop stops on whichever of the two goes unanswered, so both have
-        // to come back whole.
-        for frame in [SUDDEN_ATTACK_PURCHASE, SUDDEN_ATTACK_MEDALS] {
-            let mut gateway = BillingGateway::armed();
-            gateway.write(&frame);
-
-            let body = read_framed(&mut gateway);
-
-            // Everything queued was handed over, so the title is not left
-            // waiting on a length that never arrives.
-            assert!(!gateway.readable());
-            assert!(!body.is_empty());
-        }
-    }
-
-    #[test]
-    fn a_purchase_is_answered_the_way_it_reads_as_granted() {
-        let _guard = ONE_AT_A_TIME.lock();
-
-        let mut gateway = BillingGateway::armed();
-        gateway.write(&SUDDEN_ATTACK_PURCHASE);
-
-        // Zero is what its parser has to leave behind for the shop to draw
-        // 구매 성공 rather than 구매 실패하였습니다.
-        assert!(read_framed(&mut gateway).iter().all(|&byte| byte == 0));
-    }
-}
-
 /// A connected WIPI socket, as `org.kwis.msf.io.URL.find` hands one back.
 ///
 /// The reference declares this an interface and returns one of its `com.velox`
@@ -348,5 +274,79 @@ impl Socket {
         tracing::debug!("org.kwis.msf.io.Socket::getSocketDiscripter({this:?})");
 
         jvm.get_field(&this, "fd", "I").await
+    }
+}
+
+#[cfg(test)]
+mod billing_gateway_tests {
+    use alloc::{vec, vec::Vec};
+
+    use spin::Mutex;
+
+    use wie_backend::{LocalConnection, LocalRead};
+
+    use super::BillingGateway;
+
+    /// These drive one gateway each, but the answers they check are the
+    /// title's whole protocol; holding this keeps a failure readable as one
+    /// test's rather than two interleaved.
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+    /// The eighteen bytes 서든어택 포켓 writes when a cash purchase is
+    /// confirmed.
+    const SUDDEN_ATTACK_PURCHASE: [u8; 18] = [
+        0x29, 0x10, 0x00, 0x00, 0x00, 0x0b, 0x30, 0x31, 0x30, 0x34, 0x36, 0x31, 0x31, 0x39, 0x32, 0x36, 0x39, 0x00,
+    ];
+
+    /// The medal report that follows it.
+    const SUDDEN_ATTACK_MEDALS: [u8; 18] = [
+        0x3c, 0x10, 0x00, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00, 0x28,
+    ];
+
+    /// Reads a gateway out the way one of these titles does: a length first,
+    /// then the body it describes.
+    fn read_framed(gateway: &mut BillingGateway) -> Vec<u8> {
+        let mut length = [0u8; 4];
+        for byte in length.iter_mut() {
+            let mut one = [0u8; 1];
+            assert!(matches!(gateway.read(&mut one), LocalRead::Data(1)));
+            *byte = one[0];
+        }
+
+        let mut body = vec![0u8; u32::from_be_bytes(length) as usize];
+        assert!(matches!(gateway.read(&mut body), LocalRead::Data(_)));
+
+        body
+    }
+
+    #[test]
+    fn both_of_a_purchases_exchanges_are_answered_in_full() {
+        let _guard = ONE_AT_A_TIME.lock();
+
+        // The shop stops on whichever of the two goes unanswered, so both have
+        // to come back whole.
+        for frame in [SUDDEN_ATTACK_PURCHASE, SUDDEN_ATTACK_MEDALS] {
+            let mut gateway = BillingGateway::armed();
+            gateway.write(&frame);
+
+            let body = read_framed(&mut gateway);
+
+            // Everything queued was handed over, so the title is not left
+            // waiting on a length that never arrives.
+            assert!(!gateway.readable());
+            assert!(!body.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_purchase_is_answered_the_way_it_reads_as_granted() {
+        let _guard = ONE_AT_A_TIME.lock();
+
+        let mut gateway = BillingGateway::armed();
+        gateway.write(&SUDDEN_ATTACK_PURCHASE);
+
+        // Zero is what its parser has to leave behind for the shop to draw
+        // 구매 성공 rather than 구매 실패하였습니다.
+        assert!(read_framed(&mut gateway).iter().all(|&byte| byte == 0));
     }
 }

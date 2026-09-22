@@ -47,7 +47,7 @@ pub(crate) fn report_hot_wipic(dt_ms: u64) {
         let count = slot.swap(0, Relaxed);
         if count > top[5].1 {
             top[5] = (id, count);
-            top.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+            top.sort_unstable_by_key(|a| core::cmp::Reverse(a.1));
         }
     }
     if top[0].1 == 0 {
@@ -786,54 +786,6 @@ fn unix_seconds_to_utc(timestamp: i64) -> (i32, i32, i32, i32, i32, i32) {
     (year, month, day, hour, minute, second)
 }
 
-#[cfg(test)]
-mod fs_total_space_tests {
-    use super::{clamp_native_fs_space, is_native_fs_space_ex_access};
-
-    #[test]
-    fn native_fs_total_space_preserves_handset_scale_capacity() {
-        assert_eq!(clamp_native_fs_space(32 * 1024 * 1024), 32 * 1024 * 1024);
-    }
-
-    #[test]
-    fn native_fs_total_space_saturates_at_signed_int_max() {
-        assert_eq!(clamp_native_fs_space(i32::MAX as u64), i32::MAX as u32);
-        assert_eq!(clamp_native_fs_space(i32::MAX as u64 + 1), i32::MAX as u32);
-        assert_eq!(clamp_native_fs_space(u64::MAX), i32::MAX as u32);
-    }
-
-    #[test]
-    fn native_fs_total_space_ex_accepts_only_canonical_access_selectors() {
-        assert!(is_native_fs_space_ex_access(1));
-        assert!(is_native_fs_space_ex_access(2));
-        assert!(is_native_fs_space_ex_access(3));
-        assert!(is_native_fs_space_ex_access(100));
-
-        for access in [-1, 0, 4, 99, 101, i32::MAX] {
-            assert!(!is_native_fs_space_ex_access(access));
-        }
-    }
-
-    #[test]
-    fn native_fs_available_ex_uses_total_space_ex_access_contract() {
-        for access in [1, 2, 3, 100] {
-            assert!(is_native_fs_space_ex_access(access));
-        }
-
-        for access in [-1, 0, 4, 99, 101, i32::MAX] {
-            assert!(!is_native_fs_space_ex_access(access));
-        }
-    }
-
-    #[test]
-    fn native_fs_available_uses_same_signed_int_boundary() {
-        assert_eq!(clamp_native_fs_space(16 * 1024 * 1024), 16 * 1024 * 1024);
-        assert_eq!(clamp_native_fs_space(i32::MAX as u64), i32::MAX as u32);
-        assert_eq!(clamp_native_fs_space(i32::MAX as u64 + 1), i32::MAX as u32);
-        assert_eq!(clamp_native_fs_space(u64::MAX), i32::MAX as u32);
-    }
-}
-
 #[allow(dead_code)]
 fn civil_from_days(days: i64) -> (i32, i32, i32) {
     let days = days + 719_468;
@@ -905,4 +857,52 @@ async fn mda_set_water_mark(_context: &mut dyn WIPICContext, a0: u32, a1: u32, a
     tracing::warn!("stub MC_mdaSetWaterMark({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
 
     Ok(0)
+}
+
+#[cfg(test)]
+mod fs_total_space_tests {
+    use super::{clamp_native_fs_space, is_native_fs_space_ex_access};
+
+    #[test]
+    fn native_fs_total_space_preserves_handset_scale_capacity() {
+        assert_eq!(clamp_native_fs_space(32 * 1024 * 1024), 32 * 1024 * 1024);
+    }
+
+    #[test]
+    fn native_fs_total_space_saturates_at_signed_int_max() {
+        assert_eq!(clamp_native_fs_space(i32::MAX as u64), i32::MAX as u32);
+        assert_eq!(clamp_native_fs_space(i32::MAX as u64 + 1), i32::MAX as u32);
+        assert_eq!(clamp_native_fs_space(u64::MAX), i32::MAX as u32);
+    }
+
+    #[test]
+    fn native_fs_total_space_ex_accepts_only_canonical_access_selectors() {
+        assert!(is_native_fs_space_ex_access(1));
+        assert!(is_native_fs_space_ex_access(2));
+        assert!(is_native_fs_space_ex_access(3));
+        assert!(is_native_fs_space_ex_access(100));
+
+        for access in [-1, 0, 4, 99, 101, i32::MAX] {
+            assert!(!is_native_fs_space_ex_access(access));
+        }
+    }
+
+    #[test]
+    fn native_fs_available_ex_uses_total_space_ex_access_contract() {
+        for access in [1, 2, 3, 100] {
+            assert!(is_native_fs_space_ex_access(access));
+        }
+
+        for access in [-1, 0, 4, 99, 101, i32::MAX] {
+            assert!(!is_native_fs_space_ex_access(access));
+        }
+    }
+
+    #[test]
+    fn native_fs_available_uses_same_signed_int_boundary() {
+        assert_eq!(clamp_native_fs_space(16 * 1024 * 1024), 16 * 1024 * 1024);
+        assert_eq!(clamp_native_fs_space(i32::MAX as u64), i32::MAX as u32);
+        assert_eq!(clamp_native_fs_space(i32::MAX as u64 + 1), i32::MAX as u32);
+        assert_eq!(clamp_native_fs_space(u64::MAX), i32::MAX as u32);
+    }
 }

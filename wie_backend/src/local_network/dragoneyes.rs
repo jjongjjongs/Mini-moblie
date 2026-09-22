@@ -173,7 +173,7 @@ impl DragonEyesConnection {
 
 #[cfg(test)]
 mod tests {
-    use alloc::{vec, vec::Vec};
+    use alloc::vec::Vec;
 
     use super::{DragonEyesConnection, DragonEyesEndpoint};
     use crate::local_network::{LocalConnection, LocalEndpoint, LocalRead};

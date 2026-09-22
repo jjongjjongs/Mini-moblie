@@ -66,7 +66,7 @@ pub fn report_hot_java(dt_ms: u64) {
     }
 
     let mut top: Vec<(String, u64)> = drained;
-    top.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+    top.sort_unstable_by_key(|a| core::cmp::Reverse(a.1));
     top.truncate(6);
 
     let mut line = "[java]".to_string();

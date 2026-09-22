@@ -508,7 +508,7 @@ mod test {
     use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
     use core::sync::atomic::{AtomicBool, Ordering};
 
-    use core::mem::{offset_of, size_of};
+    use core::mem::size_of;
 
     use jvm::{Jvm, runtime::JavaLangString};
     use wipi_types::ktf::java::{JavaExceptionHandler, JavaMethodDefinition, JavaMethodExceptionTableEntry};
@@ -569,7 +569,7 @@ mod test {
 
                 let method = Allocator::alloc(&mut core, size_of::<JavaMethodDefinition>() as _)?;
                 let mut definition: JavaMethodDefinition = bytemuck::Zeroable::zeroed();
-                definition.fn_body_native_or_exception_table = table.into();
+                definition.fn_body_native_or_exception_table = table;
                 definition.exception_table_count = 1;
                 write_generic(&mut core, method, definition)?;
 

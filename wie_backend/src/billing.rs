@@ -8848,10 +8848,7 @@ mod dungeon_crasher_tests {
     #[test]
     fn nothing_else_is_claimed() {
         assert!(lgt_local_dungeon_crasher_response(&[]).is_none());
-        assert!(
-            lgt_local_dungeon_crasher_response(&vec![0u8; DUNGEON_CRASHER_FRAME]).is_none(),
-            "no magic"
-        );
+        assert!(lgt_local_dungeon_crasher_response(&[0u8; DUNGEON_CRASHER_FRAME]).is_none(), "no magic");
 
         let mut other_command = DUNGEON_CRASHER_SHOP_REQUEST;
         other_command[DUNGEON_CRASHER_COMMAND] = 1;
@@ -9035,7 +9032,7 @@ mod major_oil_tests {
     fn nothing_else_is_claimed() {
         assert!(lgt_local_major_oil_response(&[]).is_none());
         assert!(
-            lgt_local_major_oil_response(&vec![0u8; MAJOR_OIL_CONNECT_FRAME]).is_none(),
+            lgt_local_major_oil_response(&[0u8; MAJOR_OIL_CONNECT_FRAME]).is_none(),
             "a zeroed frame is not a connect"
         );
 

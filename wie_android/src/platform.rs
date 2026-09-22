@@ -247,7 +247,9 @@ impl Screen for AndroidScreen {
         let pixels = if image.bytes_per_pixel() == 2 {
             image
                 .raw()
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|bytes| i16::from_ne_bytes([bytes[0], bytes[1]]))
                 .collect::<Vec<_>>()
         } else {

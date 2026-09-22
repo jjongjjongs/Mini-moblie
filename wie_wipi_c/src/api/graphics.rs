@@ -774,8 +774,8 @@ pub async fn fill_polygon(
             }
         }
         crossings.sort_unstable();
-        for pair in crossings.chunks_exact(2) {
-            canvas.draw_line(pair[0], y, pair[1], y, color, clip);
+        for &[from, to] in crossings.as_chunks::<2>().0 {
+            canvas.draw_line(from, y, to, y, color, clip);
         }
     }
     canvas.flush()?;
@@ -2156,7 +2156,7 @@ fn read_wipi_unicode_string(context: &mut dyn WIPICContext, ptr: WIPICWord, leng
     let units: Vec<u16> = if length >= 0 {
         let mut buf = vec![0u8; (length as usize) * 2];
         context.read_bytes(ptr, &mut buf)?;
-        buf.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect()
+        buf.as_chunks::<2>().0.iter().copied().map(u16::from_le_bytes).collect()
     } else {
         let mut out = Vec::new();
         let mut addr = ptr;

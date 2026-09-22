@@ -1647,12 +1647,10 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
-            33 => {
-                if size >= 7 {
-                    eb.sysex_event_code = 33;
-                    eb.sysex_value = self.u8(at + 5);
-                    eb.sysex_arg = self.u8(at + 6);
-                }
+            33 if size >= 7 => {
+                eb.sysex_event_code = 33;
+                eb.sysex_value = self.u8(at + 5);
+                eb.sysex_arg = self.u8(at + 6);
             }
             _ => {}
         }
@@ -1800,20 +1798,17 @@ impl<'a> Parser<'a> {
         if self.u8(flag_pos) != 124 && self.u8(flag_pos) != 125 {
             return None;
         }
-        let program;
-        let tone_no;
-        if self.u8(flag_pos) == 124 && self.u8(at + 6) < 10 {
-            program = self.u8(at + 6) + 1;
-            tone_no = self.u8(at + 7);
+
+        let (program, tone_no) = if self.u8(flag_pos) == 124 && self.u8(at + 6) < 10 {
+            (self.u8(at + 6) + 1, self.u8(at + 7))
         } else if self.u8(flag_pos) == 125 && self.u8(at + 6) == 0 {
             if self.u8(at + 7) >= 10 {
                 return None;
             }
-            program = self.u8(at + 7) + 129;
-            tone_no = self.u8(at + 8);
+            (self.u8(at + 7) + 129, self.u8(at + 8))
         } else {
             return None;
-        }
+        };
         let tone_no = tone_no & 127;
         let flags = self.u8(at + 9);
         let record = at + 10;

@@ -885,7 +885,7 @@ fn report_hot_regions() {
         total += count as u64;
         if count > top[5].1 {
             top[5] = (index, count);
-            top.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+            top.sort_unstable_by_key(|a| core::cmp::Reverse(a.1));
         }
     }
     if total == 0 {
@@ -926,7 +926,7 @@ fn report_hot_svc(dt_ms: u64) {
         let count = slot.swap(0, Relaxed);
         if count > top[3].1 {
             top[3] = (category, count);
-            top.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+            top.sort_unstable_by_key(|a| core::cmp::Reverse(a.1));
         }
     }
     if top[0].1 == 0 {
