@@ -440,9 +440,16 @@ impl JavaMethod {
             let method = JavaMethod::from_raw(exception_handler.ptr_method, core);
             let exception_table = method.exception_table()?;
 
+            // The method's own name, not only its address. "No handler" is
+            // read off a device log more often than it is reproduced, and an
+            // address means nothing there: which method the throw came from is
+            // the whole question, and asking the record for its name is the
+            // only place it can be answered.
+            let name = method.name().map(|name| name.to_string()).unwrap_or_else(|_| "?".into());
+
             let _ = write!(
                 searched,
-                " [{}] method={:#x} label={:#x} entries={}",
+                " [{}] method={:#x} {name} label={:#x} entries={}",
                 visited.len() - 1,
                 exception_handler.ptr_method,
                 exception_handler.current_pc,
