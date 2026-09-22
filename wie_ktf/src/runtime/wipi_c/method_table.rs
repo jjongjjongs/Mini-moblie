@@ -723,7 +723,12 @@ pub fn get_served_method_body(table_id: WIPICTableId, function_id: u16) -> Optio
             WIPICDatabaseMethodId::Available => Some(database::available_storage_ktf.into_body()),
             WIPICDatabaseMethodId::Unk13 => Some(gen_stub(13, "MC_dbUnk13")),
             WIPICDatabaseMethodId::Unk14 => Some(gen_stub(14, "MC_dbUnk14")),
-            WIPICDatabaseMethodId::Unk15 => Some(gen_stub(15, "MC_dbUnk15")),
+            // The same question slot 11 answers, asked at another slot. 리얼싸커
+            // 2009 will not read a save until it has been told how big it is:
+            // it opens the record, seeks to the front, asks here twice, and
+            // with a zero for an answer closes the record unread and writes a
+            // fresh header over it. Answered the size, it reads the save back.
+            WIPICDatabaseMethodId::Unk15 => Some(database::get_record_size_ktf.into_body()),
             WIPICDatabaseMethodId::Exists => Some(database::exists_database_ktf.into_body()),
         },
         WIPICTableId::Interface7 => {

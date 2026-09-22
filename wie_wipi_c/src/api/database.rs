@@ -1941,6 +1941,12 @@ pub async fn get_number_of_records_ktf(context: &mut dyn WIPICContext, db_id: i3
 /// the space, it starts. The two are told apart the way `get_access_mode_ktf`
 /// tells its two callers apart - by whether the argument is one of this
 /// runtime's handles - rather than by guessing which meaning the slot has.
+///
+/// Slot 15 asks the same question and is served from here too. 리얼싸커 2009
+/// will not read a save until it has been told how big one is: it opens the
+/// record, seeks to the front, asks twice, and with a zero for an answer closes
+/// the record unread and writes a fresh header over it, so every save it made
+/// came back empty. Answered the size, it reads them.
 pub async fn get_record_size_ktf(context: &mut dyn WIPICContext, db_id: i32) -> Result<i32> {
     tracing::debug!("MC_dbGetRecordSize({db_id:#x}) [KTF]");
 
@@ -3301,6 +3307,26 @@ mod tests {
         let mut landed = [0u8; 3];
         context.read_bytes(0x2000, &mut landed).unwrap();
         assert_eq!(&landed, b"HIT", "the seek that tell fed lands on the entry");
+    }
+
+    /// Slot 15 asks the size the way slot 11 does.
+    ///
+    /// 리얼싸커 2009 asks here before it will read a save back, and answered
+    /// zero it closes the record unread. The mapping is what carries that, so
+    /// the test is on the table rather than on this function.
+    #[futures_test::test]
+    async fn the_size_of_a_record_is_what_a_handle_holds() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"record/game_sav_1.sav\0").unwrap();
+
+        let db_id = open_database(&mut context, 0x1000, 8, 1).await.unwrap();
+        context.write_bytes(0x2000, b"a saved game").unwrap();
+        stream_write(&mut context, db_id, 0x2000, 12).await.unwrap();
+
+        // Where the cursor is does not change how much is there - the title
+        // seeks to the front before it asks.
+        select_record_ktf(&mut context, db_id, 0, 0, 0).await.unwrap();
+        assert_eq!(get_record_size_ktf(&mut context, db_id).await.unwrap(), 12);
     }
 
     /// A store's name is the title's to choose, not a length this runtime gets
