@@ -496,11 +496,49 @@ impl Bank {
     /// recording has no patch to fall back to, and playing one of the file's
     /// other voices instead is what made an effect a handful of bare notes.
     pub fn sampled_for(&self, program: u8) -> Option<Arc<[i16]>> {
-        let number = self.voices.iter().find_map(|voice| match voice.kind {
-            VoiceKind::Sampled(number) if voice.program == program => Some(number),
-            _ => None,
-        })?;
+        // The program the sequence selected, when the file defined something
+        // for it. A program defined as a patch plays that patch, not a
+        // recording, so this answers nothing for it.
+        if let Some(voice) = self.voices.iter().find(|voice| voice.program == program) {
+            let VoiceKind::Sampled(number) = voice.kind else {
+                return None;
+            };
 
+            return self.wave(number);
+        }
+
+        self.only_recording()
+    }
+
+    /// The one recording a clip carries, when the program it selected was
+    /// never defined.
+    ///
+    /// Two of 데빌메이크라이's twenty four effects disagree with themselves:
+    /// `att1_0` records its voice under program thirty four and then selects
+    /// eighty one, and `evo` records a hundred and six and selects eighty
+    /// seven. The other twenty two name the same number twice, so the number
+    /// is not being read wrong - those two files were simply authored with one
+    /// side changed and the other left behind.
+    ///
+    /// Looked up strictly they reach nothing, and the four note ons meant to
+    /// fire the gunshot fall back to a stand in patch - which is the effect
+    /// that was wrong to begin with. But a clip like this holds one voice and
+    /// one recording and nothing else, so what it means is not in doubt
+    /// whatever the two records call it. Only that shape is answered here: a
+    /// file with a patch among its voices, or with more than one recording to
+    /// choose between, is left alone.
+    fn only_recording(&self) -> Option<Arc<[i16]>> {
+        let [(_, pcm)] = &self.waves[..] else {
+            return None;
+        };
+        let [only] = &self.voices[..] else {
+            return None;
+        };
+
+        matches!(only.kind, VoiceKind::Sampled(_)).then(|| pcm.clone())
+    }
+
+    fn wave(&self, number: u8) -> Option<Arc<[i16]>> {
         self.waves.iter().find_map(|(held, pcm)| (*held == number).then(|| pcm.clone()))
     }
 
@@ -765,9 +803,12 @@ mod tests {
         assert_eq!(pcm.len(), (SAMPLED_WAVE.len() - 1 - 1 - WAVE_DATA_OFFSET) * 2);
         assert!(pcm.iter().any(|&x| x != 0), "the recording decoded to silence");
 
-        // Nothing else reaches for it: a program the file never defined has no
-        // recording, and neither has a synthesised one.
-        assert!(bank.sampled_for(0x24).is_none());
+        // This clip holds one voice and one recording, so an undefined program
+        // reaches that recording too - see
+        // `a_clip_that_disagrees_with_itself_still_reaches_its_recording`. What
+        // must not happen is a synthesised program being handed one, which
+        // `a_patch_in_the_bank_stops_the_guess` holds.
+        assert!(bank.sampled_for(0x24).is_some());
     }
 
     #[test]
@@ -793,5 +834,72 @@ mod tests {
         let (tone, _) = bank.tone_for(0, 0x23, 60);
 
         assert!(tone.operators[1].attack > 0, "the sampled program has nothing to fall back to");
+    }
+
+    /// 데빌메이크라이's `att1_0.mmf`, the gunshot: the same record as
+    /// [`SAMPLED_VOICE`] but recorded under program `0x22` while its sequence
+    /// goes on to select eighty one.
+    const MISMATCHED_VOICE: &[u8] = &[
+        0xF0, 0x43, 0x79, 0x07, 0x7F, 0x01, 0x7C, 0x01, 0x22, 0x00, 0x01, 0x1F, 0x40, 0x78, 0x40, 0x00, 0xF0, 0xF0, 0x00, 0x01, 0x00, 0x00, 0x0C,
+        0x03, 0x0C, 0x03, 0x00, 0xF7,
+    ];
+
+    #[test]
+    fn a_clip_that_disagrees_with_itself_still_reaches_its_recording() {
+        let mut bank = Bank::new();
+
+        bank.accept_sysex(MISMATCHED_VOICE);
+        bank.accept_sysex(SAMPLED_WAVE);
+
+        // Eighty one is what the sequence selects and nothing defines. The
+        // file holds one voice and one recording, so that recording is what it
+        // has to mean.
+        assert!(bank.sampled_for(81).is_some());
+
+        // The number it does record still reaches it, and so does any other -
+        // there is only the one sound in the file.
+        assert!(bank.sampled_for(0x22).is_some());
+    }
+
+    #[test]
+    fn a_clip_that_agrees_with_itself_is_unaffected() {
+        let mut bank = Bank::new();
+
+        bank.accept_sysex(SAMPLED_VOICE);
+        bank.accept_sysex(SAMPLED_WAVE);
+
+        assert!(bank.sampled_for(0x23).is_some());
+    }
+
+    #[test]
+    fn a_patch_in_the_bank_stops_the_guess() {
+        let mut bank = Bank::new();
+
+        // A file that also defines a synthesised voice is not the shape this
+        // answers for: an undefined program there could mean either, so it
+        // means neither.
+        bank.accept_sysex(FOUR_OPERATOR);
+        bank.accept_sysex(MISMATCHED_VOICE);
+        bank.accept_sysex(SAMPLED_WAVE);
+
+        assert!(bank.sampled_for(81).is_none());
+
+        // The program the patch is under is a patch, and asking for a
+        // recording under it answers nothing rather than handing one over.
+        assert!(bank.sampled_for(0x55).is_none());
+    }
+
+    #[test]
+    fn two_recordings_stop_the_guess() {
+        let mut bank = Bank::new();
+        let mut second = SAMPLED_WAVE.to_vec();
+        second[6] = 0x01;
+
+        bank.accept_sysex(MISMATCHED_VOICE);
+        bank.accept_sysex(SAMPLED_WAVE);
+        bank.accept_sysex(&second);
+
+        // Two recordings and nothing saying which - so nothing is guessed.
+        assert!(bank.sampled_for(81).is_none());
     }
 }
