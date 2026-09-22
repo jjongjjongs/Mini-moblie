@@ -14,6 +14,8 @@
 //!   handset had a melodic bank in ROM that we have no copy of, so without
 //!   these those programs would be silent.
 
+use std::sync::Arc;
+
 use crate::ma3::tables::{KEYLEVEL_SELECTOR_MAP, MULTIPLE_MAP};
 
 /// Operators in a voice at most. Two operator voices leave the rest unused.
@@ -221,9 +223,35 @@ fn rhythm_tone(key: u8) -> Option<(Tone, u8)> {
     Tone::from_fields(global, &record[5..]).map(|tone| (tone, pitch))
 }
 
-/// Yamaha's manufacturer id, then the SMAF and MA-3 markers, then the command
-/// that carries a voice. Everything this synthesiser understands starts here.
-const VOICE_PREFIX: [u8; 5] = [0x43, 0x79, 0x06, 0x7F, 0x01];
+/// Yamaha's manufacturer id, then the SMAF marker. The byte after them names
+/// the chip, and a file may speak for either: 데빌메이크라이's eleven pieces of
+/// music are MA-3 and every one of its twenty four effects is MA-5.
+const VOICE_HEADER: [u8; 2] = [0x43, 0x79];
+const MODEL_MA3: u8 = 0x06;
+const MODEL_MA5: u8 = 0x07;
+
+/// Where the chip byte sits, and the marker and command that follow it.
+const MODEL_OFFSET: usize = 2;
+const MARKER_OFFSET: usize = 3;
+const MARKER: u8 = 0x7F;
+const COMMAND_OFFSET: usize = 4;
+
+/// The command that carries a voice, and the one that carries the recording a
+/// sampled voice plays.
+const COMMAND_SET_VOICE: u8 = 0x01;
+const COMMAND_SET_WAVE: u8 = 0x03;
+
+/// The chip a message names, if it is one of this synthesiser's at all.
+fn voice_model(body: &[u8]) -> Option<u8> {
+    if body.len() <= COMMAND_OFFSET || !body.starts_with(&VOICE_HEADER) || body[MARKER_OFFSET] != MARKER {
+        return None;
+    }
+
+    matches!(body[MODEL_OFFSET], MODEL_MA3 | MODEL_MA5).then(|| body[MODEL_OFFSET])
+}
+
+/// Where a voice message's own fields start, past that header.
+const VOICE_PREFIX_LEN: usize = 5;
 
 /// Voices arrive as one of two commands. `0x7C` is the synthesised one this
 /// module plays; `0x7D` names a recording in the handset's ROM instead, and is
@@ -264,11 +292,20 @@ fn unpack(packed: &[u8], wanted: usize) -> Option<Vec<u8>> {
     (out.len() >= wanted).then_some(out)
 }
 
+/// What a voice message defines.
+enum VoiceKind {
+    /// A patch this synthesiser plays.
+    Fm(Tone),
+    /// A recording, which arrives separately under this number. See
+    /// [`Bank::accept_sysex`].
+    Sampled(u8),
+}
+
 /// A voice message and where it belongs.
 struct VoiceMessage {
     bank: u8,
     program: u8,
-    tone: Tone,
+    kind: VoiceKind,
 }
 
 /// Reads a voice out of one system exclusive message, or returns nothing if
@@ -276,11 +313,29 @@ struct VoiceMessage {
 fn parse_voice(message: &[u8]) -> Option<VoiceMessage> {
     // The sequence parser hands these over wrapped, so strip the frame.
     let body = message.strip_prefix(&[0xF0]).unwrap_or(message);
-    if body.len() < MIN_VOICE_MESSAGE || body.last() != Some(&0xF7) || !body.starts_with(&VOICE_PREFIX) {
+    if body.last() != Some(&0xF7) {
         return None;
     }
 
-    let command = body[VOICE_PREFIX.len()];
+    let model = voice_model(body)?;
+    if body[COMMAND_OFFSET] != COMMAND_SET_VOICE {
+        return None;
+    }
+
+    // MA-5 carries its sound as a recording it uploads rather than as a patch,
+    // and says so with a one where MA-3's shapes all have a zero. The message
+    // is shorter than any patch, so it is read before the length check below.
+    if model == MODEL_MA5
+        && let Some(sampled) = parse_sampled_voice(body)
+    {
+        return Some(sampled);
+    }
+
+    if body.len() < MIN_VOICE_MESSAGE {
+        return None;
+    }
+
+    let command = body[VOICE_PREFIX_LEN];
     if command != COMMAND_VOICE && command != COMMAND_SAMPLE {
         return None;
     }
@@ -311,7 +366,67 @@ fn parse_voice(message: &[u8]) -> Option<VoiceMessage> {
     let unpacked = unpack(&body[PACKED_OFFSET..PACKED_OFFSET + packed_len], unpacked_len)?;
     let tone = Tone::from_packed(&unpacked[1..1 + voice_len])?;
 
-    Some(VoiceMessage { bank, program, tone })
+    Some(VoiceMessage {
+        bank,
+        program,
+        kind: VoiceKind::Fm(tone),
+    })
+}
+
+/// Where a sampled voice keeps the number of the recording it plays.
+const SAMPLED_WAVE_OFFSET: usize = 25;
+
+/// Reads a sampled voice - one that names a recording the file uploads - out
+/// of an MA-5 voice message, or nothing if the message is not one.
+///
+/// All twenty four 데빌메이크라이 sends are the same twenty seven bytes, and
+/// only three of them differ between one effect and the next: the program, the
+/// sample count, and the number the recording arrives under.
+///
+/// ```text
+/// 43 79 07 7F 01 7C 01 23 00 01 1F 40 78 40 00 F0 F0 00 01 00 00 09 67 09 67 00 F7
+///             ^cmd    ^bank ^prog ^sampled                        ^samples-1 ^wave
+/// ```
+///
+/// The program is the one the sequence then selects - `Program ch=0 program=35`
+/// against the `23` here - and the count is one short of what the recording
+/// decodes to, which is how the layout was settled: `att0_0` says `0967` and
+/// decodes to 2,408 samples, `kar` says `274F` and decodes to 10,064.
+///
+/// Nothing here says how loud or how fast to play it. Those bytes are the same
+/// in all twenty four, so they belong to the format rather than to the effect.
+fn parse_sampled_voice(body: &[u8]) -> Option<VoiceMessage> {
+    if body.len() <= SAMPLED_WAVE_OFFSET || body[SHAPE_OFFSET] != 1 {
+        return None;
+    }
+
+    Some(VoiceMessage {
+        bank: (body[6] & 127) + 1,
+        program: body[7] & 127,
+        kind: VoiceKind::Sampled(body[SAMPLED_WAVE_OFFSET]),
+    })
+}
+
+/// Where an uploaded recording's own bytes start, past the header, the number
+/// it is under and the byte behind it.
+const WAVE_DATA_OFFSET: usize = 7;
+
+/// Reads one uploaded recording: its number, and the samples it carries.
+///
+/// The bytes are four bit Yamaha ADPCM, the same the ROM recordings are in, so
+/// silence reads as the `80` and `08` nibble pairs `shot.mmf` opens with. They
+/// are eight bit and length delimited - `evo.mmf` and `heal.mmf` both carry an
+/// `F7` inside their sound - so the terminator is taken off by position and
+/// never searched for.
+fn parse_wave(body: &[u8]) -> Option<(u8, Vec<i16>)> {
+    let model = voice_model(body)?;
+    if model != MODEL_MA5 || body[COMMAND_OFFSET] != COMMAND_SET_WAVE || body.len() <= WAVE_DATA_OFFSET + 1 {
+        return None;
+    }
+
+    let adpcm = &body[WAVE_DATA_OFFSET..body.len() - 1];
+
+    Some((body[VOICE_PREFIX_LEN], super::wave::decode_adpcm4_mono(adpcm)))
 }
 
 /// The voices a running sequence can reach.
@@ -319,6 +434,10 @@ pub struct Bank {
     /// Keyed by bank and program, in the order the file defined them. A file
     /// carries a handful of voices, so a scan costs less than a map.
     voices: Vec<VoiceMessage>,
+    /// The recordings the file has uploaded, by the number a sampled voice
+    /// names. Shared rather than copied: one recording is played by every note
+    /// that reaches for it, and 데빌메이크라이's are four kilobytes apiece.
+    waves: Vec<(u8, Arc<[i16]>)>,
 }
 
 impl Default for Bank {
@@ -329,7 +448,10 @@ impl Default for Bank {
 
 impl Bank {
     pub fn new() -> Self {
-        Self { voices: Vec::new() }
+        Self {
+            voices: Vec::new(),
+            waves: Vec::new(),
+        }
     }
 
     /// Takes a voice out of a system exclusive message. Anything that is not
@@ -338,6 +460,21 @@ impl Bank {
     ///
     /// Returns whether the message defined a voice, for the log.
     pub fn accept_sysex(&mut self, message: &[u8]) -> bool {
+        let body = message.strip_prefix(&[0xF0]).unwrap_or(message);
+
+        // A recording, for a sampled voice that has already named it or is
+        // about to: the two arrive together, the voice first.
+        if let Some((number, pcm)) = parse_wave(body) {
+            let pcm: Arc<[i16]> = pcm.into();
+            if let Some(existing) = self.waves.iter_mut().find(|(held, _)| *held == number) {
+                existing.1 = pcm;
+            } else {
+                self.waves.push((number, pcm));
+            }
+
+            return true;
+        }
+
         let Some(voice) = parse_voice(message) else {
             return false;
         };
@@ -345,12 +482,26 @@ impl Bank {
         // A file may redefine a program part way through; the later definition
         // is the one that applies from then on.
         if let Some(existing) = self.voices.iter_mut().find(|x| x.bank == voice.bank && x.program == voice.program) {
-            existing.tone = voice.tone;
+            existing.kind = voice.kind;
         } else {
             self.voices.push(voice);
         }
 
         true
+    }
+
+    /// The recording `program` plays, if the file uploaded one for it.
+    ///
+    /// Answered before the synthesised lookup: a program that names a
+    /// recording has no patch to fall back to, and playing one of the file's
+    /// other voices instead is what made an effect a handful of bare notes.
+    pub fn sampled_for(&self, program: u8) -> Option<Arc<[i16]>> {
+        let number = self.voices.iter().find_map(|voice| match voice.kind {
+            VoiceKind::Sampled(number) if voice.program == program => Some(number),
+            _ => None,
+        })?;
+
+        self.waves.iter().find_map(|(held, pcm)| (*held == number).then(|| pcm.clone()))
     }
 
     /// The voice to sound `note` with, and the pitch to sound it at.
@@ -373,8 +524,11 @@ impl Bank {
         // A file that defines no voice for this program still expects a sound.
         // Falling back to another of its own voices keeps the title's own
         // character, which a generic stand in would not.
-        if let Some(voice) = self.voices.first() {
-            return (voice.tone, note);
+        if let Some(tone) = self.voices.iter().find_map(|x| match x.kind {
+            VoiceKind::Fm(tone) => Some(tone),
+            VoiceKind::Sampled(_) => None,
+        }) {
+            return (tone, note);
         }
 
         (melodic_stand_in(program), note)
@@ -384,7 +538,10 @@ impl Bank {
         // Banks are chosen by controller in ways that vary between titles, and
         // guessing wrong is worse than ignoring them: a file rarely defines
         // the same program twice, so the program alone identifies the voice.
-        self.voices.iter().find(|x| x.program == program).map(|x| x.tone)
+        self.voices.iter().find_map(|x| match x.kind {
+            VoiceKind::Fm(tone) if x.program == program => Some(tone),
+            _ => None,
+        })
     }
 
     /// How many voices the running file has defined, for the log.
@@ -458,7 +615,7 @@ fn stand_in(algorithm: u8, modulator: (u8, u8, u8, u8, u8, u8, u8), carrier: (u8
 
 #[cfg(test)]
 mod tests {
-    use super::{Bank, DRUM_CHANNEL, OPERATORS, Tone, parse_voice, unpack};
+    use super::{Bank, DRUM_CHANNEL, OPERATORS, Tone, VoiceKind, WAVE_DATA_OFFSET, parse_voice, unpack};
 
     /// A four operator voice, as one of the library's own files sends it.
     const FOUR_OPERATOR: &[u8] = &[
@@ -486,12 +643,17 @@ mod tests {
 
         assert_eq!(voice.program, 0x55);
         assert_eq!(voice.bank, 1);
-        assert_eq!(voice.tone.operator_count, OPERATORS);
+
+        let VoiceKind::Fm(tone) = voice.kind else {
+            panic!("a four operator voice is a patch, not a recording");
+        };
+
+        assert_eq!(tone.operator_count, OPERATORS);
         // Two operators either side of the algorithm's own numbering, so a
         // misread of the packing would not leave every field plausible.
-        assert!(voice.tone.operators.iter().any(|x| x.attack != 0));
-        assert!(voice.tone.operators.iter().all(|x| x.level <= 63));
-        assert!(voice.tone.operators.iter().all(|x| x.waveform < 32));
+        assert!(tone.operators.iter().any(|x| x.attack != 0));
+        assert!(tone.operators.iter().all(|x| x.level <= 63));
+        assert!(tone.operators.iter().all(|x| x.waveform < 32));
     }
 
     #[test]
@@ -556,5 +718,80 @@ mod tests {
         let tone = Tone::default();
 
         assert_eq!(tone.operator_count, 2);
+    }
+
+    /// 데빌메이크라이's `att0_0.mmf`, as the file sends it: an MA-5 sampled
+    /// voice naming bank 2, program `0x23` and recording 0. `kar.mmf` and
+    /// `shot.mmf` send the same twenty seven bytes but for the program, the
+    /// sample count and the recording's number, which is `01` in both.
+    const SAMPLED_VOICE: &[u8] = &[
+        0xF0, 0x43, 0x79, 0x07, 0x7F, 0x01, 0x7C, 0x01, 0x23, 0x00, 0x01, 0x1F, 0x40, 0x78, 0x40, 0x00, 0xF0, 0xF0, 0x00, 0x01, 0x00, 0x00, 0x09,
+        0x67, 0x09, 0x67, 0x00, 0xF7,
+    ];
+
+    /// The head of the recording that follows it, cut short: the file uploads
+    /// 1,212 bytes, and what matters to the parse is the number it is under
+    /// and where the samples start.
+    const SAMPLED_WAVE: &[u8] = &[
+        0xF0, 0x43, 0x79, 0x07, 0x7F, 0x03, 0x00, 0x00, 0x20, 0x10, 0x18, 0xDA, 0x49, 0xCC, 0x90, 0x5E, 0xF7,
+    ];
+
+    #[test]
+    fn a_sampled_voice_names_a_recording_rather_than_a_patch() {
+        let voice = parse_voice(SAMPLED_VOICE).expect("this is a voice message");
+
+        // The program is the one the sequence then selects, and the bank is
+        // one past the byte, the way a synthesised voice's is.
+        assert_eq!(voice.program, 0x23);
+        assert_eq!(voice.bank, 2);
+
+        let VoiceKind::Sampled(number) = voice.kind else {
+            panic!("a sampled voice is a recording, not a patch");
+        };
+
+        assert_eq!(number, 0);
+    }
+
+    #[test]
+    fn a_recording_reaches_the_program_that_named_it() {
+        let mut bank = Bank::new();
+
+        assert!(bank.accept_sysex(SAMPLED_VOICE));
+        assert!(bank.accept_sysex(SAMPLED_WAVE));
+
+        let pcm = bank.sampled_for(0x23).expect("the program named recording 0");
+
+        // Two samples a byte, and the terminator is not one of them.
+        assert_eq!(pcm.len(), (SAMPLED_WAVE.len() - 1 - 1 - WAVE_DATA_OFFSET) * 2);
+        assert!(pcm.iter().any(|&x| x != 0), "the recording decoded to silence");
+
+        // Nothing else reaches for it: a program the file never defined has no
+        // recording, and neither has a synthesised one.
+        assert!(bank.sampled_for(0x24).is_none());
+    }
+
+    #[test]
+    fn a_recording_does_not_arrive_as_a_patch() {
+        let mut bank = Bank::new();
+
+        // The upload is accepted, but as a recording - taking it for a voice
+        // is what would put a program in the bank that plays nothing.
+        assert!(bank.accept_sysex(SAMPLED_WAVE));
+        assert_eq!(bank.len(), 0);
+    }
+
+    #[test]
+    fn a_sampled_program_is_not_sounded_as_a_patch() {
+        let mut bank = Bank::new();
+
+        bank.accept_sysex(FOUR_OPERATOR);
+        bank.accept_sysex(SAMPLED_VOICE);
+
+        // Asked for the sampled program as a patch, the bank answers with a
+        // stand in rather than with the file's other voice, which is a
+        // different instrument entirely.
+        let (tone, _) = bank.tone_for(0, 0x23, 60);
+
+        assert!(tone.operators[1].attack > 0, "the sampled program has nothing to fall back to");
     }
 }

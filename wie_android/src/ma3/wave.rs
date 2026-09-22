@@ -275,6 +275,67 @@ impl WaveVoice {
         })
     }
 
+    /// A voice built from a recording the file uploaded itself.
+    ///
+    /// The ROM recordings above are named by a bank id and carry a forty byte
+    /// record that says how to play them. One a file sends over system
+    /// exclusive has neither: it is samples and a number, and everything else -
+    /// how fast to play it, how loud, how it ends - is the format's rather than
+    /// the record's. So the recording plays at its own rate, shifted by how far
+    /// the note is from the one it was recorded at, at full level, and it does
+    /// not loop. These are single sounds - a sword stroke, a hit - and they end
+    /// when the recording does, which [`Self::normalize_position`] already
+    /// does for a one shot.
+    ///
+    /// `source_rate` is the rate the recording was made at, and `base_note`
+    /// the note it plays back unshifted at.
+    pub fn from_samples(pcm: Arc<[i16]>, source_rate: u32, note: u8, base_note: u8, sample_rate: u32) -> Option<Self> {
+        if pcm.len() < 2 || source_rate == 0 || sample_rate == 0 {
+            return None;
+        }
+
+        let semitones = f64::from(i32::from(note) - i32::from(base_note)) / 12.0;
+        let step = (f64::from(source_rate) / f64::from(sample_rate)) * semitones.exp2();
+
+        // The chip's release rates come out of a voice record, and an uploaded
+        // recording has none. A title that lifts the key before the sound has
+        // run out means it to stop, so this is short enough to be that rather
+        // than a tail.
+        const RELEASE_MS: f64 = 20.0;
+        const RELEASE_FLOOR: f64 = 0.001;
+        let release_samples = RELEASE_MS / 1000.0 * f64::from(sample_rate);
+        let release_q30 = (RELEASE_FLOOR.powf(1.0 / release_samples.max(1.0)) * f64::from(1u32 << 30)) as u64;
+
+        Some(Self {
+            pcm: pcm.clone(),
+            position: 0.0,
+            step,
+            sample_end: pcm.len() - 1,
+            loop_start: 0,
+            loops: false,
+
+            // Held at full rather than stepped through an envelope: the shape
+            // of one of these is in the recording, not around it.
+            env_state: ENV_DECAY1,
+            env_q31: 1 << 31,
+            attack_q31: 0,
+            decay1_q30: 1 << 30,
+            decay2_q30: 1 << 30,
+            release_q30,
+            sustain_q31: 0,
+            level_q15: 1 << 15,
+
+            amp_lfo: false,
+            amp_depth: 0,
+            pitch_lfo: false,
+            pitch_depth: 0,
+            lfo_phase_q20: 0,
+            lfo_step_q20: 0,
+
+            active: true,
+        })
+    }
+
     fn step_envelope(&mut self) {
         match self.env_state {
             ENV_RELEASE => {

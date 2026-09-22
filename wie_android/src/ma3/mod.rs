@@ -111,6 +111,24 @@ pub const CHANNELS: usize = 2;
 /// it should sound. Matched to that ceiling.
 const MAX_VOICES: usize = 31;
 
+/// The rate a file's own uploaded recordings were made at, and the note they
+/// play back unshifted at.
+///
+/// Neither is in the message. Across the twenty four sampled voices
+/// 데빌메이크라이 sends, only the program, the sample count and the recording's
+/// number differ - every other byte of the record is the same - so the rate is
+/// the format's rather than the file's. Eight kilohertz is what the handset's
+/// own recordings decode to (see [`wave`]), and it is the reading the lengths
+/// bear out: `kar.mmf`'s 10,064 samples come to 1.26 seconds against the 1.39
+/// its sequence holds the note for, where sixteen would leave half the hold
+/// silent and four would run twice as long as the note.
+///
+/// Every one of these files plays note sixty, so the two are only ever read
+/// together: at this pairing a recording plays back at exactly the rate it was
+/// made at, unshifted.
+const UPLOADED_WAVE_RATE: u32 = 8000;
+const UPLOADED_WAVE_NOTE: u8 = 60;
+
 /// The volume a clip plays at until a title turns it down, on the 0..=100 scale
 /// WIPI sets volumes on.
 pub const FULL_VOLUME: u8 = 100;
@@ -225,6 +243,11 @@ impl Synth {
         // stand in.
         let source = if channel == DRUM_CHANNEL {
             match WaveVoice::drum(note, velocity, SAMPLE_RATE) {
+                Some(voice) => Source::Pcm(voice),
+                None => Source::Fm(self.fm_voice(channel, &state, note)),
+            }
+        } else if let Some(pcm) = self.bank.sampled_for(state.program) {
+            match WaveVoice::from_samples(pcm, UPLOADED_WAVE_RATE, note, UPLOADED_WAVE_NOTE, SAMPLE_RATE) {
                 Some(voice) => Source::Pcm(voice),
                 None => Source::Fm(self.fm_voice(channel, &state, note)),
             }

@@ -6,10 +6,11 @@
 //! reaches the mixer. A title whose effects sound wrong is nearly always a
 //! message this player drops, and that is visible here and nowhere else.
 //!
-//! 데빌메이크라이 is why it exists. Its music is MA-3 (`f0 43 79 06`) and every
-//! one of its effects is MA-5 (`f0 43 79 07`), carrying its sound as a wave
-//! bulk this synthesiser has no path for - so each effect came out as the four
-//! bare notes that were meant to trigger it, on whatever voice was loaded.
+//! 데빌메이크라이 is why it exists. Its eleven pieces of music are MA-3
+//! (`f0 43 79 06`) and all twenty four of its effects are MA-5
+//! (`f0 43 79 07`), carrying their sound as a wave bulk - so until that bulk
+//! was given a path, each effect came out as the four bare notes that were
+//! meant to trigger it, on whatever voice happened to be loaded.
 //!
 //! ```text
 //! cargo run -p wie_backend --example mmf_chunks -- res/att0_0.mmf res/bgm2.mmf
