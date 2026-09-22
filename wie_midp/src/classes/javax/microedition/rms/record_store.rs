@@ -210,11 +210,39 @@ impl RecordStore {
 
     async fn open_record_store(
         jvm: &Jvm,
-        _context: &mut WieJvmContext,
+        context: &mut WieJvmContext,
         name: ClassInstanceRef<String>,
         create: bool,
     ) -> JvmResult<ClassInstanceRef<Self>> {
         tracing::debug!("javax.microedition.rms.RecordStore::openRecordStore({name:?}, {create:?})");
+
+        // An open that was told not to create has nothing to open when the
+        // store is not there. This opened one anyway, so a title asking "do I
+        // have a save?" was always told yes, and the read that followed found
+        // no records.
+        //
+        // 시네마타이쿤 is where that ends a run. Its `com.mc.util.a` keeps the
+        // title's settings in a store called `config`, and asks for them in two
+        // steps: a static `a(String)Z` that opens the store to see whether it is
+        // there, and a static `a(String)String` that opens it again and reads
+        // record one. The first is seven `try` blocks deep and answers false for
+        // a store that is not there; the second assumes it is. Told the store
+        // existed, the title read a record that was never written, got null, and
+        // died building a tokenizer over it - `String.toCharArray` on null,
+        // inside `GameAppMain.startApp`, before its first frame.
+        if !create {
+            let store_name = JavaLangString::to_rust_string(jvm, &name).await?;
+            let app_id = context.system().pid().to_owned();
+            let existing = context.system().platform().database_repository().list(&app_id).await;
+
+            if !existing.contains(&store_name) {
+                tracing::debug!("javax.microedition.rms.RecordStore::openRecordStore({store_name}) -> no such store");
+
+                return Err(jvm
+                    .exception("javax/microedition/rms/RecordStoreException", "Record store not found")
+                    .await);
+            }
+        }
 
         let store = jvm
             .new_class("javax/microedition/rms/RecordStore", "(Ljava/lang/String;)V", (name,))
@@ -316,6 +344,59 @@ mod test {
                 panic!("unknown record deletion succeeded");
             };
             assert!(jvm.is_instance(&*exception, "javax/microedition/rms/InvalidRecordIDException"));
+
+            Ok(())
+        })
+    }
+
+    /// An open that was told not to create fails when the store is not there,
+    /// and succeeds once it is.
+    ///
+    /// 시네마타이쿤 asks that question about its `config` store to decide
+    /// whether it has settings to read. Answered yes for a store that was never
+    /// written, it read a record that does not exist, got null, and died on the
+    /// first thing it did with it.
+    #[test]
+    fn opening_a_store_that_is_not_there_without_creating_it_fails() -> Result<()> {
+        run_jvm_test(Box::new([get_protos().into()]), |jvm| async move {
+            let name: ClassInstanceRef<String> = JavaLangString::from_rust_string(&jvm, "config").await?.into();
+
+            let missing: JvmResult<ClassInstanceRef<RecordStore>> = jvm
+                .invoke_static(
+                    "javax/microedition/rms/RecordStore",
+                    "openRecordStore",
+                    "(Ljava/lang/String;Z)Ljavax/microedition/rms/RecordStore;",
+                    (name.clone(), false),
+                )
+                .await;
+            let Err(JavaError::JavaException(exception)) = missing else {
+                panic!("opening a store that was never written succeeded");
+            };
+            assert!(jvm.is_instance(&*exception, "javax/microedition/rms/RecordStoreException"));
+
+            // Written once, it opens without being asked to create it.
+            let created: ClassInstanceRef<RecordStore> = jvm
+                .invoke_static(
+                    "javax/microedition/rms/RecordStore",
+                    "openRecordStore",
+                    "(Ljava/lang/String;Z)Ljavax/microedition/rms/RecordStore;",
+                    (name.clone(), true),
+                )
+                .await?;
+            let mut data = jvm.instantiate_array("B", 1).await?;
+            jvm.store_array(&mut data, 0, [7i8]).await?;
+            let _: i32 = jvm.invoke_virtual(&created, "addRecord", "([BII)I", (data, 0, 1)).await?;
+
+            let reopened: ClassInstanceRef<RecordStore> = jvm
+                .invoke_static(
+                    "javax/microedition/rms/RecordStore",
+                    "openRecordStore",
+                    "(Ljava/lang/String;Z)Ljavax/microedition/rms/RecordStore;",
+                    (name, false),
+                )
+                .await?;
+            let count: i32 = jvm.invoke_virtual(&reopened, "getNumRecords", "()I", ()).await?;
+            assert_eq!(count, 1);
 
             Ok(())
         })
