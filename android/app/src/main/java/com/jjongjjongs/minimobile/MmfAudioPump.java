@@ -31,18 +31,11 @@ final class MmfAudioPump {
      * Frames asked for per pull, matched to the device's own mixer burst by
      * {@link #configure(Context)}.
      *
-     * <p>The chunk bounds two separate waits, and both are what a sound started
-     * over music has to sit through: a note reaching the mixer part way through
-     * a chunk is not rendered until the next one begins, and the write carrying
-     * it overshoots {@link #LEAD_MS} by however much a chunk holds.
+     * <p>A note reaching the mixer part way through a chunk is not rendered
+     * until the next one begins, so the chunk is the grain of the whole path.
      *
-     * <p>Picking a number outright is the wrong instrument for it. The track
-     * drains in whole HAL bursts and {@link AudioTrack#getPlaybackHeadPosition()}
-     * only moves when one is consumed, so a chunk that is not a burst leaves the
-     * queue reading below by a ragged remainder, and the lead gate above either
-     * holds a write it should have sent or sends one it should have held. That
-     * is jitter on every note rather than a fixed delay. Writing the device's
-     * own burst puts every write on a boundary the reading can actually see.
+     * <p>The track drains in whole HAL bursts, so writing the device's own burst
+     * puts every write on a boundary its playback head can actually report.
      *
      * <p>The burst the device reports is in frames at its native output rate, so
      * it is scaled to {@link #RATE}, which is what this track runs at.
@@ -53,32 +46,30 @@ final class MmfAudioPump {
     /** Used until {@link #configure(Context)} reports the device's burst. */
     private static volatile int chunkFrames = DEFAULT_CHUNK_FRAMES;
 
-    /** Track buffer, matching the reference's ~120 ms with headroom. */
-    private static final int TRACK_BUFFER_MS = 180;
-    /** Buffer filled before playback starts, so the first writes cannot drain
-     *  the track before the pace settles. Below the buffer so a stopped track
-     *  never blocks a write forever. */
-    private static final int PREFILL_MS = 60;
     /**
-     * How far ahead of the playback head this will render.
+     * How much audio may stand between a note and the speaker.
      *
-     * <p>A blocking write on its own fills the track to the brim, so while
-     * music plays the queue sits near {@link #TRACK_BUFFER_MS} and a sound
-     * started now is mixed into the next chunk - behind all of it. That is the
-     * effect arriving late over background music: the note was on time, the
-     * audio in front of it was not.
+     * <p>This is the track's own buffer, and that is the whole mechanism: a
+     * blocking write returns only when the track has room, so the queue cannot
+     * grow past the buffer and needs nothing to hold it there.
      *
-     * <p>This is also the whole of the margin. The track being large does not
-     * help on its own - capacity absorbs nothing while it is empty - so what
-     * stands between a late render and a break in the stream is exactly the
-     * audio already queued, which is this. Lowering it buys latency straight
-     * out of that margin, which is why the chunk came down instead.
+     * <p>It used to be 180 ms with a polling gate on top that slept in 4 ms
+     * steps whenever the queue read more than 60 ms, which is this job done
+     * twice and done worse. A measured second of it: 252 waits, one full second
+     * of sleeping inside one second, not a single blocking write - the track
+     * always had room for a 3 ms chunk - and a queue swinging between 20 and 59
+     * ms. A control loop whose sampling period is longer than the chunk it
+     * actuates with cannot settle, and that swing is a note landing anywhere in
+     * a 39 ms window depending on which part of the cycle it arrives in. The
+     * gate is gone; the buffer is sized at what it was trying to hold.
      */
-    private static final int LEAD_MS = 60;
-    /** Consecutive waits before the lead is ignored and a write goes out
-     *  anyway, so a device whose playback head does not advance the way this
-     *  reads it falls back to the blocking write rather than to silence. */
-    private static final int MAX_WAITS = 24;
+    private static final int TARGET_LATENCY_MS = 60;
+    /**
+     * Written before playback starts, so the first writes cannot drain the
+     * track before the pace settles. Must stay well under the buffer: with the
+     * track stopped, writes fill it and then block until {@code play()}.
+     */
+    private static final int PREFILL_MS = TARGET_LATENCY_MS / 2;
 
     /** Emitted once a second so the queue ahead of a note can be read off a
      *  device log rather than reasoned about. */
@@ -165,11 +156,8 @@ final class MmfAudioPump {
         int prefillFrames = 0;
         boolean playing = false;
         long framesWritten = 0;
-        int waits = 0;
         long statsStart = System.nanoTime();
         int statPulls = 0;
-        int statWaits = 0;
-        int statForced = 0;
         int statIdle = 0;
         int statQueuedSamples = 0;
         long statQueuedSum = 0;
@@ -190,42 +178,18 @@ final class MmfAudioPump {
                     continue;
                 }
 
-                // Far enough ahead already? Then let the track drain before
-                // rendering more, so what is queued in front of a sound that
-                // starts now stays near LEAD_MS. Checked before the pull, so
-                // the synthesiser is not run ahead of playback either.
+                // The queue ahead of the playback head, which is what a note
+                // starting now has to sit through. Nothing acts on it - the
+                // blocking write below bounds it - but it is the number the
+                // whole question turns on, so it is measured.
                 if (track != null && playing) {
-                    // A head still at zero has not started moving - play() has
-                    // been called but the track has yet to pick it up. Waiting
-                    // on that reading holds off the writes while the prefill
-                    // plays out, which empties the track at the very moment a
-                    // title's first sound is starting. Nothing is ahead of the
-                    // playback yet either, so there is nothing to wait for.
-                    //
-                    // A count outside the track's own capacity is not a reading
-                    // to act on. Either way this falls through to the blocking
-                    // write.
                     long head = track.getPlaybackHeadPosition() & 0xFFFFFFFFL;
-                    long queued = framesWritten - head;
-                    long lead = (long) RATE * LEAD_MS / 1000;
-                    long capacity = (long) RATE * TRACK_BUFFER_MS / 1000;
-                    if (waits < MAX_WAITS && head > 0 && queued > lead && queued <= capacity) {
-                        waits++;
-                        statWaits++;
-                        sleep(4);
-                        continue;
-                    }
-                    if (waits >= MAX_WAITS) {
-                        statForced++;
-                    }
-                    // The queue as it stands for the chunk about to be rendered:
-                    // exactly what a note starting now waits through.
+                    long queued = Math.max(0, framesWritten - head);
                     statQueuedSamples++;
                     statQueuedSum += queued;
                     statQueuedMin = Math.min(statQueuedMin, queued);
                     statQueuedMax = Math.max(statQueuedMax, queued);
                 }
-                waits = 0;
 
                 int chunk = chunkFrames;
                 byte[] pcm;
@@ -285,15 +249,11 @@ final class MmfAudioPump {
                             + " queued=" + framesToMs(statQueuedSamples > 0 ? statQueuedMin : 0)
                             + "/" + framesToMs(statQueuedSamples > 0 ? statQueuedSum / statQueuedSamples : 0)
                             + "/" + framesToMs(statQueuedMax) + "ms"
-                            + " waits=" + statWaits
-                            + " forced=" + statForced
                             + " idle=" + statIdle
                             + " underruns=+" + (underruns - lastUnderruns));
                     lastUnderruns = underruns;
                     statsStart = now;
                     statPulls = 0;
-                    statWaits = 0;
-                    statForced = 0;
                     statIdle = 0;
                     statQueuedSamples = 0;
                     statQueuedSum = 0;
@@ -325,7 +285,7 @@ final class MmfAudioPump {
         if (minimum <= 0) {
             return null;
         }
-        int bufferBytes = Math.max(minimum, RATE * FRAME_BYTES * TRACK_BUFFER_MS / 1000);
+        int bufferBytes = Math.max(minimum, RATE * FRAME_BYTES * TARGET_LATENCY_MS / 1000);
         try {
             AudioTrack track;
             if (Build.VERSION.SDK_INT >= 26) {
@@ -341,6 +301,7 @@ final class MmfAudioPump {
                                 .build())
                         .setBufferSizeInBytes(bufferBytes)
                         .setTransferMode(AudioTrack.MODE_STREAM)
+                        .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
                         .build();
             } else {
                 track = new AudioTrack(AudioManager.STREAM_MUSIC, RATE, mask,
@@ -352,7 +313,7 @@ final class MmfAudioPump {
             }
             report("[pump] opened " + RATE + "Hz stereo buffer=" + bufferBytes
                     + "B frames=" + track.getBufferSizeInFrames()
-                    + " chunk=" + chunkFrames + " lead=" + LEAD_MS + "ms");
+                    + " chunk=" + chunkFrames + " target=" + TARGET_LATENCY_MS + "ms");
             return track;
         } catch (RuntimeException e) {
             Log.e(TAG, "could not open AudioTrack", e);
