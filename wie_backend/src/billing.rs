@@ -8589,6 +8589,66 @@ fn is_number(field: &[u8]) -> bool {
     !field.is_empty() && field.iter().all(u8::is_ascii_digit)
 }
 
+/// The words 하얀섬 speaks to the 가바플러스 gateway.
+///
+/// 하얀섬 (`0002C059`) opens `210.222.18.28:11532` on its first screen and
+/// writes one line of text, NUL terminated. Four of them exist, built at
+/// `binary.mod`'s `0x1f780` from the format strings its `.text` carries:
+///
+/// ```text
+/// CHARGE %s %s %s          the paid upgrade to the full version
+/// SMSAGREE %s %s %c        the consent the title asks about before anything
+/// KOIN_REQ_P2 %s %s        the KOIN balance
+/// KOIN_USE_P2 %s %s        spending it
+/// ```
+///
+/// What comes back is two bytes, which is exactly what the title reads:
+/// `MC_netSocketRead(sock, buffer, 2)`. Its reader at `0x1fe9c` takes the
+/// first as a **signed** result code and the second as the length of a string
+/// behind it, and a zero there ends the reply. `0x1f87c` then reads that code
+/// against the command it was sent under, and only some values are an answer
+/// it carries on from:
+///
+/// ```text
+/// CHARGE        0 or 1     registered now, or registered already
+/// SMSAGREE      2 or 3
+/// KOIN_REQ_P2   7
+/// KOIN_USE_P2   8
+/// ```
+///
+/// Everything else is an error it draws instead - `-3` its monthly limit,
+/// `-5` an LGT employee, `-6` a firmware upgrade, and anything unrecognised
+/// 서버와의 접속이 원활하지 않습니다.
+///
+/// Only `SMSAGREE` is answered here. It is the one the title cannot get past:
+/// it is sent on the first screen, before the title is playable at all, and
+/// 네트워크 진행중입니다 with its progress bar is what the handset showed
+/// forever while nothing answered. The other three are a purchase and a
+/// balance, and what a server would have said about either is not something
+/// this has read off a run - so they are left to the trace that says no reply
+/// was shaped, rather than answered with a guess.
+fn lgt_local_white_island_response(request: &[u8]) -> Option<Vec<u8>> {
+    /// The command, and the only one answered.
+    const CONSENT: &[u8] = b"SMSAGREE ";
+    /// What `0x1f87c` reads the consent as an answer for. Three is the other.
+    const CONSENT_ANSWERED: u8 = 2;
+    /// The length of the string behind the code. Nothing follows this one.
+    const NOTHING_FOLLOWS: u8 = 0;
+
+    // A line of text, NUL terminated, and nothing else on the socket writes
+    // one: every other protocol here leads with a binary header.
+    let line = request.strip_suffix(b"\0")?;
+    if line.is_empty() || !line.iter().all(|byte| byte.is_ascii_graphic() || *byte == b' ') {
+        return None;
+    }
+
+    if !line.starts_with(CONSENT) {
+        return None;
+    }
+
+    Some(alloc::vec![CONSENT_ANSWERED, NOTHING_FOLLOWS])
+}
+
 pub fn response(request: &[u8]) -> Option<Vec<u8>> {
     lgt_local_granted_response(request)
         .or_else(|| lgt_local_cash_response(request))
@@ -8627,7 +8687,48 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_soul_hunter_raki_response(request))
         .or_else(|| lgt_local_soul_hunter_raki_catalogue_response(request))
         .or_else(|| lgt_local_nexon_mobile_response(request))
+        .or_else(|| lgt_local_white_island_response(request))
         .or_else(|| ktf_local_download_response(request))
+}
+
+#[cfg(test)]
+mod white_island_tests {
+    use super::*;
+
+    /// What 하얀섬 writes on its first screen, off the handset: the consent,
+    /// the subscriber's number, the product it is asking about, and the flag.
+    const CONSENT: &[u8] = b"SMSAGREE 01057375505 G1000135 N\0";
+
+    /// Two bytes: the code `0x1f87c` reads the consent as an answer for, and a
+    /// zero length for the string that does not follow it.
+    #[test]
+    fn the_consent_is_answered() {
+        let reply = response(CONSENT).expect("the consent is answered");
+
+        assert_eq!(reply, alloc::vec![2, 0]);
+    }
+
+    /// The other three lines are a purchase and a balance, and nothing here
+    /// has read what a server said about either.
+    #[test]
+    fn the_purchase_and_the_balance_are_left_alone() {
+        for line in [
+            &b"CHARGE 01057375505 G1000135 C2000468\0"[..],
+            &b"KOIN_REQ_P2 01057375505 G1000135\0"[..],
+            &b"KOIN_USE_P2 01057375505 G1000135\0"[..],
+        ] {
+            assert_eq!(lgt_local_white_island_response(line), None, "{:?} is not answered here", line);
+        }
+    }
+
+    /// The line has to be NUL terminated text, so a frame with a binary header
+    /// is never read as one.
+    #[test]
+    fn a_binary_frame_is_not_a_line() {
+        assert_eq!(lgt_local_white_island_response(b"SMSAGREE \x01\x02\x03\0"), None);
+        assert_eq!(lgt_local_white_island_response(b"SMSAGREE 01057375505"), None, "unterminated");
+        assert_eq!(lgt_local_white_island_response(b"\0"), None, "empty");
+    }
 }
 
 #[cfg(test)]
