@@ -92,14 +92,13 @@ fn decrypt_cbc(cipher: &[u8]) -> Vec<u8> {
 
     let mut plain = Vec::with_capacity(cipher.len());
     let mut chain = IV;
-    for block in cipher.chunks_exact(16) {
-        let mut state = [0u8; 16];
-        state.copy_from_slice(block);
+    for block in cipher.as_chunks::<16>().0 {
+        let mut state = *block;
         decrypt_block(&mut state, &round_keys);
         for (out, previous) in state.iter().zip(chain) {
             plain.push(out ^ previous);
         }
-        chain.copy_from_slice(block);
+        chain = *block;
     }
 
     plain
@@ -230,8 +229,8 @@ fn inv_shift_rows(state: &mut [u8; 16]) {
 }
 
 fn inv_mix_columns(state: &mut [u8; 16]) {
-    for column in state.chunks_exact_mut(4) {
-        let [a, b, c, d] = [column[0], column[1], column[2], column[3]];
+    for column in state.as_chunks_mut::<4>().0 {
+        let [a, b, c, d] = *column;
         column[0] = mul(a, 14) ^ mul(b, 11) ^ mul(c, 13) ^ mul(d, 9);
         column[1] = mul(a, 9) ^ mul(b, 14) ^ mul(c, 11) ^ mul(d, 13);
         column[2] = mul(a, 13) ^ mul(b, 9) ^ mul(c, 14) ^ mul(d, 11);

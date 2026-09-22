@@ -919,7 +919,7 @@ impl InputMethod {
                         return InputMethodOutput::default();
                     };
 
-                    let (kept, carried) = Self::split_korean_jong(jong).map_or((1, jong), |(first, second)| (first, second));
+                    let (kept, carried) = Self::split_korean_jong(jong).unwrap_or((1, jong));
 
                     if let Some(committed) = Self::compose_korean_syllable(old_cho, old_jung, kept) {
                         Self::put_korean_char(&mut output.output0, &mut output.output0_len, committed);

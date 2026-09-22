@@ -1483,13 +1483,11 @@ pub fn load_hero4_warehouse(kept: &[u8]) {
     let mut warehouse = HERO4_WAREHOUSE.lock();
 
     warehouse.rows = kept
-        .chunks_exact(HERO4_ITEM_RECORD)
+        .as_chunks::<HERO4_ITEM_RECORD>()
+        .0
+        .iter()
         .take(HERO4_WAREHOUSE_ROWS)
-        .map(|record| {
-            let mut row = [0u8; HERO4_ITEM_RECORD];
-            row.copy_from_slice(record);
-            row
-        })
+        .copied()
         .collect();
     warehouse.loaded = true;
     warehouse.changed = false;
