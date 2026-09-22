@@ -2311,6 +2311,31 @@ pub fn lgt_local_granted_response(request: &[u8]) -> Option<Vec<u8>> {
 /// `0xb234` branches on this one's result at all; the screen's own state is
 /// what moves on. So it answers 0 with no message.
 ///
+/// 테일즈위버 루시안칼츠편's shop asks for its own errand under command `0x0a`,
+/// with a `u32` body - twelve bytes in all:
+///
+/// ```text
+/// 0c 00 00 00 ff ff 0a 00 0c 00 00 00
+/// ```
+///
+/// Its own module says what that answer has to be. `0x2231c` is the one place
+/// a request is built, a switch over thirteen kinds that each write their
+/// body, the frame's length and then the command as two bytes at `[6]` and
+/// `[7]`; kind 2, at `0x225d6`, is the one that writes four bytes of body and
+/// `0x0a`. `0x2312c` receives, and the readers behind it - `0x2320c`,
+/// `0x24532`, `0x24632`, `0x24540` - all read one payload:
+///
+/// ```text
+/// [8]      u8  - the result
+/// [9..11]  u16 - a message length, little end first
+/// [11..]         the message, that many bytes and nothing past it
+/// ```
+///
+/// Every one of them takes **0** as the result that goes on and sends anything
+/// else to the same error state, and none reads the command it came back
+/// under. So the answer is command `0x0b` - one past, the way this protocol's
+/// other three answers are - with a zero result and no message.
+///
 /// Neither payload can be left out altogether. `0x70a0` allocates a block only
 /// for a frame that declares more than its header, and hands `0xe3c0` a null
 /// pointer otherwise, which both readers would read from - so each answer is
@@ -2351,6 +2376,13 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
     /// A `u32` code and the byte `0x7390` always writes behind it.
     const ERRAND_BODY: usize = 5;
     const ERRAND_TAIL: u8 = 0x1e;
+
+    /// What 테일즈위버 루시안칼츠편's shop sends for its errand instead, and
+    /// what the readers behind `0x2312c` read the answer of.
+    const SHOP_REQUEST: u16 = 0x000a;
+    const SHOP_ANSWER: u16 = 0x000b;
+    /// The `u32` `0x225d6` builds its body out of, which is the whole of it.
+    const SHOP_BODY: usize = 4;
 
     /// The results `0xb234` goes on from. They are not the same value: the
     /// register step stops on 0 where the other two go on from it.
@@ -2425,6 +2457,9 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
         // A `u32` code and the byte behind it, which is what says the frame is
         // `0x7390`'s rather than five other bytes under this command.
         ERRAND_REQUEST if body.len() == ERRAND_BODY && body[4] == ERRAND_TAIL => (ERRAND_ANSWER, vec![AUTH_GRANTED, 0, 0]),
+        // A `u32` and nothing else, which is the whole of what `0x225d6`
+        // builds. The result and an empty message is all its reader takes.
+        SHOP_REQUEST if body.len() == SHOP_BODY => (SHOP_ANSWER, vec![AUTH_GRANTED, 0, 0]),
         _ => return None,
     };
 
@@ -11768,6 +11803,28 @@ mod tests {
             response,
             vec![0x0f, 0x00, 0x00, 0x00, 0xff, 0xff, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
         );
+    }
+
+    /// And the errand its shop opens its session for, which `0x225d6` builds
+    /// and the readers behind `0x2312c` read the answer of.
+    #[test]
+    fn the_shop_s_errand_is_answered_under_the_command_past_its_own() {
+        // The frame the title wrote, byte for byte off the device.
+        let request = [0x0c, 0x00, 0x00, 0x00, 0xff, 0xff, 0x0a, 0x00, 0x0c, 0x00, 0x00, 0x00];
+
+        let response = lgt_local_marked_command_response(&request).unwrap();
+
+        // Command `0x0b`, a granted result, and a message of no bytes - which
+        // is the whole of what `0x24540` reads.
+        assert_eq!(response, vec![0x0b, 0x00, 0x00, 0x00, 0xff, 0xff, 0x0b, 0x00, 0x00, 0x00, 0x00]);
+        assert_eq!(u32::from_le_bytes(response[0..4].try_into().unwrap()) as usize, response.len());
+
+        // A body that is not that one `u32` is some other title's frame under
+        // a command this plain.
+        let mut longer = request.to_vec();
+        longer.push(0);
+        longer[0] += 1;
+        assert!(lgt_local_marked_command_response(&longer).is_none());
     }
 
     /// And the authentication this title opens with, which is what says it
