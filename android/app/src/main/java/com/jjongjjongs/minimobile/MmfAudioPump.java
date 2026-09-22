@@ -118,11 +118,20 @@ final class MmfAudioPump {
                 // starts now stays near LEAD_MS. Checked before the pull, so
                 // the synthesiser is not run ahead of playback either.
                 if (track != null && playing && waits < MAX_WAITS) {
-                    long queued = framesWritten - (track.getPlaybackHeadPosition() & 0xFFFFFFFFL);
+                    long head = track.getPlaybackHeadPosition() & 0xFFFFFFFFL;
+                    long queued = framesWritten - head;
                     long lead = (long) RATE * LEAD_MS / 1000;
-                    // A reading outside the track's own capacity is not one to
-                    // act on; fall through to the blocking write instead.
-                    if (queued > lead && queued <= (long) RATE * TRACK_BUFFER_MS / 1000) {
+                    // A head still at zero has not started moving - play() has
+                    // been called but the track has yet to pick it up. Waiting
+                    // on that reading holds off the writes while the prefill
+                    // plays out, which empties the track at the very moment a
+                    // title's first sound is starting. Nothing is ahead of the
+                    // playback yet either, so there is nothing to wait for.
+                    //
+                    // A count outside the track's own capacity is not a reading
+                    // to act on. Either way this falls through to the blocking
+                    // write.
+                    if (head > 0 && queued > lead && queued <= (long) RATE * TRACK_BUFFER_MS / 1000) {
                         waits++;
                         sleep(4);
                         continue;
