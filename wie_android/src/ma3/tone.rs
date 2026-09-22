@@ -266,6 +266,23 @@ const MIN_VOICE_MESSAGE: usize = 30;
 const SHAPE_OFFSET: usize = 9;
 const PACKED_OFFSET: usize = 10;
 
+/// Length of the one MA-5 voice message that carries a patch.
+///
+/// MA-3 packs a voice because its exclusive is seven bit, and pays five bytes
+/// of headers for the thirty the voice takes. MA-5's is length delimited - the
+/// same reason its uploaded recordings can hold an `F7` - so it sends those
+/// thirty raw, and lands three bytes shorter than MA-3's four operator message
+/// rather than at one of its two lengths.
+///
+/// It is the same layout underneath. Decoded this way against the eighty seven
+/// MA-3 files that sit beside them in one ringtone collection, the fifty four
+/// MA-5 voices come out with the same shape the MA-3 voices do - mean
+/// attenuation 13.0 against 13.7, mean attack 11.6 against 11.3, and the same
+/// waveform carrying 53% of operators in both. Read at any other offset the
+/// levels flatten towards the middle of their range and the waveforms spread
+/// evenly, so this is where the voice starts.
+const MA5_VOICE_MESSAGE: usize = 43;
+
 /// System exclusive is seven bit, so a voice is sent with the high bits of
 /// each run of seven bytes gathered into a leading byte.
 const PACK_GROUP: usize = 7;
@@ -348,23 +365,30 @@ fn parse_voice(message: &[u8]) -> Option<VoiceMessage> {
         ((body[6] & 127) + 1, body[7] & 127)
     };
 
-    // Three shapes exist, told apart by the message's length and a byte that
-    // is set only on the one naming a recording. Two and four operator voices
-    // differ only in how much follows.
-    let (packed_len, unpacked_len, voice_len) = match (body.len() + 1, body[SHAPE_OFFSET]) {
-        (32, 0) => (20, 17, 16),
-        (48, 0) => (36, 31, 30),
-        // A recording, which this synthesiser cannot play.
-        (31, 1) => return None,
+    // Shapes are told apart by the message's length and a byte that is set
+    // only on the one naming a recording. Two and four operator voices differ
+    // only in how much follows.
+    //
+    // The unpacked form starts with a byte this synthesiser does not read, and
+    // the voice follows it. MA-5 lays the voice out the same way but does not
+    // pack it, so both arrive at the same slice by different routes and the
+    // buffer is held alive out here for the borrowed one.
+    let unpacked;
+    let voice: &[u8] = match (model, body.len() + 1, body[SHAPE_OFFSET]) {
+        (_, 32, 0) => {
+            unpacked = unpack(body.get(PACKED_OFFSET..PACKED_OFFSET + 20)?, 17)?;
+            unpacked.get(1..17)?
+        }
+        (_, 48, 0) => {
+            unpacked = unpack(body.get(PACKED_OFFSET..PACKED_OFFSET + 36)?, 31)?;
+            unpacked.get(1..31)?
+        }
+        (MODEL_MA5, MA5_VOICE_MESSAGE, 0) => body.get(PACKED_OFFSET + 1..body.len() - 1)?,
+        // A recording, which is read by `parse_sampled_voice` rather than here.
         _ => return None,
     };
 
-    if body.len() < PACKED_OFFSET + packed_len {
-        return None;
-    }
-
-    let unpacked = unpack(&body[PACKED_OFFSET..PACKED_OFFSET + packed_len], unpacked_len)?;
-    let tone = Tone::from_packed(&unpacked[1..1 + voice_len])?;
+    let tone = Tone::from_packed(voice)?;
 
     Some(VoiceMessage {
         bank,
@@ -901,5 +925,64 @@ mod tests {
 
         // Two recordings and nothing saying which - so nothing is guessed.
         assert!(bank.sampled_for(81).is_none());
+    }
+
+    /// An MA-5 patch, as one of a ringtone collection's `cookki` sends it:
+    /// forty three bytes, the voice raw rather than packed.
+    const MA5_FOUR_OPERATOR: &[u8] = &[
+        0xF0, 0x43, 0x79, 0x07, 0x7F, 0x01, 0x7C, 0x01, 0x7A, 0x00, 0x00, 0x00, 0x79, 0x03, 0x02, 0x0F, 0xF0, 0x10, 0x00, 0x30, 0x07, 0x22, 0x22,
+        0xFF, 0x54, 0x10, 0x00, 0x20, 0x42, 0x40, 0xFF, 0x30, 0x00, 0x00, 0x08, 0x42, 0x42, 0x1F, 0x00, 0x00, 0x00, 0x00, 0xF7,
+    ];
+
+    #[test]
+    fn an_ma5_patch_is_read_raw_rather_than_unpacked() {
+        let voice = parse_voice(MA5_FOUR_OPERATOR).expect("this is a voice message");
+
+        assert_eq!(voice.program, 0x7A);
+        assert_eq!(voice.bank, 2);
+
+        let VoiceKind::Fm(tone) = voice.kind else {
+            panic!("shape zero is a patch, not a recording");
+        };
+
+        // The global byte sits where MA-3's does once its leading byte is
+        // stepped over, and names algorithm three - so four operators.
+        assert_eq!(tone.algorithm, 3);
+        assert_eq!(tone.operator_count, OPERATORS);
+
+        // Read one byte to either side and these would be whatever happened to
+        // land there. Held against the bytes above: the message carries a
+        // carrier that opens and operators that are not all silent.
+        assert!(tone.operators.iter().any(|x| x.attack != 0));
+        assert!(tone.operators.iter().any(|x| x.level != 0));
+        assert!(tone.operators.iter().all(|x| x.level <= 63));
+        assert!(tone.operators.iter().all(|x| x.waveform < 32));
+    }
+
+    #[test]
+    fn an_ma5_patch_is_not_taken_for_a_recording() {
+        let mut bank = Bank::new();
+
+        assert!(bank.accept_sysex(MA5_FOUR_OPERATOR));
+        assert_eq!(bank.len(), 1);
+
+        // It is a patch, so it sounds as one and never reaches for a
+        // recording - even though the model byte is the one recordings use.
+        assert!(bank.sampled_for(0x7A).is_none());
+
+        let (tone, note) = bank.tone_for(0, 0x7A, 60);
+        assert_eq!(tone.operator_count, OPERATORS);
+        assert_eq!(note, 60);
+    }
+
+    #[test]
+    fn a_truncated_ma5_patch_is_refused() {
+        // Every length but the one is refused rather than read off the end.
+        for cut in [30, 35, 42] {
+            let mut short = MA5_FOUR_OPERATOR[..cut].to_vec();
+            *short.last_mut().unwrap() = 0xF7;
+
+            assert!(parse_voice(&short).is_none(), "a {cut} byte message is not a voice");
+        }
     }
 }
