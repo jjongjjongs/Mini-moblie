@@ -101,6 +101,48 @@ pub async fn java_throw(core: &mut ArmCore, jvm: &mut Jvm, ptr_error: KtfJvmWord
     JavaMethod::handle_exception(core, jvm, exception).await
 }
 
+/// Throws a throwable the title built itself.
+///
+/// The runtime hands AOT code two ways to throw, and they differ in what they
+/// are given. `java_throw` above takes the *name* of a class and makes the
+/// instance itself, which is how the runtime's own checks raise - a null
+/// dereference, an allocation that failed. This one takes an instance that is
+/// already on the heap, which is what a `throw` written in the title compiles
+/// to: allocate, run the constructor, throw the object.
+///
+/// Only the first had a function behind it, and the word for this one was left
+/// zero. 주타이쿤2 reads its save on the way up, has no record to read on a
+/// first run, and its `catch` raises the failure as an object of its own - so
+/// the game's thread jumped to that zero and died before a frame was drawn,
+/// with `Fatal error: jump native address is null` the only thing said about
+/// it. Nothing drained the event queue after that: the queue grew an entry per
+/// key press, the screen stayed black, and the emulator carried on as if the
+/// title were merely quiet.
+pub async fn java_throw_instance(core: &mut ArmCore, jvm: &mut Jvm, ptr_exception: KtfJvmWord, a1: u32) -> Result<JavaMethodResult> {
+    tracing::warn!("java_throw_instance({ptr_exception:#x}, {a1})");
+
+    // `throw null` is a null dereference, and the class the runtime names for
+    // one is the class it names everywhere else.
+    if ptr_exception == 0 {
+        return java_throw_class(core, jvm, "java/lang/NullPointerException").await;
+    }
+
+    let exception = JavaClassInstance::from_raw(ptr_exception, core);
+
+    JavaMethod::handle_exception(core, jvm, Box::new(exception)).await
+}
+
+/// Raises a fresh instance of `name`, the way `java_throw` does for a name the
+/// guest supplies.
+async fn java_throw_class(core: &mut ArmCore, jvm: &mut Jvm, name: &str) -> Result<JavaMethodResult> {
+    let exception = match jvm.new_class(name, "()V", ()).await {
+        Ok(x) => x,
+        Err(x) => return Err(JvmSupport::to_wie_err(jvm, x).await),
+    };
+
+    JavaMethod::handle_exception(core, jvm, exception).await
+}
+
 /// Turns a jump's result into what the supervisor-call return path wants.
 ///
 /// `entry_sp` is where the guest call was entered. A catch block whose frame was
