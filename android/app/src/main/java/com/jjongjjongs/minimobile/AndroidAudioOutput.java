@@ -67,7 +67,9 @@ final class AndroidAudioOutput {
         midiThread.scheduleAtFixedRate(this::pumpMidi, 0, 20, TimeUnit.MILLISECONDS);
         // The synthesiser's continuous output is pulled on its own AudioTrack-
         // clocked thread now, rather than pushed from the game loop, so it plays
-        // in real time and does not break up.
+        // in real time and does not break up. Size its chunk from this device's
+        // mixer burst before the thread starts.
+        MmfAudioPump.configure(context);
         MmfAudioPump.start();
     }
 

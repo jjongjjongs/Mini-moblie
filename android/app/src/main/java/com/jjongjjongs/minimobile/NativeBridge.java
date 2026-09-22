@@ -90,6 +90,12 @@ final class NativeBridge {
      */
     static native byte[] nativeRenderAudio(int frames);
 
+    /**
+     * Emits one audio-pump line into the native log sink, which is what a
+     * collected report contains - {@code android.util.Log} does not reach it.
+     */
+    static native void nativeAudioStats(String line);
+
     /** Returns a pending handset backlight mode, or zero when unchanged. */
     static native int nativePollBacklightMode();
 

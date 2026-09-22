@@ -1,5 +1,6 @@
 package com.jjongjjongs.minimobile;
 
+import android.content.Context;
 import android.media.AudioAttributes;
 import android.media.AudioFormat;
 import android.media.AudioManager;
@@ -27,21 +28,31 @@ final class MmfAudioPump {
     private static final int CHANNELS = 2;
     private static final int FRAME_BYTES = CHANNELS * 2;
     /**
-     * Frames asked for per pull (~6 ms).
+     * Frames asked for per pull, matched to the device's own mixer burst by
+     * {@link #configure(Context)}.
      *
-     * <p>The chunk bounds two separate waits, and both are what a sound
-     * started over music has to sit through. A note reaching the mixer part
-     * way through a chunk is not rendered until the next one begins, and the
-     * write that carries it overshoots {@link #LEAD_MS} by however much a
-     * chunk holds - so at twenty three milliseconds a chunk the queue ahead of
-     * it swung between sixty and eighty three, and the note itself could wait
-     * another twenty three to be picked up at all.
+     * <p>The chunk bounds two separate waits, and both are what a sound started
+     * over music has to sit through: a note reaching the mixer part way through
+     * a chunk is not rendered until the next one begins, and the write carrying
+     * it overshoots {@link #LEAD_MS} by however much a chunk holds.
      *
-     * <p>Shrinking it takes both down without touching the lead, which is the
-     * part that cannot be spent: four times the pulls a second, each a quarter
-     * of the work, for a queue that now sits between sixty and sixty six.
+     * <p>Picking a number outright is the wrong instrument for it. The track
+     * drains in whole HAL bursts and {@link AudioTrack#getPlaybackHeadPosition()}
+     * only moves when one is consumed, so a chunk that is not a burst leaves the
+     * queue reading below by a ragged remainder, and the lead gate above either
+     * holds a write it should have sent or sends one it should have held. That
+     * is jitter on every note rather than a fixed delay. Writing the device's
+     * own burst puts every write on a boundary the reading can actually see.
+     *
+     * <p>The burst the device reports is in frames at its native output rate, so
+     * it is scaled to {@link #RATE}, which is what this track runs at.
      */
-    private static final int CHUNK_FRAMES = 256;
+    private static final int DEFAULT_CHUNK_FRAMES = 256;
+    private static final int MIN_CHUNK_FRAMES = 96;
+    private static final int MAX_CHUNK_FRAMES = 2048;
+    /** Used until {@link #configure(Context)} reports the device's burst. */
+    private static volatile int chunkFrames = DEFAULT_CHUNK_FRAMES;
+
     /** Track buffer, matching the reference's ~120 ms with headroom. */
     private static final int TRACK_BUFFER_MS = 180;
     /** Buffer filled before playback starts, so the first writes cannot drain
@@ -69,11 +80,52 @@ final class MmfAudioPump {
      *  reads it falls back to the blocking write rather than to silence. */
     private static final int MAX_WAITS = 24;
 
+    /** Emitted once a second so the queue ahead of a note can be read off a
+     *  device log rather than reasoned about. */
+    private static final long STATS_PERIOD_NS = 1_000_000_000L;
+
     private static Thread thread;
     private static volatile boolean running;
     private static volatile boolean paused;
 
     private MmfAudioPump() {}
+
+    /**
+     * Takes the device's native output burst and sample rate and sizes the
+     * chunk from them. Safe to call more than once; falls back to
+     * {@link #DEFAULT_CHUNK_FRAMES} when the device reports nothing.
+     */
+    static void configure(Context context) {
+        int burst = 0;
+        int nativeRate = 0;
+        try {
+            AudioManager manager = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
+            if (manager != null) {
+                burst = parseProperty(manager.getProperty(AudioManager.PROPERTY_OUTPUT_FRAMES_PER_BUFFER));
+                nativeRate = parseProperty(manager.getProperty(AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE));
+            }
+        } catch (RuntimeException ignored) {
+        }
+        int chunk = DEFAULT_CHUNK_FRAMES;
+        if (burst > 0) {
+            long scaled = nativeRate > 0 ? (long) burst * RATE / nativeRate : burst;
+            chunk = (int) Math.max(MIN_CHUNK_FRAMES, Math.min(MAX_CHUNK_FRAMES, scaled));
+        }
+        chunkFrames = chunk;
+        report("[pump] device burst=" + burst + " @" + nativeRate + "Hz"
+                + " -> chunk=" + chunk + " frames (" + (chunk * 1000 / RATE) + "ms @" + RATE + "Hz)");
+    }
+
+    private static int parseProperty(String value) {
+        if (value == null) {
+            return 0;
+        }
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
 
     static synchronized void start() {
         paused = false;
@@ -114,6 +166,16 @@ final class MmfAudioPump {
         boolean playing = false;
         long framesWritten = 0;
         int waits = 0;
+        long statsStart = System.nanoTime();
+        int statPulls = 0;
+        int statWaits = 0;
+        int statForced = 0;
+        int statIdle = 0;
+        int statQueuedSamples = 0;
+        long statQueuedSum = 0;
+        long statQueuedMin = Long.MAX_VALUE;
+        long statQueuedMax = 0;
+        int lastUnderruns = 0;
         try {
             while (running) {
                 if (paused) {
@@ -132,10 +194,7 @@ final class MmfAudioPump {
                 // rendering more, so what is queued in front of a sound that
                 // starts now stays near LEAD_MS. Checked before the pull, so
                 // the synthesiser is not run ahead of playback either.
-                if (track != null && playing && waits < MAX_WAITS) {
-                    long head = track.getPlaybackHeadPosition() & 0xFFFFFFFFL;
-                    long queued = framesWritten - head;
-                    long lead = (long) RATE * LEAD_MS / 1000;
+                if (track != null && playing) {
                     // A head still at zero has not started moving - play() has
                     // been called but the track has yet to pick it up. Waiting
                     // on that reading holds off the writes while the prefill
@@ -146,23 +205,39 @@ final class MmfAudioPump {
                     // A count outside the track's own capacity is not a reading
                     // to act on. Either way this falls through to the blocking
                     // write.
-                    if (head > 0 && queued > lead && queued <= (long) RATE * TRACK_BUFFER_MS / 1000) {
+                    long head = track.getPlaybackHeadPosition() & 0xFFFFFFFFL;
+                    long queued = framesWritten - head;
+                    long lead = (long) RATE * LEAD_MS / 1000;
+                    long capacity = (long) RATE * TRACK_BUFFER_MS / 1000;
+                    if (waits < MAX_WAITS && head > 0 && queued > lead && queued <= capacity) {
                         waits++;
+                        statWaits++;
                         sleep(4);
                         continue;
                     }
+                    if (waits >= MAX_WAITS) {
+                        statForced++;
+                    }
+                    // The queue as it stands for the chunk about to be rendered:
+                    // exactly what a note starting now waits through.
+                    statQueuedSamples++;
+                    statQueuedSum += queued;
+                    statQueuedMin = Math.min(statQueuedMin, queued);
+                    statQueuedMax = Math.max(statQueuedMax, queued);
                 }
                 waits = 0;
 
+                int chunk = chunkFrames;
                 byte[] pcm;
                 try {
-                    pcm = NativeBridge.nativeRenderAudio(CHUNK_FRAMES);
+                    pcm = NativeBridge.nativeRenderAudio(chunk);
                 } catch (Throwable t) {
                     pcm = null;
                 }
 
                 if (pcm == null || pcm.length == 0) {
                     // Nothing is sounding; idle briefly and keep the track ready.
+                    statIdle++;
                     sleep(5);
                     continue;
                 }
@@ -199,6 +274,32 @@ final class MmfAudioPump {
                     continue;
                 }
                 framesWritten += pcm.length / FRAME_BYTES;
+                statPulls++;
+
+                long now = System.nanoTime();
+                if (now - statsStart >= STATS_PERIOD_NS) {
+                    int underruns = track.getUnderrunCount();
+                    long span = Math.max(1L, now - statsStart);
+                    report("[pump] " + (statPulls * 1_000_000_000L / span) + " pull/s"
+                            + " chunk=" + chunk + "f"
+                            + " queued=" + framesToMs(statQueuedSamples > 0 ? statQueuedMin : 0)
+                            + "/" + framesToMs(statQueuedSamples > 0 ? statQueuedSum / statQueuedSamples : 0)
+                            + "/" + framesToMs(statQueuedMax) + "ms"
+                            + " waits=" + statWaits
+                            + " forced=" + statForced
+                            + " idle=" + statIdle
+                            + " underruns=+" + (underruns - lastUnderruns));
+                    lastUnderruns = underruns;
+                    statsStart = now;
+                    statPulls = 0;
+                    statWaits = 0;
+                    statForced = 0;
+                    statIdle = 0;
+                    statQueuedSamples = 0;
+                    statQueuedSum = 0;
+                    statQueuedMin = Long.MAX_VALUE;
+                    statQueuedMax = 0;
+                }
 
                 if (!playing) {
                     prefillFrames += pcm.length / FRAME_BYTES;
@@ -249,8 +350,9 @@ final class MmfAudioPump {
                 track.release();
                 return null;
             }
-            Log.i(TAG, "opened " + RATE + "Hz stereo buffer=" + bufferBytes
-                    + " frames=" + track.getBufferSizeInFrames());
+            report("[pump] opened " + RATE + "Hz stereo buffer=" + bufferBytes
+                    + "B frames=" + track.getBufferSizeInFrames()
+                    + " chunk=" + chunkFrames + " lead=" + LEAD_MS + "ms");
             return track;
         } catch (RuntimeException e) {
             Log.e(TAG, "could not open AudioTrack", e);
@@ -267,6 +369,24 @@ final class MmfAudioPump {
         } catch (RuntimeException ignored) {
         }
         track.release();
+    }
+
+    /**
+     * Logs one line to both sinks. The native one is what a collected report
+     * holds; logcat is what is there when a device is attached.
+     */
+    private static void report(String line) {
+        Log.i(TAG, line);
+        try {
+            NativeBridge.nativeAudioStats(line);
+        } catch (Throwable ignored) {
+            // The library may not be loaded yet, and a stats line is never
+            // worth taking the pump down for.
+        }
+    }
+
+    private static long framesToMs(long frames) {
+        return frames * 1000 / RATE;
     }
 
     private static void sleep(long millis) {

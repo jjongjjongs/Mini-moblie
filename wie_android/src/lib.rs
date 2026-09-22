@@ -303,6 +303,26 @@ pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativ
     }
 }
 
+/// `nativeAudioStats(String line)`
+///
+/// Emits one line from the audio pump into the same `tracing` sink the rest of
+/// the emulator logs to. The pump runs entirely in Java, so what it knows -
+/// how deep the queue ahead of a note is, how often the track ran dry - reaches
+/// `android.util.Log` and nowhere else, and the log a report is collected from
+/// carries only this sink. Without this the one component whose timing the
+/// complaint is about is the one component invisible in the log.
+///
+/// # Safety
+/// Called by the JVM with valid `env` and `line` references.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativeAudioStats(mut env: JNIEnv, _class: JClass, line: JString) {
+    let Ok(line) = env.get_string(&line) else {
+        return;
+    };
+    let line: String = line.into();
+    tracing::info!("{line}");
+}
+
 /// `nativePollBacklightMode() -> int`
 ///
 /// Returns zero when there is no pending change. Non-zero values are handset
