@@ -26,8 +26,22 @@ final class MmfAudioPump {
     private static final int RATE = 44100;
     private static final int CHANNELS = 2;
     private static final int FRAME_BYTES = CHANNELS * 2;
-    /** Frames asked for per pull (~23 ms); small enough to stay responsive. */
-    private static final int CHUNK_FRAMES = 1024;
+    /**
+     * Frames asked for per pull (~6 ms).
+     *
+     * <p>The chunk bounds two separate waits, and both are what a sound
+     * started over music has to sit through. A note reaching the mixer part
+     * way through a chunk is not rendered until the next one begins, and the
+     * write that carries it overshoots {@link #LEAD_MS} by however much a
+     * chunk holds - so at twenty three milliseconds a chunk the queue ahead of
+     * it swung between sixty and eighty three, and the note itself could wait
+     * another twenty three to be picked up at all.
+     *
+     * <p>Shrinking it takes both down without touching the lead, which is the
+     * part that cannot be spent: four times the pulls a second, each a quarter
+     * of the work, for a queue that now sits between sixty and sixty six.
+     */
+    private static final int CHUNK_FRAMES = 256;
     /** Track buffer, matching the reference's ~120 ms with headroom. */
     private static final int TRACK_BUFFER_MS = 180;
     /** Buffer filled before playback starts, so the first writes cannot drain
@@ -43,10 +57,11 @@ final class MmfAudioPump {
      * effect arriving late over background music: the note was on time, the
      * audio in front of it was not.
      *
-     * <p>The track stays as big as it was, because that size is what absorbs a
-     * late render without breaking the stream. What changes is that this stops
-     * getting further ahead than it needs to be, so the backlog a new sound
-     * waits behind is this rather than the whole buffer.
+     * <p>This is also the whole of the margin. The track being large does not
+     * help on its own - capacity absorbs nothing while it is empty - so what
+     * stands between a late render and a break in the stream is exactly the
+     * audio already queued, which is this. Lowering it buys latency straight
+     * out of that margin, which is why the chunk came down instead.
      */
     private static final int LEAD_MS = 60;
     /** Consecutive waits before the lead is ignored and a write goes out
