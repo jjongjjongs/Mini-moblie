@@ -195,12 +195,51 @@ impl CardCanvas {
         let cards = jvm.get_field(&this, "cards", "Ljava/util/Vector;").await?;
         let length = jvm.invoke_virtual(&cards, "size", "()I", ()).await?;
 
-        for i in 0..length {
+        let first = Self::first_visible_card(jvm, &this, length, client_top).await?;
+
+        for i in first..length {
             let card: ClassInstanceRef<Card> = jvm.invoke_virtual(&cards, "elementAt", "(I)Ljava/lang/Object;", (i,)).await?;
             Self::paint_one(jvm, &graphics, &card, client_top, region).await?;
         }
 
         Ok(())
+    }
+
+    /// Where in the stack a pass has to start: the topmost card that leaves
+    /// nothing of the client area showing, or the bottom when none does.
+    ///
+    /// The stack is composited because a pushed card need not fill the panel -
+    /// a menu or a dialog is pushed over the scene it belongs to, and the scene
+    /// underneath has to keep drawing. A card that does fill it is a different
+    /// thing: nothing below it is on screen, and a title that has pushed one is
+    /// done with what it covered.
+    ///
+    /// 광란의 수족관 is where that matters. Its logo card loads its sprites,
+    /// shows them, and when its turn is over pushes the next card and lets the
+    /// sprites go. Painted again underneath that card - which this did, every
+    /// card in the stack, every pass - its `paint` reached into the array it had
+    /// just released and the run ended on a NullPointerException in
+    /// `GNCLogo.paint`, a full-screen card drawn over it and all.
+    async fn first_visible_card(jvm: &Jvm, this: &ClassInstanceRef<Self>, length: i32, client_top: i32) -> JvmResult<i32> {
+        let canvas_width: i32 = jvm.invoke_virtual(this, "getWidth", "()I", ()).await?;
+        let canvas_height: i32 = jvm.invoke_virtual(this, "getHeight", "()I", ()).await?;
+        let cards = jvm.get_field(this, "cards", "Ljava/util/Vector;").await?;
+
+        // From the top down, so the answer is the last card that covers it.
+        for i in (0..length).rev() {
+            let card: ClassInstanceRef<Card> = jvm.invoke_virtual(&cards, "elementAt", "(I)Ljava/lang/Object;", (i,)).await?;
+
+            let x: i32 = jvm.invoke_virtual(&card, "getX", "()I", ()).await?;
+            let y: i32 = jvm.invoke_virtual(&card, "getY", "()I", ()).await?;
+            let width: i32 = jvm.invoke_virtual(&card, "getWidth", "()I", ()).await?;
+            let height: i32 = jvm.invoke_virtual(&card, "getHeight", "()I", ()).await?;
+
+            if covers_client_area(x, y, width, height, canvas_width, canvas_height, client_top) {
+                return Ok(i);
+            }
+        }
+
+        Ok(0)
     }
 
     /// Takes the region `Canvas.repaint` collected, and leaves nothing pending.
@@ -539,5 +578,44 @@ impl CardCanvas {
         let _: () = jvm.invoke_virtual(&top_card, "notifyEvent", "(III)V", (r#type, param1, param2)).await?;
 
         Ok(())
+    }
+}
+
+/// Whether a card at `(x, y)` of `width` x `height` leaves nothing of the
+/// client area showing.
+///
+/// The card's origin is its own, `client_top` rows down the panel, so the area
+/// it has to cover is the panel less the rows a docked strip took.
+fn covers_client_area(x: i32, y: i32, width: i32, height: i32, canvas_width: i32, canvas_height: i32, client_top: i32) -> bool {
+    x <= 0 && y <= 0 && x + width >= canvas_width && y + height >= canvas_height - client_top
+}
+
+#[cfg(test)]
+mod covering_card_tests {
+    use super::covers_client_area;
+
+    /// A card the size of the panel covers it, and everything under it is off
+    /// screen. 광란의 수족관 pushes one of these over its logo card and then
+    /// lets the logo's sprites go.
+    #[test]
+    fn a_card_the_size_of_the_panel_covers_it() {
+        assert!(covers_client_area(0, 0, 240, 320, 240, 320, 0));
+    }
+
+    /// A dialog does not, and the scene it was pushed over keeps drawing.
+    #[test]
+    fn a_dialog_pushed_over_a_scene_does_not_cover_it() {
+        assert!(!covers_client_area(20, 60, 200, 120, 240, 320, 0));
+        assert!(!covers_client_area(0, 0, 240, 200, 240, 320, 0), "short of the bottom");
+        assert!(!covers_client_area(0, 0, 200, 320, 240, 320, 0), "short of the right");
+        assert!(!covers_client_area(0, 24, 240, 320, 240, 320, 0), "starts below the top");
+    }
+
+    /// With a strip docked, the client area is the panel less its rows, so a
+    /// card that fills what is left covers it.
+    #[test]
+    fn a_card_fills_what_a_docked_strip_leaves() {
+        assert!(covers_client_area(0, 0, 240, 296, 240, 320, 24));
+        assert!(!covers_client_area(0, 0, 240, 200, 240, 320, 24));
     }
 }
