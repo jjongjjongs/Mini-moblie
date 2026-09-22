@@ -548,18 +548,62 @@ pub async fn java_array_new(core: &mut ArmCore, jvm: &mut Jvm, element_type: u32
     Ok(raw)
 }
 
-pub async fn java_check_type(core: &mut ArmCore, jvm: &mut Jvm, ptr_class: u32, ptr_instance: u32, unk: u32) -> Result<u32> {
-    tracing::warn!("stub java_check_type({ptr_class:#x}, {ptr_instance:#x}, {unk:#x})");
+/// Whether `ptr_instance` is an instance of `ptr_class` - the answer a
+/// `checkcast` or an `instanceof` in the title's code is decided by.
+///
+/// The call takes two arguments and no more. The title reaches this through
+/// its own `checkcast` helper - 시네마타이쿤's is at `0x153ed8` - which loads
+/// the resolved class into `r0` and the object into `r1` and branches through
+/// the slot; `r2` is whatever the caller last left there. This read a third
+/// argument off it and answered **yes** whenever it was not zero, which is to
+/// say whenever a register happened to be dirty.
+///
+/// What that cost: 시네마타이쿤 asks three hundred times while drawing one
+/// screen, and every one of them arrived with `r2` holding 1. A cast that
+/// should have failed was taken, the title read fields off an object of
+/// another class, and the class word it got out was not a class - the module's
+/// own assignability walk followed it into unmapped memory and the run ended
+/// on "Invalid memory access" inside `com.mc.b.paint`.
+///
+/// Not every `ptr_class` is a class this can read, though, and that is what
+/// the dirty register was accidentally covering up. A KTF class names itself:
+/// its first word is its own address plus four, which is the same test
+/// `get_java_method` uses to tell a class from a vtable reference. Where that
+/// does not hold, what was passed is not something to answer from, and the
+/// answer stays the lenient yes this has always given - reading it as a class
+/// walks off into whatever the address happens to hold, which is how
+/// 광란의 수족관 and 시네마타이쿤 both died on their first screen when this
+/// asked without checking.
+///
+/// An array is answered yes as well. `is_instance` is asked about the element
+/// class rather than the array type, so an array cast to its own type comes
+/// back no; that is a separate question and answering it here would trade one
+/// bad cast for another.
+pub async fn java_check_type(core: &mut ArmCore, jvm: &mut Jvm, ptr_class: u32, ptr_instance: u32) -> Result<u32> {
+    /// What a KTF class holds in its first word: its own address plus four.
+    fn names_itself(core: &ArmCore, ptr_class: u32) -> bool {
+        matches!(read_generic::<u32, _>(core, ptr_class), Ok(first) if first == ptr_class + 4)
+    }
 
     let instance = JavaClassInstance::from_raw(ptr_instance, core);
 
-    // TODO is it correct?
-    if instance.class()?.name()?.starts_with('[') || unk != 0 {
+    if !names_itself(core, ptr_class) {
+        tracing::debug!("java_check_type({ptr_class:#x}, {ptr_instance:#x}) -> 1 (not a class record)");
+
+        return Ok(1);
+    }
+
+    if instance.class()?.name()?.starts_with('[') {
+        tracing::debug!("java_check_type({ptr_class:#x}, {ptr_instance:#x}) -> 1 (array)");
+
         return Ok(1);
     }
 
     let class = JavaClassDefinition::from_raw(ptr_class, core);
-    let result = jvm.is_instance(&instance, &class.name()?);
+    let class_name = class.name()?;
+    let result = jvm.is_instance(&instance, &class_name);
+
+    tracing::debug!("java_check_type({class_name}, {:?}) -> {result}", instance.class().and_then(|x| x.name()));
 
     Ok(if result { 1 } else { 0 })
 }
