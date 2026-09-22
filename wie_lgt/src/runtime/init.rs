@@ -3625,6 +3625,11 @@ fn array_component_class(array_classes: &ArrayClasses, array_class: u32) -> Resu
 /// An object holds its data block at +8 and an array's block starts with its
 /// length, so a handle that reads back a plausible length is almost certainly
 /// an array - which is all a diagnostic needs it to be.
+///
+/// Every step gives up rather than insists, the `+ 8` included: this runs while
+/// an error is already being described, and the handle it is handed is whatever
+/// the module had - `0xFFFFFFFF` among them. A diagnostic that panics loses the
+/// error it was called to report.
 fn array_length_at(core: &ArmCore, value: u32) -> Option<u32> {
     const MAX_PLAUSIBLE_LENGTH: u32 = 0x10_0000;
 
@@ -3632,7 +3637,7 @@ fn array_length_at(core: &ArmCore, value: u32) -> Option<u32> {
         return None;
     }
 
-    let data: u32 = read_generic(core, value + 8).ok()?;
+    let data: u32 = read_generic(core, value.checked_add(8)?).ok()?;
     if data < 0x1000 {
         return None;
     }
