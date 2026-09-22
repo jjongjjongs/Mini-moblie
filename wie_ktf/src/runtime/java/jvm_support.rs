@@ -12,7 +12,7 @@ mod value;
 mod vtable;
 
 use alloc::{boxed::Box, format, sync::Arc};
-use core::mem::size_of;
+use core::mem::{offset_of, size_of};
 use jvm_implementation::KtfJvmImplementation;
 
 use bytemuck::{Pod, Zeroable};
@@ -25,7 +25,7 @@ use wie_core_arm::{Allocator, ArmCore};
 use wie_jvm_support::JvmSupport;
 use wie_util::{Result, WieError, read_generic, write_generic};
 
-use wipi_types::ktf::InitParam2;
+use wipi_types::ktf::java::{JavaClass as RawJavaClass, JavaClassDescriptor as RawJavaClassDescriptor};
 
 use self::{
     array_class_instance::JavaArrayClassInstance,
@@ -76,17 +76,44 @@ pub(crate) const NATIVE_RETURN_VALUE_OFFSET: u32 = 0x28;
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct KtfJvmSupportContext {
-    ptr_vtables_base: u32,
+    /// The array of class records the JVM context is, which is what a vtable
+    /// index indexes. See [`KtfJvmSupport::get_vtable_index`].
+    ptr_class_records: u32,
     ptr_jvm_exception_context: u32,
-    /// The class each vtable in `ptr_vtables_base` belongs to, at the same
-    /// index. See [`KtfJvmSupport::class_by_vtable_word`].
+    /// The class each record in `ptr_class_records` stands for, one per
+    /// record. See [`KtfJvmSupport::class_by_vtable_word`].
     ptr_vtable_classes: u32,
 }
 
 const SUPPORT_CONTEXT_BASE: u32 = 0x7fff0000;
 
-/// How many vtables `InitParam2` carries.
+/// How many class records the JVM context carries.
 const VTABLE_COUNT: usize = 128;
+
+/// How far apart two vtable indices are, which is a class record in words.
+///
+/// The index an object carries is a word offset from the JVM context, and what
+/// it points at there is a whole class record - so one class takes as many
+/// indices as a record has words, and the indices a class can be given are the
+/// multiples of this. `[C`, `java/lang/String` and `java/lang/Class` at 0, 5
+/// and 10 are the first three records of that array, which is what says a
+/// record is five words long.
+const VTABLE_STRIDE: usize = size_of::<RawJavaClass>() / size_of::<u32>();
+
+/// Which record a vtable index names, if it names one at all.
+///
+/// An index that is not a whole number of records from the head of the array
+/// names no class: it falls inside one, which is what a word this runtime
+/// never wrote looks like.
+fn record_of_index(index: u32) -> Option<usize> {
+    let record = index as usize / VTABLE_STRIDE;
+
+    ((index as usize).is_multiple_of(VTABLE_STRIDE) && record < VTABLE_COUNT).then_some(record)
+}
+
+/// Where a class record keeps its vtable, which is the one word of it this
+/// runtime used to fill in.
+const VTABLE_OFFSET: u32 = offset_of!(RawJavaClass, ptr_vtable) as u32;
 
 /// The vtable slots a compiled image expects its own classes at. See
 /// [`KtfJvmSupport::reserve_vtable_index`].
@@ -110,14 +137,16 @@ impl KtfJvmSupport {
         jar_name: Option<&str>,
         binary_name: Option<&str>,
     ) -> Result<(Jvm, Box<dyn ClassInstance>)> {
-        let jvm_context = InitParam2 {
-            unk1: 0,
-            unk2: 0,
-            unk3: 0,
-            ptr_java_vtables: [0; 128],
-        };
-        let ptr_jvm_context = Allocator::alloc(core, size_of::<InitParam2>() as u32)?;
-        write_generic(core, ptr_jvm_context, jvm_context)?;
+        // The context is an array of class records, which is what the index an
+        // object carries reaches into. See [`KtfJvmSupport::get_vtable_index`].
+        let ptr_jvm_context = Allocator::alloc(core, (VTABLE_COUNT * size_of::<RawJavaClass>()) as u32)?;
+        for record in 0..VTABLE_COUNT {
+            write_generic(
+                core,
+                ptr_jvm_context + (record * size_of::<RawJavaClass>()) as u32,
+                RawJavaClass::zeroed(),
+            )?;
+        }
 
         let jvm_exception_context = KtfJvmExceptionContext {
             unk: [0; 8],
@@ -138,14 +167,14 @@ impl KtfJvmSupport {
         // threads are running, and with it the game.
         core.register_thread_local_word(ptr_jvm_exception_context + EXCEPTION_HANDLER_HEAD_OFFSET)?;
 
-        // As many as `InitParam2` holds vtables, which is what indexes this.
+        // One per class record, which is what indexes this.
         let ptr_vtable_classes = Allocator::alloc(core, (VTABLE_COUNT * size_of::<u32>()) as u32)?;
-        for index in 0..VTABLE_COUNT {
-            write_generic(core, ptr_vtable_classes + (index * size_of::<u32>()) as u32, 0u32)?;
+        for record in 0..VTABLE_COUNT {
+            write_generic(core, ptr_vtable_classes + (record * size_of::<u32>()) as u32, 0u32)?;
         }
 
         let context_data = KtfJvmSupportContext {
-            ptr_vtables_base: ptr_jvm_context + 12,
+            ptr_class_records: ptr_jvm_context,
             ptr_jvm_exception_context,
             ptr_vtable_classes,
         };
@@ -155,7 +184,7 @@ impl KtfJvmSupport {
         // take these, and an object already carrying an index cannot be told
         // that its class has moved.
         for (_, index) in BUILT_IN_VTABLES {
-            write_generic(core, context_data.ptr_vtables_base + (index * size_of::<u32>()) as u32, VTABLE_HELD)?;
+            write_generic(core, Self::class_record(&context_data, index as u32) + VTABLE_OFFSET, VTABLE_HELD)?;
         }
 
         // KTF's own vendor classes go alongside the shared WIPI-Java and MIDP
@@ -297,35 +326,90 @@ impl KtfJvmSupport {
         Ok(context_data.ptr_jvm_exception_context)
     }
 
+    /// Where the record a vtable index names sits.
+    ///
+    /// The index is a word offset from the JVM context, which is the head of
+    /// the array of records; see [`KtfJvmSupport::get_vtable_index`].
+    fn class_record(context_data: &KtfJvmSupportContext, index: u32) -> u32 {
+        context_data.ptr_class_records + index * size_of::<u32>() as u32
+    }
+
+    /// Makes `record` stand for `class` to the module.
+    ///
+    /// The module reads a class out of the JVM context whole - its vtable to
+    /// dispatch through, its descriptor to ask what package it is in and which
+    /// class it extends - so the record has to be a class record and not just
+    /// somewhere to keep a vtable pointer. What it cannot be is the class
+    /// itself: that record is wherever it already is, in the module's own
+    /// image or on the heap, and the index only reaches inside the context.
+    ///
+    /// So the record is given a descriptor of its own, a copy of the class's
+    /// with the class itself as its parent. A module walking up from the
+    /// record - 시네마타이쿤's `com/mc/b.paint` does, to settle whether
+    /// `lib/h` may touch a protected field of `game/i` - meets the real class
+    /// on its first step and the real hierarchy after it. Left as it was, a
+    /// vtable pointer with whatever the neighbouring records held around it,
+    /// that walk read `[descriptor]` out of another class's vtable count and
+    /// took the emulator down.
+    fn write_class_record(core: &mut ArmCore, record: u32, class: &JavaClassDefinition) -> Result<()> {
+        let raw: RawJavaClass = read_generic(core, class.ptr_raw)?;
+        let mut descriptor: RawJavaClassDescriptor = read_generic(core, raw.ptr_descriptor)?;
+        descriptor.ptr_parent_class = class.ptr_raw;
+
+        let ptr_descriptor = Allocator::alloc(core, size_of::<RawJavaClassDescriptor>() as u32)?;
+        write_generic(core, ptr_descriptor, descriptor)?;
+
+        write_generic(core, record, RawJavaClass { ptr_descriptor, ..raw })
+    }
+
+    /// The index the module is to carry for `class`, in an object's first
+    /// field shifted up by five.
+    ///
+    /// It is a word offset from the JVM context, and what it names there is a
+    /// whole class record - so the indices are the multiples of
+    /// [`VTABLE_STRIDE`], one per record.
     pub fn get_vtable_index(core: &mut ArmCore, class: &JavaClassDefinition) -> Result<u32> {
         // TODO remove context
         let context_data: KtfJvmSupportContext = read_generic(core, SUPPORT_CONTEXT_BASE)?;
 
-        let ptr_vtable = class.ptr_vtable()?;
-
-        // Every slot, not up to the first empty one: the slots the built-in
-        // classes are kept at leave holes behind them. See
-        // [`KtfJvmSupport::reserve_vtable_index`].
+        // Which class a record stands for, not which vtable it holds: an array
+        // class has no vtable of its own, so asked by vtable every one of them
+        // matched the first record still empty - and took an index whose
+        // record nothing had written. A module that reads the class out of
+        // such a record finds a descriptor of zero and goes on to read the
+        // element type at 0x14 of it, which is where `FtFinal.startApp` and
+        // `ED4.startApp` die the moment either makes an array.
         let mut free = None;
-        for index in 0..VTABLE_COUNT {
-            let current: u32 = read_generic(core, context_data.ptr_vtables_base + (index * size_of::<u32>()) as u32)?;
+        for record in 0..VTABLE_COUNT {
+            let index = (record * VTABLE_STRIDE) as u32;
+            let registered: u32 = read_generic(core, context_data.ptr_vtable_classes + (record * size_of::<u32>()) as u32)?;
 
-            if current == ptr_vtable {
-                return Ok(index as _);
+            if registered == class.ptr_raw {
+                return Ok(index);
             }
 
-            if current == 0 && free.is_none() {
-                free = Some(index);
+            if registered == 0 && free.is_none() {
+                // Not one a built-in class is being kept, which is held until
+                // the JVM is up enough to resolve it. See
+                // [`KtfJvmSupport::reserve_vtable_index`].
+                let held: u32 = read_generic(core, Self::class_record(&context_data, index) + VTABLE_OFFSET)?;
+                if held == 0 {
+                    free = Some(index);
+                }
             }
         }
 
         let Some(index) = free else {
             return Err(WieError::FatalError(format!("no room for a {} vtable", class.name()?)));
         };
-        write_generic(core, context_data.ptr_vtables_base + (index * size_of::<u32>()) as u32, ptr_vtable)?;
-        write_generic(core, context_data.ptr_vtable_classes + (index * size_of::<u32>()) as u32, class.ptr_raw)?;
+        Self::write_class_record(core, Self::class_record(&context_data, index), class)?;
+        write_generic(
+            core,
+            context_data.ptr_vtable_classes + (index as usize / VTABLE_STRIDE * size_of::<u32>()) as u32,
+            class.ptr_raw,
+        )?;
 
-        Ok(index as _)
+        Ok(index)
     }
 
     /// Keeps `name`'s vtable at `index`, where a module expects to find it.
@@ -350,23 +434,29 @@ impl KtfJvmSupport {
         let ptr_vtable = JavaClassDefinition::from_raw(ptr_class, core).ptr_vtable()?;
 
         let context_data: KtfJvmSupportContext = read_generic(core, SUPPORT_CONTEXT_BASE)?;
-        let slot = context_data.ptr_vtables_base + (index * size_of::<u32>()) as u32;
+        let record = Self::class_record(&context_data, index as u32);
 
-        let current: u32 = read_generic(core, slot)?;
+        let current: u32 = read_generic(core, record + VTABLE_OFFSET)?;
         if current != 0 && current != VTABLE_HELD && current != ptr_vtable {
             tracing::warn!("vtable {index} is taken, so {name} is not where a compiled image looks for it");
 
             return Ok(());
         }
 
+        Self::write_class_record(core, record, &JavaClassDefinition::from_raw(ptr_class, core))?;
+
         // An array class has no vtable of its own here - nothing dispatches
-        // through one - so the slot keeps its holder and only the class is
-        // written, which is what reads it back.
-        if ptr_vtable != 0 {
-            write_generic(core, slot, ptr_vtable)?;
+        // through one - so the record keeps its holder, which is what stops
+        // another class taking it.
+        if ptr_vtable == 0 {
+            write_generic(core, record + VTABLE_OFFSET, VTABLE_HELD)?;
         }
 
-        write_generic(core, context_data.ptr_vtable_classes + (index * size_of::<u32>()) as u32, ptr_class)?;
+        write_generic(
+            core,
+            context_data.ptr_vtable_classes + (index / VTABLE_STRIDE * size_of::<u32>()) as u32,
+            ptr_class,
+        )?;
 
         Ok(())
     }
@@ -377,17 +467,17 @@ impl KtfJvmSupport {
     /// see `JavaClassInstance::instantiate` - and that is all an object in a
     /// relocated module's own image carries: those have no room for the class
     /// pointer this runtime's own objects keep beside their fields, so the
-    /// index is the only way back to the class. Answers zero for an index
-    /// nothing was registered at.
+    /// index is the only way back to the class. The index names a record of
+    /// the JVM context, and the class it stands for is what this answers -
+    /// zero for an index no record was written at.
     pub fn class_by_vtable_word(core: &mut ArmCore, word: u32) -> Result<u32> {
-        let index = (word >> 5) / size_of::<u32>() as u32;
-        if index as usize >= VTABLE_COUNT {
+        let Some(record) = record_of_index((word >> 5) / size_of::<u32>() as u32) else {
             return Ok(0);
-        }
+        };
 
         let context_data: KtfJvmSupportContext = read_generic(core, SUPPORT_CONTEXT_BASE)?;
 
-        read_generic(core, context_data.ptr_vtable_classes + index * size_of::<u32>() as u32)
+        read_generic(core, context_data.ptr_vtable_classes + (record * size_of::<u32>()) as u32)
     }
 
     pub fn current_java_exception_handler(core: &mut ArmCore) -> Result<u32> {
@@ -418,7 +508,7 @@ mod test {
     use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
     use core::sync::atomic::{AtomicBool, Ordering};
 
-    use core::mem::size_of;
+    use core::mem::{offset_of, size_of};
 
     use jvm::{Jvm, runtime::JavaLangString};
     use wipi_types::ktf::java::{JavaExceptionHandler, JavaMethodDefinition, JavaMethodExceptionTableEntry};
@@ -781,5 +871,36 @@ mod test {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod vtable_index_tests {
+    use super::{BUILT_IN_VTABLES, VTABLE_COUNT, VTABLE_STRIDE, record_of_index};
+
+    #[test]
+    fn a_class_record_is_five_words() {
+        assert_eq!(VTABLE_STRIDE, 5);
+    }
+
+    #[test]
+    fn the_built_in_classes_are_the_first_records() {
+        let records = BUILT_IN_VTABLES.map(|(_, index)| record_of_index(index as _));
+
+        assert_eq!(records, [Some(0), Some(1), Some(2)]);
+    }
+
+    #[test]
+    fn an_index_that_falls_inside_a_record_names_no_class() {
+        assert_eq!(record_of_index(4), None);
+        assert_eq!(record_of_index(11), None);
+    }
+
+    #[test]
+    fn an_index_past_the_last_record_names_no_class() {
+        let last = (VTABLE_COUNT - 1) * VTABLE_STRIDE;
+
+        assert_eq!(record_of_index(last as _), Some(VTABLE_COUNT - 1));
+        assert_eq!(record_of_index((last + VTABLE_STRIDE) as _), None);
     }
 }

@@ -9,7 +9,7 @@ use core::mem::{offset_of, size_of};
 
 use java_runtime::classes::java::util::Vector;
 use jvm::{ClassInstanceRef, Jvm, runtime::JavaLangString};
-use wipi_types::ktf::{InitParam2, java::WIPIJBInterface};
+use wipi_types::ktf::java::{JavaClass as RawJavaClass, WIPIJBInterface};
 
 use wie_backend::YieldFuture;
 use wie_core_arm::{Allocator, ArmCore, EmulatedFunction, ResultWriter, RunFunctionResult, SvcId};
@@ -140,7 +140,7 @@ pub async fn get_java_method(core: &mut ArmCore, _: &mut (), ptr_class: u32, ptr
     // ptr_class can also be a JVM-context-relative vtable reference.
     let first_item: u32 = read_generic(core, ptr_class)?;
     let method = if first_item != ptr_class + 4 {
-        let ptr_vtable: u32 = read_generic(core, ptr_class + offset_of!(InitParam2, ptr_java_vtables) as u32)?;
+        let ptr_vtable: u32 = read_generic(core, ptr_class + offset_of!(RawJavaClass, ptr_vtable) as u32)?;
         let vtable = JavaVtable::from_raw(core, ptr_vtable);
         let method = vtable.find_method(&fullname.name, &fullname.descriptor)?;
 
