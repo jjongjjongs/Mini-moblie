@@ -1088,6 +1088,77 @@ pub(crate) extern "C" fn jit_alu_shift(val: u32, amount: u32, shift_type: u32, c
     (res as u64) | ((new_c as u64) << 32)
 }
 
+/// MUL / MLA, and the long forms UMULL / SMULL / UMLAL / SMLAL.
+///
+/// The whole word is handed over and decoded here, because what this has to
+/// reproduce is the interpreter's own arm - the two forms differ in their
+/// flags in a way that is easy to get subtly wrong. `Multiply` keeps V and
+/// clears C; `MulLong` clears both, takes Z from all sixty four bits and N
+/// from the top of the high word.
+///
+/// Compiled code reaches this instead of leaving the trace for one interpreted
+/// step. A 데빌메이크라이 capture put 99.9% of every JIT fallback on these
+/// two - 261,864 of 262,144 - because a title doing fixed point arithmetic
+/// multiplies constantly.
+///
+/// The decode refuses r15 in any field ([`arm_frontend::ArmOp::Multiply`]), so
+/// nothing here reads or writes the PC.
+///
+/// SAFETY: `ctx` points at a live `JitCtx` (guaranteed by `run`).
+pub(crate) unsafe extern "C" fn jit_arm_multiply(ctx: *mut JitCtx, inst: u32) {
+    use arm32_cpu::util::arm::build_flags;
+
+    let ctx = unsafe { &mut *ctx };
+    let reg = |r: u32| ctx.regs[(r & 15) as usize];
+    let bits = |off: u32, len: u32| (inst >> off) & ((1 << len) - 1);
+    let bit = |off: u32| (inst >> off) & 1;
+
+    let s = bit(20);
+    let rs = reg(bits(8, 4));
+    let rm = reg(bits(0, 4));
+
+    // Bit 23 separates the long forms from MUL/MLA.
+    if bit(23) == 0 {
+        let accumulate = bit(21);
+        let rd = bits(16, 4) as usize;
+        let rn = reg(bits(12, 4));
+
+        let res = rm.wrapping_mul(rs).wrapping_add(if accumulate == 0 { 0 } else { rn });
+        ctx.regs[rd] = res;
+
+        if s == 1 {
+            let v = (ctx.cpsr >> 28) & 1;
+            let flags = build_flags(v, 0, (res == 0) as u32, res >> 31);
+            ctx.cpsr = (ctx.cpsr & !(0xf << 28)) | (flags << 28);
+        }
+
+        return;
+    }
+
+    let unsigned = bit(22);
+    let accumulate = bit(21);
+    let rdhi = bits(16, 4) as usize;
+    let rdlo = bits(12, 4) as usize;
+    let carried = (u64::from(ctx.regs[rdhi]) << 32) | u64::from(ctx.regs[rdlo]);
+
+    let res: u64 = if unsigned == 0 {
+        let prod = u64::from(rs) * u64::from(rm);
+        prod.wrapping_add(if accumulate == 0 { 0 } else { carried })
+    } else {
+        let prod = i64::from(rs as i32) * i64::from(rm as i32);
+        prod.wrapping_add(if accumulate == 0 { 0 } else { carried as i64 }) as u64
+    };
+
+    let hi = (res >> 32) as u32;
+    ctx.regs[rdhi] = hi;
+    ctx.regs[rdlo] = res as u32;
+
+    if s == 1 {
+        let flags = build_flags(0, 0, (res == 0) as u32, hi >> 31);
+        ctx.cpsr = (ctx.cpsr & !(0xf << 28)) | (flags << 28);
+    }
+}
+
 /// SAFETY: `ctx` points at a live `JitCtx` whose `mem`/`code_pages` are valid for
 /// the duration of the call (guaranteed by `run`).
 pub(crate) unsafe extern "C" fn jit_load8(ctx: *mut JitCtx, addr: u32) -> u32 {
@@ -1957,6 +2028,141 @@ mod tests {
             regs[13] = DATA + 0x8000;
             let end = CODE + (OPS as u32) * 2;
             assert_same(&code, &regs, end);
+        }
+    }
+
+    /// MUL and MLA against the interpreter, with and without the S bit.
+    ///
+    /// The JIT used to decline every multiply: 데빌메이크라이 put 99.9% of all
+    /// its fallbacks on them. Compiling them has to leave the arithmetic and
+    /// the flags exactly where the interpreter left them, which is the whole
+    /// point of these.
+    #[test]
+    fn jit_arm_multiply_matches_the_interpreter() {
+        let code = arm(&[
+            0xe0000291, // mul   r0, r1, r2
+            0xe0100291, // muls  r0, r1, r2
+            0xe0203291, // mla   r0, r1, r2, r3
+            0xe0303291, // mlas  r0, r1, r2, r3
+        ]);
+        let mut regs = [0u32; 15];
+        regs[1] = 0xdead_beef;
+        regs[2] = 0x0001_2345;
+        regs[3] = 0x7fff_ffff;
+        regs[13] = DATA + 0x8000;
+        assert_same_arm(&code, &regs, CODE + 16);
+    }
+
+    /// The S bit on MUL keeps V and clears C, where the long forms clear both.
+    /// A run that starts with every flag set is what tells the two apart.
+    #[test]
+    fn jit_arm_multiply_flags_match_from_all_flags_set() {
+        let code = arm(&[
+            0xe3a00000, // mov  r0, #0
+            0xe3500000, // cmp  r0, #0        (sets Z, and C)
+            0xe0100291, // muls r0, r1, r2    -> result zero: Z set, C cleared, V kept
+            0xe2a04000, // adc  r4, r0, #0    (reads C back out)
+        ]);
+        let mut regs = [0u32; 15];
+        regs[1] = 0x8000_0000;
+        regs[2] = 0x0000_0000;
+        regs[13] = DATA + 0x8000;
+        assert_same_arm(&code, &regs, CODE + 16);
+    }
+
+    /// The four long forms, signed and unsigned, accumulating and not.
+    #[test]
+    fn jit_arm_multiply_long_matches_the_interpreter() {
+        let code = arm(&[
+            0xe0810392, // umull r0, r1, r2, r3
+            0xe0910392, // umulls r0, r1, r2, r3
+            0xe0c10392, // smull r0, r1, r2, r3
+            0xe0d10392, // smulls r0, r1, r2, r3
+        ]);
+        let mut regs = [0u32; 15];
+        regs[2] = 0xffff_fffe; // -2 signed, huge unsigned: the two differ
+        regs[3] = 0x0000_0003;
+        regs[13] = DATA + 0x8000;
+        assert_same_arm(&code, &regs, CODE + 16);
+    }
+
+    /// The accumulating long forms read the destination pair back in, so what
+    /// they carry matters as much as what they multiply.
+    #[test]
+    fn jit_arm_multiply_long_accumulate_matches_the_interpreter() {
+        let code = arm(&[
+            0xe0a10392, // umlal r0, r1, r2, r3
+            0xe0b10392, // umlals r0, r1, r2, r3
+            0xe0e10392, // smlal r0, r1, r2, r3
+            0xe0f10392, // smlals r0, r1, r2, r3
+        ]);
+        let mut regs = [0u32; 15];
+        regs[0] = 0xffff_ffff; // the low half carries, so the add crosses words
+        regs[1] = 0x0000_0001;
+        regs[2] = 0x8000_0000;
+        regs[3] = 0x0000_0002;
+        regs[13] = DATA + 0x8000;
+        assert_same_arm(&code, &regs, CODE + 16);
+    }
+
+    /// A multiply whose condition fails writes nothing - not the destination,
+    /// not the flags.
+    #[test]
+    fn jit_arm_multiply_respects_its_condition() {
+        let code = arm(&[
+            0xe3a00001, // mov   r0, #1
+            0xe3500000, // cmp   r0, #0     -> NE
+            0x00100291, // muleq r0, r1, r2 (not taken)
+            0x10100291, // mulne r0, r1, r2 (taken)
+        ]);
+        let mut regs = [0u32; 15];
+        regs[1] = 0x0000_1234;
+        regs[2] = 0x0000_0010;
+        regs[13] = DATA + 0x8000;
+        assert_same_arm(&code, &regs, CODE + 16);
+    }
+
+    /// A multiply naming r15 is left to the interpreter rather than compiled,
+    /// and the two must still agree on what it did.
+    #[test]
+    fn jit_arm_multiply_naming_pc_matches_the_interpreter() {
+        let code = arm(&[
+            0xe000029f, // mul r0, pc, r2   (rm == 15)
+            0xe1a00000, // nop
+        ]);
+        let mut regs = [0u32; 15];
+        regs[2] = 0x0000_0003;
+        regs[13] = DATA + 0x8000;
+        assert_same_arm(&code, &regs, CODE + 8);
+    }
+
+    /// The point of all this: a multiply is compiled rather than handed back.
+    /// The frontend answering `Some` is what stops the trace exiting for one
+    /// interpreted step, which is where the fallbacks were going.
+    #[test]
+    fn jit_arm_multiply_is_compiled_not_declined() {
+        use super::arm_frontend::decode_arm;
+
+        for inst in [
+            0xe0000291u32, // mul
+            0xe0100291,    // muls
+            0xe0203291,    // mla
+            0xe0810392,    // umull
+            0xe0d10392,    // smulls
+            0xe0a10392,    // umlal
+            0xe0f10392,    // smlals
+        ] {
+            assert!(decode_arm(inst, CODE).is_some(), "{inst:#010x} was declined");
+        }
+
+        // Still declined: r15 anywhere, and the unconditional space.
+        for inst in [
+            0xe000029fu32, // mul r0, pc, r2
+            0xe081039fu32, // umull with rm == 15
+            0xe08f0392u32, // umull with rdhi == 15
+            0xf0000291u32, // cond 0xf is not a multiply
+        ] {
+            assert!(decode_arm(inst, CODE).is_none(), "{inst:#010x} should be left alone");
         }
     }
 }

@@ -27,7 +27,10 @@ use dynasmrt::{AssemblyOffset, DynamicLabel, DynasmApi, DynasmLabelApi, Executab
 use crate::engine::fast::{FastOp, ends_trace};
 
 use super::arm_frontend::{ArmOp, Off, Op2, arm_ends_trace};
-use super::{JitCtx, exit, jit_alu_shift, jit_arm_shift, jit_cond_met, jit_load8, jit_load16, jit_load32, jit_store8, jit_store16, jit_store32};
+use super::{
+    JitCtx, exit, jit_alu_shift, jit_arm_multiply, jit_arm_shift, jit_cond_met, jit_load8, jit_load16, jit_load32, jit_store8, jit_store16,
+    jit_store32,
+};
 
 /// `dynasm!` selects the target architecture per invocation, defaulting to x64;
 /// this wrapper prepends `.arch aarch64` so every code-emitting helper assembles
@@ -395,6 +398,23 @@ fn emit_arm(a: &mut Asm, op: &ArmOp, pc: u32) {
             if !matches!(opcode, 0x8..=0xB) {
                 a64!(a ; str w8, [x19, #ro(rd)]);
             }
+            if guarded {
+                a64!(a ; skip:);
+            }
+        }
+        ArmOp::Multiply { cond, inst, .. } => {
+            // The helper is the interpreter's own arm and does the whole
+            // instruction - registers and flags - so this only has to hand it
+            // the context and the word.
+            let guarded = emit_arm_guard(a, cond);
+            let lo = (inst & 0xffff) as u32;
+            let hi = (inst >> 16) as u32;
+            a64!(a
+                ; mov x0, x19
+                ; movz w1, #lo
+                ; movk w1, #hi, lsl #16
+            );
+            emit_call(a, jit_arm_multiply as *const () as u64);
             if guarded {
                 a64!(a ; skip:);
             }

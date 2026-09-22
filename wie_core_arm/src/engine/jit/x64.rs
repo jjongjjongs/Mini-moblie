@@ -15,7 +15,10 @@ use dynasmrt::{AssemblyOffset, DynamicLabel, DynasmApi, DynasmLabelApi, Executab
 use crate::engine::fast::{FastOp, ends_trace};
 
 use super::arm_frontend::{ArmOp, Off, Op2, arm_ends_trace};
-use super::{JitCtx, exit, jit_alu_shift, jit_arm_shift, jit_cond_met, jit_load8, jit_load16, jit_load32, jit_store8, jit_store16, jit_store32};
+use super::{
+    JitCtx, exit, jit_alu_shift, jit_arm_multiply, jit_arm_shift, jit_cond_met, jit_load8, jit_load16, jit_load32, jit_store8, jit_store16,
+    jit_store32,
+};
 
 /// A compiled block owning its executable buffer (stable pointers; a flush drops
 /// it) plus the entry offset.
@@ -420,6 +423,21 @@ fn emit_arm(a: &mut Asm, op: &ArmOp, pc: u32) {
             if !matches!(opcode, 0x8..=0xB) {
                 dynasm!(a ; mov [rbx + ro(rd)], r8d);
             }
+            if guarded {
+                dynasm!(a ; skip:);
+            }
+        }
+        ArmOp::Multiply { cond, inst, .. } => {
+            // The helper is the interpreter's own arm and does the whole
+            // instruction - registers and flags - so this only has to hand it
+            // the context and the word.
+            let guarded = emit_arm_guard(a, cond);
+            dynasm!(a
+                ; mov rdi, rbx
+                ; mov esi, inst as i32
+                ; mov rax, QWORD jit_arm_multiply as *const () as i64
+                ; call rax
+            );
             if guarded {
                 dynasm!(a ; skip:);
             }

@@ -75,6 +75,16 @@ pub(crate) enum ArmOp {
     },
     /// BX register: interworking branch.
     BranchEx { cond: u8, rm: u8 },
+    /// MUL / MLA, and the long forms UMULL / SMULL / UMLAL / SMLAL - one
+    /// variant, because the helper that runs them tells the two apart by bit
+    /// 23 exactly as the interpreter does.
+    ///
+    /// The whole word is carried rather than its fields, since that helper is
+    /// the interpreter's own arm and decodes the word itself - see
+    /// [`super::jit_arm_multiply`]. Neither form is compiled when any of its
+    /// register fields is r15, so the helper never reads or writes a PC the
+    /// compiled block is holding elsewhere.
+    Multiply { cond: u8, inst: u32 },
 }
 
 /// Data-processing operand 2.
@@ -101,8 +111,20 @@ pub(crate) fn arm_ends_trace(op: &ArmOp) -> bool {
         ArmOp::Branch { .. } | ArmOp::BranchEx { .. } => true,
         ArmOp::DataProc { rd, .. } => *rd == 15,
         ArmOp::Block { load: true, reglist, .. } => reglist & (1 << 15) != 0,
+        // A multiply naming r15 anywhere is refused at decode, so a compiled
+        // one never touches the PC.
         _ => false,
     }
+}
+
+/// Whether any of a multiply's four register fields is r15.
+///
+/// The architecture leaves such an encoding unpredictable and no title uses
+/// one, so rather than decide what a PC read or write should mean inside a
+/// compiled block, these are left to the interpreter - the same answer the
+/// data-processing decode gives a PC operand.
+fn multiply_touches_pc(inst: u32) -> bool {
+    [0, 8, 12, 16].into_iter().any(|off| bits(inst, off, 4) == 15)
 }
 
 #[inline]
@@ -172,11 +194,19 @@ pub(crate) fn decode_arm(inst: u32, pc: u32) -> Option<ArmOp> {
         }
         return decode_data_proc(inst, pc);
     }
+    // MUL / MLA, then the long forms. `cond == 0xf` is the unconditional
+    // extension space rather than a multiply, and is left alone.
     if m(0x0fc0_00f0, 0x0000_0090) {
-        return None; // Multiply
+        if cond == 0xf || multiply_touches_pc(inst) {
+            return None;
+        }
+        return Some(ArmOp::Multiply { cond, inst });
     }
     if m(0x0f80_00f0, 0x0080_0090) {
-        return None; // MulLong
+        if cond == 0xf || multiply_touches_pc(inst) {
+            return None;
+        }
+        return Some(ArmOp::Multiply { cond, inst });
     }
     // Single data transfer (immediate or scaled-register offset).
     if m(0x0e00_0000, 0x0400_0000) || m(0x0e00_0010, 0x0600_0000) {
