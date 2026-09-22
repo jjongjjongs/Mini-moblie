@@ -33,7 +33,26 @@ final class MmfAudioPump {
     /** Buffer filled before playback starts, so the first writes cannot drain
      *  the track before the pace settles. Below the buffer so a stopped track
      *  never blocks a write forever. */
-    private static final int PREFILL_MS = 90;
+    private static final int PREFILL_MS = 60;
+    /**
+     * How far ahead of the playback head this will render.
+     *
+     * <p>A blocking write on its own fills the track to the brim, so while
+     * music plays the queue sits near {@link #TRACK_BUFFER_MS} and a sound
+     * started now is mixed into the next chunk - behind all of it. That is the
+     * effect arriving late over background music: the note was on time, the
+     * audio in front of it was not.
+     *
+     * <p>The track stays as big as it was, because that size is what absorbs a
+     * late render without breaking the stream. What changes is that this stops
+     * getting further ahead than it needs to be, so the backlog a new sound
+     * waits behind is this rather than the whole buffer.
+     */
+    private static final int LEAD_MS = 60;
+    /** Consecutive waits before the lead is ignored and a write goes out
+     *  anyway, so a device whose playback head does not advance the way this
+     *  reads it falls back to the blocking write rather than to silence. */
+    private static final int MAX_WAITS = 24;
 
     private static Thread thread;
     private static volatile boolean running;
@@ -78,6 +97,8 @@ final class MmfAudioPump {
         AudioTrack track = null;
         int prefillFrames = 0;
         boolean playing = false;
+        long framesWritten = 0;
+        int waits = 0;
         try {
             while (running) {
                 if (paused) {
@@ -91,6 +112,23 @@ final class MmfAudioPump {
                     sleep(20);
                     continue;
                 }
+
+                // Far enough ahead already? Then let the track drain before
+                // rendering more, so what is queued in front of a sound that
+                // starts now stays near LEAD_MS. Checked before the pull, so
+                // the synthesiser is not run ahead of playback either.
+                if (track != null && playing && waits < MAX_WAITS) {
+                    long queued = framesWritten - (track.getPlaybackHeadPosition() & 0xFFFFFFFFL);
+                    long lead = (long) RATE * LEAD_MS / 1000;
+                    // A reading outside the track's own capacity is not one to
+                    // act on; fall through to the blocking write instead.
+                    if (queued > lead && queued <= (long) RATE * TRACK_BUFFER_MS / 1000) {
+                        waits++;
+                        sleep(4);
+                        continue;
+                    }
+                }
+                waits = 0;
 
                 byte[] pcm;
                 try {
@@ -108,6 +146,7 @@ final class MmfAudioPump {
                 if (track == null) {
                     track = openTrack();
                     prefillFrames = 0;
+                    framesWritten = 0;
                     playing = false;
                     if (track == null) {
                         sleep(20);
@@ -132,8 +171,10 @@ final class MmfAudioPump {
                     closeTrack(track);
                     track = null;
                     playing = false;
+                    framesWritten = 0;
                     continue;
                 }
+                framesWritten += pcm.length / FRAME_BYTES;
 
                 if (!playing) {
                     prefillFrames += pcm.length / FRAME_BYTES;
