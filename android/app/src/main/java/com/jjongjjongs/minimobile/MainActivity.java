@@ -58,6 +58,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
@@ -86,16 +87,24 @@ public final class MainActivity extends Activity {
 
     /**
      * How long a single tick may run, and the delay scheduled after it finishes.
-     * A CPU-bound title runs the whole budget every tick, so the run/idle ratio
-     * is {@code BUDGET / (BUDGET + INTERVAL)}: the old 20/16 starved the emulator
-     * to 56% of real time and, because MIPS is measured over the wall clock, made
-     * a title that the JIT can drive at ~70 MIPS look like ~40 and feel slow. A
-     * short interval lifts the duty cycle to ~83% without pegging a menu: the
-     * native tick now returns the instant the emulator reports idle (every task
-     * asleep), so the interval becomes a real sleep whenever there is no work.
+     *
+     * <p>The delay used to be the same whatever the tick did, so a CPU-bound
+     * title paid it every time and the run/idle ratio was
+     * {@code BUDGET / (BUDGET + INTERVAL)}: 20/16 starved the emulator to 56% of
+     * real time, and 20/4 still gave away a sixth of it. The delay is there for
+     * an idle title - the native tick returns the instant the emulator reports
+     * every task asleep, and without a delay a menu would spin the thread - so
+     * it is only owed when the tick actually went idle.
+     *
+     * <p>So the loop now asks how the tick went. One that used its whole budget
+     * had work left and is re-armed at once ({@link #BUSY_INTERVAL_MS}); one
+     * that came back early had nothing to do and sleeps
+     * {@link #TICK_INTERVAL_MS}. A title that needs the CPU gets all of it, and
+     * a menu still costs the same handful of wakeups a second it did before.
      */
     private static final int TICK_BUDGET_MS = 20;
     private static final int TICK_INTERVAL_MS = 4;
+    private static final int BUSY_INTERVAL_MS = 0;
 
     /** Audio commands drained per tick, so a backlog cannot stall the loop. */
     private static final int MAX_AUDIO_PER_TICK = 32;
@@ -323,6 +332,13 @@ public final class MainActivity extends Activity {
      */
     private volatile long tickStartedAt;
 
+    /**
+     * How long the last {@link NativeBridge#nativeTick} call took, in
+     * milliseconds, and 0 for a step that did not tick at all. The loop reads it
+     * to decide whether the emulator still had work when its budget ran out.
+     */
+    private long lastTickRanMs;
+
     /** Whether the player is currently saying the game has stopped answering. */
     private boolean wedgeReported;
 
@@ -412,7 +428,7 @@ public final class MainActivity extends Activity {
 
         showLibrary();
 
-        emulatorThread.scheduleWithFixedDelay(this::emulatorStep, 0, TICK_INTERVAL_MS, TimeUnit.MILLISECONDS);
+        scheduleEmulatorStep(0);
     }
 
     @Override
@@ -2612,10 +2628,45 @@ public final class MainActivity extends Activity {
     }
 
     /**
+     * Runs one step and re-arms itself at the interval that step earned.
+     *
+     * <p>This replaces a fixed-delay schedule, which charged an idle title and a
+     * busy one the same pause - see {@link #TICK_BUDGET_MS}. Re-arming happens
+     * in a {@code finally} so a step that throws does not silently cancel the
+     * loop and leave the game frozen, which is what a periodic schedule does.
+     *
+     * <p>The budget is compared with a millisecond of slack because the clock
+     * this is measured on counts in whole milliseconds, and the native side
+     * starts its own deadline a moment after the reading here: a tick that ran
+     * the whole budget can come back measuring one less, and charging it the
+     * idle delay would give back most of what this is for.
+     */
+    private void emulatorLoop() {
+        try {
+            emulatorStep();
+        } finally {
+            boolean busy = lastTickRanMs + 1 >= TICK_BUDGET_MS;
+            scheduleEmulatorStep(busy ? BUSY_INTERVAL_MS : TICK_INTERVAL_MS);
+        }
+    }
+
+    /** Queues the next step, unless the player is closing and the thread is gone. */
+    private void scheduleEmulatorStep(long delayMs) {
+        try {
+            emulatorThread.schedule(this::emulatorLoop, delayMs, TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException closing) {
+            // `shutdownNow` has run; there is nothing left to step.
+        }
+    }
+
+    /**
      * One scheduled step: advance the emulator, drain audio, publish a frame.
      * Runs on the emulator thread.
      */
     private void emulatorStep() {
+        // Nothing ran, so the step that re-arms this one owes the idle delay.
+        lastTickRanMs = 0;
+
         if (!running || !playerVisible || !foreground || paused) {
             return;
         }
@@ -2623,6 +2674,7 @@ public final class MainActivity extends Activity {
         PerformanceTuner.beforeNativeTick();
         tickStartedAt = SystemClock.elapsedRealtime();
         String status = NativeBridge.nativeTick(TICK_BUDGET_MS);
+        lastTickRanMs = SystemClock.elapsedRealtime() - tickStartedAt;
         tickStartedAt = 0;
         PerformanceTuner.afterNativeTick();
 

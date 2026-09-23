@@ -346,7 +346,7 @@ fn emit_arm_guard(a: &mut Asm, cond: u8) -> bool {
         }
         None if cond >= 0xe => false,
         None => {
-            a64!(a ; movz w0, #(cond as u32) ; ldr w1, [x19, #CPSR]);
+            a64!(a ; movz w0, #cond as u32 ; ldr w1, [x19, #CPSR]);
             emit_call(a, jit_cond_met as *const () as u64);
             a64!(a ; cbz w0, >skip);
             true
@@ -359,7 +359,7 @@ fn emit_arm_op2(a: &mut Asm, op2: Op2) {
     match op2 {
         Op2::Imm { val, carry } => {
             mov_imm32!(a, w10, val);
-            a64!(a ; movz w11, #(carry & 0xffff));
+            a64!(a ; movz w11, #carry & 0xffff);
         }
         Op2::ShiftImm { rm, ty, amount } => emit_arm_shift_call(a, rm, ty, amount as u32, false, None),
         Op2::ShiftReg { rm, ty, rs } => emit_arm_shift_call(a, rm, ty, 0, true, Some(rs)),
@@ -367,14 +367,14 @@ fn emit_arm_op2(a: &mut Asm, op2: Op2) {
 }
 
 fn emit_arm_shift_call(a: &mut Asm, rm: u8, ty: u8, amount_imm: u32, reg_shift: bool, rs: Option<u8>) {
-    a64!(a ; ldr w0, [x19, #ro(rm)] ; movz w1, #(ty as u32));
+    a64!(a ; ldr w0, [x19, #ro(rm)] ; movz w1, #ty as u32);
     if let Some(rs) = rs {
         a64!(a ; ldr w2, [x19, #ro(rs)] ; and w2, w2, #0xff);
     } else {
         a64!(a ; movz w2, #amount_imm);
     }
     a64!(a
-        ; movz w3, #(reg_shift as u32)
+        ; movz w3, #reg_shift as u32
         ; ldr w4, [x19, #CPSR]
         ; ubfx w4, w4, #29, #1
     );
@@ -658,9 +658,9 @@ fn emit_arm_block_body(a: &mut Asm, op: &ArmOp, pc: u32) {
         let delta = if up { total * 4 } else { -total * 4 };
         a64!(a ; ldr w0, [x19, #SCRATCH]);
         if delta >= 0 {
-            a64!(a ; add w0, w0, #(delta as u32));
+            a64!(a ; add w0, w0, #delta as u32);
         } else {
-            a64!(a ; sub w0, w0, #((-delta) as u32));
+            a64!(a ; sub w0, w0, #(-delta) as u32);
         }
         a64!(a ; str w0, [x19, #ro(rn)]);
     }
@@ -670,9 +670,9 @@ fn emit_arm_block_body(a: &mut Asm, op: &ArmOp, pc: u32) {
         let off = addr_base + (i as i32 + pre_incr) * 4;
         a64!(a ; mov x0, x19 ; ldr w1, [x19, #SCRATCH]);
         if off >= 0 {
-            a64!(a ; add w1, w1, #(off as u32));
+            a64!(a ; add w1, w1, #off as u32);
         } else {
-            a64!(a ; sub w1, w1, #((-off) as u32));
+            a64!(a ; sub w1, w1, #(-off) as u32);
         }
         if load {
             emit_call(a, jit_load32 as *const () as u64);
