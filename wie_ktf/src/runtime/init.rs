@@ -22,7 +22,7 @@ use crate::{
         java::{
             interface::{
                 get_java_method, get_wipi_jb_interface, java_array_new, java_check_type, java_class_load, java_new, java_throw, java_throw_instance,
-                map_jump_result,
+                jb_monitor_enter, jb_monitor_exit, map_jump_result,
             },
             jvm_support::{JavaMethodResult, JavaVtable, KtfJvmSupport},
         },
@@ -653,6 +653,25 @@ pub(crate) fn module_unwound_arguments(core: &mut ArmCore, context_base: u32, ta
 const MODULE_INVOKE: u32 = 0;
 const MODULE_INVOKE_NATIVE: u32 = 1;
 
+/// The jump table's third and fourth entries: the two ends of a `synchronized`
+/// block, with the object to lock in `r0`.
+///
+/// Both are reached through a pair of stubs - one that takes the reference
+/// already resolved and one that resolves a constant-pool index first, for a
+/// `synchronized` on a class rather than an instance - and both hand on the
+/// resolved pointer. 대박돈까스 died on the first of them before it had drawn
+/// anything: its `startApp` takes a lock around the screen it is setting, and
+/// the module's own compiled shape says what the pair is. `0x10556e` pushes a
+/// `try` handler, `0x105574` jumps slot 2 with the object, the field stores
+/// follow, and `0x10560e` jumps slot 3 with the same object - a handler that
+/// releases the lock on the way out is what a `synchronized` block compiles to,
+/// and nothing else needs one.
+///
+/// Neither answer is read: the module's own code carries on with the object it
+/// already had.
+const MODULE_MONITOR_ENTER: u32 = 2;
+const MODULE_MONITOR_EXIT: u32 = 3;
+
 /// The jump table's fifth entry, which a compiled method calls from inside a
 /// loop with whatever its registers happen to hold and whose answer it never
 /// reads - a place for the runtime to do something, and there is nothing this
@@ -824,6 +843,8 @@ async fn handle_module_jump_svc(core: &mut ArmCore, jvm: &mut Jvm, id: SvcId) ->
     match id.0 {
         MODULE_INVOKE => return module_invoke(core, jvm, false).await?.write(core, lr),
         MODULE_INVOKE_NATIVE => return module_invoke(core, jvm, true).await?.write(core, lr),
+        MODULE_MONITOR_ENTER => return jb_monitor_enter(core, jvm, core.read_param(0)?).await?.write(core, lr),
+        MODULE_MONITOR_EXIT => return jb_monitor_exit(core, jvm, core.read_param(0)?).await?.write(core, lr),
         MODULE_POLL => return 0u32.write(core, lr),
         _ => (),
     }

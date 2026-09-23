@@ -349,7 +349,7 @@ async fn jb_unk5(_: &mut ArmCore, _: &mut (), a0: u32, a1: u32) -> Result<u32> {
 ///
 /// The monitor is keyed by the instance's address, which is what the JVM uses
 /// for identity, so a second call about the same object finds the same monitor.
-async fn jb_monitor_enter(core: &mut ArmCore, jvm: &mut Jvm, ptr_instance: u32) -> Result<u32> {
+pub(crate) async fn jb_monitor_enter(core: &mut ArmCore, jvm: &mut Jvm, ptr_instance: u32) -> Result<u32> {
     tracing::trace!("jb_monitor_enter({ptr_instance:#x})");
 
     // Entering on null is the title's own bug and the JVM has nothing to lock;
@@ -368,7 +368,7 @@ async fn jb_monitor_enter(core: &mut ArmCore, jvm: &mut Jvm, ptr_instance: u32) 
     Ok(0)
 }
 
-async fn jb_monitor_exit(core: &mut ArmCore, jvm: &mut Jvm, ptr_instance: u32) -> Result<u32> {
+pub(crate) async fn jb_monitor_exit(core: &mut ArmCore, jvm: &mut Jvm, ptr_instance: u32) -> Result<u32> {
     tracing::trace!("jb_monitor_exit({ptr_instance:#x})");
 
     if ptr_instance == 0 {
