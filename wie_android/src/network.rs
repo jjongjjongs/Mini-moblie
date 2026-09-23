@@ -89,12 +89,30 @@ impl AndroidNetwork {
         }
     }
 
+    /// How a socket is registered with the poller.
+    ///
+    /// Edge, on every platform this ships to: Android polls with epoll, and a
+    /// socket registered edge-triggered stays armed, which is what the readiness
+    /// loop here expects. A backend without edge-triggered readiness - the IOCP
+    /// one the Windows CI runner builds this crate against, which is the only
+    /// place it is ever built off Android - takes one-shot instead, so the
+    /// crate's own tests can open a socket there rather than failing every one
+    /// of them on a registration the platform cannot make.
+    fn poll_mode(&self) -> PollMode {
+        if self.poller.supports_edge() {
+            PollMode::Edge
+        } else {
+            PollMode::Oneshot
+        }
+    }
+
     fn register_socket(&self, handle: i32, socket: &Socket) -> Result<(), NetworkError> {
         let interest = Event::all(handle as usize).with_interrupt();
+        let mode = self.poll_mode();
 
         let result = match socket {
-            Socket::Tcp(TcpState::Connected(stream)) => unsafe { self.poller.add_with_mode(stream, interest, PollMode::Edge) },
-            Socket::Udp(socket) => unsafe { self.poller.add_with_mode(socket, interest, PollMode::Edge) },
+            Socket::Tcp(TcpState::Connected(stream)) => unsafe { self.poller.add_with_mode(stream, interest, mode) },
+            Socket::Udp(socket) => unsafe { self.poller.add_with_mode(socket, interest, mode) },
             Socket::Tcp(TcpState::Disconnected | TcpState::Connecting | TcpState::Failed(_)) => return Ok(()),
         };
 
@@ -304,7 +322,9 @@ impl Network for AndroidNetwork {
                 Ok(stream) => {
                     let interest = Event::all(socket as usize).with_interrupt();
 
-                    if unsafe { poller.add_with_mode(&stream, interest, PollMode::Edge) }.is_ok() {
+                    let mode = if poller.supports_edge() { PollMode::Edge } else { PollMode::Oneshot };
+
+                    if unsafe { poller.add_with_mode(&stream, interest, mode) }.is_ok() {
                         pending_events
                             .lock()
                             .unwrap_or_else(|x| x.into_inner())
