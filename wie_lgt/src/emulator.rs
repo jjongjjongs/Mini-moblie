@@ -831,6 +831,7 @@ mod annunciator_tests {
         assert!(title_expects_annunciator("0002cb6a"));
         assert!(title_expects_annunciator("0002A52B"));
         assert!(title_expects_annunciator("0002d4d0"));
+        assert!(title_expects_annunciator("00030DD8"));
     }
 
     #[test]

@@ -123,6 +123,15 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     (TitlePlatform::Lgt, "0002A52B", annunciator()),
     // 알바타이쿤2: every screen it draws lands exactly one strip down.
     (TitlePlatform::Lgt, "0002D4D0", annunciator()),
+    // 마구마구2011: the same, and it composes through its own off-screen
+    // surface rather than the `MC_grp*` calls, so nothing but the strip's
+    // height moves it. Told the whole 320-row panel it asks for a 240x320
+    // surface, lays its scene out a strip down it, and flushes the lot: the
+    // top 24 rows reach the screen black and the bottom 24 - the `CLR 메뉴`
+    // and `TIME` bar under the diamond - fall off the end of the surface and
+    // are not drawn at all. Told the 296 a strip leaves, it asks for 240x296
+    // and fills it from its first row.
+    (TitlePlatform::Lgt, "00030DD8", annunciator()),
     // 만귀토벌전: lays every screen out below the strip and inside the rows
     // left under it, so the rows the strip takes off the top are also what
     // lines that layout up. Taken away with the rest of KTF's strips, its last
