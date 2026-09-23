@@ -4,7 +4,7 @@ use java_class_proto::{JavaFieldProto, JavaMethodProto};
 use java_constants::{FieldAccessFlags, MethodAccessFlags};
 use jvm::{ClassInstanceRef, Jvm, Result as JvmResult};
 
-use wie_backend::canvas::Color;
+use wie_backend::canvas::{Clip, Color};
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 use wie_midp::classes::javax::microedition::{
     lcdui::{Display, Graphics, Image},
@@ -23,6 +23,12 @@ impl XDisplay {
             methods: vec![
                 JavaMethodProto::new("<clinit>", "()V", Self::cl_init, MethodAccessFlags::STATIC),
                 JavaMethodProto::new("refresh", "(IIII)V", Self::refresh, MethodAccessFlags::STATIC),
+                JavaMethodProto::new(
+                    "clear",
+                    "(Ljavax/microedition/lcdui/Graphics;Ljavax/microedition/lcdui/Image;II)V",
+                    Self::clear,
+                    MethodAccessFlags::STATIC,
+                ),
                 JavaMethodProto::new(
                     "copyLCD",
                     "(Ljavax/microedition/lcdui/Graphics;Ljavax/microedition/lcdui/Image;IIII)V",
@@ -56,6 +62,42 @@ impl XDisplay {
         let platform = context.system().platform();
         let screen = platform.screen();
         screen.request_redraw().unwrap();
+
+        Ok(())
+    }
+
+    /// The vendor's screen clear: black over everything the graphics draws on,
+    /// then `image`, when there is one, at (`x`, `y`) as a backdrop.
+    ///
+    /// It takes no colour - the caller sets one only afterwards, for the text it
+    /// writes on the cleared screen - and it clears the whole surface rather
+    /// than the clip, as the reference emulator (wfeature, `xDisplayClear`)
+    /// reads its one known call site. 코인마스터 names it; it was missing.
+    async fn clear(
+        jvm: &Jvm,
+        _context: &mut WieJvmContext,
+        mut graphics: ClassInstanceRef<Graphics>,
+        image: ClassInstanceRef<Image>,
+        x: i32,
+        y: i32,
+    ) -> JvmResult<()> {
+        tracing::debug!("com.xce.lcdui.XDisplay::clear({graphics:?}, {image:?}, {x}, {y})");
+
+        if graphics.is_null() {
+            return Err(jvm.exception("java/lang/NullPointerException", "graphics is null").await);
+        }
+
+        let target = Graphics::image(jvm, &mut graphics).await?;
+        let mut canvas = Image::canvas(jvm, &target).await?;
+        let (width, height) = (canvas.image().width(), canvas.image().height());
+        let everything = Clip { x: 0, y: 0, width, height };
+
+        canvas.fill_rect(0, 0, width, height, Color { a: 0xff, r: 0, g: 0, b: 0 }, everything);
+
+        if !image.is_null() {
+            let backdrop = Image::image(jvm, &image).await?;
+            canvas.draw(x, y, backdrop.width(), backdrop.height(), &*backdrop, 0, 0, everything);
+        }
 
         Ok(())
     }

@@ -117,6 +117,15 @@ impl SktEmulator {
             ("m.VENDER", "vender"),
             ("m.CARRIER", "SKT"),
             ("m.SK_VM", "10"),
+            // Handset facts titles read straight into `String.equals` with no
+            // null check: 드래곤아이즈 compares m.EXT_SW against "600" in its
+            // MIDlet constructor, and died there on the null a missing
+            // property answers. The values match none of the constants a
+            // title compares against (wfeature answers the same).
+            ("m.MODEL", "0"),
+            ("m.MONDEL", "0"),
+            ("m.EXT_SW", "0"),
+            ("m.TYPE", "0"),
             ("com.xce.wipi.version", ""),
         ];
         let properties = properties

@@ -6,7 +6,7 @@ mod fields;
 
 use wie_jvm_support::WieJavaClassProto;
 
-pub fn get_protos() -> [WieJavaClassProto; 26] {
+pub fn get_protos() -> [WieJavaClassProto; 30] {
     [
         classes::javax::microedition::lcdui::Alert::as_proto(),
         classes::javax::microedition::lcdui::AlertType::as_proto(),
@@ -29,6 +29,10 @@ pub fn get_protos() -> [WieJavaClassProto; 26] {
         classes::javax::microedition::midlet::MIDlet::as_proto(),
         classes::javax::microedition::rms::InvalidRecordIDException::as_proto(),
         classes::javax::microedition::rms::RecordStore::as_proto(),
+        classes::javax::microedition::rms::RecordEnumeration::as_proto(),
+        classes::javax::microedition::rms::RecordEnumerationImpl::as_proto(),
+        classes::javax::microedition::rms::RecordFilter::as_proto(),
+        classes::javax::microedition::rms::RecordComparator::as_proto(),
         classes::javax::microedition::rms::RecordStoreException::as_proto(),
         classes::net::wie::EventQueue::as_proto(),
         classes::net::wie::Launcher::as_proto(),

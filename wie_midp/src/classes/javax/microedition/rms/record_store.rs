@@ -8,6 +8,8 @@ use java_runtime::classes::java::lang::String;
 use jvm::{Array, ClassInstanceRef, Jvm, Result as JvmResult, runtime::JavaLangString};
 
 use wie_backend::Database;
+
+use crate::classes::javax::microedition::rms::{RecordComparator, RecordEnumeration, RecordFilter};
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 
 // class javax.microedition.rms.RecordStore
@@ -31,6 +33,12 @@ impl RecordStore {
                 JavaMethodProto::new("setRecord", "(I[BII)V", Self::set_record, Default::default()),
                 JavaMethodProto::new("getNumRecords", "()I", Self::get_num_records, Default::default()),
                 JavaMethodProto::new("closeRecordStore", "()V", Self::close_record_store, Default::default()),
+                JavaMethodProto::new(
+                    "enumerateRecords",
+                    "(Ljavax/microedition/rms/RecordFilter;Ljavax/microedition/rms/RecordComparator;Z)Ljavax/microedition/rms/RecordEnumeration;",
+                    Self::enumerate_records,
+                    Default::default(),
+                ),
                 JavaMethodProto::new(
                     "openRecordStore",
                     "(Ljava/lang/String;Z)Ljavax/microedition/rms/RecordStore;",
@@ -200,6 +208,82 @@ impl RecordStore {
         let count = database.get_record_ids().await.len();
 
         Ok(count as _)
+    }
+
+    /// The store's records, as an enumeration over their ids.
+    ///
+    /// Without a filter every record is in it; without a comparator they come
+    /// in the order they were added, which is ascending id. With a filter, a
+    /// record is in it when `matches` says so; with a comparator they are
+    /// ordered by what `compare` answers, the first before the second when it
+    /// answers `PRECEDES`.
+    async fn enumerate_records(
+        jvm: &Jvm,
+        context: &mut WieJvmContext,
+        this: ClassInstanceRef<Self>,
+        filter: ClassInstanceRef<RecordFilter>,
+        comparator: ClassInstanceRef<RecordComparator>,
+        keep_updated: bool,
+    ) -> JvmResult<ClassInstanceRef<RecordEnumeration>> {
+        tracing::debug!("javax.microedition.rms.RecordStore::enumerateRecords({this:?}, {filter:?}, {comparator:?}, {keep_updated})");
+
+        let database = Self::get_database(jvm, context, &this).await?;
+        let mut ids = database.get_record_ids().await;
+        ids.sort_unstable();
+
+        let mut chosen: Vec<(i32, Option<ClassInstanceRef<Array<i8>>>)> = Vec::with_capacity(ids.len());
+        for id in ids {
+            let id = id as i32;
+            if filter.is_null() && comparator.is_null() {
+                chosen.push((id, None));
+                continue;
+            }
+
+            let record: ClassInstanceRef<Array<i8>> = jvm.invoke_virtual(&this, "getRecord", "(I)[B", (id,)).await?;
+            if !filter.is_null() {
+                let matches: bool = jvm.invoke_virtual(&filter, "matches", "([B)Z", (record.clone(),)).await?;
+                if !matches {
+                    continue;
+                }
+            }
+            chosen.push((id, Some(record)));
+        }
+
+        // An insertion sort, since every comparison is a call into the title.
+        if !comparator.is_null() {
+            for i in 1..chosen.len() {
+                let mut j = i;
+                while j > 0 {
+                    let (Some(left), Some(right)) = (chosen[j - 1].1.clone(), chosen[j].1.clone()) else {
+                        break;
+                    };
+                    let order: i32 = jvm.invoke_virtual(&comparator, "compare", "([B[B)I", (right, left)).await?;
+                    if order != RecordComparator::PRECEDES {
+                        break;
+                    }
+                    chosen.swap(j - 1, j);
+                    j -= 1;
+                }
+            }
+        }
+
+        let ids: Vec<i32> = chosen.into_iter().map(|(id, _)| id).collect();
+        let mut array = jvm.instantiate_array("I", ids.len() as _).await?;
+        jvm.store_array(&mut array, 0, ids).await?;
+
+        let enumeration: ClassInstanceRef<RecordEnumeration> = jvm
+            .new_class(
+                "net/wie/RecordEnumerationImpl",
+                "(Ljavax/microedition/rms/RecordStore;[I)V",
+                (this, array),
+            )
+            .await?
+            .into();
+
+        let mut enumeration_mut = enumeration.clone();
+        jvm.put_field(&mut enumeration_mut, "keptUpdated", "Z", keep_updated).await?;
+
+        Ok(enumeration)
     }
 
     async fn close_record_store(_jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<()> {

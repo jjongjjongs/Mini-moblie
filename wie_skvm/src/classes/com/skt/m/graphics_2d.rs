@@ -45,6 +45,8 @@ impl Graphics2D {
                     Default::default(),
                 ),
                 JavaMethodProto::new("invertRect", "(IIII)V", Self::invert_rect, Default::default()),
+                JavaMethodProto::new("setPixel", "(III)V", Self::set_pixel, Default::default()),
+                JavaMethodProto::new("getPixel", "(II)I", Self::get_pixel, Default::default()),
                 JavaMethodProto::new(
                     "createMaskableImage",
                     "(II)Ljavax/microedition/lcdui/Image;",
@@ -150,6 +152,63 @@ impl Graphics2D {
         }
 
         Ok(())
+    }
+
+    /// Sets one pixel to an RGB colour, under the graphics' translation and
+    /// clip. 코인마스터 names it; it was missing.
+    async fn set_pixel(jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>, x: i32, y: i32, rgb: i32) -> JvmResult<()> {
+        tracing::debug!("com.skt.m.Graphics2D::setPixel({this:?}, {x}, {y}, {rgb:#x})");
+
+        let mut graphics: ClassInstanceRef<Graphics> = jvm.get_field(&this, "graphics", "Ljavax/microedition/lcdui/Graphics;").await?;
+        let translate_x: i32 = jvm.get_field(&graphics, "translateX", "I").await?;
+        let translate_y: i32 = jvm.get_field(&graphics, "translateY", "I").await?;
+        let clip = Graphics::clip(jvm, &graphics).await?;
+
+        let (x, y) = (x + translate_x, y + translate_y);
+        if x < clip.x || x >= clip.x + clip.width as i32 || y < clip.y || y >= clip.y + clip.height as i32 {
+            return Ok(());
+        }
+
+        let image = Graphics::image(jvm, &mut graphics).await?;
+        let mut canvas = Image::canvas(jvm, &image).await?;
+        if x < 0 || y < 0 || x >= canvas.image().width() as i32 || y >= canvas.image().height() as i32 {
+            return Ok(());
+        }
+
+        canvas.put_pixel(
+            x,
+            y,
+            Color {
+                a: 0xff,
+                r: (rgb >> 16) as u8,
+                g: (rgb >> 8) as u8,
+                b: rgb as u8,
+            },
+        );
+
+        Ok(())
+    }
+
+    /// One pixel's RGB, under the graphics' translation. A read is bounded by
+    /// the surface and not by the clip - a clip is a rule about drawing - and
+    /// a pixel off the surface reads as -1, as the reference emulator's does.
+    async fn get_pixel(jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>, x: i32, y: i32) -> JvmResult<i32> {
+        tracing::debug!("com.skt.m.Graphics2D::getPixel({this:?}, {x}, {y})");
+
+        let mut graphics: ClassInstanceRef<Graphics> = jvm.get_field(&this, "graphics", "Ljavax/microedition/lcdui/Graphics;").await?;
+        let translate_x: i32 = jvm.get_field(&graphics, "translateX", "I").await?;
+        let translate_y: i32 = jvm.get_field(&graphics, "translateY", "I").await?;
+
+        let image = Graphics::image(jvm, &mut graphics).await?;
+        let pixels = Image::image(jvm, &image).await?;
+        let (x, y) = (x + translate_x, y + translate_y);
+        if x < 0 || y < 0 || x >= pixels.width() as i32 || y >= pixels.height() as i32 {
+            return Ok(-1);
+        }
+
+        let color = pixels.get_pixel(x, y);
+
+        Ok(((color.r as i32) << 16) | ((color.g as i32) << 8) | color.b as i32)
     }
 
     /// Blits a region of `src` with one of SK-VM's combine modes: 0 copies,

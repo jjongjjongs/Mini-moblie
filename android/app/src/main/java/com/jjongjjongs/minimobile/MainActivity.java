@@ -48,10 +48,12 @@ import android.widget.TextView;
 import android.widget.Toast;
 import android.view.WindowManager;
 
+import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.util.Arrays;
 import java.util.ArrayList;
@@ -71,6 +73,7 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipInputStream;
 import java.nio.ShortBuffer;
+import java.nio.charset.StandardCharsets;
 
 /**
  * Library of imported games plus the player that runs one.
@@ -2154,7 +2157,11 @@ public final class MainActivity extends Activity {
         final int maxCandidates = 200;
         final int maxIconBytes = 512 * 1024;
 
-        try (ZipFile zip = new ZipFile(game)) {
+        // Entry names are read as Latin-1, which decodes any byte. SKT archives
+        // name their save data in EUC-KR (드래곤아이즈's 드래곤아이즈.dat), and
+        // the default UTF-8 refuses the whole archive on that one name - every
+        // other entry, the icon too, with it.
+        try (ZipFile zip = new ZipFile(game, StandardCharsets.ISO_8859_1)) {
             List<ZipEntry> candidates = new ArrayList<>();
             Enumeration<? extends ZipEntry> entries = zip.entries();
             while (entries.hasMoreElements()) {
@@ -2241,7 +2248,7 @@ public final class MainActivity extends Activity {
             byte[] best = null;
             long bestArea = 0;
 
-            try (ZipInputStream stream = new ZipInputStream(zip.getInputStream(jar))) {
+            try (ZipInputStream stream = new ZipInputStream(skipSkvmJarHeader(zip.getInputStream(jar)))) {
                 byte[] chunk = new byte[8192];
                 ZipEntry inner;
                 while ((inner = stream.getNextEntry()) != null) {
@@ -2303,6 +2310,41 @@ public final class MainActivity extends Activity {
         return null;
     }
 
+    /**
+     * The jar's zip, past the 32 bytes of SK-VM header an SKT jar opens with,
+     * which a zip reader would otherwise take for no entries at all.
+     */
+    private static InputStream skipSkvmJarHeader(InputStream input) throws IOException {
+        final int skvmHeaderBytes = 32;
+
+        BufferedInputStream stream = new BufferedInputStream(input);
+        stream.mark(skvmHeaderBytes + 4);
+        byte[] head = new byte[skvmHeaderBytes + 4];
+        int headRead = 0;
+        while (headRead < head.length) {
+            int read = stream.read(head, headRead, head.length - headRead);
+            if (read <= 0) {
+                break;
+            }
+            headRead += read;
+        }
+        stream.reset();
+
+        boolean zipAtStart = headRead >= 2 && head[0] == 'P' && head[1] == 'K';
+        boolean zipAfterHeader = headRead >= skvmHeaderBytes + 2 && head[skvmHeaderBytes] == 'P' && head[skvmHeaderBytes + 1] == 'K';
+        if (!zipAtStart && zipAfterHeader) {
+            long skipped = 0;
+            while (skipped < skvmHeaderBytes) {
+                long step = stream.skip(skvmHeaderBytes - skipped);
+                if (step <= 0) {
+                    break;
+                }
+                skipped += step;
+            }
+        }
+        return stream;
+    }
+
     /** Lower ranks are tried first: the names an icon usually has. */
     private static int iconNameRank(String path) {
         String name = path;
@@ -2322,7 +2364,7 @@ public final class MainActivity extends Activity {
         if (name.startsWith("small.")) {
             return 2;
         }
-        if (name.endsWith(".icon") || name.contains("icon")) {
+        if (name.endsWith(".icon") || name.contains("icon") || name.endsWith(".wmr")) {
             return 3;
         }
         if (name.endsWith("_l.png") || name.endsWith("_ad.png") || name.endsWith("_m.png") || name.endsWith("_s.png")) {
@@ -2349,7 +2391,8 @@ public final class MainActivity extends Activity {
                 headerRead += read;
             }
 
-            if (!looksLikeImage(header, headerRead)) {
+            boolean skvmIcon = isSkvmIconResource(header, headerRead);
+            if (!skvmIcon && !looksLikeImage(header, headerRead)) {
                 return null;
             }
 
@@ -2362,7 +2405,7 @@ public final class MainActivity extends Activity {
             }
 
             byte[] bytes = buffer.toByteArray();
-            Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+            Bitmap bitmap = skvmIcon ? decodeSkvmIcon(bytes) : BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
             if (bitmap != null
                     && bitmap.getWidth() >= minSide && bitmap.getHeight() >= minSide
                     && bitmap.getWidth() <= maxSide && bitmap.getHeight() <= maxSide) {
@@ -2373,6 +2416,68 @@ public final class MainActivity extends Activity {
         }
 
         return null;
+    }
+
+    /**
+     * Whether these bytes open an SK-VM icon resource, the {@code .wmr} beside
+     * an SKT title's jar.
+     *
+     * <p>An SKT archive carries no picture of its own: its entries are the
+     * jar, the {@code .msd} descriptor, the {@code .mod} and the {@code .wmr},
+     * and the jar's leading 32 bytes of SK-VM header keep it from reading as a
+     * zip. So every SKT title came up with the placeholder tile.
+     */
+    private static boolean isSkvmIconResource(byte[] header, int length) {
+        return length >= 4
+                && (header[0] & 0xff) == 0xad && (header[1] & 0xff) == 0xde
+                && (header[2] & 0xff) == 0xce && (header[3] & 0xff) == 0xfa;
+    }
+
+    /**
+     * The menu icon out of an SK-VM icon resource.
+     *
+     * <p>The file is the magic {@code 0xFACEDEAD} and its total length, then
+     * records of an index and a byte length, each followed by its body. Record
+     * 0 is the handset menu's still icon, a plain 23x23 BMP; record 1 is the
+     * animated one, in a format of its own.
+     */
+    private static Bitmap decodeSkvmIcon(byte[] bytes) {
+        int offset = 8;
+        while (offset + 8 <= bytes.length) {
+            int index = readLittleEndianInt(bytes, offset);
+            int length = readLittleEndianInt(bytes, offset + 4);
+            int body = offset + 8;
+            if (length < 0 || length > bytes.length - body) {
+                return null;
+            }
+            if (length > 6 && (index == 0 || (bytes[body] == 'B' && bytes[body + 1] == 'M'))) {
+                // Some titles' icons declare a file size short of their own
+                // pixels (1638 bytes for 1710), which a strict decoder refuses,
+                // so the record's own length stands in for it.
+                byte[] bmp = Arrays.copyOfRange(bytes, body, body + length);
+                bmp[2] = (byte) length;
+                bmp[3] = (byte) (length >> 8);
+                bmp[4] = (byte) (length >> 16);
+                bmp[5] = (byte) (length >> 24);
+                Bitmap bitmap = BitmapFactory.decodeByteArray(bmp, 0, bmp.length);
+                if (bitmap != null) {
+                    // Blown up by whole pixels here so the tile, which fills
+                    // at many times the icon's size, keeps its pixels sharp
+                    // rather than smearing them.
+                    int scale = 4;
+                    return Bitmap.createScaledBitmap(bitmap, bitmap.getWidth() * scale, bitmap.getHeight() * scale, false);
+                }
+            }
+            offset = body + length;
+        }
+        return null;
+    }
+
+    private static int readLittleEndianInt(byte[] bytes, int offset) {
+        return (bytes[offset] & 0xff)
+                | (bytes[offset + 1] & 0xff) << 8
+                | (bytes[offset + 2] & 0xff) << 16
+                | (bytes[offset + 3] & 0xff) << 24;
     }
 
     /** Whether these bytes open the way an image these archives carry does. */
