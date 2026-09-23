@@ -66,7 +66,12 @@ pub enum MIDPKeyCode {
     LEFT_SOFT_KEY = 6,
     RIGHT_SOFT_KEY = 7,
     CLEAR = 8,
-    CALL = 10,
+    /// The send key. 이터널사가 names it in its own key table -
+    /// `KEY_SEND = 190`, beside `KEY_UP = 141` and the rest of this table - and
+    /// reads it in the field to raise a guard the story waits on. It was 10,
+    /// which no SK-VM title seen compares against, so the handset's send key
+    /// did nothing and the story could not go on.
+    CALL = 190,
     HANGUP = -1,
     VOLUME_UP = 13,
     VOLUME_DOWN = 14,
@@ -441,5 +446,21 @@ impl EventQueue {
         let call_serially_events = jvm.get_field(&this, "callSeriallyEvents", "Ljava/util/Vector;").await?;
         jvm.invoke_virtual(&call_serially_events, "addElement", "(Ljava/lang/Object;)V", [event.into()])
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use wie_backend::KeyCode;
+
+    use super::MIDPKeyCode;
+
+    /// The send key reaches an SK-VM title as the handset's own code, 190, and
+    /// a code read back from a title resolves to it again.
+    #[test]
+    fn the_send_key_is_the_handsets_190() {
+        assert_eq!(MIDPKeyCode::from_key_code(KeyCode::CALL) as i32, 190);
+        assert!(matches!(MIDPKeyCode::from_raw(190), Some(MIDPKeyCode::CALL)));
+        assert!(MIDPKeyCode::from_raw(10).is_none());
     }
 }
