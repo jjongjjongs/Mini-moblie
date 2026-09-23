@@ -254,7 +254,8 @@ where
             let proto = get_runtime_class_proto(class)
                 .or_else(|| a_class_the_runtime_lacks(class))
                 .map(refuse_a_null_array)
-                .map(fill_in_string_buffer);
+                .map(fill_in_string_buffer)
+                .map(fill_the_readers_buffer);
             if let Some(proto) = proto {
                 return Ok(Some(
                     self.implementation
@@ -558,6 +559,106 @@ async fn string_buffer_set_char_at(
     Ok(())
 }
 
+/// A stand-in for the class whose `read` is wrapped below.
+struct InputStreamReader;
+
+/// The name the runtime's own `read` is moved to, so the one below can call it.
+const READ_A_CHUNK: &str = "__wieReadChunk";
+
+/// Makes `java.io.InputStreamReader.read(char[], int, int)` fill the buffer it
+/// is given, instead of stopping at the first chunk it manages to decode.
+///
+/// The runtime's own decodes ten bytes at a time and returns as soon as that
+/// round produced anything, so a title asking for the whole of a file gets the
+/// first few characters of it and nothing else. `Reader.read` is allowed to
+/// return fewer than asked, but every implementation a title was written
+/// against keeps going while the source has bytes ready - the JDK's decoder
+/// reads on while `available()` says there is more - and a title that hands it
+/// a `ByteArrayInputStream` over a resource it has already loaded expects the
+/// file back in one call.
+///
+/// 장금이의꿈 does. Its dialogue screens read `txt/script_*.txt` through one
+/// `read(buf, 0, available())` and then scan the buffer for the `+` that ends
+/// the line. `script_0.txt` is 218 bytes of EUC-KR - 한상궁's opening speech,
+/// the one under the portrait - and it came back as six characters, `한상궁 : `.
+/// With no `+` among them the scan measured nothing, the title built the empty
+/// array that left, and reading its first character was
+/// `ArrayIndexOutOfBoundsException` out of `e.paint` - the dialogue box drawn
+/// and empty, and the game down with it.
+///
+/// So the runtime's `read` becomes a chunk reader and this one calls it until
+/// the request is met or the source has nothing more to give without blocking.
+/// The second part is what keeps a socket's reader from waiting for a length
+/// that may never arrive: a round stops when neither the stream nor the
+/// decoder's own hold-back has a byte left.
+///
+/// Anything that is not that class, or a runtime that has since grown a `read`
+/// of another shape, is handed back untouched.
+fn fill_the_readers_buffer(mut proto: RuntimeClassProto) -> RuntimeClassProto {
+    if proto.name != "java/io/InputStreamReader" {
+        return proto;
+    }
+
+    let Some(chunk) = proto.methods.iter_mut().find(|x| x.name == "read" && x.descriptor == "([CII)I") else {
+        return proto;
+    };
+
+    chunk.name = READ_A_CHUNK.into();
+
+    proto.methods.push(JavaMethodProto::new(
+        "read",
+        "([CII)I",
+        input_stream_reader_read,
+        MethodAccessFlags::empty(),
+    ));
+
+    proto
+}
+
+async fn input_stream_reader_read(
+    jvm: &Jvm,
+    _: &mut RuntimeContext,
+    this: ClassInstanceRef<InputStreamReader>,
+    buf: ClassInstanceRef<Array<JavaChar>>,
+    offset: i32,
+    length: i32,
+) -> JvmResult<i32> {
+    // The chunk reader checks the arguments and answers a zero-length request,
+    // so this one does not have to - it only has to not call it in a loop that
+    // would never end.
+    if length <= 0 {
+        return jvm.invoke_virtual(&this, READ_A_CHUNK, "([CII)I", (buf, offset, length)).await;
+    }
+
+    let mut read = 0;
+    while read < length {
+        let chunk: i32 = jvm
+            .invoke_virtual(&this, READ_A_CHUNK, "([CII)I", (buf.clone(), offset + read, length - read))
+            .await?;
+
+        // End of the stream. Whatever came before it is the answer; nothing at
+        // all is the end of the stream to the caller too.
+        if chunk <= 0 {
+            return Ok(if read == 0 { chunk } else { read });
+        }
+
+        read += chunk;
+
+        // What the decoder is holding back - the tail of a character whose
+        // first byte arrived in this round - counts as more to come, because
+        // the next round can finish it without reading anything.
+        let held: i32 = jvm.get_field(&this, "readBufSize", "I").await?;
+        let source = jvm.get_field(&this, "in", "Ljava/io/InputStream;").await?;
+        let available: i32 = jvm.invoke_virtual(&source, "available", "()I", ()).await?;
+
+        if held + available <= 0 {
+            break;
+        }
+    }
+
+    Ok(read)
+}
+
 /// A stand-in for the class whose constructors are replaced below, so the
 /// bodies can name their receiver the way every other proto does.
 struct ByteArrayInputStream;
@@ -655,7 +756,66 @@ mod tests {
     use test_utils::run_jvm_test;
     use wie_util::WieError;
 
-    use super::{StringBuffer, refuse_a_null_array};
+    use super::{READ_A_CHUNK, StringBuffer, refuse_a_null_array};
+
+    /// A file a title reads in one call comes back whole, not one decoder round
+    /// of it.
+    ///
+    /// 장금이의꿈 reads its dialogue that way - `read(buf, 0, available())` over
+    /// a `ByteArrayInputStream` of the whole file - and got the first six
+    /// characters of a 218-byte line, which left it scanning an empty buffer
+    /// for the `+` that ends it.
+    #[test]
+    fn a_reader_hands_back_everything_the_stream_holds() -> Result<(), WieError> {
+        // Two hundred and eighteen bytes of EUC-KR, the length and the shape of
+        // the line the title died on - longer than one ten-byte round by a wide
+        // margin, and Korean, so a round can end mid-character.
+        let line = "한상궁 : 지금부터 생각시 선발 시험을 치르겠다. 모두들 각자의 자리에서 준비하거라.                     생각시 시험은 직접 음식을 만들어 채점하는 것으로, 불러주는 음식 재료를 틀림없이                     만든 사람이 합격하게 되느니라. 정신을 바짝 차려야 한다.+";
+
+        run_jvm_test(Box::new([]), async move |jvm| {
+            let bytes = encoding_rs::EUC_KR.encode(line).0.into_owned();
+            let mut data = jvm.instantiate_array("B", bytes.len()).await?;
+            jvm.store_array(&mut data, 0, bytes.iter().map(|x| *x as i8).collect::<Vec<_>>()).await?;
+
+            let stream = jvm.new_class("java/io/ByteArrayInputStream", "([B)V", (data,)).await?;
+            let charset = JavaLangString::from_rust_string(&jvm, "EUC-KR").await?;
+            let reader = jvm
+                .new_class(
+                    "java/io/InputStreamReader",
+                    "(Ljava/io/InputStream;Ljava/lang/String;)V",
+                    (stream, charset),
+                )
+                .await?;
+
+            let room = line.chars().count();
+            let buffer = jvm.instantiate_array("C", room).await?;
+            let read: i32 = jvm.invoke_virtual(&reader, "read", "([CII)I", (buffer.clone(), 0, room as i32)).await?;
+
+            assert_eq!(read, room as i32);
+
+            let characters: Vec<u16> = jvm.load_array(&buffer.into(), 0, room).await?;
+            assert_eq!(alloc::string::String::from_utf16(&characters).unwrap(), line);
+
+            // And the end of the stream is still the end of the stream.
+            let spare = jvm.instantiate_array("C", 8).await?;
+            let read: i32 = jvm.invoke_virtual(&reader, "read", "([CII)I", (spare, 0, 8)).await?;
+            assert_eq!(read, -1);
+
+            Ok(())
+        })
+    }
+
+    /// The runtime's own `read` is what the wrapper calls, so it has to still be
+    /// there under its new name - and only once.
+    #[test]
+    fn the_runtimes_own_read_is_kept_under_its_own_name() {
+        let filled = super::fill_the_readers_buffer(get_runtime_class_proto("java/io/InputStreamReader").unwrap());
+
+        let named = |name: &str, descriptor: &str| filled.methods.iter().filter(|x| x.name == name && x.descriptor == descriptor).count();
+
+        assert_eq!(named("read", "([CII)I"), 1);
+        assert_eq!(named(READ_A_CHUNK, "([CII)I"), 1);
+    }
 
     #[test]
     fn byte_array_input_streams_constructors_are_the_ones_replaced() {

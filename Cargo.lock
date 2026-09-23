@@ -3602,6 +3602,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "bytemuck",
+ "encoding_rs",
  "futures-test",
  "java_class_proto",
  "java_constants",

@@ -20,5 +20,6 @@ wie_backend = { workspace = true }
 wie_util = { workspace = true }
 
 [dev-dependencies]
+encoding_rs = { version = "^0.8", default-features = false, features = ["alloc"] }
 futures-test = { workspace = true }
 test_utils = { workspace = true }
