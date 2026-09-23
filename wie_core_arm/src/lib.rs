@@ -34,6 +34,22 @@ pub static PC_SAMPLES: [::core::sync::atomic::AtomicU32; 65536] = [const { ::cor
 pub static SVC_COUNT: ::core::sync::atomic::AtomicU64 = ::core::sync::atomic::AtomicU64::new(0);
 pub static RUN_CALLS: ::core::sync::atomic::AtomicU64 = ::core::sync::atomic::AtomicU64::new(0);
 
+/// Which execution engine this build was compiled with.
+///
+/// The engine is a compile-time choice (see `core::default_engine`), and a
+/// build that meant to ship the JIT and did not looks exactly like one that
+/// did - only slower. A capture that names the engine says so outright rather
+/// than leaving it to be inferred from a rate.
+pub const fn engine_name() -> &'static str {
+    if cfg!(all(feature = "jit", any(target_arch = "x86_64", target_arch = "aarch64"))) {
+        "jit"
+    } else if cfg!(feature = "fast_cpu") {
+        "fast"
+    } else {
+        "interpreter"
+    }
+}
+
 /// Total interpreter fallbacks from the JIT, for the perf meter — a non-zero
 /// rate confirms the JIT engine is active, and the magnitude shows how much
 /// still misses compiled code.

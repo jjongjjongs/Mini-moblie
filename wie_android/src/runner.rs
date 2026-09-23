@@ -255,6 +255,8 @@ struct LoopMeter {
     /// the frame, the polls - and what comes after is the wait itself.
     armed_at: Option<Instant>,
     insns_at_window: u64,
+    svcs_at_window: u64,
+    fallbacks_at_window: u64,
     ticks: u32,
     inside: Duration,
     /// Draining what the tick produced: the audio commands, the frame, the
@@ -312,12 +314,22 @@ impl LoopMeter {
             return;
         }
 
-        let insns = wie_core_arm::EXECUTED_INSTRUCTIONS.load(std::sync::atomic::Ordering::Relaxed);
+        use std::sync::atomic::Ordering;
+
+        let insns = wie_core_arm::EXECUTED_INSTRUCTIONS.load(Ordering::Relaxed);
+        let svcs = wie_core_arm::SVC_COUNT.load(Ordering::Relaxed);
+        let fallbacks = wie_core_arm::JIT_FALLBACKS.load(Ordering::Relaxed);
+
         let ran = insns.saturating_sub(self.insns_at_window);
         let mips = ran as f64 / window.as_secs_f64() / 1.0e6;
 
+        // Against the instructions, this says whether the time goes into
+        // running guest code or into the round trip out of it. See `SVC_COUNT`.
+        let svc_rate = svcs.saturating_sub(self.svcs_at_window) as f64 / window.as_secs_f64();
+
         tracing::info!(
-            "[loop] {} ticks in {:.2}s: run={}ms drain={}ms sleep={}ms (worst gap {}ms) idle={}/{} frames={} {:.1} MIPS",
+            "[loop] {} ticks in {:.2}s: run={}ms drain={}ms sleep={}ms (worst gap {}ms) idle={}/{} frames={} \
+             {:.1} MIPS on {} ({:.0} svc/s, {} fallbacks)",
             self.ticks,
             window.as_secs_f64(),
             self.inside.as_millis(),
@@ -328,12 +340,17 @@ impl LoopMeter {
             self.ticks,
             self.frames,
             mips,
+            wie_core_arm::engine_name(),
+            svc_rate,
+            fallbacks.saturating_sub(self.fallbacks_at_window),
         );
 
         *self = Self {
             window_began: Some(now),
             left_at: self.left_at,
             insns_at_window: insns,
+            svcs_at_window: svcs,
+            fallbacks_at_window: fallbacks,
             ..Default::default()
         };
     }
@@ -351,6 +368,8 @@ static RUNNER: Mutex<Runner> = Mutex::new(Runner {
         left_at: None,
         armed_at: None,
         insns_at_window: 0,
+        svcs_at_window: 0,
+        fallbacks_at_window: 0,
         ticks: 0,
         inside: Duration::ZERO,
         drained: Duration::ZERO,
