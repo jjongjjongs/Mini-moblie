@@ -2303,6 +2303,78 @@ public final class MainActivity extends Activity {
         return null;
     }
 
+    /** Lower ranks are tried first: the names an icon usually has. */
+    private static int iconNameRank(String path) {
+        String name = path;
+        int slash = name.lastIndexOf('/');
+        if (slash >= 0) {
+            name = name.substring(slash + 1);
+        }
+        name = name.toLowerCase(Locale.US);
+
+        // Largest first, so the tile gets the best picture the archive has.
+        if (name.startsWith("big.")) {
+            return 0;
+        }
+        if (name.startsWith("middle.")) {
+            return 1;
+        }
+        if (name.startsWith("small.")) {
+            return 2;
+        }
+        if (name.endsWith(".icon") || name.contains("icon")) {
+            return 3;
+        }
+        if (name.endsWith("_l.png") || name.endsWith("_ad.png") || name.endsWith("_m.png") || name.endsWith("_s.png")) {
+            return 3;
+        }
+        return 4;
+    }
+
+    /** The entry decoded as cover art, or null when it is not one. */
+    private Bitmap readIconEntry(ZipFile zip, ZipEntry entry, int maxIconBytes) {
+        final int minSide = 12;
+        final int maxSide = 256;
+
+        try (InputStream stream = zip.getInputStream(entry)) {
+            // The header first, so an archive's own jar is passed over on its
+            // first eight bytes rather than read to the cap.
+            byte[] header = new byte[8];
+            int headerRead = 0;
+            while (headerRead < header.length) {
+                int read = stream.read(header, headerRead, header.length - headerRead);
+                if (read <= 0) {
+                    break;
+                }
+                headerRead += read;
+            }
+
+            if (!looksLikeImage(header, headerRead)) {
+                return null;
+            }
+
+            ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+            buffer.write(header, 0, headerRead);
+            byte[] chunk = new byte[8192];
+            int read;
+            while ((read = stream.read(chunk)) > 0 && buffer.size() <= maxIconBytes) {
+                buffer.write(chunk, 0, read);
+            }
+
+            byte[] bytes = buffer.toByteArray();
+            Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+            if (bitmap != null
+                    && bitmap.getWidth() >= minSide && bitmap.getHeight() >= minSide
+                    && bitmap.getWidth() <= maxSide && bitmap.getHeight() <= maxSide) {
+                return bitmap;
+            }
+        } catch (Exception e) {
+            // Not an icon, or unreadable; the next candidate still gets a turn.
+        }
+
+        return null;
+    }
+
     /** Whether these bytes open the way an image these archives carry does. */
     private static boolean looksLikeImage(byte[] header, int length) {
         if (length < 4) {
