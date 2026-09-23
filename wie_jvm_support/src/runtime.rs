@@ -251,7 +251,10 @@ where
 
     async fn find_rustjar_class(&self, jvm: &Jvm, classpath: &str, class: &str) -> JvmResult<Option<Box<dyn ClassDefinition>>> {
         if classpath == RT_RUSTJAR {
-            let proto = get_runtime_class_proto(class).map(refuse_a_null_array).map(fill_in_string_buffer);
+            let proto = get_runtime_class_proto(class)
+                .or_else(|| a_class_the_runtime_lacks(class))
+                .map(refuse_a_null_array)
+                .map(fill_in_string_buffer);
             if let Some(proto) = proto {
                 return Ok(Some(
                     self.implementation
@@ -285,6 +288,59 @@ where
 /// receiver the way every other proto does.
 struct StringBuffer;
 struct JavaString;
+struct IllegalStateException;
+
+/// Stands in for a class of the platform's own the runtime does not define.
+///
+/// A class the JVM cannot find ends the thread that wanted it, the same as a
+/// method it cannot find, so a title that names one is a title that stops.
+///
+/// `java.lang.IllegalStateException` is CLDC's, and the runtime carries three
+/// of its neighbours - `IllegalAccessException`, `IllegalArgumentException`,
+/// `IllegalMonitorStateException` - but not it. 주타이쿤2 raises one from its
+/// 사육장 선택 screen and died there on `No such class`, with the game already
+/// several screens in.
+fn a_class_the_runtime_lacks(class: &str) -> Option<RuntimeClassProto> {
+    if class != "java/lang/IllegalStateException" {
+        return None;
+    }
+
+    Some(RuntimeClassProto {
+        name: "java/lang/IllegalStateException",
+        parent_class: Some("java/lang/RuntimeException"),
+        interfaces: Vec::new(),
+        methods: [
+            JavaMethodProto::new("<init>", "()V", illegal_state_exception_init, MethodAccessFlags::empty()),
+            JavaMethodProto::new(
+                "<init>",
+                "(Ljava/lang/String;)V",
+                illegal_state_exception_init_with_message,
+                MethodAccessFlags::empty(),
+            ),
+        ]
+        .into(),
+        fields: Vec::new(),
+        access_flags: Default::default(),
+    })
+}
+
+async fn illegal_state_exception_init(jvm: &Jvm, _: &mut RuntimeContext, this: ClassInstanceRef<IllegalStateException>) -> JvmResult<()> {
+    tracing::debug!("java.lang.IllegalStateException::<init>({this:?})");
+
+    jvm.invoke_special(&this, "java/lang/RuntimeException", "<init>", "()V", ()).await
+}
+
+async fn illegal_state_exception_init_with_message(
+    jvm: &Jvm,
+    _: &mut RuntimeContext,
+    this: ClassInstanceRef<IllegalStateException>,
+    message: ClassInstanceRef<JavaString>,
+) -> JvmResult<()> {
+    tracing::debug!("java.lang.IllegalStateException::<init>({this:?}, {message:?})");
+
+    jvm.invoke_special(&this, "java/lang/RuntimeException", "<init>", "(Ljava/lang/String;)V", (message,))
+        .await
+}
 
 /// Gives `java.lang.StringBuffer` the methods the runtime does not carry.
 ///
@@ -681,6 +737,36 @@ mod tests {
             let result: JvmResult<ClassInstanceRef<StringBuffer>> =
                 jvm.invoke_virtual(&buffer, "insert", "(II)Ljava/lang/StringBuffer;", (11, 0)).await;
             assert!(result.is_err(), "11 is outside a buffer of 10");
+
+            Ok(())
+        })
+    }
+
+    /// The class the runtime does not define is there to be made and thrown,
+    /// and it is a `RuntimeException` - which is what a title catching one
+    /// broadly relies on.
+    #[test]
+    fn an_illegal_state_exception_can_be_made_and_caught() -> Result<(), WieError> {
+        run_jvm_test(Box::new([]), async |jvm| {
+            let message = JavaLangString::from_rust_string(&jvm, "the zoo is not open").await?;
+            let with_message = jvm
+                .new_class("java/lang/IllegalStateException", "(Ljava/lang/String;)V", (message,))
+                .await?;
+
+            let read_back = jvm.invoke_virtual(&with_message, "getMessage", "()Ljava/lang/String;", ()).await?;
+            assert_eq!(JavaLangString::to_rust_string(&jvm, &read_back).await?, "the zoo is not open");
+
+            // The no-argument form is the one a `throw new` with nothing to say
+            // compiles to, and it carries no message.
+            let bare = jvm.new_class("java/lang/IllegalStateException", "()V", ()).await?;
+            let none: ClassInstanceRef<crate::runtime::JavaString> = jvm.invoke_virtual(&bare, "getMessage", "()Ljava/lang/String;", ()).await?;
+            assert!(none.is_null());
+
+            // A catch for any of these three has to see it, which is what the
+            // parent chain decides.
+            for caught in ["java/lang/RuntimeException", "java/lang/Exception", "java/lang/Throwable"] {
+                assert!(jvm.is_instance(&*bare, caught), "an IllegalStateException has to be caught as {caught}");
+            }
 
             Ok(())
         })
