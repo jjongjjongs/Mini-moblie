@@ -8635,8 +8635,95 @@ fn is_number(field: &[u8]) -> bool {
     !field.is_empty() && field.iter().all(u8::is_ascii_digit)
 }
 
+/// The eight-byte header 마구마구2011 frames both directions with: `MM` and the
+/// message's own length, written in decimal and padded to six with NULs.
+const MAGU_HEADER: usize = 8;
+
+/// Where the fixed `1Z` sits in a request, after the ten-digit subscriber.
+const MAGU_MARKER: usize = MAGU_HEADER + 10;
+
+/// What 마구마구2011's shop wants back when something is bought.
+///
+/// 마구마구2011 (`00030DD8`) opens a billing socket to `211.239.165.13:8037`
+/// and writes one record per purchase. Buying 4000 거니 wrote thirty-four
+/// bytes:
+///
+/// ```text
+/// "MM" "34\0\0\0\0" "1075597734" "1Z" "SB_거니_4000_M"
+/// ```
+///
+/// - `MM`, then the message's own length in decimal padded to six with NULs,
+/// - the subscriber number with its leading zero dropped,
+/// - a fixed `1Z`,
+/// - and the command, built from the format string at `0xcfc74`,
+///   `SB_%s_%d_M` - the item and its price in won. Its siblings in the same
+///   table are `AS_%d`, `AB_%d`, `AU_1_%d`, `RV_%d`, `MW_%s_` and the rest of
+///   the shop's traffic; `SB_` is the buy.
+///
+/// The answer is read at `0x2be7e`. The parser wants the same header - `MM`,
+/// then six characters it runs through `atoi` - refuses a frame shorter than
+/// eight bytes, steps over the header, and walks a chain of tag compares:
+/// `YX`, `YY`, `NT_`, `YP_`, `YL_`, `YC_`, `YD`, `YK_`, and at `0x2c256`
+/// `SB`. That last one is the purchase, and what it does with the rest of the
+/// frame is nothing: it copies the body aside and then dispatches on the item
+/// name it remembered when it built the request - `거니`, `조합행운권`,
+/// `조합보존권`, `추가덱1`, `추가덱2`, `레벨초기화`, `잠재력초기화`,
+/// `거니복권`, `복권1/3/5/10` - and grants it.
+///
+/// So the reply is the header and the tag, and nothing else has to be right.
+///
+/// `None` for anything that is not one of these records. The signature is the
+/// `MM`, a length field that describes the frame it is in, the `1Z` after ten
+/// digits of subscriber, and an `SB_` command - four things at once, so no
+/// other title's frame reaches this.
+fn lgt_local_maguer2011_response(request: &[u8]) -> Option<Vec<u8>> {
+    let length = request.get(2..MAGU_HEADER).filter(|_| request.starts_with(b"MM"))?;
+    let length = &length[..length.iter().position(|x| *x == 0).unwrap_or(length.len())];
+    let length: usize = core::str::from_utf8(length).ok()?.parse().ok()?;
+    if length != request.len() {
+        return None;
+    }
+
+    let subscriber = request.get(MAGU_HEADER..MAGU_MARKER)?;
+    if !subscriber.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+
+    if request.get(MAGU_MARKER..MAGU_MARKER + 2)? != b"1Z" {
+        return None;
+    }
+
+    if !request.get(MAGU_MARKER + 2..)?.starts_with(b"SB_") {
+        return None;
+    }
+
+    magu_frame(b"SB")
+}
+
+/// `body` under the header 마구마구2011 reads, or `None` when the frame would
+/// be longer than the six characters the length field holds.
+fn magu_frame(body: &[u8]) -> Option<Vec<u8>> {
+    let length = MAGU_HEADER + body.len();
+    let digits = alloc::format!("{length}");
+    if digits.len() > MAGU_HEADER - 2 {
+        return None;
+    }
+
+    let mut frame = Vec::with_capacity(length);
+    frame.extend_from_slice(b"MM");
+    frame.extend_from_slice(digits.as_bytes());
+    frame.resize(MAGU_HEADER, 0);
+    frame.extend_from_slice(body);
+
+    Some(frame)
+}
+
 pub fn response(request: &[u8]) -> Option<Vec<u8>> {
-    lgt_local_granted_response(request)
+    // First: its signature is four things at once - see
+    // `lgt_local_maguer2011_response` - so nothing else can be taken for it,
+    // and it cannot take anything else.
+    lgt_local_maguer2011_response(request)
+        .or_else(|| lgt_local_granted_response(request))
         .or_else(|| lgt_local_cash_response(request))
         // Before the 제노니아 packet matcher, which claims these by their length
         // and answers with a status this title's purchase receiver refuses.
@@ -8674,6 +8761,77 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_soul_hunter_raki_catalogue_response(request))
         .or_else(|| lgt_local_nexon_mobile_response(request))
         .or_else(|| ktf_local_download_response(request))
+}
+
+#[cfg(test)]
+mod maguer2011_tests {
+    use super::*;
+
+    /// The record the device log caught, byte for byte: 4000 거니 bought on
+    /// `01075597734`.
+    const PURCHASE: [u8; 34] = [
+        0x4d, 0x4d, 0x33, 0x34, 0x00, 0x00, 0x00, 0x00, 0x31, 0x30, 0x37, 0x35, 0x35, 0x39, 0x37, 0x37, 0x33, 0x34, 0x31, 0x5a, 0x53, 0x42, 0x5f,
+        0xb0, 0xc5, 0xb4, 0xcf, 0x5f, 0x34, 0x30, 0x30, 0x30, 0x5f, 0x4d,
+    ];
+
+    #[test]
+    fn the_gateway_answers_the_purchase() {
+        assert!(response(&PURCHASE).is_some());
+    }
+
+    /// The header the title's own parser wants: `MM`, then six characters that
+    /// `atoi` reads as the frame's length, then the tag it dispatches on.
+    #[test]
+    fn the_answer_is_the_header_and_the_tag() {
+        let reply = lgt_local_maguer2011_response(&PURCHASE).expect("the purchase is answered");
+
+        assert_eq!(reply, b"MM10\0\0\0\0SB");
+        assert_eq!(reply.len(), 10);
+
+        // The length field describes the frame it is in, which is what the
+        // parser steps over the header with.
+        let length: usize = core::str::from_utf8(&reply[2..4]).unwrap().parse().unwrap();
+        assert_eq!(length, reply.len());
+
+        // And it clears the `> 7` the parser refuses anything shorter than.
+        assert!(reply.len() > 7);
+    }
+
+    /// The four things that have to line up, one missing at a time.
+    #[test]
+    fn nothing_else_is_claimed() {
+        let mut wrong_magic = PURCHASE;
+        wrong_magic[0] = b'N';
+        assert_eq!(lgt_local_maguer2011_response(&wrong_magic), None);
+
+        // A length that does not describe the frame it is in.
+        let mut wrong_length = PURCHASE;
+        wrong_length[3] = b'5';
+        assert_eq!(lgt_local_maguer2011_response(&wrong_length), None);
+
+        let mut wrong_marker = PURCHASE;
+        wrong_marker[19] = b'Y';
+        assert_eq!(lgt_local_maguer2011_response(&wrong_marker), None);
+
+        // A subscriber field that is not ten digits.
+        let mut wrong_subscriber = PURCHASE;
+        wrong_subscriber[8] = b'x';
+        assert_eq!(lgt_local_maguer2011_response(&wrong_subscriber), None);
+
+        assert_eq!(lgt_local_maguer2011_response(&PURCHASE[..20]), None);
+        assert_eq!(lgt_local_maguer2011_response(b""), None);
+    }
+
+    /// Only the buy. The shop's other commands - `AS_`, `AB_`, `AU_`, `RV_`,
+    /// `MW_` and the rest - are not answered here, and are logged unanswered
+    /// the way they were before.
+    #[test]
+    fn only_the_buy_is_answered() {
+        let mut inventory = PURCHASE.to_vec();
+        inventory[20..23].copy_from_slice(b"AS_");
+
+        assert_eq!(lgt_local_maguer2011_response(&inventory), None);
+    }
 }
 
 #[cfg(test)]
