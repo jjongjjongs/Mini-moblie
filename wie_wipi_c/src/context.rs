@@ -64,6 +64,18 @@ pub trait WIPICContext: ByteRead + ByteWrite + Send + Sync {
     fn graphics_context_layout(&self) -> ContextLayout {
         ContextLayout::Lgt
     }
+
+    /// Whether `MC_mdaClipCreate` answers null for a clip of no size.
+    ///
+    /// The two handsets disagree, and a title is written against the one it
+    /// shipped on. LGT's firmware makes the clip and only skips its buffer:
+    /// `MC_mdaClipCreate` @0x196ba0 refuses a null type or a negative size and
+    /// nothing else. KTF refuses zero as well - the reference's
+    /// `ktfWIPICMediaCreate` returns null on a zero type or a zero size before
+    /// it reads anything else - and a KTF title's own sound path counts on it.
+    fn refuses_empty_clip(&self) -> bool {
+        false
+    }
 }
 
 pub struct WIPICResult {
@@ -174,6 +186,8 @@ pub mod test {
         pixel_op_takes_source_first: bool,
         /// The order this handset keeps a context's two colour words in.
         graphics_context_layout: ContextLayout,
+        /// Whether this handset refuses a clip of no size.
+        refuses_empty_clip: bool,
         /// Every address given back, in the order it was given back. A live
         /// list only says whether a block is held; this says who let go of it
         /// and how many times, which is what a test about ownership needs.
@@ -198,6 +212,11 @@ pub mod test {
             self.graphics_context_layout = layout;
         }
 
+        /// Stands in for a KTF handset, which refuses a clip of no size.
+        pub fn set_refuses_empty_clip(&mut self, refuses: bool) {
+            self.refuses_empty_clip = refuses;
+        }
+
         #[allow(clippy::new_without_default)]
         pub fn new() -> Self {
             Self {
@@ -218,6 +237,7 @@ pub mod test {
                 guest_function: None,
                 pixel_op_takes_source_first: false,
                 graphics_context_layout: ContextLayout::Lgt,
+                refuses_empty_clip: false,
                 freed: Vec::new(),
             }
         }
@@ -241,6 +261,7 @@ pub mod test {
                 guest_function: None,
                 pixel_op_takes_source_first: false,
                 graphics_context_layout: ContextLayout::Lgt,
+                refuses_empty_clip: false,
                 freed: Vec::new(),
             }
         }
@@ -339,6 +360,10 @@ pub mod test {
 
         fn graphics_context_layout(&self) -> ContextLayout {
             self.graphics_context_layout
+        }
+
+        fn refuses_empty_clip(&self) -> bool {
+            self.refuses_empty_clip
         }
 
         fn system(&mut self) -> &mut System {

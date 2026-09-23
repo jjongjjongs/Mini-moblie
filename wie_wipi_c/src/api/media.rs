@@ -161,8 +161,33 @@ struct MdaClip {
     handle: u32,
 }
 
+/// `MC_mdaClipCreate` - a clip to play `buf_size` bytes of `ptr_type` through.
+///
+/// **On KTF a clip of no size is null.** The reference refuses a zero size
+/// before it reads anything else, and a title's own sound path is built on
+/// that. 슈퍼리얼테니스 asks for `s/serv_smash.mmf` where its archive carries
+/// `s/serve_smash.mmf`, so that one sound never loads and its slot stays empty.
+/// Playing it:
+///
+/// ```text
+/// 0x10c168  size = sound->m28()              ; 0, the slot is empty
+/// 0x10c182  clip = MC_mdaClipCreate(type, size, cb)
+/// 0x10c188  cmp  r0, #0                      ; null - give up quietly
+/// 0x10c1aa  data = sound->m24()              ; ldr r0, [slot->buffer] - null
+/// ```
+///
+/// Its only guard is the null clip. Handed one anyway, it went on to read its
+/// data through the empty slot's null pointer, and the run stopped the first
+/// time a serve was smashed. LGT's firmware makes the clip and skips its
+/// buffer, so this is asked of the handset rather than decided here.
 pub async fn clip_create(context: &mut dyn WIPICContext, ptr_type: WIPICWord, buf_size: WIPICWord, callback: WIPICWord) -> Result<WIPICWord> {
     tracing::debug!("MC_mdaClipCreate({ptr_type:#x}, {buf_size:#x}, {callback:#x})");
+
+    if buf_size == 0 && context.refuses_empty_clip() {
+        tracing::info!("[media] MC_mdaClipCreate(type={ptr_type:#x}, buf_size=0) -> null, a clip of no size is refused here");
+
+        return Ok(0);
+    }
 
     let clip_address = context.alloc_raw(size_of::<MdaClip>() as u32)?;
     let clip = MdaClip {
@@ -767,6 +792,30 @@ mod tests {
     /// loads the next beep into a fresh one. The level used to live on the
     /// audio handle `MC_mdaClipPutData` minted, so every beep played at full
     /// scale and the setting reached no sound at all.
+    /// A KTF handset refuses a clip of no size; an LGT one makes it.
+    ///
+    /// 슈퍼리얼테니스's sound path has no guard but the null clip: a size of
+    /// zero is a sound that never loaded, and a clip made for it has the title
+    /// read that sound's data through a null pointer.
+    #[futures_test::test]
+    async fn a_clip_of_no_size_is_null_on_ktf_alone() {
+        let mut ktf = TestContext::new();
+        ktf.set_refuses_empty_clip(true);
+        assert_eq!(clip_create(&mut ktf, 0x1000, 0, 0).await.unwrap(), 0);
+        assert_ne!(
+            clip_create(&mut ktf, 0x1000, 0x467, 0).await.unwrap(),
+            0,
+            "a clip with a size is still made"
+        );
+
+        let mut lgt = TestContext::new();
+        assert_ne!(
+            clip_create(&mut lgt, 0x1000, 0, 0).await.unwrap(),
+            0,
+            "LGT's firmware makes the clip and skips its buffer"
+        );
+    }
+
     #[futures_test::test]
     async fn a_clip_keeps_its_level_when_its_data_is_loaded_again() {
         let mut context = test_context();
