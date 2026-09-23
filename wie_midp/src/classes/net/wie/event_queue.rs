@@ -264,7 +264,7 @@ impl EventQueue {
                 break;
             } else {
                 let call_serially_events = jvm.get_field(&this, "callSeriallyEvents", "Ljava/util/Vector;").await?;
-                if !jvm.invoke_virtual(&call_serially_events, "isEmpty", "()Z", ()).await? {
+                if !jvm.invoke_virtual(&call_serially_events, "isEmpty", "()Z", ()).await? && !Self::serial_waits_on_paint(jvm, context).await? {
                     let event: ClassInstanceRef<Runnable> =
                         jvm.invoke_virtual(&call_serially_events, "remove", "(I)Ljava/lang/Object;", (0,)).await?;
                     let _: () = jvm.invoke_virtual(&event, "run", "()V", ()).await?;
@@ -308,6 +308,44 @@ impl EventQueue {
         }
 
         Ok(())
+    }
+
+    /// Whether the next serial call should wait for a repaint the title has
+    /// asked for and the host has not yet painted.
+    ///
+    /// MIDP runs a serial call after the repaints already requested have been
+    /// serviced. A frame loop that repaints and hands itself back to
+    /// `callSerially` relies on it: with nothing to hold it, the loop ran its
+    /// runnable again and again while the host's paint was on its way, and
+    /// anything the title set for `paint` to read in between was lost.
+    /// 드래곤아이즈 records a key press for its `paint` to act on and clears it at
+    /// the top of each runnable, so a press was lost to every extra run.
+    ///
+    /// The paint then runs the runnable itself (`runSerialAfterPaint`). A
+    /// host that never paints - a stand-down, a frontend in the background -
+    /// must not stop the title, so the wait is bounded.
+    async fn serial_waits_on_paint(jvm: &Jvm, context: &mut WieJvmContext) -> JvmResult<bool> {
+        const MAX_WAIT_MS: i64 = 100;
+
+        let current_midlet: ClassInstanceRef<MIDlet> = jvm
+            .get_static_field("javax/microedition/midlet/MIDlet", "currentMIDlet", "Ljavax/microedition/midlet/MIDlet;")
+            .await?;
+        if current_midlet.is_null() {
+            return Ok(false);
+        }
+
+        let display = MIDlet::display(jvm, &current_midlet).await?;
+        if display.is_null() {
+            return Ok(false);
+        }
+
+        let requested_at: i64 = jvm.get_field(&display, "__wieRepaintRequestedAt", "J").await?;
+        if requested_at == 0 {
+            return Ok(false);
+        }
+
+        let now = context.system().platform().now().raw() as i64;
+        Ok(now - requested_at < MAX_WAIT_MS)
     }
 
     /// Whether a paint kept through a stand-down is now due, taking it if so.
@@ -392,6 +430,8 @@ impl EventQueue {
                 } else {
                     jvm.put_field(&mut display, "__wiePaintOwed", "Z", false).await?;
                     let _: () = jvm.invoke_virtual(&display, "handlePaintEvent", "()V", ()).await?;
+
+                    Self::run_serial_after_paint(jvm, &this).await?;
                 }
             }
             EventQueueEvent::KeyEvent => {
@@ -416,6 +456,32 @@ impl EventQueue {
         }
 
         Ok(())
+    }
+
+    /// Runs the `callSerially` runnable that was waiting on the paint just
+    /// served, before any input queued behind that paint.
+    ///
+    /// MIDP runs a serial call "soon after completion of the repaint cycle",
+    /// and a frame loop written as a runnable that repaints and re-queues
+    /// itself counts on the two staying together, input arriving between one
+    /// frame's runnable and the next frame's paint. 드래곤아이즈 clears its key
+    /// state at the top of its runnable and reads it in `paint`: a key taken
+    /// between the paint and the runnable was cleared before it was ever read,
+    /// and a press took two or three tries to land. Serial calls used to run
+    /// only once every queued event had been served, which put a key pressed
+    /// during a frame exactly there. (wfeature pairs them the same way: one
+    /// paint, then one serial runnable, each pass.)
+    ///
+    /// One runnable, not the queue: the one this paint was waiting on. The rest
+    /// still run when the queue is idle.
+    async fn run_serial_after_paint(jvm: &Jvm, this: &ClassInstanceRef<Self>) -> JvmResult<()> {
+        let call_serially_events = jvm.get_field(this, "callSeriallyEvents", "Ljava/util/Vector;").await?;
+        if jvm.invoke_virtual(&call_serially_events, "isEmpty", "()Z", ()).await? {
+            return Ok(());
+        }
+
+        let event: ClassInstanceRef<Runnable> = jvm.invoke_virtual(&call_serially_events, "remove", "(I)Ljava/lang/Object;", (0,)).await?;
+        jvm.invoke_virtual(&event, "run", "()V", ()).await
     }
 
     async fn get_event_queue(jvm: &Jvm, _context: &mut WieJvmContext) -> JvmResult<ClassInstanceRef<Self>> {

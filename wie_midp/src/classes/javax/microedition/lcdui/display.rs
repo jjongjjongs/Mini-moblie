@@ -99,6 +99,10 @@ impl Display {
                 // down, kept until the stand-down is over. See
                 // `net.wie.EventQueue.getNextEvent`.
                 JavaFieldProto::new("__wiePaintOwed", "Z", Default::default()),
+                // When the oldest repaint not yet painted was asked for, or 0.
+                // A serial call waits on it; see
+                // `net.wie.EventQueue.serialWaitsOnPaint`.
+                JavaFieldProto::new("__wieRepaintRequestedAt", "J", Default::default()),
             ],
             access_flags: Default::default(),
         }
@@ -240,15 +244,21 @@ impl Display {
     }
 
     async fn repaint(
-        _jvm: &Jvm,
+        jvm: &Jvm,
         context: &mut WieJvmContext,
-        this: ClassInstanceRef<Self>,
+        mut this: ClassInstanceRef<Self>,
         x: i32,
         y: i32,
         width: i32,
         height: i32,
     ) -> JvmResult<()> {
         tracing::debug!("javax.microedition.lcdui.Display::repaint({this:?}, {x}, {y}, {width}, {height})");
+
+        let requested_at: i64 = jvm.get_field(&this, "__wieRepaintRequestedAt", "J").await?;
+        if requested_at == 0 {
+            let now = context.system().platform().now().raw() as i64;
+            jvm.put_field(&mut this, "__wieRepaintRequestedAt", "J", now.max(1)).await?;
+        }
 
         let platform = context.system().platform();
         let screen = platform.screen();
@@ -284,8 +294,10 @@ impl Display {
             .get_field(&this, "currentDisplayable", "Ljavax/microedition/lcdui/Displayable;")
             .await?;
 
+        let mut this = this.clone();
+        jvm.put_field(&mut this, "__wieRepaintRequestedAt", "J", 0i64).await?;
+
         if !current_displayable.is_null() {
-            let mut this = this.clone();
             jvm.put_field(&mut this, "__wiePainting", "Z", true).await?;
 
             let screen_graphics: ClassInstanceRef<Graphics> = jvm.get_field(&this, "screenGraphics", "Ljavax/microedition/lcdui/Graphics;").await?;

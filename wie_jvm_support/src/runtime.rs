@@ -17,6 +17,7 @@ use wie_util::WieError;
 use crate::{JvmImplementation, JvmSupport, WIE_RUSTJAR, WieJavaClassProto, WieJvmContext};
 
 mod file;
+mod thread_census;
 mod timer;
 
 use file::FileImpl;
@@ -257,6 +258,7 @@ where
                 .map(refuse_a_null_array)
                 .map(fill_in_string_buffer)
                 .map(timer::fill_in_timer)
+                .map(thread_census::fill_in_thread_census)
                 .map(fill_the_readers_buffer);
             if let Some(proto) = proto {
                 return Ok(Some(

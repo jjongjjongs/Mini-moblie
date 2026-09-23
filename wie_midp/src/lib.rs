@@ -6,8 +6,14 @@ mod fields;
 
 use wie_jvm_support::WieJavaClassProto;
 
-pub fn get_protos() -> [WieJavaClassProto; 30] {
+pub fn get_protos() -> [WieJavaClassProto; 36] {
     [
+        classes::javax::microedition::io::Connection::as_proto(),
+        classes::javax::microedition::io::ConnectionNotFoundException::as_proto(),
+        classes::javax::microedition::io::Connector::as_proto(),
+        classes::javax::microedition::io::InputConnection::as_proto(),
+        classes::javax::microedition::io::OutputConnection::as_proto(),
+        classes::javax::microedition::io::StreamConnection::as_proto(),
         classes::javax::microedition::lcdui::Alert::as_proto(),
         classes::javax::microedition::lcdui::AlertType::as_proto(),
         classes::javax::microedition::lcdui::Canvas::as_proto(),
