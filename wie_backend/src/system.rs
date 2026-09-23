@@ -53,6 +53,9 @@ pub struct System {
     /// How many rows that strip takes, or zero for the size table's own answer.
     /// See [`System::title_annunciator_rows`].
     title_annunciator_rows: Arc<AtomicU32>,
+    /// Whether this title's clips include their far edge.
+    /// See [`System::title_clip_includes_far_edge`].
+    title_clip_includes_far_edge: Arc<AtomicBool>,
 }
 
 impl System {
@@ -89,6 +92,7 @@ impl System {
             title_draws_sideways: Arc::new(AtomicBool::new(false)),
             title_expects_annunciator: Arc::new(AtomicBool::new(false)),
             title_annunciator_rows: Arc::new(AtomicU32::new(0)),
+            title_clip_includes_far_edge: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -193,6 +197,18 @@ impl System {
 
     pub fn set_title_draws_sideways(&self, sideways: bool) {
         self.title_draws_sideways.store(sideways, Ordering::SeqCst);
+    }
+
+    /// Whether the title was written for a handset whose `setClip` took in the
+    /// pixel at the far edge of the rectangle as well. Looked up in
+    /// `crate::quirks` and set here by the emulator that loaded the archive;
+    /// the MIDP `Graphics` is what reads it.
+    pub fn title_clip_includes_far_edge(&self) -> bool {
+        self.title_clip_includes_far_edge.load(Ordering::SeqCst)
+    }
+
+    pub fn set_title_clip_includes_far_edge(&self, includes: bool) {
+        self.title_clip_includes_far_edge.store(includes, Ordering::SeqCst);
     }
 
     /// Whether the title lays its screens out below the handset's status strip,

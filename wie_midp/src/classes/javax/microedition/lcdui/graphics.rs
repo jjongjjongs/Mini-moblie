@@ -245,7 +245,7 @@ impl Graphics {
 
     async fn set_clip(
         jvm: &Jvm,
-        _: &mut WieJvmContext,
+        context: &mut WieJvmContext,
         mut this: ClassInstanceRef<Graphics>,
         x: i32,
         y: i32,
@@ -256,6 +256,14 @@ impl Graphics {
 
         let translate_x: i32 = jvm.get_field(&this, "translateX", "I").await?;
         let translate_y: i32 = jvm.get_field(&this, "translateY", "I").await?;
+
+        // A title written for a handset whose clip took in its far edge sizes
+        // every clip one short; see `TitleQuirks::clip_includes_far_edge`.
+        let (width, height) = if context.system().title_clip_includes_far_edge() {
+            (if width > 0 { width + 1 } else { width }, if height > 0 { height + 1 } else { height })
+        } else {
+            (width, height)
+        };
 
         // clip fields hold absolute coordinates; negative w/h must clamp to 0 or `Self::clip()`'s
         // u32 cast produces a huge clip that copy_area's i64 extension treats as unbounded

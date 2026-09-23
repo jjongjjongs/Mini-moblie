@@ -73,6 +73,7 @@ impl SktEmulator {
         files: &BTreeMap<String, Vec<u8>>,
     ) -> Result<Self> {
         let system = System::new(platform, id, id, DefaultTaskRunner);
+        system.set_title_clip_includes_far_edge(title_quirks(TitlePlatform::Skt, id).clip_includes_far_edge);
 
         // SK-VM titles ask for archive entries in a case the archive does not
         // use - they ship `Data/Map01.dat` and open `data/map01.dat`. The

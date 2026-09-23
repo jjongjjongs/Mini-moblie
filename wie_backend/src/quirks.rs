@@ -57,6 +57,19 @@ pub struct TitleQuirks {
     /// scene and transposes it on its way to the screen - so the frame has to
     /// be turned back where it is presented. See `wie_backend::present`.
     pub drawn_sideways: bool,
+
+    /// Whether the handset the title was written for took `setClip(x, y, w,
+    /// h)` to include the pixel at `x + w` and `y + h`, so the clip is one
+    /// pixel wider and taller than MIDP says.
+    ///
+    /// 이터널사가 (SKT 3826345643) says so itself: every one of its 191
+    /// `setClip` calls adds a field that holds -1 to the width and the height,
+    /// and it cuts its 16-pixel map tiles out of their strips with
+    /// `setClip(x, y, 16 - 1, 16 - 1)`. Clipped the way MIDP reads it, each
+    /// tile lost its last column and row, and the map was a grid of black
+    /// lines. Other SK-VM titles pass the full size (교실이데아 clips its
+    /// tiles to 16 by 16), so this is the title's and not the platform's.
+    pub clip_includes_far_edge: bool,
 }
 
 const fn panel(width: u32, height: u32) -> TitleQuirks {
@@ -65,6 +78,7 @@ const fn panel(width: u32, height: u32) -> TitleQuirks {
         expects_annunciator: false,
         annunciator_rows: None,
         drawn_sideways: false,
+        clip_includes_far_edge: false,
     }
 }
 
@@ -74,6 +88,7 @@ const fn annunciator() -> TitleQuirks {
         expects_annunciator: true,
         annunciator_rows: None,
         drawn_sideways: false,
+        clip_includes_far_edge: false,
     }
 }
 
@@ -84,6 +99,7 @@ const fn annunciator_of(rows: u32) -> TitleQuirks {
         expects_annunciator: true,
         annunciator_rows: Some(rows),
         drawn_sideways: false,
+        clip_includes_far_edge: false,
     }
 }
 
@@ -93,6 +109,7 @@ const fn sideways() -> TitleQuirks {
         expects_annunciator: false,
         annunciator_rows: None,
         drawn_sideways: true,
+        clip_includes_far_edge: false,
     }
 }
 
@@ -110,6 +127,16 @@ const fn sideways() -> TitleQuirks {
 /// stay listed: they place every screen inside 204 of their 220 rows, so the
 /// strip's height is what their layout is measured from, and without it they
 /// lose the screen rather than a band at the bottom.
+const fn clip_includes_far_edge() -> TitleQuirks {
+    TitleQuirks {
+        screen_size: None,
+        expects_annunciator: false,
+        annunciator_rows: None,
+        drawn_sideways: false,
+        clip_includes_far_edge: true,
+    }
+}
+
 const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // 미니게임 히어로즈2 터치: repaints a 240x80 sponsor banner along the
     // bottom of whatever height it is told, so its 320 rows of screen need a
@@ -187,6 +214,7 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // off-screen buffer of its own, and copies that onto the screen a quarter
     // turn clockwise - the handset was meant to be turned sideways to play it.
     (TitlePlatform::Lgt, "000323B3", sideways()),
+    (TitlePlatform::Skt, "3826345643", clip_includes_far_edge()),
 ];
 
 /// What to do differently for the title `aid` on `platform`.
