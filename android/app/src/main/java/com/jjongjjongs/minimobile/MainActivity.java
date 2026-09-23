@@ -69,6 +69,7 @@ import java.util.Enumeration;
 import java.util.Locale;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
+import java.util.zip.ZipInputStream;
 import java.nio.ShortBuffer;
 
 /**
@@ -2189,6 +2190,13 @@ public final class MainActivity extends Activity {
                     return bitmap;
                 }
             }
+
+            // Nothing in the archive's own entries decoded. Its jar still has
+            // the title's own pictures, and one of those beats the placeholder.
+            Bitmap fromJar = readIconInsideJar(zip, maxIconBytes);
+            if (fromJar != null) {
+                return fromJar;
+            }
         } catch (Exception e) {
             // A corrupt or unreadable archive still gets a placeholder tile.
         }
@@ -2196,73 +2204,100 @@ public final class MainActivity extends Activity {
         return null;
     }
 
-    /** Lower ranks are tried first: the names an icon usually has. */
-    private static int iconNameRank(String path) {
-        String name = path;
-        int slash = name.lastIndexOf('/');
-        if (slash >= 0) {
-            name = name.substring(slash + 1);
-        }
-        name = name.toLowerCase(Locale.US);
+    /**
+     * Cover art out of the title's own jar, for an archive whose icons this
+     * cannot read.
+     *
+     * <p>장금이의꿈's three icons are not pictures in any format here: they open
+     * {@code SAF\0}, a KTF container whose pixels are packed its own way, and
+     * every other entry in that archive is the jar - one entry, far past the
+     * size cap, so the archive came up with the placeholder tile. Its jar holds
+     * three hundred PNGs, the title art among them.
+     *
+     * <p>Which one is the same question the named icons answer by being named
+     * largest first, and the same answer: the biggest picture that will fit a
+     * tile. A title's own artwork is the largest thing it carries - 장금이의꿈's
+     * is {@code img/menu/introchar.png}, 장금이 under the title in 151x193 -
+     * while the rest of a jar is sprites and strips of HUD. Names are no help
+     * here: this title's {@code logo.png} is the publisher's mark.
+     *
+     * <p>Only the bounds are decoded while looking, which reads each picture's
+     * header and not its pixels, and only the winner is kept.
+     */
+    private Bitmap readIconInsideJar(ZipFile zip, int maxIconBytes) {
+        final int maxJarBytes = 16 * 1024 * 1024;
+        final int minSide = 32;
+        final int maxSide = 512;
 
-        // Largest first, so the tile gets the best picture the archive has.
-        if (name.startsWith("big.")) {
-            return 0;
-        }
-        if (name.startsWith("middle.")) {
-            return 1;
-        }
-        if (name.startsWith("small.")) {
-            return 2;
-        }
-        if (name.endsWith(".icon") || name.contains("icon")) {
-            return 3;
-        }
-        if (name.endsWith("_l.png") || name.endsWith("_ad.png") || name.endsWith("_m.png") || name.endsWith("_s.png")) {
-            return 3;
-        }
-        return 4;
-    }
+        for (Enumeration<? extends ZipEntry> entries = zip.entries(); entries.hasMoreElements(); ) {
+            ZipEntry jar = entries.nextElement();
+            if (jar.isDirectory() || !jar.getName().toLowerCase(Locale.US).endsWith(".jar")) {
+                continue;
+            }
+            if (jar.getSize() > maxJarBytes) {
+                continue;
+            }
 
-    /** The entry decoded as cover art, or null when it is not one. */
-    private Bitmap readIconEntry(ZipFile zip, ZipEntry entry, int maxIconBytes) {
-        final int minSide = 12;
-        final int maxSide = 256;
+            byte[] best = null;
+            long bestArea = 0;
 
-        try (InputStream stream = zip.getInputStream(entry)) {
-            // The header first, so an archive's own jar is passed over on its
-            // first eight bytes rather than read to the cap.
-            byte[] header = new byte[8];
-            int headerRead = 0;
-            while (headerRead < header.length) {
-                int read = stream.read(header, headerRead, header.length - headerRead);
-                if (read <= 0) {
-                    break;
+            try (ZipInputStream stream = new ZipInputStream(zip.getInputStream(jar))) {
+                byte[] chunk = new byte[8192];
+                ZipEntry inner;
+                while ((inner = stream.getNextEntry()) != null) {
+                    if (inner.isDirectory()) {
+                        continue;
+                    }
+
+                    byte[] header = new byte[8];
+                    int headerRead = 0;
+                    while (headerRead < header.length) {
+                        int read = stream.read(header, headerRead, header.length - headerRead);
+                        if (read <= 0) {
+                            break;
+                        }
+                        headerRead += read;
+                    }
+                    if (!looksLikeImage(header, headerRead)) {
+                        continue;
+                    }
+
+                    ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+                    buffer.write(header, 0, headerRead);
+                    int read;
+                    while (buffer.size() <= maxIconBytes && (read = stream.read(chunk)) > 0) {
+                        buffer.write(chunk, 0, read);
+                    }
+                    if (buffer.size() > maxIconBytes) {
+                        continue;
+                    }
+
+                    byte[] bytes = buffer.toByteArray();
+                    BitmapFactory.Options bounds = new BitmapFactory.Options();
+                    bounds.inJustDecodeBounds = true;
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
+
+                    if (bounds.outWidth < minSide || bounds.outHeight < minSide
+                            || bounds.outWidth > maxSide || bounds.outHeight > maxSide) {
+                        continue;
+                    }
+
+                    long area = (long) bounds.outWidth * bounds.outHeight;
+                    if (area > bestArea) {
+                        bestArea = area;
+                        best = bytes;
+                    }
                 }
-                headerRead += read;
+            } catch (Exception e) {
+                continue;
             }
 
-            if (!looksLikeImage(header, headerRead)) {
-                return null;
+            if (best != null) {
+                Bitmap bitmap = BitmapFactory.decodeByteArray(best, 0, best.length);
+                if (bitmap != null) {
+                    return bitmap;
+                }
             }
-
-            ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-            buffer.write(header, 0, headerRead);
-            byte[] chunk = new byte[8192];
-            int read;
-            while ((read = stream.read(chunk)) > 0 && buffer.size() <= maxIconBytes) {
-                buffer.write(chunk, 0, read);
-            }
-
-            byte[] bytes = buffer.toByteArray();
-            Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
-            if (bitmap != null
-                    && bitmap.getWidth() >= minSide && bitmap.getHeight() >= minSide
-                    && bitmap.getWidth() <= maxSide && bitmap.getHeight() <= maxSide) {
-                return bitmap;
-            }
-        } catch (Exception e) {
-            // Not an icon, or unreadable; the next candidate still gets a turn.
         }
 
         return null;
