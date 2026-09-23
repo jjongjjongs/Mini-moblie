@@ -4,8 +4,12 @@ use java_class_proto::{JavaFieldProto, JavaMethodProto};
 use java_constants::{FieldAccessFlags, MethodAccessFlags};
 use jvm::{ClassInstanceRef, Jvm, Result as JvmResult};
 
+use wie_backend::canvas::Color;
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
-use wie_midp::classes::javax::microedition::lcdui::{Graphics, Image};
+use wie_midp::classes::javax::microedition::{
+    lcdui::{Display, Graphics, Image},
+    midlet::MIDlet,
+};
 
 // class com.xce.lcdui.XDisplay
 pub struct XDisplay;
@@ -56,9 +60,19 @@ impl XDisplay {
         Ok(())
     }
 
+    /// Copies a region of the screen into `image`, at its origin.
+    ///
+    /// This was a stub, so the image kept whatever it held before - nothing.
+    /// 교실이데아 takes the whole screen this way before it draws over it, and
+    /// draws the copy back as the background of its field and its dialogue: with
+    /// nothing copied, every dialogue sat on black and every sprite that moved
+    /// left a trail of itself, since the background drawn over it each frame was
+    /// an empty image. The graphics argument is not where the copy comes from;
+    /// the screen is, as the reference emulator (wfeature, `xDisplayCopyLCD`)
+    /// reads it too.
     #[allow(clippy::too_many_arguments)]
     async fn copy_lcd(
-        _jvm: &Jvm,
+        jvm: &Jvm,
         _context: &mut WieJvmContext,
         graphics: ClassInstanceRef<Graphics>,
         image: ClassInstanceRef<Image>,
@@ -67,7 +81,55 @@ impl XDisplay {
         width: i32,
         height: i32,
     ) -> JvmResult<()> {
-        tracing::warn!("stub com.xce.lcdui.XDisplay::copyLCD({graphics:?}, {image:?}, {x}, {y}, {width}, {height})",);
+        tracing::debug!("com.xce.lcdui.XDisplay::copyLCD({graphics:?}, {image:?}, {x}, {y}, {width}, {height})");
+
+        if image.is_null() {
+            return Err(jvm.exception("java/lang/NullPointerException", "image is null").await);
+        }
+
+        Self::copy_screen(jvm, &image, x, y, width, height).await
+    }
+
+    /// The screen: the image the current display's canvas paints into and the
+    /// host presents.
+    async fn screen(jvm: &Jvm) -> JvmResult<ClassInstanceRef<Image>> {
+        let midlet: ClassInstanceRef<MIDlet> = jvm
+            .get_static_field("javax/microedition/midlet/MIDlet", "currentMIDlet", "Ljavax/microedition/midlet/MIDlet;")
+            .await?;
+        let display: ClassInstanceRef<Display> = jvm
+            .invoke_static(
+                "javax/microedition/lcdui/Display",
+                "getDisplay",
+                "(Ljavax/microedition/midlet/MIDlet;)Ljavax/microedition/lcdui/Display;",
+                (midlet,),
+            )
+            .await?;
+        let mut graphics = Display::screen_graphics(jvm, &display).await?;
+
+        Graphics::image(jvm, &mut graphics).await
+    }
+
+    /// Copies the screen's `x`, `y`, `width` by `height` into `into` at its
+    /// origin. What the region leaves off the screen, or off `into`, is not
+    /// copied. The screen is opaque, so what is copied is too.
+    pub async fn copy_screen(jvm: &Jvm, into: &ClassInstanceRef<Image>, x: i32, y: i32, width: i32, height: i32) -> JvmResult<()> {
+        let screen = Image::image(jvm, &Self::screen(jvm).await?).await?;
+        let mut canvas = Image::canvas(jvm, into).await?;
+
+        let (screen_width, screen_height) = (screen.width() as i32, screen.height() as i32);
+        let (into_width, into_height) = (canvas.image().width() as i32, canvas.image().height() as i32);
+
+        for row in 0..height.min(into_height) {
+            for column in 0..width.min(into_width) {
+                let (screen_x, screen_y) = (x + column, y + row);
+                if screen_x < 0 || screen_y < 0 || screen_x >= screen_width || screen_y >= screen_height {
+                    continue;
+                }
+
+                let color = screen.get_pixel(screen_x, screen_y);
+                canvas.put_pixel(column, row, Color { a: 0xff, ..color });
+            }
+        }
 
         Ok(())
     }

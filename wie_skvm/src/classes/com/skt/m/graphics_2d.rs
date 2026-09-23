@@ -8,6 +8,8 @@ use wie_backend::canvas::Color;
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 use wie_midp::classes::javax::microedition::lcdui::{Graphics, Image};
 
+use crate::classes::com::xce::lcdui::XDisplay;
+
 /// SK-VM's `Graphics2D.drawImage` combine modes. 0 is a copy.
 const SOURCE_AND: i32 = 1;
 const SOURCE_OR: i32 = 2;
@@ -42,6 +44,7 @@ impl Graphics2D {
                     Self::draw_image,
                     Default::default(),
                 ),
+                JavaMethodProto::new("invertRect", "(IIII)V", Self::invert_rect, Default::default()),
                 JavaMethodProto::new(
                     "createMaskableImage",
                     "(II)Ljavax/microedition/lcdui/Image;",
@@ -75,8 +78,18 @@ impl Graphics2D {
         Ok(instance.into())
     }
 
+    /// A new image holding a region of the screen: what a title takes before
+    /// it draws an overlay it means to undo. It was a blank image of the right
+    /// size, so the undo drew nothing back. `XDisplay.copyLCD` is the same copy
+    /// into an image the caller already has.
     async fn capture_lcd(jvm: &Jvm, _context: &mut WieJvmContext, x: i32, y: i32, width: i32, height: i32) -> JvmResult<ClassInstanceRef<Image>> {
-        tracing::warn!("stub com.skt.m.Graphics2D::captureLCD({x}, {y}, {width}, {height})");
+        tracing::debug!("com.skt.m.Graphics2D::captureLCD({x}, {y}, {width}, {height})");
+
+        if width <= 0 || height <= 0 {
+            return Err(jvm
+                .exception("java/lang/IllegalArgumentException", "capture width and height must be positive")
+                .await);
+        }
 
         let image: ClassInstanceRef<Image> = jvm
             .invoke_static(
@@ -87,7 +100,56 @@ impl Graphics2D {
             )
             .await?;
 
+        XDisplay::copy_screen(jvm, &image, x, y, width, height).await?;
+
         Ok(image)
+    }
+
+    /// Inverts the colour of every pixel in a rectangle, under the graphics'
+    /// translation and clip. 교실이데아 names it; it was missing, which is a
+    /// fatal `NoSuchMethodError` the first time it is called.
+    async fn invert_rect(
+        jvm: &Jvm,
+        _context: &mut WieJvmContext,
+        this: ClassInstanceRef<Self>,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) -> JvmResult<()> {
+        tracing::debug!("com.skt.m.Graphics2D::invertRect({this:?}, {x}, {y}, {width}, {height})");
+
+        let mut graphics: ClassInstanceRef<Graphics> = jvm.get_field(&this, "graphics", "Ljavax/microedition/lcdui/Graphics;").await?;
+        let translate_x: i32 = jvm.get_field(&graphics, "translateX", "I").await?;
+        let translate_y: i32 = jvm.get_field(&graphics, "translateY", "I").await?;
+        let clip = Graphics::clip(jvm, &graphics).await?;
+
+        let image = Graphics::image(jvm, &mut graphics).await?;
+        let mut canvas = Image::canvas(jvm, &image).await?;
+        let (image_width, image_height) = (canvas.image().width() as i32, canvas.image().height() as i32);
+
+        let left = (x + translate_x).max(clip.x).max(0);
+        let top = (y + translate_y).max(clip.y).max(0);
+        let right = (x + translate_x + width).min(clip.x + clip.width as i32).min(image_width);
+        let bottom = (y + translate_y + height).min(clip.y + clip.height as i32).min(image_height);
+
+        for row in top..bottom {
+            for column in left..right {
+                let color = canvas.image().get_pixel(column, row);
+                canvas.put_pixel(
+                    column,
+                    row,
+                    Color {
+                        a: 0xff,
+                        r: 0xff - color.r,
+                        g: 0xff - color.g,
+                        b: 0xff - color.b,
+                    },
+                );
+            }
+        }
+
+        Ok(())
     }
 
     /// Blits a region of `src` with one of SK-VM's combine modes: 0 copies,
@@ -285,6 +347,37 @@ mod tests {
 
             let source = image(&jvm, 0x800000, 0x40c040).await?;
             assert_eq!(draw(&jvm, source, 3).await?, [0xc0c040, 0x000000]);
+
+            Ok(())
+        })
+    }
+
+    /// `invertRect` flips each channel under the rectangle and nothing
+    /// outside it.
+    #[test]
+    fn invert_rect_flips_only_the_rectangle() -> Result<()> {
+        run_jvm_test(protos(), |jvm| async move {
+            let image = image(&jvm, 0x40c040, 0x40c040).await?;
+            let graphics: ClassInstanceRef<()> = jvm
+                .invoke_virtual(&image, "getGraphics", "()Ljavax/microedition/lcdui/Graphics;", ())
+                .await?;
+            let graphics_2d: ClassInstanceRef<()> = jvm
+                .invoke_static(
+                    "com/skt/m/Graphics2D",
+                    "getGraphics2D",
+                    "(Ljavax/microedition/lcdui/Graphics;)Lcom/skt/m/Graphics2D;",
+                    (graphics,),
+                )
+                .await?;
+
+            let _: () = jvm.invoke_virtual(&graphics_2d, "invertRect", "(IIII)V", (1, 0, 1, 1)).await?;
+
+            let pixels = Image::image(&jvm, &image).await?;
+            let rgb = |x| {
+                let color = pixels.get_pixel(x, 0);
+                (u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b)
+            };
+            assert_eq!([rgb(0), rgb(1)], [0x40c040, 0xbf3fbf]);
 
             Ok(())
         })

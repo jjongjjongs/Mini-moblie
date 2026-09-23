@@ -45,6 +45,23 @@ async fn sleep(jvm: &Jvm, millis: i64) -> JvmResult<()> {
     jvm.invoke_static("java/lang/Thread", "sleep", "(J)V", (millis,)).await
 }
 
+/// Sleeps until `counter` has moved, a short sleep at a time.
+///
+/// The test platform's clock is one for the whole process and every reading
+/// moves it, so tests running beside each other hurry each other's time along
+/// and a fixed sleep can end before the timer's thread has had a turn. Waiting
+/// for the thing itself does not depend on how fast the clock runs.
+async fn sleep_until_run(jvm: &Jvm, counter: &AtomicUsize) -> JvmResult<()> {
+    for _ in 0..1000 {
+        if counter.load(Ordering::SeqCst) > 0 {
+            return Ok(());
+        }
+        sleep(jvm, 10).await?;
+    }
+
+    panic!("the task never ran");
+}
+
 #[test]
 fn a_cancelled_timer_runs_nothing_more() -> wie_util::Result<()> {
     let protos = vec![CountingTask::<true>::proto("test/TimerCounted")];
@@ -56,9 +73,7 @@ fn a_cancelled_timer_runs_nothing_more() -> wie_util::Result<()> {
             .invoke_virtual(&timer, "scheduleAtFixedRate", "(Ljava/util/TimerTask;JJ)V", (task, 0i64, 10i64))
             .await?;
 
-        sleep(&jvm, 300).await?;
-        let before = TIMER_RUNS.load(Ordering::SeqCst);
-        assert!(before > 0, "the task never ran");
+        sleep_until_run(&jvm, &TIMER_RUNS).await?;
 
         let _: () = jvm.invoke_virtual(&timer, "cancel", "()V", ()).await?;
         let after_cancel = TIMER_RUNS.load(Ordering::SeqCst);
@@ -81,8 +96,7 @@ fn a_cancelled_task_runs_no_more_and_says_so_once() -> wie_util::Result<()> {
             .invoke_virtual(&timer, "scheduleAtFixedRate", "(Ljava/util/TimerTask;JJ)V", (task.clone(), 0i64, 10i64))
             .await?;
 
-        sleep(&jvm, 300).await?;
-        assert!(TASK_RUNS.load(Ordering::SeqCst) > 0, "the task never ran");
+        sleep_until_run(&jvm, &TASK_RUNS).await?;
 
         let first: bool = jvm.invoke_virtual(&task, "cancel", "()Z", ()).await?;
         let second: bool = jvm.invoke_virtual(&task, "cancel", "()Z", ()).await?;
