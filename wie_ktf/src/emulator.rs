@@ -447,6 +447,10 @@ impl Emulator for KtfEmulator {
         self.system.is_idle()
     }
 
+    fn sleep_hint(&self) -> Option<u64> {
+        self.system.idle_for()
+    }
+
     fn tick(&mut self) -> Result<()> {
         self.system.tick().map_err(|x| {
             let reg_stack = self.core.dump_reg_stack(IMAGE_BASE);

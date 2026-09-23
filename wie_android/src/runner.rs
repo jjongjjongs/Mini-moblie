@@ -400,6 +400,13 @@ impl Runner {
         }
     }
 
+    /// How long the host loop may sleep before the title has work again, in
+    /// milliseconds, or `None` to keep to its own interval. See
+    /// [`Emulator::sleep_hint`](wie_backend::Emulator::sleep_hint).
+    pub fn sleep_hint(&self) -> Option<u64> {
+        self.instance.as_ref()?.emulator.sleep_hint()
+    }
+
     pub fn take_frame(&mut self) -> Option<Frame> {
         self.instance.as_ref()?.shared.take_frame()
     }

@@ -44,6 +44,16 @@ final class NativeBridge {
     static native int nativeRunning();
 
     /**
+     * How long the loop may sleep before the title has work again, in
+     * milliseconds, or -1 to keep to its own interval.
+     *
+     * <p>Asked after a tick that came back early. A fixed poll interval costs
+     * one poll for every interval a title's timer spans; told the wait, the loop
+     * can wake once and on time.
+     */
+    static native int nativeSleepHintMs();
+
+    /**
      * Guest instructions retired so far. It climbs while the title is running
      * and stops dead when it is not, which is what tells a title doing a long
      * piece of work - a loading screen is one tick that can last seconds -

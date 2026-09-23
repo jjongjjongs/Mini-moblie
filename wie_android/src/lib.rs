@@ -153,6 +153,21 @@ pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativ
     std::panic::catch_unwind(AssertUnwindSafe(runner::is_running)).unwrap_or(false).into()
 }
 
+/// `nativeSleepHintMs() -> int`
+///
+/// How long the loop may sleep before the title has work again, or -1 to keep
+/// to its own interval. Asked right after a tick that came back early, so the
+/// loop waits once for the title's timer instead of polling its way there.
+///
+/// # Safety
+/// Called by the JVM with a valid `env` reference.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativeSleepHintMs(_env: JNIEnv, _class: JClass) -> jint {
+    let hint = std::panic::catch_unwind(AssertUnwindSafe(|| with_runner(|runner| runner.sleep_hint()))).unwrap_or(None);
+
+    hint.map_or(-1, |ms| ms.min(jint::MAX as u64) as jint)
+}
+
 /// `nativeGuestProgress() -> long`
 ///
 /// Guest instructions retired so far. It climbs while the title is running and

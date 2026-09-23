@@ -104,6 +104,12 @@ impl System {
         self.executor.is_idle()
     }
 
+    /// How long the host may sleep before the emulator has work again, in
+    /// milliseconds. See [`Executor::idle_for`](crate::Executor::idle_for).
+    pub fn idle_for(&self) -> Option<u64> {
+        self.executor.idle_for(self.platform.now())
+    }
+
     pub fn spawn<C>(&self, callable: C)
     where
         C: AsyncCallable<Result<()>> + 'static + Send,

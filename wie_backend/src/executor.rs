@@ -174,6 +174,37 @@ impl Executor {
         running == 0 && inner.sleeping_tasks.values().min().is_some_and(|&wakeup| inner.last_now < wakeup)
     }
 
+    /// How long until there is work again, in milliseconds, when there is none
+    /// now.
+    ///
+    /// [`is_idle`](Self::is_idle) says only *that* the host may stop; this says
+    /// how long it may stop for. A host that polls a fixed interval instead has
+    /// to pay one poll's overhead for every interval a title's timer spans, and
+    /// a title that asks for the next frame in 15ms was waiting 33 for it -
+    /// several poll cycles, each draining audio and asking the emulator its
+    /// state again, before one of them happened to land past the wake-up.
+    ///
+    /// `None` when the host should keep to its own interval: something is
+    /// runnable, nothing is scheduled at all, or the tasks are spinning rather
+    /// than sleeping - a spin has no wake-up to wait for, and the host's
+    /// interval is what keeps it from pegging the thread.
+    pub fn idle_for(&self, now: Instant) -> Option<u64> {
+        let inner = self.inner.lock();
+
+        if inner.last_step_only_yielded {
+            return None;
+        }
+
+        let running = inner.tasks.len() - inner.sleeping_tasks.len();
+        if running != 0 {
+            return None;
+        }
+
+        let wakeup = *inner.sleeping_tasks.values().min()?;
+
+        (wakeup > now).then(|| wakeup - now)
+    }
+
     fn step(&mut self, now: Instant) -> Result<()> {
         // Polling a task re-enters the executor - `sleep` and `spawn` both take the
         // lock - so a task has to be out of the map while it is polled. It is taken
@@ -450,6 +481,57 @@ mod tests {
 
         executor.tick(advancing_clock(200)).unwrap();
         assert!(completed.load(Ordering::Relaxed));
+    }
+
+    /// The host is told how long the wait is, not just that there is one.
+    ///
+    /// A fixed poll interval pays one poll per interval the wait spans, and the
+    /// wake-up lands late by whatever is left over. 제노니아2 asks for its next
+    /// frame in 15ms and was waiting 33 for it.
+    #[test]
+    fn an_idle_executor_says_how_long_it_is_idle_for() {
+        let mut executor = Executor::new();
+
+        // The sleep registers the wake-up; the yield after it is what leaves the
+        // task in the map to be woken, rather than finishing and taking its
+        // wake-up with it.
+        let executor_clone = executor.clone();
+        executor.spawn(move || async move {
+            executor_clone.sleep(100);
+            YieldOnce(false).await;
+        });
+
+        executor.tick(advancing_clock(0)).unwrap();
+
+        // The test clock advances a millisecond per read, so the sleep was
+        // asked for at 1 and runs to 101: at 60 there are 41 left to wait.
+        assert!(executor.is_idle());
+        assert_eq!(executor.idle_for(Instant::from_epoch_millis(60)), Some(41));
+
+        // At the wake-up and past it there is nothing left to wait for, and the
+        // host is told to come back on its own terms rather than to sleep zero.
+        assert_eq!(executor.idle_for(Instant::from_epoch_millis(101)), None);
+        assert_eq!(executor.idle_for(Instant::from_epoch_millis(140)), None);
+    }
+
+    /// A task that is spinning rather than sleeping has no wake-up to wait for,
+    /// so the host keeps to its own interval - which is what stops a spin from
+    /// pegging the thread. It is still idle, which is a different question.
+    #[test]
+    fn a_spinning_task_offers_no_wait() {
+        let mut executor = Executor::new();
+
+        let spinner = executor.clone();
+        executor.spawn(move || async move {
+            for _ in 0..10_000 {
+                YieldFuture::waiting(&spinner).await;
+            }
+        });
+
+        executor.tick(advancing_clock(0)).unwrap();
+
+        assert!(executor.is_idle());
+        assert_eq!(executor.idle_for(Instant::from_epoch_millis(0)), None);
     }
 
     #[test]

@@ -106,6 +106,19 @@ public final class MainActivity extends Activity {
     private static final int TICK_INTERVAL_MS = 4;
     private static final int BUSY_INTERVAL_MS = 0;
 
+    /**
+     * The longest the loop will sleep on the emulator's word, whatever it says.
+     *
+     * <p>Input is read at the top of a step, so a sleep is also how long a key
+     * press can sit unhandled. A tick may already hold the thread for
+     * {@link #TICK_BUDGET_MS}, so waiting about as long as that costs nothing a
+     * player has not already been paying, while still covering the 15ms frame
+     * timer these titles ask for. A title idling in a menu is asked about again
+     * this often rather than every {@link #TICK_INTERVAL_MS}, which is fewer
+     * wakeups than before, not more.
+     */
+    private static final int MAX_IDLE_SLEEP_MS = 16;
+
     /** Audio commands drained per tick, so a backlog cannot stall the loop. */
     private static final int MAX_AUDIO_PER_TICK = 32;
 
@@ -2645,9 +2658,28 @@ public final class MainActivity extends Activity {
         try {
             emulatorStep();
         } finally {
-            boolean busy = lastTickRanMs + 1 >= TICK_BUDGET_MS;
-            scheduleEmulatorStep(busy ? BUSY_INTERVAL_MS : TICK_INTERVAL_MS);
+            scheduleEmulatorStep(nextStepDelayMs());
         }
+    }
+
+    /**
+     * How long to wait before the next step.
+     *
+     * <p>A tick that used its whole budget had work left and is re-armed at
+     * once. One that came back early went idle, and the emulator is asked how
+     * long that idleness lasts: waiting exactly that long lands on the title's
+     * timer in one wakeup, where a fixed interval needed several and arrived
+     * late. It answers -1 when it cannot say - a title spinning rather than
+     * sleeping, or one already stopped - and then the fixed interval stands.
+     */
+    private long nextStepDelayMs() {
+        if (lastTickRanMs + 1 >= TICK_BUDGET_MS) {
+            return BUSY_INTERVAL_MS;
+        }
+
+        int hint = NativeBridge.nativeSleepHintMs();
+
+        return hint < 0 ? TICK_INTERVAL_MS : Math.min(hint, MAX_IDLE_SLEEP_MS);
     }
 
     /** Queues the next step, unless the player is closing and the thread is gone. */

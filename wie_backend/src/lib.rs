@@ -59,6 +59,17 @@ pub trait Emulator {
     fn is_idle(&self) -> bool {
         false
     }
+
+    /// How long the host may sleep before this emulator has work again, in
+    /// milliseconds, when [`is_idle`](Self::is_idle) is true.
+    ///
+    /// A host that polls a fixed interval pays one poll for every interval a
+    /// title's timer spans; told how long the wait actually is, it can wake
+    /// once, on time. `None` means "keep to your own interval", which is the
+    /// default and what an emulator that does not track wake-ups reports.
+    fn sleep_hint(&self) -> Option<u64> {
+        None
+    }
 }
 
 pub struct ProfileSample {
