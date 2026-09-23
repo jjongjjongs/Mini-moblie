@@ -227,6 +227,31 @@ pub async fn unset_timer(context: &mut dyn WIPICContext, ptr_timer: WIPICWord) -
     Ok(())
 }
 
+/// A block the heap could not serve, answered the way C answers it.
+///
+/// `MC_knlAlloc` and `MC_knlCalloc` are the platform's `malloc` and `calloc`,
+/// and a request either of them cannot serve is a pointer of zero - not an
+/// error, and certainly not the end of the run. Passing the allocator's refusal
+/// up took the VM down instead, on a `net.wie.WieError: Allocation failure`
+/// thrown out of whatever the title happened to be doing, and a title that
+/// checks its pointer never got the chance to.
+///
+/// It is worth saying that a refusal here is not the same thing as a full heap.
+/// 테일즈위버 루시안칼츠편 asked for `0x7a237a23` bytes - two gigabytes, out of
+/// a size word it read from somewhere it should not have - with 107MB of the
+/// 128MB heap still free. A handset with a megabyte of heap answers that with
+/// null and the title carries on, which is what it has to do here too, and what
+/// this leaves is the size in the log to be chased rather than a dead emulator.
+fn out_of_memory(what: &str, size: WIPICWord, error: WieError) -> Result<WIPICIndirectPtr> {
+    if !matches!(error, WieError::AllocationFailure) {
+        return Err(error);
+    }
+
+    tracing::warn!("{what}({size:#x}) could not be served; answering null the way the reference does");
+
+    Ok(WIPICIndirectPtr(0))
+}
+
 pub async fn alloc(context: &mut dyn WIPICContext, size: WIPICWord) -> Result<WIPICIndirectPtr> {
     tracing::debug!("MC_knlAlloc({size:#x})");
 
@@ -238,9 +263,10 @@ pub async fn alloc(context: &mut dyn WIPICContext, size: WIPICWord) -> Result<WI
     // asks for zero bytes while it loads, and on null writes its own
     // out-of-memory marker file and carries on down its failure path - a title
     // reporting a memory exhaustion that never happened.
-    let allocated = context.alloc(size.max(1))?;
-
-    Ok(allocated)
+    match context.alloc(size.max(1)) {
+        Ok(allocated) => Ok(allocated),
+        Err(error) => out_of_memory("MC_knlAlloc", size, error),
+    }
 }
 
 pub async fn calloc(context: &mut dyn WIPICContext, size: WIPICWord) -> Result<WIPICIndirectPtr> {
@@ -253,7 +279,10 @@ pub async fn calloc(context: &mut dyn WIPICContext, size: WIPICWord) -> Result<W
     // faulted it. Allocate a minimal block so the pointer is non-null.
     let alloc_size = size.max(1);
 
-    let memory = context.alloc(alloc_size)?;
+    let memory = match context.alloc(alloc_size) {
+        Ok(memory) => memory,
+        Err(error) => return out_of_memory("MC_knlCalloc", size, error),
+    };
 
     let zero = iter::repeat_n(0, alloc_size as _).collect::<Vec<_>>();
     context.write_bytes(context.data_ptr(memory)?, &zero)?;
@@ -922,7 +951,7 @@ mod test {
 
     use test_utils::{TestPlatform, TestPlatformEvent};
     use wie_backend::{DefaultTaskRunner, System};
-    use wie_util::{ByteRead, ByteWrite, Result, read_null_terminated_string_bytes, write_null_terminated_string_bytes};
+    use wie_util::{ByteRead, ByteWrite, Result, WieError, read_null_terminated_string_bytes, write_null_terminated_string_bytes};
 
     use crate::{WIPICContext, context::test::TestContext, method::MethodImpl};
 
@@ -1358,6 +1387,28 @@ mod test {
         // archive.
         let mut context = program_control_context(None);
         assert_eq!(get_access_level(&mut context).await.unwrap(), -12);
+    }
+
+    /// A request the heap cannot serve is a null pointer, not the end of the run.
+    ///
+    /// `MC_knlAlloc` and `MC_knlCalloc` are the platform's `malloc` and
+    /// `calloc`. Passing the allocator's refusal up threw
+    /// `net.wie.WieError: Allocation failure` out of whatever the title was
+    /// doing and stopped the emulator, where a handset answers null and lets
+    /// the title take its own failure path.
+    #[test]
+    fn a_block_the_heap_cannot_serve_is_a_null_pointer() {
+        assert_eq!(
+            super::out_of_memory("MC_knlCalloc", 0x7a23_7a23, WieError::AllocationFailure).unwrap().0,
+            0
+        );
+
+        // Anything else is still a fault, and still stops the run: a read that
+        // faulted is not an answer a title can be given.
+        assert!(matches!(
+            super::out_of_memory("MC_knlAlloc", 16, WieError::InvalidMemoryAccess(0)),
+            Err(WieError::InvalidMemoryAccess(0))
+        ));
     }
 
     /// A context whose platform records whether the title was asked to quit.
