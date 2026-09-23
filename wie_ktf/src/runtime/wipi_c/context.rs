@@ -68,11 +68,11 @@ impl WIPICContext for KtfWIPICContext {
         true
     }
 
-    /// KTF keeps the background pixel in the first of a context's two colour
-    /// words and the foreground in the second - see `ContextLayout`. 헬싱 is
-    /// what says so: it fills its own context and draws with the second.
+    /// KTF lays `MC_GrpContext` out with a word in front of the clip rectangle
+    /// - see `ContextLayout`, which has what 헬싱 and 액션히어로3D say about
+    /// every word of it.
     fn graphics_context_layout(&self) -> ContextLayout {
-        ContextLayout::BackgroundFirst
+        ContextLayout::Ktf
     }
 
     fn alloc_raw(&mut self, size: WIPICWord) -> Result<WIPICWord> {

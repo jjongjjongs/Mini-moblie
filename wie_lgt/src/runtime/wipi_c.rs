@@ -15,7 +15,7 @@ use wie_wipi_c::api::graphics::{ContextLayout, WIPICGraphicsContextIdx};
 
 /// LGT keeps the foreground pixel in the first of the two colour words - see
 /// `ContextLayout`.
-const LAYOUT: ContextLayout = ContextLayout::ForegroundFirst;
+const LAYOUT: ContextLayout = ContextLayout::Lgt;
 use wie_wipi_c::{
     MethodImpl, WIPICContext, WIPICMethodBody, WIPICResult,
     api::{database, filesystem, graphics, im, kernel, media, misc, net, phone, serial, shared_buf, system, uic, util},

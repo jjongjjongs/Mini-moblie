@@ -147,18 +147,50 @@ fn read_context<M>(memory: &M, layout: ContextLayout, p_grp_ctx: WIPICWord) -> R
 where
     M: ByteRead + ?Sized,
 {
-    let grp_ctx: WIPICGraphicsContext = read_generic(memory, p_grp_ctx)?;
+    let at = layout.offsets();
+    let word = |offset: WIPICWord| read_generic::<WIPICWord, _>(memory, p_grp_ctx + offset);
 
-    Ok(grp_ctx.in_layout(layout))
+    Ok(WIPICGraphicsContext {
+        clip: [word(at.clip)?, word(at.clip + 4)?, word(at.clip + 8)?, word(at.clip + 12)?],
+        fgpxl: word(at.fgpxl)?,
+        bgpxl: word(at.bgpxl)?,
+        alpha: word(at.alpha)?,
+        transparent: word(at.transparent)?,
+        param1: word(at.param1)?,
+        font: word(at.font)?,
+        style: word(at.style)?,
+        pixel_op_func_ptr: word(at.pixel_op_func_ptr)?,
+        offset: [word(at.offset)?, word(at.offset + 4)?],
+    })
 }
 
-/// A context written back in the handset's own field order - see
-/// [`read_context`].
+/// A context written back into the handset's own words - see [`read_context`].
+///
+/// Only the words the layout names are written. A word the handset keeps for
+/// itself - KTF's leading one - is left as the title left it, because nothing
+/// here knows what it is for.
 fn write_context<M>(memory: &mut M, layout: ContextLayout, p_grp_ctx: WIPICWord, grp_ctx: WIPICGraphicsContext) -> Result<()>
 where
     M: ByteWrite + ?Sized,
 {
-    write_generic(memory, p_grp_ctx, grp_ctx.in_layout(layout))
+    let at = layout.offsets();
+    let mut word = |offset: WIPICWord, value: WIPICWord| write_generic(memory, p_grp_ctx + offset, value);
+
+    for (index, corner) in grp_ctx.clip.iter().enumerate() {
+        word(at.clip + 4 * index as WIPICWord, *corner)?;
+    }
+    word(at.fgpxl, grp_ctx.fgpxl)?;
+    word(at.bgpxl, grp_ctx.bgpxl)?;
+    word(at.alpha, grp_ctx.alpha)?;
+    word(at.transparent, grp_ctx.transparent)?;
+    word(at.param1, grp_ctx.param1)?;
+    word(at.font, grp_ctx.font)?;
+    word(at.style, grp_ctx.style)?;
+    word(at.pixel_op_func_ptr, grp_ctx.pixel_op_func_ptr)?;
+    word(at.offset, grp_ctx.offset[0])?;
+    word(at.offset + 4, grp_ctx.offset[1])?;
+
+    Ok(())
 }
 
 pub fn init_context_in<M>(memory: &mut M, layout: ContextLayout, p_grp_ctx: WIPICWord) -> Result<()>
@@ -234,8 +266,14 @@ where
         WIPICGraphicsContextIdx::BgPixelIdx => {
             grp_ctx.bgpxl = pv as _;
         }
-        // The reference stores nothing for op 3 and reports nothing back.
-        WIPICGraphicsContextIdx::TransPixelIdx => {}
+        // Only where the handset has a word for it. KTF does, and a title's
+        // own blitter keys against what it reads back from there; LGT has none
+        // and the reference drops the call - see [`ContextOffsets`].
+        WIPICGraphicsContextIdx::TransPixelIdx => {
+            if layout.offsets().keeps_transparent {
+                grp_ctx.transparent = pv;
+            }
+        }
         // The reference ignores an alpha outside 0..=0xff rather than storing it.
         WIPICGraphicsContextIdx::AlphaIdx => {
             if pv <= 0xff {
@@ -324,8 +362,12 @@ where
         }
         WIPICGraphicsContextIdx::FgPixelIdx => write_generic(memory, out_ptr, grp_ctx.fgpxl)?,
         WIPICGraphicsContextIdx::BgPixelIdx => write_generic(memory, out_ptr, grp_ctx.bgpxl)?,
-        // The reference reads nothing back for op 3.
-        WIPICGraphicsContextIdx::TransPixelIdx => {}
+        // Read back where the handset keeps one - see the setter.
+        WIPICGraphicsContextIdx::TransPixelIdx => {
+            if layout.offsets().keeps_transparent {
+                write_generic(memory, out_ptr, grp_ctx.transparent)?
+            }
+        }
         WIPICGraphicsContextIdx::AlphaIdx => write_generic(memory, out_ptr, grp_ctx.alpha)?,
         // The stand-in for XOR mode is ours, not an address: a title reading
         // the slot is told there is no operation, the same as before.
@@ -372,6 +414,26 @@ fn context_color(framebuffer: &FrameBuffer, gctx: &WIPICGraphicsContext) -> Colo
     }
 
     color
+}
+
+/// Where a primitive's coordinates land, once the context's drawing offset is
+/// added.
+///
+/// Op 10 is not a note a title leaves for itself: the reference installs it on
+/// the graphics object it converts the context into -
+/// `wipic_grpContext_to_dgraphics` (@0x1aa2e8) ends by handing `[gc+0x30]` and
+/// `[gc+0x34]` to the origin setter at `0x1979e4` - so every primitive drawn
+/// through that context is drawn relative to it. Stored and never added, a
+/// title that moves its origin instead of moving every coordinate drew its
+/// whole screen in the corner: 액션히어로3D sets one 600 times on the way into
+/// its menu, and its menu list came out at the top left of the panel it
+/// belongs in.
+///
+/// The clip is not moved with it. The reference sets the clip on the graphics
+/// object from the context's own rectangle *before* it sets the origin, so the
+/// rectangle stays in the surface's coordinates whatever the origin is.
+fn context_offset(gctx: &WIPICGraphicsContext) -> (i32, i32) {
+    (gctx.offset[0] as i32, gctx.offset[1] as i32)
 }
 
 /// The rectangle a context's clip lets through.
@@ -432,6 +494,8 @@ pub async fn put_pixel(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst_fb)?)?);
     let gctx = read_context(context, context.graphics_context_layout(), p_gctx)?;
+    let (offset_x, offset_y) = context_offset(&gctx);
+    let (x, y) = (x + offset_x, y + offset_y);
 
     if !context_clip(&gctx).allows(x, y) {
         return Ok(());
@@ -463,6 +527,8 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst_fb)?)?);
     let gctx = read_context(context, context.graphics_context_layout(), p_gctx)?;
+    let (offset_x, offset_y) = context_offset(&gctx);
+    let (x, y) = (x + offset_x, y + offset_y);
 
     // Only the part of the rectangle the context's clip allows, so every path
     // below - the operation, the direct write and the canvas - covers the same
@@ -592,6 +658,8 @@ pub async fn draw_arc(
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst)?)?);
     let gctx = read_context(context, context.graphics_context_layout(), p_gctx)?;
+    let (offset_x, offset_y) = context_offset(&gctx);
+    let (x, y) = (x + offset_x, y + offset_y);
     let mut canvas = framebuffer.canvas(context)?;
 
     let clip = Clip {
@@ -638,6 +706,8 @@ pub async fn fill_arc(
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst)?)?);
     let gctx = read_context(context, context.graphics_context_layout(), p_gctx)?;
+    let (offset_x, offset_y) = context_offset(&gctx);
+    let (x, y) = (x + offset_x, y + offset_y);
     let mut canvas = framebuffer.canvas(context)?;
 
     let clip = Clip {
@@ -715,7 +785,11 @@ pub async fn draw_polygon(
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst)?)?);
     let gctx = read_context(context, context.graphics_context_layout(), p_gctx)?;
-    let points = read_polygon_points(context, x_points, y_points, n_points as usize)?;
+    let (offset_x, offset_y) = context_offset(&gctx);
+    let points = read_polygon_points(context, x_points, y_points, n_points as usize)?
+        .into_iter()
+        .map(|(x, y)| (x + offset_x, y + offset_y))
+        .collect::<Vec<_>>();
 
     let bounds = polygon_bounds(&points);
     let clip = bounds_clip(bounds).intersect(&context_clip(&gctx));
@@ -749,7 +823,11 @@ pub async fn fill_polygon(
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst)?)?);
     let gctx = read_context(context, context.graphics_context_layout(), p_gctx)?;
-    let points = read_polygon_points(context, x_points, y_points, n_points as usize)?;
+    let (offset_x, offset_y) = context_offset(&gctx);
+    let points = read_polygon_points(context, x_points, y_points, n_points as usize)?
+        .into_iter()
+        .map(|(x, y)| (x + offset_x, y + offset_y))
+        .collect::<Vec<_>>();
 
     let bounds = polygon_bounds(&points);
     let clip = bounds_clip(bounds).intersect(&context_clip(&gctx));
@@ -1042,6 +1120,8 @@ pub async fn draw_image(
     // Only the part of the blit the context's clip allows. A clet that wants
     // one cell of a sprite sheet sets the clip to where that cell is to land
     // and hands over the whole sheet, so this is what picks the cell out.
+    let (offset_x, offset_y) = context_offset(&grp_ctx);
+    let (dx, dy) = (dx + offset_x, dy + offset_y);
     let Some((dx, dy, w, h, sx, sy)) = clipped_blit(&context_clip(&grp_ctx), dx, dy, w, h, sx, sy) else {
         return Ok(());
     };
@@ -1549,6 +1629,8 @@ pub async fn copy_area(
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst)?)?);
     let gctx = read_context(context, context.graphics_context_layout(), pgc)?;
+    let (offset_x, offset_y) = context_offset(&gctx);
+    let (dx, dy) = (dx + offset_x, dy + offset_y);
 
     let Some((dx, dy, w, h, x, y)) = clipped_blit(&context_clip(&gctx), dx, dy, w, h, x, y) else {
         return Ok(());
@@ -2238,6 +2320,8 @@ async fn draw_text(context: &mut dyn WIPICContext, dst: WIPICIndirectPtr, x: i32
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst)?)?);
     let gctx = read_context(context, context.graphics_context_layout(), pgc)?;
+    let (offset_x, offset_y) = context_offset(&gctx);
+    let (x, y) = (x + offset_x, y + offset_y);
 
     let clip = Clip {
         x: 0,
@@ -2635,6 +2719,8 @@ pub async fn draw_rect(context: &mut dyn WIPICContext, dst: WIPICIndirectPtr, x:
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst)?)?);
     let gctx = read_context(context, context.graphics_context_layout(), pgc)?;
+    let (offset_x, offset_y) = context_offset(&gctx);
+    let (x, y) = (x + offset_x, y + offset_y);
     let mut canvas = framebuffer.canvas(context)?;
 
     let clip = Clip {
@@ -2657,6 +2743,8 @@ pub async fn draw_line(context: &mut dyn WIPICContext, dst: WIPICIndirectPtr, x1
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst)?)?);
     let gctx = read_context(context, context.graphics_context_layout(), pgc)?;
+    let (offset_x, offset_y) = context_offset(&gctx);
+    let (x1, y1, x2, y2) = (x1 + offset_x, y1 + offset_y, x2 + offset_x, y2 + offset_y);
     let context_clip = context_clip(&gctx);
     let color = context_color(&framebuffer, &gctx);
 
@@ -3426,7 +3514,7 @@ mod tests {
         const FIRST: u32 = 0x10;
         const SECOND: u32 = 0x14;
 
-        for (layout, wanted) in [(ContextLayout::BackgroundFirst, 0x6da0u32), (ContextLayout::ForegroundFirst, 0x0000)] {
+        for (layout, wanted) in [(ContextLayout::Ktf, 0x6da0u32), (ContextLayout::Lgt, 0x0000)] {
             let mut context = test_context();
             context.set_graphics_context_layout(layout);
 
@@ -3604,6 +3692,40 @@ mod tests {
 
         let untouched = drawn.get_pixel(1, 1);
         assert_eq!((untouched.r, untouched.g, untouched.b), (0, 0, 0));
+    }
+
+    /// A primitive is drawn relative to the context's offset.
+    ///
+    /// The reference installs op 10 as the origin of the graphics object it
+    /// draws through - `wipic_grpContext_to_dgraphics` (@0x1aa2e8) - so a title
+    /// that moves its origin and then draws at (0, 0) is drawing at the origin,
+    /// not at the corner.
+    #[futures_test::test]
+    async fn a_primitive_lands_where_the_contexts_offset_puts_it() {
+        let mut context = test_context();
+
+        let pgc_handle = context.alloc(core::mem::size_of::<super::WIPICGraphicsContext>() as u32).unwrap();
+        let pgc = context.data_ptr(pgc_handle).unwrap();
+        init_context(&mut context, pgc).await.unwrap();
+
+        let destination = framebuffer_of(&mut context, 2, 2, &[0xff00_0000; 4]).await;
+
+        // One pixel to the right and one down, then white into the corner.
+        let offset = context.alloc_raw(8).unwrap();
+        write_generic(&mut context, offset, 1u32).unwrap();
+        write_generic(&mut context, offset + 4, 1u32).unwrap();
+        set_context(&mut context, pgc, Idx::OffsetIdx, offset).await.unwrap();
+        set_context(&mut context, pgc, Idx::FgPixelIdx, 0x00ff_ffff).await.unwrap();
+        super::fill_rect(&mut context, destination, 0, 0, 1, 1, pgc).await.unwrap();
+
+        let handle = read_generic(&context, context.data_ptr(destination).unwrap()).unwrap();
+        let filled = super::FrameBuffer(handle).image(&mut context).unwrap();
+
+        let moved = filled.get_pixel(1, 1);
+        assert_eq!((moved.r, moved.g, moved.b), (0xff, 0xff, 0xff), "the fill did not move with the offset");
+
+        let corner = filled.get_pixel(0, 0);
+        assert_eq!((corner.r, corner.g, corner.b), (0, 0, 0), "it was drawn at the corner as well");
     }
 
     async fn framebuffer_of(context: &mut TestContext, width: u32, height: u32, pixels: &[u32]) -> super::WIPICIndirectPtr {

@@ -8,7 +8,7 @@ use wie_wipi_c::api::graphics::{ContextLayout, WIPICGraphicsContextIdx};
 
 /// KTF keeps the background pixel in the first of the two colour words - see
 /// `ContextLayout`.
-const LAYOUT: ContextLayout = ContextLayout::BackgroundFirst;
+const LAYOUT: ContextLayout = ContextLayout::Ktf;
 use wie_wipi_c::{
     WIPICMethodBody, WIPICResult,
     api::{filesystem, graphics, im, kernel, media, net, serial, shared_buf},

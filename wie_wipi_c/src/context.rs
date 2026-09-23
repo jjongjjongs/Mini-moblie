@@ -62,7 +62,7 @@ pub trait WIPICContext: ByteRead + ByteWrite + Send + Sync {
     /// See `ContextLayout`. LGT's is the one the API is usually written down
     /// with, so it is the default and KTF is what overrides it.
     fn graphics_context_layout(&self) -> ContextLayout {
-        ContextLayout::ForegroundFirst
+        ContextLayout::Lgt
     }
 }
 
@@ -217,7 +217,7 @@ pub mod test {
                 spawned: Vec::new(),
                 guest_function: None,
                 pixel_op_takes_source_first: false,
-                graphics_context_layout: ContextLayout::ForegroundFirst,
+                graphics_context_layout: ContextLayout::Lgt,
                 freed: Vec::new(),
             }
         }
@@ -240,7 +240,7 @@ pub mod test {
                 spawned: Vec::new(),
                 guest_function: None,
                 pixel_op_takes_source_first: false,
-                graphics_context_layout: ContextLayout::ForegroundFirst,
+                graphics_context_layout: ContextLayout::Lgt,
                 freed: Vec::new(),
             }
         }
