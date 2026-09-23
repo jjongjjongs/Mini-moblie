@@ -8,7 +8,6 @@ use core::mem::size_of;
 
 use bytemuck::pod_collect_to_vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use spin::Mutex;
 
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
 
@@ -888,36 +887,29 @@ pub async fn fill_polygon(
 /// `destroy_image` is given, so it names one image for as long as it exists. A
 /// handle entered twice without being destroyed replaces its own entry, so an
 /// address the allocator reuses cannot make one image answer for another.
-static IMAGE_SOURCES: Mutex<Vec<(WIPICWord, WIPICWord)>> = Mutex::new(Vec::new());
-
 /// Remember that `image` is holding `source`, which is the platform's to free.
-fn hold_image_source(image: WIPICWord, source: WIPICWord) {
+fn hold_image_source(context: &dyn WIPICContext, image: WIPICWord, source: WIPICWord) {
     if source == 0 {
         return;
     }
 
-    let mut sources = IMAGE_SOURCES.lock();
-    sources.retain(|&(held, _)| held != image);
-    sources.push((image, source));
+    context.kernel_state().lock().image_sources.insert(image, source);
 }
 
 /// Take `image`'s source back out, and say whether it was still the platform's.
-fn take_image_source(image: WIPICWord) -> Option<WIPICWord> {
-    let mut sources = IMAGE_SOURCES.lock();
-    let at = sources.iter().position(|&(held, _)| held == image)?;
-
-    Some(sources.swap_remove(at).1)
+fn take_image_source(context: &dyn WIPICContext, image: WIPICWord) -> Option<WIPICWord> {
+    context.kernel_state().lock().image_sources.remove(&image)
 }
 
 /// The title has freed this block itself, so no image may give it back again.
 ///
 /// Called from `MC_knlFree`, which is how a title gives a block back.
-pub fn forget_image_source(source: WIPICWord) {
+pub fn forget_image_source(context: &dyn WIPICContext, source: WIPICWord) {
     if source == 0 {
         return;
     }
 
-    IMAGE_SOURCES.lock().retain(|&(_, held)| held != source);
+    context.kernel_state().lock().image_sources.retain(|_, &mut held| held != source);
 }
 
 pub async fn create_image(
@@ -950,7 +942,7 @@ pub async fn create_image(
     write_generic(context, ptr_image, memory)?;
     write_generic(context, context.data_ptr(memory)?, image)?;
 
-    hold_image_source(memory.0, image_data.0);
+    hold_image_source(context, memory.0, image_data.0);
 
     Ok(1) // MC_GRP_IMAGE_DONE
 }
@@ -980,7 +972,7 @@ pub async fn destroy_image(context: &mut dyn WIPICContext, image: WIPICIndirectP
     // while they are still the platform's to give back. See [`IMAGE_SOURCES`]:
     // a title that has freed the block itself has been taken off that list, and
     // the address it had is by now somebody else's.
-    if let Some(source) = take_image_source(image.0)
+    if let Some(source) = take_image_source(context, image.0)
         && source != 0
         && let Err(error) = context.free(WIPICIndirectPtr(source))
     {

@@ -318,7 +318,7 @@ pub async fn free(context: &mut dyn WIPICContext, memory: WIPICIndirectPtr) -> R
     // it was made from, that image stops answering for it here rather than
     // freeing it a second time once the allocator has handed the address out
     // again. See `graphics::IMAGE_SOURCES`.
-    crate::api::graphics::forget_image_source(memory.0);
+    crate::api::graphics::forget_image_source(context, memory.0);
 
     context.free(memory)?;
 
@@ -356,6 +356,15 @@ pub struct KernelState {
     /// interface tables, because building one needs to make guest-side stubs
     /// and only the platform can do that.
     dll_interfaces: BTreeMap<String, WIPICWord>,
+    /// The encoded bytes each live image was made from, by the image's own
+    /// address - see `graphics::hold_image_source`.
+    ///
+    /// It lives here, with the rest of what one running title owns, rather than
+    /// in a static of its own. Addresses are a title's, and two of them mean
+    /// nothing to each other: a static made one title's image answer for a
+    /// block at the same address in another, which is a thing this runtime's
+    /// own tests do to each other every time they run side by side.
+    pub(crate) image_sources: BTreeMap<WIPICWord, WIPICWord>,
 }
 
 pub type SharedKernelState = Arc<Mutex<KernelState>>;
