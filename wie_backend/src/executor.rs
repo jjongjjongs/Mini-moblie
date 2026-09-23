@@ -219,6 +219,26 @@ impl Executor {
             let mut poll_order = core::mem::take(&mut inner.poll_order);
             poll_order.extend(inner.tasks.keys().copied());
 
+            // In spawn order, which is what a task id counts. The map's own
+            // order would do as well for fairness - every task is polled once
+            // either way, and only who goes first in a step differs - but it is
+            // a hash order over a randomly seeded hasher, so it differs between
+            // runs of the same binary over the same archive.
+            //
+            // A guest thread's turn then lands wherever that seed put it, and a
+            // title whose threads race gets a different answer each launch.
+            // 서울타이쿤2 does: `startApp` pushes its card, the card's
+            // `showNotify` queues a repaint, and the tick's budget runs out
+            // right there. Whether the next step resumes the title's own thread
+            // - which goes on to create the image its `paint` draws - or the
+            // event thread that drains that repaint first decided whether the
+            // title started or died on `NullPointerException: image is null`,
+            // about half the launches either way.
+            //
+            // Spawn order also puts the main thread ahead of anything it
+            // started, which is the order a title is written expecting.
+            poll_order.sort_unstable();
+
             let task_count = inner.tasks.len();
 
             (poll_order, task_count)
@@ -343,7 +363,7 @@ impl Executor {
 
 #[cfg(test)]
 mod tests {
-    use alloc::sync::Arc;
+    use alloc::{sync::Arc, vec::Vec};
     use core::{
         cell::Cell,
         future::Future,
@@ -353,6 +373,8 @@ mod tests {
     };
 
     use wie_util::WieError;
+
+    use spin::Mutex;
 
     use super::Executor;
     use crate::{task::YieldFuture, time::Instant};
@@ -532,6 +554,37 @@ mod tests {
 
         assert!(executor.is_idle());
         assert_eq!(executor.idle_for(Instant::from_epoch_millis(0)), None);
+    }
+
+    /// Threads take their turn in the order they were spawned, every step.
+    ///
+    /// The poll order used to be a `HashMap`'s, over a randomly seeded hasher,
+    /// so which guest thread went first was drawn afresh on every launch. A
+    /// title whose threads race got a different answer each time: 서울타이쿤2
+    /// started or died on `image is null` about half the launches, depending on
+    /// whether its own thread or the event thread resumed after the tick that
+    /// queued its first repaint.
+    #[test]
+    fn threads_take_their_turn_in_the_order_they_were_spawned() {
+        let mut executor = Executor::new();
+
+        let turns = Arc::new(Mutex::new(Vec::new()));
+
+        // Enough of them that a hash order matching this one by chance is not
+        // what a passing run means.
+        for id in 0..8 {
+            let seen = turns.clone();
+            executor.spawn(move || async move {
+                seen.lock().push(id);
+                YieldOnce(false).await;
+
+                Ok::<_, WieError>(())
+            });
+        }
+
+        executor.tick(advancing_clock(0)).unwrap();
+
+        assert_eq!(*turns.lock(), (0..8).collect::<Vec<_>>());
     }
 
     #[test]
