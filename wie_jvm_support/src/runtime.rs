@@ -17,6 +17,7 @@ use wie_util::WieError;
 use crate::{JvmImplementation, JvmSupport, WIE_RUSTJAR, WieJavaClassProto, WieJvmContext};
 
 mod file;
+mod timer;
 
 use file::FileImpl;
 
@@ -255,6 +256,7 @@ where
                 .or_else(|| a_class_the_runtime_lacks(class))
                 .map(refuse_a_null_array)
                 .map(fill_in_string_buffer)
+                .map(timer::fill_in_timer)
                 .map(fill_the_readers_buffer);
             if let Some(proto) = proto {
                 return Ok(Some(
