@@ -59,6 +59,10 @@ impl TextComponent {
                 JavaFieldProto::new("imHandler", "Lorg/kwis/msp/lcdui/InputMethodHandler;", Default::default()),
                 JavaFieldProto::new("iMode", "I", Default::default()),
                 JavaFieldProto::new("text", "Ljava/lang/String;", Default::default()),
+                // The same text as a char array, which is where the native
+                // class keeps it and where a title that reaches past the API
+                // reads it. See `store_text`.
+                JavaFieldProto::new("m_td", "[C", Default::default()),
                 JavaFieldProto::new("maxLength", "I", Default::default()),
                 JavaFieldProto::new("__wieConstraint", "I", Default::default()),
                 JavaFieldProto::new("__wieFont", "Lorg/kwis/msp/lcdui/Font;", Default::default()),
@@ -97,9 +101,42 @@ impl TextComponent {
         // callers of ()V historically expect a non-null empty text object.
         let text = JavaLangString::from_rust_string(jvm, "").await?;
         let mut this = this;
-        jvm.put_field(&mut this, "text", "Ljava/lang/String;", text).await?;
+        Self::store_text(jvm, &mut this, text.into()).await?;
 
         Ok(())
+    }
+
+    /// Stores `text` as the component's text, in both the shapes it is read in.
+    ///
+    /// The native class keeps the text as a char array, `m_td`, with `m_cPos`
+    /// saying how far into it the cursor is; this one keeps a `java.lang.String`
+    /// and derives everything from that. A title using the API cannot tell, and
+    /// none needed to - until one read the array.
+    ///
+    /// 서울타이쿤2's name entry does. Its screen died on `Field m_td[C not found
+    /// from org/kwis/msp/lwc/TextComponent` the moment it opened, and with that
+    /// thread gone the box sat there taking keys that reached the event queue,
+    /// were dispatched, and had nothing left to act on them - a screen that
+    /// looks like it is ignoring input and is in fact no longer running.
+    ///
+    /// So the array is kept beside the string, rebuilt whenever the string
+    /// changes. It is as long as the text, not the buffer a native component
+    /// would have allocated to `maxLength`: what a title reads out of it is
+    /// bounded by `m_cPos`, which counts the characters that are really there.
+    async fn store_text(jvm: &Jvm, this: &mut ClassInstanceRef<TextComponent>, text: ClassInstanceRef<String>) -> JvmResult<()> {
+        let characters = if text.is_null() {
+            alloc::string::String::new()
+        } else {
+            JavaLangString::to_rust_string(jvm, &text).await?
+        };
+
+        jvm.put_field(this, "text", "Ljava/lang/String;", text).await?;
+
+        let characters = characters.encode_utf16().collect::<vec::Vec<_>>();
+        let mut array: ClassInstanceRef<Array<JavaChar>> = jvm.instantiate_array("C", characters.len()).await?.into();
+        jvm.store_array(&mut array, 0, characters).await?;
+
+        jvm.put_field(this, "m_td", "[C", array).await
     }
 
     async fn init_with_constraint(jvm: &Jvm, context: &mut WieJvmContext, this: ClassInstanceRef<TextComponent>, constraint: i32) -> JvmResult<()> {
@@ -547,7 +584,7 @@ impl TextComponent {
 
         jvm.put_field(&mut input_listener, "__wieChanged", "Z", false).await?;
 
-        jvm.put_field(&mut this, "text", "Ljava/lang/String;", string).await?;
+        Self::store_text(jvm, &mut this, string).await?;
 
         jvm.put_field(&mut this, "m_cPos", "I", 0).await?;
 
@@ -640,7 +677,7 @@ impl TextComponent {
             .invoke_virtual(&combined, "concat", "(Ljava/lang/String;)Ljava/lang/String;", (suffix,))
             .await?;
 
-        jvm.put_field(&mut this, "text", "Ljava/lang/String;", combined).await?;
+        Self::store_text(jvm, &mut this, combined).await?;
 
         Ok(())
     }
@@ -773,7 +810,7 @@ impl TextComponent {
             .invoke_virtual(&prefix, "concat", "(Ljava/lang/String;)Ljava/lang/String;", (suffix,))
             .await?;
 
-        jvm.put_field(&mut this, "text", "Ljava/lang/String;", combined).await?;
+        Self::store_text(jvm, &mut this, combined).await?;
 
         jvm.invoke_virtual(&this, "controlCursor", "(III)V", (position, length, 2)).await
     }
