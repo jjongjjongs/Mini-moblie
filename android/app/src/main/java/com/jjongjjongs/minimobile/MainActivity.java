@@ -60,8 +60,10 @@ import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.Locale;
@@ -352,6 +354,24 @@ public final class MainActivity extends Activity {
      */
     private long lastTickRanMs;
 
+    /**
+     * The step waiting to run, so a key press can pull it forward.
+     *
+     * <p>Written by the emulator thread as it re-arms and read by the UI thread
+     * when it has input, which is why it is volatile.
+     */
+    private volatile ScheduledFuture<?> pendingStep;
+
+    /**
+     * Whether a key has arrived that the running step will not have seen.
+     *
+     * <p>Cancelling the waiting step covers a key that lands while the loop is
+     * asleep. This covers the other half: one that lands after a step has
+     * already taken the input it is going to take, which cannot be cancelled
+     * into and would otherwise wait out the next sleep.
+     */
+    private final AtomicBoolean inputSinceStep = new AtomicBoolean();
+
     /** Whether the player is currently saying the game has stopped answering. */
     private boolean wedgeReported;
 
@@ -550,7 +570,7 @@ public final class MainActivity extends Activity {
         }
 
         padHeld[code] = down;
-        NativeBridge.nativeKey(code, down ? 1 : 0);
+        sendKey(code, down);
     }
 
     /** Releases every handset key the pad currently holds. */
@@ -2658,7 +2678,15 @@ public final class MainActivity extends Activity {
         try {
             emulatorStep();
         } finally {
-            scheduleEmulatorStep(nextStepDelayMs());
+            long delay = nextStepDelayMs();
+            scheduleEmulatorStep(delay);
+
+            // A key that landed between reading the delay and arming the step
+            // would find nothing to pull forward and wait the sleep out. Ask
+            // again now that there is something waiting.
+            if (delay > 0 && inputSinceStep.get()) {
+                pullStepForward();
+            }
         }
     }
 
@@ -2677,6 +2705,12 @@ public final class MainActivity extends Activity {
             return BUSY_INTERVAL_MS;
         }
 
+        // A key that landed after this step took its input has not been acted on
+        // yet, so there is work whatever the emulator thinks.
+        if (inputSinceStep.get()) {
+            return BUSY_INTERVAL_MS;
+        }
+
         int hint = NativeBridge.nativeSleepHintMs();
 
         return hint < 0 ? TICK_INTERVAL_MS : Math.min(hint, MAX_IDLE_SLEEP_MS);
@@ -2685,9 +2719,35 @@ public final class MainActivity extends Activity {
     /** Queues the next step, unless the player is closing and the thread is gone. */
     private void scheduleEmulatorStep(long delayMs) {
         try {
-            emulatorThread.schedule(this::emulatorLoop, delayMs, TimeUnit.MILLISECONDS);
+            pendingStep = emulatorThread.schedule(this::emulatorLoop, delayMs, TimeUnit.MILLISECONDS);
         } catch (RejectedExecutionException closing) {
             // `shutdownNow` has run; there is nothing left to step.
+        }
+    }
+
+    /**
+     * Presses or releases a handset key, and brings the emulator's next step
+     * forward so the sleep before it is not also the key's wait.
+     */
+    private void sendKey(int code, boolean pressed) {
+        NativeBridge.nativeKey(code, pressed ? 1 : 0);
+
+        inputSinceStep.set(true);
+        pullStepForward();
+    }
+
+    /**
+     * Runs the waiting step now, if one is still waiting.
+     *
+     * <p>A step already running is left alone - that is what `cancel(false)`
+     * says - because taking it over mid-tick would be worse than the key waiting
+     * for the end of it. {@link #inputSinceStep} is what covers that case: the
+     * step that finishes then re-arms at once rather than sleeping.
+     */
+    private void pullStepForward() {
+        ScheduledFuture<?> waiting = pendingStep;
+        if (waiting != null && waiting.getDelay(TimeUnit.MILLISECONDS) > 0 && waiting.cancel(false)) {
+            scheduleEmulatorStep(0);
         }
     }
 
@@ -2702,6 +2762,10 @@ public final class MainActivity extends Activity {
         if (!running || !playerVisible || !foreground || paused) {
             return;
         }
+
+        // The tick drains the input inbox as it starts, so anything waiting now
+        // is about to be seen; a key that arrives after this sets it again.
+        inputSinceStep.set(false);
 
         PerformanceTuner.beforeNativeTick();
         tickStartedAt = SystemClock.elapsedRealtime();
@@ -3361,7 +3425,7 @@ public final class MainActivity extends Activity {
                 key.down = held;
                 changed = true;
                 Log.d(TAG, (held ? "key down: " : "key up: ") + key.code);
-                NativeBridge.nativeKey(key.code, held ? 1 : 0);
+                sendKey(key.code, held);
             }
 
             if (changed) {
