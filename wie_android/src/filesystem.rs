@@ -1,12 +1,53 @@
 use std::{
-    ffi::CString,
     fs::{self, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
-    os::unix::{ffi::OsStrExt, fs::PermissionsExt},
     path::{Component, Path, PathBuf},
 };
 
 use wie_backend::{Filesystem, FilesystemMkdirError, FilesystemRenameError, FilesystemRmDirError, FilesystemSetModeError};
+
+/// The two calls this file makes that only a Unix has: `statfs`, for how big
+/// the storage is and how much of it is left, and the permission bits
+/// `MC_fsSetAttribute` sets.
+///
+/// This crate is the Android front end and is only ever built for Android, but
+/// it is a member of the workspace, so `cargo clippy --all` on a Windows runner
+/// checks it for the host and stops at the first of them. The calls are here
+/// and the rest of the crate compiles everywhere; off a Unix the two report
+/// that they could not answer, the same way a failed `statfs` does.
+#[cfg(unix)]
+mod host {
+    use std::{ffi::CString, fs, os::unix::ffi::OsStrExt, os::unix::fs::PermissionsExt, path::Path};
+
+    /// The block size, the total blocks and the blocks an unprivileged
+    /// application may still use, as `statfs` reports them.
+    pub fn storage_blocks(path: &Path) -> Option<(u64, u64, u64)> {
+        let path = CString::new(path.as_os_str().as_bytes()).ok()?;
+        let mut stats = unsafe { core::mem::zeroed::<libc::statfs>() };
+        if unsafe { libc::statfs(path.as_ptr(), &mut stats) } != 0 {
+            return None;
+        }
+
+        Some((stats.f_bsize as u64, stats.f_blocks, stats.f_bavail))
+    }
+
+    pub fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+    }
+}
+
+#[cfg(not(unix))]
+mod host {
+    use std::path::Path;
+
+    pub fn storage_blocks(_path: &Path) -> Option<(u64, u64, u64)> {
+        None
+    }
+
+    pub fn set_mode(_path: &Path, _mode: u32) -> std::io::Result<()> {
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+    }
+}
 
 /// Persistent filesystem rooted at the app-private directory Java passes to
 /// `nativeStart`, laid out as `<base>/<aid>/<path>`.
@@ -237,7 +278,7 @@ impl Filesystem for AndroidFilesystem {
     async fn set_mode(&self, aid: &str, path: &str, mode: u32) -> core::result::Result<(), FilesystemSetModeError> {
         let path = self.path_for(aid, path).ok_or(FilesystemSetModeError::Other)?;
 
-        fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|error| {
+        host::set_mode(&path, mode).map_err(|error| {
             match error.raw_os_error() {
                 Some(2) => FilesystemSetModeError::NotFound,     // ENOENT
                 Some(36) => FilesystemSetModeError::NameTooLong, // ENAMETOOLONG
@@ -264,14 +305,12 @@ impl Filesystem for AndroidFilesystem {
             }
         }
 
-        let path = CString::new(probe.as_os_str().as_bytes()).ok()?;
-        let mut stats = unsafe { core::mem::zeroed::<libc::statfs>() };
-        if unsafe { libc::statfs(path.as_ptr(), &mut stats) } != 0 {
+        let Some((block_size, blocks, _)) = host::storage_blocks(&probe) else {
             tracing::warn!(aid, path = ?probe, "total_space: statfs failed");
             return None;
-        }
+        };
 
-        Some((stats.f_bsize as u64).saturating_mul(stats.f_blocks))
+        Some(block_size.saturating_mul(blocks))
     }
 
     async fn available_space(&self, aid: &str) -> Option<u64> {
@@ -292,14 +331,12 @@ impl Filesystem for AndroidFilesystem {
             }
         }
 
-        let path = CString::new(probe.as_os_str().as_bytes()).ok()?;
-        let mut stats = unsafe { core::mem::zeroed::<libc::statfs>() };
-        if unsafe { libc::statfs(path.as_ptr(), &mut stats) } != 0 {
+        let Some((block_size, _, available)) = host::storage_blocks(&probe) else {
             tracing::warn!(aid, path = ?probe, "available_space: statfs failed");
             return None;
-        }
+        };
 
-        Some((stats.f_bsize as u64).saturating_mul(stats.f_bavail))
+        Some(block_size.saturating_mul(available))
     }
 
     async fn list(&self, aid: &str, path: &str) -> Option<Vec<String>> {
