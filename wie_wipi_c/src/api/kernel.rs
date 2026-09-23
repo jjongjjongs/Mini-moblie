@@ -252,6 +252,26 @@ fn out_of_memory(what: &str, size: WIPICWord, error: WieError) -> Result<WIPICIn
     Ok(WIPICIndirectPtr(0))
 }
 
+/// The largest block this platform hands a title.
+///
+/// `MC_knlGetTotalMemory` tells a title this handset has [`TOTAL_MEMORY`], so a
+/// single request past that figure is one no handset could ever serve and the
+/// reference answers it with null. The heap behind this platform is 128MiB -
+/// orders more than the handsets these archives shipped for - and serving such a
+/// request out of it is what turns a title's own guarded mistake into a fault.
+///
+/// 테일즈위버 루시안칼츠편 is the case that showed it. `d/i04.dat` record 47, the
+/// 잡화상점 shopkeeper, declares three animation frames but lists two image ids
+/// and pads the remaining slots with 0xff, so the engine's third frame load
+/// indexes `i/npc01.dat`'s 214-entry directory at 255 and reads its length from
+/// 328 bytes past the block the directory was read into. The title checks that
+/// allocation for null and returns quietly when it is - on a handset it always
+/// is, because whatever stale word it read is larger than the handset has. Here
+/// the word read 0x5000000, the 80MiB request was served, and the title went on
+/// to copy 80MiB of nothing into it and walk it for a PNG `PLTE` chunk with no
+/// bound, faulting on the first page past the heap.
+const LARGEST_BLOCK: WIPICWord = TOTAL_MEMORY as WIPICWord;
+
 pub async fn alloc(context: &mut dyn WIPICContext, size: WIPICWord) -> Result<WIPICIndirectPtr> {
     tracing::debug!("MC_knlAlloc({size:#x})");
 
@@ -263,6 +283,10 @@ pub async fn alloc(context: &mut dyn WIPICContext, size: WIPICWord) -> Result<WI
     // asks for zero bytes while it loads, and on null writes its own
     // out-of-memory marker file and carries on down its failure path - a title
     // reporting a memory exhaustion that never happened.
+    if size > LARGEST_BLOCK {
+        return out_of_memory("MC_knlAlloc", size, WieError::AllocationFailure);
+    }
+
     match context.alloc(size.max(1)) {
         Ok(allocated) => Ok(allocated),
         Err(error) => out_of_memory("MC_knlAlloc", size, error),
@@ -277,6 +301,10 @@ pub async fn calloc(context: &mut dyn WIPICContext, size: WIPICWord) -> Result<W
     // a zero-length buffer and treats a null result as failure, unwinding into
     // a state it then dereferences through a -1 handle; handing back null there
     // faulted it. Allocate a minimal block so the pointer is non-null.
+    if size > LARGEST_BLOCK {
+        return out_of_memory("MC_knlCalloc", size, WieError::AllocationFailure);
+    }
+
     let alloc_size = size.max(1);
 
     let memory = match context.alloc(alloc_size) {
@@ -1418,6 +1446,33 @@ mod test {
             super::out_of_memory("MC_knlAlloc", 16, WieError::InvalidMemoryAccess(0)),
             Err(WieError::InvalidMemoryAccess(0))
         ));
+    }
+
+    /// A request past the memory this platform says the handset has is refused
+    /// here rather than served out of a heap no handset had.
+    ///
+    /// 테일즈위버 루시안칼츠편 reads one image id past its own list for the
+    /// 잡화상점 shopkeeper, and the length it then reads out of the directory is
+    /// whatever stale word sits past it. The title checks the allocation for
+    /// null and gives up quietly on one - which is what a handset gives it. The
+    /// 80MiB our heap could serve is what let it go on to copy 80MiB of nothing
+    /// and walk it for a PNG chunk that is not there.
+    #[futures_test::test]
+    async fn a_block_larger_than_the_handset_is_a_null_pointer() {
+        assert!(
+            super::LARGEST_BLOCK as i32 == super::TOTAL_MEMORY,
+            "the ceiling is what MC_knlGetTotalMemory reports, so a title is never served more than it is told exists"
+        );
+
+        let mut context = TestContext::new();
+
+        for allocator in [alloc.into_body(), calloc.into_body()] {
+            let refused = allocator.call(&mut context, Box::new([0x500_0000])).await.unwrap();
+            assert_eq!(refused.results[0], 0, "80MiB is past the handset and answers null");
+
+            let served = allocator.call(&mut context, Box::new([0x100])).await.unwrap();
+            assert_ne!(served.results[0], 0, "a block the handset could hold is still served");
+        }
     }
 
     /// A context whose platform records whether the title was asked to quit.
