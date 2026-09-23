@@ -119,13 +119,18 @@ impl Displayable {
         tracing::debug!("javax.microedition.lcdui.Displayable::getHeight({this:?})");
 
         let display: ClassInstanceRef<Display> = jvm.get_field(&this, "currentDisplay", "Ljavax/microedition/lcdui/Display;").await?;
-        let height = if display.is_null() {
+        let height: i32 = if display.is_null() {
             context.system().platform().screen().height() as i32
         } else {
             jvm.invoke_virtual(&display, "getHeight", "()I", ()).await?
         };
 
-        Ok(height)
+        // The rows the platform keeps below the displayable, when it keeps any
+        // (see `System::displayable_reserved_rows`). A screen too short to give
+        // them up reports what it has.
+        let reserved = context.system().displayable_reserved_rows() as i32;
+
+        Ok(if height > reserved { height - reserved } else { height })
     }
 
     async fn handle_key_event(_jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>, event_type: i32, code: i32) -> JvmResult<()> {

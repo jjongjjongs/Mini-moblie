@@ -56,6 +56,9 @@ pub struct System {
     /// Whether this title's clips include their far edge.
     /// See [`System::title_clip_includes_far_edge`].
     title_clip_includes_far_edge: Arc<AtomicBool>,
+    /// How many rows below a `Displayable` the platform keeps for itself.
+    /// See [`System::displayable_reserved_rows`].
+    displayable_reserved_rows: Arc<AtomicU32>,
 }
 
 impl System {
@@ -93,6 +96,7 @@ impl System {
             title_expects_annunciator: Arc::new(AtomicBool::new(false)),
             title_annunciator_rows: Arc::new(AtomicU32::new(0)),
             title_clip_includes_far_edge: Arc::new(AtomicBool::new(false)),
+            displayable_reserved_rows: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -209,6 +213,18 @@ impl System {
 
     pub fn set_title_clip_includes_far_edge(&self, includes: bool) {
         self.title_clip_includes_far_edge.store(includes, Ordering::SeqCst);
+    }
+
+    /// How many rows fewer than the display a `Displayable` reports as its
+    /// height, for the platform's own bar below it. Zero everywhere but on
+    /// SK-VM, whose Canvas is sixteen rows shorter than the display; the
+    /// emulator that loaded the archive sets it.
+    pub fn displayable_reserved_rows(&self) -> u32 {
+        self.displayable_reserved_rows.load(Ordering::SeqCst)
+    }
+
+    pub fn set_displayable_reserved_rows(&self, rows: u32) {
+        self.displayable_reserved_rows.store(rows, Ordering::SeqCst);
     }
 
     /// Whether the title lays its screens out below the handset's status strip,

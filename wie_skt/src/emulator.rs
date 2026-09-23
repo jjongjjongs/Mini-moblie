@@ -75,6 +75,15 @@ impl SktEmulator {
         let system = System::new(platform, id, id, DefaultTaskRunner);
         system.set_title_clip_includes_far_edge(title_quirks(TitlePlatform::Skt, id).clip_includes_far_edge);
 
+        // An SK-VM Canvas reports sixteen rows fewer than the display - the
+        // rows the handset kept for its soft-key bar - and titles add them back:
+        // 이터널사가 takes its screen height as `getHeight() + 16`. Answering the
+        // display put everything such a title anchors to the bottom sixteen rows
+        // too low, off the end of the screen; the reference emulator (wfeature,
+        // `canvasReservedRows`) counts fifty-one titles that do it. Only the
+        // number changes: the drawing surface is still the whole display.
+        system.set_displayable_reserved_rows(16);
+
         // SK-VM titles ask for archive entries in a case the archive does not
         // use - they ship `Data/Map01.dat` and open `data/map01.dat`. The
         // reference emulator resolves those case-insensitively
