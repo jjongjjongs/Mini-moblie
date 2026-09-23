@@ -215,6 +215,11 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // turn clockwise - the handset was meant to be turned sideways to play it.
     (TitlePlatform::Lgt, "000323B3", sideways()),
     (TitlePlatform::Skt, "3826345643", clip_includes_far_edge()),
+    // 사고뭉치트윈즈: clips and clears a 120x144 play area centred on the
+    // Canvas and fills the rest with a tiled pattern, so on the 240x320
+    // default it played in a small box in the middle of the screen. 144 rows
+    // is the Canvas of a 120x160 handset, the sixteen soft-key rows under it.
+    (TitlePlatform::Skt, "0054532850", panel(120, 160)),
 ];
 
 /// What to do differently for the title `aid` on `platform`.

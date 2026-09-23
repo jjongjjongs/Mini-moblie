@@ -45,13 +45,32 @@ impl XDisplay {
         }
     }
 
-    async fn cl_init(jvm: &Jvm, _: &mut WieJvmContext) -> JvmResult<()> {
+    /// The screen's size, which titles read from these fields the way they
+    /// would read `Canvas.getWidth` - and cache, in a constructor, for good.
+    ///
+    /// They were 240x320 whatever the screen was. 사고뭉치트윈즈 centres its
+    /// 120x144 play area on `width / 2, height2 / 2`, so run on the 120x160
+    /// panel it was made for it still drew around (120, 160), off the bottom
+    /// right of the screen. The rest of the screen is its own tiled backdrop,
+    /// eight rows of it above and below the play area on that panel.
+    ///
+    /// `height2` is the whole display too, not the rows a Canvas reports: a
+    /// handset kept a soft-key bar there, but titles read `height2` as the
+    /// screen - 디지몬RPGII lays its screen out in it and 교실이데아 sizes its
+    /// back buffer by it - and the drawing surface here is the whole display
+    /// (wfeature answers the same, `publishScreenSize`).
+    async fn cl_init(jvm: &Jvm, context: &mut WieJvmContext) -> JvmResult<()> {
         tracing::debug!("com.xce.lcdui.XDisplay::<clinit>()");
 
-        // TODO: temp
-        jvm.put_static_field("com/xce/lcdui/XDisplay", "width", "I", 240).await?;
-        jvm.put_static_field("com/xce/lcdui/XDisplay", "height", "I", 320).await?;
-        jvm.put_static_field("com/xce/lcdui/XDisplay", "height2", "I", 320).await?;
+        let (width, height) = {
+            let platform = context.system().platform();
+            let screen = platform.screen();
+            (screen.width() as i32, screen.height() as i32)
+        };
+
+        jvm.put_static_field("com/xce/lcdui/XDisplay", "width", "I", width).await?;
+        jvm.put_static_field("com/xce/lcdui/XDisplay", "height", "I", height).await?;
+        jvm.put_static_field("com/xce/lcdui/XDisplay", "height2", "I", height).await?;
 
         Ok(())
     }

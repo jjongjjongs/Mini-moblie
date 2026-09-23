@@ -112,7 +112,21 @@ impl EventQueue {
         Self::default()
     }
 
+    /// Queues `event` behind everything already waiting.
+    ///
+    /// A redraw replaces one still waiting rather than queueing beside it. A
+    /// paint draws the whole screen as it is when it runs, so two waiting say
+    /// nothing one does not, and a host asks for one whenever the title
+    /// repaints, which can be more often than the title serves them: a title
+    /// that paints once per 100ms frame from its own loop - 사고뭉치트윈즈 -
+    /// served one a frame while a backlog of four stood in front of every key,
+    /// and each press reached it 400ms late. The one kept is the newest, at
+    /// the back, so a repaint asked for after a key still paints after it.
     pub fn push(&mut self, event: Event) {
+        if matches!(event, Event::Redraw) {
+            self.events.retain(|x| !matches!(x, Event::Redraw));
+        }
+
         self.events.push_back(event);
     }
 
@@ -171,6 +185,23 @@ mod tests {
             Event::Timer { id, generation, .. } => (*id, *generation),
             _ => panic!("expected timer event"),
         }
+    }
+
+    /// A redraw asked for while one is waiting leaves one, behind the input
+    /// that came between them.
+    #[test]
+    fn a_waiting_redraw_is_replaced_rather_than_queued_beside() {
+        use super::KeyCode;
+
+        let mut queue = EventQueue::new();
+        queue.push(Event::Redraw);
+        queue.push(Event::Keydown(KeyCode::OK));
+        queue.push(Event::Redraw);
+        queue.push(Event::Redraw);
+
+        assert!(matches!(queue.pop(), Some(Event::Keydown(KeyCode::OK))));
+        assert!(matches!(queue.pop(), Some(Event::Redraw)));
+        assert!(queue.pop().is_none());
     }
 
     #[test]
