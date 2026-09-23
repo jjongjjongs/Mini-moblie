@@ -229,11 +229,137 @@ pub fn request_stop() {
     }
 }
 
-pub struct Runner {
-    instance: Option<Instance>,
+/// Where a second of the host loop went.
+///
+/// The loop is the emulator's whole share of the phone: it runs a tick, drains
+/// what the tick produced, and waits. A capture shows what the title did inside
+/// a tick and nothing at all about the rest, so a frame that takes 68ms when the
+/// title asked for 15 could be the guest computing, this loop waiting, or the
+/// drain between the two, and the log could not tell them apart.
+///
+/// This says which, in three parts that add up to the window: `run` is time
+/// inside `tick`, `drain` is what the loop did with what the tick produced -
+/// the audio commands, the frame, the polls beside them, all of it across JNI -
+/// and `sleep` is the wait it chose afterwards. `idle` says how many of the
+/// ticks stopped for want of anything to run rather than for want of budget,
+/// and `worst gap` is the longest single spell outside, which is what a late
+/// frame is made of.
+#[derive(Default)]
+struct LoopMeter {
+    window_began: Option<Instant>,
+    /// When the last tick returned, so the next one can say how long the loop
+    /// spent away from the emulator.
+    left_at: Option<Instant>,
+    /// When the loop last asked how long it could sleep, which is the last thing
+    /// it does before sleeping. What comes before it is the drain - the audio,
+    /// the frame, the polls - and what comes after is the wait itself.
+    armed_at: Option<Instant>,
+    insns_at_window: u64,
+    ticks: u32,
+    inside: Duration,
+    /// Draining what the tick produced: the audio commands, the frame, the
+    /// handful of polls beside them. All of it crosses JNI once per step.
+    drained: Duration,
+    /// Waiting, having nothing to do.
+    slept: Duration,
+    /// The longest single spell outside, which is what a late frame is made of.
+    outside_worst: Duration,
+    /// Ticks that stopped because the emulator had nothing left to run, against
+    /// ones that used their whole budget. A loop that is mostly idle is waiting
+    /// on something; one that is mostly out of budget is short of CPU.
+    idle: u32,
+    frames: u32,
 }
 
-static RUNNER: Mutex<Runner> = Mutex::new(Runner { instance: None });
+impl LoopMeter {
+    /// Called as a tick begins; answers when it began.
+    fn enter(&mut self) -> Instant {
+        let now = Instant::now();
+
+        if let Some(left) = self.left_at {
+            let away = now.duration_since(left);
+            self.outside_worst = self.outside_worst.max(away);
+
+            // A tick that used its whole budget never asked how long it could
+            // sleep and never slept, so all of its time away was the drain.
+            match self.armed_at {
+                Some(armed) => {
+                    self.drained += armed.saturating_duration_since(left);
+                    self.slept += now.saturating_duration_since(armed);
+                }
+                None => self.drained += away,
+            }
+        }
+
+        self.window_began.get_or_insert(now);
+
+        now
+    }
+
+    /// Called as a tick returns, and reports once a second has gone by.
+    fn leave(&mut self, began: Instant, stopped_idle: bool) {
+        let now = Instant::now();
+
+        self.ticks += 1;
+        self.inside += now.duration_since(began);
+        self.idle += u32::from(stopped_idle);
+        self.left_at = Some(now);
+        self.armed_at = None;
+
+        let Some(window_began) = self.window_began else { return };
+        let window = now.duration_since(window_began);
+        if window < Duration::from_secs(1) {
+            return;
+        }
+
+        let insns = wie_core_arm::EXECUTED_INSTRUCTIONS.load(std::sync::atomic::Ordering::Relaxed);
+        let ran = insns.saturating_sub(self.insns_at_window);
+        let mips = ran as f64 / window.as_secs_f64() / 1.0e6;
+
+        tracing::info!(
+            "[loop] {} ticks in {:.2}s: run={}ms drain={}ms sleep={}ms (worst gap {}ms) idle={}/{} frames={} {:.1} MIPS",
+            self.ticks,
+            window.as_secs_f64(),
+            self.inside.as_millis(),
+            self.drained.as_millis(),
+            self.slept.as_millis(),
+            self.outside_worst.as_millis(),
+            self.idle,
+            self.ticks,
+            self.frames,
+            mips,
+        );
+
+        *self = Self {
+            window_began: Some(now),
+            left_at: self.left_at,
+            insns_at_window: insns,
+            ..Default::default()
+        };
+    }
+}
+
+pub struct Runner {
+    instance: Option<Instance>,
+    meter: LoopMeter,
+}
+
+static RUNNER: Mutex<Runner> = Mutex::new(Runner {
+    instance: None,
+    meter: LoopMeter {
+        window_began: None,
+        left_at: None,
+        armed_at: None,
+        insns_at_window: 0,
+        ticks: 0,
+        inside: Duration::ZERO,
+        drained: Duration::ZERO,
+        slept: Duration::ZERO,
+        outside_worst: Duration::ZERO,
+        idle: 0,
+        frames: 0,
+    },
+});
 
 pub fn with_runner<T>(f: impl FnOnce(&mut Runner) -> T) -> T {
     let mut runner = RUNNER.lock().unwrap_or_else(|x| x.into_inner());
@@ -282,6 +408,7 @@ impl Runner {
                 });
 
                 self.instance = Some(Instance { emulator, shared });
+                self.meter = LoopMeter::default();
 
                 String::new()
             }
@@ -320,7 +447,19 @@ impl Runner {
 
     /// Runs the emulator for up to `budget`. Returns a status line for the
     /// player, empty while everything is fine.
+    ///
+    /// Wraps the run so [`LoopMeter`] can say how the second was split between
+    /// the emulator and the loop around it.
     pub fn tick(&mut self, budget: Duration) -> String {
+        let began = self.meter.enter();
+        let mut stopped_idle = false;
+        let status = self.run_tick(budget, &mut stopped_idle);
+        self.meter.leave(began, stopped_idle);
+
+        status
+    }
+
+    fn run_tick(&mut self, budget: Duration, stopped_idle: &mut bool) -> String {
         // A stop the UI asked for while the previous tick was running. It is
         // answered before anything else, so the tick after a stop never runs
         // the title a person has already left.
@@ -391,6 +530,8 @@ impl Runner {
             // running to the full budget — which is what lifts its duty cycle
             // once the host delay is short.
             if instance.emulator.is_idle() {
+                *stopped_idle = true;
+
                 return String::new();
             }
 
@@ -403,12 +544,19 @@ impl Runner {
     /// How long the host loop may sleep before the title has work again, in
     /// milliseconds, or `None` to keep to its own interval. See
     /// [`Emulator::sleep_hint`](wie_backend::Emulator::sleep_hint).
-    pub fn sleep_hint(&self) -> Option<u64> {
+    pub fn sleep_hint(&mut self) -> Option<u64> {
+        // The last thing the loop asks before it waits, so this is where the
+        // drain ends and the wait begins. See [`LoopMeter`].
+        self.meter.armed_at = Some(Instant::now());
+
         self.instance.as_ref()?.emulator.sleep_hint()
     }
 
     pub fn take_frame(&mut self) -> Option<Frame> {
-        self.instance.as_ref()?.shared.take_frame()
+        let frame = self.instance.as_ref()?.shared.take_frame();
+        self.meter.frames += u32::from(frame.is_some());
+
+        frame
     }
 
     pub fn take_audio(&mut self) -> Option<Vec<u8>> {
