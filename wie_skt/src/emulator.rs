@@ -192,16 +192,23 @@ impl SktMsd {
     /// (`aram-core/loader/skvm.ParseDescriptor`); here every field is optional
     /// and a missing main class is caught later, where it can be reported,
     /// rather than by indexing off the end of a line.
+    ///
+    /// The text is EUC-KR, as the handset wrote it, unless it happens to read
+    /// as UTF-8. Reading it as UTF-8 alone dropped every line that carried
+    /// Korean - 디지몬RPGII names itself in `MIDlet-1`, so the line holding its
+    /// main class was the one thrown away and the title stopped at `Main
+    /// class not found`.
     pub fn parse(filename: &str, data: &[u8]) -> Self {
         let mut main_class = String::new();
         let mut id: String = filename.split('.').next().unwrap_or(filename).into();
         let mut properties = BTreeMap::new();
 
-        for line in data.split(|x| *x == b'\n') {
-            let Ok(line) = str::from_utf8(line) else {
-                continue;
-            };
+        let text = match str::from_utf8(data) {
+            Ok(text) => text.into(),
+            Err(_) => encoding_rs::EUC_KR.decode(data).0,
+        };
 
+        for line in text.split('\n') {
             let Some((key, value)) = line.split_once(':') else {
                 continue;
             };
@@ -267,6 +274,17 @@ mod tests {
         let msd = SktMsd::parse("app.msd", b"MIDlet-1: Game\nMIDlet-2\n");
 
         assert!(msd.main_class.is_empty());
+    }
+
+    /// A descriptor in EUC-KR - the handset's own encoding - gives up the
+    /// fields on its Korean lines too, main class included.
+    #[test]
+    fn an_euc_kr_descriptor_keeps_its_korean_lines() {
+        let (name, _, _) = encoding_rs::EUC_KR.encode("MIDlet-Name: 디지몬RPGII\r\nMIDlet-1: 디지몬RPGII,,exceptGame.Digi2Midlet\r\n");
+        let msd = SktMsd::parse("0052634065.msd", &name);
+
+        assert_eq!(msd.main_class, "exceptGame.Digi2Midlet");
+        assert_eq!(msd.properties.get("MIDlet-Name").map(|x| x.as_str()), Some("디지몬RPGII"));
     }
 
     /// A line with no colon is not a property, and a descriptor made of them

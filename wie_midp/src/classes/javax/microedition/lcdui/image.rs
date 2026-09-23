@@ -28,6 +28,7 @@ impl Image {
             parent_class: Some("java/lang/Object"),
             interfaces: vec![],
             methods: vec![
+                JavaMethodProto::new("<init>", "()V", Self::init_empty, Default::default()),
                 JavaMethodProto::new("<init>", "(II[BI)V", Self::init, Default::default()),
                 JavaMethodProto::new("getWidth", "()I", Self::get_width, Default::default()),
                 JavaMethodProto::new("getHeight", "()I", Self::get_height, Default::default()),
@@ -70,6 +71,21 @@ impl Image {
             ],
             access_flags: Default::default(),
         }
+    }
+
+    /// The handset's `Image` had a constructor that takes nothing, and a
+    /// handset VM never checked whether a title was allowed to call it.
+    /// 디지몬RPGII does, once, while it builds its game state - `new Image()`
+    /// with the result thrown away, beside a row of its own classes made the
+    /// same way - so without this the title stopped on `NoSuchMethodError`
+    /// before its first frame. What it makes is an empty image; nothing reads
+    /// it.
+    async fn init_empty(jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<()> {
+        tracing::debug!("javax.microedition.lcdui.Image::<init>({this:?})");
+
+        let _: () = jvm.invoke_special(&this, "java/lang/Object", "<init>", "()V", ()).await?;
+
+        Ok(())
     }
 
     async fn init(
