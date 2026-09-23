@@ -173,6 +173,16 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // of a 176x220 panel. All 320 rows, not the 296 a strip would leave: its
     // key bar - `CLR:뒤로 OK:선택 #:도움말` - is on the last of them.
     (TitlePlatform::Ktf, "01035ACD", panel(240, 320)),
+    // 대박돈까스: its descriptor names no panel, and everything it draws says
+    // 176x220. Its gameplay screen is a fixed 176x205 composition - the shop
+    // floor, the 확장/청소/홍보/정보/폐점 bar down the right, the HP and
+    // TOTAL/TODAY strip and the MENU/PAUSE keys under it - and on a 240x320
+    // panel that sat in the top left with the panel's own colour beside it.
+    // Its menus are the other half of the story: those it lays out from the
+    // height the screen reports, so the title screen's copyright and `OK` went
+    // to row 311 and stayed there under the gameplay that followed, which is
+    // the leftover menu text showing below the shop.
+    (TitlePlatform::Ktf, "01025922", panel(176, 220)),
     // 소울게이트: takes a 240x320 screen, composes every frame into a 320x240
     // off-screen buffer of its own, and copies that onto the screen a quarter
     // turn clockwise - the handset was meant to be turned sideways to play it.
