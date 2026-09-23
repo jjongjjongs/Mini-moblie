@@ -2,12 +2,9 @@
 
 use std::ops::{Index, IndexMut};
 
-use log::*;
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
-
 use crate::mode::Mode;
 use crate::util::bit::BitUtilExt;
+use log::*;
 
 pub type Reg = u8;
 
@@ -45,16 +42,8 @@ const REG_MAP: [[usize; 18]; 6] = [
     [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 34, 35, 15, 16, 36],   // undefined
 ];
 
-#[cfg(feature = "serde")]
-mod big_array {
-    use serde_big_array::big_array;
-    big_array! { BigArray; +super::NUM_RGSR }
-}
-
 #[derive(Copy, Clone)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub(crate) struct RegFile {
-    #[cfg_attr(feature = "serde", serde(with = "big_array::BigArray"))]
     reg: [u32; NUM_RGSR],
     bank: usize,
 }

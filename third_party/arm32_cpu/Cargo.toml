@@ -12,11 +12,12 @@ repository = "https://github.com/dlunch/arm32_cpu"
 keywords = ["emulator", "emulation", "arm"]
 categories = ["emulators"]
 
-[features]
-default = []
-serde = []
-serde-serialize = ["serde"]
-advanced_disasm = []
+# Upstream's `serde`, `serde-serialize` and `advanced_disasm` are not here. Their
+# dependencies were left behind when this crate was vendored, and the code they
+# gate has since drifted out of building against this copy at all: `Cpu` is
+# `Copy` now and `advanced_disasm` puts a `Capstone` inside it. They named
+# nothing and built nowhere, and any `--all-features` pass - the coverage job is
+# one - stopped on them.
 
 [dependencies]
 log = "0.4"

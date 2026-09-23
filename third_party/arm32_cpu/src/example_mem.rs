@@ -1,14 +1,10 @@
 use std::collections::BTreeMap;
 
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
-
 use crate::Memory;
 
 /// Example memory device backed by a BTreeMap<u32, u8>.
 ///
 /// Uninitialized memory returns 0x00.
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Default)]
 pub struct ExampleMem(BTreeMap<u32, u8>);
 

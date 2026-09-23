@@ -206,6 +206,11 @@ pub async fn get_java_method(core: &mut ArmCore, _: &mut (), ptr_class: u32, ptr
     Ok(method.ptr_raw)
 }
 
+// The `#[must_use]` the lint sees is the one `async_recursion` puts on the
+// boxed future it returns, not one written here, and there is no version of
+// that crate without it - `async_trait`'s own was fixed upstream, this one's
+// was not. See `clippy::double_must_use`.
+#[allow(clippy::double_must_use)]
 #[async_recursion::async_recursion]
 async fn find_java_method(class: &JavaClassDefinition, name: &str, descriptor: &str) -> Result<Option<JavaMethod>> {
     let method = class.method(name, descriptor, false)?;

@@ -32,12 +32,6 @@
     clippy::cast_lossless, // Register types _won't_ be changed in the future
 )]
 
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
-
-#[cfg(feature = "advanced_disasm")]
-use capstone::prelude::*;
-
 pub mod reg;
 
 mod alignment;
@@ -102,14 +96,9 @@ pub trait Memory {
 
 /// An emulated CPU with ARMv5-era ARM/Thumb support.
 #[derive(Copy, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Cpu {
     /// Registers
     reg: RegFile,
-    /// Disassembler
-    #[cfg(feature = "advanced_disasm")]
-    #[cfg_attr(feature = "serde", serde(skip))]
-    cs: Option<Capstone>,
 }
 
 impl std::fmt::Debug for Cpu {
@@ -135,15 +124,6 @@ impl Cpu {
     pub fn new() -> Cpu {
         let mut cpu = Cpu {
             reg: RegFile::new_empty(),
-            #[cfg(feature = "advanced_disasm")]
-            cs: Some(
-                Capstone::new()
-                    .arm()
-                    .mode(arch::arm::ArchMode::Arm)
-                    .detail(true)
-                    .build()
-                    .unwrap(),
-            ),
         };
 
         cpu.reg_set(Mode::User, reg::PC, 0x00);
