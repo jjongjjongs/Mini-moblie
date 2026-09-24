@@ -26,6 +26,12 @@ const IME_BACKSPACE: i8 = -16;
 /// A key press, as the input method numbers its events.
 const IME_PRESS: u32 = 2;
 
+/// The input method's Hangul mode, which a field starts in.
+const KOREAN_MODE: u32 = 3;
+
+/// How many modes `*` cycles: small letters, capitals, digits and Hangul.
+const INPUT_MODES: u32 = 4;
+
 /// Inset of the text from the field's border, in pixels.
 const TEXT_INSET: i32 = 2;
 
@@ -87,7 +93,7 @@ impl XTextField {
 
     async fn init(
         jvm: &Jvm,
-        _context: &mut WieJvmContext,
+        context: &mut WieJvmContext,
         mut this: ClassInstanceRef<Self>,
         text: ClassInstanceRef<String>,
         max_size: i32,
@@ -113,6 +119,12 @@ impl XTextField {
         // title juggling two fields is the one that calls `setFocus`, and
         // turning the other one off is what that call is for.
         jvm.put_field(&mut this, "__wieXTextFieldFocused", "Z", true).await?;
+
+        // A Korean handset opened a text field in Hangul. The input method
+        // starts in English otherwise, so a name field took only Latin
+        // letters: 택티컬퀘스트's character name could not be written in
+        // Korean at all. `*` moves on from here - see `handle_key`.
+        context.system().set_current_input_mode(KOREAN_MODE);
 
         Ok(())
     }
@@ -190,6 +202,22 @@ impl XTextField {
                     Some((Self::drop_last_chars(&committed, 1), 0))
                 }
             }
+            // `*` switches the input mode, as a handset's field did - Hangul,
+            // then small letters, capitals and digits, and back round - the
+            // same order `MC_uicHandleInput` steps through. Whatever was being
+            // composed is finished first, in the mode it was typed in.
+            // Korean mode has no use for the key (it is `#` that is the space
+            // there), and the reference emulator switches on it too
+            // (wfeature, `textInputState.press`).
+            Some(MIDPKeyCode::KEY_STAR) => {
+                let output = context.system().handle_input_method(IME_FLUSH, IME_PRESS);
+                let updated = Self::append(&committed, &output, max_size).unwrap_or((committed.clone(), 0));
+
+                let mode = context.system().current_input_mode();
+                context.system().set_current_input_mode((mode + 1) % INPUT_MODES);
+
+                Some(updated)
+            }
             // Moving off the field ends the syllable it was holding.
             Some(MIDPKeyCode::UP | MIDPKeyCode::DOWN | MIDPKeyCode::LEFT | MIDPKeyCode::RIGHT) => {
                 let output = context.system().handle_input_method(IME_FLUSH, IME_PRESS);
@@ -207,8 +235,7 @@ impl XTextField {
                 | MIDPKeyCode::KEY_NUM7
                 | MIDPKeyCode::KEY_NUM8
                 | MIDPKeyCode::KEY_NUM9
-                | MIDPKeyCode::KEY_POUND
-                | MIDPKeyCode::KEY_STAR,
+                | MIDPKeyCode::KEY_POUND,
             ) => {
                 let output = context.system().handle_input_method(key_code as i8, IME_PRESS);
 
@@ -382,11 +409,23 @@ mod tests {
     const KEY_2: i32 = 50;
     const KEY_3: i32 = 51;
     const KEY_4: i32 = 52;
+    const KEY_1: i32 = 49;
+    const STAR: i32 = 42;
     const CLEAR: i32 = 8;
     const RIGHT: i32 = 145;
     const LEFT_SOFT_KEY: i32 = 129;
 
+    /// A field switched to English small letters, which is what most of
+    /// these cases type in.
     async fn field(jvm: &Jvm, text: &str, max_size: i32) -> JvmResult<ClassInstanceRef<()>> {
+        let field = korean_field(jvm, text, max_size).await?;
+        press(jvm, &field, STAR).await?;
+
+        Ok(field)
+    }
+
+    /// A field as a title makes it, in the mode it opens in.
+    async fn korean_field(jvm: &Jvm, text: &str, max_size: i32) -> JvmResult<ClassInstanceRef<()>> {
         let text = JavaLangString::from_rust_string(jvm, text).await?;
 
         Ok(jvm
@@ -409,7 +448,47 @@ mod tests {
         JavaLangString::to_rust_string(jvm, &text).await
     }
 
-    /// The default input mode is English multi-tap, where 2 starts on `a`.
+    /// A field opens in Hangul: ㄱ on 4 and ㅣ on 1 make 기.
+    #[test]
+    fn a_new_field_types_hangul() -> Result<()> {
+        run_jvm_test(protos(), |jvm| async move {
+            let field = korean_field(&jvm, "", 0).await?;
+
+            press(&jvm, &field, KEY_4).await?;
+            press(&jvm, &field, KEY_1).await?;
+
+            assert_eq!(text(&jvm, &field).await?, "기");
+
+            Ok(())
+        })
+    }
+
+    /// `*` finishes the syllable and moves on to small letters, and three
+    /// more presses bring it back round to Hangul.
+    #[test]
+    fn star_cycles_the_input_mode() -> Result<()> {
+        run_jvm_test(protos(), |jvm| async move {
+            let field = korean_field(&jvm, "", 0).await?;
+
+            press(&jvm, &field, KEY_4).await?;
+            press(&jvm, &field, KEY_1).await?;
+            press(&jvm, &field, STAR).await?;
+            press(&jvm, &field, KEY_2).await?;
+
+            assert_eq!(text(&jvm, &field).await?, "기a");
+
+            press(&jvm, &field, STAR).await?;
+            press(&jvm, &field, STAR).await?;
+            press(&jvm, &field, STAR).await?;
+            press(&jvm, &field, KEY_4).await?;
+
+            assert_eq!(text(&jvm, &field).await?, "기aㄱ");
+
+            Ok(())
+        })
+    }
+
+    /// Small letters are multi-tap, where 2 starts on `a`.
     #[test]
     fn a_keypad_press_puts_its_letter_in_the_field() -> Result<()> {
         run_jvm_test(protos(), |jvm| async move {
