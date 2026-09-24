@@ -230,6 +230,13 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // default it played in a small box in the middle of the screen. 144 rows
     // is the Canvas of a 120x160 handset, the sixteen soft-key rows under it.
     (TitlePlatform::Skt, "0054532850", panel(120, 160)),
+    // 바운티블루스: drawn for a 128x160 handset - its field, portraits and
+    // dialogue art are 128 wide, and it lays the play field out from the
+    // Canvas height (`getHeight() + 16`). On the 240x320 default the field
+    // took the top 144 rows and the rest of the screen was the dark red
+    // panel it draws under the field, with the stage banner repeated in it;
+    // on 128x160 the field fills the screen as it did on the handset.
+    (TitlePlatform::Skt, "0145741367", panel(128, 160)),
 ];
 
 /// What to do differently for the title `aid` on `platform`.
