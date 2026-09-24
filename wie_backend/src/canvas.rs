@@ -1121,6 +1121,25 @@ fn decode_ecnx(data: &[u8]) -> Result<Box<dyn Image>> {
 }
 
 pub fn decode_image(data: &[u8]) -> Result<Box<dyn Image>> {
+    decode_image_with(data, DecodeConventions::Wipi)
+}
+
+/// The image conventions a platform brings to a decode.
+///
+/// KTF/WIPI/LGT titles treat palette index 0 as an indexed image's transparent
+/// colour; SK-VM does not - it marks transparency with a `tRNS` chunk and reads
+/// a one-colour indexed PNG as the opaque fill it is. The two disagree only over
+/// the degenerate one-palette-entry tile with no `tRNS`, so the platform says
+/// which reading applies.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DecodeConventions {
+    /// KTF/WIPI/LGT: a one-colour index-0 tile is a transparent spacer.
+    Wipi,
+    /// SK-VM (MIDP): honour `tRNS` only; a one-colour tile is opaque.
+    Skvm,
+}
+
+pub fn decode_image_with(data: &[u8], conventions: DecodeConventions) -> Result<Box<dyn Image>> {
     extern crate std; // XXX
 
     use std::io::Cursor;
@@ -1168,7 +1187,7 @@ pub fn decode_image(data: &[u8]) -> Result<Box<dyn Image>> {
         }
     }
 
-    if rgba.width() <= 15 && rgba.height() <= 15 && png_is_single_index0_tile(data) {
+    if conventions == DecodeConventions::Wipi && rgba.width() <= 15 && rgba.height() <= 15 && png_is_single_index0_tile(data) {
         for pixel in rgba.pixels_mut() {
             pixel.0[3] = 0;
         }

@@ -12,7 +12,8 @@ use jvm::{
 };
 
 use wie_backend::canvas::{
-    ArgbPixel, Canvas, Color, Image as BackendImage, ImageBuffer, ImageBufferCanvas, PixelType, Rgb332Pixel, Rgb565Pixel, decode_image,
+    ArgbPixel, Canvas, Color, DecodeConventions, Image as BackendImage, ImageBuffer, ImageBufferCanvas, PixelType, Rgb332Pixel, Rgb565Pixel,
+    decode_image_with,
 };
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 
@@ -160,7 +161,12 @@ impl Image {
         jvm.array_raw_buffer(&data).await?.read(image_offset as _, &mut image_data)?;
 
         let image = {
-            let result = decode_image(&cast_vec(image_data));
+            // SK-VM conventions: honour tRNS only. A one-colour indexed PNG with
+            // no tRNS is an opaque fill, not the transparent spacer the WIPI
+            // families read it as - 크레이지버스's 12x12 menuTile.png is exactly
+            // that, and read as transparent its menu background never covered
+            // the frame, so every state smeared over the last.
+            let result = decode_image_with(&cast_vec(image_data), DecodeConventions::Skvm);
             if let Ok(image) = result {
                 image
             } else {
