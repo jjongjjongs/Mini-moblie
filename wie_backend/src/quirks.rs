@@ -330,6 +330,28 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // shape. Elements are anchored to `getHeight()`, so they follow whatever
     // height the panel yields.
     (TitlePlatform::Skt, "0050608430", panel(128, 160)),
+    // 신시티 (GameAppMain): drawn for a 176-wide handset - its title (`logo.png`
+    // 176x202), dialogue box and status strip are all 176 wide, and it lays its
+    // map and the year/money bar out down to row 208. On the 240x320 default the
+    // map sat at the top with the bar stranded far below it over black. 176x208
+    // is the panel it fills.
+    (TitlePlatform::Skt, "0050978830", panel(176, 208)),
+    // 츄리닝 (Churining): its backgrounds are 128-wide (`wishjar_bg.png` 128x140,
+    // `main_bg.png` 120x144), so it is a 128-class title. On the 240x320 default
+    // it drew in a box in the corner; 128x160 is the panel it fills.
+    (TitlePlatform::Skt, "0050664330", panel(128, 160)),
+    // Magical (마법사 타이쿤): its Canvas clamps its play field to 128x146
+    // (`if (width > 128) width = 128`, `if (height > 146) height = 146`) and
+    // centres it. On the 240x320 default it sat in a small box in the middle.
+    // 128x160 is the 128-class panel that field fills.
+    (TitlePlatform::Skt, "0048926642", panel(128, 160)),
+    // 파파라치타이쿤 (papa): drawn for a 128-class handset - its artwork is 132
+    // wide at most and its Canvas selects a layout by exact panel height, capping
+    // it at a 160-row field (`if (height >= 160) field = 160`, with 143/145/148
+    // variants for the shorter panels). On the 240x320 default its alley scene,
+    // title and cursor scattered across the screen at coordinates meant for a
+    // narrow one. 128x160 is the panel the 160-row layout is drawn for.
+    (TitlePlatform::Skt, "0053919219", panel(128, 160)),
 ];
 
 /// What to do differently for the title `aid` on `platform`.
