@@ -12,8 +12,8 @@
 //! of a rasterizer and the two model formats. Here it is real: it parses the
 //! uncompressed version-3 `.mbac` model and its `.bmp` skin and draws the mesh
 //! with a small software rasterizer (see the `model` submodule), so the 3D
-//! character appears. The `.mtra` motion is not decoded yet, so a model is drawn
-//! in its rest pose rather than animated.
+//! character appears. The `.mtra` motion is decoded too, so the posture a title
+//! selects poses the model's bones rather than drawing it in its rest pose.
 //!
 //! The fixed point is the title's own: a coordinate is scaled so 4096 is 1.0,
 //! and a full circle is 4096 of the angle unit the trigonometry takes.

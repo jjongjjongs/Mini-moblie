@@ -236,13 +236,19 @@ impl XoWorld {
         jvm.put_field(&mut this, "postureFrame", "I", frame).await
     }
 
-    /// How many frames a motion has. The `.mtra` decode that would answer this
-    /// exactly is not in yet, so a loaded motion reports a steady length - enough
-    /// for a title's dance clock to run - and no motion reports none.
+    /// How many frames a motion's action has, in the 16.16 frame units the
+    /// title counts in - what the middleware's `getNumFrames` answers. Parsed
+    /// from the loaded `.mtra`; no motion, or an action the motion does not
+    /// hold, reports none.
     async fn get_max_frame(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, motion: i32) -> JvmResult<i32> {
         tracing::debug!("m.XO_World::getMaxFrame({this:?}, {motion})");
-        let mtra: ClassInstanceRef<Array<i8>> = jvm.get_field(&this, "mtraData", "[B").await?;
-        Ok(if mtra.is_null() { 0 } else { MOTION_FRAMES })
+        let Some(mtra) = Self::read_bytes(jvm, &this, "mtraData").await? else {
+            return Ok(0);
+        };
+        let frames = model::Motion::parse(&mtra)
+            .and_then(|m| m.num_frames(motion.max(0) as usize))
+            .unwrap_or(0);
+        Ok(frames)
     }
 
     /// Draw the loaded model with its skin, through the view the title set.
@@ -271,10 +277,23 @@ impl XoWorld {
             None => None,
         };
 
+        // Pose the model by the posture the title selected, if a motion is
+        // loaded and holds that action; otherwise draw the rest pose.
+        let action: i32 = jvm.get_field(&this, "postureAction", "I").await?;
+        let frame: i32 = jvm.get_field(&this, "postureFrame", "I").await?;
+        let motion = match Self::read_bytes(jvm, &this, "mtraData").await? {
+            Some(mtra) => model::Motion::parse(&mtra),
+            None => None,
+        };
+        let pose = match &motion {
+            Some(mo) => m.animated_pose(mo, action.max(0) as usize, frame),
+            None => m.rest_pose(),
+        };
+
         let image = Graphics::image(jvm, &mut graphics).await?;
         let mut canvas = Image::canvas(jvm, &image).await?;
 
-        m.render(&cells, scale, cx, cy, texture.as_ref(), &mut *canvas);
+        m.render(&pose, &cells, scale, cx, cy, texture.as_ref(), &mut *canvas);
 
         Ok(())
     }
@@ -308,9 +327,6 @@ impl XoWorld {
         Ok(cells)
     }
 }
-
-/// The steady motion length reported until the `.mtra` decode lands.
-const MOTION_FRAMES: i32 = 30;
 
 enum Axis {
     Y,

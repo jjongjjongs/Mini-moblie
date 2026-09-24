@@ -29,7 +29,7 @@ use alloc::{vec, vec::Vec};
 
 use wie_backend::canvas::{Canvas, Color};
 
-use crate::classes::m::MICRO3D_ONE;
+use crate::classes::m::{MICRO3D_ONE, trig};
 
 const MBAC_MAGIC: u16 = 0x424D; // "MB"
 
@@ -51,12 +51,15 @@ struct Face {
     uv: [(u8, u8); 4],
 }
 
-/// One bone: the run of vertices it owns and its rest-pose world transform.
+/// One bone: the run of vertices it owns, its parent, and its transforms.
 struct Bone {
     start: usize,
     end: usize,
-    /// 4.12 fixed-point 3x4 transform into model space (rotation over 4096,
-    /// translation in raw model units), already composed with the parent's.
+    parent: i16,
+    /// 4.12 fixed-point 3x4 transform relative to the parent (the bind pose),
+    /// which a motion composes onto to animate the bone.
+    local: [i32; 12],
+    /// The bind `local` composed up the hierarchy, used for the rest pose.
     world: [i32; 12],
 }
 
@@ -164,6 +167,8 @@ impl Model {
             bones.push(Bone {
                 start: cursor,
                 end: cursor + seg,
+                parent,
+                local,
                 world,
             });
             cursor += seg;
@@ -183,7 +188,7 @@ impl Model {
 
     /// Rest-pose positions: each vertex carried into model space by the world
     /// transform of the bone that owns it.
-    fn rest_pose(&self) -> Vec<[i32; 3]> {
+    pub fn rest_pose(&self) -> Vec<[i32; 3]> {
         let mut out = self.verts.clone();
         for bone in &self.bones {
             for index in bone.start..bone.end.min(out.len()) {
@@ -193,15 +198,51 @@ impl Model {
         out
     }
 
-    /// Draw the model into `canvas`.
+    /// The model posed by one frame of a motion's action: each bone's bind
+    /// transform composed with its animated delta at `frame`, walked down the
+    /// hierarchy, then applied to the vertices the bone owns. Follows the
+    /// MascotCapsule V3 runtime (`ActionTable`/`Figure.updateBoneTrans`).
+    pub fn animated_pose(&self, motion: &Motion, action: usize, frame: i32) -> Vec<[i32; 3]> {
+        let Some(action) = motion.actions.get(action) else {
+            return self.rest_pose();
+        };
+
+        // Each bone's animated world transform, in bind order (a parent always
+        // precedes its children, as the file lays bones out).
+        let mut world: Vec<[i32; 12]> = Vec::with_capacity(self.bones.len());
+        for (index, bone) in self.bones.iter().enumerate() {
+            let local = match action.bones.get(index) {
+                Some(anim) => anim.local(frame, &bone.local),
+                None => bone.local,
+            };
+            let composed = if bone.parent >= 0 && (bone.parent as usize) < world.len() {
+                compose(world[bone.parent as usize], local)
+            } else {
+                local
+            };
+            world.push(composed);
+        }
+
+        let mut out = self.verts.clone();
+        for (index, bone) in self.bones.iter().enumerate() {
+            for vertex in bone.start..bone.end.min(out.len()) {
+                out[vertex] = apply(&world[index], self.verts[vertex]);
+            }
+        }
+        out
+    }
+
+    /// Draw the model, posed as `pose` (its per-vertex model-space positions),
+    /// into `canvas`.
     ///
     /// `view` is the 4.12 model-to-camera transform the title built (its `A3`),
     /// `scale` the projection scale and `(cx, cy)` the screen point the camera
     /// looks through - the three arguments the title passes to `setView`.
-    pub fn render(&self, view: &[i32; 12], scale: i32, cx: i32, cy: i32, texture: Option<&Texture>, canvas: &mut dyn Canvas) {
+    #[allow(clippy::too_many_arguments)]
+    pub fn render(&self, pose: &[[i32; 3]], view: &[i32; 12], scale: i32, cx: i32, cy: i32, texture: Option<&Texture>, canvas: &mut dyn Canvas) {
         let width = canvas.image().width() as i32;
         let height = canvas.image().height() as i32;
-        let rest = self.rest_pose();
+        let rest = pose;
 
         // Project every vertex once. A vertex behind the camera has no valid
         // screen point; its faces are dropped.
@@ -373,6 +414,334 @@ fn fill_triangle(canvas: &mut dyn Canvas, width: i32, height: i32, pts: [(f32, f
     }
 }
 
+// ---------------------------------------------------------------------------
+// motion (`.mtra`, version 4)
+// ---------------------------------------------------------------------------
+//
+// The motion that animates the model. The format is the MascotCapsule V3
+// ActionTable, read as its reference runtime does (see rmn20/MascotME,
+// `ActionTable.java`):
+//
+// ```text
+//   "MT"  u8 version(=4)  u8 0  u16 num_actions  u16 num_bones
+//   u16 trans_type_counts[8]      -- bones per transform type, across actions
+//   i32 data_size
+//   repeat(num_actions):
+//     u16 key_frames              -- the action's length (getNumFrames)
+//     repeat(num_bones): u8 type, then that type's channels
+//     (version 5 only: a dynamic-polygon chunk)
+//   20-byte trailer
+// ```
+//
+// A channel is `u16 count` then `count` entries. A 3D channel (translate,
+// scale, rotate) entry is four `i16`: a frame and an x/y/z; a 1D channel (roll)
+// entry is two: a frame and an angle. A bone's transform at a frame is its bind
+// transform composed with the animated delta the channels give.
+
+/// A parsed `.mtra` motion: a list of actions.
+pub struct Motion {
+    actions: Vec<Action>,
+}
+
+/// One action: its length in frames and a per-bone animation.
+struct Action {
+    key_frames: u16,
+    bones: Vec<BoneAnim>,
+}
+
+/// How one bone is animated within an action. The `Vec`s are keyframe lists,
+/// `[frame, x, y, z]` for the 3D channels and `[frame, angle]` for roll.
+struct BoneAnim {
+    kind: u8,
+    matrix: [i32; 12],
+    translate: Vec<[i16; 4]>,
+    scale: Vec<[i16; 4]>,
+    rotate: Vec<[i16; 4]>,
+    roll: Vec<[i16; 2]>,
+    translate_const: [i16; 3],
+    roll_const: i16,
+}
+
+impl Motion {
+    pub fn parse(data: &[u8]) -> Option<Motion> {
+        if data.len() < 28 || &data[0..2] != b"MT" {
+            return None;
+        }
+        let version = *data.get(2)?;
+        if *data.get(3)? != 0 || !(2..=5).contains(&version) {
+            return None;
+        }
+        let num_actions = u16_at(data, 4)? as usize;
+        let num_bones = u16_at(data, 6)? as usize;
+        // trans_type_counts[8] at 8..24 and data_size at 24..28 are hints only.
+
+        let mut offset = 28;
+        let mut actions = Vec::with_capacity(num_actions);
+        for _ in 0..num_actions {
+            let key_frames = u16_at(data, offset)?;
+            offset += 2;
+
+            let mut bones = Vec::with_capacity(num_bones);
+            for _ in 0..num_bones {
+                let kind = *data.get(offset)?;
+                offset += 1;
+                let mut anim = BoneAnim {
+                    kind,
+                    matrix: crate::classes::m::a3::identity(),
+                    translate: Vec::new(),
+                    scale: Vec::new(),
+                    rotate: Vec::new(),
+                    roll: Vec::new(),
+                    translate_const: [0; 3],
+                    roll_const: 0,
+                };
+                match kind {
+                    0 => {
+                        for cell in anim.matrix.iter_mut() {
+                            *cell = i16_at(data, offset)? as i32;
+                            offset += 2;
+                        }
+                    }
+                    1 => {}
+                    2 => {
+                        anim.translate = read_channel3(data, &mut offset)?;
+                        anim.scale = read_channel3(data, &mut offset)?;
+                        anim.rotate = read_channel3(data, &mut offset)?;
+                        anim.roll = read_channel1(data, &mut offset)?;
+                    }
+                    3 => {
+                        for value in anim.translate_const.iter_mut() {
+                            *value = i16_at(data, offset)?;
+                            offset += 2;
+                        }
+                        anim.rotate = read_channel3(data, &mut offset)?;
+                        anim.roll_const = i16_at(data, offset)?;
+                        offset += 2;
+                    }
+                    4 => {
+                        anim.rotate = read_channel3(data, &mut offset)?;
+                        anim.roll = read_channel1(data, &mut offset)?;
+                    }
+                    5 => {
+                        anim.rotate = read_channel3(data, &mut offset)?;
+                    }
+                    6 => {
+                        anim.translate = read_channel3(data, &mut offset)?;
+                        anim.rotate = read_channel3(data, &mut offset)?;
+                        anim.roll = read_channel1(data, &mut offset)?;
+                    }
+                    _ => return None,
+                }
+                bones.push(anim);
+            }
+
+            if version >= 5 {
+                let count = u16_at(data, offset)? as usize;
+                offset += 2 + count * 6;
+            }
+            actions.push(Action { key_frames, bones });
+        }
+
+        Some(Motion { actions })
+    }
+
+    /// The action's length, in the 16.16 frame units the title counts in - what
+    /// the reference runtime's `getNumFrames` answers.
+    pub fn num_frames(&self, action: usize) -> Option<i32> {
+        self.actions.get(action).map(|a| (a.key_frames as i32) << 16)
+    }
+}
+
+impl BoneAnim {
+    /// The bone's animated local transform at `frame` (16.16), its bind
+    /// transform composed with the delta the channels give.
+    fn local(&self, frame: i32, bind_local: &[i32; 12]) -> [i32; 12] {
+        match self.kind {
+            0 => self.matrix,
+            1 => *bind_local,
+            _ => {
+                let key = frame >> 4;
+                let (tx, ty, tz) = match self.kind {
+                    2 | 6 => interp3(key, &self.translate),
+                    3 => (
+                        self.translate_const[0] as i32,
+                        self.translate_const[1] as i32,
+                        self.translate_const[2] as i32,
+                    ),
+                    _ => (0, 0, 0),
+                };
+                let (rx, ry, rz) = interp3(key, &self.rotate);
+                let mut delta = rotation_from_direction(rx, ry, rz);
+                delta[3] = tx;
+                delta[7] = ty;
+                delta[11] = tz;
+
+                match self.kind {
+                    2 | 4 | 6 => apply_roll(&mut delta, interp1(key, &self.roll)),
+                    3 => apply_roll(&mut delta, self.roll_const as i32),
+                    _ => {}
+                }
+                if self.kind == 2 {
+                    let (sx, sy, sz) = interp3(key, &self.scale);
+                    apply_scale(&mut delta, sx, sy, sz);
+                }
+                compose(*bind_local, delta)
+            }
+        }
+    }
+}
+
+/// Read a 3D channel: `u16 count`, then `count` `[frame, x, y, z]` entries.
+fn read_channel3(data: &[u8], offset: &mut usize) -> Option<Vec<[i16; 4]>> {
+    let count = u16_at(data, *offset)? as usize;
+    *offset += 2;
+    let mut entries = Vec::with_capacity(count);
+    for _ in 0..count {
+        entries.push([
+            i16_at(data, *offset)?,
+            i16_at(data, *offset + 2)?,
+            i16_at(data, *offset + 4)?,
+            i16_at(data, *offset + 6)?,
+        ]);
+        *offset += 8;
+    }
+    Some(entries)
+}
+
+/// Read a 1D (roll) channel: `u16 count`, then `count` `[frame, angle]` entries.
+fn read_channel1(data: &[u8], offset: &mut usize) -> Option<Vec<[i16; 2]>> {
+    let count = u16_at(data, *offset)? as usize;
+    *offset += 2;
+    let mut entries = Vec::with_capacity(count);
+    for _ in 0..count {
+        entries.push([i16_at(data, *offset)?, i16_at(data, *offset + 2)?]);
+        *offset += 4;
+    }
+    Some(entries)
+}
+
+/// Sample a 3D keyframe list at a 16.12 frame, interpolating between keys.
+fn interp3(key: i32, buffer: &[[i16; 4]]) -> (i32, i32, i32) {
+    if buffer.is_empty() {
+        return (0, 0, 0);
+    }
+    let whole = key >> 12;
+    let last = buffer.len() - 1;
+    if whole >= buffer[last][0] as u16 as i32 {
+        let e = buffer[last];
+        return (e[1] as i32, e[2] as i32, e[3] as i32);
+    }
+    for i in (0..=last).rev() {
+        let prev = buffer[i][0] as u16 as i32;
+        if prev > whole {
+            continue;
+        }
+        if prev == whole {
+            let e = buffer[i];
+            return (e[1] as i32, e[2] as i32, e[3] as i32);
+        }
+        let next = buffer[i + 1][0] as u16 as i32;
+        let delta = (key - (prev << 12)) / (next - prev);
+        let lerp = |a: i16, b: i16| a as i32 + (((b as i32 - a as i32) * delta) >> 12);
+        return (
+            lerp(buffer[i][1], buffer[i + 1][1]),
+            lerp(buffer[i][2], buffer[i + 1][2]),
+            lerp(buffer[i][3], buffer[i + 1][3]),
+        );
+    }
+    let e = buffer[0];
+    (e[1] as i32, e[2] as i32, e[3] as i32)
+}
+
+/// Sample a roll keyframe list at a 16.12 frame, interpolating between keys.
+fn interp1(key: i32, buffer: &[[i16; 2]]) -> i32 {
+    if buffer.is_empty() {
+        return 0;
+    }
+    let whole = key >> 12;
+    let last = buffer.len() - 1;
+    if whole >= buffer[last][0] as u16 as i32 {
+        return buffer[last][1] as i32;
+    }
+    for i in (0..=last).rev() {
+        let prev = buffer[i][0] as u16 as i32;
+        if prev > whole {
+            continue;
+        }
+        if prev == whole {
+            return buffer[i][1] as i32;
+        }
+        let next = buffer[i + 1][0] as u16 as i32;
+        let delta = (key - (prev << 12)) / (next - prev);
+        return buffer[i][1] as i32 + (((buffer[i + 1][1] as i32 - buffer[i][1] as i32) * delta) >> 12);
+    }
+    buffer[0][1] as i32
+}
+
+/// A unit vector scaled so 4096 is 1.0, for the rotation builder.
+fn normalize_fixed(x: i32, y: i32, z: i32) -> (i32, i32, i32) {
+    let magnitude = libm::sqrt((x as i64 * x as i64 + y as i64 * y as i64 + z as i64 * z as i64) as f64) as i64;
+    if magnitude == 0 {
+        return (0, 0, 4096);
+    }
+    (
+        (x as i64 * 4096 / magnitude) as i32,
+        (y as i64 * 4096 / magnitude) as i32,
+        (z as i64 * 4096 / magnitude) as i32,
+    )
+}
+
+/// Build the 4.12 rotation that turns a bone's +Z onto `(vx, vy, vz)`, as the
+/// reference runtime's `ActionTable.rotate` does.
+fn rotation_from_direction(vx: i32, vy: i32, vz: i32) -> [i32; 12] {
+    let (x, y, z) = normalize_fixed(vx, vy, vz);
+    let (x, y, z) = (x as i64, y as i64, z as i64);
+    let mut m = [0i32; 12];
+    let xx = (x * x + 2048) >> 12;
+    let yy = (y * y + 2048) >> 12;
+    if xx > 0 || yy > 0 {
+        let a = ((4096 - z) << 12) / (yy + xx);
+        let b = ((a * -((x * y + 2048) >> 12)) >> 12) as i32;
+        m[0] = (z + ((yy * a + 2048) >> 12)) as i32;
+        m[1] = b;
+        m[2] = x as i32;
+        m[4] = b;
+        m[5] = (z + ((xx * a + 2048) >> 12)) as i32;
+        m[6] = y as i32;
+        m[8] = -x as i32;
+        m[9] = -y as i32;
+    } else {
+        m[0] = 4096;
+        m[5] = z as i32;
+    }
+    m[10] = z as i32;
+    m
+}
+
+/// Roll a transform about the bone's forward axis by `angle` (4.12 turns).
+fn apply_roll(m: &mut [i32; 12], angle: i32) {
+    let s = trig(angle, libm::sin) as i64;
+    let c = trig(angle, libm::cos) as i64;
+    let (m00, m01) = (m[0] as i64, m[1] as i64);
+    let (m10, m11) = (m[4] as i64, m[5] as i64);
+    let (m20, m21) = (m[8] as i64, m[9] as i64);
+    m[0] = ((m00 * c + m01 * s + 2048) >> 12) as i32;
+    m[1] = ((m01 * c - m00 * s + 2048) >> 12) as i32;
+    m[4] = ((m10 * c + m11 * s + 2048) >> 12) as i32;
+    m[5] = ((m11 * c - m10 * s + 2048) >> 12) as i32;
+    m[8] = ((m20 * c + m21 * s + 2048) >> 12) as i32;
+    m[9] = ((m21 * c - m20 * s + 2048) >> 12) as i32;
+}
+
+/// Scale a transform's columns by a 4.12 factor each.
+fn apply_scale(m: &mut [i32; 12], sx: i32, sy: i32, sz: i32) {
+    for row in 0..3 {
+        m[row * 4] = ((m[row * 4] as i64 * sx as i64 + 2048) >> 12) as i32;
+        m[row * 4 + 1] = ((m[row * 4 + 1] as i64 * sy as i64 + 2048) >> 12) as i32;
+        m[row * 4 + 2] = ((m[row * 4 + 2] as i64 * sz as i64 + 2048) >> 12) as i32;
+    }
+}
+
 /// Decode the avatar skin. It is a plain Windows BMP - 8-bit palettised in the
 /// stock assets - so the standard decoder handles it, but a hand-rolled reader
 /// keeps this free of image-crate assumptions and copes with the 8-bit form the
@@ -524,6 +893,73 @@ mod tests {
         let first_index = 12 + 3 * 6 + 2;
         data[first_index] = 99;
         assert!(Model::parse(&data).is_none());
+    }
+
+    /// A minimal version-4 `.mtra`: one action of 30 keyframes over two bones,
+    /// the first held (type 1), the second animated (type 4: a rotate channel
+    /// and a roll channel).
+    fn synthetic_mtra() -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"MT");
+        data.push(4); // version
+        data.push(0);
+        data.extend_from_slice(&1u16.to_le_bytes()); // actions
+        data.extend_from_slice(&2u16.to_le_bytes()); // bones
+        data.extend_from_slice(&[0u8; 16]); // trans_type_counts[8]
+        data.extend_from_slice(&0i32.to_le_bytes()); // data_size hint
+        // action 0
+        data.extend_from_slice(&30u16.to_le_bytes()); // key_frames
+        // bone 0: type 1 (held), no channels
+        data.push(1);
+        // bone 1: type 4 (rotate + roll)
+        data.push(4);
+        // rotate channel: two keys
+        data.extend_from_slice(&2u16.to_le_bytes());
+        for (frame, x, y, z) in [(0i16, 0i16, 0i16, 4096i16), (10, 4096, 0, 0)] {
+            data.extend_from_slice(&frame.to_le_bytes());
+            data.extend_from_slice(&x.to_le_bytes());
+            data.extend_from_slice(&y.to_le_bytes());
+            data.extend_from_slice(&z.to_le_bytes());
+        }
+        // roll channel: one key
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&0i16.to_le_bytes());
+        data.extend_from_slice(&0i16.to_le_bytes());
+        data.extend_from_slice(&[0u8; 20]); // trailer
+        data
+    }
+
+    #[test]
+    fn parses_a_version_4_motion() {
+        let motion = Motion::parse(&synthetic_mtra()).expect("parse");
+        assert_eq!(motion.actions.len(), 1);
+        // getNumFrames answers key_frames << 16.
+        assert_eq!(motion.num_frames(0), Some(30 << 16));
+        assert_eq!(motion.num_frames(1), None);
+        assert_eq!(motion.actions[0].bones.len(), 2);
+        assert_eq!(motion.actions[0].bones[0].kind, 1);
+        assert_eq!(motion.actions[0].bones[1].kind, 4);
+    }
+
+    #[test]
+    fn poses_a_model_with_a_motion() {
+        // A one-bone model with the identity bind and a motion whose single
+        // bone holds (type 1) leaves the vertices at the rest pose.
+        let model = Model::parse(&synthetic_mbac()).expect("model");
+        let mut mtra = Vec::new();
+        mtra.extend_from_slice(b"MT");
+        mtra.push(4);
+        mtra.push(0);
+        mtra.extend_from_slice(&1u16.to_le_bytes()); // actions
+        mtra.extend_from_slice(&1u16.to_le_bytes()); // bones
+        mtra.extend_from_slice(&[0u8; 16]);
+        mtra.extend_from_slice(&0i32.to_le_bytes());
+        mtra.extend_from_slice(&30u16.to_le_bytes());
+        mtra.push(1); // bone 0: held
+        mtra.extend_from_slice(&[0u8; 20]);
+
+        let motion = Motion::parse(&mtra).expect("motion");
+        assert_eq!(model.animated_pose(&motion, 0, 0), model.rest_pose());
     }
 
     #[test]
