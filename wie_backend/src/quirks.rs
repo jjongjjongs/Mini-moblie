@@ -137,6 +137,17 @@ const fn clip_includes_far_edge() -> TitleQuirks {
     }
 }
 
+impl TitleQuirks {
+    /// This entry, for a title that also clips the way
+    /// [`clip_includes_far_edge`](Self::clip_includes_far_edge) describes.
+    const fn with_clip_including_far_edge(self) -> Self {
+        Self {
+            clip_includes_far_edge: true,
+            ..self
+        }
+    }
+}
+
 const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // 미니게임 히어로즈2 터치: repaints a 240x80 sponsor banner along the
     // bottom of whatever height it is told, so its 320 rows of screen need a
@@ -236,7 +247,13 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // took the top 144 rows and the rest of the screen was the dark red
     // panel it draws under the field, with the stage banner repeated in it;
     // on 128x160 the field fills the screen as it did on the handset.
-    (TitlePlatform::Skt, "0145741367", panel(128, 160)),
+    //
+    // It also clips the way 이터널사가 does: its two clip helpers pass
+    // `w - 1, h - 1` when a flag it sets unconditionally in its canvas
+    // constructor is on, and it cuts its 16-pixel field tiles out of their
+    // strips that way. Read as MIDP reads it, each tile lost its last column
+    // and row and the forest was a grid of black lines.
+    (TitlePlatform::Skt, "0145741367", panel(128, 160).with_clip_including_far_edge()),
 ];
 
 /// What to do differently for the title `aid` on `platform`.
@@ -261,6 +278,15 @@ mod tests {
     fn a_title_without_an_entry_asks_for_nothing() {
         assert_eq!(title_quirks(TitlePlatform::Lgt, "00025C2B"), TitleQuirks::default());
         assert_eq!(title_quirks(TitlePlatform::Skt, "00030F5B"), TitleQuirks::default());
+    }
+
+    /// 바운티블루스 needs both its panel and the wider clip.
+    #[test]
+    fn an_entry_can_carry_a_panel_and_a_clip_rule_together() {
+        let quirks = title_quirks(TitlePlatform::Skt, "0145741367");
+
+        assert_eq!(quirks.screen_size, Some((128, 160)));
+        assert!(quirks.clip_includes_far_edge);
     }
 
     /// Ids are assigned per carrier, so an entry must not answer for the same
