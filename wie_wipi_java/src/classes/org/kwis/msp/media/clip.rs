@@ -38,6 +38,7 @@ impl Clip {
                 ),
                 JavaMethodProto::new("free", "()V", Self::free, Default::default()),
                 JavaMethodProto::new("setVolume", "(I)Z", Self::set_volume, Default::default()),
+                JavaMethodProto::new("setVolume", "(I)V", Self::set_volume_void, Default::default()),
                 JavaMethodProto::new(
                     "setListener",
                     "(Lorg/kwis/msp/media/PlayListener;)V",
@@ -197,6 +198,17 @@ impl Clip {
 
         let result: i32 = jvm.invoke_virtual(&this, "mediaSetVolume", "(I)I", (level,)).await?;
         Ok(result >= 0)
+    }
+
+    /// The void form of `setVolume`. Some SK-VM builds of the class declare
+    /// `setVolume(I)V` instead of the boolean form; STRIKERS1999 calls it that
+    /// way. It sets the level and drops the answer.
+    async fn set_volume_void(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Clip>, level: i32) -> JvmResult<()> {
+        tracing::debug!("org.kwis.msp.media.Clip::setVolume({this:?}, {level}) -> void");
+
+        let _: bool = jvm.invoke_virtual(&this, "setVolume", "(I)Z", (level,)).await?;
+
+        Ok(())
     }
 
     async fn set_listener(
