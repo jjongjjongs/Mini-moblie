@@ -34,12 +34,13 @@ use crate::classes::m::MICRO3D_ONE;
 const MBAC_MAGIC: u16 = 0x424D; // "MB"
 
 /// The extra divisor the title's `setView` scale needs beyond a plain
-/// perspective divide, so a model sits at the size the title draws it - it
-/// centres its avatar on the same spot in the bus that it marks with a
-/// silhouette, and this lands the mesh there. Calibrated against 크레이지버스's
-/// stage-1 view (`setView` scale 4034, a camera ~740 units back from a mesh
-/// ~180 tall); a plain divide draws it several times too large.
-const PROJECTION_DIVISOR: f32 = 16.0;
+/// perspective divide, so a model sits at the size the title draws it. The
+/// dancer fills much of the bus aisle - head up by the windows, feet on the
+/// floor - which the title's own screenshots show; this lands the mesh at that
+/// size. Calibrated against 크레이지버스's stage-1 view (`setView` scale 4034, a
+/// camera ~740 units back from a mesh ~180 tall); a plain divide draws it
+/// several times larger still.
+const PROJECTION_DIVISOR: f32 = 6.0;
 
 /// One triangle or quad: vertex indices and per-corner texture coordinates.
 struct Face {
