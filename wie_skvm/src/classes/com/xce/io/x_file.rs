@@ -63,6 +63,7 @@ impl XFile {
         tracing::debug!("com.xce.io.XFile::<init>({this:?}, {name:?}, {mode:?})");
 
         let _: () = jvm.invoke_special(&this, "java/lang/Object", "<init>", "()V", ()).await?;
+        Self::require_name(jvm, &name).await?;
 
         if mode == READ_RESOURCE {
             let class = jvm.invoke_virtual(&this, "getClass", "()Ljava/lang/Class;", ()).await?;
@@ -88,9 +89,26 @@ impl XFile {
         Ok(())
     }
 
+    /// A null file name is the title's mistake, and it hears about it as a
+    /// `NullPointerException` it can catch, the way the reference emulator
+    /// answers it (wfeature, `stringArgument`).
+    ///
+    /// It went on into `java.io.File` instead, which took the null and then
+    /// panicked reading the path back - ending the whole run, not the
+    /// title's thread. 택티컬퀘스트 asks `XFile.exists(null)` from its title
+    /// screen, and the first key press there stopped the emulator.
+    async fn require_name(jvm: &Jvm, name: &ClassInstanceRef<String>) -> JvmResult<()> {
+        if name.is_null() {
+            return Err(jvm.exception("java/lang/NullPointerException", "String is null").await);
+        }
+
+        Ok(())
+    }
+
     async fn exists(jvm: &Jvm, _context: &mut WieJvmContext, name: ClassInstanceRef<String>) -> JvmResult<bool> {
         tracing::debug!("com.xce.io.XFile::exists({name:?})");
 
+        Self::require_name(jvm, &name).await?;
         let file = jvm.new_class("java/io/File", "(Ljava/lang/String;)V", (name,)).await?;
         let exists = jvm.invoke_virtual(&file, "exists", "()Z", ()).await?;
 
@@ -100,6 +118,7 @@ impl XFile {
     async fn filesize(jvm: &Jvm, _context: &mut WieJvmContext, name: ClassInstanceRef<String>) -> JvmResult<i32> {
         tracing::debug!("com.xce.io.XFile::filesize({name:?})");
 
+        Self::require_name(jvm, &name).await?;
         let file = jvm.new_class("java/io/File", "(Ljava/lang/String;)V", (name,)).await?;
         let size: i64 = jvm.invoke_virtual(&file, "length", "()J", ()).await?;
 
