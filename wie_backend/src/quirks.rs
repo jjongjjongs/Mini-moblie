@@ -215,6 +215,16 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // turn clockwise - the handset was meant to be turned sideways to play it.
     (TitlePlatform::Lgt, "000323B3", sideways()),
     (TitlePlatform::Skt, "3826345643", clip_includes_far_edge()),
+    // 아슬아슬타워쿤: built for a 176-wide panel. Its Canvas init branches on
+    // getWidth(): at 176 or under it stacks its two title images - title1
+    // (176x64) over title0 (176x160) - to fill the whole screen with its world
+    // map, and the menu draws over it. Told a wider screen it takes a second
+    // path that lays title0 and title2 side by side across the top 160 rows
+    // only and leaves the rest of its back buffer the white a mutable image
+    // starts as, so on the 240x320 default the menu sat on a bare white band
+    // below the map. Given the 176x220 panel it was drawn for, the map fills
+    // the screen again.
+    (TitlePlatform::Skt, "0054981375", panel(176, 220)),
     // 사고뭉치트윈즈: clips and clears a 120x144 play area centred on the
     // Canvas and fills the rest with a tiled pattern, so on the 240x320
     // default it played in a small box in the middle of the screen. 144 rows
