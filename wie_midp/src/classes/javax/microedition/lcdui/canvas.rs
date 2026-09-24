@@ -32,6 +32,8 @@ impl Canvas {
                 JavaMethodProto::new("keyReleased", "(I)V", Self::key_released, Default::default()),
                 JavaMethodProto::new("setFullScreenMode", "(Z)V", Self::set_full_screen_mode, Default::default()),
                 JavaMethodProto::new("isDoubleBuffered", "()Z", Self::is_double_buffered, Default::default()),
+                JavaMethodProto::new("getWidth", "()I", Self::get_width, Default::default()),
+                JavaMethodProto::new("getHeight", "()I", Self::get_height, Default::default()),
                 // wie private methods
                 JavaMethodProto::new("handleKeyEvent", "(II)V", Self::handle_key_event, Default::default()),
                 JavaMethodProto::new(
@@ -64,6 +66,27 @@ impl Canvas {
             .await?;
 
         Ok(())
+    }
+
+    /// `getWidth`/`getHeight` live on Displayable, but a title that subclasses
+    /// Canvas and overrides them reaches its size with `super.getWidth()` -
+    /// which compiles to `invokespecial Canvas.getWidth`, resolved against
+    /// Canvas's own method table. Declaring them here, forwarding to the
+    /// Displayable body, lets that resolve. 삼국지연의 (tk.Kingdoms) overrides
+    /// getHeight and calls super from it, and died with NoSuchMethodError when
+    /// Canvas had no getHeight of its own.
+    async fn get_width(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<i32> {
+        tracing::debug!("javax.microedition.lcdui.Canvas::getWidth({this:?})");
+
+        jvm.invoke_special(&this, "javax/microedition/lcdui/Displayable", "getWidth", "()I", ())
+            .await
+    }
+
+    async fn get_height(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<i32> {
+        tracing::debug!("javax.microedition.lcdui.Canvas::getHeight({this:?})");
+
+        jvm.invoke_special(&this, "javax/microedition/lcdui/Displayable", "getHeight", "()I", ())
+            .await
     }
 
     async fn repaint(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<()> {
