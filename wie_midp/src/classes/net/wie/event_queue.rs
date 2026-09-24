@@ -63,7 +63,15 @@ pub enum MIDPKeyCode {
     LEFT = 142,
     RIGHT = 145,
     FIRE = 148,
-    LEFT_SOFT_KEY = 6,
+    /// The left soft key, which reaches a Canvas as the handset's menu key.
+    ///
+    /// A Canvas here has no commands for a soft key to fire, and on an SK-VM
+    /// handset a Canvas without commands hears the soft key as the menu key,
+    /// 129 (wfeature does the same, `KeyCodeMenu`). 바운티블루스 opens its
+    /// in-game menu on 129 and 사고뭉치트윈즈 and 교실이데아 read it too; none of
+    /// the SK-VM titles seen compares against the 6 this used to send, so the
+    /// L button did nothing in any of them.
+    LEFT_SOFT_KEY = 129,
     RIGHT_SOFT_KEY = 7,
     CLEAR = 8,
     /// The send key. 이터널사가 names it in its own key table -
@@ -526,6 +534,8 @@ mod tests {
     #[test]
     fn the_send_key_is_the_handsets_190() {
         assert_eq!(MIDPKeyCode::from_key_code(KeyCode::CALL) as i32, 190);
+        assert_eq!(MIDPKeyCode::from_key_code(KeyCode::LEFT_SOFT_KEY) as i32, 129);
+        assert!(matches!(MIDPKeyCode::from_raw(129), Some(MIDPKeyCode::LEFT_SOFT_KEY)));
         assert!(matches!(MIDPKeyCode::from_raw(190), Some(MIDPKeyCode::CALL)));
         assert!(MIDPKeyCode::from_raw(10).is_none());
     }

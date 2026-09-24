@@ -384,7 +384,7 @@ mod tests {
     const KEY_4: i32 = 52;
     const CLEAR: i32 = 8;
     const RIGHT: i32 = 145;
-    const LEFT_SOFT_KEY: i32 = 6;
+    const LEFT_SOFT_KEY: i32 = 129;
 
     async fn field(jvm: &Jvm, text: &str, max_size: i32) -> JvmResult<ClassInstanceRef<()>> {
         let text = JavaLangString::from_rust_string(jvm, text).await?;

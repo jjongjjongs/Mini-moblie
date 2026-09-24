@@ -241,19 +241,21 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // default it played in a small box in the middle of the screen. 144 rows
     // is the Canvas of a 120x160 handset, the sixteen soft-key rows under it.
     (TitlePlatform::Skt, "0054532850", panel(120, 160)),
-    // 바운티블루스: drawn for a 128x160 handset - its field, portraits and
-    // dialogue art are 128 wide, and it lays the play field out from the
-    // Canvas height (`getHeight() + 16`). On the 240x320 default the field
-    // took the top 144 rows and the rest of the screen was the dark red
-    // panel it draws under the field, with the stage banner repeated in it;
-    // on 128x160 the field fills the screen as it did on the handset.
+    // 바운티블루스: drawn for a 128-wide handset - its field, portraits and
+    // dialogue art are 128 wide - and it lays the screen out from the Canvas
+    // height (`getHeight() + 16`): a 144-row field and a 32-row status panel
+    // under it that repeats the stage banner in a frame. On the 240x320
+    // default the panel ran to the bottom of the screen as a dark red block;
+    // at 128x160 it lost its lower half and the banner was cut through. 176
+    // rows is the height its field and panel add up to, and the title, the
+    // chapter screens and the dialogue boxes all sit inside it.
     //
     // It also clips the way 이터널사가 does: its two clip helpers pass
     // `w - 1, h - 1` when a flag it sets unconditionally in its canvas
     // constructor is on, and it cuts its 16-pixel field tiles out of their
     // strips that way. Read as MIDP reads it, each tile lost its last column
     // and row and the forest was a grid of black lines.
-    (TitlePlatform::Skt, "0145741367", panel(128, 160).with_clip_including_far_edge()),
+    (TitlePlatform::Skt, "0145741367", panel(128, 176).with_clip_including_far_edge()),
 ];
 
 /// What to do differently for the title `aid` on `platform`.
@@ -285,7 +287,7 @@ mod tests {
     fn an_entry_can_carry_a_panel_and_a_clip_rule_together() {
         let quirks = title_quirks(TitlePlatform::Skt, "0145741367");
 
-        assert_eq!(quirks.screen_size, Some((128, 160)));
+        assert_eq!(quirks.screen_size, Some((128, 176)));
         assert!(quirks.clip_includes_far_edge);
     }
 
