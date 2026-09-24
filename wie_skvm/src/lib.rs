@@ -5,8 +5,11 @@ use wie_jvm_support::WieJavaClassProto;
 
 pub mod classes;
 
-pub fn get_protos() -> [WieJavaClassProto; 18] {
+pub fn get_protos() -> [WieJavaClassProto; 21] {
     [
+        classes::m::A3::as_proto(),
+        classes::m::V3::as_proto(),
+        classes::m::XoWorld::as_proto(),
         classes::com::skt::m::AudioClip::as_proto(),
         classes::com::skt::m::AudioSystem::as_proto(),
         classes::com::skt::m::BackLight::as_proto(),
