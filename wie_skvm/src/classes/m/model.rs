@@ -40,7 +40,14 @@ const MBAC_MAGIC: u16 = 0x424D; // "MB"
 /// size. Calibrated against 크레이지버스's stage-1 view (`setView` scale 4034, a
 /// camera ~740 units back from a mesh ~180 tall); a plain divide draws it
 /// several times larger still.
-const PROJECTION_DIVISOR: f32 = 6.0;
+const PROJECTION_DIVISOR: f32 = 7.5;
+
+/// A downward nudge of the projection centre, as a fraction of the canvas
+/// height, so the dancer stands on the bus floor rather than floating above
+/// it. The title's `setView` centre (`cy`) sits at the model's own origin,
+/// which is up around the mesh's hips; the reference screenshots put the feet
+/// down on the dance pad, so the drawn centre is dropped by this much to match.
+const VERTICAL_BIAS: f32 = 0.09;
 
 /// One triangle or quad: vertex indices and per-corner texture coordinates.
 struct Face {
@@ -253,6 +260,8 @@ impl Model {
             visible: bool,
         }
         let scale = scale as f32;
+        // The projection centre, nudged down so the feet reach the floor.
+        let cy = cy as f32 + height as f32 * VERTICAL_BIAS;
         let projected: Vec<Projected> = rest
             .iter()
             .map(|&v| {
@@ -272,7 +281,7 @@ impl Model {
                 }
                 Projected {
                     x: cx as f32 + cxr * scale / (depth * PROJECTION_DIVISOR),
-                    y: cy as f32 - cyr * scale / (depth * PROJECTION_DIVISOR),
+                    y: cy - cyr * scale / (depth * PROJECTION_DIVISOR),
                     depth,
                     visible: true,
                 }
@@ -306,8 +315,9 @@ impl Model {
                 bounds = Some((nx.min(p.x), xx.max(p.x), ny.min(p.y), xy.max(p.y)));
             }
             tracing::debug!(
-                "m.XO_World::draw screen={width}x{height} scale={scale} c=({cx},{cy}) tris={} screen_bbox={bounds:?}",
-                tris.len()
+                "m.XO_World::draw screen={width}x{height} scale={scale} c=({cx},{cy_drawn}) tris={tris} screen_bbox={bounds:?}",
+                cy_drawn = cy,
+                tris = tris.len(),
             );
         }
 
