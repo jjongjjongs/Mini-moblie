@@ -262,6 +262,15 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // strips that way. Read as MIDP reads it, each tile lost its last column
     // and row and the forest was a grid of black lines.
     (TitlePlatform::Skt, "0145741367", panel(128, 176).with_clip_including_far_edge()),
+    // 삼국쟁패 패왕전기 (게임빌): draws a fixed-size battle field centred on the
+    // Canvas from `getWidth()/2` and `getHeight()/2` offsets, so the play area
+    // stays about 162 wide wherever it lands and only the margin around it
+    // grows with the screen. On the 240x320 default the battle sat in a small
+    // box in the middle with wide dead borders. Its menus scale to whatever
+    // panel they are given, but 176 is the narrowest common SKT panel that
+    // still holds the fixed field, so at 176x220 the battle fills the screen
+    // and the field's centring leaves only a few pixels each side.
+    (TitlePlatform::Skt, "0047375473", panel(176, 220)),
 ];
 
 /// What to do differently for the title `aid` on `platform`.
