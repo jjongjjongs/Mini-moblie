@@ -104,6 +104,17 @@ impl WieAudioClip {
 
     /// Starts the clip and waits for it: to the end of the clip for a play,
     /// and for a stop - which a loop has no other end than - for either.
+    ///
+    /// **A play cut short by another thread throws, where one that plays out
+    /// returns.** The vendor's `AudioClip` raises on an interruption - a `stop`
+    /// or `close`, or a fresh start of the same clip - and a title's sound
+    /// thread is written around that: 크레이지버스 wraps its `clip.play()` in a
+    /// `try/catch` and resets its own repeat/playing flags there. Without the
+    /// throw those flags stay set, and its `SoundPlayer.run()` then sits in a
+    /// `Thread.sleep` loop holding the player's monitor - so the game thread
+    /// deadlocks the moment it calls the synchronized `play()` for the next
+    /// sound, which is the freeze on entering a stage. Only a natural end
+    /// returns, so a title that plays a clip through is unaffected.
     async fn start(jvm: &Jvm, context: &mut WieJvmContext, this: ClassInstanceRef<Self>, repeat: bool) -> JvmResult<()> {
         let handle: i32 = jvm.get_field(&this, "audioHandle", "I").await?;
         if handle == 0 {
@@ -117,8 +128,11 @@ impl WieAudioClip {
         };
 
         loop {
-            let stopped = playback.stopped.load(Ordering::Relaxed) || playback.superseded.load(Ordering::Relaxed);
-            if stopped || (!repeat && playback.completed.load(Ordering::Acquire)) {
+            let interrupted = playback.stopped.load(Ordering::Relaxed) || playback.superseded.load(Ordering::Relaxed);
+            if interrupted {
+                return Err(jvm.exception("java/lang/InterruptedException", "the clip was stopped").await);
+            }
+            if !repeat && playback.completed.load(Ordering::Acquire) {
                 return Ok(());
             }
 
