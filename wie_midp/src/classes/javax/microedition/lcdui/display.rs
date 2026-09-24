@@ -320,6 +320,17 @@ impl Display {
 
             if let Err(x) = result {
                 Self::handle_exception(jvm, x).await?;
+
+                // A paint that threw is painted again on the next frame, as it
+                // would be on a runtime that paints every frame whether asked
+                // or not (wfeature does). This host paints only when asked, so
+                // a title whose loop waits on its own paint to finish was left
+                // waiting for good: 얼라이브 loads its images a few at a time
+                // inside `paint`, wakes its loop with `notify` as `paint`'s last
+                // act, and its first paints draw an image it has not loaded
+                // yet. That paint threw before the `notify`, the loop never
+                // woke to ask for another, and the loading screen stayed up.
+                context.system().platform().screen().request_redraw().unwrap();
             }
 
             // HACK: disable paint for clet apps, as they handle paint by themselves

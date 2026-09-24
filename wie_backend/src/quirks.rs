@@ -226,6 +226,12 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // turn clockwise - the handset was meant to be turned sideways to play it.
     (TitlePlatform::Lgt, "000323B3", sideways()),
     (TitlePlatform::Skt, "3826345643", clip_includes_far_edge()),
+    // 얼라이브: drawn for a 176x220 handset - its title sky, menu and the city
+    // under them, and every screen after, are laid out 176 wide and down to
+    // row 220. On the 240x320 default it drew in the left 176 columns, left
+    // what the previous screen had put in the rest, and split its title
+    // between the top of the screen and the bottom.
+    (TitlePlatform::Skt, "0174585654", panel(176, 220)),
     // 아슬아슬타워쿤: built for a 176-wide panel. Its Canvas init branches on
     // getWidth(): at 176 or under it stacks its two title images - title1
     // (176x64) over title0 (176x160) - to fill the whole screen with its world
