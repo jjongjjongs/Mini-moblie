@@ -5,18 +5,21 @@
 //! renderer [`XO_World`]. Without them the title's Canvas dies in its own class
 //! initializer, before it paints anything - `NoClassDefFoundError: m/V3`.
 //!
-//! The maths is real and the renderer is not, following the reference emulator
-//! (wfeature, `internal/api/skvm/micro3d.go`). `V3` and `A3` are arithmetic: a
-//! title composes a camera, transforms a point, and reads the result back as
-//! three integers it projects itself, and all of that is answered exactly.
-//! `XO_World` is the part that would need a rasterizer and the `.mbac`/`.mtra`
-//! model formats; it keeps its state and draws nothing, so the 3D content does
-//! not appear but the title runs.
+//! `V3` and `A3` are arithmetic: a title composes a camera, transforms a point,
+//! and reads the result back as three integers it projects itself, and all of
+//! that is answered exactly. `XO_World` is the renderer - the part the reference
+//! emulator (wfeature, `internal/api/skvm/micro3d.go`) left as a stub for want
+//! of a rasterizer and the two model formats. Here it is real: it parses the
+//! uncompressed version-3 `.mbac` model and its `.bmp` skin and draws the mesh
+//! with a small software rasterizer (see the `model` submodule), so the 3D
+//! character appears. The `.mtra` motion is not decoded yet, so a model is drawn
+//! in its rest pose rather than animated.
 //!
 //! The fixed point is the title's own: a coordinate is scaled so 4096 is 1.0,
 //! and a full circle is 4096 of the angle unit the trigonometry takes.
 
 mod a3;
+mod model;
 mod v3;
 mod xo_world;
 

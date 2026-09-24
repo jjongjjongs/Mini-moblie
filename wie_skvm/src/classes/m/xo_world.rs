@@ -1,19 +1,25 @@
-use alloc::vec;
+use alloc::{vec, vec::Vec};
 
-use java_class_proto::JavaMethodProto;
+use java_class_proto::{JavaFieldProto, JavaMethodProto};
 use java_constants::MethodAccessFlags;
-use jvm::{ClassInstanceRef, Jvm, Result as JvmResult};
+use java_runtime::classes::java::io::InputStream;
+use jvm::{Array, ClassInstanceRef, Jvm, Result as JvmResult, runtime::JavaIoInputStream};
 
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
+use wie_midp::classes::javax::microedition::lcdui::{Graphics, Image};
 
-use crate::classes::m::{MICRO3D_ONE, a3, trig, v3};
+use crate::classes::m::{MICRO3D_ONE, a3, model, trig, v3};
 
 // class m.XO_World
 //
-// SK-VM's 3D renderer. Its trigonometry and camera maths are real, because a
-// title does its own geometry with them; the rasterizer and the .mbac/.mtra
-// model formats are not, so it keeps what it is told and draws nothing. See the
-// module comment.
+// SK-VM's 3D renderer for the Mascot Capsule Micro3D middleware. Its
+// trigonometry and camera maths were always real; the model loader and
+// rasterizer are now real too, so the `.mbac` model a title loads is drawn with
+// its `.bmp` skin. See [`super::model`] for the formats and the rasterizer.
+//
+// The state a title sets between calls - the loaded model, its skin, the view
+// the title projects through, and the posture it selected - lives in this
+// object's own fields, so it is freed with the object and needs no registry.
 pub struct XoWorld;
 
 impl XoWorld {
@@ -35,10 +41,10 @@ impl XoWorld {
                 ),
                 JavaMethodProto::new("rotY", "(ILm/A3;)V", Self::rot_y, MethodAccessFlags::STATIC),
                 JavaMethodProto::new("rotZ", "(ILm/A3;)V", Self::rot_z, MethodAccessFlags::STATIC),
-                // The renderer, which keeps its state and draws nothing.
-                JavaMethodProto::new("loadMBAC", "(Ljava/io/InputStream;)I", Self::load, Default::default()),
-                JavaMethodProto::new("loadMTRA", "(Ljava/io/InputStream;)I", Self::load, Default::default()),
-                JavaMethodProto::new("loadBMP", "(Ljava/io/InputStream;)I", Self::load, Default::default()),
+                // The renderer.
+                JavaMethodProto::new("loadMBAC", "(Ljava/io/InputStream;)I", Self::load_mbac, Default::default()),
+                JavaMethodProto::new("loadMTRA", "(Ljava/io/InputStream;)I", Self::load_mtra, Default::default()),
+                JavaMethodProto::new("loadBMP", "(Ljava/io/InputStream;)I", Self::load_bmp, Default::default()),
                 JavaMethodProto::new("shareData", "(Lm/XO_World;)V", Self::share_data, Default::default()),
                 JavaMethodProto::new(
                     "setVram",
@@ -53,7 +59,23 @@ impl XoWorld {
                 JavaMethodProto::new("draw", "(Ljavax/microedition/lcdui/Graphics;)V", Self::draw, Default::default()),
                 JavaMethodProto::new("dispose", "()V", Self::dispose, Default::default()),
             ],
-            fields: vec![],
+            fields: vec![
+                // Raw asset bytes, re-parsed at draw time. Storing the bytes
+                // keeps every model's state in the object that owns it.
+                JavaFieldProto::new("mbacData", "[B", Default::default()),
+                JavaFieldProto::new("mtraData", "[B", Default::default()),
+                JavaFieldProto::new("bmpData", "[B", Default::default()),
+                // The view the title last set through `setView`: twelve 4.12
+                // transform cells, a projection scale, and a screen centre.
+                JavaFieldProto::new("viewCells", "[I", Default::default()),
+                JavaFieldProto::new("viewScale", "I", Default::default()),
+                JavaFieldProto::new("viewCx", "I", Default::default()),
+                JavaFieldProto::new("viewCy", "I", Default::default()),
+                JavaFieldProto::new("hasView", "Z", Default::default()),
+                // The posture the title last selected through `setPosture`.
+                JavaFieldProto::new("postureAction", "I", Default::default()),
+                JavaFieldProto::new("postureFrame", "I", Default::default()),
+            ],
             access_flags: Default::default(),
         }
     }
@@ -120,14 +142,49 @@ impl XoWorld {
         rotate(jvm, angle, target, Axis::Z).await
     }
 
-    /// A loader answers a handle the title discards.
-    async fn load(_: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, stream: ClassInstanceRef<()>) -> JvmResult<i32> {
-        tracing::debug!("m.XO_World::load({this:?}, {stream:?})");
-
+    /// A loader keeps the bytes it is handed and answers a handle the title
+    /// discards. The bytes are parsed at draw time.
+    async fn load_mbac(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, stream: ClassInstanceRef<InputStream>) -> JvmResult<i32> {
+        tracing::debug!("m.XO_World::loadMBAC({this:?}, {stream:?})");
+        Self::store_stream(jvm, this, "mbacData", stream).await?;
         Ok(0)
     }
 
-    async fn share_data(_: &Jvm, _: &mut WieJvmContext, _this: ClassInstanceRef<Self>, _other: ClassInstanceRef<Self>) -> JvmResult<()> {
+    async fn load_mtra(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, stream: ClassInstanceRef<InputStream>) -> JvmResult<i32> {
+        tracing::debug!("m.XO_World::loadMTRA({this:?}, {stream:?})");
+        Self::store_stream(jvm, this, "mtraData", stream).await?;
+        Ok(0)
+    }
+
+    async fn load_bmp(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, stream: ClassInstanceRef<InputStream>) -> JvmResult<i32> {
+        tracing::debug!("m.XO_World::loadBMP({this:?}, {stream:?})");
+        Self::store_stream(jvm, this, "bmpData", stream).await?;
+        Ok(0)
+    }
+
+    /// Read a stream to its end and keep it in a `byte[]` field.
+    async fn store_stream(jvm: &Jvm, mut this: ClassInstanceRef<Self>, field: &str, stream: ClassInstanceRef<InputStream>) -> JvmResult<()> {
+        if stream.is_null() {
+            return Ok(());
+        }
+        let data = JavaIoInputStream::read_until_end(jvm, &stream).await?;
+        let mut array = jvm.instantiate_array("B", data.len() as _).await?;
+        jvm.store_array(&mut array, 0, data.into_iter().map(|x| x as i8).collect::<Vec<i8>>())
+            .await?;
+        jvm.put_field(&mut this, field, "[B", array).await
+    }
+
+    /// A model shares another's loaded data: the boss reuses the avatar's mesh
+    /// and skin rather than loading its own.
+    async fn share_data(jvm: &Jvm, _: &mut WieJvmContext, mut this: ClassInstanceRef<Self>, other: ClassInstanceRef<Self>) -> JvmResult<()> {
+        tracing::debug!("m.XO_World::shareData({this:?}, {other:?})");
+        if other.is_null() {
+            return Ok(());
+        }
+        for field in ["mbacData", "mtraData", "bmpData"] {
+            let value: ClassInstanceRef<Array<i8>> = jvm.get_field(&other, field, "[B").await?;
+            jvm.put_field(&mut this, field, "[B", value).await?;
+        }
         Ok(())
     }
 
@@ -135,49 +192,125 @@ impl XoWorld {
         _: &Jvm,
         _: &mut WieJvmContext,
         _this: ClassInstanceRef<Self>,
-        _graphics: ClassInstanceRef<()>,
+        _graphics: ClassInstanceRef<Graphics>,
         _world: ClassInstanceRef<Self>,
         _x: i32,
         _y: i32,
     ) -> JvmResult<()> {
+        // The double buffer the middleware would render into is the same
+        // `Graphics` a title hands `draw`, so there is nothing to set aside here.
         Ok(())
     }
 
+    /// The title's projection: a model-to-camera transform, a projection scale
+    /// (passed for x and y alike), and the screen point it is centred on.
     #[allow(clippy::too_many_arguments)]
     async fn set_view(
-        _: &Jvm,
+        jvm: &Jvm,
         _: &mut WieJvmContext,
-        _this: ClassInstanceRef<Self>,
-        _transform: ClassInstanceRef<a3::A3>,
-        _a: i32,
-        _b: i32,
-        _c: i32,
-        _d: i32,
+        mut this: ClassInstanceRef<Self>,
+        transform: ClassInstanceRef<a3::A3>,
+        scale: i32,
+        _scale_y: i32,
+        cx: i32,
+        cy: i32,
     ) -> JvmResult<()> {
-        Ok(())
+        let cells = a3::read(jvm, &transform).await?;
+        tracing::debug!("m.XO_World::setView({this:?}, scale={scale}, c=({cx},{cy}), cells={cells:?})");
+        let mut array = jvm.instantiate_array("I", 12).await?;
+        jvm.store_array(&mut array, 0, cells.to_vec()).await?;
+        jvm.put_field(&mut this, "viewCells", "[I", array).await?;
+        jvm.put_field(&mut this, "viewScale", "I", scale).await?;
+        jvm.put_field(&mut this, "viewCx", "I", cx).await?;
+        jvm.put_field(&mut this, "viewCy", "I", cy).await?;
+        jvm.put_field(&mut this, "hasView", "Z", true).await
     }
 
     async fn set_clip(_: &Jvm, _: &mut WieJvmContext, _this: ClassInstanceRef<Self>, _x: i32, _y: i32, _width: i32, _height: i32) -> JvmResult<()> {
         Ok(())
     }
 
-    async fn set_posture(_: &Jvm, _: &mut WieJvmContext, _this: ClassInstanceRef<Self>, _a: i32, _b: i32) -> JvmResult<()> {
-        Ok(())
+    async fn set_posture(jvm: &Jvm, _: &mut WieJvmContext, mut this: ClassInstanceRef<Self>, action: i32, frame: i32) -> JvmResult<()> {
+        tracing::debug!("m.XO_World::setPosture({this:?}, {action}, {frame})");
+        jvm.put_field(&mut this, "postureAction", "I", action).await?;
+        jvm.put_field(&mut this, "postureFrame", "I", frame).await
     }
 
-    /// An unloaded motion has no frames.
-    async fn get_max_frame(_: &Jvm, _: &mut WieJvmContext, _this: ClassInstanceRef<Self>, _motion: i32) -> JvmResult<i32> {
-        Ok(0)
+    /// How many frames a motion has. The `.mtra` decode that would answer this
+    /// exactly is not in yet, so a loaded motion reports a steady length - enough
+    /// for a title's dance clock to run - and no motion reports none.
+    async fn get_max_frame(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, motion: i32) -> JvmResult<i32> {
+        tracing::debug!("m.XO_World::getMaxFrame({this:?}, {motion})");
+        let mtra: ClassInstanceRef<Array<i8>> = jvm.get_field(&this, "mtraData", "[B").await?;
+        Ok(if mtra.is_null() { 0 } else { MOTION_FRAMES })
     }
 
-    async fn draw(_: &Jvm, _: &mut WieJvmContext, _this: ClassInstanceRef<Self>, _graphics: ClassInstanceRef<()>) -> JvmResult<()> {
+    /// Draw the loaded model with its skin, through the view the title set.
+    async fn draw(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, mut graphics: ClassInstanceRef<Graphics>) -> JvmResult<()> {
+        tracing::debug!("m.XO_World::draw({this:?}, {graphics:?})");
+
+        let has_view: bool = jvm.get_field(&this, "hasView", "Z").await?;
+        if graphics.is_null() || !has_view {
+            return Ok(());
+        }
+
+        let Some(mbac) = Self::read_bytes(jvm, &this, "mbacData").await? else {
+            return Ok(());
+        };
+        let Some(m) = model::Model::parse(&mbac) else {
+            return Ok(());
+        };
+
+        let cells = Self::read_view(jvm, &this).await?;
+        let scale: i32 = jvm.get_field(&this, "viewScale", "I").await?;
+        let cx: i32 = jvm.get_field(&this, "viewCx", "I").await?;
+        let cy: i32 = jvm.get_field(&this, "viewCy", "I").await?;
+
+        let texture = match Self::read_bytes(jvm, &this, "bmpData").await? {
+            Some(bmp) => model::parse_texture(&bmp),
+            None => None,
+        };
+
+        let image = Graphics::image(jvm, &mut graphics).await?;
+        let mut canvas = Image::canvas(jvm, &image).await?;
+
+        m.render(&cells, scale, cx, cy, texture.as_ref(), &mut *canvas);
+
         Ok(())
     }
 
     async fn dispose(_: &Jvm, _: &mut WieJvmContext, _this: ClassInstanceRef<Self>) -> JvmResult<()> {
         Ok(())
     }
+
+    /// Read a `byte[]` field into bytes, or `None` when it was never set.
+    async fn read_bytes(jvm: &Jvm, this: &ClassInstanceRef<Self>, field: &str) -> JvmResult<Option<Vec<u8>>> {
+        let array: ClassInstanceRef<Array<i8>> = jvm.get_field(this, field, "[B").await?;
+        if array.is_null() {
+            return Ok(None);
+        }
+        let length = jvm.array_length(&array).await?;
+        let signed: Vec<i8> = jvm.load_array(&array, 0, length).await?;
+        Ok(Some(signed.into_iter().map(|x| x as u8).collect()))
+    }
+
+    /// Read the stored view transform, defaulting to the identity.
+    async fn read_view(jvm: &Jvm, this: &ClassInstanceRef<Self>) -> JvmResult<[i32; 12]> {
+        let array: ClassInstanceRef<Array<i32>> = jvm.get_field(this, "viewCells", "[I").await?;
+        if array.is_null() {
+            return Ok(a3::identity());
+        }
+        let values: Vec<i32> = jvm.load_array(&array, 0, 12).await?;
+        let mut cells = a3::identity();
+        for (cell, value) in cells.iter_mut().zip(values) {
+            *cell = value;
+        }
+        Ok(cells)
+    }
 }
+
+/// The steady motion length reported until the `.mtra` decode lands.
+const MOTION_FRAMES: i32 = 30;
 
 enum Axis {
     Y,
