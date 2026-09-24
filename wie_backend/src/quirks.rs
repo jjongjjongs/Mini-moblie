@@ -285,6 +285,39 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // 170x200 field, the same at any panel size, so it keeps its size and only
     // recentres with the bus.
     (TitlePlatform::Skt, "0027684826", panel(176, 208)),
+    // 대해적시대 (gametoilet, SeaDog): its `GameCanvas` reads its size from the
+    // Canvas (`width = getWidth()`, `height = getHeight() + 16`) and centres its
+    // artwork on the physical screen, clamping its play field to a height of 202
+    // (`if (height > 202) margin = (height - 202) / 2`). On the 240x320 default
+    // its title and world sat in the middle of a wide black border. 176x208 is
+    // the 176-class panel it was drawn for, so the field fills the screen with
+    // only a few rows' margin. Its id is the descriptor's `DD-ProgName`
+    // (0055719339), not the archive's filename (0055719338).
+    (TitlePlatform::Skt, "0055719339", panel(176, 208)),
+    // 크레이지스노보드 (gametoilet, SnowBoard): same house engine as 대해적시대,
+    // laying its 176-class field (its bounds are the 200/202/208 its Canvas
+    // counts in) out centred on the screen. On the 240x320 default it drew in a
+    // box in the middle; 176x208 is the panel it fills.
+    (TitlePlatform::Skt, "0054300745", panel(176, 208)),
+    // KMakerB (크레이지메이커): its Canvas lays out from `getWidth()` and
+    // `getHeight() + 16`, branching on a 178-wide threshold onto a 168-wide
+    // field and counting its rows in 220. On the 240x320 default its screens
+    // sat centred with a wide margin; 176x220 is the panel the layout is
+    // measured for.
+    (TitlePlatform::Skt, "0050092169", panel(176, 220)),
+    // com.softenter.p_te: its `PteCanvas` branches on the Canvas width - a
+    // 176-wide screen takes a 208-row layout, a narrower one a 128x160 layout.
+    // On the 240x320 default it took the 176 path and drew it centred in the
+    // larger canvas with a border. 176x208 is that path's own panel.
+    (TitlePlatform::Skt, "3500406052", panel(176, 208)),
+    // MBC무한도전 (Challenge): drawn for a 128-wide handset - its backgrounds
+    // (`bg1.png`, `title_logo.png`) are 128 wide and its Canvas branches
+    // `if (width > 128)`, laying its ~120x142 field out from `getWidth()/2` and
+    // `(getHeight() + 16)/2`. On the 240x320 default the field sat centred with
+    // its content spread apart top and bottom over empty rows. 128x160 is the
+    // 128-class panel it fills. Its id is the descriptor's `DD-ProgName`
+    // (9000000008), not the archive's filename (1000000009).
+    (TitlePlatform::Skt, "9000000008", panel(128, 160)),
 ];
 
 /// What to do differently for the title `aid` on `platform`.
