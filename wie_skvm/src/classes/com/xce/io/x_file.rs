@@ -48,6 +48,16 @@ impl XFile {
                 JavaFieldProto::new("mode", "I", Default::default()),
                 JavaFieldProto::new("is", "Ljava/io/InputStream;", Default::default()),
                 JavaFieldProto::new("raf", "Ljava/io/RandomAccessFile;", Default::default()),
+                // The reference SK-VM XFile keeps these three protected fields,
+                // and a title that subclasses XFile reads them directly. `type`
+                // says where the bytes are: 3 means an in-memory `buf` at
+                // `offset`, anything else means read them off the file/stream.
+                // Ours is always stream- or file-backed, so `type` is never 3
+                // and `buf`/`offset` stay unset. 크레이지버스's com.xce.io.XResource
+                // extends XFile and reaches for `type` in its constructor.
+                JavaFieldProto::new("type", "I", Default::default()),
+                JavaFieldProto::new("buf", "[B", Default::default()),
+                JavaFieldProto::new("offset", "I", Default::default()),
             ],
             access_flags: Default::default(),
         }
@@ -73,6 +83,7 @@ impl XFile {
 
             jvm.put_field(&mut this, "is", "Ljava/io/InputStream;", resource_stream).await?;
             jvm.put_field(&mut this, "mode", "I", mode).await?;
+            jvm.put_field(&mut this, "type", "I", mode).await?;
         } else {
             let file = jvm.new_class("java/io/File", "(Ljava/lang/String;)V", (name,)).await?;
 
@@ -84,6 +95,7 @@ impl XFile {
                 .await?;
             jvm.put_field(&mut this, "raf", "Ljava/io/RandomAccessFile;", raf).await?;
             jvm.put_field(&mut this, "mode", "I", mode).await?;
+            jvm.put_field(&mut this, "type", "I", mode).await?;
         }
 
         Ok(())
