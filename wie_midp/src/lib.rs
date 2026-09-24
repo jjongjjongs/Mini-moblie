@@ -6,7 +6,7 @@ mod fields;
 
 use wie_jvm_support::WieJavaClassProto;
 
-pub fn get_protos() -> [WieJavaClassProto; 37] {
+pub fn get_protos() -> [WieJavaClassProto; 38] {
     [
         classes::javax::microedition::io::Connection::as_proto(),
         classes::javax::microedition::io::ConnectionNotFoundException::as_proto(),
@@ -41,6 +41,7 @@ pub fn get_protos() -> [WieJavaClassProto; 37] {
         classes::javax::microedition::rms::RecordFilter::as_proto(),
         classes::javax::microedition::rms::RecordComparator::as_proto(),
         classes::javax::microedition::rms::RecordStoreException::as_proto(),
+        classes::javax::microedition::rms::RecordStoreNotFoundException::as_proto(),
         classes::net::wie::EventQueue::as_proto(),
         classes::net::wie::Launcher::as_proto(),
         classes::net::wie::SmafPlayer::as_proto(),

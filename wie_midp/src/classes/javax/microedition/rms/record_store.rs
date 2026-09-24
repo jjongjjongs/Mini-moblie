@@ -322,8 +322,13 @@ impl RecordStore {
             if !existing.contains(&store_name) {
                 tracing::debug!("javax.microedition.rms.RecordStore::openRecordStore({store_name}) -> no such store");
 
+                // The specific type, not the base RecordStoreException: a title
+                // catches this on its own to tell "no save yet" apart from a
+                // store failure and create the store in response. 크레이지버스
+                // opens with create=false, catches this, and opens again with
+                // create=true to write its defaults.
                 return Err(jvm
-                    .exception("javax/microedition/rms/RecordStoreException", "Record store not found")
+                    .exception("javax/microedition/rms/RecordStoreNotFoundException", "Record store not found")
                     .await);
             }
         }
