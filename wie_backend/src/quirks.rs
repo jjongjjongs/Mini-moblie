@@ -318,6 +318,18 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // 128-class panel it fills. Its id is the descriptor's `DD-ProgName`
     // (9000000008), not the archive's filename (1000000009).
     (TitlePlatform::Skt, "9000000008", panel(128, 160)),
+    // STRIKERS1999 (WIPI/org.kwis.msp): its `S1999Card` draws the whole game
+    // into a fixed 120-wide offscreen (`m_nScreenW = 120`, `m_nImgBuf =
+    // createBlankImage(120, getHeight())`) and blits it centred at
+    // `(getWidth() - 120) / 2`, taking its playfield height straight from
+    // `getHeight()` with no clamp. On the 240x320 default the buffer was 120
+    // wide by 320 tall, so the game sat in a centred column stretched to twice
+    // its height - enemies spawning far above the ship, the intro formation
+    // strung out down the middle. It is a 120-wide handset title, so 128x160
+    // (the field centres with a 4-pixel margin) gives it a screen the right
+    // shape. Elements are anchored to `getHeight()`, so they follow whatever
+    // height the panel yields.
+    (TitlePlatform::Skt, "0050608430", panel(128, 160)),
 ];
 
 /// What to do differently for the title `aid` on `platform`.
