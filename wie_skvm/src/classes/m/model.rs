@@ -33,6 +33,14 @@ use crate::classes::m::MICRO3D_ONE;
 
 const MBAC_MAGIC: u16 = 0x424D; // "MB"
 
+/// The extra divisor the title's `setView` scale needs beyond a plain
+/// perspective divide, so a model sits at the size the title draws it - it
+/// centres its avatar on the same spot in the bus that it marks with a
+/// silhouette, and this lands the mesh there. Calibrated against 크레이지버스's
+/// stage-1 view (`setView` scale 4034, a camera ~740 units back from a mesh
+/// ~180 tall); a plain divide draws it several times too large.
+const PROJECTION_DIVISOR: f32 = 16.0;
+
 /// One triangle or quad: vertex indices and per-corner texture coordinates.
 struct Face {
     /// 3 for a triangle, 4 for a quad.
@@ -207,7 +215,12 @@ impl Model {
             .iter()
             .map(|&v| {
                 let (cxr, cyr, czr) = camera_space(view, v);
-                if czr <= 1.0 {
+                // The title's look-at, as `getViewTrans` builds it, faces down
+                // -Z: a point in front of the camera has a negative camera-space
+                // z, so the depth to divide by is its magnitude. A point that is
+                // not in front has no screen position.
+                let depth = -czr;
+                if depth <= 1.0 {
                     return Projected {
                         x: 0.0,
                         y: 0.0,
@@ -216,9 +229,9 @@ impl Model {
                     };
                 }
                 Projected {
-                    x: cx as f32 + cxr * scale / czr,
-                    y: cy as f32 - cyr * scale / czr,
-                    depth: czr,
+                    x: cx as f32 + cxr * scale / (depth * PROJECTION_DIVISOR),
+                    y: cy as f32 - cyr * scale / (depth * PROJECTION_DIVISOR),
+                    depth,
                     visible: true,
                 }
             })
