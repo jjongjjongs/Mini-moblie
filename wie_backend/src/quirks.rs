@@ -271,6 +271,20 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // still holds the fixed field, so at 176x220 the battle fills the screen
     // and the field's centring leaves only a few pixels each side.
     (TitlePlatform::Skt, "0047375473", panel(176, 220)),
+    // 크레이지버스 (COMO2D): draws a fixed-size bus interior centred on the
+    // Canvas and fills the rest with its green (`fillRect(0, 0, lcdW, lcdH)`
+    // then `drawImage(busBase, centerX, centerY, HCENTER|VCENTER)`). Its
+    // Canvas init clamps its play field to 170x200 - `if (width > 170) { width
+    // = 170 }`, `if (height > 200) { height = 200 }` - and keeps the bus centre
+    // at the physical screen's own centre, so on the 240x320 default the bus
+    // (its `busBase176206.png` skin is 186x206) sat in a small box in the
+    // middle with a wide green border all round. The panel it was drawn for is
+    // just larger than that 170x200 field: 176x208 leaves only a few pixels'
+    // margin, so the bus fills the screen as the title's own screenshots show.
+    // The 3D dancer is unaffected - its `setView` is built from the clamped
+    // 170x200 field, the same at any panel size, so it keeps its size and only
+    // recentres with the bus.
+    (TitlePlatform::Skt, "0027684826", panel(176, 208)),
 ];
 
 /// What to do differently for the title `aid` on `platform`.
