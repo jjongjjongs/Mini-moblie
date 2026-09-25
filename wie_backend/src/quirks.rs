@@ -341,12 +341,14 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // with wide white borders (`refresh(32, 50, 176, 220)`). Given the 176x220
     // it was drawn for, the centring offset is zero and it fills the screen.
     (TitlePlatform::Skt, "0050230368", panel(176, 220)),
-    // 엑스피드스노보드 (SKT MIDlet): laid out for 176x220. On the 240x320 default
-    // its player/mode-select screens drew the character portrait twice - a
-    // second copy sliding off the right - because the extra width left room its
-    // fixed layout filled with a stray repeat. At 176x220 the portrait is single
-    // and every screen fills. Keyed by DD-ProgName, not the archive filename.
-    (TitlePlatform::Skt, "0052018663", panel(176, 220)),
+    // 엑스피드스노보드 (SKT MIDlet): laid out for a ~180x220 panel. On the
+    // 240x320 default its player/mode-select screens drew the character portrait
+    // twice - a second copy sliding off the right - because the extra width left
+    // room its fixed layout filled with a stray repeat. Its height is 220 (a
+    // shorter panel leaves the previous screen showing between its content and
+    // the status bar); 180 wide keeps the right edge its 176-wide neighbour
+    // clipped. Keyed by DD-ProgName, not the archive filename.
+    (TitlePlatform::Skt, "0052018663", panel(180, 220)),
     // 크레이지버스 (COMO2D): draws a fixed-size bus interior centred on the
     // Canvas and fills the rest with its green (`fillRect(0, 0, lcdW, lcdH)`
     // then `drawImage(busBase, centerX, centerY, HCENTER|VCENTER)`). Its
