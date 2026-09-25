@@ -300,6 +300,18 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // default it played in a small box in the middle of the screen. 144 rows
     // is the Canvas of a 120x160 handset, the sixteen soft-key rows under it.
     (TitlePlatform::Skt, "0054532850", panel(120, 160)),
+    // 로맨스소드: drawn for a 176-wide handset - its title art comes in 120- and
+    // 176-wide variants (main_logo_120, main_logo_176) chosen off getWidth(). On
+    // the 240x320 default it took the width>=240 branch, asked for a
+    // main_logo_240 the jar never carried, and drew that null image every frame
+    // - the paint threw and the screen stayed black. On the 176 panel it loads
+    // the art it ships.
+    (TitlePlatform::Skt, "0050378735", panel(176, 208)),
+    // 레스토랑타이쿤2006: ships one asset set, in an img_176 folder, and picks
+    // the folder off getWidth() - at 240 it asked for an img_240 that is not
+    // there and drew into a small box adrift on the black default. Its full
+    // background mbg176 is 176x202, so the 176 panel is the one it composes for.
+    (TitlePlatform::Skt, "0052039193", panel(176, 208)),
     // 바운티블루스: drawn for a 128-wide handset - its field, portraits and
     // dialogue art are 128 wide - and it lays the screen out from the Canvas
     // height (`getHeight() + 16`): a 144-row field and a 32-row status panel

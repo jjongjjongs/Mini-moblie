@@ -200,10 +200,17 @@ fn profile_callback(path: &PathBuf) -> anyhow::Result<wie_backend::ProfileCallba
 }
 
 pub fn start(filename: &str, options: Options) -> anyhow::Result<()> {
-    let window = WindowImpl::new(240, 320).unwrap(); // TODO hardcoded size
-    let platform = Box::new(WieCliPlatform::new(window.handle()));
-
     let buf = fs::read(filename)?;
+
+    // A title drawn for a panel other than 240x320 lays itself out for that
+    // one, so let the archive name its own before the window exists, the same
+    // way the Android runner does. Almost none do; those fall back to 240x320.
+    let (width, height) = LgtEmulator::screen_size(&buf)
+        .or_else(|| SktEmulator::screen_size(&buf))
+        .or_else(|| KtfEmulator::screen_size(&buf))
+        .unwrap_or((240, 320));
+    let window = WindowImpl::new(width, height).unwrap();
+    let platform = Box::new(WieCliPlatform::new(window.handle()));
     // Only used to pick the loader; all file access keeps the original casing.
     let extension = filename.to_lowercase();
     let mut emulator: Box<dyn Emulator> = if extension.ends_with("zip") {
