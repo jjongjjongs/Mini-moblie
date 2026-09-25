@@ -613,6 +613,10 @@ mod tests {
         async fn list(&self, _app_id: &str) -> Vec<String> {
             vec![]
         }
+
+        async fn has_records(&self, _name: &str, _app_id: &str) -> bool {
+            false
+        }
     }
 
     struct NullFilesystem;

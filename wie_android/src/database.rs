@@ -117,6 +117,17 @@ impl wie_backend::DatabaseRepository for AndroidDatabaseRepository {
     async fn list(&self, app_id: &str) -> Vec<String> {
         self.list_databases(app_id)
     }
+
+    async fn has_records(&self, name: &str, app_id: &str) -> bool {
+        let path = self.path_for_database(name, app_id);
+
+        fs::read_dir(&path)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|record| record.ok())
+            .any(|record| record.path().is_file() && record.file_name().to_str().is_some_and(|name| name.parse::<RecordId>().is_ok()))
+    }
 }
 
 struct AndroidDatabase {

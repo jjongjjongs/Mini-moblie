@@ -221,6 +221,13 @@ impl DatabaseRepository for MemoryDatabaseRepository {
         names.dedup();
         names
     }
+
+    async fn has_records(&self, name: &str, app_id: &str) -> bool {
+        self.store
+            .lock()
+            .get(&(app_id.to_string(), name.to_string()))
+            .is_some_and(|records| !records.is_empty())
+    }
 }
 
 struct MemoryDatabase {

@@ -317,9 +317,17 @@ impl RecordStore {
         if !create {
             let store_name = JavaLangString::to_rust_string(jvm, &name).await?;
             let app_id = context.system().pid().to_owned();
-            let existing = context.system().platform().database_repository().list(&app_id).await;
 
-            if !existing.contains(&store_name) {
+            // Whether the store is there, by its own resolved name rather than
+            // the top-level listing: 초밥의달인3 keeps its save in a store called
+            // `file/data`, whose directory is nested a level below the
+            // application's namespace where `list` never looks. Asked the
+            // listing, a save written under such a name was always reported
+            // missing, and the load screen showed empty slots over a save that
+            // was on disk the whole time.
+            let has_save = context.system().platform().database_repository().has_records(&store_name, &app_id).await;
+
+            if !has_save {
                 tracing::debug!("javax.microedition.rms.RecordStore::openRecordStore({store_name}) -> no such store");
 
                 // The specific type, not the base RecordStoreException: a title
@@ -486,6 +494,60 @@ mod test {
                 .await?;
             let count: i32 = jvm.invoke_virtual(&reopened, "getNumRecords", "()I", ()).await?;
             assert_eq!(count, 1);
+
+            Ok(())
+        })
+    }
+
+    /// A store saved under a nested name opens again without being asked to
+    /// create it.
+    ///
+    /// 초밥의달인3 keeps its save in a store called `file/data`, whose directory
+    /// is nested a level below the application's namespace. The existence check
+    /// once read the top-level listing, which never sees such a store, so the
+    /// save was reported missing every time the game looked for it.
+    #[test]
+    fn a_store_saved_under_a_nested_name_is_found_again() -> Result<()> {
+        run_jvm_test(Box::new([get_protos().into()]), |jvm| async move {
+            let name: ClassInstanceRef<String> = JavaLangString::from_rust_string(&jvm, "file/data").await?.into();
+
+            // Not there before it is written, even though a name with a slash
+            // in it would once have slipped past the listing.
+            let missing: JvmResult<ClassInstanceRef<RecordStore>> = jvm
+                .invoke_static(
+                    "javax/microedition/rms/RecordStore",
+                    "openRecordStore",
+                    "(Ljava/lang/String;Z)Ljavax/microedition/rms/RecordStore;",
+                    (name.clone(), false),
+                )
+                .await;
+            let Err(JavaError::JavaException(exception)) = missing else {
+                panic!("opening a nested store that was never written succeeded");
+            };
+            assert!(jvm.is_instance(&*exception, "javax/microedition/rms/RecordStoreNotFoundException"));
+
+            let created: ClassInstanceRef<RecordStore> = jvm
+                .invoke_static(
+                    "javax/microedition/rms/RecordStore",
+                    "openRecordStore",
+                    "(Ljava/lang/String;Z)Ljavax/microedition/rms/RecordStore;",
+                    (name.clone(), true),
+                )
+                .await?;
+            let mut data = jvm.instantiate_array("B", 3).await?;
+            jvm.store_array(&mut data, 0, [4i8, 5, 6]).await?;
+            let _: i32 = jvm.invoke_virtual(&created, "addRecord", "([BII)I", (data, 0, 3)).await?;
+
+            let reopened: ClassInstanceRef<RecordStore> = jvm
+                .invoke_static(
+                    "javax/microedition/rms/RecordStore",
+                    "openRecordStore",
+                    "(Ljava/lang/String;Z)Ljavax/microedition/rms/RecordStore;",
+                    (name, false),
+                )
+                .await?;
+            let count: i32 = jvm.invoke_virtual(&reopened, "getNumRecords", "()I", ()).await?;
+            assert_eq!(count, 1, "the save under the nested name is found again");
 
             Ok(())
         })
