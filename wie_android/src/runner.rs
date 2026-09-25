@@ -86,8 +86,10 @@ fn j2me_panel(data: &[u8]) -> Option<(u32, u32)> {
     }
 
     match jar_app_id(&jar).as_str() {
-        // 호국전기이순신 - a 2004 LG MIDlet drawn for a 176x220 handset.
-        "c3fc1679fb1cf977c27e8c534a502b78" => Some((176, 220)),
+        // 호국전기이순신 - a 2004 LG MIDlet. Its screens are laid out for a
+        // 176-tall-ish handset; 192 wide keeps the in-battle command menu, which
+        // it draws flush to the left edge, from losing its first column.
+        "c3fc1679fb1cf977c27e8c534a502b78" => Some((192, 220)),
         _ => None,
     }
 }
