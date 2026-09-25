@@ -1,6 +1,7 @@
 #![no_std]
 extern crate alloc;
 
+mod authentication;
 mod context;
 mod fields;
 mod jvm_implementation;
