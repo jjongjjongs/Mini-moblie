@@ -65,6 +65,7 @@ impl XTextField {
                     Default::default(),
                 ),
                 JavaMethodProto::new("setFocus", "(Z)V", Self::set_focus, Default::default()),
+                JavaMethodProto::new("hasFocus", "()Z", Self::has_focus, Default::default()),
                 JavaMethodProto::new("setBounds", "(IIII)V", Self::set_bounds, Default::default()),
                 JavaMethodProto::new("keyPressed", "(I)V", Self::key_pressed, Default::default()),
                 JavaMethodProto::new("keyRepeated", "(I)V", Self::key_repeated, Default::default()),
@@ -135,6 +136,16 @@ impl XTextField {
         jvm.put_field(&mut this, "__wieXTextFieldFocused", "Z", focus).await?;
 
         Ok(())
+    }
+
+    /// Whether the field currently takes the keys. A title juggling two fields
+    /// reads this to find which one it is editing; 영웅모바일귀령천마's name
+    /// entry calls it every frame and died with a `NoSuchMethodError` when it
+    /// was not here.
+    async fn has_focus(jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<bool> {
+        tracing::debug!("com.xce.lcdui.XTextField::hasFocus({this:?})");
+
+        jvm.get_field(&this, "__wieXTextFieldFocused", "Z").await
     }
 
     async fn set_bounds(
@@ -630,6 +641,29 @@ mod tests {
             let _: () = jvm.invoke_virtual(&field, "setFocus", "(Z)V", (true,)).await?;
             press(&jvm, &field, KEY_2).await?;
             assert_eq!(text(&jvm, &field).await?, "a");
+
+            Ok(())
+        })
+    }
+
+    /// `hasFocus` reports what `setFocus` set, which is how a title tracks
+    /// which of its fields the keys are going to. 영웅모바일귀령천마 calls it
+    /// every frame; without it the name screen died with a NoSuchMethodError.
+    #[test]
+    fn has_focus_reports_the_focus_state() -> Result<()> {
+        run_jvm_test(protos(), |jvm| async move {
+            let field = field(&jvm, "", 0).await?;
+
+            let focused: bool = jvm.invoke_virtual(&field, "hasFocus", "()Z", ()).await?;
+            assert!(focused, "a field starts able to take keys");
+
+            let _: () = jvm.invoke_virtual(&field, "setFocus", "(Z)V", (false,)).await?;
+            let focused: bool = jvm.invoke_virtual(&field, "hasFocus", "()Z", ()).await?;
+            assert!(!focused, "setFocus(false) is visible through hasFocus");
+
+            let _: () = jvm.invoke_virtual(&field, "setFocus", "(Z)V", (true,)).await?;
+            let focused: bool = jvm.invoke_virtual(&field, "hasFocus", "()Z", ()).await?;
+            assert!(focused, "setFocus(true) is visible through hasFocus");
 
             Ok(())
         })
