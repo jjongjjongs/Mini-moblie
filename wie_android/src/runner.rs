@@ -430,9 +430,10 @@ impl Runner {
             .or_else(|| KtfEmulator::screen_size(&data))
             .or_else(|| j2me_panel(&data))
             .unwrap_or((SCREEN_WIDTH, SCREEN_HEIGHT));
-        if (width, height) != (SCREEN_WIDTH, SCREEN_HEIGHT) {
-            tracing::info!("archive names its own panel: {width}x{height}");
-        }
+        // Always on: which panel a title is given decides how its fixed-layout
+        // screens land, so a capture that does not say the size cannot answer
+        // why a title drew where it did.
+        tracing::info!("panel: {width}x{height}");
 
         let platform = Box::new(AndroidPlatform::new(runtime_dir, width, height, shared.clone(), handset_information));
 
