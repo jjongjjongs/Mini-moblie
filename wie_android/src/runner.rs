@@ -68,6 +68,30 @@ fn jar_app_id(jar: &[u8]) -> String {
     LgtEmulator::jar_app_id(jar).unwrap_or_else(|| content_id(jar))
 }
 
+/// The panel a bare J2ME MIDlet was drawn for, when it is not the default.
+///
+/// A handset archive names its own screen through its descriptor, which the
+/// three archive emulators read; a plain jar carries no such thing, so a title
+/// laid out for a smaller panel than today's 240x320 - most MIDP titles of its
+/// years were - has to be recognised by content and given it here. Keyed by the
+/// same id the jar is filed under, so it holds across launches.
+fn j2me_panel(data: &[u8]) -> Option<(u32, u32)> {
+    let files = extract_zip(data).ok()?;
+    let jar = packaged_jar(&files).unwrap_or_else(|| data.to_vec());
+
+    // Only titles that fall through to the J2ME emulator; a KTF/LGT/SKT jar
+    // names its own panel the usual way.
+    if KtfEmulator::loadable_jar(&jar) || LgtEmulator::loadable_jar(&jar) || SktEmulator::loadable_jar(&jar) {
+        return None;
+    }
+
+    match jar_app_id(&jar).as_str() {
+        // 호국전기이순신 - a 2004 LG MIDlet drawn for a 176x220 handset.
+        "c3fc1679fb1cf977c27e8c534a502b78" => Some((176, 220)),
+        _ => None,
+    }
+}
+
 /// The jar a download package carries, when the package is only a wrapper.
 ///
 /// Some titles arrive as a zip holding one jar and its three icons rather than
@@ -402,6 +426,7 @@ impl Runner {
         let (width, height) = LgtEmulator::screen_size(&data)
             .or_else(|| SktEmulator::screen_size(&data))
             .or_else(|| KtfEmulator::screen_size(&data))
+            .or_else(|| j2me_panel(&data))
             .unwrap_or((SCREEN_WIDTH, SCREEN_HEIGHT));
         if (width, height) != (SCREEN_WIDTH, SCREEN_HEIGHT) {
             tracing::info!("archive names its own panel: {width}x{height}");
