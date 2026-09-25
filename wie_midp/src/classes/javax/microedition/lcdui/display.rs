@@ -302,6 +302,20 @@ impl Display {
 
             let screen_graphics: ClassInstanceRef<Graphics> = jvm.get_field(&this, "screenGraphics", "Ljavax/microedition/lcdui/Graphics;").await?;
 
+            // A title that composes each frame over a blank surface, and leaves
+            // the rows it does not draw to whatever was there, needs that blank
+            // surface made for it: the buffer keeps the last frame otherwise,
+            // and its own earlier screen shows through the bands it does not
+            // cover. See `wie_backend::quirks` (미니스포츠클럽's match HUD).
+            if context.system().title_clears_screen_each_paint() {
+                let width: i32 = jvm.get_field(&this, "width", "I").await?;
+                let height: i32 = jvm.get_field(&this, "height", "I").await?;
+
+                let _: () = jvm.invoke_virtual(&screen_graphics, "setClip", "(IIII)V", (0, 0, width, height)).await?;
+                let _: () = jvm.invoke_virtual(&screen_graphics, "setColor", "(III)V", (0, 0, 0)).await?;
+                let _: () = jvm.invoke_virtual(&screen_graphics, "fillRect", "(IIII)V", (0, 0, width, height)).await?;
+            }
+
             // TODO draw title and bottom soft bar if not fullscreen
 
             let result: JvmResult<()> = jvm

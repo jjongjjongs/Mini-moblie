@@ -56,6 +56,9 @@ pub struct System {
     /// Whether this title's clips include their far edge.
     /// See [`System::title_clip_includes_far_edge`].
     title_clip_includes_far_edge: Arc<AtomicBool>,
+    /// Whether the screen buffer is wiped before each paint for this title.
+    /// See [`System::title_clears_screen_each_paint`].
+    title_clears_screen_each_paint: Arc<AtomicBool>,
     /// How many rows below a `Displayable` the platform keeps for itself.
     /// See [`System::displayable_reserved_rows`].
     displayable_reserved_rows: Arc<AtomicU32>,
@@ -96,6 +99,7 @@ impl System {
             title_expects_annunciator: Arc::new(AtomicBool::new(false)),
             title_annunciator_rows: Arc::new(AtomicU32::new(0)),
             title_clip_includes_far_edge: Arc::new(AtomicBool::new(false)),
+            title_clears_screen_each_paint: Arc::new(AtomicBool::new(false)),
             displayable_reserved_rows: Arc::new(AtomicU32::new(0)),
         }
     }
@@ -213,6 +217,19 @@ impl System {
 
     pub fn set_title_clip_includes_far_edge(&self, includes: bool) {
         self.title_clip_includes_far_edge.store(includes, Ordering::SeqCst);
+    }
+
+    /// Whether the runtime should wipe the screen buffer to black before every
+    /// paint for this title, because it composes each frame over a blank
+    /// surface and leaves the rows it does not draw to whatever was there.
+    /// Looked up in `crate::quirks` and set here by the emulator that loaded
+    /// the archive; the MIDP `Display` is what reads it.
+    pub fn title_clears_screen_each_paint(&self) -> bool {
+        self.title_clears_screen_each_paint.load(Ordering::SeqCst)
+    }
+
+    pub fn set_title_clears_screen_each_paint(&self, clears: bool) {
+        self.title_clears_screen_each_paint.store(clears, Ordering::SeqCst);
     }
 
     /// How many rows fewer than the display a `Displayable` reports as its

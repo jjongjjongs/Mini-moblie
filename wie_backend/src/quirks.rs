@@ -70,6 +70,21 @@ pub struct TitleQuirks {
     /// lines. Other SK-VM titles pass the full size (교실이데아 clips its
     /// tiles to 16 by 16), so this is the title's and not the platform's.
     pub clip_includes_far_edge: bool,
+
+    /// Whether the runtime should wipe the screen buffer to black before every
+    /// paint, because the title composes each frame expecting a blank surface
+    /// and leaves the rows it does not draw to whatever was there before.
+    ///
+    /// A MIDP screen buffer keeps what the last frame left in it, and most
+    /// titles rely on that. A few do not: they bottom-anchor a fixed-size
+    /// picture and draw a heads-up strip over the band above it, and they clear
+    /// the whole screen only when a loading screen goes by, trusting the buffer
+    /// to hold that clear under the strip's gaps for the rest of the run. Where
+    /// the buffer instead holds a title's own earlier screen, its picture shows
+    /// through those gaps. Wiping before each paint gives such a title the blank
+    /// surface it composes for, and costs it nothing, since it draws its frame
+    /// whole every time.
+    pub clears_screen_each_paint: bool,
 }
 
 const fn panel(width: u32, height: u32) -> TitleQuirks {
@@ -79,6 +94,7 @@ const fn panel(width: u32, height: u32) -> TitleQuirks {
         annunciator_rows: None,
         drawn_sideways: false,
         clip_includes_far_edge: false,
+        clears_screen_each_paint: false,
     }
 }
 
@@ -89,6 +105,7 @@ const fn annunciator() -> TitleQuirks {
         annunciator_rows: None,
         drawn_sideways: false,
         clip_includes_far_edge: false,
+        clears_screen_each_paint: false,
     }
 }
 
@@ -100,6 +117,7 @@ const fn annunciator_of(rows: u32) -> TitleQuirks {
         annunciator_rows: Some(rows),
         drawn_sideways: false,
         clip_includes_far_edge: false,
+        clears_screen_each_paint: false,
     }
 }
 
@@ -110,6 +128,7 @@ const fn sideways() -> TitleQuirks {
         annunciator_rows: None,
         drawn_sideways: true,
         clip_includes_far_edge: false,
+        clears_screen_each_paint: false,
     }
 }
 
@@ -134,6 +153,7 @@ const fn clip_includes_far_edge() -> TitleQuirks {
         annunciator_rows: None,
         drawn_sideways: false,
         clip_includes_far_edge: true,
+        clears_screen_each_paint: false,
     }
 }
 
@@ -143,6 +163,16 @@ impl TitleQuirks {
     const fn with_clip_including_far_edge(self) -> Self {
         Self {
             clip_includes_far_edge: true,
+            ..self
+        }
+    }
+
+    /// This entry, for a title that also needs a blank surface each paint the
+    /// way [`clears_screen_each_paint`](Self::clears_screen_each_paint)
+    /// describes.
+    const fn with_screen_cleared_each_paint(self) -> Self {
+        Self {
+            clears_screen_each_paint: true,
             ..self
         }
     }
@@ -363,7 +393,20 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // of it, so a taller panel left the top rows the render never reached
     // showing the previous screen (its menu, a stale logo) through the gap.
     // 176x200 makes the buffer exactly the height the game paints.
-    (TitlePlatform::Skt, "0054401421", panel(176, 200)),
+    //
+    // In play it also needs the screen wiped before each paint. Its match
+    // screens are not composed into that full-height buffer: each sport
+    // bottom-anchors a fixed picture (baseball's is 200x180, built by
+    // `ImageLoader.loadBaseBack` and drawn `BOTTOM|HCENTER` at the screen's
+    // bottom centre) and draws a score-and-distance strip over the ~20-row
+    // band left above it. The game clears the whole screen only when a loading
+    // screen passes (`loadingBar` fills it, `paintPlayInfo` does not), and
+    // trusts the buffer to keep that clear under the strip's gaps. Ours instead
+    // kept the menu it drew before the match, so the `MINI SPORTS CLUB` logo
+    // showed between the score boxes. Wiping the buffer each paint gives the
+    // match the blank band it composes over, and the menu and loading screens,
+    // which fill the buffer whole, do not notice.
+    (TitlePlatform::Skt, "0054401421", panel(176, 200).with_screen_cleared_each_paint()),
     // 물가에돌팅기기IQ (GAMEVIL 2006): the same GAMEVIL framework, reading
     // `XDisplay.width`/`height2` and placing its title, menu, stage bar and
     // puzzle field from the screen edges. On the 240x320 default the menu ran
@@ -403,6 +446,22 @@ mod tests {
 
         assert_eq!(quirks.screen_size, Some((128, 176)));
         assert!(quirks.clip_includes_far_edge);
+    }
+
+    /// 미니스포츠클럽 needs its panel and a wipe before each paint.
+    #[test]
+    fn an_entry_can_carry_a_panel_and_a_per_paint_wipe_together() {
+        let quirks = title_quirks(TitlePlatform::Skt, "0054401421");
+
+        assert_eq!(quirks.screen_size, Some((176, 200)));
+        assert!(quirks.clears_screen_each_paint);
+    }
+
+    /// The wipe is one title's, not every title's.
+    #[test]
+    fn a_title_without_the_wipe_rule_does_not_get_it() {
+        assert!(!title_quirks(TitlePlatform::Skt, "0027684826").clears_screen_each_paint);
+        assert!(!title_quirks(TitlePlatform::Skt, "0145741367").clears_screen_each_paint);
     }
 
     /// Ids are assigned per carrier, so an entry must not answer for the same
