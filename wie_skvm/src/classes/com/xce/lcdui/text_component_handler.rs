@@ -4,20 +4,27 @@ use java_class_proto::{JavaFieldProto, JavaMethodProto};
 use java_constants::{ClassAccessFlags, MethodAccessFlags};
 use jvm::{ClassInstanceRef, Jvm, Result as JvmResult};
 
+use wie_backend::InputMethodOutput;
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 use wie_midp::classes::net::wie::MIDPKeyCode;
 
-/// How long the same key waits before the next press starts a fresh character
-/// rather than cycling to the next letter on the key, in guest milliseconds.
-/// Measured on the guest clock so a frontend that runs ticks in batches types
-/// the same text as one running live.
-const COMMIT_DELAY_MS: i64 = 900;
+/// Tells the input method to finish the syllable it is holding and hand it
+/// over, adding nothing new - what a directional or mode key does when it ends
+/// the composition.
+const IME_FLUSH: i8 = -99;
 
-/// The character sets `*` cycles through. A field opens in small letters
-/// (mode 0); capitals and digits follow, and back round.
-const MODE_UPPERCASE: i32 = 1;
-const MODE_NUMERIC: i32 = 2;
-const MODE_COUNT: i32 = 3;
+/// Tells the input method to step one stroke back inside the syllable it is
+/// composing, which is what CLEAR means while a syllable is still open.
+const IME_BACKSPACE: i8 = -16;
+
+/// A key press, as the input method numbers its events.
+const IME_PRESS: u32 = 2;
+
+/// The input method's Hangul mode, which the platform's field opens in.
+const KOREAN_MODE: u32 = 3;
+
+/// How many modes `*` cycles through: small letters, capitals, digits, Hangul.
+const INPUT_MODES: u32 = 4;
 
 // interface com.xce.lcdui.TextComponent
 //
@@ -56,35 +63,23 @@ impl TextComponent {
     }
 }
 
-/// One edit the input method makes to the attached component: which of the
-/// interface's methods to call, and with what.
-enum TextEdit {
-    /// The key was not the input method's; the game gets it.
-    None,
-    Insert(u16),
-    Replace(u16),
-    Delete,
-    MoveCursor(i32),
-    /// The mode key was pressed: nothing is typed, but the indicator a title
-    /// draws from `getInputMode` has changed.
-    ModeChanged,
-}
-
 // class com.xce.lcdui.TextComponentHandler
 //
-// SK-VM's keypad input method, the half of the vendor's text input a title
-// reaches when it draws its own field (a `TextComponent`) rather than using the
-// platform's `XTextField`. The title gets the one handler from the static,
-// hands it its component, and routes every key press through `keyPressed`; the
-// handler turns the presses into `insert`/`replace`/`delete`/`moveCursor` edits
-// on the component and answers whether it took the key. 서울타이쿤's name screen
-// is one such field, and without this class it threw NoClassDefFoundError the
-// moment it opened, so no key ever reached it.
+// SK-VM's keypad input method. A title draws its own field and reaches this two
+// ways: it hands the handler a `TextComponent` and routes keys through
+// `keyPressed` (서울타이쿤), or it focuses an `XTextField` and routes keys the
+// same way without handing over a component (댄스배틀오디션). Either way the
+// press becomes an edit on the field, and the handler answers whether it took
+// the key - what it does not take reaches the game, so an unclaimed OK still
+// confirms the name. Without this class both titles threw NoClassDefFoundError
+// the moment their name screen opened.
 //
-// This types the Latin and numeric modes the shared keypad table carries, the
-// same three `*` cycles through on the reference emulator (wfeature,
-// `textInputState.press`). A syllable-composing Hangul mode is not part of it,
-// there as here.
+// The composition is the shared keypad editor every text field in this runtime
+// types with - the same `MC_uicHandleInput` an XTextField uses - so a syllable
+// builds up over several keys and Hangul composes here as it does there. A
+// component holds the text and cannot be read back, so the handler keeps how
+// many of its trailing characters are the syllable still open, and replaces
+// exactly those on the next key.
 pub struct TextComponentHandler;
 
 impl TextComponentHandler {
@@ -114,7 +109,7 @@ impl TextComponentHandler {
             ],
             fields: vec![
                 // The one handler a handset has, kept so a title that asks
-                // twice gets the same composition state.
+                // twice gets the same object.
                 JavaFieldProto::new(
                     "__wieInstance",
                     "Lcom/xce/lcdui/TextComponentHandler;",
@@ -132,13 +127,10 @@ impl TextComponentHandler {
                 // The component the input method edits, or null when a title
                 // has turned its field off.
                 JavaFieldProto::new("__wieComponent", "Ljava/lang/Object;", Default::default()),
-                JavaFieldProto::new("__wieMode", "I", Default::default()),
-                // The multi-tap cycle in progress: which key it belongs to (0
-                // when none), how far through that key's letters it has gone,
-                // and the guest time of the last press.
-                JavaFieldProto::new("__wieCycleKey", "I", Default::default()),
-                JavaFieldProto::new("__wieCyclePos", "I", Default::default()),
-                JavaFieldProto::new("__wieLastKey", "J", Default::default()),
+                // How many characters at the caret are the syllable still being
+                // composed, and so are replaced rather than added to by the
+                // next key.
+                JavaFieldProto::new("__wieComposition", "I", Default::default()),
             ],
             access_flags: ClassAccessFlags::FINAL,
         }
@@ -153,8 +145,7 @@ impl TextComponentHandler {
     }
 
     /// The handler singleton, made on the first call and kept in the static so
-    /// every later caller gets the same one - and so the cycle a title is in
-    /// the middle of typing survives from one key to the next.
+    /// every later caller gets the same one.
     async fn get_text_component_handler(jvm: &Jvm, _context: &mut WieJvmContext) -> JvmResult<ClassInstanceRef<Self>> {
         tracing::debug!("com.xce.lcdui.TextComponentHandler::getTextComponentHandler()");
 
@@ -182,30 +173,38 @@ impl TextComponentHandler {
     }
 
     /// Attaches the component the input method edits, or detaches it when a
-    /// title passes null - which is how a title turns its field off. Either way
-    /// the cycle in progress ends: it belonged to the field being left.
+    /// title passes null - which is how a title turns its field off. Attaching
+    /// opens the field in Hangul, the mode a handset's name screen started in,
+    /// and either way ends the composition in progress.
     async fn set_text_component(
         jvm: &Jvm,
-        _context: &mut WieJvmContext,
+        context: &mut WieJvmContext,
         mut this: ClassInstanceRef<Self>,
         component: ClassInstanceRef<TextComponent>,
     ) -> JvmResult<()> {
         tracing::debug!("com.xce.lcdui.TextComponentHandler::setTextComponent({this:?}, {component:?})");
 
+        let attaching = !component.is_null();
         jvm.put_field(&mut this, "__wieComponent", "Ljava/lang/Object;", component).await?;
-        Self::end_cycle(jvm, &mut this).await?;
+        jvm.put_field(&mut this, "__wieComposition", "I", 0).await?;
+
+        if attaching {
+            context.system().set_current_input_mode(KOREAN_MODE);
+        } else {
+            context.system().reset_input_method_composition();
+        }
 
         Ok(())
     }
 
     /// Which mode the input method is in, as the bits a title reads to draw the
-    /// indicator a handset showed beside a field: 1 capitals, 2 small letters,
-    /// 8 digits - the order one local title's own switch names them in.
-    async fn get_input_mode(jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<i32> {
-        let mode: i32 = jvm.get_field(&this, "__wieMode", "I").await?;
-        Ok(match mode {
-            MODE_UPPERCASE => 1,
-            MODE_NUMERIC => 8,
+    /// indicator a handset showed beside a field: 16 Hangul, 1 capitals, 2 small
+    /// letters, 8 digits - the order one local title's own switch names them in.
+    async fn get_input_mode(_jvm: &Jvm, context: &mut WieJvmContext, _this: ClassInstanceRef<Self>) -> JvmResult<i32> {
+        Ok(match context.system().current_input_mode() {
+            1 => 1,
+            2 => 8,
+            KOREAN_MODE => 16,
             _ => 2,
         })
     }
@@ -213,28 +212,28 @@ impl TextComponentHandler {
     /// Ends the composition in progress, leaving the component and its text
     /// alone. A title calls this from its own `moveCursor` so a cycle that kept
     /// running would not write the next letter over what the caret moved to.
-    async fn clear(jvm: &Jvm, _context: &mut WieJvmContext, mut this: ClassInstanceRef<Self>) -> JvmResult<()> {
+    async fn clear(jvm: &Jvm, context: &mut WieJvmContext, mut this: ClassInstanceRef<Self>) -> JvmResult<()> {
         tracing::debug!("com.xce.lcdui.TextComponentHandler::clear({this:?})");
 
-        Self::end_cycle(jvm, &mut this).await?;
+        jvm.put_field(&mut this, "__wieComposition", "I", 0).await?;
+        context.system().reset_input_method_composition();
 
         Ok(())
     }
 
-    /// Types one key into the attached component and answers whether the input
-    /// method took it. What it does not take reaches the game: a title routes
-    /// every key here first, and its pad has to keep working while a field is on
-    /// screen, so an unclaimed OK or soft key still confirms the name.
+    /// Types one key into the field and answers whether the input method took
+    /// it. With a component attached the key edits it; with none, the key is
+    /// for the XTextField a title focused. What the field has no use for - OK,
+    /// the soft keys, up and down - is left for the game so its name screen can
+    /// confirm and navigate.
     async fn key_pressed(jvm: &Jvm, context: &mut WieJvmContext, mut this: ClassInstanceRef<Self>, key_code: i32) -> JvmResult<bool> {
         tracing::debug!("com.xce.lcdui.TextComponentHandler::keyPressed({this:?}, {key_code})");
 
         let component: ClassInstanceRef<TextComponent> = jvm.get_field(&this, "__wieComponent", "Ljava/lang/Object;").await?;
         if component.is_null() {
             // No component was handed over, so the keys are for the field a
-            // title focused. Its own keyPressed is the shared editor, Hangul
-            // and all - the same one an XTextField typed with is reached
-            // directly. What the field has no use for is left for the game, so
-            // its OK still confirms the name.
+            // title focused. Its own keyPressed is the same shared editor, so
+            // it types (Hangul and all) directly.
             let field: ClassInstanceRef<()> = jvm
                 .get_static_field("com/xce/lcdui/TextComponentHandler", "__wieFocusedField", "Lcom/xce/lcdui/XTextField;")
                 .await?;
@@ -245,39 +244,90 @@ impl TextComponentHandler {
             return Ok(false);
         }
 
-        let now = context.system().platform().now().raw() as i64;
-        let edit = Self::press(jvm, &mut this, key_code, now).await?;
+        let composition: i32 = jvm.get_field(&this, "__wieComposition", "I").await?;
 
-        match edit {
-            TextEdit::None => Ok(false),
-            TextEdit::ModeChanged => {
-                let _: () = jvm.invoke_virtual(&component, "repaint", "()V", ()).await?;
-                Ok(true)
-            }
-            TextEdit::MoveCursor(code) => {
-                let _: () = jvm.invoke_virtual(&component, "moveCursor", "(I)V", (code,)).await?;
-                let _: () = jvm.invoke_virtual(&component, "repaint", "()V", ()).await?;
-                Ok(true)
-            }
-            TextEdit::Delete => {
-                let _: () = jvm.invoke_virtual(&component, "delete", "()V", ()).await?;
-                let _: () = jvm.invoke_virtual(&component, "repaint", "()V", ()).await?;
-                Ok(true)
-            }
-            TextEdit::Replace(character) => {
-                let _: () = jvm.invoke_virtual(&component, "replace", "(C)V", (character as i32,)).await?;
-                let _: () = jvm.invoke_virtual(&component, "repaint", "()V", ()).await?;
-                Ok(true)
-            }
-            TextEdit::Insert(character) => {
-                // The component holds the text, so the limit it fills to is its
-                // to enforce: type only while `size` is under `getMaxSize`. A
-                // key that would overflow is still the input method's, taken and
-                // dropped rather than passed to the game.
-                if !Self::is_full(jvm, &component).await? {
-                    let _: () = jvm.invoke_virtual(&component, "insert", "(C)V", (character as i32,)).await?;
+        // The edit turns the shared editor's output into calls on the
+        // component: `updated` is the new composing length, `None` a key the
+        // component was too full to take, and a bare `Ok(false)` return a key
+        // the field does not want.
+        let updated = match MIDPKeyCode::from_raw(key_code) {
+            // CLEAR steps back inside an open syllable, or deletes a finished
+            // character when there is none.
+            Some(MIDPKeyCode::CLEAR) => {
+                let result = if composition > 0 {
+                    let output = context.system().handle_input_method(IME_BACKSPACE, IME_PRESS);
+                    Self::apply_output(jvm, &component, composition, &output).await?
+                } else {
+                    let _: () = jvm.invoke_virtual(&component, "delete", "()V", ()).await?;
                     let _: () = jvm.invoke_virtual(&component, "repaint", "()V", ()).await?;
+                    Some(0)
+                };
+                // Nothing is composing now, so drop any half-built state the
+                // step-back left, and the next key starts a fresh character.
+                if matches!(result, Some(0)) {
+                    context.system().reset_input_method_composition();
                 }
+                result
+            }
+            // `*` switches the mode, finishing whatever was being composed
+            // first, in the mode it was typed in.
+            Some(MIDPKeyCode::KEY_STAR) => {
+                let output = context.system().handle_input_method(IME_FLUSH, IME_PRESS);
+                let committed = Self::apply_output(jvm, &component, composition, &output).await?.unwrap_or(0);
+                let mode = context.system().current_input_mode();
+                context.system().set_current_input_mode((mode + 1) % INPUT_MODES);
+                let _: () = jvm.invoke_virtual(&component, "repaint", "()V", ()).await?;
+                Some(committed)
+            }
+            // Moving off the field ends the syllable it was holding. Up and
+            // down are the game's, so the field commits and lets them by.
+            Some(MIDPKeyCode::UP | MIDPKeyCode::DOWN) => {
+                let output = context.system().handle_input_method(IME_FLUSH, IME_PRESS);
+                Self::apply_output(jvm, &component, composition, &output).await?;
+                jvm.put_field(&mut this, "__wieComposition", "I", 0).await?;
+                return Ok(false);
+            }
+            // Left and right commit the syllable and move the component's own
+            // caret, which the component decides the meaning of.
+            Some(MIDPKeyCode::LEFT | MIDPKeyCode::RIGHT) => {
+                let output = context.system().handle_input_method(IME_FLUSH, IME_PRESS);
+                Self::apply_output(jvm, &component, composition, &output).await?;
+                let _: () = jvm.invoke_virtual(&component, "moveCursor", "(I)V", (key_code,)).await?;
+                let _: () = jvm.invoke_virtual(&component, "repaint", "()V", ()).await?;
+                jvm.put_field(&mut this, "__wieComposition", "I", 0).await?;
+                return Ok(true);
+            }
+            Some(
+                MIDPKeyCode::KEY_NUM0
+                | MIDPKeyCode::KEY_NUM1
+                | MIDPKeyCode::KEY_NUM2
+                | MIDPKeyCode::KEY_NUM3
+                | MIDPKeyCode::KEY_NUM4
+                | MIDPKeyCode::KEY_NUM5
+                | MIDPKeyCode::KEY_NUM6
+                | MIDPKeyCode::KEY_NUM7
+                | MIDPKeyCode::KEY_NUM8
+                | MIDPKeyCode::KEY_NUM9
+                | MIDPKeyCode::KEY_POUND,
+            ) => {
+                let output = context.system().handle_input_method(key_code as i8, IME_PRESS);
+                Self::apply_output(jvm, &component, composition, &output).await?
+            }
+            // Soft keys, CALL, OK - the game's, not the field's.
+            _ => return Ok(false),
+        };
+
+        match updated {
+            Some(new_composition) => {
+                jvm.put_field(&mut this, "__wieComposition", "I", new_composition).await?;
+                Ok(true)
+            }
+            // The key would have run the field past its limit, so it is refused
+            // whole: the composition it advanced is dropped and the text left
+            // as it was, the same as a full field taking nothing.
+            None => {
+                context.system().reset_input_method_composition();
+                jvm.put_field(&mut this, "__wieComposition", "I", 0).await?;
                 Ok(true)
             }
         }
@@ -291,114 +341,44 @@ impl TextComponentHandler {
         Ok(false)
     }
 
-    /// Runs one key through the multi-tap cycle, updating the handler's stored
-    /// state and returning the edit the component should be told to make.
-    async fn press(jvm: &Jvm, this: &mut ClassInstanceRef<Self>, key_code: i32, now: i64) -> JvmResult<TextEdit> {
-        match MIDPKeyCode::from_raw(key_code) {
-            Some(MIDPKeyCode::CLEAR) => {
-                Self::end_cycle(jvm, this).await?;
-                Ok(TextEdit::Delete)
-            }
-            // The component decides what its own caret does with the key; one
-            // local title inserts a space when the caret is already at the end.
-            Some(MIDPKeyCode::LEFT | MIDPKeyCode::RIGHT) => {
-                Self::end_cycle(jvm, this).await?;
-                Ok(TextEdit::MoveCursor(key_code))
-            }
-            // `*` switches the mode, finishing whatever was being composed
-            // first, in the mode it was typed in.
-            Some(MIDPKeyCode::KEY_STAR) => {
-                let mode: i32 = jvm.get_field(this, "__wieMode", "I").await?;
-                jvm.put_field(this, "__wieMode", "I", (mode + 1) % MODE_COUNT).await?;
-                Self::end_cycle(jvm, this).await?;
-                Ok(TextEdit::ModeChanged)
-            }
-            Some(MIDPKeyCode::KEY_POUND) => {
-                Self::end_cycle(jvm, this).await?;
-                Ok(TextEdit::Delete)
-            }
-            _ => {
-                let Some(options) = Self::keypad(key_code) else {
-                    return Ok(TextEdit::None);
-                };
-                let mode: i32 = jvm.get_field(this, "__wieMode", "I").await?;
+    /// Replays the shared editor's output onto the component: the syllable it
+    /// was composing (`composition` characters at the caret) is replaced by
+    /// what the editor now reports finished and still open, both as EUC-KR
+    /// bytes. Answers the new composing length, or `None` when the result would
+    /// run the component past `getMaxSize` - the whole key is refused then,
+    /// rather than half a syllable.
+    async fn apply_output(
+        jvm: &Jvm,
+        component: &ClassInstanceRef<TextComponent>,
+        composition: i32,
+        output: &InputMethodOutput,
+    ) -> JvmResult<Option<i32>> {
+        let finished = encoding_rs::EUC_KR.decode(&output.output0[..output.output0_len]).0;
+        let composing = encoding_rs::EUC_KR.decode(&output.output1[..output.output1_len]).0;
+        let finished_len = finished.chars().count() as i32;
+        let composing_len = composing.chars().count() as i32;
 
-                if mode == MODE_NUMERIC {
-                    Self::end_cycle(jvm, this).await?;
-                    return Ok(TextEdit::Insert(key_code as u16));
-                }
-
-                let cycle_key: i32 = jvm.get_field(this, "__wieCycleKey", "I").await?;
-                let last_key: i64 = jvm.get_field(this, "__wieLastKey", "J").await?;
-
-                // A second press of the same key inside the commit delay writes
-                // the next letter over the one it just produced.
-                if cycle_key == key_code && now - last_key < COMMIT_DELAY_MS {
-                    let position: i32 = jvm.get_field(this, "__wieCyclePos", "I").await?;
-                    let position = (position + 1) % options.len() as i32;
-                    jvm.put_field(this, "__wieCyclePos", "I", position).await?;
-                    jvm.put_field(this, "__wieLastKey", "J", now).await?;
-                    return Ok(TextEdit::Replace(Self::apply_mode(mode, options[position as usize])));
-                }
-
-                jvm.put_field(this, "__wieCycleKey", "I", key_code).await?;
-                jvm.put_field(this, "__wieCyclePos", "I", 0).await?;
-                jvm.put_field(this, "__wieLastKey", "J", now).await?;
-                Ok(TextEdit::Insert(Self::apply_mode(mode, options[0])))
-            }
-        }
-    }
-
-    /// Commits whatever character the cycle was on, so the next press of the
-    /// same key inserts rather than replaces.
-    async fn end_cycle(jvm: &Jvm, this: &mut ClassInstanceRef<Self>) -> JvmResult<()> {
-        jvm.put_field(this, "__wieCycleKey", "I", 0).await?;
-        jvm.put_field(this, "__wieCyclePos", "I", 0).await?;
-
-        Ok(())
-    }
-
-    /// Whether another character fits: the two numbers are the only way to
-    /// know, since the interface hands out edits and never a character back.
-    async fn is_full(jvm: &Jvm, component: &ClassInstanceRef<TextComponent>) -> JvmResult<bool> {
         let size: i32 = jvm.invoke_virtual(component, "size", "()I", ()).await?;
         let max_size: i32 = jvm.invoke_virtual(component, "getMaxSize", "()I", ()).await?;
-
-        Ok(max_size > 0 && size >= max_size)
-    }
-
-    /// What one keypad key cycles through, in the order a handset produced
-    /// them, or `None` when the pad does not carry the key.
-    fn keypad(key: i32) -> Option<&'static [u8]> {
-        Some(match key {
-            49 => b".,?!'\"1-()@/:_",
-            50 => b"abc2",
-            51 => b"def3",
-            52 => b"ghi4",
-            53 => b"jkl5",
-            54 => b"mno6",
-            55 => b"pqrs7",
-            56 => b"tuv8",
-            57 => b"wxyz9",
-            48 => b" 0",
-            _ => return None,
-        })
-    }
-
-    /// The letter a key produces in the active mode: as the keypad table
-    /// carries it, or its capital.
-    fn apply_mode(mode: i32, character: u8) -> u16 {
-        if mode == MODE_UPPERCASE {
-            character.to_ascii_uppercase() as u16
-        } else {
-            character as u16
+        if max_size > 0 && size - composition + finished_len + composing_len > max_size {
+            return Ok(None);
         }
+
+        for _ in 0..composition {
+            let _: () = jvm.invoke_virtual(component, "delete", "()V", ()).await?;
+        }
+        for character in finished.chars().chain(composing.chars()) {
+            let _: () = jvm.invoke_virtual(component, "insert", "(C)V", (character as i32,)).await?;
+        }
+        let _: () = jvm.invoke_virtual(component, "repaint", "()V", ()).await?;
+
+        Ok(Some(composing_len))
     }
 
     /// Whether the key is one the input method types with, rather than one the
-    /// game reads for itself. The digits, `*`, `#`, CLEAR and the two side
-    /// keys are the field's; OK, the soft keys, and up and down are the game's,
-    /// so its name screen can still confirm and move between rows.
+    /// game reads for itself. The digits, `*`, `#`, CLEAR and the two side keys
+    /// are the field's; OK, the soft keys, and up and down are the game's, so a
+    /// name screen can still confirm and move between rows.
     fn is_field_key(key_code: i32) -> bool {
         (48..=57).contains(&key_code)
             || matches!(
@@ -442,8 +422,10 @@ mod test {
 
     use crate::get_protos;
 
+    const KEY_1: i32 = 49;
     const KEY_2: i32 = 50;
     const KEY_3: i32 = 51;
+    const KEY_4: i32 = 52;
     const KEY_5: i32 = 53;
     const STAR: i32 = 42;
     const CLEAR: i32 = 8;
@@ -597,34 +579,61 @@ mod test {
         jvm.invoke_virtual(handler, "keyPressed", "(I)Z", (key,)).await
     }
 
+    async fn mode(jvm: &Jvm, handler: &ClassInstanceRef<()>) -> JvmResult<i32> {
+        jvm.invoke_virtual(handler, "getInputMode", "()I", ()).await
+    }
+
     async fn text(jvm: &Jvm, component: &ClassInstanceRef<()>) -> JvmResult<RustString> {
         let text = jvm.get_field(component, "text", "Ljava/lang/String;").await?;
         JavaLangString::to_rust_string(jvm, &text).await
     }
 
-    /// A keypad press types its first letter, and a different key adds the
-    /// next one after it.
+    /// The field opens in Hangul, so 4 then 1 compose 기 into the component -
+    /// the syllable built up over the two keys and replaced in place.
     #[test]
-    fn keys_type_letters_into_the_component() -> Result<()> {
+    fn a_component_composes_hangul() -> Result<()> {
         run_jvm_test(protos(), |jvm| async move {
             let (handler, component) = attach(&jvm, 0).await?;
+            assert_eq!(mode(&jvm, &handler).await?, 16);
 
-            assert!(press(&jvm, &handler, KEY_2).await?);
-            assert_eq!(text(&jvm, &component).await?, "a");
-
-            assert!(press(&jvm, &handler, KEY_3).await?);
-            assert_eq!(text(&jvm, &component).await?, "ad");
+            assert!(press(&jvm, &handler, KEY_4).await?);
+            assert!(press(&jvm, &handler, KEY_1).await?);
+            assert_eq!(text(&jvm, &component).await?, "기");
 
             Ok(())
         })
     }
 
-    /// Tapping the same key again inside the commit delay writes the next
-    /// letter over the one it just produced - that is multi-tap.
+    /// `*` walks the modes - Hangul to small letters to capitals to digits -
+    /// and `getInputMode` reports each as its bit.
+    #[test]
+    fn star_cycles_the_mode() -> Result<()> {
+        run_jvm_test(protos(), |jvm| async move {
+            let (handler, component) = attach(&jvm, 0).await?;
+
+            assert_eq!(mode(&jvm, &handler).await?, 16); // Hangul
+            press(&jvm, &handler, STAR).await?;
+            assert_eq!(mode(&jvm, &handler).await?, 2); // small letters
+            press(&jvm, &handler, KEY_2).await?;
+            assert_eq!(text(&jvm, &component).await?, "a");
+
+            press(&jvm, &handler, STAR).await?;
+            assert_eq!(mode(&jvm, &handler).await?, 1); // capitals
+            press(&jvm, &handler, STAR).await?;
+            assert_eq!(mode(&jvm, &handler).await?, 8); // digits
+            press(&jvm, &handler, KEY_2).await?;
+            assert_eq!(text(&jvm, &component).await?, "a2");
+
+            Ok(())
+        })
+    }
+
+    /// In the letter modes the same key cycles the character it just produced.
     #[test]
     fn tapping_the_same_key_cycles_in_place() -> Result<()> {
         run_jvm_test(protos(), |jvm| async move {
             let (handler, component) = attach(&jvm, 0).await?;
+            press(&jvm, &handler, STAR).await?; // small letters
 
             press(&jvm, &handler, KEY_2).await?;
             press(&jvm, &handler, KEY_2).await?;
@@ -637,38 +646,13 @@ mod test {
         })
     }
 
-    /// `*` moves to capitals, then to digits, and `getInputMode` reports each.
-    #[test]
-    fn star_cycles_the_mode() -> Result<()> {
-        run_jvm_test(protos(), |jvm| async move {
-            let (handler, component) = attach(&jvm, 0).await?;
-
-            // Small letters to start.
-            let mode: i32 = jvm.invoke_virtual(&handler, "getInputMode", "()I", ()).await?;
-            assert_eq!(mode, 2);
-
-            press(&jvm, &handler, STAR).await?;
-            let mode: i32 = jvm.invoke_virtual(&handler, "getInputMode", "()I", ()).await?;
-            assert_eq!(mode, 1);
-            press(&jvm, &handler, KEY_2).await?;
-            assert_eq!(text(&jvm, &component).await?, "A");
-
-            press(&jvm, &handler, STAR).await?;
-            let mode: i32 = jvm.invoke_virtual(&handler, "getInputMode", "()I", ()).await?;
-            assert_eq!(mode, 8);
-            press(&jvm, &handler, KEY_2).await?;
-            assert_eq!(text(&jvm, &component).await?, "A2");
-
-            Ok(())
-        })
-    }
-
-    /// CLEAR deletes the character before the caret; LEFT moves the caret so
-    /// the next letter lands inside the text.
+    /// CLEAR deletes the character before the caret; LEFT commits and moves it
+    /// so the next letter lands inside the text.
     #[test]
     fn clear_deletes_and_the_caret_moves() -> Result<()> {
         run_jvm_test(protos(), |jvm| async move {
             let (handler, component) = attach(&jvm, 0).await?;
+            press(&jvm, &handler, STAR).await?; // small letters
 
             press(&jvm, &handler, KEY_2).await?;
             press(&jvm, &handler, KEY_3).await?;
@@ -692,6 +676,7 @@ mod test {
     fn a_full_field_refuses_and_other_keys_pass_through() -> Result<()> {
         run_jvm_test(protos(), |jvm| async move {
             let (handler, component) = attach(&jvm, 1).await?;
+            press(&jvm, &handler, STAR).await?; // small letters
 
             assert!(press(&jvm, &handler, KEY_2).await?);
             assert!(press(&jvm, &handler, KEY_3).await?); // refused: field is full
@@ -709,9 +694,6 @@ mod test {
     /// focused field, Hangul and all: 4 then 1 make 기 in the field it opened.
     #[test]
     fn keys_reach_the_focused_xtextfield_with_no_component() -> Result<()> {
-        const KEY_4: i32 = 52;
-        const KEY_1: i32 = 49;
-
         run_jvm_test(protos(), |jvm| async move {
             let empty = JavaLangString::from_rust_string(&jvm, "").await?;
             let field: ClassInstanceRef<()> = jvm
