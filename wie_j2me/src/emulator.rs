@@ -51,6 +51,10 @@ impl J2MEEmulator {
     ) -> Result<Self> {
         let system = System::new(platform, id, id, DefaultTaskRunner);
 
+        // A pure J2ME MIDlet reads its d-pad as the standard negative nav codes,
+        // not SK-VM's positive table that the shared key enum defaults to.
+        system.set_midp_uses_standard_key_codes();
+
         for (path, data) in files {
             system.filesystem().add_virtual(path, data.clone());
         }

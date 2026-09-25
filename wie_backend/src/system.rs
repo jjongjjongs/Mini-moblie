@@ -62,6 +62,9 @@ pub struct System {
     /// How many rows below a `Displayable` the platform keeps for itself.
     /// See [`System::displayable_reserved_rows`].
     displayable_reserved_rows: Arc<AtomicU32>,
+    /// Whether the MIDP key path delivers the de-facto standard negative nav
+    /// codes. See [`System::midp_uses_standard_key_codes`].
+    midp_uses_standard_key_codes: Arc<AtomicBool>,
 }
 
 impl System {
@@ -101,6 +104,7 @@ impl System {
             title_clip_includes_far_edge: Arc::new(AtomicBool::new(false)),
             title_clears_screen_each_paint: Arc::new(AtomicBool::new(false)),
             displayable_reserved_rows: Arc::new(AtomicU32::new(0)),
+            midp_uses_standard_key_codes: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -242,6 +246,22 @@ impl System {
 
     pub fn set_displayable_reserved_rows(&self, rows: u32) {
         self.displayable_reserved_rows.store(rows, Ordering::SeqCst);
+    }
+
+    /// Whether this platform hands a MIDP `Canvas` the de-facto standard nav
+    /// key codes - `KEY_UP` = -1 down through `KEY_FIRE` = -5, the values Nokia
+    /// set and the rest of the J2ME world followed - rather than the positive
+    /// table SK-VM's handsets used. A pure J2ME MIDlet that reads a d-pad
+    /// straight out of `keyPressed` (호국전기이순신 switches on exactly -5..-1)
+    /// gets nothing from the SK-VM codes, so the J2ME emulator sets this and
+    /// SK-VM/WIPI, which share the same key enum, leave it off. `net.wie
+    /// .EventQueue` and the MIDP `Canvas`'s `getGameAction` read it.
+    pub fn midp_uses_standard_key_codes(&self) -> bool {
+        self.midp_uses_standard_key_codes.load(Ordering::SeqCst)
+    }
+
+    pub fn set_midp_uses_standard_key_codes(&self) {
+        self.midp_uses_standard_key_codes.store(true, Ordering::SeqCst);
     }
 
     /// Whether the title lays its screens out below the handset's status strip,

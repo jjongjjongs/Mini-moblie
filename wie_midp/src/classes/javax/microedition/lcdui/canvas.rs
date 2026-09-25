@@ -8,7 +8,7 @@ use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 
 use crate::classes::{
     javax::microedition::lcdui::{Display, Graphics, display::HOST_PAINT_STAND_DOWN_MS},
-    net::wie::{KeyboardEventType, MIDPKeyCode},
+    net::wie::{KeyboardEventType, MIDPKeyCode, STD_KEY_DOWN, STD_KEY_FIRE, STD_KEY_LEFT, STD_KEY_RIGHT, STD_KEY_UP},
 };
 
 // abstract class javax.microedition.lcdui.Canvas
@@ -220,8 +220,24 @@ impl Canvas {
         jvm.put_field(&mut display.clone(), "__wieStandDownUntil", "J", until as i64).await
     }
 
-    async fn get_game_action(_: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, key: i32) -> JvmResult<i32> {
+    async fn get_game_action(_: &Jvm, context: &mut WieJvmContext, this: ClassInstanceRef<Self>, key: i32) -> JvmResult<i32> {
         tracing::debug!("javax.microedition.lcdui.Canvas::getGameAction({this:?}, {key})");
+
+        // When the platform delivers the standard negative nav codes, map those
+        // back; the SK-VM positive table's -1 (`HANGUP`) would otherwise shadow
+        // `KEY_UP`, so the two conventions are read apart, not merged.
+        if context.system().midp_uses_standard_key_codes() {
+            let action = match key {
+                STD_KEY_UP => 1,    // UP
+                STD_KEY_DOWN => 6,  // DOWN
+                STD_KEY_LEFT => 2,  // LEFT
+                STD_KEY_RIGHT => 5, // RIGHT
+                STD_KEY_FIRE => 8,  // FIRE
+                _ => 0,
+            };
+
+            return Ok(action);
+        }
 
         let action = match MIDPKeyCode::from_raw(key) {
             Some(MIDPKeyCode::UP) => 1,    // UP

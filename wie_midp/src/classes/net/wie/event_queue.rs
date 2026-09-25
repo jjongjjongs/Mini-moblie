@@ -98,6 +98,36 @@ pub enum MIDPKeyCode {
     KEY_STAR = 42,  // *
 }
 
+/// The de-facto standard MIDP nav key codes - the ones Nokia's handsets set
+/// and the wider J2ME world adopted. A pure J2ME MIDlet reads these straight
+/// out of `keyPressed` (호국전기이순신 switches on exactly -5..-1) instead of
+/// going through `getGameAction`, so a platform that serves such titles has to
+/// deliver them in place of SK-VM's positive table.
+pub const STD_KEY_UP: i32 = -1;
+pub const STD_KEY_DOWN: i32 = -2;
+pub const STD_KEY_LEFT: i32 = -3;
+pub const STD_KEY_RIGHT: i32 = -4;
+pub const STD_KEY_FIRE: i32 = -5;
+
+/// The code a MIDP `Canvas` hears for `keycode`, in whichever convention this
+/// platform uses. `standard` picks the negative Nokia nav codes over SK-VM's
+/// positive table; every non-nav key (the digits, `*`, `#`, the soft and call
+/// keys) is the same either way.
+pub fn midp_key_code(keycode: KeyCode, standard: bool) -> i32 {
+    if standard {
+        match keycode {
+            KeyCode::UP => return STD_KEY_UP,
+            KeyCode::DOWN => return STD_KEY_DOWN,
+            KeyCode::LEFT => return STD_KEY_LEFT,
+            KeyCode::RIGHT => return STD_KEY_RIGHT,
+            KeyCode::OK => return STD_KEY_FIRE,
+            _ => {}
+        }
+    }
+
+    MIDPKeyCode::from_key_code(keycode) as i32
+}
+
 impl MIDPKeyCode {
     pub fn from_raw(raw: i32) -> Option<Self> {
         Some(match raw {
@@ -209,6 +239,8 @@ impl EventQueue {
     ) -> JvmResult<()> {
         tracing::debug!("net.wie.EventQueue::getNextEvent({this:?}, {event:?})");
 
+        let standard_keys = context.system().midp_uses_standard_key_codes();
+
         let mut pending_timer_events = Vec::new();
         loop {
             let now = context.system().platform().now();
@@ -220,19 +252,19 @@ impl EventQueue {
                     Event::Keydown(x) => vec![
                         EventQueueEvent::KeyEvent as _,
                         KeyboardEventType::KeyPressed as _,
-                        MIDPKeyCode::from_key_code(x) as _,
+                        midp_key_code(x, standard_keys),
                         0,
                     ],
                     Event::Keyup(x) => vec![
                         EventQueueEvent::KeyEvent as _,
                         KeyboardEventType::KeyReleased as _,
-                        MIDPKeyCode::from_key_code(x) as _,
+                        midp_key_code(x, standard_keys),
                         0,
                     ],
                     Event::Keyrepeat(x) => vec![
                         EventQueueEvent::KeyEvent as _,
                         KeyboardEventType::KeyRepeated as _,
-                        MIDPKeyCode::from_key_code(x) as _,
+                        midp_key_code(x, standard_keys),
                         0,
                     ],
                     Event::Timer {
@@ -527,7 +559,23 @@ impl EventQueue {
 mod tests {
     use wie_backend::KeyCode;
 
-    use super::MIDPKeyCode;
+    use super::{MIDPKeyCode, STD_KEY_DOWN, STD_KEY_FIRE, STD_KEY_LEFT, STD_KEY_RIGHT, STD_KEY_UP, midp_key_code};
+
+    /// On the standard convention the d-pad reaches a title as Nokia's negative
+    /// codes; every other key keeps the value it has without it.
+    #[test]
+    fn standard_nav_keys_are_negative() {
+        assert_eq!(midp_key_code(KeyCode::UP, true), STD_KEY_UP);
+        assert_eq!(midp_key_code(KeyCode::DOWN, true), STD_KEY_DOWN);
+        assert_eq!(midp_key_code(KeyCode::LEFT, true), STD_KEY_LEFT);
+        assert_eq!(midp_key_code(KeyCode::RIGHT, true), STD_KEY_RIGHT);
+        assert_eq!(midp_key_code(KeyCode::OK, true), STD_KEY_FIRE);
+        // Digits are ASCII on either convention.
+        assert_eq!(midp_key_code(KeyCode::NUM5, true), 53);
+        assert_eq!(midp_key_code(KeyCode::NUM5, false), 53);
+        // Without it, the d-pad stays on SK-VM's positive table.
+        assert_eq!(midp_key_code(KeyCode::UP, false), MIDPKeyCode::UP as i32);
+    }
 
     /// The send key reaches an SK-VM title as the handset's own code, 190, and
     /// a code read back from a title resolves to it again.
