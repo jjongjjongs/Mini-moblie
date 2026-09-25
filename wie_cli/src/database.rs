@@ -79,35 +79,8 @@ impl wie_backend::DatabaseRepository for DatabaseRepository {
             &sanitized_app_id
         };
 
-        let root = self.base_path.join(app_id).join("db");
-        let Ok(entries) = fs::read_dir(root) else {
-            return Vec::new();
-        };
-
         let mut names = Vec::new();
-
-        for entry in entries.filter_map(|entry| entry.ok()) {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-
-            let has_record = fs::read_dir(&path)
-                .ok()
-                .into_iter()
-                .flatten()
-                .filter_map(|record| record.ok())
-                .any(|record| record.path().is_file() && record.file_name().to_str().is_some_and(|name| name.parse::<RecordId>().is_ok()));
-
-            if !has_record {
-                continue;
-            }
-
-            if let Ok(name) = entry.file_name().into_string() {
-                names.push(name);
-            }
-        }
-
+        collect_stores(&self.base_path.join(app_id).join("db"), "", 0, &mut names);
         names.sort();
         names
     }
@@ -121,6 +94,51 @@ impl wie_backend::DatabaseRepository for DatabaseRepository {
             .flatten()
             .filter_map(|record| record.ok())
             .any(|record| record.path().is_file() && record.file_name().to_str().is_some_and(|name| name.parse::<RecordId>().is_ok()))
+    }
+}
+
+/// Whether a directory directly holds a record, which is what makes it a store
+/// rather than a step on the way to one.
+fn directory_holds_a_record(dir: &std::path::Path) -> bool {
+    fs::read_dir(dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|record| record.ok())
+        .any(|record| record.path().is_file() && record.file_name().to_str().is_some_and(|name| name.parse::<RecordId>().is_ok()))
+}
+
+/// Every store rooted under `dir`, by the name a title opens it with, including
+/// stores saved under a nested name like `file/data` (초밥의달인3) that sit a
+/// level below the namespace. Each directory holding a record is named by its
+/// path from the root joined with `/`; an intermediate directory that holds no
+/// record of its own is only a step on the way to a name and is not listed.
+fn collect_stores(dir: &std::path::Path, prefix: &str, depth: usize, names: &mut Vec<String>) {
+    const MAX_DEPTH: usize = 16;
+    if depth >= MAX_DEPTH {
+        return;
+    }
+
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries.filter_map(|entry| entry.ok()) {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let Ok(component) = entry.file_name().into_string() else {
+            continue;
+        };
+        let name = if prefix.is_empty() { component } else { format!("{prefix}/{component}") };
+
+        if directory_holds_a_record(&path) {
+            names.push(name.clone());
+        }
+
+        collect_stores(&path, &name, depth + 1, names);
     }
 }
 

@@ -553,6 +553,40 @@ mod test {
         })
     }
 
+    /// A store saved under a nested name is offered by listRecordStores, which
+    /// is how a load screen that enumerates saves finds it.
+    ///
+    /// 초밥의달인3 saves under `file/data` and its load screen lists the stores.
+    /// The listing once dropped any name with a slash, so the save was written
+    /// and persisted but never shown, and the slots read empty after a restart.
+    #[test]
+    fn a_store_saved_under_a_nested_name_is_listed() -> Result<()> {
+        run_jvm_test(Box::new([get_protos().into()]), |jvm| async move {
+            let name: ClassInstanceRef<String> = JavaLangString::from_rust_string(&jvm, "file/data").await?.into();
+            let store: ClassInstanceRef<RecordStore> = jvm
+                .invoke_static(
+                    "javax/microedition/rms/RecordStore",
+                    "openRecordStore",
+                    "(Ljava/lang/String;Z)Ljavax/microedition/rms/RecordStore;",
+                    (name, true),
+                )
+                .await?;
+
+            let mut data = jvm.instantiate_array("B", 1).await?;
+            jvm.store_array(&mut data, 0, [7i8]).await?;
+            let _: i32 = jvm.invoke_virtual(&store, "addRecord", "([BII)I", (data, 0, 1)).await?;
+
+            let listed: ClassInstanceRef<Array<String>> = jvm
+                .invoke_static("javax/microedition/rms/RecordStore", "listRecordStores", "()[Ljava/lang/String;", ())
+                .await?;
+            assert_eq!(jvm.array_length(&listed).await?, 1);
+            let first: ClassInstanceRef<String> = jvm.load_array(&listed, 0, 1).await?.pop().unwrap();
+            assert_eq!(JavaLangString::to_rust_string(&jvm, &first).await?.as_str(), "file/data");
+
+            Ok(())
+        })
+    }
+
     #[test]
     fn delete_record_store_removes_it_from_the_listing() -> Result<()> {
         run_jvm_test(Box::new([get_protos().into()]), |jvm| async move {

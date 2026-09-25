@@ -48,12 +48,45 @@ impl AndroidDatabaseRepository {
             &sanitized_app_id
         };
 
-        let root = self.base_path.join(app_id);
-        let Ok(entries) = fs::read_dir(root) else {
-            return Vec::new();
-        };
-
         let mut names = Vec::new();
+        Self::collect_stores(&self.base_path.join(app_id), "", 0, &mut names);
+        names.sort();
+        names
+    }
+
+    /// Whether a directory directly holds a record, which is what makes it a
+    /// store rather than a step on the way to one.
+    fn directory_holds_a_record(dir: &std::path::Path) -> bool {
+        fs::read_dir(dir)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|record| record.ok())
+            .any(|record| record.path().is_file() && record.file_name().to_str().is_some_and(|name| name.parse::<RecordId>().is_ok()))
+    }
+
+    /// Every store rooted under `dir`, by the name a title opens it with.
+    ///
+    /// A store name is free-form and may carry a slash - 초밥의달인3 keeps its
+    /// save in one called `file/data` - so a store is not always a direct child
+    /// of the application's namespace: it can be nested a level down, under an
+    /// intermediate directory that is only part of the name and holds no record
+    /// of its own. Walking the tree and naming every directory that holds a
+    /// record (joined back with `/`) is what lets `listDataBases` see such a
+    /// store, so a save written under a nested name is offered on the load
+    /// screen rather than passed over. The reference keeps the same names in an
+    /// explicit `rms/.index`; this reads them back off the tree instead.
+    fn collect_stores(dir: &std::path::Path, prefix: &str, depth: usize, names: &mut Vec<String>) {
+        // A save tree is a handful of levels at most; the bound only stops a
+        // crafted or corrupt tree from recursing without end.
+        const MAX_DEPTH: usize = 16;
+        if depth >= MAX_DEPTH {
+            return;
+        }
+
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
 
         for entry in entries.filter_map(|entry| entry.ok()) {
             let path = entry.path();
@@ -61,27 +94,17 @@ impl AndroidDatabaseRepository {
                 continue;
             }
 
-            // A direct database directory contains numeric record files.
-            // This rejects an intermediate directory belonging only to a
-            // nested logical name such as "foo/bar".
-            let has_record = fs::read_dir(&path)
-                .ok()
-                .into_iter()
-                .flatten()
-                .filter_map(|record| record.ok())
-                .any(|record| record.path().is_file() && record.file_name().to_str().is_some_and(|name| name.parse::<RecordId>().is_ok()));
-
-            if !has_record {
+            let Ok(component) = entry.file_name().into_string() else {
                 continue;
+            };
+            let name = if prefix.is_empty() { component } else { format!("{prefix}/{component}") };
+
+            if Self::directory_holds_a_record(&path) {
+                names.push(name.clone());
             }
 
-            if let Ok(name) = entry.file_name().into_string() {
-                names.push(name);
-            }
+            Self::collect_stores(&path, &name, depth + 1, names);
         }
-
-        names.sort();
-        names
     }
 }
 
@@ -198,7 +221,7 @@ mod tests {
     use super::AndroidDatabaseRepository;
 
     #[test]
-    fn database_list_returns_direct_database_and_skips_nested_parent() {
+    fn database_list_returns_direct_and_nested_stores_but_not_bare_parents() {
         use std::{
             fs,
             time::{SystemTime, UNIX_EPOCH},
@@ -213,14 +236,16 @@ mod tests {
         fs::create_dir_all(&direct).unwrap();
         fs::write(direct.join("0"), b"metadata").unwrap();
 
-        // This represents logical name "parent/child". The root-level
-        // "parent" directory is only a path component, not a database.
+        // Logical name "parent/child": a store saved under a nested name, the
+        // way 초밥의달인3 saves under "file/data". The store is listed by its
+        // full name; the "parent" directory above it, which holds no record of
+        // its own, is not - it is only a step on the way to the name.
         let nested = base.join("test-aid").join("parent").join("child");
         fs::create_dir_all(&nested).unwrap();
         fs::write(nested.join("0"), b"metadata").unwrap();
 
         let names = repository.list_databases("test-aid");
-        assert_eq!(names, vec!["root".to_string()]);
+        assert_eq!(names, vec!["parent/child".to_string(), "root".to_string()]);
 
         fs::remove_dir_all(base).unwrap();
     }

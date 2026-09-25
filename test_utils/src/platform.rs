@@ -200,16 +200,17 @@ impl DatabaseRepository for MemoryDatabaseRepository {
     async fn list(&self, app_id: &str) -> Vec<String> {
         let store = self.store.lock();
         let mut names: Vec<String> = store
-            .keys()
-            .filter_map(|(stored_app_id, name)| {
-                if stored_app_id != app_id {
+            .iter()
+            .filter_map(|((stored_app_id, name), records)| {
+                if stored_app_id != app_id || records.is_empty() {
                     return None;
                 }
 
-                // Android/CLI normalize a guest-leading slash away. Preserve
-                // that observable storage model in the in-memory repository.
+                // Android/CLI normalize a guest-leading slash away and list a
+                // store by the name it holds records under - nested names
+                // (초밥의달인3's `file/data`) included. Mirror that here.
                 let name = name.trim_start_matches('/');
-                if name.is_empty() || name.contains('/') {
+                if name.is_empty() {
                     return None;
                 }
 
