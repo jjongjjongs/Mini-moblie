@@ -439,9 +439,9 @@ mod test {
                     JavaFieldProto::new("hideCount", "I", Default::default()),
                     JavaFieldProto::new("keyCount", "I", Default::default()),
                     JavaFieldProto::new("notifyCount", "I", Default::default()),
-                    /// Whether this card takes the key, the way a card with a
-                    /// focused text box does, or lets it fall through, the way
-                    /// the input-mode indicator does.
+                    // Whether this card takes the key, the way a card with a
+                    // focused text box does, or lets it fall through, the way
+                    // the input-mode indicator does.
                     JavaFieldProto::new("takesKeys", "Z", Default::default()),
                 ],
                 access_flags: Default::default(),

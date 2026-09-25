@@ -90,3 +90,25 @@ impl MediaPlayer {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod test {
+    use alloc::boxed::Box;
+
+    use jvm::ClassInstanceRef;
+    use test_utils::run_jvm_test;
+    use wie_util::Result;
+
+    use crate::get_protos;
+
+    #[test]
+    fn media_player_class_resolves_and_constructs() -> Result<()> {
+        run_jvm_test(Box::new([wie_midp::get_protos().into(), get_protos().into()]), |jvm| async move {
+            let player: ClassInstanceRef<()> = jvm.new_class("mmpp/media/MediaPlayer", "()V", ()).await?.into();
+            assert!(!player.is_null());
+            let _: () = jvm.invoke_virtual(&player, "start", "()V", ()).await?;
+            let _: () = jvm.invoke_virtual(&player, "stop", "()V", ()).await?;
+            Ok::<(), jvm::JavaError>(())
+        })
+    }
+}
