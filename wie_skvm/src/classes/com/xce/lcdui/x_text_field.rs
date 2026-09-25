@@ -7,7 +7,7 @@ use java_class_proto::{JavaFieldProto, JavaMethodProto};
 use java_runtime::classes::java::lang::String;
 use jvm::{ClassInstanceRef, Jvm, Result as JvmResult, runtime::JavaLangString};
 
-use wie_backend::InputMethodOutput;
+use wie_backend::{Event, InputMethodOutput};
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 use wie_midp::classes::{
     javax::microedition::lcdui::{Canvas, Graphics},
@@ -281,6 +281,14 @@ impl XTextField {
         let text = JavaLangString::from_rust_string(jvm, &text).await?;
         jvm.put_field(&mut this, "text", "Ljava/lang/String;", text).await?;
         jvm.put_field(&mut this, "__wieXTextFieldComposition", "I", composition).await?;
+
+        // The field draws itself into the title's Canvas, but a title that hands
+        // input off to this field stops painting and waits - it treats the field
+        // as the handset's own widget, which redraws itself as the player types.
+        // Ask for a repaint so the new text actually reaches the screen.
+        // (러브다이어리 sits on its name-entry screen with the paint loop idle;
+        // without this the typed name never showed.)
+        context.system().event_queue().push(Event::Redraw);
 
         Ok(())
     }
