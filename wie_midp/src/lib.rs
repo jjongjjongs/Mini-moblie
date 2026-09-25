@@ -6,8 +6,12 @@ mod fields;
 
 use wie_jvm_support::WieJavaClassProto;
 
-pub fn get_protos() -> [WieJavaClassProto; 38] {
+pub fn get_protos() -> [WieJavaClassProto; 42] {
     [
+        classes::mmpp::media::BackLight::as_proto(),
+        classes::mmpp::media::MediaPlayer::as_proto(),
+        classes::mmpp::media::Vibration::as_proto(),
+        classes::mmpp::microedition::lcdui::GraphicsX::as_proto(),
         classes::javax::microedition::io::Connection::as_proto(),
         classes::javax::microedition::io::ConnectionNotFoundException::as_proto(),
         classes::javax::microedition::io::Connector::as_proto(),

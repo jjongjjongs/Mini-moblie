@@ -88,7 +88,7 @@ impl Graphics {
     pub fn as_proto() -> WieJavaClassProto {
         WieJavaClassProto {
             name: "javax/microedition/lcdui/Graphics",
-            parent_class: Some("java/lang/Object"),
+            parent_class: Some("mmpp/microedition/lcdui/GraphicsX"),
             interfaces: vec![],
             methods: vec![
                 JavaMethodProto::new("<init>", "(Ljavax/microedition/lcdui/Image;)V", Self::init_with_image, Default::default()),
@@ -156,7 +156,9 @@ impl Graphics {
     async fn init_with_image(jvm: &Jvm, _: &mut WieJvmContext, mut this: ClassInstanceRef<Self>, image: ClassInstanceRef<Image>) -> JvmResult<()> {
         tracing::debug!("javax.microedition.lcdui.Graphics::<init>({this:?}, {image:?})");
 
-        let _: () = jvm.invoke_special(&this, "java/lang/Object", "<init>", "()V", ()).await?;
+        let _: () = jvm
+            .invoke_special(&this, "mmpp/microedition/lcdui/GraphicsX", "<init>", "()V", ())
+            .await?;
 
         let width: i32 = jvm.invoke_virtual(&image, "getWidth", "()I", ()).await?;
         let height: i32 = jvm.invoke_virtual(&image, "getHeight", "()I", ()).await?;

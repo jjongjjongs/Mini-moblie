@@ -6,9 +6,8 @@ pub mod classes;
 
 use wie_jvm_support::WieJavaClassProto;
 
-pub fn get_protos() -> [WieJavaClassProto; 71] {
+pub fn get_protos() -> [WieJavaClassProto; 70] {
     [
-        crate::classes::mmpp::media::MediaPlayer::as_proto(),
         crate::classes::org::kwis::msf::io::Message::as_proto(),
         crate::classes::org::kwis::msf::io::Network::as_proto(),
         crate::classes::org::kwis::msf::io::SchemeNotFoundException::as_proto(),

@@ -103,7 +103,7 @@ mod test {
 
     #[test]
     fn media_player_class_resolves_and_constructs() -> Result<()> {
-        run_jvm_test(Box::new([wie_midp::get_protos().into(), get_protos().into()]), |jvm| async move {
+        run_jvm_test(Box::new([get_protos().into()]), |jvm| async move {
             let player: ClassInstanceRef<()> = jvm.new_class("mmpp/media/MediaPlayer", "()V", ()).await?.into();
             assert!(!player.is_null());
             let _: () = jvm.invoke_virtual(&player, "start", "()V", ()).await?;
