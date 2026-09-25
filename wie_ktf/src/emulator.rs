@@ -194,6 +194,7 @@ impl KtfEmulator {
         system.set_title_draws_sideways(title_quirks(TitlePlatform::Ktf, aid).drawn_sideways);
         system.set_title_expects_annunciator(title_quirks(TitlePlatform::Ktf, aid).expects_annunciator);
         system.set_title_annunciator_rows(title_quirks(TitlePlatform::Ktf, aid).annunciator_rows);
+        system.set_title_clears_screen_each_paint(title_quirks(TitlePlatform::Ktf, aid).clears_screen_each_paint);
 
         for (path, data) in files {
             let path = packaged_name(path).unwrap_or(path);

@@ -132,6 +132,19 @@ const fn sideways() -> TitleQuirks {
     }
 }
 
+/// A title that needs a blank surface before each paint and asks nothing else
+/// of the panel. See [`TitleQuirks::clears_screen_each_paint`].
+const fn clears_frame() -> TitleQuirks {
+    TitleQuirks {
+        screen_size: None,
+        expects_annunciator: false,
+        annunciator_rows: None,
+        drawn_sideways: false,
+        clip_includes_far_edge: false,
+        clears_screen_each_paint: true,
+    }
+}
+
 /// Every title this runtime knows something about, and what it knows.
 ///
 /// The reasoning behind each entry is at the function that reads it - the
@@ -251,6 +264,16 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // to row 311 and stayed there under the gameplay that followed, which is
     // the leftover menu text showing below the shop.
     (TitlePlatform::Ktf, "01025922", panel(176, 220)),
+    // 초밥의달인3 (KTF PD004152): a Java title whose screens draw inside a
+    // 240x296 clip - the bottom 24 rows are the handset's soft-key strip, which
+    // it never touches - while some earlier screen fills the whole 240x320 with
+    // its orange background. Our MIDP screen buffer keeps that orange under the
+    // 24-row strip the later screens leave alone, so its load screen and menus
+    // sat over an orange band. It redraws its screen whole every paint, so
+    // wiping the buffer first costs it nothing and leaves that strip black
+    // instead of a stale frame. The panel stays 240x320: the title clips to the
+    // full height on other screens, so it is not drawn for a shorter one.
+    (TitlePlatform::Ktf, "010346A2", clears_frame()),
     // 소울게이트: takes a 240x320 screen, composes every frame into a 320x240
     // off-screen buffer of its own, and copies that onto the screen a quarter
     // turn clockwise - the handset was meant to be turned sideways to play it.
