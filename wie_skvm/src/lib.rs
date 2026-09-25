@@ -5,7 +5,7 @@ use wie_jvm_support::WieJavaClassProto;
 
 pub mod classes;
 
-pub fn get_protos() -> [WieJavaClassProto; 21] {
+pub fn get_protos() -> [WieJavaClassProto; 23] {
     [
         classes::m::A3::as_proto(),
         classes::m::V3::as_proto(),
@@ -24,6 +24,8 @@ pub fn get_protos() -> [WieJavaClassProto; 21] {
         classes::com::xce::io::FileInputStream::as_proto(),
         classes::com::xce::io::FileOutputStream::as_proto(),
         classes::com::xce::io::XFile::as_proto(),
+        classes::com::xce::lcdui::TextComponent::as_proto(),
+        classes::com::xce::lcdui::TextComponentHandler::as_proto(),
         classes::com::xce::lcdui::Toolkit::as_proto(),
         classes::com::xce::lcdui::XDisplay::as_proto(),
         classes::com::xce::lcdui::XTextField::as_proto(),
