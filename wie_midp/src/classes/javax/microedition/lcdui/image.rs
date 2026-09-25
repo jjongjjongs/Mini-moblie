@@ -115,11 +115,18 @@ impl Image {
 
         let bytes_per_pixel = 4;
 
+        // A blank mutable image starts opaque white, as MIDP requires ("all
+        // pixels ... are white"). Left at zero it was transparent black, so a
+        // title that made an off-screen buffer and painted only part of it -
+        // 미니스포츠클럽 renders its scene into the lower rows of a full-screen
+        // BackImg - blitted the untouched rows as transparent, and the previous
+        // frame (its menu, a stale logo) showed through the gap. Opaque white
+        // covers it, the way a handset does.
         Self::create_image_instance(
             jvm,
             width as _,
             height as _,
-            &vec![0; (width * height * bytes_per_pixel) as usize],
+            &vec![0xff; (width * height * bytes_per_pixel) as usize],
             bytes_per_pixel as _,
         )
         .await
