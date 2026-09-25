@@ -135,6 +135,12 @@ impl XTextField {
 
         jvm.put_field(&mut this, "__wieXTextFieldFocused", "Z", focus).await?;
 
+        // Tell the input method which field is focused. A title that routes its
+        // keys through TextComponentHandler without handing it a component -
+        // 댄스배틀오디션 does - is typing into the field it focused, and the
+        // handler needs to know which one that is.
+        super::TextComponentHandler::set_focused_field(jvm, &this, focus).await?;
+
         Ok(())
     }
 

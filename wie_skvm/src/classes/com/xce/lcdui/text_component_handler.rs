@@ -120,6 +120,15 @@ impl TextComponentHandler {
                     "Lcom/xce/lcdui/TextComponentHandler;",
                     java_constants::FieldAccessFlags::STATIC,
                 ),
+                // The XTextField that last took focus, or null. A title that
+                // draws the platform's own field routes its keys through the
+                // handler without ever handing it a component - the field it
+                // focused is the one the keys are for. 댄스배틀오디션 is one.
+                JavaFieldProto::new(
+                    "__wieFocusedField",
+                    "Lcom/xce/lcdui/XTextField;",
+                    java_constants::FieldAccessFlags::STATIC,
+                ),
                 // The component the input method edits, or null when a title
                 // has turned its field off.
                 JavaFieldProto::new("__wieComponent", "Ljava/lang/Object;", Default::default()),
@@ -221,6 +230,18 @@ impl TextComponentHandler {
 
         let component: ClassInstanceRef<TextComponent> = jvm.get_field(&this, "__wieComponent", "Ljava/lang/Object;").await?;
         if component.is_null() {
+            // No component was handed over, so the keys are for the field a
+            // title focused. Its own keyPressed is the shared editor, Hangul
+            // and all - the same one an XTextField typed with is reached
+            // directly. What the field has no use for is left for the game, so
+            // its OK still confirms the name.
+            let field: ClassInstanceRef<()> = jvm
+                .get_static_field("com/xce/lcdui/TextComponentHandler", "__wieFocusedField", "Lcom/xce/lcdui/XTextField;")
+                .await?;
+            if !field.is_null() && Self::is_field_key(key_code) {
+                let _: () = jvm.invoke_virtual(&field, "keyPressed", "(I)V", (key_code,)).await?;
+                return Ok(true);
+            }
             return Ok(false);
         }
 
@@ -372,6 +393,39 @@ impl TextComponentHandler {
         } else {
             character as u16
         }
+    }
+
+    /// Whether the key is one the input method types with, rather than one the
+    /// game reads for itself. The digits, `*`, `#`, CLEAR and the two side
+    /// keys are the field's; OK, the soft keys, and up and down are the game's,
+    /// so its name screen can still confirm and move between rows.
+    fn is_field_key(key_code: i32) -> bool {
+        (48..=57).contains(&key_code)
+            || matches!(
+                MIDPKeyCode::from_raw(key_code),
+                Some(MIDPKeyCode::CLEAR | MIDPKeyCode::LEFT | MIDPKeyCode::RIGHT | MIDPKeyCode::KEY_STAR | MIDPKeyCode::KEY_POUND)
+            )
+    }
+
+    /// Records the field a title focused, or clears it when that field loses
+    /// focus, so keys routed through the handler with no component attached
+    /// reach the field the title is drawing. Called from `XTextField.setFocus`.
+    pub(crate) async fn set_focused_field<T>(jvm: &Jvm, field: &ClassInstanceRef<T>, focused: bool) -> JvmResult<()> {
+        const CLASS: &str = "com/xce/lcdui/TextComponentHandler";
+        const NAME: &str = "__wieFocusedField";
+        const DESC: &str = "Lcom/xce/lcdui/XTextField;";
+
+        if focused {
+            return jvm.put_static_field(CLASS, NAME, DESC, field.clone()).await;
+        }
+
+        // Only the field that is still the registered one clears it: a field
+        // losing focus after a newer one took it must not unregister the newer.
+        let current: ClassInstanceRef<()> = jvm.get_static_field(CLASS, NAME, DESC).await?;
+        if !current.is_null() && current.identity() == field.identity() {
+            jvm.put_static_field(CLASS, NAME, DESC, ClassInstanceRef::<()>::new(None)).await?;
+        }
+        Ok(())
     }
 }
 
@@ -644,6 +698,48 @@ mod test {
             assert_eq!(text(&jvm, &component).await?, "a");
 
             // OK is the game's, not the field's.
+            assert!(!press(&jvm, &handler, OK).await?);
+
+            Ok(())
+        })
+    }
+
+    /// A title that focuses an XTextField and routes its keys through the
+    /// handler without attaching a component - 댄스배틀오디션 - types into that
+    /// focused field, Hangul and all: 4 then 1 make 기 in the field it opened.
+    #[test]
+    fn keys_reach_the_focused_xtextfield_with_no_component() -> Result<()> {
+        const KEY_4: i32 = 52;
+        const KEY_1: i32 = 49;
+
+        run_jvm_test(protos(), |jvm| async move {
+            let empty = JavaLangString::from_rust_string(&jvm, "").await?;
+            let field: ClassInstanceRef<()> = jvm
+                .new_class(
+                    "com/xce/lcdui/XTextField",
+                    "(Ljava/lang/String;IILjavax/microedition/lcdui/Canvas;)V",
+                    (empty, 8i32, 0i32, ClassInstanceRef::<()>::new(None)),
+                )
+                .await?
+                .into();
+            let _: () = jvm.invoke_virtual(&field, "setFocus", "(Z)V", (true,)).await?;
+
+            let handler: ClassInstanceRef<()> = jvm
+                .invoke_static(
+                    "com/xce/lcdui/TextComponentHandler",
+                    "getTextComponentHandler",
+                    "()Lcom/xce/lcdui/TextComponentHandler;",
+                    (),
+                )
+                .await?;
+
+            assert!(press(&jvm, &handler, KEY_4).await?);
+            assert!(press(&jvm, &handler, KEY_1).await?);
+
+            let typed = jvm.invoke_virtual(&field, "getText", "()Ljava/lang/String;", ()).await?;
+            assert_eq!(JavaLangString::to_rust_string(&jvm, &typed).await?, "기");
+
+            // OK is still the game's to confirm the name with.
             assert!(!press(&jvm, &handler, OK).await?);
 
             Ok(())
