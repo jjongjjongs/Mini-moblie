@@ -138,7 +138,14 @@ impl Image {
         let name = JavaLangString::to_rust_string(jvm, &name).await?;
 
         let class_loader = jvm.current_class_loader().await?;
-        let stream = JavaLangClassLoader::get_resource_as_stream(jvm, &class_loader, &name).await?.unwrap();
+        // A resource the title asks for by name may not be in the jar. The
+        // spec answers that with an IOException, which titles catch and carry
+        // on from - 로맨스소드 ships only 120- and 176-wide title logos and
+        // asks for a 240 one on a 240 screen, then prints the trace and keeps
+        // going. Panicking instead took the whole emulator down.
+        let Some(stream) = JavaLangClassLoader::get_resource_as_stream(jvm, &class_loader, &name).await? else {
+            return Err(jvm.exception("java/io/IOException", &alloc::format!("resource not found: {name}")).await);
+        };
 
         let image_data = JavaIoInputStream::read_until_end(jvm, &stream).await?;
         let image_data_len = image_data.len() as i32;
