@@ -348,7 +348,7 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // shorter panel leaves the previous screen showing between its content and
     // the status bar); 180 wide keeps the right edge its 176-wide neighbour
     // clipped. Keyed by DD-ProgName, not the archive filename.
-    (TitlePlatform::Skt, "0052018663", panel(180, 220)),
+    (TitlePlatform::Skt, "0052018663", panel(200, 220)),
     // 크레이지버스 (COMO2D): draws a fixed-size bus interior centred on the
     // Canvas and fills the rest with its green (`fillRect(0, 0, lcdW, lcdH)`
     // then `drawImage(busBase, centerX, centerY, HCENTER|VCENTER)`). Its
