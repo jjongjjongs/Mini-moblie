@@ -357,9 +357,13 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // it with no clamp, so on the 240x320 default its menu, logo, character art
     // and stat box scattered to the corners of the larger screen with wide gaps
     // between. It is a 176-wide GAMEVIL title (its title art centres with the
-    // ~13% margin a 176 panel leaves in 240), so 176x220 packs the layout back
-    // together.
-    (TitlePlatform::Skt, "0054401421", panel(176, 220)),
+    // ~13% margin a 176 panel leaves in 240). Its height is the 200 its own code
+    // counts in: it renders each screen into a `createImage(width, height)`
+    // buffer and blits that whole buffer every frame, and it fills only 200 rows
+    // of it, so a taller panel left the top rows the render never reached
+    // showing the previous screen (its menu, a stale logo) through the gap.
+    // 176x200 makes the buffer exactly the height the game paints.
+    (TitlePlatform::Skt, "0054401421", panel(176, 200)),
     // 물가에돌팅기기IQ (GAMEVIL 2006): the same GAMEVIL framework, reading
     // `XDisplay.width`/`height2` and placing its title, menu, stage bar and
     // puzzle field from the screen edges. On the 240x320 default the menu ran
