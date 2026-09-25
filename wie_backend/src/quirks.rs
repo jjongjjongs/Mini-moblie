@@ -352,6 +352,20 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // title and cursor scattered across the screen at coordinates meant for a
     // narrow one. 128x160 is the panel the 160-row layout is drawn for.
     (TitlePlatform::Skt, "0053919219", panel(128, 160)),
+    // 미니스포츠클럽 (GAMEVIL, Mini): its GAMEVIL framework reads the screen from
+    // `com.xce.lcdui.XDisplay.width`/`height2` and lays every element out against
+    // it with no clamp, so on the 240x320 default its menu, logo, character art
+    // and stat box scattered to the corners of the larger screen with wide gaps
+    // between. It is a 176-wide GAMEVIL title (its title art centres with the
+    // ~13% margin a 176 panel leaves in 240), so 176x220 packs the layout back
+    // together.
+    (TitlePlatform::Skt, "0054401421", panel(176, 220)),
+    // 물가에돌팅기기IQ (GAMEVIL 2006): the same GAMEVIL framework, reading
+    // `XDisplay.width`/`height2` and placing its title, menu, stage bar and
+    // puzzle field from the screen edges. On the 240x320 default the menu ran
+    // off the right, the bars pinned to the far edges and the field sat small in
+    // the middle. 176x220 is the panel the layout is measured for.
+    (TitlePlatform::Skt, "0053630031", panel(176, 220)),
 ];
 
 /// What to do differently for the title `aid` on `platform`.
