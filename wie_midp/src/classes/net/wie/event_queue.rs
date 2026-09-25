@@ -108,11 +108,18 @@ pub const STD_KEY_DOWN: i32 = -2;
 pub const STD_KEY_LEFT: i32 = -3;
 pub const STD_KEY_RIGHT: i32 = -4;
 pub const STD_KEY_FIRE: i32 = -5;
+/// The two soft keys and the clear key sit just past the d-pad on the same
+/// scale - Nokia's -6/-7/-8, which the J2ME world took up with the rest.
+/// 호국전기이순신 reads its 뒤로가기(clear) as -8 and drops the positive 8 we
+/// used to send, so its back button did nothing.
+pub const STD_KEY_SOFT1: i32 = -6;
+pub const STD_KEY_SOFT2: i32 = -7;
+pub const STD_KEY_CLEAR: i32 = -8;
 
 /// The code a MIDP `Canvas` hears for `keycode`, in whichever convention this
-/// platform uses. `standard` picks the negative Nokia nav codes over SK-VM's
-/// positive table; every non-nav key (the digits, `*`, `#`, the soft and call
-/// keys) is the same either way.
+/// platform uses. `standard` picks the negative Nokia codes - the d-pad, the
+/// two soft keys and clear - over SK-VM's positive table; every other key (the
+/// digits, `*`, `#`, the call keys) is the same either way.
 pub fn midp_key_code(keycode: KeyCode, standard: bool) -> i32 {
     if standard {
         match keycode {
@@ -121,6 +128,9 @@ pub fn midp_key_code(keycode: KeyCode, standard: bool) -> i32 {
             KeyCode::LEFT => return STD_KEY_LEFT,
             KeyCode::RIGHT => return STD_KEY_RIGHT,
             KeyCode::OK => return STD_KEY_FIRE,
+            KeyCode::LEFT_SOFT_KEY => return STD_KEY_SOFT1,
+            KeyCode::RIGHT_SOFT_KEY => return STD_KEY_SOFT2,
+            KeyCode::CLEAR => return STD_KEY_CLEAR,
             _ => {}
         }
     }
@@ -559,7 +569,9 @@ impl EventQueue {
 mod tests {
     use wie_backend::KeyCode;
 
-    use super::{MIDPKeyCode, STD_KEY_DOWN, STD_KEY_FIRE, STD_KEY_LEFT, STD_KEY_RIGHT, STD_KEY_UP, midp_key_code};
+    use super::{
+        MIDPKeyCode, STD_KEY_CLEAR, STD_KEY_DOWN, STD_KEY_FIRE, STD_KEY_LEFT, STD_KEY_RIGHT, STD_KEY_SOFT1, STD_KEY_SOFT2, STD_KEY_UP, midp_key_code,
+    };
 
     /// On the standard convention the d-pad reaches a title as Nokia's negative
     /// codes; every other key keeps the value it has without it.
@@ -570,11 +582,15 @@ mod tests {
         assert_eq!(midp_key_code(KeyCode::LEFT, true), STD_KEY_LEFT);
         assert_eq!(midp_key_code(KeyCode::RIGHT, true), STD_KEY_RIGHT);
         assert_eq!(midp_key_code(KeyCode::OK, true), STD_KEY_FIRE);
+        assert_eq!(midp_key_code(KeyCode::LEFT_SOFT_KEY, true), STD_KEY_SOFT1);
+        assert_eq!(midp_key_code(KeyCode::RIGHT_SOFT_KEY, true), STD_KEY_SOFT2);
+        assert_eq!(midp_key_code(KeyCode::CLEAR, true), STD_KEY_CLEAR);
         // Digits are ASCII on either convention.
         assert_eq!(midp_key_code(KeyCode::NUM5, true), 53);
         assert_eq!(midp_key_code(KeyCode::NUM5, false), 53);
-        // Without it, the d-pad stays on SK-VM's positive table.
+        // Without it, the keys stay on SK-VM's positive table.
         assert_eq!(midp_key_code(KeyCode::UP, false), MIDPKeyCode::UP as i32);
+        assert_eq!(midp_key_code(KeyCode::CLEAR, false), MIDPKeyCode::CLEAR as i32);
     }
 
     /// The send key reaches an SK-VM title as the handset's own code, 190, and
