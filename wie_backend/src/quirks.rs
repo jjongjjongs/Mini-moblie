@@ -336,6 +336,11 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // still holds the fixed field, so at 176x220 the battle fills the screen
     // and the field's centring leaves only a few pixels each side.
     (TitlePlatform::Skt, "0047375473", panel(176, 220)),
+    // 컴투스프로야구2 (SK-VM): draws a fixed 176x220 screen and centres it on
+    // `XDisplay.width/height`, so on the 240x320 default it sits at (32, 50)
+    // with wide white borders (`refresh(32, 50, 176, 220)`). Given the 176x220
+    // it was drawn for, the centring offset is zero and it fills the screen.
+    (TitlePlatform::Skt, "0050230368", panel(176, 220)),
     // 크레이지버스 (COMO2D): draws a fixed-size bus interior centred on the
     // Canvas and fills the rest with its green (`fillRect(0, 0, lcdW, lcdH)`
     // then `drawImage(busBase, centerX, centerY, HCENTER|VCENTER)`). Its
