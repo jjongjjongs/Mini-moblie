@@ -68,9 +68,10 @@ pub struct System {
     /// Whether this title reads its keys as the SK-VM handset's positive
     /// scancodes. See [`System::title_keys_as_skvm_scancodes`].
     title_keys_as_skvm_scancodes: Arc<AtomicBool>,
-    /// Whether the screen buffer starts black rather than the white a MIDP
-    /// mutable image starts as. See [`System::screen_starts_black`].
-    screen_starts_black: Arc<AtomicBool>,
+    /// Set once the title has drawn through the SK-VM graphics path
+    /// (`com.skt.m.Graphics2D`), which keeps its own translate and clip on the
+    /// screen graphics between frames. See [`System::title_owns_graphics_state`].
+    title_owns_graphics_state: Arc<AtomicBool>,
 }
 
 impl System {
@@ -118,7 +119,7 @@ impl System {
             displayable_reserved_rows: Arc::new(AtomicU32::new(0)),
             midp_uses_standard_key_codes: Arc::new(AtomicBool::new(false)),
             title_keys_as_skvm_scancodes: Arc::new(AtomicBool::new(false)),
-            screen_starts_black: Arc::new(AtomicBool::new(false)),
+            title_owns_graphics_state: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -291,24 +292,26 @@ impl System {
         self.title_keys_as_skvm_scancodes.store(uses, Ordering::SeqCst);
     }
 
-    /// Whether the screen buffer starts black rather than the white a MIDP
-    /// mutable image starts as.
+    /// Whether the title keeps its own translate and clip on the screen graphics
+    /// between frames, so the runtime must not reset them after a paint.
     ///
-    /// The `Display`'s screen is a mutable image, which MIDP starts white.
-    /// A handset LCD starts black, and a title that composes onto it without
-    /// blanking the parts it does not draw - an SK-VM title that never calls
-    /// `com.xce.lcdui.XDisplay.clear`, and relies on the LCD being dark under
-    /// the margins its fixed layout leaves - needs the black it was written
-    /// for, or those margins show the white the buffer started as. Set for
-    /// SK-VM titles, whose vendor draw path (`com.skt.m.Graphics2D`,
-    /// `XDisplay`) is the handset's LCD, not a MIDP `Canvas` that paints its
-    /// whole surface each frame.
-    pub fn screen_starts_black(&self) -> bool {
-        self.screen_starts_black.load(Ordering::SeqCst)
+    /// An SK-VM title draws through `com.skt.m.Graphics2D` from its own loop and
+    /// leaves the screen graphics translated into its play area (Chaos블레이드
+    /// keeps it at 39,79) frame to frame, rather than re-establishing it from a
+    /// blank each paint the way a MIDP `Canvas` does. Resetting the graphics
+    /// after the paint - which a MIDP title needs, to start its next paint from
+    /// a clean origin - zeroes a translate the SK-VM title still counts on, and
+    /// its next `translate(-39,-79)/translate(39,79)` pair, meant to return to
+    /// the play area, lands at the screen origin instead. A 162x162 white fill
+    /// then sits at (0,0) as a box over the scene. Looked up in `crate::quirks`
+    /// and set by the emulator that loaded the archive; read in
+    /// `Display.handlePaintEvent`.
+    pub fn title_owns_graphics_state(&self) -> bool {
+        self.title_owns_graphics_state.load(Ordering::SeqCst)
     }
 
-    pub fn set_screen_starts_black(&self) {
-        self.screen_starts_black.store(true, Ordering::SeqCst);
+    pub fn set_title_owns_graphics_state(&self) {
+        self.title_owns_graphics_state.store(true, Ordering::SeqCst);
     }
 
     /// Whether the title lays its screens out below the handset's status strip,

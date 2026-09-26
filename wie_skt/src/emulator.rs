@@ -76,16 +76,9 @@ impl SktEmulator {
         system.set_title_clip_includes_far_edge(title_quirks(TitlePlatform::Skt, id).clip_includes_far_edge);
         system.set_title_clears_screen_each_paint(title_quirks(TitlePlatform::Skt, id).clears_screen_each_paint);
         system.set_title_keys_as_skvm_scancodes(title_quirks(TitlePlatform::Skt, id).keys_as_skvm_scancodes);
-
-        // The handset LCD an SK-VM title draws onto starts black, so the screen
-        // buffer does too. A title that composes onto it with a fixed layout and
-        // never blanks the margins - Chaos블레이드 (0027571859) centres a
-        // 162x162 field on the 240x320 screen and never calls `XDisplay.clear` -
-        // relies on that black; on the white a MIDP mutable image starts as, the
-        // rows it never draws show through white. Set for every SKT title: a
-        // MIDP one repaints its whole Canvas each frame and never sees the
-        // difference, so only the SK-VM draw path, which is the LCD itself, does.
-        system.set_screen_starts_black();
+        if title_quirks(TitlePlatform::Skt, id).owns_graphics_state {
+            system.set_title_owns_graphics_state();
+        }
 
         // An SK-VM Canvas reports sixteen rows fewer than the display - the
         // rows the handset kept for its soft-key bar - and titles add them back:

@@ -100,6 +100,11 @@ pub struct TitleQuirks {
     /// direction and back did nothing. `net.wie.CardCanvas` reads this and hands
     /// such a title the scancodes its table is keyed on instead.
     pub keys_as_skvm_scancodes: bool,
+
+    /// Whether the title keeps its own translate and clip on the screen graphics
+    /// between frames, so the runtime must not reset them after a paint. See
+    /// [`crate::System::title_owns_graphics_state`].
+    pub owns_graphics_state: bool,
 }
 
 const fn panel(width: u32, height: u32) -> TitleQuirks {
@@ -111,6 +116,7 @@ const fn panel(width: u32, height: u32) -> TitleQuirks {
         clip_includes_far_edge: false,
         clears_screen_each_paint: false,
         keys_as_skvm_scancodes: false,
+        owns_graphics_state: false,
     }
 }
 
@@ -123,6 +129,7 @@ const fn annunciator() -> TitleQuirks {
         clip_includes_far_edge: false,
         clears_screen_each_paint: false,
         keys_as_skvm_scancodes: false,
+        owns_graphics_state: false,
     }
 }
 
@@ -136,6 +143,7 @@ const fn annunciator_of(rows: u32) -> TitleQuirks {
         clip_includes_far_edge: false,
         clears_screen_each_paint: false,
         keys_as_skvm_scancodes: false,
+        owns_graphics_state: false,
     }
 }
 
@@ -148,6 +156,7 @@ const fn sideways() -> TitleQuirks {
         clip_includes_far_edge: false,
         clears_screen_each_paint: false,
         keys_as_skvm_scancodes: false,
+        owns_graphics_state: false,
     }
 }
 
@@ -162,6 +171,7 @@ const fn clears_frame() -> TitleQuirks {
         clip_includes_far_edge: false,
         clears_screen_each_paint: true,
         keys_as_skvm_scancodes: false,
+        owns_graphics_state: false,
     }
 }
 
@@ -188,6 +198,7 @@ const fn clip_includes_far_edge() -> TitleQuirks {
         clip_includes_far_edge: true,
         clears_screen_each_paint: false,
         keys_as_skvm_scancodes: false,
+        owns_graphics_state: false,
     }
 }
 
@@ -202,6 +213,22 @@ const fn skvm_scancode_keys() -> TitleQuirks {
         clip_includes_far_edge: false,
         clears_screen_each_paint: false,
         keys_as_skvm_scancodes: true,
+        owns_graphics_state: false,
+    }
+}
+
+/// A title that keeps its own translate and clip on the screen graphics between
+/// frames. See [`TitleQuirks::owns_graphics_state`].
+const fn owns_graphics_state() -> TitleQuirks {
+    TitleQuirks {
+        screen_size: None,
+        expects_annunciator: false,
+        annunciator_rows: None,
+        drawn_sideways: false,
+        clip_includes_far_edge: false,
+        clears_screen_each_paint: false,
+        keys_as_skvm_scancodes: false,
+        owns_graphics_state: true,
     }
 }
 
@@ -517,6 +544,16 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // 엑스맨(X-Men): sizes its screens from getWidth/getHeight, so it fits
     // whatever panel it is given, but was drawn for a 176x220 handset.
     (TitlePlatform::Skt, "0053594173", panel(176, 220)),
+    // Chaos블레이드 (GAMEVIL, SK-VM): draws through `com.skt.m.Graphics2D` from
+    // its own loop and keeps the screen graphics translated into its centred
+    // 162x162 play area (at 39,79) frame to frame. Resetting the graphics after
+    // each paint - which a MIDP Canvas needs - zeroed that translate from under
+    // it, and one of its `translate(-39,-79)/translate(39,79)` pairs then
+    // returned to the screen origin instead of the play area: a 162x162 white
+    // fill it lays down before compositing the scene sat at (0,0) as a box in
+    // the top-left corner the centred frame never reaches. See
+    // `System::title_owns_graphics_state`.
+    (TitlePlatform::Skt, "0027571859", owns_graphics_state()),
 ];
 
 /// What to do differently for the title `aid` on `platform`.
