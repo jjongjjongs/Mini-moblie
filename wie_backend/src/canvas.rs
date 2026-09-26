@@ -1179,6 +1179,17 @@ pub fn decode_image_with(data: &[u8], conventions: DecodeConventions) -> Result<
     };
     let mut rgba = image.into_rgba8();
 
+    // SK-VM PNGs write their `tRNS` alpha on the handset's 4-bit scale - 0
+    // transparent, 15 opaque - not PNG's own 0..255. A spec decoder reads the
+    // 15 an opaque pixel carries as 6% and draws it as a ghost. 포켓올림픽 is
+    // almost all such images (329 of them), so its whole screen came up faint.
+    // Expand the scale so 15 becomes 255 and a middling value keeps its share.
+    if png_declares_4bit_trns_alpha(data) {
+        for pixel in rgba.pixels_mut() {
+            pixel.0[3] = pixel.0[3].saturating_mul(17);
+        }
+    }
+
     if bmp_keys_out_the_sheet_colour(data) {
         for pixel in rgba.pixels_mut() {
             if pixel.0[..3] == SPRITE_SHEET_KEY {
@@ -1200,6 +1211,53 @@ pub fn decode_image_with(data: &[u8], conventions: DecodeConventions) -> Result<
         rgba.height(),
         pod_collect_to_vec(&data),
     )) as Box<_>)
+}
+
+/// Whether `data` is a palette PNG whose `tRNS` alpha is written on the SK-VM
+/// handset's 4-bit scale - 0 transparent, 15 opaque - rather than PNG's own
+/// 0..255.
+///
+/// A spec `tRNS` reaches 255 on the entries it means to leave opaque, so a
+/// palette image whose whole `tRNS` tops out at 15 is not that: its opaque
+/// entries are the 4-bit scale's own opaque, and read as 0..255 they come out
+/// at 6% - the ghost 포켓올림픽's art turned into. The maximum being 15 or less
+/// is the signature, since a binary-transparency file (one transparent index,
+/// the rest with no `tRNS` entry and so opaque) never writes a small positive
+/// value for a colour it draws.
+fn png_declares_4bit_trns_alpha(data: &[u8]) -> bool {
+    /// `\x89PNG\r\n\x1a\n`.
+    const SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+
+    if !data.starts_with(&SIGNATURE) {
+        return false;
+    }
+
+    let mut at = SIGNATURE.len();
+    let mut is_palette = false;
+    let mut trns_max: Option<u8> = None;
+
+    while let Some(header) = data.get(at..at + 8) {
+        let length = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
+        let kind = &header[4..8];
+        let body_at = at + 8;
+        let Some(body) = data.get(body_at..body_at + length) else {
+            break;
+        };
+
+        match kind {
+            // IHDR: width, height, then bit depth and colour type; colour type 3
+            // is a palette image.
+            b"IHDR" => is_palette = body.get(9) == Some(&3),
+            b"tRNS" => trns_max = body.iter().copied().max(),
+            b"IEND" => break,
+            _ => {}
+        }
+
+        // Past the body and its four-byte CRC to the next chunk.
+        at = body_at + length + 4;
+    }
+
+    is_palette && matches!(trns_max, Some(max) if (1..=15).contains(&max))
 }
 
 /// The same PNG with every chunk CRC recomputed, or `None` if it is not a PNG or
@@ -1466,6 +1524,48 @@ mod tests {
 
         // Repaired back to exactly the bytes a correct encoder would have written.
         assert_eq!(png_with_repaired_crcs(&patched).as_deref(), Some(sound.as_slice()));
+    }
+
+    /// A 1x1 indexed PNG whose one palette entry carries `alpha` in `tRNS`.
+    fn indexed_png_with_trns(alpha: u8) -> Vec<u8> {
+        fn chunk(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+            let mut out = (body.len() as u32).to_be_bytes().to_vec();
+            out.extend_from_slice(kind);
+            out.extend_from_slice(body);
+
+            let mut hasher = crc32fast::Hasher::new();
+            hasher.update(&out[4..]);
+            out.extend_from_slice(&hasher.finalize().to_be_bytes());
+
+            out
+        }
+
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        // 1x1, bit depth 8, colour type 3 (indexed).
+        png.extend(chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 3, 0, 0, 0]));
+        png.extend(chunk(b"PLTE", &[0x12, 0x34, 0x56]));
+        png.extend(chunk(b"tRNS", &[alpha]));
+        png.extend(chunk(b"IDAT", &miniz_oxide::deflate::compress_to_vec_zlib(&[0, 0], 6)));
+        png.extend(chunk(b"IEND", &[]));
+
+        png
+    }
+
+    /// SK-VM art marks an opaque pixel with alpha 15 in `tRNS`, on the handset's
+    /// 4-bit scale. Read as 0..255 it is a 6% ghost - 포켓올림픽's whole screen -
+    /// so the decode has to expand it to fully opaque.
+    #[test]
+    fn a_4bit_trns_opaque_pixel_decodes_opaque() {
+        let image = decode_image(&indexed_png_with_trns(15)).unwrap();
+        assert_eq!(image.get_pixel(0, 0).a, 255);
+    }
+
+    /// A spec `tRNS` reaches 255 on the entries it leaves opaque, so an ordinary
+    /// opaque pixel is left exactly as it is and not pushed past opaque.
+    #[test]
+    fn an_8bit_trns_opaque_pixel_is_left_alone() {
+        let image = decode_image(&indexed_png_with_trns(255)).unwrap();
+        assert_eq!(image.get_pixel(0, 0).a, 255);
     }
 
     /// An 8bpp BMP laid out the way a WIPI sprite sheet and the frames cut from
