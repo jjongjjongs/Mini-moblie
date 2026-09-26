@@ -151,31 +151,43 @@ impl SnowBoardConnection {
     ///
     /// The map/notice/list command (`01x0`, `02x0`) is where a body is needed.
     /// `ParseData` reads it one of two ways, chosen not by the request but by an
-    /// `isnotice` field the title sets for itself, so the reply has to satisfy
-    /// both:
-    ///
-    /// - as a notice: eight bytes read into a date string, then an `int` -
-    ///   twelve bytes.
-    /// - as a map list: an `int`, then an `int` count, then that many records -
-    ///   eight bytes for a zero count.
-    ///
-    /// Twelve zero bytes are both at once: a notice with an empty date, or a map
-    /// list whose count (the second int, still within the twelve) is zero. The
-    /// title lands on its notice board or on `맵파일이 없습니다` rather than
-    /// reading off the end of the body and abandoning the screen (a null map
-    /// array, then a paint that dereferences it). A later phase fills the map
-    /// records from the bundled maps.
+    /// `isnotice` field the title sets for itself, and when it is a notice it
+    /// reads the map list too, straight after. So the reply has to feed all
+    /// three reads at once ([`map_family_body`]).
     fn reply(request: &[u8]) -> Vec<u8> {
         let mut reply = Self::header(request);
 
         let is_map_family = matches!(request.get(1), Some(b'1') | Some(b'2'));
         if is_map_family {
-            let body = [0u8; 12];
+            let body = Self::map_family_body();
             Self::set_body_length(&mut reply, body.len());
             reply.extend_from_slice(&body);
         }
 
         reply
+    }
+
+    /// The body the map/notice/list command needs, laid out so every read
+    /// `ParseData` might make off it lands and none run past the end:
+    ///
+    /// - As a **notice** it reads eight bytes into a date, then an `int`
+    ///   length. A zero length makes it return early - taking the notice screen
+    ///   but never marking the exchange finished, so the title waits on
+    ///   `접속중...` for ever. So the length is one, and one text byte follows;
+    ///   the notice parse then falls through into the map-list parse.
+    /// - As a **map list** (both after a notice and on its own) it reads an
+    ///   `int`, then an `int` count. Both are read from the leading eight bytes,
+    ///   which are zero, so the count is zero: an empty list, `맵파일이 없습니다`.
+    ///
+    /// A later phase fills the list records.
+    fn map_family_body() -> Vec<u8> {
+        let mut body = vec![0u8; 21];
+        // As a notice: [0..8] date, [8..12] a length of one (big-endian), [12]
+        // its one text byte. As a map list: [0..4] and [4..8] are two ints, both
+        // zero, so the count is zero; the notice fields sit past what it reads.
+        body[11] = 1;
+        body[12] = b' ';
+        body
     }
 
     /// The forty byte success header for `request`: the reply command, an empty
@@ -331,18 +343,16 @@ mod tests {
         data.write(&request);
 
         let reply = read_all(&mut data);
-        assert_eq!(reply.len(), HEADER_LEN + 12, "the header and a twelve byte body");
+        assert_eq!(reply.len(), HEADER_LEN + 21, "the header and a twenty-one byte body");
         assert_eq!(&reply[0..4], b"0011", "the map family's reply command, which the header parser reads");
-        assert_eq!(&reply[4..12], b"00000012", "the body length is written into the header");
-        assert_eq!(
-            &reply[HEADER_LEN..],
-            &[0u8; 12],
-            "zeros: a zero count for a list, an empty date for a notice"
-        );
+        assert_eq!(&reply[4..12], b"00000021", "the body length is written into the header");
+        let body = &reply[HEADER_LEN..];
+        assert_eq!(&body[0..8], &[0u8; 8], "as a map list: two zero ints, a zero count");
+        assert_eq!(&body[8..12], &[0, 0, 0, 1], "as a notice: a text length of one, so no early return");
     }
 
     #[test]
-    fn the_notice_request_is_answered_0011_with_a_date_and_int_body() {
+    fn the_notice_request_is_answered_0011_with_the_same_body() {
         let mut data = SnowBoardConnection {
             is_gateway: false,
             pending: Vec::new(),
@@ -354,10 +364,11 @@ mod tests {
         request[40] = b'1';
         data.write(&request);
 
+        // The reply is the same whichever way the title will parse it.
         let reply = read_all(&mut data);
-        assert_eq!(reply.len(), HEADER_LEN + 12, "the header and a twelve byte body");
+        assert_eq!(reply.len(), HEADER_LEN + 21, "the header and the shared twenty-one byte body");
         assert_eq!(&reply[0..4], b"0011", "the map family's reply command");
-        assert_eq!(&reply[4..12], b"00000012", "the body length is written into the header");
+        assert_eq!(&reply[4..12], b"00000021", "the body length is written into the header");
     }
 
     #[test]
