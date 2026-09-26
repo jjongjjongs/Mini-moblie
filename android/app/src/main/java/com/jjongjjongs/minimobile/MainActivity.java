@@ -475,10 +475,12 @@ public final class MainActivity extends Activity {
         // The AudioTracks are paused, not released, when we leave the
         // foreground, so playback picks up where it left off on return.
         audioOutput.resume();
+        ControlPatch.onResume(this);
     }
 
     @Override
     protected void onPause() {
+        ControlPatch.onPause(this);
         foreground = false;
         // Leaving the foreground while a key is held would otherwise leave it
         // stuck down: the finger's ACTION_UP is delivered to whatever takes
@@ -493,6 +495,7 @@ public final class MainActivity extends Activity {
 
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
+        ControlPatch.onFocus(this, hasFocus);
         super.onWindowFocusChanged(hasFocus);
         // A notification shade or dialog can take focus without pausing us,
         // and swallows the touch release the same way. Drop held keys as soon
@@ -648,8 +651,29 @@ public final class MainActivity extends Activity {
         return true;
     }
 
+    // ControlPatch owns the gamepad: its mapping table, live capture and
+    // preset slots. Consuming pad events here, before they reach onKeyDown /
+    // onGenericMotionEvent, keeps a single owner and avoids a button firing
+    // twice. Non-pad events return false and fall through untouched.
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (ControlPatch.onGamepadKey(this, event)) {
+            return true;
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
+    @Override
+    public boolean dispatchGenericMotionEvent(MotionEvent event) {
+        if (ControlPatch.onGamepadMotion(this, event)) {
+            return true;
+        }
+        return super.dispatchGenericMotionEvent(event);
+    }
+
     @Override
     protected void onDestroy() {
+        ControlPatch.onDestroy(this);
         running = false;
         if (autoRotateObserver != null) {
             getContentResolver().unregisterContentObserver(autoRotateObserver);
@@ -663,6 +687,9 @@ public final class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
+        if (ControlPatch.onBack(this)) {
+            return;
+        }
         if (keyMapVisible) {
             // The screen keeps its own working copy, so back is the same
             // question its own arrow asks.
@@ -700,6 +727,7 @@ public final class MainActivity extends Activity {
     // --- library ---------------------------------------------------------
 
     private void showLibrary() {
+        ControlPatch.onLeave(this);
         running = false;
         playerVisible = false;
         wedgeWatch.removeCallbacks(watchForWedge);
@@ -754,7 +782,7 @@ public final class MainActivity extends Activity {
         View padEntry = new PadGlyphView(this);
         padEntry.setBackground(roundedRect(LIB_GREEN_SOFT, LIB_GREEN_LINE, 1, 12));
         padEntry.setContentDescription("게임패드 키매핑");
-        padEntry.setOnClickListener(v -> showKeyMap());
+        padEntry.setOnClickListener(v -> ControlPatch.showPadMapping(this));
         nameRow.addView(padEntry, new LinearLayout.LayoutParams(dp(40), dp(40)));
 
         content.addView(nameRow);
@@ -2512,6 +2540,10 @@ public final class MainActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
 
+        if (ControlPatch.onActivityResult(this, requestCode, resultCode, data)) {
+            return;
+        }
+
         if (resultCode != RESULT_OK || data == null) {
             return;
         }
@@ -2673,6 +2705,7 @@ public final class MainActivity extends Activity {
 
         applyStatusBarInset(root);
         setContentView(root);
+        ControlPatch.onPlayerBuilt(this);
     }
 
     /** Status line, with the rotate and log buttons in the top-right corner. */
@@ -2718,6 +2751,16 @@ public final class MainActivity extends Activity {
         bar.addView(stopButton, stopParams);
 
         showCollectState();
+
+        // The way into keypad customization, per-button hide, per-button
+        // rapid-fire, layout save/backup and gamepad mapping - all reachable
+        // while a game is running.
+        Button controlsButton = navyButton("설정");
+        controlsButton.setContentDescription("키패드와 게임패드 설정");
+        controlsButton.setOnClickListener(v -> ControlPatch.showSettings(this));
+        LinearLayout.LayoutParams controlsParams = new LinearLayout.LayoutParams(dp(48), dp(34));
+        controlsParams.rightMargin = dp(6);
+        bar.addView(controlsButton, controlsParams);
 
         rotateButton = navyButton("");
         rotateButton.setOnClickListener(v -> toggleOrientation());
@@ -3487,14 +3530,19 @@ public final class MainActivity extends Activity {
             Key key = keys.get(index);
             key.bounds.set(x, y, x + width, y + height);
             key.shade();
+            ControlPatch.afterPlace(this, index);
         }
 
         @Override
         protected void onDraw(Canvas canvas) {
+            ControlPatch.beforeDraw(this, canvas);
             float radius = dp(8);
             subInk.setTextSize(ink.getTextSize() * 0.42f);
 
             for (Key key : keys) {
+                if (ControlPatch.hidden(this, key)) {
+                    continue;
+                }
                 if (key.down) {
                     fill.setShader(null);
                     fill.setColor(key.pressedColor());
@@ -3549,6 +3597,7 @@ public final class MainActivity extends Activity {
                 }
                 subInk.setTextSize(subWas);
             }
+            ControlPatch.afterDraw(this, canvas);
         }
 
         /** Shrinks {@code paint} just enough that {@code text} fits {@code room}. */
@@ -3561,6 +3610,9 @@ public final class MainActivity extends Activity {
 
         @Override
         public boolean onTouchEvent(MotionEvent event) {
+            if (ControlPatch.beforeTouch(this, event)) {
+                return true;
+            }
             switch (event.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
                 case MotionEvent.ACTION_POINTER_DOWN: {
@@ -3592,12 +3644,7 @@ public final class MainActivity extends Activity {
         }
 
         private Key keyAt(float x, float y) {
-            for (Key key : keys) {
-                if (key.bounds.contains(x, y)) {
-                    return key;
-                }
-            }
-            return null;
+            return (Key) ControlPatch.keyAt(this, x, y);
         }
 
         /**
@@ -3637,7 +3684,7 @@ public final class MainActivity extends Activity {
                 key.down = held;
                 changed = true;
                 Log.d(TAG, (held ? "key down: " : "key up: ") + key.code);
-                sendKey(key.code, held);
+                ControlPatch.touchKey(key.code, held ? 1 : 0);
             }
 
             if (changed) {
