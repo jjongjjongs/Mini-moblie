@@ -153,12 +153,23 @@ final class ControlStyle {
             int i2 = iArr[i];
             Button button = alertDialog.getButton(i2);
             if (button != null) {
-                button(button, i2 == -1);
+                boolean primary = i2 == -1;
+                button(button, primary);
+                // Unified footer sizing: a little wider, a touch shorter than the
+                // base button, and lifted off the bottom edge.
+                button.setPadding(dp(15.0f), dp(8.0f), dp(15.0f), dp(8.0f));
+                button.setMinWidth(dp(primary ? 70.0f : 64.0f));
+                button.setMinimumWidth(dp(primary ? 70.0f : 64.0f));
+                button.setMinHeight(dp(36.0f));
+                button.setMinimumHeight(dp(36.0f));
                 ViewGroup.LayoutParams layoutParams = button.getLayoutParams();
                 if (layoutParams instanceof ViewGroup.MarginLayoutParams) {
                     ViewGroup.MarginLayoutParams marginLayoutParams = (ViewGroup.MarginLayoutParams) layoutParams;
                     marginLayoutParams.leftMargin = dp(4.0f);
                     marginLayoutParams.rightMargin = dp(4.0f);
+                    // Lift the footer buttons off the very bottom edge.
+                    marginLayoutParams.topMargin = dp(6.0f);
+                    marginLayoutParams.bottomMargin = dp(12.0f);
                     button.setLayoutParams(marginLayoutParams);
                 }
             }
