@@ -10,4 +10,15 @@
         <item name="android:colorAccent">#FF1769AA</item>
         <item name="android:windowActionBar">false</item>
     </style>
+
+    <!--
+      Dialog theme for the in-game control settings (keypad edit, per-button
+      hide/rapid, layout save/backup, gamepad mapping). ControlStyle looks this
+      up by name at runtime and throws if it is missing, so every control menu
+      needs it. Light alert dialog with the controls' green accent.
+    -->
+    <style name="MiniControlsDialogTheme" parent="@android:style/Theme.Material.Light.Dialog.Alert">
+        <item name="android:colorAccent">#FF2E8B57</item>
+        <item name="android:colorPrimary">#FF2E8B57</item>
+    </style>
 </resources>
