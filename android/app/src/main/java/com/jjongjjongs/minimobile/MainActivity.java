@@ -2778,8 +2778,105 @@ public final class MainActivity extends Activity {
         bg.setColor(Color.argb(140, 0, 0, 0));
         bg.setStroke(Math.max(1, dp(1)), Color.argb(90, 255, 255, 255));
         gear.setBackground(bg);
+        gear.setAlpha(gearOpacity() / 100f);
         gear.setOnClickListener(v -> showGameMenu());
+        gear.setOnLongClickListener(v -> {
+            showGearOpacityDialog(gear);
+            return true;
+        });
         return gear;
+    }
+
+    private int gearOpacity() {
+        int v = getSharedPreferences("mini_ui", MODE_PRIVATE).getInt("gear_opacity", 70);
+        return Math.max(15, Math.min(100, v));
+    }
+
+    private void setGearOpacity(int value) {
+        getSharedPreferences("mini_ui", MODE_PRIVATE).edit().putInt("gear_opacity", value).apply();
+    }
+
+    /**
+     * Long-pressing the gear opens this: a slider that changes the gear's
+     * transparency live (15–100%). 적용 keeps it, 취소 or dismissing puts the
+     * old value back, 기본값 resets to 70%.
+     */
+    private void showGearOpacityDialog(final Button gear) {
+        final int original = gearOpacity();
+        final int[] current = {original};
+
+        int themeId = getResources().getIdentifier("MiniControlsDialogThemeDark", "style", getPackageName());
+        android.view.ContextThemeWrapper ctx = new android.view.ContextThemeWrapper(
+                this, themeId != 0 ? themeId : android.R.style.Theme_Material_Dialog_Alert);
+
+        LinearLayout content = new LinearLayout(ctx);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(22), dp(10), dp(22), dp(4));
+
+        LinearLayout labelRow = new LinearLayout(ctx);
+        labelRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        TextView label = new TextView(ctx);
+        label.setText("투명도");
+        label.setTextColor(COLOR_SUBTEXT);
+        label.setTextSize(13f);
+        labelRow.addView(label, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        final TextView value = new TextView(ctx);
+        value.setText(original + "%");
+        value.setTextColor(COLOR_ACCENT);
+        value.setTextSize(16f);
+        value.setTypeface(Typeface.DEFAULT_BOLD);
+        labelRow.addView(value);
+        content.addView(labelRow);
+
+        final android.widget.SeekBar bar = new android.widget.SeekBar(ctx);
+        bar.setMax(85);
+        bar.setProgress(original - 15);
+        bar.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(android.widget.SeekBar seekBar, int progress, boolean fromUser) {
+                int v = 15 + progress;
+                current[0] = v;
+                value.setText(v + "%");
+                gear.setAlpha(v / 100f);
+            }
+
+            @Override
+            public void onStartTrackingTouch(android.widget.SeekBar seekBar) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(android.widget.SeekBar seekBar) {
+            }
+        });
+        LinearLayout.LayoutParams barParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        barParams.topMargin = dp(6);
+        content.addView(bar, barParams);
+
+        LinearLayout ends = new LinearLayout(ctx);
+        TextView low = new TextView(ctx);
+        low.setText("흐리게 15%");
+        low.setTextColor(COLOR_SUBTEXT);
+        low.setTextSize(11f);
+        ends.addView(low, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        TextView high = new TextView(ctx);
+        high.setText("진하게 100%");
+        high.setTextColor(COLOR_SUBTEXT);
+        high.setTextSize(11f);
+        high.setGravity(android.view.Gravity.END);
+        ends.addView(high, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        content.addView(ends);
+
+        AlertDialog dialog = new AlertDialog.Builder(ctx)
+                .setTitle("메뉴 버튼 투명도")
+                .setView(content)
+                .setPositiveButton("적용", (d, w) -> setGearOpacity(current[0]))
+                .setNegativeButton("취소", (d, w) -> gear.setAlpha(original / 100f))
+                .setNeutralButton("기본값", null)
+                .setOnCancelListener(d -> gear.setAlpha(original / 100f))
+                .create();
+        dialog.show();
+        // 기본값: reset to 70% without closing (the slider drives the live gear).
+        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> bar.setProgress(70 - 15));
     }
 
     /**
