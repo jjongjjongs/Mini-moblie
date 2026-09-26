@@ -35,7 +35,7 @@ final class ControlDialogs {
     static final int IMPORT_LAYOUT = 6212;
     boolean captureArmed;
     AlertDialog captureDialog;
-    Button[] padRows;
+    LinearLayout[] padRows;
     String pendingBackup;
     final ControlPatch.Session s;
     // Two palettes, one active. Dark is the default (in-game menus); the
@@ -556,7 +556,7 @@ final class ControlDialogs {
     void padMenu() {
         LinearLayout column = column();
         column.addView(this.style.hint("게임 키를 고른 뒤 연결할 패드 버튼을 누르세요.\n변경은 바로 저장됩니다. 왼쪽 스틱은 방향키로 동작합니다."));
-        this.padRows = new Button[21];
+        this.padRows = new LinearLayout[21];
         LinearLayout linearLayout = null;
         for (int i = 0; i < ControlData.ORDER.length; i++) {
             if (i == 0) {
@@ -567,16 +567,8 @@ final class ControlDialogs {
                 linearLayout = this.style.section(column, "숫자·기호");
             }
             final int i2 = ControlData.ORDER[i];
-            Button mappingRow = this.style.mappingRow();
-            mappingRow.setOnClickListener(new View.OnClickListener() { // from class: com.jjongjjongs.minimobile.ControlDialogs.23
-                @Override // android.view.View.OnClickListener
-                public void onClick(View view) {
-                    ControlDialogs.this.capture(i2);
-                }
-            });
-            this.padRows[i2] = mappingRow;
             this.style.divider(linearLayout);
-            linearLayout.addView(mappingRow, new LinearLayout.LayoutParams(-1, -2));
+            linearLayout.addView(buildPadRow(i2), new LinearLayout.LayoutParams(-1, -2));
         }
         refreshPadRows();
         ScrollView scrollView = new ScrollView(this.style.context);
@@ -705,12 +697,106 @@ final class ControlDialogs {
         return "누르는 동안 연사 · 초당 " + ControlRapid.rate(rapidSettings.periodMs) + "회";
     }
 
+    /** One game key: its name, the pad buttons bound to it as chips, and a +. */
+    View buildPadRow(final int handsetIndex) {
+        LinearLayout row = new LinearLayout(this.style.context);
+        row.setGravity(16);
+        row.setPadding(this.style.dp(12.0f), this.style.dp(9.0f), this.style.dp(12.0f), this.style.dp(9.0f));
+        row.setMinimumHeight(this.style.dp(52.0f));
+        row.setBackground(this.style.buttonBackground(false, true));
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                ControlDialogs.this.capture(handsetIndex);
+            }
+        });
+
+        TextView name = this.style.text(ControlData.NAMES[handsetIndex], 14.0f, this.style.INK);
+        name.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        name.setMaxLines(1);
+        row.addView(name, new LinearLayout.LayoutParams(-2, -2));
+
+        LinearLayout chips = new LinearLayout(this.style.context);
+        chips.setGravity(21);
+        this.padRows[handsetIndex] = chips;
+        row.addView(chips, new LinearLayout.LayoutParams(0, -2, 1.0f));
+
+        TextView add = this.style.text("＋", 17.0f, this.style.DEEP);
+        add.setGravity(17);
+        add.setBackground(this.style.rounded(this.style.SOFT, this.style.SOFT_LINE, 1, 9));
+        add.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                ControlDialogs.this.capture(handsetIndex);
+            }
+        });
+        LinearLayout.LayoutParams addParams = new LinearLayout.LayoutParams(this.style.dp(34.0f), this.style.dp(34.0f));
+        addParams.leftMargin = this.style.dp(8.0f);
+        row.addView(add, addParams);
+        return row;
+    }
+
+    /** A removable chip for one pad button bound to a key. */
+    View padChip(final int padKeyCode) {
+        boolean lightPalette = this.style.light;
+        int fill = lightPalette ? this.style.SOFT : android.graphics.Color.rgb(23, 50, 58);
+        int line = lightPalette ? this.style.SOFT_LINE : android.graphics.Color.rgb(44, 90, 97);
+        int ink = lightPalette ? this.style.DEEP : android.graphics.Color.rgb(127, 221, 234);
+
+        LinearLayout chip = new LinearLayout(this.style.context);
+        chip.setGravity(16);
+        chip.setBackground(this.style.rounded(fill, line, 1, 10));
+        chip.setPadding(this.style.dp(9.0f), this.style.dp(5.0f), this.style.dp(6.0f), this.style.dp(5.0f));
+        chip.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                ControlDialogs.this.removeMapping(padKeyCode);
+            }
+        });
+
+        TextView label = this.style.text(physicalName(padKeyCode), 12.0f, ink);
+        label.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        chip.addView(label);
+
+        TextView x = this.style.text("✕", 11.0f, ink);
+        x.setPadding(this.style.dp(6.0f), 0, 0, 0);
+        chip.addView(x);
+
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, -2);
+        params.leftMargin = this.style.dp(6.0f);
+        chip.setLayoutParams(params);
+        return chip;
+    }
+
+    /** Drops a single pad button's binding. */
+    void removeMapping(int padKeyCode) {
+        if (this.s.mapping.remove(Integer.valueOf(padKeyCode)) != null) {
+            this.s.savePads();
+            ControlPatch.input.releaseAll();
+            refreshPadRows();
+        }
+    }
+
     void refreshPadRows() {
-        if (this.padRows != null) {
-            for (int i = 0; i < this.padRows.length; i++) {
-                if (this.padRows[i] != null) {
-                    this.style.mappingText(this.padRows[i], ControlData.NAMES[i], assigned(i));
+        if (this.padRows == null) {
+            return;
+        }
+        for (int i = 0; i < this.padRows.length; i++) {
+            LinearLayout chips = this.padRows[i];
+            if (chips == null) {
+                continue;
+            }
+            chips.removeAllViews();
+            boolean any = false;
+            for (Map.Entry<Integer, Integer> entry : this.s.mapping.entrySet()) {
+                if (entry.getValue().intValue() == i) {
+                    chips.addView(padChip(entry.getKey().intValue()));
+                    any = true;
                 }
+            }
+            if (!any) {
+                TextView none = this.style.text("연결 없음", 12.0f, this.style.MUTED);
+                chips.addView(none);
             }
         }
     }

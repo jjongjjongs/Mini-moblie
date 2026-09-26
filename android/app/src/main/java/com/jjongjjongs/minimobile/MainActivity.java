@@ -777,13 +777,8 @@ public final class MainActivity extends Activity {
         name.setTextColor(LIB_INK);
         nameRow.addView(name, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        // The way into the key mapping, at the end of the name row where there
-        // was nothing but space.
-        View padEntry = new PadGlyphView(this);
-        padEntry.setBackground(roundedRect(LIB_GREEN_SOFT, LIB_GREEN_LINE, 1, 12));
-        padEntry.setContentDescription("게임패드 키매핑");
-        padEntry.setOnClickListener(v -> ControlPatch.showPadMapping(this));
-        nameRow.addView(padEntry, new LinearLayout.LayoutParams(dp(40), dp(40)));
+        // Gamepad key mapping now lives in the in-game settings (the gear menu),
+        // so the library no longer needs its own entry.
 
         content.addView(nameRow);
 
@@ -2533,6 +2528,8 @@ public final class MainActivity extends Activity {
                 "application/java-archive",
                 "application/octet-stream",
         });
+        // Let the player pick several games at once.
+        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         startActivityForResult(intent, PICK_GAME);
     }
 
@@ -2551,22 +2548,68 @@ public final class MainActivity extends Activity {
             return;
         }
 
-        Uri uri = data.getData();
-        if (uri == null) {
-            return;
-        }
-
         if (requestCode == PICK_SAVE) {
+            Uri uri = data.getData();
+            if (uri == null) {
+                return;
+            }
             Toast.makeText(this, "세이브를 불러오는 중...", Toast.LENGTH_SHORT).show();
             importSaveNow(uri);
             return;
         }
 
-        Toast.makeText(this, "게임을 가져오는 중...", Toast.LENGTH_SHORT).show();
-        emulatorThread.execute(() -> importGame(uri));
+        // A multi-select returns the picks as ClipData; a single pick as getData.
+        java.util.ArrayList<Uri> uris = new java.util.ArrayList<>();
+        android.content.ClipData clip = data.getClipData();
+        if (clip != null) {
+            for (int i = 0; i < clip.getItemCount(); i++) {
+                Uri item = clip.getItemAt(i).getUri();
+                if (item != null) {
+                    uris.add(item);
+                }
+            }
+        } else if (data.getData() != null) {
+            uris.add(data.getData());
+        }
+        if (uris.isEmpty()) {
+            return;
+        }
+
+        Toast.makeText(this, uris.size() == 1 ? "게임을 가져오는 중..." : (uris.size() + "개 게임을 가져오는 중..."), Toast.LENGTH_SHORT).show();
+        emulatorThread.execute(() -> importGames(uris));
     }
 
-    private void importGame(Uri uri) {
+    /** Imports each picked game, then refreshes the library once at the end. */
+    private void importGames(java.util.List<Uri> uris) {
+        int done = 0;
+        String lastError = null;
+        for (Uri uri : uris) {
+            try {
+                importGameFile(uri);
+                done++;
+            } catch (Exception e) {
+                lastError = e.getMessage();
+            }
+        }
+        final int ok = done;
+        final int failed = uris.size() - done;
+        final String error = lastError;
+        runOnUiThread(() -> {
+            String message;
+            if (failed == 0) {
+                message = ok == 1 ? "가져오기 완료" : ok + "개 가져오기 완료";
+            } else if (ok == 0) {
+                message = "가져오기 실패" + (error != null ? ": " + error : "");
+            } else {
+                message = ok + "개 완료 · " + failed + "개 실패";
+            }
+            Toast.makeText(this, message, failed == 0 ? Toast.LENGTH_SHORT : Toast.LENGTH_LONG).show();
+            showLibrary();
+        });
+    }
+
+    /** Copies one picked game into the library. Throws on failure. */
+    private void importGameFile(Uri uri) throws Exception {
         String name = queryName(uri).replaceAll("[^A-Za-z0-9가-힣._ -]", "_");
         if (name.isEmpty()) {
             name = "game_" + System.currentTimeMillis() + ".zip";
@@ -2584,14 +2627,9 @@ public final class MainActivity extends Activity {
             while ((read = input.read(chunk)) >= 0) {
                 output.write(chunk, 0, read);
             }
-
-            runOnUiThread(() -> {
-                Toast.makeText(this, "가져오기 완료", Toast.LENGTH_SHORT).show();
-                showLibrary();
-            });
         } catch (Exception e) {
             target.delete();
-            runOnUiThread(() -> Toast.makeText(this, "가져오기 실패: " + e.getMessage(), Toast.LENGTH_LONG).show());
+            throw e;
         }
     }
 
