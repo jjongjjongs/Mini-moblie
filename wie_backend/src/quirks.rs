@@ -504,6 +504,10 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // them - only the digits, `*` and `#`, which reach it as ASCII either way,
     // did anything. See `TitleQuirks::keys_as_skvm_scancodes`.
     (TitlePlatform::Skt, "0051574505", skvm_scancode_keys()),
+    // 센티멘탈러브+ (InFusio/잼버거): drawn for a 176x220 handset. On the
+    // 240x320 default its logo and screens sit in the top-left with the panel's
+    // own colour around them; 176x220 is the panel it was laid out for.
+    (TitlePlatform::Skt, "0054448880", panel(176, 220)),
 ];
 
 /// What to do differently for the title `aid` on `platform`.

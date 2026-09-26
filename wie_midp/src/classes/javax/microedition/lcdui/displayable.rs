@@ -32,6 +32,8 @@ impl Displayable {
                 ),
                 JavaMethodProto::new("getWidth", "()I", Self::get_width, Default::default()),
                 JavaMethodProto::new("getHeight", "()I", Self::get_height, Default::default()),
+                JavaMethodProto::new("showNotify", "()V", Self::show_notify, Default::default()),
+                JavaMethodProto::new("hideNotify", "()V", Self::hide_notify, Default::default()),
                 // wie private methods...
                 JavaMethodProto::new(
                     "setDisplay",
@@ -131,6 +133,27 @@ impl Displayable {
         let reserved = context.system().displayable_reserved_rows() as i32;
 
         Ok(if height > reserved { height - reserved } else { height })
+    }
+
+    /// Called by [`Display::setCurrent`](super::Display) when this displayable
+    /// becomes the visible one, before its first paint. The base does nothing;
+    /// a `Canvas` subclass overrides it, and MIDP titles hang the start of
+    /// their game loop off it - 센티멘탈러브's `Canvas` starts its `run()` thread
+    /// and clears the flag that thread waits on only here, so without the call
+    /// its logo screen never advanced.
+    async fn show_notify(_jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<()> {
+        tracing::debug!("javax.microedition.lcdui.Displayable::showNotify({this:?})");
+
+        Ok(())
+    }
+
+    /// Called by [`Display::setCurrent`](super::Display) when this displayable
+    /// stops being the visible one. The base does nothing; a subclass overrides
+    /// it to pause what `showNotify` started.
+    async fn hide_notify(_jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<()> {
+        tracing::debug!("javax.microedition.lcdui.Displayable::hideNotify({this:?})");
+
+        Ok(())
     }
 
     async fn handle_key_event(_jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>, event_type: i32, code: i32) -> JvmResult<()> {

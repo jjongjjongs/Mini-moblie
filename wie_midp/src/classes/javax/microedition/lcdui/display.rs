@@ -188,7 +188,21 @@ impl Display {
             .get_field(&this, "currentDisplayable", "Ljavax/microedition/lcdui/Displayable;")
             .await?;
 
+        // Whether this call changes which displayable is showing. `showNotify`
+        // and `hideNotify` fire only on a real change: a title that hangs the
+        // start of its game loop off `showNotify` (센티멘탈러브 does) must not
+        // have it started twice by a `setCurrent` to the displayable already up.
+        let same: bool = if old_displayable.is_null() || displayable.is_null() {
+            false
+        } else {
+            jvm.invoke_virtual(&old_displayable, "equals", "(Ljava/lang/Object;)Z", (displayable.clone(),))
+                .await?
+        };
+
         if !old_displayable.is_null() {
+            if !same {
+                let _: () = jvm.invoke_virtual(&old_displayable, "hideNotify", "()V", ()).await?;
+            }
             let _: () = jvm
                 .invoke_virtual(&old_displayable, "setDisplay", "(Ljavax/microedition/lcdui/Display;)V", (None,))
                 .await?;
@@ -205,6 +219,14 @@ impl Display {
         let _: () = jvm
             .invoke_virtual(&displayable, "setDisplay", "(Ljavax/microedition/lcdui/Display;)V", (this.clone(),))
             .await?;
+
+        // The visible displayable is told it is showing before its first paint,
+        // as MIDP's lifecycle promises. A title relies on it: 센티멘탈러브's
+        // `Canvas.showNotify` starts the thread that drives its logo screen on,
+        // so without the call the screen sits frozen.
+        if !same && !displayable.is_null() {
+            let _: () = jvm.invoke_virtual(&displayable, "showNotify", "()V", ()).await?;
+        }
 
         let fullscreen_mode: bool = jvm.get_field(&displayable, "isInFullScreenMode", "Z").await?;
         jvm.put_field(&mut this, "isInFullScreenMode", "Z", fullscreen_mode).await?;
