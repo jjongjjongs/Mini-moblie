@@ -150,27 +150,27 @@ impl SnowBoardConnection {
     /// was opening is abandoned.
     ///
     /// The map/notice/list command (`01x0`, `02x0`) is where a body is needed.
-    /// `ParseData` reads it two ways, chosen by the notice flag the title
-    /// appends to the request (its `isnotice`, at offset 40):
+    /// `ParseData` reads it one of two ways, chosen not by the request but by an
+    /// `isnotice` field the title sets for itself, so the reply has to satisfy
+    /// both:
     ///
-    /// - flag set: a notice - eight bytes read into a date string, then an
-    ///   `int`. Twelve zero bytes are a notice with an empty date.
-    /// - flag clear: a map list - an `int`, then an `int` count, then that many
-    ///   records. Eight zero bytes are a leading int and a count of zero, which
-    ///   lands the title on `맵파일이 없습니다` rather than reading off the end
-    ///   of the body and abandoning the screen (a null map array, then a paint
-    ///   that dereferences it). A later phase fills the records from the bundled
-    ///   maps.
+    /// - as a notice: eight bytes read into a date string, then an `int` -
+    ///   twelve bytes.
+    /// - as a map list: an `int`, then an `int` count, then that many records -
+    ///   eight bytes for a zero count.
+    ///
+    /// Twelve zero bytes are both at once: a notice with an empty date, or a map
+    /// list whose count (the second int, still within the twelve) is zero. The
+    /// title lands on its notice board or on `맵파일이 없습니다` rather than
+    /// reading off the end of the body and abandoning the screen (a null map
+    /// array, then a paint that dereferences it). A later phase fills the map
+    /// records from the bundled maps.
     fn reply(request: &[u8]) -> Vec<u8> {
         let mut reply = Self::header(request);
 
         let is_map_family = matches!(request.get(1), Some(b'1') | Some(b'2'));
         if is_map_family {
-            let body = if request.get(40) == Some(&b'1') {
-                vec![0u8; 12] // an eight byte date, then an int
-            } else {
-                vec![0u8; 8] // a leading int, then a zero count
-            };
+            let body = [0u8; 12];
             Self::set_body_length(&mut reply, body.len());
             reply.extend_from_slice(&body);
         }
@@ -331,10 +331,14 @@ mod tests {
         data.write(&request);
 
         let reply = read_all(&mut data);
-        assert_eq!(reply.len(), HEADER_LEN + 8, "the header and an eight byte body");
+        assert_eq!(reply.len(), HEADER_LEN + 12, "the header and a twelve byte body");
         assert_eq!(&reply[0..4], b"0011", "the map family's reply command, which the header parser reads");
-        assert_eq!(&reply[4..12], b"00000008", "the body length is written into the header");
-        assert_eq!(&reply[HEADER_LEN..], &[0u8; 8], "an unread int then a zero count");
+        assert_eq!(&reply[4..12], b"00000012", "the body length is written into the header");
+        assert_eq!(
+            &reply[HEADER_LEN..],
+            &[0u8; 12],
+            "zeros: a zero count for a list, an empty date for a notice"
+        );
     }
 
     #[test]
