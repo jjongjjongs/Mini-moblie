@@ -490,6 +490,7 @@ final class ControlDialogs {
 
     void mainMenu() {
         final String[] strArr = {"키패드 위치·크기 편집", "버튼별 표시·숨김", "버튼별 연사 ON/OFF", "현재 배치 저장", "저장된 배치 불러오기·삭제", "배치 파일로 백업", "배치 파일에서 복원", "현재 배치 초기화", "게임패드 매핑"};
+        final String[] iconArr = {"✏", "👁", "⚡", "💾", "📂", "📤", "📥", "↺", "🎮"};
         LinearLayout column = column();
         column.addView(this.style.hint("설정을 변경하는 동안 게임을 일시정지합니다."));
         ScrollView scrollView = new ScrollView(this.style.context);
@@ -505,7 +506,7 @@ final class ControlDialogs {
             } else if (idx == 8) {
                 linearLayout = this.style.section(column, "게임패드");
             }
-            this.style.menuRow(linearLayout, strArr[idx], new View.OnClickListener() {
+            this.style.menuRow(linearLayout, iconArr[idx], strArr[idx], new View.OnClickListener() {
                 @Override // android.view.View.OnClickListener
                 public void onClick(View view) {
                     switch (idx) {

@@ -239,7 +239,7 @@ final class ControlEditor {
             this.paint.setShader(null);
             this.paint.setStyle(Paint.Style.STROKE);
             this.paint.setStrokeWidth(ControlPatch.dp(this.s.a, 1.0f));
-            this.paint.setColor(Color.rgb(91, 132, 111));
+            this.paint.setColor(Color.rgb(96, 168, 180));
             for (KeyRef keyRef3 : this.keys) {
                 if (!layout().hidden[keyRef3.code]) {
                     canvas.drawRoundRect(keyRef3.bounds, ControlPatch.dp(this.s.a, 7.0f), ControlPatch.dp(this.s.a, 7.0f), this.paint);
@@ -247,7 +247,7 @@ final class ControlEditor {
             }
             if (this.selected >= 0 && this.byCode[this.selected] != null && !layout().hidden[this.selected]) {
                 RectF rectF = this.byCode[this.selected].bounds;
-                this.paint.setColor(Color.rgb(124, 245, 164));
+                this.paint.setColor(Color.rgb(132, 224, 236));
                 this.paint.setStrokeWidth(ControlPatch.dp(this.s.a, 3.0f));
                 canvas.drawRoundRect(rectF, ControlPatch.dp(this.s.a, 7.0f), ControlPatch.dp(this.s.a, 7.0f), this.paint);
                 float min3 = Math.min(ControlPatch.dp(this.s.a, 16.0f), Math.min(rectF.width(), rectF.height()) * 0.35f);
@@ -268,7 +268,7 @@ final class ControlEditor {
         this.gridPath.reset();
         this.paint.setShader(null);
         this.paint.setStyle(Paint.Style.STROKE);
-        this.paint.setColor(Color.argb(105, 133, 198, 169));
+        this.paint.setColor(Color.argb(105, 84, 199, 214));
         this.paint.setStrokeWidth(1.0f);
         for (int i = 0; i <= floor; i++) {
             float f = i * gridStep;

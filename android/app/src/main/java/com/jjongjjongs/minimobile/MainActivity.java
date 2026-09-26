@@ -2758,9 +2758,38 @@ public final class MainActivity extends Activity {
                 "조작 설정 (키패드·게임패드)",
                 landscapeMode ? "세로 화면으로" : "가로 화면으로",
         };
+        String[] icons = {"📋", "🔧", "⚙", "🔄"};
+        android.widget.ArrayAdapter<String> adapter =
+                new android.widget.ArrayAdapter<String>(this, 0, items) {
+                    @Override
+                    public View getView(int position, View convertView, ViewGroup parent) {
+                        LinearLayout row = new LinearLayout(MainActivity.this);
+                        row.setOrientation(LinearLayout.HORIZONTAL);
+                        row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+                        row.setPadding(dp(18), dp(12), dp(18), dp(12));
+                        TextView icon = new TextView(MainActivity.this);
+                        icon.setText(icons[position]);
+                        icon.setTextSize(15f);
+                        icon.setGravity(android.view.Gravity.CENTER);
+                        GradientDrawable box = new GradientDrawable();
+                        box.setColor(COLOR_PANEL_2);
+                        box.setCornerRadius(dp(8));
+                        box.setStroke(Math.max(1, dp(1)), COLOR_HAIR);
+                        icon.setBackground(box);
+                        LinearLayout.LayoutParams ip = new LinearLayout.LayoutParams(dp(30), dp(30));
+                        ip.rightMargin = dp(12);
+                        row.addView(icon, ip);
+                        TextView label = new TextView(MainActivity.this);
+                        label.setText(getItem(position));
+                        label.setTextColor(COLOR_TEXT);
+                        label.setTextSize(15f);
+                        row.addView(label, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                        return row;
+                    }
+                };
         new AlertDialog.Builder(new android.view.ContextThemeWrapper(this, android.R.style.Theme_Material_Dialog_Alert))
                 .setTitle(running && currentGameName != null ? currentGameName : "게임")
-                .setItems(items, (dialog, which) -> {
+                .setAdapter(adapter, (dialog, which) -> {
                     switch (which) {
                         case 0:
                             if (collecting) {

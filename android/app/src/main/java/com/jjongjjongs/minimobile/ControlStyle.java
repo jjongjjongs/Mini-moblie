@@ -224,12 +224,24 @@ final class ControlStyle {
     }
 
     void menuRow(LinearLayout linearLayout, String str, View.OnClickListener onClickListener) {
+        menuRow(linearLayout, null, str, onClickListener);
+    }
+
+    void menuRow(LinearLayout linearLayout, String icon, String str, View.OnClickListener onClickListener) {
         divider(linearLayout);
         LinearLayout linearLayout2 = new LinearLayout(this.context);
         linearLayout2.setGravity(16);
         linearLayout2.setPadding(dp(12.0f), dp(12.0f), dp(12.0f), dp(12.0f));
         linearLayout2.setMinimumHeight(dp(48.0f));
         linearLayout2.setBackground(buttonBackground(false, true));
+        if (icon != null) {
+            TextView glyph = text(icon, 15.0f, DEEP);
+            glyph.setGravity(17);
+            glyph.setBackground(rounded(SOFT, SOFT_LINE, 1, 8));
+            LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(dp(30.0f), dp(30.0f));
+            iconParams.rightMargin = dp(12.0f);
+            linearLayout2.addView(glyph, iconParams);
+        }
         linearLayout2.addView(text(str, 14.0f, INK), new LinearLayout.LayoutParams(0, -2, 1.0f));
         TextView text = text("›", 22.0f, DEEP);
         text.setPadding(dp(10.0f), 0, 0, 0);
