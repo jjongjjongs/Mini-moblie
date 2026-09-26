@@ -2783,6 +2783,18 @@ public final class MainActivity extends Activity {
     }
 
     /**
+     * What the rotate menu item says, which is what tapping it does. With the
+     * phone's auto-rotate on it locks or unlocks the current orientation
+     * (고정/해제); with auto-rotate off it forces the other orientation.
+     */
+    private String rotateMenuLabel() {
+        if (autoRotateOn()) {
+            return orientationPinned ? "화면 고정 해제" : "화면 고정";
+        }
+        return landscapeMode ? "세로 화면으로" : "가로 화면으로";
+    }
+
+    /**
      * The list the gear opens: the same actions the title bar carried, chosen
      * from a menu and applied on tap. Log collect is one entry that reads start
      * or stop from the current state; rotate names the orientation it switches
@@ -2794,7 +2806,7 @@ public final class MainActivity extends Activity {
                 collecting ? "로그 수집 종료·저장" : "로그 수집 시작",
                 "로그 진단 설정",
                 "조작 설정 (키패드·게임패드)",
-                landscapeMode ? "세로 화면으로" : "가로 화면으로",
+                rotateMenuLabel(),
         };
         String[] icons = {"📋", "🔧", "⚙", "🔄"};
         android.widget.ArrayAdapter<String> adapter =
