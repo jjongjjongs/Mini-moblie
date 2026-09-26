@@ -6,7 +6,7 @@ mod fields;
 
 use wie_jvm_support::WieJavaClassProto;
 
-pub fn get_protos() -> [WieJavaClassProto; 42] {
+pub fn get_protos() -> [WieJavaClassProto; 45] {
     [
         classes::mmpp::media::BackLight::as_proto(),
         classes::mmpp::media::MediaPlayer::as_proto(),
@@ -48,6 +48,9 @@ pub fn get_protos() -> [WieJavaClassProto; 42] {
         classes::javax::microedition::rms::RecordStoreNotFoundException::as_proto(),
         classes::net::wie::EventQueue::as_proto(),
         classes::net::wie::Launcher::as_proto(),
+        classes::net::wie::LocalSocketInputStream::as_proto(),
+        classes::net::wie::LocalSocketOutputStream::as_proto(),
+        classes::net::wie::LocalStreamConnection::as_proto(),
         classes::net::wie::SmafPlayer::as_proto(),
         classes::net::wie::WieError::as_proto(),
     ]

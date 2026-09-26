@@ -26,6 +26,7 @@ mod capture;
 mod dragoneyes;
 mod funter;
 mod gpang;
+mod snowboard;
 
 pub use self::{
     ack::{AckEndpoint, Framing},
@@ -33,6 +34,7 @@ pub use self::{
     dragoneyes::DragonEyesEndpoint,
     funter::FunterEndpoint,
     gpang::GpangEndpoint,
+    snowboard::SnowBoardEndpoint,
 };
 
 use alloc::{boxed::Box, collections::BTreeMap, string::String, vec::Vec};

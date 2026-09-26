@@ -83,28 +83,59 @@ impl Connector {
         }
     }
 
-    async fn open(jvm: &Jvm, _: &mut WieJvmContext, name: ClassInstanceRef<String>) -> Result<ClassInstanceRef<Connection>> {
+    async fn open(jvm: &Jvm, context: &mut WieJvmContext, name: ClassInstanceRef<String>) -> Result<ClassInstanceRef<Connection>> {
         tracing::debug!("javax.microedition.io.Connector::open({name:?})");
 
-        Err(refuse(jvm, &name).await)
+        Self::open_local_or_refuse(jvm, context, &name).await
     }
 
-    async fn open_with_mode(jvm: &Jvm, _: &mut WieJvmContext, name: ClassInstanceRef<String>, mode: i32) -> Result<ClassInstanceRef<Connection>> {
+    async fn open_with_mode(
+        jvm: &Jvm,
+        context: &mut WieJvmContext,
+        name: ClassInstanceRef<String>,
+        mode: i32,
+    ) -> Result<ClassInstanceRef<Connection>> {
         tracing::debug!("javax.microedition.io.Connector::open({name:?}, {mode})");
 
-        Err(refuse(jvm, &name).await)
+        Self::open_local_or_refuse(jvm, context, &name).await
     }
 
     async fn open_with_mode_and_timeouts(
         jvm: &Jvm,
-        _: &mut WieJvmContext,
+        context: &mut WieJvmContext,
         name: ClassInstanceRef<String>,
         mode: i32,
         timeouts: bool,
     ) -> Result<ClassInstanceRef<Connection>> {
         tracing::debug!("javax.microedition.io.Connector::open({name:?}, {mode}, {timeouts})");
 
-        Err(refuse(jvm, &name).await)
+        Self::open_local_or_refuse(jvm, context, &name).await
+    }
+
+    /// Hands back a connection to whichever in-process endpoint answers for the
+    /// address, or refuses the way every dial-out is refused when none does.
+    ///
+    /// This is the one seam where a `Connector` reaches a connection rather than
+    /// a `ConnectionNotFoundException`: the emulator's own servers (a title's
+    /// ranking board, its map server) answer here so a title written against a
+    /// server that is gone can still leave the screen it dialed from. A title
+    /// whose address no endpoint claims is refused exactly as before.
+    async fn open_local_or_refuse(jvm: &Jvm, context: &mut WieJvmContext, name: &ClassInstanceRef<String>) -> Result<ClassInstanceRef<Connection>> {
+        let name_string = if name.is_null() {
+            RustString::new()
+        } else {
+            JavaLangString::to_rust_string(jvm, name).await?
+        };
+
+        if let Some((scheme, host, port)) = parse_socket_url(&name_string) {
+            let descriptor = context.system().local_network().connect(scheme, host, port);
+            if let Some(descriptor) = descriptor {
+                let connection: ClassInstanceRef<Connection> = jvm.new_class("net/wie/LocalStreamConnection", "(I)V", (descriptor,)).await?.into();
+                return Ok(connection);
+            }
+        }
+
+        Err(refuse(jvm, name).await)
     }
 
     async fn open_input_stream(jvm: &Jvm, _: &mut WieJvmContext, name: ClassInstanceRef<String>) -> Result<ClassInstanceRef<InputStream>> {
@@ -145,4 +176,22 @@ async fn refuse(jvm: &Jvm, name: &ClassInstanceRef<String>) -> JavaError {
     tracing::info!("Refusing connection to {name:?}: no network");
 
     jvm.exception("javax/microedition/io/ConnectionNotFoundException", &name).await
+}
+
+/// Splits a GCF name of the form `scheme://host:port` into its parts, or `None`
+/// when it is not one an in-process endpoint could answer (no host and port to
+/// match on). Any `;` parameters and a trailing path are dropped - an endpoint
+/// matches on the address alone.
+fn parse_socket_url(name: &str) -> Option<(&str, &str, u16)> {
+    let (scheme, rest) = name.split_once("://")?;
+
+    // Stop at whatever follows the authority: a path, a query or GCF `;` params.
+    let authority = rest.split(['/', ';', '?']).next().unwrap_or(rest);
+    let (host, port) = authority.rsplit_once(':')?;
+    if host.is_empty() {
+        return None;
+    }
+
+    let port = port.parse().ok()?;
+    Some((scheme, host, port))
 }

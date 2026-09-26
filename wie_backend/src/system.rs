@@ -84,6 +84,12 @@ impl System {
         // see the exchange rather than to have it answered.
         local_network.register(Box::new(crate::local_network::GpangEndpoint::new()));
 
+        // 엑스피드스노보드's ranking/map server, gone for years. Answering it in
+        // process lets the title past the `네트워크 접속 에러` its title screen
+        // shows the moment it dials out. Host-gated, so no other title is
+        // touched.
+        local_network.register(Box::new(crate::local_network::SnowBoardEndpoint));
+
         let platform = Arc::new(platform);
 
         Self {
