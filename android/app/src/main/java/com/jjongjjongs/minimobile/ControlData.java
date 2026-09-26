@@ -11,6 +11,10 @@ public final class ControlData {
     public static final int COUNT = 21;
     public static final int MAX_SLOTS = 32;
     public static final String[] NAMES = {"위 ▲", "아래 ▼", "왼쪽 ◀", "오른쪽 ▶", "확인 OK", "왼쪽 기능키 L", "오른쪽 기능키 R", "뒤로가기", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "별표 *", "샵 #", "저장"};
+    /** The glyph on the left badge of a key, by key code. */
+    public static final String[] BADGES = {"▲", "▼", "◀", "▶", "OK", "L", "R", "BK", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "✱", "#", "SV"};
+    /** The short row label beside the badge (empty for digits, which the badge already names). */
+    public static final String[] SHORT = {"위", "아래", "왼쪽", "오른쪽", "확인", "좌기능", "우기능", "뒤로", "", "", "", "", "", "", "", "", "", "", "별표", "샵", "저장"};
     public static final int[] ORDER = {0, 1, 2, 3, 4, 5, 6, 7, 20, 9, 10, 11, 12, 13, 14, 15, 16, 17, 8, 18, 19};
     public Layout portrait = new Layout();
     public Layout landscape = new Layout();

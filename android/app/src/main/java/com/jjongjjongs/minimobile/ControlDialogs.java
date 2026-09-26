@@ -36,6 +36,10 @@ final class ControlDialogs {
     boolean captureArmed;
     AlertDialog captureDialog;
     LinearLayout[] padRows;
+    LinearLayout[] padRowViews;
+    View padBanner;
+    TextView padBannerText;
+    Runnable captureTimeout;
     String pendingBackup;
     final ControlPatch.Session s;
     // Two palettes, one active. Dark is the default (in-game menus); the
@@ -203,14 +207,17 @@ final class ControlDialogs {
         int i2 = this.captureTarget;
         this.s.mapping.put(Integer.valueOf(i), Integer.valueOf(i2));
         this.s.savePads();
-        refreshPadRows();
-        AlertDialog alertDialog = this.captureDialog;
         this.captureTarget = -1;
-        this.captureDialog = null;
-        if (alertDialog != null) {
-            alertDialog.dismiss();
+        if (this.captureTimeout != null) {
+            this.main.removeCallbacks(this.captureTimeout);
+            this.captureTimeout = null;
         }
-        ControlPatch.toast(this.s.a, String.valueOf(physicalName(i)) + " → " + ControlData.NAMES[i2]);
+        if (this.padBanner != null) {
+            this.padBanner.setVisibility(View.GONE);
+        }
+        clearHighlight();
+        refreshPadRows();
+        ControlPatch.toast(this.s.a, String.valueOf(shortPadLabel(i)) + " → " + ControlData.NAMES[i2]);
     }
 
     String assigned(int i) {
@@ -230,42 +237,27 @@ final class ControlDialogs {
         return new AlertDialog.Builder(this.style.context, this.style.themeId).setTitle(str);
     }
 
+    /** Arms capture for a key: the pad menu banner asks for a button press. */
     void capture(final int i) {
+        if (this.padBanner == null || this.padBannerText == null) {
+            return;
+        }
         this.captureTarget = i;
         this.captureArmed = this.s.axesNeutral;
         ControlPatch.input.releaseAll();
-        final PadDialog padDialog = new PadDialog(this.s.a, this.style.themeId);
-        this.captureDialog = padDialog;
-        padDialog.setTitle(String.valueOf(ControlData.NAMES[i]) + "에 연결");
-        padDialog.setMessage("연결할 게임패드 버튼을 한 번 눌러 주세요.\n트리거·방향 패드도 지정할 수 있습니다.\n현재: " + assigned(i));
-        padDialog.setButton(-2, "취소", new DialogInterface.OnClickListener() { // from class: com.jjongjjongs.minimobile.ControlDialogs.28
-            @Override // android.content.DialogInterface.OnClickListener
-            public void onClick(DialogInterface dialogInterface, int i2) {
-            }
-        });
-        padDialog.setButton(-3, "이 키의 매핑 해제", new DialogInterface.OnClickListener() { // from class: com.jjongjjongs.minimobile.ControlDialogs.29
-            @Override // android.content.DialogInterface.OnClickListener
-            public void onClick(DialogInterface dialogInterface, int i2) {
-                Iterator<Map.Entry<Integer, Integer>> it = ControlDialogs.this.s.mapping.entrySet().iterator();
-                while (it.hasNext()) {
-                    if (it.next().getValue().intValue() == i) {
-                        it.remove();
-                    }
-                }
-                ControlDialogs.this.s.savePads();
-                ControlDialogs.this.refreshPadRows();
-            }
-        });
-        track(padDialog, new Runnable() { // from class: com.jjongjjongs.minimobile.ControlDialogs.30
-            @Override // java.lang.Runnable
+        this.padBannerText.setText("‘" + ControlData.NAMES[i] + "’에 연결할 버튼을 누르세요");
+        this.padBanner.setVisibility(View.VISIBLE);
+        highlightRow(i);
+        if (this.captureTimeout != null) {
+            this.main.removeCallbacks(this.captureTimeout);
+        }
+        this.captureTimeout = new Runnable() {
+            @Override
             public void run() {
-                if (ControlDialogs.this.captureDialog == padDialog) {
-                    ControlDialogs.this.captureDialog = null;
-                    ControlDialogs.this.captureTarget = -1;
-                }
-                ControlDialogs.this.refreshPadRows();
+                ControlDialogs.this.cancelCapture();
             }
-        });
+        };
+        this.main.postDelayed(this.captureTimeout, 5000L);
     }
 
     boolean captureKey(KeyEvent keyEvent) {
@@ -555,8 +547,32 @@ final class ControlDialogs {
 
     void padMenu() {
         LinearLayout column = column();
-        column.addView(this.style.hint("게임 키를 고른 뒤 연결할 패드 버튼을 누르세요.\n변경은 바로 저장됩니다. 왼쪽 스틱은 방향키로 동작합니다."));
+
+        // Header: title with 프리셋 · 기본값으로 on the right (the mockup layout).
+        LinearLayout header = new LinearLayout(this.style.context);
+        header.setGravity(16);
+        header.setPadding(0, this.style.dp(2.0f), 0, this.style.dp(4.0f));
+        TextView title = this.style.text("게임패드 매핑", 18.0f, this.style.INK);
+        title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        header.addView(title, new LinearLayout.LayoutParams(0, -2, 1.0f));
+        header.addView(headerButton("프리셋", new Runnable() {
+            @Override
+            public void run() {
+                ControlDialogs.this.padPresets();
+            }
+        }));
+        header.addView(headerButton("기본값으로", new Runnable() {
+            @Override
+            public void run() {
+                ControlDialogs.this.restoreDefaultMapping();
+            }
+        }));
+        column.addView(header);
+
+        column.addView(this.style.hint("키의 + 를 눌러 연결할 패드 버튼을 누르세요. 변경은 바로 저장됩니다.\n연결된 패드: " + connectedPadName()));
+
         this.padRows = new LinearLayout[21];
+        this.padRowViews = new LinearLayout[21];
         LinearLayout linearLayout = null;
         for (int i = 0; i < ControlData.ORDER.length; i++) {
             if (i == 0) {
@@ -571,37 +587,175 @@ final class ControlDialogs {
             linearLayout.addView(buildPadRow(i2), new LinearLayout.LayoutParams(-1, -2));
         }
         refreshPadRows();
+
         ScrollView scrollView = new ScrollView(this.style.context);
         scrollView.addView(column);
+
+        android.widget.FrameLayout frame = new android.widget.FrameLayout(this.style.context);
+        frame.addView(scrollView, new android.widget.FrameLayout.LayoutParams(-1, -1));
+        this.padBanner = buildCaptureBanner();
+        this.padBanner.setVisibility(View.GONE);
+        android.widget.FrameLayout.LayoutParams bannerParams = new android.widget.FrameLayout.LayoutParams(-1, -2);
+        bannerParams.gravity = 80;
+        int m = this.style.dp(10.0f);
+        bannerParams.setMargins(m, m, m, m);
+        frame.addView(this.padBanner, bannerParams);
+
         PadDialog padDialog = new PadDialog(this.s.a, this.style.themeId);
-        padDialog.setTitle("게임패드 매핑");
-        padDialog.setView(scrollView);
-        padDialog.setButton(-2, "닫기", new DialogInterface.OnClickListener() { // from class: com.jjongjjongs.minimobile.ControlDialogs.24
-            @Override // android.content.DialogInterface.OnClickListener
+        padDialog.setView(frame);
+        padDialog.setButton(-2, "닫기", new DialogInterface.OnClickListener() {
+            @Override
             public void onClick(DialogInterface dialogInterface, int i3) {
             }
         });
-        padDialog.setButton(-3, "프리셋", new DialogInterface.OnClickListener() { // from class: com.jjongjjongs.minimobile.ControlDialogs.25
-            @Override // android.content.DialogInterface.OnClickListener
-            public void onClick(DialogInterface dialogInterface, int i3) {
-                ControlDialogs.this.padPresets();
+        track(padDialog, new Runnable() {
+            @Override
+            public void run() {
+                ControlDialogs.this.cancelCapture();
+                ControlDialogs.this.padBanner = null;
+                ControlDialogs.this.padBannerText = null;
+                ControlDialogs.this.padRowViews = null;
+                ControlDialogs.this.padRows = null;
             }
         });
-        padDialog.setButton(-1, "기본 매핑", new DialogInterface.OnClickListener() { // from class: com.jjongjjongs.minimobile.ControlDialogs.26
-            @Override // android.content.DialogInterface.OnClickListener
-            public void onClick(DialogInterface dialogInterface, int i3) {
-                ControlDialogs.this.track(ControlDialogs.this.builder("기본 매핑 복원").setMessage("위·아래·왼쪽·오른쪽만 연결하고 나머지는 연결 없음으로 바꿀까요? 저장한 프리셋은 유지됩니다.").setPositiveButton("복원", new DialogInterface.OnClickListener() { // from class: com.jjongjjongs.minimobile.ControlDialogs.26.1
-                    @Override // android.content.DialogInterface.OnClickListener
-                    public void onClick(DialogInterface dialogInterface2, int i4) {
-                        ControlDialogs.this.s.mapping.clear();
-                        ControlDialogs.this.s.mapping.putAll(ControlPads.defaults());
-                        ControlDialogs.this.s.savePads();
-                        ControlDialogs.this.refreshPadRows();
+    }
+
+    /** A small secondary button for the pad menu header. */
+    Button headerButton(String text, final Runnable action) {
+        Button button = this.style.button(text, false);
+        button.setTextSize(12.5f);
+        button.setMinHeight(this.style.dp(34.0f));
+        button.setMinimumHeight(this.style.dp(34.0f));
+        button.setPadding(this.style.dp(12.0f), this.style.dp(4.0f), this.style.dp(12.0f), this.style.dp(4.0f));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, -2);
+        params.leftMargin = this.style.dp(6.0f);
+        button.setLayoutParams(params);
+        button.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                action.run();
+            }
+        });
+        return button;
+    }
+
+    void restoreDefaultMapping() {
+        track(builder("기본 매핑 복원").setMessage("위·아래·왼쪽·오른쪽만 연결하고 나머지는 연결 없음으로 바꿀까요? 저장한 프리셋은 유지됩니다.").setPositiveButton("복원", new DialogInterface.OnClickListener() {
+            @Override
+            public void onClick(DialogInterface dialogInterface, int i) {
+                ControlDialogs.this.s.mapping.clear();
+                ControlDialogs.this.s.mapping.putAll(ControlPads.defaults());
+                ControlDialogs.this.s.savePads();
+                ControlDialogs.this.refreshPadRows();
+            }
+        }).setNegativeButton("취소", (DialogInterface.OnClickListener) null).create());
+    }
+
+    /** Name of the first connected gamepad, or 없음. */
+    String connectedPadName() {
+        try {
+            for (int id : android.view.InputDevice.getDeviceIds()) {
+                android.view.InputDevice device = android.view.InputDevice.getDevice(id);
+                if (device == null) {
+                    continue;
+                }
+                int src = device.getSources();
+                boolean pad = (src & android.view.InputDevice.SOURCE_GAMEPAD) == android.view.InputDevice.SOURCE_GAMEPAD
+                        || (src & android.view.InputDevice.SOURCE_JOYSTICK) == android.view.InputDevice.SOURCE_JOYSTICK;
+                if (pad) {
+                    String name = device.getName();
+                    if (name != null && name.length() > 0) {
+                        return name;
                     }
-                }).setNegativeButton("취소", (DialogInterface.OnClickListener) null).create());
+                }
+            }
+        } catch (Exception e) {
+            // fall through
+        }
+        return "없음";
+    }
+
+    /** The floating "press a button" banner shown while capturing. */
+    View buildCaptureBanner() {
+        LinearLayout banner = new LinearLayout(this.style.context);
+        banner.setGravity(16);
+        banner.setPadding(this.style.dp(14.0f), this.style.dp(12.0f), this.style.dp(12.0f), this.style.dp(12.0f));
+        int bg = this.style.light ? this.style.GREEN : android.graphics.Color.rgb(31, 91, 100);
+        int bl = this.style.light ? this.style.GREEN : android.graphics.Color.rgb(44, 90, 97);
+        banner.setBackground(this.style.rounded(bg, bl, 1, 16));
+
+        android.widget.ProgressBar spinner = new android.widget.ProgressBar(this.style.context);
+        spinner.setIndeterminate(true);
+        LinearLayout.LayoutParams spinnerParams = new LinearLayout.LayoutParams(this.style.dp(26.0f), this.style.dp(26.0f));
+        spinnerParams.rightMargin = this.style.dp(12.0f);
+        banner.addView(spinner, spinnerParams);
+
+        int bannerInk = android.graphics.Color.rgb(234, 252, 255);
+        this.padBannerText = this.style.text("패드 버튼을 누르세요", 13.5f, bannerInk);
+        this.padBannerText.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        banner.addView(this.padBannerText, new LinearLayout.LayoutParams(0, -2, 1.0f));
+
+        TextView cancel = this.style.text("취소", 13.0f, bannerInk);
+        cancel.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        cancel.setGravity(17);
+        cancel.setPadding(this.style.dp(12.0f), this.style.dp(7.0f), this.style.dp(12.0f), this.style.dp(7.0f));
+        cancel.setBackground(this.style.rounded(android.graphics.Color.argb(40, 255, 255, 255), android.graphics.Color.argb(40, 255, 255, 255), 0, 10));
+        cancel.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                ControlDialogs.this.cancelCapture();
             }
         });
-        track(padDialog);
+        LinearLayout.LayoutParams cancelParams = new LinearLayout.LayoutParams(-2, -2);
+        cancelParams.leftMargin = this.style.dp(8.0f);
+        banner.addView(cancel, cancelParams);
+        return banner;
+    }
+
+    /** Highlights the armed key row and dims the rest. */
+    void highlightRow(int target) {
+        if (this.padRowViews == null) {
+            return;
+        }
+        int fill = this.style.light ? this.style.SOFT : android.graphics.Color.rgb(23, 50, 58);
+        for (int j = 0; j < this.padRowViews.length; j++) {
+            LinearLayout view = this.padRowViews[j];
+            if (view == null) {
+                continue;
+            }
+            if (j == target) {
+                view.setBackground(this.style.rounded(fill, this.style.GREEN, 2, 12));
+                view.setAlpha(1.0f);
+            } else {
+                view.setAlpha(0.35f);
+            }
+        }
+    }
+
+    void clearHighlight() {
+        if (this.padRowViews == null) {
+            return;
+        }
+        for (LinearLayout view : this.padRowViews) {
+            if (view != null) {
+                view.setBackground(this.style.buttonBackground(false, true));
+                view.setAlpha(1.0f);
+            }
+        }
+    }
+
+    /** Stops waiting for a pad button without binding anything. */
+    void cancelCapture() {
+        this.captureTarget = -1;
+        if (this.captureTimeout != null) {
+            this.main.removeCallbacks(this.captureTimeout);
+            this.captureTimeout = null;
+        }
+        if (this.padBanner != null) {
+            this.padBanner.setVisibility(View.GONE);
+        }
+        clearHighlight();
+        ControlPatch.input.releaseAll();
     }
 
     void padPresets() {
@@ -697,11 +851,11 @@ final class ControlDialogs {
         return "누르는 동안 연사 · 초당 " + ControlRapid.rate(rapidSettings.periodMs) + "회";
     }
 
-    /** One game key: its name, the pad buttons bound to it as chips, and a +. */
+    /** One game key: badge, short name, its bound pad buttons as chips, and a +. */
     View buildPadRow(final int handsetIndex) {
         LinearLayout row = new LinearLayout(this.style.context);
         row.setGravity(16);
-        row.setPadding(this.style.dp(12.0f), this.style.dp(9.0f), this.style.dp(12.0f), this.style.dp(9.0f));
+        row.setPadding(this.style.dp(10.0f), this.style.dp(9.0f), this.style.dp(10.0f), this.style.dp(9.0f));
         row.setMinimumHeight(this.style.dp(52.0f));
         row.setBackground(this.style.buttonBackground(false, true));
         row.setOnClickListener(new View.OnClickListener() {
@@ -710,8 +864,17 @@ final class ControlDialogs {
                 ControlDialogs.this.capture(handsetIndex);
             }
         });
+        this.padRowViews[handsetIndex] = row;
 
-        TextView name = this.style.text(ControlData.NAMES[handsetIndex], 14.0f, this.style.INK);
+        TextView badge = this.style.text(ControlData.BADGES[handsetIndex], 12.0f, this.style.DEEP);
+        badge.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        badge.setGravity(17);
+        badge.setBackground(this.style.rounded(this.style.SOFT, this.style.SOFT_LINE, 1, 8));
+        LinearLayout.LayoutParams badgeParams = new LinearLayout.LayoutParams(this.style.dp(30.0f), this.style.dp(30.0f));
+        badgeParams.rightMargin = this.style.dp(10.0f);
+        row.addView(badge, badgeParams);
+
+        TextView name = this.style.text(ControlData.SHORT[handsetIndex], 14.0f, this.style.INK);
         name.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
         name.setMaxLines(1);
         row.addView(name, new LinearLayout.LayoutParams(-2, -2));
@@ -723,7 +886,7 @@ final class ControlDialogs {
 
         TextView add = this.style.text("＋", 17.0f, this.style.DEEP);
         add.setGravity(17);
-        add.setBackground(this.style.rounded(this.style.SOFT, this.style.SOFT_LINE, 1, 9));
+        add.setBackground(dashedBox());
         add.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
@@ -734,6 +897,32 @@ final class ControlDialogs {
         addParams.leftMargin = this.style.dp(8.0f);
         row.addView(add, addParams);
         return row;
+    }
+
+    /** The dashed outline box behind the + add affordance. */
+    android.graphics.drawable.GradientDrawable dashedBox() {
+        android.graphics.drawable.GradientDrawable d = new android.graphics.drawable.GradientDrawable();
+        d.setColor(android.graphics.Color.TRANSPARENT);
+        d.setCornerRadius(this.style.dp(9.0f));
+        int line = this.style.light ? this.style.SOFT_LINE : android.graphics.Color.rgb(44, 90, 97);
+        d.setStroke(Math.max(1, this.style.dp(1.2f)), line, this.style.dp(4.0f), this.style.dp(3.0f));
+        return d;
+    }
+
+    /** Short chip label for a pad code (D-pad glyphs, else the physical name). */
+    static String shortPadLabel(int code) {
+        switch (code) {
+            case KeyEvent.KEYCODE_DPAD_UP:
+                return "D▲";
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+                return "D▼";
+            case KeyEvent.KEYCODE_DPAD_LEFT:
+                return "D◀";
+            case KeyEvent.KEYCODE_DPAD_RIGHT:
+                return "D▶";
+            default:
+                return physicalName(code);
+        }
     }
 
     /** A removable chip for one pad button bound to a key. */
@@ -754,7 +943,7 @@ final class ControlDialogs {
             }
         });
 
-        TextView label = this.style.text(physicalName(padKeyCode), 12.0f, ink);
+        TextView label = this.style.text(shortPadLabel(padKeyCode), 12.0f, ink);
         label.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
         chip.addView(label);
 
