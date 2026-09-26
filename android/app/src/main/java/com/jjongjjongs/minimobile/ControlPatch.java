@@ -604,11 +604,17 @@ public final class ControlPatch {
     }
 
     public static void showPadMapping(Activity activity) {
-        of(activity).ui.padMenu();
+        // Opened from the game library: the light green list palette.
+        Session session = of(activity);
+        session.ui.palette(true);
+        session.ui.padMenu();
     }
 
     public static void showSettings(Activity activity) {
-        of(activity).ui.mainMenu();
+        // Opened in-game from the gear: the dark control palette.
+        Session session = of(activity);
+        session.ui.palette(false);
+        session.ui.mainMenu();
     }
 
     public static void syncLogButton(Activity activity) {

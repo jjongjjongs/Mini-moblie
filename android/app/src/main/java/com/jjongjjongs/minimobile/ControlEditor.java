@@ -107,9 +107,9 @@ final class ControlEditor {
             detachToolbar();
             this.toolbar = new LinearLayout(this.s.ui.style.context);
             this.toolbar.setOrientation(1);
-            this.toolbar.setBackgroundColor(ControlStyle.BG);
+            this.toolbar.setBackgroundColor(this.s.ui.style.BG);
             this.toolbar.setPadding(ControlPatch.dp(this.s.a, 8.0f), ControlPatch.dp(this.s.a, 6.0f), ControlPatch.dp(this.s.a, 8.0f), ControlPatch.dp(this.s.a, 8.0f));
-            this.title = this.s.ui.style.text("", 12.0f, ControlStyle.MUTED);
+            this.title = this.s.ui.style.text("", 12.0f, this.s.ui.style.MUTED);
             this.title.setPadding(ControlPatch.dp(this.s.a, 4.0f), ControlPatch.dp(this.s.a, 6.0f), ControlPatch.dp(this.s.a, 4.0f), 0);
             LinearLayout linearLayout = new LinearLayout(this.s.a);
             linearLayout.setGravity(16);

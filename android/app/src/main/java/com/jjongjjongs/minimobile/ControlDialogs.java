@@ -38,7 +38,11 @@ final class ControlDialogs {
     Button[] padRows;
     String pendingBackup;
     final ControlPatch.Session s;
-    final ControlStyle style;
+    // Two palettes, one active. Dark is the default (in-game menus); the
+    // library's gamepad mapping switches to light via palette(true).
+    final ControlStyle darkStyle;
+    final ControlStyle lightStyle;
+    ControlStyle style;
     final Handler main = new Handler(Looper.getMainLooper());
     int captureTarget = -1;
 
@@ -136,8 +140,8 @@ final class ControlDialogs {
     static final class PadDialog extends AlertDialog {
         final Activity activity;
 
-        PadDialog(Activity activity) {
-            super(activity, ControlStyle.theme(activity));
+        PadDialog(Activity activity, int themeId) {
+            super(activity, themeId);
             this.activity = activity;
         }
 
@@ -160,7 +164,15 @@ final class ControlDialogs {
 
     ControlDialogs(ControlPatch.Session session) {
         this.s = session;
-        this.style = new ControlStyle(this.s.a);
+        this.darkStyle = new ControlStyle(this.s.a, false);
+        this.lightStyle = new ControlStyle(this.s.a, true);
+        this.style = this.darkStyle;
+    }
+
+    /** Picks the palette for the dialogs opened next: light for the library's
+     * gamepad mapping, dark for everything in-game. */
+    void palette(boolean lightPalette) {
+        this.style = lightPalette ? this.lightStyle : this.darkStyle;
     }
 
     static String physicalName(int i) {
@@ -222,7 +234,7 @@ final class ControlDialogs {
         this.captureTarget = i;
         this.captureArmed = this.s.axesNeutral;
         ControlPatch.input.releaseAll();
-        final PadDialog padDialog = new PadDialog(this.s.a);
+        final PadDialog padDialog = new PadDialog(this.s.a, this.style.themeId);
         this.captureDialog = padDialog;
         padDialog.setTitle(String.valueOf(ControlData.NAMES[i]) + "에 연결");
         padDialog.setMessage("연결할 게임패드 버튼을 한 번 눌러 주세요.\n트리거·방향 패드도 지정할 수 있습니다.\n현재: " + assigned(i));
@@ -332,7 +344,7 @@ final class ControlDialogs {
         float[] fArr = {keyRef.bounds.left, keyRef.bounds.top, keyRef.bounds.width(), keyRef.bounds.height()};
         int i3 = 0;
         while (i3 < 4) {
-            TextView text = this.style.text(strArr[i3], 13.0f, ControlStyle.MUTED);
+            TextView text = this.style.text(strArr[i3], 13.0f, this.style.MUTED);
             text.setPadding(0, this.style.dp(10.0f), 0, this.style.dp(6.0f));
             column.addView(text);
             editTextArr[i3] = this.style.input();
@@ -568,7 +580,7 @@ final class ControlDialogs {
         refreshPadRows();
         ScrollView scrollView = new ScrollView(this.style.context);
         scrollView.addView(column);
-        PadDialog padDialog = new PadDialog(this.s.a);
+        PadDialog padDialog = new PadDialog(this.s.a, this.style.themeId);
         padDialog.setTitle("게임패드 매핑");
         padDialog.setView(scrollView);
         padDialog.setButton(-2, "닫기", new DialogInterface.OnClickListener() { // from class: com.jjongjjongs.minimobile.ControlDialogs.24

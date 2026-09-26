@@ -24,20 +24,50 @@ import android.widget.TextView;
 final class ControlStyle {
     final Context context;
     final int themeId;
-    static final int BG = Color.rgb(255, 255, 255);
-    static final int INK = Color.rgb(26, 42, 32);
-    static final int MUTED = Color.rgb(100, 117, 104);
-    static final int LINE = Color.rgb(233, 241, 235);
-    static final int DIVIDER = Color.rgb(238, 243, 239);
-    static final int GREEN = Color.rgb(46, 139, 87);
-    static final int DEEP = Color.rgb(34, 114, 71);
-    static final int SOFT = Color.rgb(220, 242, 226);
-    static final int SOFT_LINE = Color.rgb(199, 232, 209);
-    static final int SOFTER = Color.rgb(238, 248, 241);
+    final boolean light;
+    // Palette, chosen by `light`. Dark (default) is the player's control
+    // palette so the in-game menus sit on the game without clashing; light is
+    // the library's green list palette, for the gamepad mapping opened there.
+    // The field names carry the light semantics (BG = surface, GREEN = accent,
+    // etc.); the dark values map onto the same roles.
+    final int BG;
+    final int INK;
+    final int MUTED;
+    final int LINE;
+    final int DIVIDER;
+    final int GREEN;
+    final int DEEP;
+    final int SOFT;
+    final int SOFT_LINE;
+    final int SOFTER;
 
-    ControlStyle(Activity activity) {
-        this.themeId = theme(activity);
+    ControlStyle(Activity activity, boolean light) {
+        this.light = light;
+        this.themeId = theme(activity, light);
         this.context = new ContextThemeWrapper(activity, this.themeId);
+        if (light) {
+            BG = Color.rgb(255, 255, 255);
+            INK = Color.rgb(26, 42, 32);
+            MUTED = Color.rgb(100, 117, 104);
+            LINE = Color.rgb(233, 241, 235);
+            DIVIDER = Color.rgb(238, 243, 239);
+            GREEN = Color.rgb(46, 139, 87);
+            DEEP = Color.rgb(34, 114, 71);
+            SOFT = Color.rgb(220, 242, 226);
+            SOFT_LINE = Color.rgb(199, 232, 209);
+            SOFTER = Color.rgb(238, 248, 241);
+        } else {
+            BG = Color.rgb(28, 30, 36);       // panel: dialog/card/row surface
+            INK = Color.rgb(233, 234, 237);   // primary text
+            MUTED = Color.rgb(154, 156, 166); // secondary text
+            LINE = Color.rgb(43, 46, 55);     // hairline border
+            DIVIDER = Color.rgb(43, 46, 55);  // row divider
+            GREEN = Color.rgb(84, 199, 214);  // cyan accent (primary fill / focus)
+            DEEP = Color.rgb(84, 199, 214);   // accent text (chevrons, 2nd button)
+            SOFT = Color.rgb(35, 38, 46);     // raised: 2nd button / chip / row fill
+            SOFT_LINE = Color.rgb(43, 46, 55);// raised border
+            SOFTER = Color.rgb(35, 38, 46);   // raised: empty tile
+        }
     }
 
     static void playerButton(Button button) {
@@ -49,12 +79,13 @@ final class ControlStyle {
         button.setBackground(gradientDrawable);
     }
 
-    static int theme(Context context) {
-        int identifier = context.getResources().getIdentifier("MiniControlsDialogTheme", "style", context.getPackageName());
+    static int theme(Context context, boolean light) {
+        String name = light ? "MiniControlsDialogTheme" : "MiniControlsDialogThemeDark";
+        int identifier = context.getResources().getIdentifier(name, "style", context.getPackageName());
         if (identifier != 0) {
             return identifier;
         }
-        throw new IllegalStateException("Missing controls dialog theme");
+        throw new IllegalStateException("Missing controls dialog theme: " + name);
     }
 
     Button button(String str, boolean z) {

@@ -2758,7 +2758,7 @@ public final class MainActivity extends Activity {
                 "조작 설정 (키패드·게임패드)",
                 landscapeMode ? "세로 화면으로" : "가로 화면으로",
         };
-        new AlertDialog.Builder(new android.view.ContextThemeWrapper(this, android.R.style.Theme_Material_Light_Dialog_Alert))
+        new AlertDialog.Builder(new android.view.ContextThemeWrapper(this, android.R.style.Theme_Material_Dialog_Alert))
                 .setTitle(running && currentGameName != null ? currentGameName : "게임")
                 .setItems(items, (dialog, which) -> {
                     switch (which) {

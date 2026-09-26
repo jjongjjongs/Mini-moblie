@@ -12,11 +12,19 @@
     </style>
 
     <!--
-      Dialog theme for the in-game control settings (keypad edit, per-button
-      hide/rapid, layout save/backup, gamepad mapping). ControlStyle looks this
-      up by name at runtime and throws if it is missing, so every control menu
-      needs it. Light alert dialog with the controls' green accent.
+      Dialog themes for the control settings. ControlStyle looks one up by name
+      at runtime (dark by default, light for the gamepad mapping opened from the
+      game library) and throws if it is missing, so both must exist.
+
+      Dark: the in-game menus float over the game, so they match the player's
+      dark control palette with the cyan accent.
     -->
+    <style name="MiniControlsDialogThemeDark" parent="@android:style/Theme.Material.Dialog.Alert">
+        <item name="android:colorAccent">#FF54C7D6</item>
+        <item name="android:colorPrimary">#FF54C7D6</item>
+    </style>
+
+    <!-- Light: the library's gamepad mapping, matching the green list screens. -->
     <style name="MiniControlsDialogTheme" parent="@android:style/Theme.Material.Light.Dialog.Alert">
         <item name="android:colorAccent">#FF2E8B57</item>
         <item name="android:colorPrimary">#FF2E8B57</item>
