@@ -792,33 +792,183 @@ final class ControlDialogs {
 
     void rapidSettings() {
         final ControlData.RapidSettings copy = this.s.data.rapid.copy();
-        boolean[] zArr = new boolean[21];
-        String[] strArr = new String[21];
-        for (int i = 0; i < 21; i++) {
-            int i2 = ControlData.ORDER[i];
-            strArr[i] = ControlData.NAMES[i2];
-            zArr[i] = copy.enabled[i2];
+        final boolean[] state = new boolean[21];
+        for (int c = 0; c < 21; c++) {
+            state[c] = copy.enabled[c];
         }
-        final AlertDialog create = builder(rapidTitle(copy)).setMultiChoiceItems(strArr, zArr, new DialogInterface.OnMultiChoiceClickListener() { // from class: com.jjongjjongs.minimobile.ControlDialogs.3
-            @Override // android.content.DialogInterface.OnMultiChoiceClickListener
-            public void onClick(DialogInterface dialogInterface, int i3, boolean z) {
-                copy.enabled[ControlData.ORDER[i3]] = z;
-            }
-        }).setPositiveButton("적용", new DialogInterface.OnClickListener() { // from class: com.jjongjjongs.minimobile.ControlDialogs.4
-            @Override // android.content.DialogInterface.OnClickListener
-            public void onClick(DialogInterface dialogInterface, int i3) {
+        final View[] chipViews = new View[21];
+        final int[] period = {copy.periodMs};
+
+        LinearLayout column = column();
+        column.addView(this.style.hint("누르고 있는 동안 자동으로 반복됩니다."));
+        addKeyGroups(column, state, chipViews);
+        column.addView(buildSpeedSlider(period));
+        ScrollView scroll = new ScrollView(this.style.context);
+        scroll.addView(column);
+
+        track(builder("연사 ON/OFF").setView(scroll).setPositiveButton("적용", new DialogInterface.OnClickListener() {
+            @Override
+            public void onClick(DialogInterface dialogInterface, int i) {
                 ControlPatch.input.releaseAll();
+                for (int c = 0; c < 21; c++) {
+                    copy.enabled[c] = state[c];
+                }
+                copy.periodMs = period[0];
                 ControlDialogs.this.s.data.rapid = copy.copy();
                 ControlDialogs.this.s.saveLayout();
             }
-        }).setNeutralButton("연사 속도", (DialogInterface.OnClickListener) null).setNegativeButton("취소", (DialogInterface.OnClickListener) null).create();
-        track(create);
-        create.getButton(-3).setOnClickListener(new View.OnClickListener() { // from class: com.jjongjjongs.minimobile.ControlDialogs.5
-            @Override // android.view.View.OnClickListener
+        }).setNegativeButton("취소", (DialogInterface.OnClickListener) null).create());
+    }
+
+    /** The three grouped rows of toggle chips shared by 표시·숨김 and 연사. */
+    void addKeyGroups(LinearLayout column, boolean[] state, View[] chipViews) {
+        addKeyGroup(column, "방향·확인", new int[]{0, 1, 2, 3, 4}, 3, true, state, chipViews);
+        addKeyGroup(column, "기능", new int[]{5, 6, 7, 20}, 2, true, state, chipViews);
+        addKeyGroup(column, "숫자·기호", new int[]{9, 10, 11, 12, 13, 14, 15, 16, 17, 8, 18, 19}, 5, false, state, chipViews);
+    }
+
+    void addKeyGroup(LinearLayout column, String title, int[] codes, int cols, boolean nameShown, boolean[] state, View[] chipViews) {
+        TextView label = this.style.text(title, 11.5f, this.style.GREEN);
+        label.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        label.setPadding(this.style.dp(2.0f), this.style.dp(12.0f), 0, this.style.dp(7.0f));
+        column.addView(label);
+
+        LinearLayout box = new LinearLayout(this.style.context);
+        box.setOrientation(1);
+        for (int start = 0; start < codes.length; start += cols) {
+            LinearLayout rowLine = new LinearLayout(this.style.context);
+            rowLine.setOrientation(0);
+            for (int c = 0; c < cols; c++) {
+                LinearLayout.LayoutParams cellParams = new LinearLayout.LayoutParams(0, -2, 1.0f);
+                cellParams.leftMargin = c == 0 ? 0 : this.style.dp(6.0f);
+                cellParams.bottomMargin = this.style.dp(6.0f);
+                int index = start + c;
+                if (index >= codes.length) {
+                    rowLine.addView(new View(this.style.context), cellParams);
+                    continue;
+                }
+                rowLine.addView(buildToggleChip(codes[index], nameShown, state, chipViews), cellParams);
+            }
+            box.addView(rowLine, new LinearLayout.LayoutParams(-1, -2));
+        }
+        column.addView(box);
+    }
+
+    View buildToggleChip(final int code, boolean nameShown, final boolean[] state, final View[] chipViews) {
+        final LinearLayout chip = new LinearLayout(this.style.context);
+        chip.setGravity(16);
+        chip.setPadding(this.style.dp(8.0f), this.style.dp(7.0f), this.style.dp(9.0f), this.style.dp(7.0f));
+        chip.setMinimumHeight(this.style.dp(40.0f));
+
+        TextView badge = this.style.text(ControlData.BADGES[code], 12.0f, this.style.DEEP);
+        badge.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        badge.setGravity(17);
+        badge.setBackground(this.style.rounded(this.style.light ? this.style.SOFTER : android.graphics.Color.rgb(43, 46, 55), this.style.SOFT_LINE, 1, 7));
+        LinearLayout.LayoutParams badgeParams = new LinearLayout.LayoutParams(this.style.dp(24.0f), this.style.dp(24.0f));
+        badgeParams.rightMargin = this.style.dp(7.0f);
+        chip.addView(badge, badgeParams);
+
+        if (nameShown && ControlData.SHORT[code].length() > 0) {
+            TextView name = this.style.text(ControlData.SHORT[code], 13.0f, this.style.INK);
+            chip.addView(name, new LinearLayout.LayoutParams(0, -2, 1.0f));
+        } else {
+            chip.addView(new View(this.style.context), new LinearLayout.LayoutParams(0, -2, 1.0f));
+        }
+
+        TextView check = this.style.text("✓", 12.0f, this.style.DEEP);
+        check.setPadding(this.style.dp(2.0f), 0, 0, 0);
+        chip.addView(check);
+        chip.setTag(check);
+
+        chipViews[code] = chip;
+        styleToggleChip(chip, state[code]);
+        chip.setOnClickListener(new View.OnClickListener() {
+            @Override
             public void onClick(View view) {
-                ControlDialogs.this.rapidSpeed(copy, create);
+                state[code] = !state[code];
+                styleToggleChip(chip, state[code]);
             }
         });
+        return chip;
+    }
+
+    void styleToggleChip(LinearLayout chip, boolean on) {
+        int fill;
+        int line;
+        if (on) {
+            fill = this.style.light ? this.style.SOFT : android.graphics.Color.rgb(23, 50, 58);
+            line = this.style.GREEN;
+        } else {
+            fill = this.style.light ? this.style.BG : android.graphics.Color.rgb(35, 38, 46);
+            line = this.style.SOFT_LINE;
+        }
+        chip.setBackground(this.style.rounded(fill, line, 1, 11));
+        Object tag = chip.getTag();
+        if (tag instanceof View) {
+            ((View) tag).setVisibility(on ? View.VISIBLE : View.INVISIBLE);
+        }
+    }
+
+    void refreshToggleChips(View[] chipViews, boolean[] state) {
+        for (int c = 0; c < chipViews.length; c++) {
+            if (chipViews[c] instanceof LinearLayout) {
+                styleToggleChip((LinearLayout) chipViews[c], state[c]);
+            }
+        }
+    }
+
+    /** The inline rapid-fire speed slider (2·3·5·8·10/s) for the 연사 dialog. */
+    View buildSpeedSlider(final int[] period) {
+        LinearLayout box = new LinearLayout(this.style.context);
+        box.setOrientation(1);
+        box.setPadding(this.style.dp(12.0f), this.style.dp(12.0f), this.style.dp(12.0f), this.style.dp(12.0f));
+        box.setBackground(this.style.rounded(this.style.light ? this.style.SOFTER : android.graphics.Color.rgb(35, 38, 46), this.style.SOFT_LINE, 1, 12));
+        LinearLayout.LayoutParams boxParams = new LinearLayout.LayoutParams(-1, -2);
+        boxParams.topMargin = this.style.dp(14.0f);
+        box.setLayoutParams(boxParams);
+
+        LinearLayout labelRow = new LinearLayout(this.style.context);
+        labelRow.setGravity(16);
+        labelRow.addView(this.style.text("연사 속도", 12.0f, this.style.MUTED), new LinearLayout.LayoutParams(0, -2, 1.0f));
+        final TextView value = this.style.text("초당 " + ControlRapid.rate(period[0]) + "회", 13.0f, this.style.DEEP);
+        value.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        labelRow.addView(value);
+        box.addView(labelRow);
+
+        int index = 2;
+        for (int k = 0; k < ControlRapid.PERIODS_MS.length; k++) {
+            if (ControlRapid.PERIODS_MS[k] == period[0]) {
+                index = k;
+            }
+        }
+        android.widget.SeekBar bar = new android.widget.SeekBar(this.style.context);
+        bar.setMax(ControlRapid.PERIODS_MS.length - 1);
+        bar.setProgress(index);
+        bar.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(android.widget.SeekBar seekBar, int progress, boolean fromUser) {
+                period[0] = ControlRapid.PERIODS_MS[progress];
+                value.setText("초당 " + ControlRapid.RATES[progress] + "회");
+            }
+
+            @Override
+            public void onStartTrackingTouch(android.widget.SeekBar seekBar) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(android.widget.SeekBar seekBar) {
+            }
+        });
+        box.addView(bar, new LinearLayout.LayoutParams(-1, -2));
+
+        LinearLayout ticks = new LinearLayout(this.style.context);
+        for (int k = 0; k < ControlRapid.RATES.length; k++) {
+            TextView tick = this.style.text(String.valueOf(ControlRapid.RATES[k]), 10.5f, k == index ? this.style.DEEP : this.style.MUTED);
+            tick.setGravity(17);
+            ticks.addView(tick, new LinearLayout.LayoutParams(0, -2, 1.0f));
+        }
+        box.addView(ticks);
+        return box;
     }
 
     void rapidSpeed(final ControlData.RapidSettings rapidSettings, final AlertDialog alertDialog) {
@@ -1089,35 +1239,44 @@ final class ControlDialogs {
 
     void visibility() {
         final ControlData.Layout layout = this.s.editor.layout();
-        final boolean[] zArr = new boolean[21];
-        String[] strArr = new String[21];
-        for (int i = 0; i < 21; i++) {
-            int i2 = ControlData.ORDER[i];
-            zArr[i] = !layout.hidden[i2];
-            strArr[i] = ControlData.NAMES[i2];
+        final boolean[] state = new boolean[21];
+        for (int c = 0; c < 21; c++) {
+            state[c] = !layout.hidden[c];
         }
-        track(builder(String.valueOf(this.s.editor.landscape() ? "가로" : "세로") + " · 표시할 버튼 선택").setMultiChoiceItems(strArr, zArr, new DialogInterface.OnMultiChoiceClickListener() { // from class: com.jjongjjongs.minimobile.ControlDialogs.8
-            @Override // android.content.DialogInterface.OnMultiChoiceClickListener
-            public void onClick(DialogInterface dialogInterface, int i3, boolean z) {
-                zArr[i3] = z;
-            }
-        }).setPositiveButton("적용", new DialogInterface.OnClickListener() { // from class: com.jjongjjongs.minimobile.ControlDialogs.9
-            @Override // android.content.DialogInterface.OnClickListener
-            public void onClick(DialogInterface dialogInterface, int i3) {
-                ControlPatch.input.releaseAll();
-                for (int i4 = 0; i4 < zArr.length; i4++) {
-                    layout.hidden[ControlData.ORDER[i4]] = !zArr[i4];
+        final View[] chipViews = new View[21];
+
+        LinearLayout column = column();
+        column.addView(this.style.hint("끈 버튼은 키패드에서 사라집니다."));
+        addKeyGroups(column, state, chipViews);
+        ScrollView scroll = new ScrollView(this.style.context);
+        scroll.addView(column);
+
+        final AlertDialog dialog = builder(String.valueOf(this.s.editor.landscape() ? "가로" : "세로") + " · 표시할 버튼")
+                .setView(scroll)
+                .setPositiveButton("적용", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialogInterface, int i) {
+                        ControlPatch.input.releaseAll();
+                        for (int c = 0; c < 21; c++) {
+                            layout.hidden[c] = !state[c];
+                        }
+                        ControlDialogs.this.s.saveLayout();
+                        ControlDialogs.this.s.editor.refresh();
+                    }
+                })
+                .setNeutralButton("모두 표시", (DialogInterface.OnClickListener) null)
+                .setNegativeButton("취소", (DialogInterface.OnClickListener) null)
+                .create();
+        track(dialog);
+        // 모두 표시: check everything without closing the dialog.
+        dialog.getButton(-3).setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                for (int c = 0; c < 21; c++) {
+                    state[c] = true;
                 }
-                ControlDialogs.this.s.saveLayout();
-                ControlDialogs.this.s.editor.refresh();
+                refreshToggleChips(chipViews, state);
             }
-        }).setNeutralButton("모두 표시", new DialogInterface.OnClickListener() { // from class: com.jjongjjongs.minimobile.ControlDialogs.10
-            @Override // android.content.DialogInterface.OnClickListener
-            public void onClick(DialogInterface dialogInterface, int i3) {
-                Arrays.fill(layout.hidden, false);
-                ControlDialogs.this.s.saveLayout();
-                ControlDialogs.this.s.editor.refresh();
-            }
-        }).setNegativeButton("취소", (DialogInterface.OnClickListener) null).create());
+        });
     }
 }
