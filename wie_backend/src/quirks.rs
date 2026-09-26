@@ -508,6 +508,12 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // 240x320 default its logo and screens sit in the top-left with the panel's
     // own colour around them; 176x220 is the panel it was laid out for.
     (TitlePlatform::Skt, "0054448880", panel(176, 220)),
+    // 포켓올림픽 (POCKETSPACE 2004): composes every screen at fixed coordinates
+    // for a 176x220 handset and never reads the panel it is given. On the
+    // 240x320 default its stadium, track and runner were stranded in the
+    // top-left with the sky and field bands stretched apart; at 176x220 the
+    // scene fills the panel and its footer lands on the bottom row.
+    (TitlePlatform::Skt, "3503930101", panel(176, 220)),
 ];
 
 /// What to do differently for the title `aid` on `platform`.
