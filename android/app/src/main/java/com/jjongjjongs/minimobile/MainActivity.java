@@ -2678,12 +2678,9 @@ public final class MainActivity extends Activity {
         keypad.landscape = landscapeMode;
         keypad.requestLayout();
 
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(COLOR_BG);
-
-        root.addView(buildTitleBar(),
-                new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(landscapeMode ? 40 : 46)));
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setBackgroundColor(COLOR_BG);
 
         if (landscapeMode) {
             // One keypad view across the whole area with the two key columns,
@@ -2697,15 +2694,101 @@ public final class MainActivity extends Activity {
                     new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT);
             screenParams.gravity = android.view.Gravity.CENTER;
             arena.addView(gameView, screenParams);
-            root.addView(arena, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+            content.addView(arena, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
         } else {
-            root.addView(gameView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, GAME_WEIGHT));
-            root.addView(keypad, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, KEYPAD_WEIGHT));
+            content.addView(gameView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, GAME_WEIGHT));
+            content.addView(keypad, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, KEYPAD_WEIGHT));
         }
 
-        applyStatusBarInset(root);
-        setContentView(root);
+        // The title bar is gone so the screen gets its space back. Everything it
+        // held - log collect/stop, the control settings and the rotate toggle -
+        // now lives behind a single translucent gear floating over the screen's
+        // top-right corner (see showGameMenu).
+        FrameLayout overlay = new FrameLayout(this);
+        overlay.addView(content,
+                new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        FrameLayout.LayoutParams gearParams = new FrameLayout.LayoutParams(dp(38), dp(38));
+        gearParams.gravity = android.view.Gravity.TOP | android.view.Gravity.END;
+        gearParams.topMargin = dp(8);
+        gearParams.rightMargin = dp(8);
+        overlay.addView(buildGearButton(), gearParams);
+
+        applyStatusBarInset(overlay);
+        setContentView(overlay);
         ControlPatch.onPlayerBuilt(this);
+    }
+
+    /**
+     * The translucent gear that stands in for the whole title bar. It floats
+     * over the screen rather than taking a row of its own, so the game gets the
+     * space the bar used to occupy.
+     */
+    private Button buildGearButton() {
+        Button gear = new Button(this);
+        gear.setText("⚙");
+        gear.setAllCaps(false);
+        gear.setTextSize(18f);
+        gear.setTextColor(Color.argb(235, 255, 255, 255));
+        gear.setPadding(0, 0, 0, 0);
+        gear.setMinWidth(0);
+        gear.setMinimumWidth(0);
+        gear.setMinHeight(0);
+        gear.setMinimumHeight(0);
+        gear.setContentDescription("게임 메뉴");
+        GradientDrawable bg = new GradientDrawable();
+        bg.setShape(GradientDrawable.OVAL);
+        bg.setColor(Color.argb(140, 0, 0, 0));
+        bg.setStroke(Math.max(1, dp(1)), Color.argb(90, 255, 255, 255));
+        gear.setBackground(bg);
+        gear.setOnClickListener(v -> showGameMenu());
+        return gear;
+    }
+
+    /**
+     * The list the gear opens: the same actions the title bar carried, chosen
+     * from a menu and applied on tap. Log collect is one entry that reads start
+     * or stop from the current state; rotate names the orientation it switches
+     * to.
+     */
+    private void showGameMenu() {
+        boolean collecting = NativeBridge.nativeLogCollecting() != 0;
+        String[] items = {
+                collecting ? "로그 수집 종료·저장" : "로그 수집 시작",
+                "로그 진단 설정",
+                "조작 설정 (키패드·게임패드)",
+                landscapeMode ? "세로 화면으로" : "가로 화면으로",
+        };
+        new AlertDialog.Builder(new android.view.ContextThemeWrapper(this, android.R.style.Theme_Material_Light_Dialog_Alert))
+                .setTitle(running && currentGameName != null ? currentGameName : "게임")
+                .setItems(items, (dialog, which) -> {
+                    switch (which) {
+                        case 0:
+                            if (collecting) {
+                                stopLogCollectAndSave();
+                            } else {
+                                startLogCollect();
+                            }
+                            break;
+                        case 1:
+                            showDiagnosticsDialog();
+                            break;
+                        case 2:
+                            ControlPatch.showSettings(this);
+                            break;
+                        case 3:
+                            toggleOrientation();
+                            break;
+                    }
+                })
+                .setNegativeButton("닫기", null)
+                .show();
+    }
+
+    /** Sets the (now optional) status label if one is present. */
+    private void setPlayerStatus(String text) {
+        if (playerStatus != null) {
+            playerStatus.setText(text);
+        }
     }
 
     /** Status line, with the rotate and log buttons in the top-right corner. */
@@ -2909,9 +2992,20 @@ public final class MainActivity extends Activity {
                     phoneModel);
             running = NativeBridge.nativeRunning() != 0;
 
-            runOnUiThread(() -> playerStatus.setText(running ? "게임 초기화 중..." : message));
+            runOnUiThread(() -> {
+                if (running) {
+                    setPlayerStatus("게임 초기화 중...");
+                } else {
+                    setPlayerStatus(message);
+                    Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+                }
+            });
         } catch (Exception e) {
-            runOnUiThread(() -> playerStatus.setText("실행 실패: " + e.getMessage()));
+            runOnUiThread(() -> {
+                String msg = "실행 실패: " + e.getMessage();
+                setPlayerStatus(msg);
+                Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
+            });
         }
     }
 
@@ -3072,7 +3166,11 @@ public final class MainActivity extends Activity {
             }
 
             String error = NativeBridge.nativeLastError();
-            runOnUiThread(() -> playerStatus.setText(error.isEmpty() ? "게임 실행이 중단되었습니다." : "실행 중단: " + error));
+            runOnUiThread(() -> {
+                String msg = error.isEmpty() ? "게임 실행이 중단되었습니다." : "실행 중단: " + error;
+                setPlayerStatus(msg);
+                Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
+            });
             // Already on the emulator thread; save before the log can be lost.
             autoSaveLogOnStop();
             return;
@@ -3085,7 +3183,7 @@ public final class MainActivity extends Activity {
             runOnUiThread(() -> {
                 gameView.setFrame(frame);
                 if (first) {
-                    playerStatus.setText(currentGameName);
+                    setPlayerStatus(currentGameName);
                 }
             });
             return;
@@ -3101,7 +3199,7 @@ public final class MainActivity extends Activity {
         // occasionally, so a slow boot does not spam the UI thread.
         if (++statusCounter >= STATUS_TICKS) {
             statusCounter = 0;
-            runOnUiThread(() -> playerStatus.setText("게임 초기화: " + status));
+            runOnUiThread(() -> setPlayerStatus("게임 초기화: " + status));
         }
     }
 
