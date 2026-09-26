@@ -54,118 +54,82 @@ final class ControlDialogs {
             this.val$uri = uri;
         }
 
-        /* JADX WARN: Code restructure failed: missing block: B:36:0x00a9, code lost:
-        
-            throw new java.lang.Exception("백업 파일은 1 MB 이하여야 합니다.");
-         */
         @Override // java.lang.Runnable
-        /*
-            Code decompiled incorrectly, please refer to instructions dump.
-            To view partially-correct add '--show-bad-code' argument
-        */
         public void run() {
-            /*
-                r7 = this;
-                int r0 = r7.val$request     // Catch: java.lang.Exception -> Lb5
-                r1 = 6211(0x1843, float:8.703E-42)
-                java.lang.String r2 = "UTF-8"
-                java.lang.String r3 = "파일을 열 수 없습니다."
-                if (r0 != r1) goto L55
-                java.lang.String r0 = r7.val$backup     // Catch: java.lang.Exception -> Lb5
-                if (r0 != 0) goto L19
-                com.jjongjjongs.minimobile.ControlDialogs r0 = com.jjongjjongs.minimobile.ControlDialogs.this     // Catch: java.lang.Exception -> Lb5
-                com.jjongjjongs.minimobile.ControlPatch$Session r0 = r0.s     // Catch: java.lang.Exception -> Lb5
-                com.jjongjjongs.minimobile.ControlData r0 = r0.data     // Catch: java.lang.Exception -> Lb5
-                java.lang.String r0 = r0.encode()     // Catch: java.lang.Exception -> Lb5
-                goto L1b
-            L19:
-                java.lang.String r0 = r7.val$backup     // Catch: java.lang.Exception -> Lb5
-            L1b:
-                com.jjongjjongs.minimobile.ControlDialogs r1 = com.jjongjjongs.minimobile.ControlDialogs.this     // Catch: java.lang.Exception -> Lb5
-                com.jjongjjongs.minimobile.ControlPatch$Session r1 = r1.s     // Catch: java.lang.Exception -> Lb5
-                android.app.Activity r1 = r1.a     // Catch: java.lang.Exception -> Lb5
-                android.content.ContentResolver r1 = r1.getContentResolver()     // Catch: java.lang.Exception -> Lb5
-                android.net.Uri r4 = r7.val$uri     // Catch: java.lang.Exception -> Lb5
-                java.lang.String r5 = "wt"
-                java.io.OutputStream r1 = r1.openOutputStream(r4, r5)     // Catch: java.lang.Exception -> Lb5
-                if (r1 == 0) goto L4f
-                byte[] r0 = r0.getBytes(r2)     // Catch: java.lang.Throwable -> L4a
-                r1.write(r0)     // Catch: java.lang.Throwable -> L4a
-                r1.flush()     // Catch: java.lang.Throwable -> L4a
-                r1.close()     // Catch: java.lang.Exception -> Lb5
-                com.jjongjjongs.minimobile.ControlDialogs r0 = com.jjongjjongs.minimobile.ControlDialogs.this     // Catch: java.lang.Exception -> Lb5
-                android.os.Handler r0 = r0.main     // Catch: java.lang.Exception -> Lb5
-                com.jjongjjongs.minimobile.ControlDialogs$22$1 r1 = new com.jjongjjongs.minimobile.ControlDialogs$22$1     // Catch: java.lang.Exception -> Lb5
-                r1.<init>()     // Catch: java.lang.Exception -> Lb5
-                r0.post(r1)     // Catch: java.lang.Exception -> Lb5
-                goto Lc2
-            L4a:
-                r0 = move-exception
-                r1.close()     // Catch: java.lang.Exception -> Lb5
-                throw r0     // Catch: java.lang.Exception -> Lb5
-            L4f:
-                java.lang.Exception r0 = new java.lang.Exception     // Catch: java.lang.Exception -> Lb5
-                r0.<init>(r3)     // Catch: java.lang.Exception -> Lb5
-                throw r0     // Catch: java.lang.Exception -> Lb5
-            L55:
-                com.jjongjjongs.minimobile.ControlDialogs r0 = com.jjongjjongs.minimobile.ControlDialogs.this     // Catch: java.lang.Exception -> Lb5
-                com.jjongjjongs.minimobile.ControlPatch$Session r0 = r0.s     // Catch: java.lang.Exception -> Lb5
-                android.app.Activity r0 = r0.a     // Catch: java.lang.Exception -> Lb5
-                android.content.ContentResolver r0 = r0.getContentResolver()     // Catch: java.lang.Exception -> Lb5
-                android.net.Uri r1 = r7.val$uri     // Catch: java.lang.Exception -> Lb5
-                java.io.InputStream r0 = r0.openInputStream(r1)     // Catch: java.lang.Exception -> Lb5
-                if (r0 == 0) goto Laf
-                java.io.ByteArrayOutputStream r1 = new java.io.ByteArrayOutputStream     // Catch: java.lang.Exception -> Lb5
-                r1.<init>()     // Catch: java.lang.Exception -> Lb5
-                r3 = 8192(0x2000, float:1.148E-41)
-                byte[] r3 = new byte[r3]     // Catch: java.lang.Throwable -> Laa
-            L70:
-                int r4 = r0.read(r3)     // Catch: java.lang.Throwable -> Laa
-                r5 = -1
-                if (r4 != r5) goto L94
-                r0.close()     // Catch: java.lang.Exception -> Lb5
-                java.lang.String r0 = new java.lang.String     // Catch: java.lang.Exception -> Lb5
-                byte[] r1 = r1.toByteArray()     // Catch: java.lang.Exception -> Lb5
-                r0.<init>(r1, r2)     // Catch: java.lang.Exception -> Lb5
-                com.jjongjjongs.minimobile.ControlData r0 = com.jjongjjongs.minimobile.ControlData.decode(r0)     // Catch: java.lang.Exception -> Lb5
-                com.jjongjjongs.minimobile.ControlDialogs r1 = com.jjongjjongs.minimobile.ControlDialogs.this     // Catch: java.lang.Exception -> Lb5
-                android.os.Handler r1 = r1.main     // Catch: java.lang.Exception -> Lb5
-                com.jjongjjongs.minimobile.ControlDialogs$22$2 r2 = new com.jjongjjongs.minimobile.ControlDialogs$22$2     // Catch: java.lang.Exception -> Lb5
-                r2.<init>()     // Catch: java.lang.Exception -> Lb5
-                r1.post(r2)     // Catch: java.lang.Exception -> Lb5
-                goto Lc2
-            L94:
-                int r5 = r1.size()     // Catch: java.lang.Throwable -> Laa
-                int r5 = r5 + r4
-                r6 = 1048576(0x100000, float:1.469368E-39)
-                if (r5 > r6) goto La2
-                r5 = 0
-                r1.write(r3, r5, r4)     // Catch: java.lang.Throwable -> Laa
-                goto L70
-            La2:
-                java.lang.Exception r1 = new java.lang.Exception     // Catch: java.lang.Throwable -> Laa
-                java.lang.String r2 = "백업 파일은 1 MB 이하여야 합니다."
-                r1.<init>(r2)     // Catch: java.lang.Throwable -> Laa
-                throw r1     // Catch: java.lang.Throwable -> Laa
-            Laa:
-                r1 = move-exception
-                r0.close()     // Catch: java.lang.Exception -> Lb5
-                throw r1     // Catch: java.lang.Exception -> Lb5
-            Laf:
-                java.lang.Exception r0 = new java.lang.Exception     // Catch: java.lang.Exception -> Lb5
-                r0.<init>(r3)     // Catch: java.lang.Exception -> Lb5
-                throw r0     // Catch: java.lang.Exception -> Lb5
-            Lb5:
-                r0 = move-exception
-                com.jjongjjongs.minimobile.ControlDialogs r1 = com.jjongjjongs.minimobile.ControlDialogs.this
-                android.os.Handler r1 = r1.main
-                com.jjongjjongs.minimobile.ControlDialogs$22$3 r2 = new com.jjongjjongs.minimobile.ControlDialogs$22$3
-                r2.<init>()
-                r1.post(r2)
-            Lc2:
-                return
-            */
-            throw new UnsupportedOperationException("Method not decompiled: com.jjongjjongs.minimobile.ControlDialogs.AnonymousClass22.run():void");
+            try {
+                if (this.val$request == ControlDialogs.EXPORT_LAYOUT) {
+                    String payload = this.val$backup != null
+                            ? this.val$backup
+                            : ControlDialogs.this.s.data.encode();
+                    java.io.OutputStream out = ControlDialogs.this.s.a.getContentResolver()
+                            .openOutputStream(this.val$uri, "wt");
+                    if (out == null) {
+                        throw new Exception("파일을 열 수 없습니다.");
+                    }
+                    try {
+                        out.write(payload.getBytes("UTF-8"));
+                        out.flush();
+                    } finally {
+                        out.close();
+                    }
+                    ControlDialogs.this.main.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            ControlDialogs.this.s.fileBusy = false;
+                            ControlDialogs.this.s.syncPause();
+                            ControlPatch.toast(ControlDialogs.this.s.a, "배치를 파일로 저장했습니다.");
+                        }
+                    });
+                } else {
+                    java.io.InputStream in = ControlDialogs.this.s.a.getContentResolver()
+                            .openInputStream(this.val$uri);
+                    if (in == null) {
+                        throw new Exception("파일을 열 수 없습니다.");
+                    }
+                    String text;
+                    try {
+                        java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
+                        byte[] chunk = new byte[8192];
+                        while (true) {
+                            int n = in.read(chunk);
+                            if (n == -1) {
+                                break;
+                            }
+                            if (buf.size() + n > 1048576) {
+                                throw new Exception("백업 파일은 1 MB 이하여야 합니다.");
+                            }
+                            buf.write(chunk, 0, n);
+                        }
+                        text = new String(buf.toByteArray(), "UTF-8");
+                    } finally {
+                        in.close();
+                    }
+                    final ControlData decoded = ControlData.decode(text);
+                    ControlDialogs.this.main.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            ControlPatch.input.releaseAll();
+                            ControlDialogs.this.s.data.applyActive(decoded);
+                            ControlDialogs.this.s.data.slots.clear();
+                            ControlDialogs.this.s.data.slots.putAll(decoded.slots);
+                            ControlDialogs.this.s.saveLayout();
+                            ControlDialogs.this.s.editor.refresh();
+                            ControlDialogs.this.s.fileBusy = false;
+                            ControlDialogs.this.s.syncPause();
+                            ControlPatch.toast(ControlDialogs.this.s.a, "배치를 파일에서 복원했습니다.");
+                        }
+                    });
+                }
+            } catch (final Exception e) {
+                ControlDialogs.this.main.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        ControlDialogs.this.s.fileBusy = false;
+                        ControlDialogs.this.s.syncPause();
+                        ControlDialogs.this.error(e.getMessage() == null ? "파일 처리 실패" : e.getMessage());
+                    }
+                });
+            }
         }
     }
 
@@ -522,23 +486,24 @@ final class ControlDialogs {
         scrollView.addView(column);
         LinearLayout linearLayout = null;
         final AlertDialog create = builder("조작 설정").setView(scrollView).setPositiveButton("게임으로 돌아가기", (DialogInterface.OnClickListener) null).create();
-        for (final int i = 0; i < 9; i++) {
-            if (i == 0) {
+        for (int i = 0; i < 9; i++) {
+            final int idx = i;
+            if (idx == 0) {
                 controlStyle = this.style;
                 str = "키패드";
-            } else if (i == 3) {
+            } else if (idx == 3) {
                 controlStyle = this.style;
                 str = "배치 저장·백업·초기화";
-            } else if (i == 8) {
+            } else if (idx == 8) {
                 controlStyle = this.style;
                 str = "게임패드";
             } else {
-                this.style.menuRow(linearLayout, strArr[i], new View.OnClickListener() { // from class: com.jjongjjongs.minimobile.ControlDialogs.2
+                this.style.menuRow(linearLayout, strArr[idx], new View.OnClickListener() { // from class: com.jjongjjongs.minimobile.ControlDialogs.2
                     @Override // android.view.View.OnClickListener
                     public void onClick(View view) {
                         ControlDialogs controlDialogs;
                         boolean z = false;
-                        switch (i) {
+                        switch (idx) {
                             case 0:
                                 ControlDialogs.this.s.editor.start();
                                 break;
@@ -575,12 +540,12 @@ final class ControlDialogs {
                 });
             }
             linearLayout = controlStyle.section(column, str);
-            this.style.menuRow(linearLayout, strArr[i], new View.OnClickListener() { // from class: com.jjongjjongs.minimobile.ControlDialogs.2
+            this.style.menuRow(linearLayout, strArr[idx], new View.OnClickListener() { // from class: com.jjongjjongs.minimobile.ControlDialogs.2
                 @Override // android.view.View.OnClickListener
                 public void onClick(View view) {
                     ControlDialogs controlDialogs;
                     boolean z = false;
-                    switch (i) {
+                    switch (idx) {
                         case 0:
                             ControlDialogs.this.s.editor.start();
                             break;

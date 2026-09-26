@@ -472,7 +472,6 @@ final class ControlEditor {
                         select(-1);
                         break;
                     }
-                    break;
                 case 1:
                     this.dragging = false;
                     this.pointer = -1;

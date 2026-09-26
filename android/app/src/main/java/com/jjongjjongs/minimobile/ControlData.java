@@ -101,9 +101,10 @@ public final class ControlData {
                 jSONObject2.put("hidden", this.hidden[i]);
                 if (this.rect[i] != null) {
                     JSONArray jSONArray = new JSONArray();
-                    int length = this.rect[i].length;
+                    float[] rectArr = this.rect[i];
+                    int length = rectArr.length;
                     for (int i2 = 0; i2 < length; i2++) {
-                        jSONArray.put(r5[i2]);
+                        jSONArray.put(rectArr[i2]);
                     }
                     jSONObject2.put("rect", jSONArray);
                 }
