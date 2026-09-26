@@ -134,6 +134,16 @@ impl Display {
             .invoke_virtual(&screen_image, "getGraphics", "()Ljavax/microedition/lcdui/Graphics;", ())
             .await?;
 
+        // A mutable image starts white; a handset LCD starts black. A title that
+        // draws onto the screen without blanking every row it leaves - an SK-VM
+        // title composing a fixed layout onto the LCD - needs the black it was
+        // written for, or its untouched margins show the buffer's white. See
+        // `System::screen_starts_black`.
+        if context.system().screen_starts_black() {
+            let _: () = jvm.invoke_virtual(&screen_graphics, "setColor", "(III)V", (0, 0, 0)).await?;
+            let _: () = jvm.invoke_virtual(&screen_graphics, "fillRect", "(IIII)V", (0, 0, width, height)).await?;
+        }
+
         jvm.put_field(&mut this, "screenImage", "Ljavax/microedition/lcdui/Image;", screen_image)
             .await?;
         jvm.put_field(&mut this, "screenGraphics", "Ljavax/microedition/lcdui/Graphics;", screen_graphics)

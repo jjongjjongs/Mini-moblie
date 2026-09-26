@@ -68,6 +68,9 @@ pub struct System {
     /// Whether this title reads its keys as the SK-VM handset's positive
     /// scancodes. See [`System::title_keys_as_skvm_scancodes`].
     title_keys_as_skvm_scancodes: Arc<AtomicBool>,
+    /// Whether the screen buffer starts black rather than the white a MIDP
+    /// mutable image starts as. See [`System::screen_starts_black`].
+    screen_starts_black: Arc<AtomicBool>,
 }
 
 impl System {
@@ -115,6 +118,7 @@ impl System {
             displayable_reserved_rows: Arc::new(AtomicU32::new(0)),
             midp_uses_standard_key_codes: Arc::new(AtomicBool::new(false)),
             title_keys_as_skvm_scancodes: Arc::new(AtomicBool::new(false)),
+            screen_starts_black: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -285,6 +289,26 @@ impl System {
 
     pub fn set_title_keys_as_skvm_scancodes(&self, uses: bool) {
         self.title_keys_as_skvm_scancodes.store(uses, Ordering::SeqCst);
+    }
+
+    /// Whether the screen buffer starts black rather than the white a MIDP
+    /// mutable image starts as.
+    ///
+    /// The `Display`'s screen is a mutable image, which MIDP starts white.
+    /// A handset LCD starts black, and a title that composes onto it without
+    /// blanking the parts it does not draw - an SK-VM title that never calls
+    /// `com.xce.lcdui.XDisplay.clear`, and relies on the LCD being dark under
+    /// the margins its fixed layout leaves - needs the black it was written
+    /// for, or those margins show the white the buffer started as. Set for
+    /// SK-VM titles, whose vendor draw path (`com.skt.m.Graphics2D`,
+    /// `XDisplay`) is the handset's LCD, not a MIDP `Canvas` that paints its
+    /// whole surface each frame.
+    pub fn screen_starts_black(&self) -> bool {
+        self.screen_starts_black.load(Ordering::SeqCst)
+    }
+
+    pub fn set_screen_starts_black(&self) {
+        self.screen_starts_black.store(true, Ordering::SeqCst);
     }
 
     /// Whether the title lays its screens out below the handset's status strip,
