@@ -30,10 +30,13 @@
 //!
 //! # Phase 1
 //!
-//! This phase answers only the connect itself: the gateway's confirm as
-//! `SUCCESS`, and the data server's traffic is logged so the command framing
-//! can be pinned from the title's own writes. Later phases answer the map
-//! list, the map file and the ranking.
+//! This phase carries the connect through: the gateway's init is answered with
+//! a `SUCCESS` confirm, and each data-server command with a success header and
+//! an empty body, which lands map/ranking/notice screens on their own "none
+//! yet" state instead of the network error a refused connect left them on. The
+//! request is logged so a body can be filled in for the screens that should
+//! show records. Later phases answer the map list, the map file and the
+//! ranking with real content.
 
 use alloc::{boxed::Box, vec, vec::Vec};
 
@@ -93,6 +96,21 @@ struct SnowBoardConnection {
     outgoing: Vec<u8>,
 }
 
+/// The forty character server-to-client header, whose fields the title reads by
+/// fixed offsets (`NetProcess.Net_ReadHeaderData`):
+///
+/// ```text
+///   [0..4]   the reply command, the request's four digit code with its last
+///            digit carried from '0' (client) to '1' (server): 0310 -> 0311
+///   [4..12]  the body length that follows, eight digits, zero padded
+///   [12..16] a status; 0002, 0003 and 0004 are the errors the title drops on,
+///            so a success is any other - 0001 here
+///   [16..24] a point total, eight digits (the title caps it at 99999)
+///   [24]     a '1' flag the title tests for
+///   [25..40] unread padding
+/// ```
+const HEADER_LEN: usize = 40;
+
 impl SnowBoardConnection {
     /// The 43 byte confirm, `SUCCESS` and everything past the result left blank.
     /// The title reads the result at `+4` and trims the name and birth fields to
@@ -104,6 +122,34 @@ impl SnowBoardConnection {
         // in that range, the checksum is the result itself.
         packet[42] = SUCCESS;
         packet
+    }
+
+    /// A success header for `request`, carrying an empty body.
+    ///
+    /// Every command the title sends (a map list, the ranking, a notice) reaches
+    /// its completion whether the body it reads back names anything or nothing,
+    /// so the shortest answer it accepts - a success with no records - is one
+    /// header and no body. An empty list lands the title on its own "none yet"
+    /// screen (`맵파일이 없습니다`) rather than the network error a refused
+    /// connect left it on. Later phases fill the body for the commands whose
+    /// screens should show something.
+    fn empty_success(request: &[u8]) -> Vec<u8> {
+        let mut reply_command = [b'0'; 4];
+        for (slot, &byte) in reply_command.iter_mut().zip(request.iter()) {
+            *slot = byte;
+        }
+        // The server's reply carries the request's code with its trailing '0'
+        // turned to '1'.
+        reply_command[3] = b'1';
+
+        let mut header = Vec::with_capacity(HEADER_LEN);
+        header.extend_from_slice(&reply_command); // [0..4]  command
+        header.extend_from_slice(b"00000000"); // [4..12]   body length: none
+        header.extend_from_slice(b"0001"); // [12..16]      status: not an error
+        header.extend_from_slice(b"00000000"); // [16..24]  point
+        header.push(b'1'); // [24]                          flag
+        header.resize(HEADER_LEN, b'0'); // [25..40]        padding
+        header
     }
 }
 
@@ -117,10 +163,24 @@ impl LocalConnection for SnowBoardConnection {
             hex_ascii(&self.pending),
         );
 
-        if self.is_gateway && self.pending.len() >= INIT_LEN {
-            self.pending.drain(..INIT_LEN);
-            self.outgoing.extend_from_slice(&Self::confirm());
-            tracing::info!("snowboard gateway: answered init with SUCCESS confirm");
+        if self.is_gateway {
+            if self.pending.len() >= INIT_LEN {
+                self.pending.drain(..INIT_LEN);
+                self.outgoing.extend_from_slice(&Self::confirm());
+                tracing::info!("snowboard gateway: answered init with SUCCESS confirm");
+            }
+            return;
+        }
+
+        // The data server's request is the ASCII command string the title
+        // builds in `FnNetControl`, opening with its four digit code. One write
+        // carries the whole request, and each request opens a fresh connection,
+        // so a code in hand is a request to answer.
+        if self.outgoing.is_empty() && self.pending.len() >= 4 {
+            let reply = Self::empty_success(&self.pending);
+            tracing::info!("snowboard data: {} -> empty success {}", hex_ascii(&self.pending), hex_ascii(&reply),);
+            self.pending.clear();
+            self.outgoing.extend_from_slice(&reply);
         }
     }
 
@@ -132,13 +192,11 @@ impl LocalConnection for SnowBoardConnection {
             return LocalRead::Data(take);
         }
 
-        // The data server's command framing is being pinned from the write
-        // logs. Until a command has an answer, close rather than leave the read
-        // waiting: a read that never returns strands the title, where an end of
-        // stream lands in the same catch its author wrote for a dropped
-        // connection. The command the title wrote is captured in the log first.
+        // A request with no answer is closed rather than left waiting: a read
+        // that never returns strands the title, where an end of stream lands in
+        // the same catch its author wrote for a dropped connection.
         if !self.is_gateway && !self.pending.is_empty() {
-            tracing::info!("snowboard data: no answer yet for {}, closing", hex_ascii(&self.pending));
+            tracing::info!("snowboard data: no answer for {}, closing", hex_ascii(&self.pending));
             return LocalRead::Closed;
         }
 
@@ -165,4 +223,62 @@ fn hex_ascii(bytes: &[u8]) -> alloc::string::String {
     }
     out.push('|');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CONFIRM_LEN, HEADER_LEN, INIT_LEN, LocalConnection, LocalRead, SUCCESS, SnowBoardConnection};
+    use alloc::{vec, vec::Vec};
+
+    fn read_all(connection: &mut SnowBoardConnection) -> Vec<u8> {
+        let mut out = vec![0u8; 256];
+        match connection.read(&mut out) {
+            LocalRead::Data(read) => out[..read].to_vec(),
+            other => panic!("expected data, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_gateway_answers_the_init_with_a_success_confirm() {
+        let mut gateway = SnowBoardConnection {
+            is_gateway: true,
+            pending: Vec::new(),
+            outgoing: Vec::new(),
+        };
+        gateway.write(&[0u8; INIT_LEN]);
+
+        let confirm = read_all(&mut gateway);
+        assert_eq!(confirm.len(), CONFIRM_LEN);
+        assert_eq!(confirm[4], SUCCESS);
+        assert_eq!(confirm[42], SUCCESS, "the checksum is the XOR of +4..+42");
+    }
+
+    #[test]
+    fn a_data_command_is_answered_with_an_empty_success_header() {
+        let mut data = SnowBoardConnection {
+            is_gateway: false,
+            pending: Vec::new(),
+            outgoing: Vec::new(),
+        };
+        // A map-list request: its code opens the ASCII string, ending in '0'.
+        data.write(b"03100100something");
+
+        let header = read_all(&mut data);
+        assert_eq!(header.len(), HEADER_LEN);
+        assert_eq!(&header[0..4], b"0311", "the reply carries the request code, '0' -> '1'");
+        assert_eq!(&header[4..12], b"00000000", "an empty body");
+        assert_ne!(&header[12..16], b"0002", "not one of the error statuses");
+        assert_eq!(header[24], b'1');
+    }
+
+    #[test]
+    fn an_unanswered_data_read_closes_rather_than_waits() {
+        let mut data = SnowBoardConnection {
+            is_gateway: false,
+            pending: Vec::new(),
+            outgoing: Vec::new(),
+        };
+        // A read before any write has nothing to close over: it waits.
+        assert_eq!(data.read(&mut [0u8; 8]), LocalRead::Pending);
+    }
 }
