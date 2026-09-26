@@ -21,6 +21,11 @@ mod host {
 
     /// The block size, the total blocks and the blocks an unprivileged
     /// application may still use, as `statfs` reports them.
+    //
+    // `f_blocks`/`f_bavail` are 32-bit on 32-bit targets (armeabi-v7a) and
+    // 64-bit on 64-bit ones. Widening through `u64::from` type-checks on both;
+    // on the 64-bit build it is an identity conversion, hence the allow.
+    #[allow(clippy::useless_conversion)]
     pub fn storage_blocks(path: &Path) -> Option<(u64, u64, u64)> {
         let path = CString::new(path.as_os_str().as_bytes()).ok()?;
         let mut stats = unsafe { core::mem::zeroed::<libc::statfs>() };
@@ -28,7 +33,7 @@ mod host {
             return None;
         }
 
-        Some((stats.f_bsize as u64, stats.f_blocks, stats.f_bavail))
+        Some((stats.f_bsize as u64, u64::from(stats.f_blocks), u64::from(stats.f_bavail)))
     }
 
     pub fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {

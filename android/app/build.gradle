@@ -4,7 +4,11 @@ apply plugin: 'com.android.application'
 // `wie_android` crate and drops one .so per ABI into `jniLibsDir`, which is
 // then the only jniLibs source AGP packages.
 def jniLibsDir = layout.buildDirectory.dir('jniLibs').get().asFile
-def abis = ['arm64-v8a']
+// 64-bit is the primary target; 32-bit (armeabi-v7a) is built too so the app
+// installs on older 32-bit-only devices. The interpreter is the portable CPU
+// fallback there - the dynasm JIT only has x86_64/aarch64 backends, so a v7a
+// build silently runs the reference interpreter (slower, but correct).
+def abis = ['arm64-v8a', 'armeabi-v7a']
 
 // The signing key is deliberately not in the repository. Point the build at it
 // with `-PkeystoreFile=... -PkeystorePassword=... -PkeyAlias=...`, or with the
@@ -137,6 +141,22 @@ android {
 
     androidResources {
         noCompress += ['wav', 'mp3']
+    }
+
+    // Ship one apk per ABI instead of a single fat apk. The native .so is the
+    // bulk of the package, so bundling every ABI into one apk would roughly
+    // double its size once armeabi-v7a joins arm64-v8a; a per-ABI split keeps
+    // each device's download to just the code it can run. `universalApk` still
+    // produces a combined apk on demand for sideloading where the target ABI
+    // is not known ahead of time.
+    splits {
+        abi {
+            enable true
+            reset()
+            //noinspection ChromeOsAbiSupport
+            include(*abis)
+            universalApk true
+        }
     }
 }
 
