@@ -65,6 +65,9 @@ pub struct System {
     /// Whether the MIDP key path delivers the de-facto standard negative nav
     /// codes. See [`System::midp_uses_standard_key_codes`].
     midp_uses_standard_key_codes: Arc<AtomicBool>,
+    /// Whether this title reads its keys as the SK-VM handset's positive
+    /// scancodes. See [`System::title_keys_as_skvm_scancodes`].
+    title_keys_as_skvm_scancodes: Arc<AtomicBool>,
 }
 
 impl System {
@@ -111,6 +114,7 @@ impl System {
             title_clears_screen_each_paint: Arc::new(AtomicBool::new(false)),
             displayable_reserved_rows: Arc::new(AtomicU32::new(0)),
             midp_uses_standard_key_codes: Arc::new(AtomicBool::new(false)),
+            title_keys_as_skvm_scancodes: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -268,6 +272,19 @@ impl System {
 
     pub fn set_midp_uses_standard_key_codes(&self) {
         self.midp_uses_standard_key_codes.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether this title reads its d-pad, select, clear and soft keys as the
+    /// SK-VM handset's own positive scancodes rather than the org.kwis codes a
+    /// `Card` is handed by default, because its key table is keyed on them.
+    /// Looked up in `crate::quirks` and set here by the emulator that loaded the
+    /// archive; `net.wie.CardCanvas` reads it.
+    pub fn title_keys_as_skvm_scancodes(&self) -> bool {
+        self.title_keys_as_skvm_scancodes.load(Ordering::SeqCst)
+    }
+
+    pub fn set_title_keys_as_skvm_scancodes(&self, uses: bool) {
+        self.title_keys_as_skvm_scancodes.store(uses, Ordering::SeqCst);
     }
 
     /// Whether the title lays its screens out below the handset's status strip,

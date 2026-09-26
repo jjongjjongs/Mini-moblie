@@ -85,6 +85,21 @@ pub struct TitleQuirks {
     /// surface it composes for, and costs it nothing, since it draws its frame
     /// whole every time.
     pub clears_screen_each_paint: bool,
+
+    /// Whether the title reads its d-pad, select, clear and soft keys as the
+    /// SK-VM handset's own positive scancodes (up=1, left=2, right=5, down=6,
+    /// select=8, clear=99, soft ok=92, soft cancel=90) rather than the org.kwis
+    /// codes this runtime hands a `Card` by default.
+    ///
+    /// An InFusio port keeps its key table as a resource - 에이지오브엠파이어2's
+    /// `res/SKT_WIPI.raw` is twenty (raw, internal) byte pairs - and looks the
+    /// raw code an event carries up in it, so a code the table has no row for is
+    /// simply dropped. The digits, `*` and `#` reach the table as their ASCII
+    /// values either way and work; the d-pad, select, clear and soft keys reach
+    /// it as org.kwis's negative codes, which the table does not list, so
+    /// direction and back did nothing. `net.wie.CardCanvas` reads this and hands
+    /// such a title the scancodes its table is keyed on instead.
+    pub keys_as_skvm_scancodes: bool,
 }
 
 const fn panel(width: u32, height: u32) -> TitleQuirks {
@@ -95,6 +110,7 @@ const fn panel(width: u32, height: u32) -> TitleQuirks {
         drawn_sideways: false,
         clip_includes_far_edge: false,
         clears_screen_each_paint: false,
+        keys_as_skvm_scancodes: false,
     }
 }
 
@@ -106,6 +122,7 @@ const fn annunciator() -> TitleQuirks {
         drawn_sideways: false,
         clip_includes_far_edge: false,
         clears_screen_each_paint: false,
+        keys_as_skvm_scancodes: false,
     }
 }
 
@@ -118,6 +135,7 @@ const fn annunciator_of(rows: u32) -> TitleQuirks {
         drawn_sideways: false,
         clip_includes_far_edge: false,
         clears_screen_each_paint: false,
+        keys_as_skvm_scancodes: false,
     }
 }
 
@@ -129,6 +147,7 @@ const fn sideways() -> TitleQuirks {
         drawn_sideways: true,
         clip_includes_far_edge: false,
         clears_screen_each_paint: false,
+        keys_as_skvm_scancodes: false,
     }
 }
 
@@ -142,6 +161,7 @@ const fn clears_frame() -> TitleQuirks {
         drawn_sideways: false,
         clip_includes_far_edge: false,
         clears_screen_each_paint: true,
+        keys_as_skvm_scancodes: false,
     }
 }
 
@@ -167,6 +187,21 @@ const fn clip_includes_far_edge() -> TitleQuirks {
         drawn_sideways: false,
         clip_includes_far_edge: true,
         clears_screen_each_paint: false,
+        keys_as_skvm_scancodes: false,
+    }
+}
+
+/// A title whose key table is keyed on the SK-VM handset's positive scancodes.
+/// See [`TitleQuirks::keys_as_skvm_scancodes`].
+const fn skvm_scancode_keys() -> TitleQuirks {
+    TitleQuirks {
+        screen_size: None,
+        expects_annunciator: false,
+        annunciator_rows: None,
+        drawn_sideways: false,
+        clip_includes_far_edge: false,
+        clears_screen_each_paint: false,
+        keys_as_skvm_scancodes: true,
     }
 }
 
@@ -461,6 +496,14 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // off the right, the bars pinned to the far edges and the field sat small in
     // the middle. 176x220 is the panel the layout is measured for.
     (TitlePlatform::Skt, "0053630031", panel(176, 220)),
+    // 에이지오브엠파이어2 (InFusio): a `Card` whose `keyNotify` looks the raw
+    // event code up in `res/SKT_WIPI.raw`, a table keyed on the SK-VM handset's
+    // own scancodes (up=1, left=2, right=5, down=6, select=8, clear=99, soft
+    // keys 92/90). Handed the org.kwis codes this runtime uses by default, the
+    // table had no row for the d-pad, select, clear or soft keys and dropped
+    // them - only the digits, `*` and `#`, which reach it as ASCII either way,
+    // did anything. See `TitleQuirks::keys_as_skvm_scancodes`.
+    (TitlePlatform::Skt, "0051574505", skvm_scancode_keys()),
 ];
 
 /// What to do differently for the title `aid` on `platform`.

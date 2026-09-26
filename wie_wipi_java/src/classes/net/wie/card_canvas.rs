@@ -73,6 +73,27 @@ impl WIPIKeyCode {
         })
     }
 
+    /// The SK-VM handset scancode this runtime's org.kwis code `wipi_key` stands
+    /// for, for a title whose key table is keyed on the handset's own scancodes.
+    /// See [`crate`]'s `TitleQuirks::keys_as_skvm_scancodes`.
+    ///
+    /// Only the d-pad, select, clear and soft keys are moved: the digits, `*`
+    /// and `#` reach such a table as their ASCII value either way, so they - and
+    /// anything else without a scancode here - are handed on unchanged.
+    pub fn to_skvm_scancode(wipi_key: i32) -> i32 {
+        match Self::from_raw(wipi_key) {
+            Some(Self::UP) => 1,
+            Some(Self::LEFT) => 2,
+            Some(Self::RIGHT) => 5,
+            Some(Self::DOWN) => 6,
+            Some(Self::FIRE) => 8,
+            Some(Self::RIGHT_SOFT_KEY) => 90,
+            Some(Self::LEFT_SOFT_KEY) => 92,
+            Some(Self::CLEAR) => 99,
+            _ => wipi_key,
+        }
+    }
+
     pub fn from_midp_raw(keycode: i32) -> i32 {
         match MIDPKeyCode::from_raw(keycode) {
             Some(MIDPKeyCode::UP) => Self::UP as i32,
@@ -348,10 +369,23 @@ impl CardCanvas {
     /// `TextComponent$ModeViewer` - the 13x7 input-mode indicator - over the
     /// text box's own card, and the indicator, which handles no keys and never
     /// meant to, swallowed every one of them.
-    async fn key_pressed(jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>, key_code: i32) -> JvmResult<()> {
+    /// The code a `Card` is handed for the org.kwis key `wipi_key`. It is that
+    /// key as-is, except for a title whose key table is keyed on the SK-VM
+    /// handset's own scancodes (see `TitleQuirks::keys_as_skvm_scancodes`),
+    /// which is handed the scancode instead so its table has a row for the
+    /// d-pad, select, clear and soft keys.
+    fn deliver_key(context: &mut WieJvmContext, wipi_key: i32) -> i32 {
+        if context.system().title_keys_as_skvm_scancodes() {
+            WIPIKeyCode::to_skvm_scancode(wipi_key)
+        } else {
+            wipi_key
+        }
+    }
+
+    async fn key_pressed(jvm: &Jvm, context: &mut WieJvmContext, this: ClassInstanceRef<Self>, key_code: i32) -> JvmResult<()> {
         tracing::debug!("net.wie.CardCanvas::keyPressed({this:?}, {key_code})");
 
-        let key_code = WIPIKeyCode::from_midp_raw(key_code);
+        let key_code = Self::deliver_key(context, WIPIKeyCode::from_midp_raw(key_code));
 
         let cards = jvm.get_field(&this, "cards", "Ljava/util/Vector;").await?;
         let length = jvm.invoke_virtual(&cards, "size", "()I", ()).await?;
@@ -368,10 +402,10 @@ impl CardCanvas {
         Ok(())
     }
 
-    async fn key_repeated(jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>, key_code: i32) -> JvmResult<()> {
+    async fn key_repeated(jvm: &Jvm, context: &mut WieJvmContext, this: ClassInstanceRef<Self>, key_code: i32) -> JvmResult<()> {
         tracing::debug!("net.wie.CardCanvas::keyRepeated({this:?}, {key_code})");
 
-        let key_code = WIPIKeyCode::from_midp_raw(key_code);
+        let key_code = Self::deliver_key(context, WIPIKeyCode::from_midp_raw(key_code));
 
         let cards = jvm.get_field(&this, "cards", "Ljava/util/Vector;").await?;
         let length = jvm.invoke_virtual(&cards, "size", "()I", ()).await?;
@@ -388,10 +422,10 @@ impl CardCanvas {
         Ok(())
     }
 
-    async fn key_released(jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>, key_code: i32) -> JvmResult<()> {
+    async fn key_released(jvm: &Jvm, context: &mut WieJvmContext, this: ClassInstanceRef<Self>, key_code: i32) -> JvmResult<()> {
         tracing::debug!("net.wie.CardCanvas::keyReleased({this:?}, {key_code})");
 
-        let key_code = WIPIKeyCode::from_midp_raw(key_code);
+        let key_code = Self::deliver_key(context, WIPIKeyCode::from_midp_raw(key_code));
 
         let cards = jvm.get_field(&this, "cards", "Ljava/util/Vector;").await?;
         let length = jvm.invoke_virtual(&cards, "size", "()I", ()).await?;
@@ -617,5 +651,41 @@ mod covering_card_tests {
     fn a_card_fills_what_a_docked_strip_leaves() {
         assert!(covers_client_area(0, 0, 240, 296, 240, 320, 24));
         assert!(!covers_client_area(0, 0, 240, 200, 240, 320, 24));
+    }
+}
+
+#[cfg(test)]
+mod skvm_scancode_tests {
+    use super::WIPIKeyCode;
+
+    /// The d-pad, select, clear and soft keys map to the scancodes
+    /// 에이지오브엠파이어2's `res/SKT_WIPI.raw` table lists (raw code -> internal):
+    /// 1->19 up, 2->21 left, 5->23 right, 6->25 down, 8->22 select, 99->24
+    /// cancel, 92->38 soft ok, 90->47 soft cancel.
+    #[test]
+    fn nav_keys_become_the_handset_scancodes_the_table_lists() {
+        assert_eq!(WIPIKeyCode::to_skvm_scancode(WIPIKeyCode::UP as i32), 1);
+        assert_eq!(WIPIKeyCode::to_skvm_scancode(WIPIKeyCode::LEFT as i32), 2);
+        assert_eq!(WIPIKeyCode::to_skvm_scancode(WIPIKeyCode::RIGHT as i32), 5);
+        assert_eq!(WIPIKeyCode::to_skvm_scancode(WIPIKeyCode::DOWN as i32), 6);
+        assert_eq!(WIPIKeyCode::to_skvm_scancode(WIPIKeyCode::FIRE as i32), 8);
+        assert_eq!(WIPIKeyCode::to_skvm_scancode(WIPIKeyCode::CLEAR as i32), 99);
+        assert_eq!(WIPIKeyCode::to_skvm_scancode(WIPIKeyCode::LEFT_SOFT_KEY as i32), 92);
+        assert_eq!(WIPIKeyCode::to_skvm_scancode(WIPIKeyCode::RIGHT_SOFT_KEY as i32), 90);
+    }
+
+    /// The digits, `*` and `#` reach the table as their ASCII value, which it
+    /// lists, so they are handed on unchanged.
+    #[test]
+    fn digits_star_and_pound_are_left_alone() {
+        for key in [
+            WIPIKeyCode::NUM0,
+            WIPIKeyCode::NUM5,
+            WIPIKeyCode::NUM9,
+            WIPIKeyCode::STAR,
+            WIPIKeyCode::HASH,
+        ] {
+            assert_eq!(WIPIKeyCode::to_skvm_scancode(key as i32), key as i32);
+        }
     }
 }
