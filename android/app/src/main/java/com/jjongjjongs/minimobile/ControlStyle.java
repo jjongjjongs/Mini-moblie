@@ -167,9 +167,10 @@ final class ControlStyle {
                     ViewGroup.MarginLayoutParams marginLayoutParams = (ViewGroup.MarginLayoutParams) layoutParams;
                     marginLayoutParams.leftMargin = dp(4.0f);
                     marginLayoutParams.rightMargin = dp(4.0f);
-                    // Lift the footer buttons off the very bottom edge.
-                    marginLayoutParams.topMargin = dp(6.0f);
-                    marginLayoutParams.bottomMargin = dp(12.0f);
+                    // No top/bottom margin: the platform button bar has a fixed
+                    // height and extra vertical margin clips the buttons.
+                    marginLayoutParams.topMargin = 0;
+                    marginLayoutParams.bottomMargin = 0;
                     button.setLayoutParams(marginLayoutParams);
                 }
             }
