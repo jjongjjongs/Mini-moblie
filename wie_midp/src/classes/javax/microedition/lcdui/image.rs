@@ -12,11 +12,12 @@ use jvm::{
 };
 
 use wie_backend::canvas::{
-    ArgbPixel, Canvas, Color, Image as BackendImage, ImageBuffer, ImageBufferCanvas, PixelType, Rgb332Pixel, Rgb565Pixel, decode_image,
+    ArgbPixel, Canvas, Color, DecodeConventions, Image as BackendImage, ImageBuffer, ImageBufferCanvas, PixelType, Rgb332Pixel, Rgb565Pixel,
+    decode_image_with,
 };
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 
-use crate::classes::javax::microedition::lcdui::Graphics;
+use crate::{classes::javax::microedition::lcdui::Graphics, fields::declared_field};
 
 // class javax.microedition.lcdui.Image
 pub struct Image;
@@ -28,6 +29,7 @@ impl Image {
             parent_class: Some("java/lang/Object"),
             interfaces: vec![],
             methods: vec![
+                JavaMethodProto::new("<init>", "()V", Self::init_empty, Default::default()),
                 JavaMethodProto::new("<init>", "(II[BI)V", Self::init, Default::default()),
                 JavaMethodProto::new("getWidth", "()I", Self::get_width, Default::default()),
                 JavaMethodProto::new("getHeight", "()I", Self::get_height, Default::default()),
@@ -72,6 +74,21 @@ impl Image {
         }
     }
 
+    /// The handset's `Image` had a constructor that takes nothing, and a
+    /// handset VM never checked whether a title was allowed to call it.
+    /// 디지몬RPGII does, once, while it builds its game state - `new Image()`
+    /// with the result thrown away, beside a row of its own classes made the
+    /// same way - so without this the title stopped on `NoSuchMethodError`
+    /// before its first frame. What it makes is an empty image; nothing reads
+    /// it.
+    async fn init_empty(jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<()> {
+        tracing::debug!("javax.microedition.lcdui.Image::<init>({this:?})");
+
+        let _: () = jvm.invoke_special(&this, "java/lang/Object", "<init>", "()V", ()).await?;
+
+        Ok(())
+    }
+
     async fn init(
         jvm: &Jvm,
         _context: &mut WieJvmContext,
@@ -98,11 +115,18 @@ impl Image {
 
         let bytes_per_pixel = 4;
 
+        // A blank mutable image starts opaque white, as MIDP requires ("all
+        // pixels ... are white"). Left at zero it was transparent black, so a
+        // title that made an off-screen buffer and painted only part of it -
+        // 미니스포츠클럽 renders its scene into the lower rows of a full-screen
+        // BackImg - blitted the untouched rows as transparent, and the previous
+        // frame (its menu, a stale logo) showed through the gap. Opaque white
+        // covers it, the way a handset does.
         Self::create_image_instance(
             jvm,
             width as _,
             height as _,
-            &vec![0; (width * height * bytes_per_pixel) as usize],
+            &vec![0xff; (width * height * bytes_per_pixel) as usize],
             bytes_per_pixel as _,
         )
         .await
@@ -114,7 +138,14 @@ impl Image {
         let name = JavaLangString::to_rust_string(jvm, &name).await?;
 
         let class_loader = jvm.current_class_loader().await?;
-        let stream = JavaLangClassLoader::get_resource_as_stream(jvm, &class_loader, &name).await?.unwrap();
+        // A resource the title asks for by name may not be in the jar. The
+        // spec answers that with an IOException, which titles catch and carry
+        // on from - 로맨스소드 ships only 120- and 176-wide title logos and
+        // asks for a 240 one on a 240 screen, then prints the trace and keeps
+        // going. Panicking instead took the whole emulator down.
+        let Some(stream) = JavaLangClassLoader::get_resource_as_stream(jvm, &class_loader, &name).await? else {
+            return Err(jvm.exception("java/io/IOException", &alloc::format!("resource not found: {name}")).await);
+        };
 
         let image_data = JavaIoInputStream::read_until_end(jvm, &stream).await?;
         let image_data_len = image_data.len() as i32;
@@ -144,7 +175,12 @@ impl Image {
         jvm.array_raw_buffer(&data).await?.read(image_offset as _, &mut image_data)?;
 
         let image = {
-            let result = decode_image(&cast_vec(image_data));
+            // SK-VM conventions: honour tRNS only. A one-colour indexed PNG with
+            // no tRNS is an opaque fill, not the transparent spacer the WIPI
+            // families read it as - 크레이지버스's 12x12 menuTile.png is exactly
+            // that, and read as transparent its menu background never covered
+            // the frame, so every state smeared over the last.
+            let result = decode_image_with(&cast_vec(image_data), DecodeConventions::Skvm);
             if let Ok(image) = result {
                 image
             } else {
@@ -183,44 +219,53 @@ impl Image {
     async fn get_width(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<i32> {
         tracing::debug!("javax.microedition.lcdui.Image::getWidth({this:?})");
 
-        jvm.get_field(&this, "w", "I").await
+        Self::width(jvm, &this).await
     }
 
     async fn get_height(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<i32> {
         tracing::debug!("javax.microedition.lcdui.Image::getHeight({this:?})");
 
-        jvm.get_field(&this, "h", "I").await
+        Self::height(jvm, &this).await
+    }
+
+    /// This image's width, for a caller already inside the platform.
+    ///
+    /// The WIPI `Image` wraps one of these and is asked for its size by titles
+    /// that plot a pixel at a time - 에스테반루크's 새로하기 asks 418591 times in
+    /// one loading routine - so the wrapper reaches the field through here
+    /// rather than paying a JVM method dispatch to arrive at the same read.
+    pub async fn width(jvm: &Jvm, this: &ClassInstanceRef<Self>) -> JvmResult<i32> {
+        jvm.get_field(this, "w", "I").await
+    }
+
+    /// This image's height; see [`Self::width`].
+    pub async fn height(jvm: &Jvm, this: &ClassInstanceRef<Self>) -> JvmResult<i32> {
+        jvm.get_field(this, "h", "I").await
     }
 
     pub async fn image(jvm: &Jvm, this: &ClassInstanceRef<Self>) -> JvmResult<Box<dyn BackendImage>> {
-        let width: i32 = jvm.get_field(this, "w", "I").await?;
-        let bpl: i32 = jvm.get_field(this, "bpl", "I").await?;
+        let pixels = ImagePixels::of(jvm, this).await?;
 
-        let bytes_per_pixel = bpl / width;
-
-        Ok(match bytes_per_pixel {
-            1 => Box::new(JavaImageBuffer::<Rgb332Pixel>::new(jvm, this).await?) as _,
-            2 => Box::new(JavaImageBuffer::<Rgb565Pixel>::new(jvm, this).await?) as _,
-            4 => Box::new(JavaImageBuffer::<ArgbPixel>::new(jvm, this).await?) as _,
-            _ => unimplemented!("Unsupported pixel format: {bytes_per_pixel}"),
+        Ok(match pixels.bytes_per_pixel() {
+            1 => Box::new(pixels.buffer::<Rgb332Pixel>()) as _,
+            2 => Box::new(pixels.buffer::<Rgb565Pixel>()) as _,
+            4 => Box::new(pixels.buffer::<ArgbPixel>()) as _,
+            other => unimplemented!("Unsupported pixel format: {other}"),
         })
     }
 
     pub async fn canvas(jvm: &Jvm, this: &ClassInstanceRef<Self>) -> JvmResult<Box<dyn Canvas>> {
-        let width: i32 = jvm.get_field(this, "w", "I").await?;
-        let bpl: i32 = jvm.get_field(this, "bpl", "I").await?;
+        let pixels = ImagePixels::of(jvm, this).await?;
 
-        let bytes_per_pixel = bpl / width;
-
-        Ok(match bytes_per_pixel {
-            1 => Box::new(ImageBufferCanvas::new(JavaImageBuffer::<Rgb332Pixel>::new(jvm, this).await?)) as _,
-            2 => Box::new(ImageBufferCanvas::new(JavaImageBuffer::<Rgb565Pixel>::new(jvm, this).await?)) as _,
-            4 => Box::new(ImageBufferCanvas::new(JavaImageBuffer::<ArgbPixel>::new(jvm, this).await?)) as _,
-            _ => unimplemented!("Unsupported pixel format: {bytes_per_pixel}"),
+        Ok(match pixels.bytes_per_pixel() {
+            1 => Box::new(ImageBufferCanvas::new(pixels.buffer::<Rgb332Pixel>())) as _,
+            2 => Box::new(ImageBufferCanvas::new(pixels.buffer::<Rgb565Pixel>())) as _,
+            4 => Box::new(ImageBufferCanvas::new(pixels.buffer::<ArgbPixel>())) as _,
+            other => unimplemented!("Unsupported pixel format: {other}"),
         })
     }
 
-    async fn create_image_instance(jvm: &Jvm, width: u32, height: u32, data: &[u8], bytes_per_pixel: u32) -> JvmResult<ClassInstanceRef<Image>> {
+    pub async fn create_image_instance(jvm: &Jvm, width: u32, height: u32, data: &[u8], bytes_per_pixel: u32) -> JvmResult<ClassInstanceRef<Image>> {
         let mut data_array = jvm.instantiate_array("B", data.len() as _).await?;
         jvm.array_raw_buffer_mut(&mut data_array).await?.write(0, data)?;
 
@@ -235,6 +280,55 @@ impl Image {
     }
 }
 
+/// An image's size, pitch and pixels, read in one pass.
+///
+/// Both ways of reaching an image's pixels used to read `w` and `bpl` to find
+/// the pixel format and then read `imgData`, `w` and `h` again to build the
+/// buffer. That is five field resolutions where three fields are wanted, and a
+/// drawing call makes one per call - see [`crate::fields::declared_field`].
+struct ImagePixels {
+    width: i32,
+    height: i32,
+    bpl: i32,
+    raw_buffer: Box<dyn ArrayRawBufferMut>,
+}
+
+impl ImagePixels {
+    async fn of(jvm: &Jvm, this: &ClassInstanceRef<Image>) -> JvmResult<Self> {
+        let class = this.class_definition();
+
+        let width: i32 = declared_field(jvm, &*class, this, "w", "I").await?;
+        let height: i32 = declared_field(jvm, &*class, this, "h", "I").await?;
+        let bpl: i32 = declared_field(jvm, &*class, this, "bpl", "I").await?;
+        let mut data: ClassInstanceRef<Array<i8>> = declared_field(jvm, &*class, this, "imgData", "[B").await?;
+
+        let raw_buffer = jvm.array_raw_buffer_mut(&mut data).await?;
+
+        Ok(Self {
+            width,
+            height,
+            bpl,
+            raw_buffer,
+        })
+    }
+
+    fn bytes_per_pixel(&self) -> i32 {
+        self.bpl / self.width
+    }
+
+    fn buffer<T>(self) -> JavaImageBuffer<T>
+    where
+        T: PixelType,
+    {
+        JavaImageBuffer {
+            width: self.width,
+            height: self.height,
+            raw_buffer: self.raw_buffer,
+            _phantom: PhantomData,
+        }
+    }
+}
+
 struct JavaImageBuffer<T>
 where
     T: PixelType,
@@ -243,26 +337,6 @@ where
     height: i32,
     raw_buffer: Box<dyn ArrayRawBufferMut>,
     _phantom: PhantomData<T>,
-}
-
-impl<T> JavaImageBuffer<T>
-where
-    T: PixelType,
-{
-    pub async fn new(jvm: &Jvm, this: &ClassInstanceRef<Image>) -> JvmResult<Self> {
-        let mut java_img_data = jvm.get_field(this, "imgData", "[B").await?;
-        let raw_buffer = jvm.array_raw_buffer_mut(&mut java_img_data).await?;
-
-        let width: i32 = jvm.get_field(this, "w", "I").await?;
-        let height: i32 = jvm.get_field(this, "h", "I").await?;
-
-        Ok(Self {
-            width,
-            height,
-            raw_buffer,
-            _phantom: PhantomData,
-        })
-    }
 }
 
 impl<T> BackendImage for JavaImageBuffer<T>
@@ -284,10 +358,15 @@ where
     fn get_pixel(&self, x: i32, y: i32) -> Color {
         let offset = (((y as u32) * self.width() + (x as u32)) * self.bytes_per_pixel()) as usize;
 
-        let mut buffer = vec![0; self.bytes_per_pixel() as usize];
-        self.raw_buffer.read(offset as _, &mut buffer).unwrap();
+        // A pixel is four bytes at most, so it is read into the stack rather
+        // than into an allocation: this is called once per pixel of every blend
+        // and every read-back, and a title that draws through the Java layer a
+        // pixel at a time was spending its frame in the allocator.
+        let mut buffer = [0u8; 4];
+        let size = size_of::<T::DataType>();
+        self.raw_buffer.read(offset as _, &mut buffer[..size]).unwrap();
 
-        T::to_color(*bytemuck::from_bytes(&buffer[..size_of::<T::DataType>()]))
+        T::to_color(*bytemuck::from_bytes(&buffer[..size]))
     }
 
     fn raw(&self) -> Cow<'_, [u8]> {
@@ -331,10 +410,12 @@ where
 
         let offset = (((y as u32) * self.width() + (x as u32)) * self.bytes_per_pixel()) as usize;
 
-        let raw_bytes = colors
-            .iter()
-            .flat_map(|color| bytemuck::bytes_of(&T::from_color(*color)).to_vec())
-            .collect::<Vec<_>>();
+        // One buffer for the run, filled in place; the flat_map this replaced
+        // allocated a `Vec` per pixel to hold its two or four bytes.
+        let mut raw_bytes = Vec::with_capacity(colors.len() * size_of::<T::DataType>());
+        for color in colors {
+            raw_bytes.extend_from_slice(bytemuck::bytes_of(&T::from_color(*color)));
+        }
 
         self.raw_buffer.write(offset as _, &raw_bytes).unwrap();
     }

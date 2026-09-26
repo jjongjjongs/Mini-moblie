@@ -2,7 +2,7 @@ use alloc::vec;
 
 use java_class_proto::{JavaFieldProto, JavaMethodProto};
 use java_runtime::classes::java::{
-    io::{DataInputStream, DataOutputStream, File as JavaFile, InputStream, OutputStream},
+    io::{DataInputStream, DataOutputStream, InputStream, OutputStream},
     lang::String,
 };
 use jvm::{Array, ClassInstanceRef, Jvm, Result as JvmResult, runtime::JavaLangString};
@@ -104,9 +104,12 @@ impl File {
         mode: i32,
         flag: i32,
     ) -> JvmResult<()> {
-        tracing::debug!("org.kwis.msp.io.File::<init>({this:?}, {filename:?}, {mode:?}, {flag:?})");
-
         let name = JavaLangString::to_rust_string(jvm, &filename).await?;
+
+        // Named: which file a title opened is what a capture of its reads needs
+        // to be read at all, and a handle says nothing.
+        tracing::debug!("org.kwis.msp.io.File::<init>({this:?}, {name:?}, {mode:?}, {flag:?})");
+
         if name.is_empty() {
             return Err(jvm.exception("java/io/IOException", "Invalid filename").await);
         }
@@ -121,6 +124,18 @@ impl File {
         let mode_string = JavaLangString::from_rust_string(jvm, mode_string).await?;
 
         let file = jvm.new_class("java/io/File", "(Ljava/lang/String;)V", (filename,)).await?;
+
+        // WIPI opens a missing data file as an empty one rather than failing: a
+        // title reads its non-volatile store (e.g. "/NVdata.txt") before it has
+        // ever written it. A read-mode RandomAccessFile requires the file to
+        // exist, so create it empty first when it does not.
+        if mode == Mode::READ_ONLY {
+            let exists: bool = jvm.invoke_virtual(&file, "exists", "()Z", ()).await?;
+            if !exists {
+                let stream = jvm.new_class("java/io/FileOutputStream", "(Ljava/io/File;)V", (file.clone(),)).await?;
+                let _: () = jvm.invoke_virtual(&stream, "close", "()V", ()).await?;
+            }
+        }
 
         let raf = jvm
             .new_class(
@@ -229,8 +244,17 @@ impl File {
     async fn open_input_stream(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<ClassInstanceRef<InputStream>> {
         tracing::debug!("org.kwis.msp.io.File::openInputStream({this:?})");
 
-        let file: ClassInstanceRef<JavaFile> = jvm.get_field(&this, "file", "Ljava/io/File;").await?;
-        let input_stream = jvm.new_class("java/io/FileInputStream", "(Ljava/io/File;)V", (file,)).await?;
+        let closed: bool = jvm.get_field(&this, "closed", "Z").await?;
+        if closed {
+            return Err(jvm.exception("java/io/IOException", "File closed").await);
+        }
+
+        // Through this file's own handle, not a second one over the same name:
+        // see `net.wie.WIPIFileInputStream` for the title that reads a header
+        // with the stream and the body with `File.read`.
+        let input_stream = jvm
+            .new_class("net/wie/WIPIFileInputStream", "(Lorg/kwis/msp/io/File;)V", (this.clone(),))
+            .await?;
 
         Ok(input_stream.into())
     }
@@ -330,16 +354,103 @@ mod test {
     use alloc::boxed::Box;
 
     use java_runtime::classes::java::{
-        io::{DataOutputStream, OutputStream},
+        io::{DataOutputStream, InputStream, OutputStream},
         lang::String,
     };
     use jvm::{ClassInstanceRef, JavaError, Result as JvmResult, runtime::JavaLangString};
     use test_utils::run_jvm_test;
     use wie_util::Result;
 
-    use crate::{classes::net::wie::WIPIFileOutputStream, get_protos};
+    use crate::{
+        classes::net::wie::{WIPIFileInputStream, WIPIFileOutputStream},
+        get_protos,
+    };
 
     use super::{File, Mode};
+
+    /// A stream taken from a `File` reads through the file's own position.
+    ///
+    /// 강철의 연금술사2 reads `tk_evt3.dat`'s record table with a
+    /// `DataInputStream` and then reads the records themselves with
+    /// `File.read`. With a stream of its own the second read started at zero,
+    /// every record came back shifted by the table, and the title eventually
+    /// asked for more of the file than was there.
+    #[test]
+    fn a_stream_over_a_file_carries_that_files_position() -> Result<()> {
+        run_jvm_test(
+            Box::new([
+                get_protos().into(),
+                [WIPIFileInputStream::as_proto(), WIPIFileOutputStream::as_proto()].into(),
+            ]),
+            |jvm| async move {
+                let filename: ClassInstanceRef<String> = JavaLangString::from_rust_string(&jvm, "shared-position.bin").await?.into();
+                let file: ClassInstanceRef<File> = jvm
+                    .new_class("org/kwis/msp/io/File", "(Ljava/lang/String;I)V", (filename, Mode::WRITE_TRUNC as i32))
+                    .await?
+                    .into();
+
+                for byte in [0x11, 0x22, 0x33, 0x44] {
+                    let written: i32 = jvm.invoke_virtual(&file, "write", "(I)I", (byte,)).await?;
+                    assert_eq!(written, 1);
+                }
+
+                let _: () = jvm.invoke_virtual(&file, "seek", "(I)V", (0,)).await?;
+
+                // A header read through the stream.
+                let stream: ClassInstanceRef<InputStream> = jvm.invoke_virtual(&file, "openInputStream", "()Ljava/io/InputStream;", ()).await?;
+                let first: i32 = jvm.invoke_virtual(&stream, "read", "()I", ()).await?;
+                let second: i32 = jvm.invoke_virtual(&stream, "read", "()I", ()).await?;
+                assert_eq!((first, second), (0x11, 0x22));
+
+                // and the body read from the file, which carries on from there
+                // rather than starting again.
+                let at_file: i32 = jvm.invoke_virtual(&file, "tell", "()I", ()).await?;
+                assert_eq!(at_file, 2, "the stream's reads move the file it was taken from");
+
+                let buf = jvm.instantiate_array("B", 2).await?;
+                let read: i32 = jvm.invoke_virtual(&file, "read", "([BII)I", (buf.clone(), 0, 2)).await?;
+                assert_eq!(read, 2);
+                let body: alloc::vec::Vec<i8> = jvm.load_array(&buf, 0, 2).await?;
+                assert_eq!(body, [0x33, 0x44]);
+
+                // Nothing left, and the stream says so the way its callers test
+                // for rather than throwing.
+                let eof: i32 = jvm.invoke_virtual(&stream, "read", "()I", ()).await?;
+                assert_eq!(eof, -1);
+
+                Ok(())
+            },
+        )
+    }
+
+    /// Closing a stream leaves the file it was taken from open.
+    #[test]
+    fn closing_a_stream_does_not_close_the_file_under_it() -> Result<()> {
+        run_jvm_test(
+            Box::new([
+                get_protos().into(),
+                [WIPIFileInputStream::as_proto(), WIPIFileOutputStream::as_proto()].into(),
+            ]),
+            |jvm| async move {
+                let filename: ClassInstanceRef<String> = JavaLangString::from_rust_string(&jvm, "stream-close.bin").await?.into();
+                let file: ClassInstanceRef<File> = jvm
+                    .new_class("org/kwis/msp/io/File", "(Ljava/lang/String;I)V", (filename, Mode::WRITE_TRUNC as i32))
+                    .await?
+                    .into();
+
+                let _: i32 = jvm.invoke_virtual(&file, "write", "(I)I", (0x5a,)).await?;
+                let _: () = jvm.invoke_virtual(&file, "seek", "(I)V", (0,)).await?;
+
+                let stream: ClassInstanceRef<InputStream> = jvm.invoke_virtual(&file, "openInputStream", "()Ljava/io/InputStream;", ()).await?;
+                let _: () = jvm.invoke_virtual(&stream, "close", "()V", ()).await?;
+
+                let value: i32 = jvm.invoke_virtual(&file, "read", "()I", ()).await?;
+                assert_eq!(value, 0x5a);
+
+                Ok(())
+            },
+        )
+    }
 
     #[test]
     fn test_byte_io_tell_and_output_streams() -> Result<()> {

@@ -63,10 +63,23 @@ pub enum MIDPKeyCode {
     LEFT = 142,
     RIGHT = 145,
     FIRE = 148,
-    LEFT_SOFT_KEY = 6,
+    /// The left soft key, which reaches a Canvas as the handset's menu key.
+    ///
+    /// A Canvas here has no commands for a soft key to fire, and on an SK-VM
+    /// handset a Canvas without commands hears the soft key as the menu key,
+    /// 129 (wfeature does the same, `KeyCodeMenu`). 바운티블루스 opens its
+    /// in-game menu on 129 and 사고뭉치트윈즈 and 교실이데아 read it too; none of
+    /// the SK-VM titles seen compares against the 6 this used to send, so the
+    /// L button did nothing in any of them.
+    LEFT_SOFT_KEY = 129,
     RIGHT_SOFT_KEY = 7,
     CLEAR = 8,
-    CALL = 10,
+    /// The send key. 이터널사가 names it in its own key table -
+    /// `KEY_SEND = 190`, beside `KEY_UP = 141` and the rest of this table - and
+    /// reads it in the field to raise a guard the story waits on. It was 10,
+    /// which no SK-VM title seen compares against, so the handset's send key
+    /// did nothing and the story could not go on.
+    CALL = 190,
     HANGUP = -1,
     VOLUME_UP = 13,
     VOLUME_DOWN = 14,
@@ -83,6 +96,46 @@ pub enum MIDPKeyCode {
     KEY_NUM9 = 57,
     KEY_POUND = 35, // #
     KEY_STAR = 42,  // *
+}
+
+/// The de-facto standard MIDP nav key codes - the ones Nokia's handsets set
+/// and the wider J2ME world adopted. A pure J2ME MIDlet reads these straight
+/// out of `keyPressed` (호국전기이순신 switches on exactly -5..-1) instead of
+/// going through `getGameAction`, so a platform that serves such titles has to
+/// deliver them in place of SK-VM's positive table.
+pub const STD_KEY_UP: i32 = -1;
+pub const STD_KEY_DOWN: i32 = -2;
+pub const STD_KEY_LEFT: i32 = -3;
+pub const STD_KEY_RIGHT: i32 = -4;
+pub const STD_KEY_FIRE: i32 = -5;
+/// The two soft keys and the clear key sit just past the d-pad on the same
+/// scale - Nokia's -6/-7/-8, which the J2ME world took up with the rest.
+/// 호국전기이순신 reads its 뒤로가기(clear) as -8 and drops the positive 8 we
+/// used to send, so its back button did nothing.
+pub const STD_KEY_SOFT1: i32 = -6;
+pub const STD_KEY_SOFT2: i32 = -7;
+pub const STD_KEY_CLEAR: i32 = -8;
+
+/// The code a MIDP `Canvas` hears for `keycode`, in whichever convention this
+/// platform uses. `standard` picks the negative Nokia codes - the d-pad, the
+/// two soft keys and clear - over SK-VM's positive table; every other key (the
+/// digits, `*`, `#`, the call keys) is the same either way.
+pub fn midp_key_code(keycode: KeyCode, standard: bool) -> i32 {
+    if standard {
+        match keycode {
+            KeyCode::UP => return STD_KEY_UP,
+            KeyCode::DOWN => return STD_KEY_DOWN,
+            KeyCode::LEFT => return STD_KEY_LEFT,
+            KeyCode::RIGHT => return STD_KEY_RIGHT,
+            KeyCode::OK => return STD_KEY_FIRE,
+            KeyCode::LEFT_SOFT_KEY => return STD_KEY_SOFT1,
+            KeyCode::RIGHT_SOFT_KEY => return STD_KEY_SOFT2,
+            KeyCode::CLEAR => return STD_KEY_CLEAR,
+            _ => {}
+        }
+    }
+
+    MIDPKeyCode::from_key_code(keycode) as i32
 }
 
 impl MIDPKeyCode {
@@ -196,6 +249,8 @@ impl EventQueue {
     ) -> JvmResult<()> {
         tracing::debug!("net.wie.EventQueue::getNextEvent({this:?}, {event:?})");
 
+        let standard_keys = context.system().midp_uses_standard_key_codes();
+
         let mut pending_timer_events = Vec::new();
         loop {
             let now = context.system().platform().now();
@@ -207,30 +262,45 @@ impl EventQueue {
                     Event::Keydown(x) => vec![
                         EventQueueEvent::KeyEvent as _,
                         KeyboardEventType::KeyPressed as _,
-                        MIDPKeyCode::from_key_code(x) as _,
+                        midp_key_code(x, standard_keys),
                         0,
                     ],
                     Event::Keyup(x) => vec![
                         EventQueueEvent::KeyEvent as _,
                         KeyboardEventType::KeyReleased as _,
-                        MIDPKeyCode::from_key_code(x) as _,
+                        midp_key_code(x, standard_keys),
                         0,
                     ],
                     Event::Keyrepeat(x) => vec![
                         EventQueueEvent::KeyEvent as _,
                         KeyboardEventType::KeyRepeated as _,
-                        MIDPKeyCode::from_key_code(x) as _,
+                        midp_key_code(x, standard_keys),
                         0,
                     ],
-                    Event::Timer { due, callback } => {
+                    Event::Timer {
+                        id,
+                        generation,
+                        due,
+                        callback,
+                    } => {
+                        if !context.system().event_queue().is_timer_current(id, generation) {
+                            continue;
+                        }
+
                         // TODO we should wait for timer more efficiently
                         if due < now {
-                            callback()
-                                .or_else(async |x| Err(jvm.exception("net/wie/WieError", &x.to_string()).await))
-                                .await?
+                            if context.system().event_queue().take_timer(id, generation) {
+                                callback()
+                                    .or_else(async |x| Err(jvm.exception("net/wie/WieError", &x.to_string()).await))
+                                    .await?
+                            }
                         } else {
-                            // push it to event queue again
-                            pending_timer_events.push(Event::Timer { due, callback });
+                            pending_timer_events.push(Event::Timer {
+                                id,
+                                generation,
+                                due,
+                                callback,
+                            });
                         }
 
                         continue;
@@ -244,25 +314,120 @@ impl EventQueue {
                 break;
             } else {
                 let call_serially_events = jvm.get_field(&this, "callSeriallyEvents", "Ljava/util/Vector;").await?;
-                if !jvm.invoke_virtual(&call_serially_events, "isEmpty", "()Z", ()).await? {
+                if !jvm.invoke_virtual(&call_serially_events, "isEmpty", "()Z", ()).await? && !Self::serial_waits_on_paint(jvm, context).await? {
                     let event: ClassInstanceRef<Runnable> =
                         jvm.invoke_virtual(&call_serially_events, "remove", "(I)Ljava/lang/Object;", (0,)).await?;
                     let _: () = jvm.invoke_virtual(&event, "run", "()V", ()).await?;
                 }
 
+                // A repaint the title asked for during a stand-down was kept
+                // rather than served; once the stand-down is over it is owed,
+                // and this is where it comes due. Nothing else would ask for it
+                // again - the title asked once.
+                if Self::take_owed_paint(jvm, context).await? {
+                    jvm.store_array(&mut event, 0, vec![EventQueueEvent::RepaintEvent as i32, 0, 0, 0])
+                        .await?;
+
+                    break;
+                }
+
                 context.system().sleep(16).await; // TODO we need to wait for events
 
                 for event in pending_timer_events.drain(..) {
-                    context.system().event_queue().push(event);
+                    let current = match &event {
+                        Event::Timer { id, generation, .. } => context.system().event_queue().is_timer_current(*id, *generation),
+                        _ => true,
+                    };
+
+                    if current {
+                        context.system().event_queue().push(event);
+                    }
                 }
             }
         }
 
         for event in pending_timer_events {
-            context.system().event_queue().push(event);
+            let current = match &event {
+                Event::Timer { id, generation, .. } => context.system().event_queue().is_timer_current(*id, *generation),
+                _ => true,
+            };
+
+            if current {
+                context.system().event_queue().push(event);
+            }
         }
 
         Ok(())
+    }
+
+    /// Whether the next serial call should wait for a repaint the title has
+    /// asked for and the host has not yet painted.
+    ///
+    /// MIDP runs a serial call after the repaints already requested have been
+    /// serviced. A frame loop that repaints and hands itself back to
+    /// `callSerially` relies on it: with nothing to hold it, the loop ran its
+    /// runnable again and again while the host's paint was on its way, and
+    /// anything the title set for `paint` to read in between was lost.
+    /// 드래곤아이즈 records a key press for its `paint` to act on and clears it at
+    /// the top of each runnable, so a press was lost to every extra run.
+    ///
+    /// The paint then runs the runnable itself (`runSerialAfterPaint`). A
+    /// host that never paints - a stand-down, a frontend in the background -
+    /// must not stop the title, so the wait is bounded.
+    async fn serial_waits_on_paint(jvm: &Jvm, context: &mut WieJvmContext) -> JvmResult<bool> {
+        const MAX_WAIT_MS: i64 = 100;
+
+        let current_midlet: ClassInstanceRef<MIDlet> = jvm
+            .get_static_field("javax/microedition/midlet/MIDlet", "currentMIDlet", "Ljavax/microedition/midlet/MIDlet;")
+            .await?;
+        if current_midlet.is_null() {
+            return Ok(false);
+        }
+
+        let display = MIDlet::display(jvm, &current_midlet).await?;
+        if display.is_null() {
+            return Ok(false);
+        }
+
+        let requested_at: i64 = jvm.get_field(&display, "__wieRepaintRequestedAt", "J").await?;
+        if requested_at == 0 {
+            return Ok(false);
+        }
+
+        let now = context.system().platform().now().raw() as i64;
+        Ok(now - requested_at < MAX_WAIT_MS)
+    }
+
+    /// Whether a paint kept through a stand-down is now due, taking it if so.
+    ///
+    /// `false` before a title has a display, which is every event the platform
+    /// delivers before its first card.
+    async fn take_owed_paint(jvm: &Jvm, context: &mut WieJvmContext) -> JvmResult<bool> {
+        let current_midlet: ClassInstanceRef<MIDlet> = jvm
+            .get_static_field("javax/microedition/midlet/MIDlet", "currentMIDlet", "Ljavax/microedition/midlet/MIDlet;")
+            .await?;
+        if current_midlet.is_null() {
+            return Ok(false);
+        }
+
+        let mut display = MIDlet::display(jvm, &current_midlet).await?;
+        if display.is_null() {
+            return Ok(false);
+        }
+
+        let owed: bool = jvm.get_field(&display, "__wiePaintOwed", "Z").await?;
+        if !owed {
+            return Ok(false);
+        }
+
+        let until: i64 = jvm.get_field(&display, "__wieStandDownUntil", "J").await?;
+        if (context.system().platform().now().raw() as i64) < until {
+            return Ok(false);
+        }
+
+        jvm.put_field(&mut display, "__wiePaintOwed", "Z", false).await?;
+
+        Ok(true)
     }
 
     async fn dispatch_event(
@@ -297,7 +462,27 @@ impl EventQueue {
 
         match event_kind {
             EventQueueEvent::RepaintEvent => {
-                let _: () = jvm.invoke_virtual(&display, "handlePaintEvent", "()V", ()).await?;
+                // A title driving its own frame loop gets this paint out of the
+                // way for a few rounds; one that has handed the screen back gets
+                // it straight back. See `HOST_PAINT_STAND_DOWN`.
+                let until: i64 = jvm.get_field(&display, "__wieStandDownUntil", "J").await?;
+                let mut display = display;
+                if (_context.system().platform().now().raw() as i64) < until {
+                    // Kept rather than dropped. A frontend asks for a host paint
+                    // only when the title asked for one, so a request thrown
+                    // away here is a screen that never comes back: 열혈고사전설2
+                    // answers its last character-creation question, swaps the
+                    // card, asks once and settles into a sleep loop - and that
+                    // one request landed inside a stand-down, so the question it
+                    // had already left stayed on the screen for good.
+                    tracing::debug!("host paint stood down until {until}, kept");
+                    jvm.put_field(&mut display, "__wiePaintOwed", "Z", true).await?;
+                } else {
+                    jvm.put_field(&mut display, "__wiePaintOwed", "Z", false).await?;
+                    let _: () = jvm.invoke_virtual(&display, "handlePaintEvent", "()V", ()).await?;
+
+                    Self::run_serial_after_paint(jvm, &this).await?;
+                }
             }
             EventQueueEvent::KeyEvent => {
                 let event_type = if let Some(event_type) = KeyboardEventType::from_raw(event[1]) {
@@ -321,6 +506,32 @@ impl EventQueue {
         }
 
         Ok(())
+    }
+
+    /// Runs the `callSerially` runnable that was waiting on the paint just
+    /// served, before any input queued behind that paint.
+    ///
+    /// MIDP runs a serial call "soon after completion of the repaint cycle",
+    /// and a frame loop written as a runnable that repaints and re-queues
+    /// itself counts on the two staying together, input arriving between one
+    /// frame's runnable and the next frame's paint. 드래곤아이즈 clears its key
+    /// state at the top of its runnable and reads it in `paint`: a key taken
+    /// between the paint and the runnable was cleared before it was ever read,
+    /// and a press took two or three tries to land. Serial calls used to run
+    /// only once every queued event had been served, which put a key pressed
+    /// during a frame exactly there. (wfeature pairs them the same way: one
+    /// paint, then one serial runnable, each pass.)
+    ///
+    /// One runnable, not the queue: the one this paint was waiting on. The rest
+    /// still run when the queue is idle.
+    async fn run_serial_after_paint(jvm: &Jvm, this: &ClassInstanceRef<Self>) -> JvmResult<()> {
+        let call_serially_events = jvm.get_field(this, "callSeriallyEvents", "Ljava/util/Vector;").await?;
+        if jvm.invoke_virtual(&call_serially_events, "isEmpty", "()Z", ()).await? {
+            return Ok(());
+        }
+
+        let event: ClassInstanceRef<Runnable> = jvm.invoke_virtual(&call_serially_events, "remove", "(I)Ljava/lang/Object;", (0,)).await?;
+        jvm.invoke_virtual(&event, "run", "()V", ()).await
     }
 
     async fn get_event_queue(jvm: &Jvm, _context: &mut WieJvmContext) -> JvmResult<ClassInstanceRef<Self>> {
@@ -351,5 +562,45 @@ impl EventQueue {
         let call_serially_events = jvm.get_field(&this, "callSeriallyEvents", "Ljava/util/Vector;").await?;
         jvm.invoke_virtual(&call_serially_events, "addElement", "(Ljava/lang/Object;)V", [event.into()])
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use wie_backend::KeyCode;
+
+    use super::{
+        MIDPKeyCode, STD_KEY_CLEAR, STD_KEY_DOWN, STD_KEY_FIRE, STD_KEY_LEFT, STD_KEY_RIGHT, STD_KEY_SOFT1, STD_KEY_SOFT2, STD_KEY_UP, midp_key_code,
+    };
+
+    /// On the standard convention the d-pad reaches a title as Nokia's negative
+    /// codes; every other key keeps the value it has without it.
+    #[test]
+    fn standard_nav_keys_are_negative() {
+        assert_eq!(midp_key_code(KeyCode::UP, true), STD_KEY_UP);
+        assert_eq!(midp_key_code(KeyCode::DOWN, true), STD_KEY_DOWN);
+        assert_eq!(midp_key_code(KeyCode::LEFT, true), STD_KEY_LEFT);
+        assert_eq!(midp_key_code(KeyCode::RIGHT, true), STD_KEY_RIGHT);
+        assert_eq!(midp_key_code(KeyCode::OK, true), STD_KEY_FIRE);
+        assert_eq!(midp_key_code(KeyCode::LEFT_SOFT_KEY, true), STD_KEY_SOFT1);
+        assert_eq!(midp_key_code(KeyCode::RIGHT_SOFT_KEY, true), STD_KEY_SOFT2);
+        assert_eq!(midp_key_code(KeyCode::CLEAR, true), STD_KEY_CLEAR);
+        // Digits are ASCII on either convention.
+        assert_eq!(midp_key_code(KeyCode::NUM5, true), 53);
+        assert_eq!(midp_key_code(KeyCode::NUM5, false), 53);
+        // Without it, the keys stay on SK-VM's positive table.
+        assert_eq!(midp_key_code(KeyCode::UP, false), MIDPKeyCode::UP as i32);
+        assert_eq!(midp_key_code(KeyCode::CLEAR, false), MIDPKeyCode::CLEAR as i32);
+    }
+
+    /// The send key reaches an SK-VM title as the handset's own code, 190, and
+    /// a code read back from a title resolves to it again.
+    #[test]
+    fn the_send_key_is_the_handsets_190() {
+        assert_eq!(MIDPKeyCode::from_key_code(KeyCode::CALL) as i32, 190);
+        assert_eq!(MIDPKeyCode::from_key_code(KeyCode::LEFT_SOFT_KEY) as i32, 129);
+        assert!(matches!(MIDPKeyCode::from_raw(129), Some(MIDPKeyCode::LEFT_SOFT_KEY)));
+        assert!(matches!(MIDPKeyCode::from_raw(190), Some(MIDPKeyCode::CALL)));
+        assert!(MIDPKeyCode::from_raw(10).is_none());
     }
 }

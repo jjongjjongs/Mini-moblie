@@ -4,6 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Enable the machine-code JIT engine (see wie_core_arm).
+jit = ["wie_core_arm/jit"]
+# Follow what a stubbed WIPI-C slot is handed: every argument that reads as a
+# pointer is dumped alongside the call. Off by default and answers nothing
+# differently - it only writes more down. See `gen_unk_stub`.
+wipic-probe = []
+
 [dependencies]
 async-recursion = { workspace = true }
 async-trait = { workspace = true }
@@ -30,3 +38,4 @@ wie_wipi_java = { workspace = true }
 
 [dev-dependencies]
 test_utils = { workspace = true }
+tracing-subscriber = { version = "^0.3", features = ["env-filter"] }

@@ -32,6 +32,9 @@ impl Displayable {
                 ),
                 JavaMethodProto::new("getWidth", "()I", Self::get_width, Default::default()),
                 JavaMethodProto::new("getHeight", "()I", Self::get_height, Default::default()),
+                JavaMethodProto::new("showNotify", "()V", Self::show_notify, Default::default()),
+                JavaMethodProto::new("hideNotify", "()V", Self::hide_notify, Default::default()),
+                JavaMethodProto::new("isShown", "()Z", Self::is_shown, Default::default()),
                 // wie private methods...
                 JavaMethodProto::new(
                     "setDisplay",
@@ -119,13 +122,64 @@ impl Displayable {
         tracing::debug!("javax.microedition.lcdui.Displayable::getHeight({this:?})");
 
         let display: ClassInstanceRef<Display> = jvm.get_field(&this, "currentDisplay", "Ljavax/microedition/lcdui/Display;").await?;
-        let height = if display.is_null() {
+        let height: i32 = if display.is_null() {
             context.system().platform().screen().height() as i32
         } else {
             jvm.invoke_virtual(&display, "getHeight", "()I", ()).await?
         };
 
-        Ok(height)
+        // The rows the platform keeps below the displayable, when it keeps any
+        // (see `System::displayable_reserved_rows`). A screen too short to give
+        // them up reports what it has.
+        let reserved = context.system().displayable_reserved_rows() as i32;
+
+        Ok(if height > reserved { height - reserved } else { height })
+    }
+
+    /// Called by [`Display::setCurrent`](super::Display) when this displayable
+    /// becomes the visible one, before its first paint. The base does nothing;
+    /// a `Canvas` subclass overrides it, and MIDP titles hang the start of
+    /// their game loop off it - 센티멘탈러브's `Canvas` starts its `run()` thread
+    /// and clears the flag that thread waits on only here, so without the call
+    /// its logo screen never advanced.
+    async fn show_notify(_jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<()> {
+        tracing::debug!("javax.microedition.lcdui.Displayable::showNotify({this:?})");
+
+        Ok(())
+    }
+
+    /// Called by [`Display::setCurrent`](super::Display) when this displayable
+    /// stops being the visible one. The base does nothing; a subclass overrides
+    /// it to pause what `showNotify` started.
+    async fn hide_notify(_jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<()> {
+        tracing::debug!("javax.microedition.lcdui.Displayable::hideNotify({this:?})");
+
+        Ok(())
+    }
+
+    /// Whether this displayable is the one currently on the screen.
+    ///
+    /// MIDP's own answer folds in the MIDlet being in the foreground and the
+    /// display being awake; here a displayable is shown exactly when it is the
+    /// current one of the display it was set on. 엑스맨's splash thread spins on
+    /// this before it counts its logo down and calls `startApp` - without the
+    /// method the thread died on `NoSuchMethodError` and the logo never left.
+    async fn is_shown(jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<bool> {
+        tracing::debug!("javax.microedition.lcdui.Displayable::isShown({this:?})");
+
+        let display: ClassInstanceRef<Display> = jvm.get_field(&this, "currentDisplay", "Ljavax/microedition/lcdui/Display;").await?;
+        if display.is_null() {
+            return Ok(false);
+        }
+
+        let current: ClassInstanceRef<Displayable> = jvm
+            .get_field(&display, "currentDisplayable", "Ljavax/microedition/lcdui/Displayable;")
+            .await?;
+        if current.is_null() {
+            return Ok(false);
+        }
+
+        jvm.invoke_virtual(&current, "equals", "(Ljava/lang/Object;)Z", (this.clone(),)).await
     }
 
     async fn handle_key_event(_jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>, event_type: i32, code: i32) -> JvmResult<()> {

@@ -15,6 +15,35 @@ use crate::classes::javax::microedition::{
 // class javax.microedition.lcdui.Display
 pub struct Display;
 
+/// How long a host paint stands down after the guest paints a frame of its own.
+///
+/// A title can drive its own frame loop - `repaint` to ask, `serviceRepaints` to
+/// enter `paint` - and a frame loop that lives inside `paint` advances the world
+/// once per entry. A host paint arriving beside it is therefore not a wasted draw
+/// but a second step the title did not take: the reference has a scrolling title
+/// whose world moved three times per step, laying the same column of terrain down
+/// at three offsets, and everything that looked like the cause - the blit argument
+/// order, the overlapping snapshot, the palette transparency, the tile decode, the
+/// anchor - turned out to be correct.
+///
+/// 200ms is measured against this corpus. Bigi 미궁 drives its own screen at a very
+/// steady 12.5 frames a second, and 81ms is the worst gap between two of its
+/// paints, so this is about two and a half times the longest wait a driving title
+/// asks for.
+///
+/// **Guest time rather than a count of host paints**, which is what the reference
+/// bounds it by, because a count means something different on every frontend: the
+/// probe's host paint arrives every 40 ticks and a display's every 16, so eight of
+/// them is a fifth of a second in one place and two and a half seconds in the
+/// other. A duration reads the same everywhere.
+///
+/// **The expiry is the half that matters.** Standing down for good on the first
+/// `serviceRepaints` looks simpler and is wrong: one local archive paints twice,
+/// 22ms apart, and then draws the whole rest of its run from a host paint it never
+/// asks for. Counting the calls does not separate the two shapes either - a load
+/// screen and a frame loop both call it.
+pub(crate) const HOST_PAINT_STAND_DOWN_MS: u64 = 200;
+
 impl Display {
     pub fn as_proto() -> WieJavaClassProto {
         WieJavaClassProto {
@@ -61,6 +90,19 @@ impl Display {
                 JavaFieldProto::new("width", "I", Default::default()),
                 JavaFieldProto::new("height", "I", Default::default()),
                 JavaFieldProto::new("paintDisabled", "Z", Default::default()),
+                // Set while a paint is running, so serviceRepaints can service
+                // a pending repaint by painting here and now without a title
+                // that calls it from inside its own paint recursing.
+                JavaFieldProto::new("__wiePainting", "Z", Default::default()),
+                JavaFieldProto::new("__wieStandDownUntil", "J", Default::default()),
+                // A repaint the title asked for while the host paint was stood
+                // down, kept until the stand-down is over. See
+                // `net.wie.EventQueue.getNextEvent`.
+                JavaFieldProto::new("__wiePaintOwed", "Z", Default::default()),
+                // When the oldest repaint not yet painted was asked for, or 0.
+                // A serial call waits on it; see
+                // `net.wie.EventQueue.serialWaitsOnPaint`.
+                JavaFieldProto::new("__wieRepaintRequestedAt", "J", Default::default()),
             ],
             access_flags: Default::default(),
         }
@@ -146,7 +188,21 @@ impl Display {
             .get_field(&this, "currentDisplayable", "Ljavax/microedition/lcdui/Displayable;")
             .await?;
 
+        // Whether this call changes which displayable is showing. `showNotify`
+        // and `hideNotify` fire only on a real change: a title that hangs the
+        // start of its game loop off `showNotify` (센티멘탈러브 does) must not
+        // have it started twice by a `setCurrent` to the displayable already up.
+        let same: bool = if old_displayable.is_null() || displayable.is_null() {
+            false
+        } else {
+            jvm.invoke_virtual(&old_displayable, "equals", "(Ljava/lang/Object;)Z", (displayable.clone(),))
+                .await?
+        };
+
         if !old_displayable.is_null() {
+            if !same {
+                let _: () = jvm.invoke_virtual(&old_displayable, "hideNotify", "()V", ()).await?;
+            }
             let _: () = jvm
                 .invoke_virtual(&old_displayable, "setDisplay", "(Ljavax/microedition/lcdui/Display;)V", (None,))
                 .await?;
@@ -163,6 +219,14 @@ impl Display {
         let _: () = jvm
             .invoke_virtual(&displayable, "setDisplay", "(Ljavax/microedition/lcdui/Display;)V", (this.clone(),))
             .await?;
+
+        // The visible displayable is told it is showing before its first paint,
+        // as MIDP's lifecycle promises. A title relies on it: 센티멘탈러브's
+        // `Canvas.showNotify` starts the thread that drives its logo screen on,
+        // so without the call the screen sits frozen.
+        if !same && !displayable.is_null() {
+            let _: () = jvm.invoke_virtual(&displayable, "showNotify", "()V", ()).await?;
+        }
 
         let fullscreen_mode: bool = jvm.get_field(&displayable, "isInFullScreenMode", "Z").await?;
         jvm.put_field(&mut this, "isInFullScreenMode", "Z", fullscreen_mode).await?;
@@ -202,15 +266,21 @@ impl Display {
     }
 
     async fn repaint(
-        _jvm: &Jvm,
+        jvm: &Jvm,
         context: &mut WieJvmContext,
-        this: ClassInstanceRef<Self>,
+        mut this: ClassInstanceRef<Self>,
         x: i32,
         y: i32,
         width: i32,
         height: i32,
     ) -> JvmResult<()> {
         tracing::debug!("javax.microedition.lcdui.Display::repaint({this:?}, {x}, {y}, {width}, {height})");
+
+        let requested_at: i64 = jvm.get_field(&this, "__wieRepaintRequestedAt", "J").await?;
+        if requested_at == 0 {
+            let now = context.system().platform().now().raw() as i64;
+            jvm.put_field(&mut this, "__wieRepaintRequestedAt", "J", now.max(1)).await?;
+        }
 
         let platform = context.system().platform();
         let screen = platform.screen();
@@ -246,8 +316,27 @@ impl Display {
             .get_field(&this, "currentDisplayable", "Ljavax/microedition/lcdui/Displayable;")
             .await?;
 
+        let mut this = this.clone();
+        jvm.put_field(&mut this, "__wieRepaintRequestedAt", "J", 0i64).await?;
+
         if !current_displayable.is_null() {
+            jvm.put_field(&mut this, "__wiePainting", "Z", true).await?;
+
             let screen_graphics: ClassInstanceRef<Graphics> = jvm.get_field(&this, "screenGraphics", "Ljavax/microedition/lcdui/Graphics;").await?;
+
+            // A title that composes each frame over a blank surface, and leaves
+            // the rows it does not draw to whatever was there, needs that blank
+            // surface made for it: the buffer keeps the last frame otherwise,
+            // and its own earlier screen shows through the bands it does not
+            // cover. See `wie_backend::quirks` (미니스포츠클럽's match HUD).
+            if context.system().title_clears_screen_each_paint() {
+                let width: i32 = jvm.get_field(&this, "width", "I").await?;
+                let height: i32 = jvm.get_field(&this, "height", "I").await?;
+
+                let _: () = jvm.invoke_virtual(&screen_graphics, "setClip", "(IIII)V", (0, 0, width, height)).await?;
+                let _: () = jvm.invoke_virtual(&screen_graphics, "setColor", "(III)V", (0, 0, 0)).await?;
+                let _: () = jvm.invoke_virtual(&screen_graphics, "fillRect", "(IIII)V", (0, 0, width, height)).await?;
+            }
 
             // TODO draw title and bottom soft bar if not fullscreen
 
@@ -259,22 +348,49 @@ impl Display {
                     (screen_graphics.clone(),),
                 )
                 .await;
-            let _: () = jvm.invoke_virtual(&screen_graphics, "reset", "()V", ()).await?;
+            // A MIDP title paints from a clean origin each frame, so the
+            // graphics is reset for the next paint. An SK-VM title instead keeps
+            // its own translate and clip on the screen graphics between frames
+            // and would have them zeroed out from under it. See
+            // `System::title_owns_graphics_state`.
+            if !context.system().title_owns_graphics_state() {
+                let _: () = jvm.invoke_virtual(&screen_graphics, "reset", "()V", ()).await?;
+            }
+            // Cleared before the exception is handled, so a failing handler
+            // cannot leave the flag standing and silence serviceRepaints for
+            // the rest of the run. Nothing below re-enters the title's paint.
+            jvm.put_field(&mut this, "__wiePainting", "Z", false).await?;
 
             if let Err(x) = result {
                 Self::handle_exception(jvm, x).await?;
+
+                // A paint that threw is painted again on the next frame, as it
+                // would be on a runtime that paints every frame whether asked
+                // or not (wfeature does). This host paints only when asked, so
+                // a title whose loop waits on its own paint to finish was left
+                // waiting for good: 얼라이브 loads its images a few at a time
+                // inside `paint`, wakes its loop with `notify` as `paint`'s last
+                // act, and its first paints draw an image it has not loaded
+                // yet. That paint threw before the `notify`, the loop never
+                // woke to ask for another, and the loading screen stayed up.
+                context.system().platform().screen().request_redraw().unwrap();
             }
 
             // HACK: disable paint for clet apps, as they handle paint by themselves
+            //
+            // The flag covers a clet reached through `net.wie.CletWrapperCard`.
+            // A title whose card is an ordinary one but whose drawing is still a
+            // C engine - 던전앤파이터 격투가 pushes a plain `Card` subclass and
+            // paints its splash from the engine - never sets it, and flushing
+            // this screen image over the top is what painted that splash white.
+            // `title_drives_lcd` is the same answer found the other way: the
+            // emulator's tick has seen the title draw into the LCD itself.
             let disable_paint: bool = jvm.get_field(&this, "paintDisabled", "Z").await?;
-            if !disable_paint {
+            if !disable_paint && !context.system().title_drives_lcd() {
                 let screen_image: ClassInstanceRef<Image> = jvm.get_field(&this, "screenImage", "Ljavax/microedition/lcdui/Image;").await?;
                 let image = Image::image(jvm, &screen_image).await?;
 
-                let platform = context.system().platform();
-                let screen = platform.screen();
-
-                screen.paint(&*image);
+                wie_backend::present(context.system(), &*image);
             }
             jvm.collect_garbage()?;
         }

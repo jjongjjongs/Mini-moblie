@@ -38,19 +38,32 @@ impl JavaClassInstance {
         Ok(instance)
     }
 
-    pub fn destroy(mut self, field_size: KtfJvmWord) -> Result<()> {
-        let raw = self.read_raw()?;
-
-        Allocator::free(&mut self.core, raw.ptr_fields, (field_size + 4) as _)?;
-        Allocator::free(&mut self.core, self.ptr_raw, size_of::<RawJavaClassInstance>() as _)?;
-
-        Ok(())
-    }
-
+    /// The class this object is one of.
+    ///
+    /// An object this runtime made keeps it in the word beside its fields. One
+    /// that a title's own compiled image carries - a string constant, the char
+    /// array behind it - has no such word: it is one word holding the address
+    /// of the fields that follow it, and the class is what the first of those
+    /// fields says, the index of its vtable. So the word beside the fields is
+    /// taken only where it really is a class record, which is a record whose
+    /// first word is its own address plus four - the same mark
+    /// `get_java_method` tests - and the index answers for the rest.
     pub fn class(&self) -> Result<JavaClassDefinition> {
         let raw = self.read_raw()?;
 
-        Ok(JavaClassDefinition::from_raw(raw.ptr_class, &self.core))
+        let mark: Result<u32> = read_generic(&self.core, raw.ptr_class);
+        let is_record = mark.is_ok_and(|mark| mark == raw.ptr_class + 4);
+        if is_record {
+            return Ok(JavaClassDefinition::from_raw(raw.ptr_class, &self.core));
+        }
+
+        let vtable_word: u32 = read_generic(&self.core, raw.ptr_fields)?;
+        let ptr_class = KtfJvmSupport::class_by_vtable_word(&mut self.core.clone(), vtable_word)?;
+        if ptr_class == 0 {
+            tracing::warn!("no class for {:#x} by vtable word {vtable_word:#x}", self.ptr_raw);
+        }
+
+        Ok(JavaClassDefinition::from_raw(ptr_class, &self.core))
     }
 
     pub(super) fn field_address(&self, offset: u32) -> Result<u32> {
@@ -92,11 +105,29 @@ impl JavaClassInstance {
 
 #[async_trait::async_trait]
 impl ClassInstance for JavaClassInstance {
-    fn destroy(self: Box<Self>) {
-        let field_size = self.class().unwrap().field_size().unwrap();
-
-        (*self).destroy(field_size as _).unwrap()
-    }
+    /// Deliberately frees nothing.
+    ///
+    /// The JVM calls this when its own collector decides an object is garbage,
+    /// and for KTF that decision is not to be trusted: the object is a block of
+    /// guest memory the ARM code may still be holding in a register, on its
+    /// stack or in another object's field, none of which is a JVM root. So the
+    /// JVM is allowed to forget the object, which costs nothing, but the guest
+    /// memory is not freed.
+    ///
+    /// Freeing it on the JVM's word corrupts live state, measurably: 투스워즈
+    /// loses the byte array behind a resource it is decoding and dies a few
+    /// frames later reading a length that has become another block's
+    /// bookkeeping.
+    ///
+    /// Nothing reclaims them instead, so a KTF title's heap only grows. That is
+    /// also what the reference emulator does, which is worth saying because it
+    /// makes this a design rather than a debt: its KTF runtime builds its Java
+    /// objects in guest memory the same way and has no collector for them at
+    /// all - the only `collectGarbage` in the whole binary belongs to its
+    /// SK-VM, and there is no free, destroy or reclaim of a KTF Java object
+    /// anywhere in it. Its one root-visitor for KTF covers strings, for state
+    /// snapshots.
+    fn destroy(self: Box<Self>) {}
 
     fn identity(&self) -> usize {
         self.ptr_raw as _
@@ -131,7 +162,18 @@ impl ClassInstance for JavaClassInstance {
 
     fn get_field(&self, field: &dyn Field) -> JvmResult<JavaValue> {
         let field = field.as_any().downcast_ref::<JavaField>().unwrap();
-        let field_type = JavaType::parse(&field.descriptor());
+        // The type its class read when it was indexed, or - for a handle made
+        // from a bare pointer - the descriptor parsed here. Parsing it per
+        // access allocated a `String` for every reference field, which a title
+        // that reads a field per pixel pays per pixel.
+        let parsed;
+        let field_type = match field.resolved_parts() {
+            Some(resolved) => &resolved.value_type,
+            None => {
+                parsed = JavaType::parse(&field.name().unwrap().descriptor);
+                &parsed
+            }
+        };
 
         assert!(!field.access_flags().contains(FieldAccessFlags::STATIC));
 
@@ -142,19 +184,24 @@ impl ClassInstance for JavaClassInstance {
             let value: KtfJvmWord = read_generic(&self.core, address).unwrap();
             let value_high: KtfJvmWord = read_generic(&self.core, address + 4).unwrap();
 
-            let r#type = JavaType::parse(&field.descriptor());
-            Ok(JavaValue::from_raw64(value, value_high, &r#type))
+            Ok(JavaValue::from_raw64(value, value_high, field_type))
         } else {
             let value: KtfJvmWord = read_generic(&self.core, address).unwrap();
 
-            let r#type = JavaType::parse(&field.descriptor());
-            Ok(JavaValue::from_raw(value, &r#type, &self.core))
+            Ok(JavaValue::from_raw(value, field_type, &self.core))
         }
     }
 
     fn put_field(&mut self, field: &dyn Field, value: JavaValue) -> JvmResult<()> {
         let field = field.as_any().downcast_ref::<JavaField>().unwrap();
-        let field_type = JavaType::parse(&field.descriptor());
+        let parsed;
+        let field_type = match field.resolved_parts() {
+            Some(resolved) => &resolved.value_type,
+            None => {
+                parsed = JavaType::parse(&field.name().unwrap().descriptor);
+                &parsed
+            }
+        };
 
         assert!(!field.access_flags().contains(FieldAccessFlags::STATIC));
 

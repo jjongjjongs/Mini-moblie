@@ -10,7 +10,7 @@ use alloc::{
 
 use jvm::{Result as JvmResult, runtime::JavaLangString};
 
-use wie_backend::{DefaultTaskRunner, Emulator, Event, Platform, System};
+use wie_backend::{DefaultTaskRunner, Emulator, Event, Platform, System, TitlePlatform, extract_zip, title_quirks};
 use wie_jvm_support::{JvmSupport, RustJavaJvmImplementation};
 use wie_util::{Result, WieError};
 
@@ -27,7 +27,12 @@ impl SktEmulator {
 
         let jar_filename = msd_file.0.replace(".msd", ".jar");
 
-        Self::load(platform, &jar_filename, &msd.id, Some(msd.main_class), msd.properties, &files)
+        // An empty main class is a descriptor that did not carry one. Passing
+        // it through as `Some("")` would reach `resolve_class("")`; `None` is
+        // what `do_start` reports as a missing main class.
+        let main_class = if msd.main_class.is_empty() { None } else { Some(msd.main_class) };
+
+        Self::load(platform, &jar_filename, &msd.id, main_class, msd.properties, &files)
     }
 
     pub fn from_jar(platform: Box<dyn Platform>, jar_filename: &str, jar: Vec<u8>, id: &str, main_class_name: Option<String>) -> Result<Self> {
@@ -44,6 +49,21 @@ impl SktEmulator {
         jar.starts_with(b"\x20\x00\x00\x00\x00\x00\x00\x00")
     }
 
+    /// The panel this archive's title was drawn for, when that is not the one
+    /// a host would pick by default.
+    ///
+    /// A host has to size its screen before there is an emulator to ask, so
+    /// this reads the archive's own `.msd` and answers from the quirk table.
+    /// `None` means the title has nothing to say and the host's own default
+    /// stands, which is every SK-VM title until one is shown to need
+    /// otherwise.
+    pub fn screen_size(archive: &[u8]) -> Option<(u32, u32)> {
+        let files = extract_zip(archive).ok()?;
+        let (filename, data) = files.iter().find(|x| x.0.ends_with(".msd"))?;
+
+        title_quirks(TitlePlatform::Skt, &SktMsd::parse(filename, data).id).screen_size
+    }
+
     fn load(
         platform: Box<dyn Platform>,
         jar_filename: &str,
@@ -53,6 +73,28 @@ impl SktEmulator {
         files: &BTreeMap<String, Vec<u8>>,
     ) -> Result<Self> {
         let system = System::new(platform, id, id, DefaultTaskRunner);
+        system.set_title_clip_includes_far_edge(title_quirks(TitlePlatform::Skt, id).clip_includes_far_edge);
+        system.set_title_clears_screen_each_paint(title_quirks(TitlePlatform::Skt, id).clears_screen_each_paint);
+        system.set_title_keys_as_skvm_scancodes(title_quirks(TitlePlatform::Skt, id).keys_as_skvm_scancodes);
+        if title_quirks(TitlePlatform::Skt, id).owns_graphics_state {
+            system.set_title_owns_graphics_state();
+        }
+
+        // An SK-VM Canvas reports sixteen rows fewer than the display - the
+        // rows the handset kept for its soft-key bar - and titles add them back:
+        // 이터널사가 takes its screen height as `getHeight() + 16`. Answering the
+        // display put everything such a title anchors to the bottom sixteen rows
+        // too low, off the end of the screen; the reference emulator (wfeature,
+        // `canvasReservedRows`) counts fifty-one titles that do it. Only the
+        // number changes: the drawing surface is still the whole display.
+        system.set_displayable_reserved_rows(16);
+
+        // SK-VM titles ask for archive entries in a case the archive does not
+        // use - they ship `Data/Map01.dat` and open `data/map01.dat`. The
+        // reference emulator resolves those case-insensitively
+        // (`aram-core/loader/skvm.findCaseInsensitive`); without it the read
+        // simply misses and the title stops at a resource it can see.
+        system.filesystem().enable_case_insensitive_reads();
 
         for (filename, data) in files {
             system.filesystem().add_virtual(filename, data.clone())
@@ -80,6 +122,15 @@ impl SktEmulator {
             ("m.VENDER", "vender"),
             ("m.CARRIER", "SKT"),
             ("m.SK_VM", "10"),
+            // Handset facts titles read straight into `String.equals` with no
+            // null check: 드래곤아이즈 compares m.EXT_SW against "600" in its
+            // MIDlet constructor, and died there on the null a missing
+            // property answers. The values match none of the constants a
+            // title compares against (wfeature answers the same).
+            ("m.MODEL", "0"),
+            ("m.MONDEL", "0"),
+            ("m.EXT_SW", "0"),
+            ("m.TYPE", "0"),
             ("com.xce.wipi.version", ""),
         ];
         let properties = properties
@@ -130,6 +181,19 @@ impl Emulator for SktEmulator {
         self.system.event_queue().push(event)
     }
 
+    /// Whether nothing is runnable until a timer fires. See
+    /// [`wie_backend::Emulator::is_idle`].
+    ///
+    /// Without this the emulator inherits the trait's conservative "never
+    /// idle", and a host that runs `tick` to a time budget spins the whole
+    /// budget out however little the title is doing - so every title on this
+    /// platform held a CPU at its top clock for as long as it ran. LGT titles
+    /// answered this from the start and stayed cool; KTF ones did not, which is
+    /// what a Y700 measured as 3.2GHz on every KTF game and 0.8GHz on the rest.
+    fn is_idle(&self) -> bool {
+        self.system.is_idle()
+    }
+
     fn tick(&mut self) -> Result<()> {
         self.system.tick()
     }
@@ -142,34 +206,118 @@ struct SktMsd {
 }
 
 impl SktMsd {
+    /// Parses a `.msd` descriptor.
+    ///
+    /// The format is one `key: value` per line, but the values are not written
+    /// to a fixed shape - `MIDlet-1` may or may not have a space after the
+    /// colon, lines may end with CRLF, and a truncated descriptor may not
+    /// carry the main class at all. The reference loader answers that with a
+    /// descriptor parser that reports a format error
+    /// (`aram-core/loader/skvm.ParseDescriptor`); here every field is optional
+    /// and a missing main class is caught later, where it can be reported,
+    /// rather than by indexing off the end of a line.
+    ///
+    /// The text is EUC-KR, as the handset wrote it, unless it happens to read
+    /// as UTF-8. Reading it as UTF-8 alone dropped every line that carried
+    /// Korean - 디지몬RPGII names itself in `MIDlet-1`, so the line holding its
+    /// main class was the one thrown away and the title stopped at `Main
+    /// class not found`.
     pub fn parse(filename: &str, data: &[u8]) -> Self {
         let mut main_class = String::new();
-        let mut id = filename[..filename.find('.').unwrap()].into();
+        let mut id: String = filename.split('.').next().unwrap_or(filename).into();
         let mut properties = BTreeMap::new();
 
-        let mut lines = data.split(|x| *x == b'\n');
+        let text = match str::from_utf8(data) {
+            Ok(text) => text.into(),
+            Err(_) => encoding_rs::EUC_KR.decode(data).0,
+        };
 
-        for line in &mut lines {
-            if line.starts_with(b"MIDlet-1:") {
-                let value = line[10..].split(|x| *x == b',').collect::<Vec<_>>();
-                main_class = str::from_utf8(value[2]).unwrap().trim().to_string();
-            }
-            if line.starts_with(b"DD-ProgName") {
-                id = str::from_utf8(&line[12..]).unwrap().trim().to_string();
-            }
+        for line in text.split('\n') {
+            let Some((key, value)) = line.split_once(':') else {
+                continue;
+            };
+            let (key, value) = (key.trim(), value.trim());
 
-            let sep = line.iter().position(|x| *x == b':');
-            if let Some(sep) = sep {
-                let key = &line[..sep];
-                let value = &line[sep + 1..];
-
-                if let (Ok(key), Ok(value)) = (str::from_utf8(key), str::from_utf8(value)) {
-                    tracing::info!("Adding property {}={}", key.trim(), value.trim());
-                    properties.insert(key.trim().to_string(), value.trim().to_string());
+            match key {
+                // `MIDlet-1: <name>, <icon>, <class>`. The icon is routinely
+                // empty and the name routinely holds no comma, but neither is
+                // guaranteed, so the class is taken as the third field and
+                // nothing is assumed about the ones before it.
+                "MIDlet-1" => {
+                    if let Some(class) = value.split(',').nth(2) {
+                        main_class = class.trim().to_string();
+                    }
                 }
+                "DD-ProgName" => id = value.to_string(),
+                _ => {}
             }
+
+            tracing::info!("Adding property {}={}", key, value);
+            properties.insert(key.to_string(), value.to_string());
         }
 
         Self { id, main_class, properties }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SktMsd;
+
+    #[test]
+    fn a_descriptor_gives_up_its_id_and_main_class() {
+        let msd = SktMsd::parse("app.msd", b"MIDlet-1: Game, , com.example.Main\nDD-ProgName: SK0123\n");
+
+        assert_eq!(msd.id, "SK0123");
+        assert_eq!(msd.main_class, "com.example.Main");
+        assert_eq!(msd.properties.get("MIDlet-1").map(|x| x.as_str()), Some("Game, , com.example.Main"));
+    }
+
+    /// Descriptors come with CRLF line endings and without the space after the
+    /// colon just as often as with it.
+    #[test]
+    fn crlf_and_a_missing_space_after_the_colon_read_the_same() {
+        let msd = SktMsd::parse("app.msd", b"MIDlet-1:Game,,com.example.Main\r\nDD-ProgName:SK0123\r\n");
+
+        assert_eq!(msd.id, "SK0123");
+        assert_eq!(msd.main_class, "com.example.Main");
+    }
+
+    /// Without `DD-ProgName` the descriptor filename is the id, and a filename
+    /// with no extension is still a usable one.
+    #[test]
+    fn the_filename_stands_in_for_a_missing_prog_name() {
+        assert_eq!(SktMsd::parse("SK9999.msd", b"MIDlet-1: G, , C\n").id, "SK9999");
+        assert_eq!(SktMsd::parse("SK9999", b"").id, "SK9999");
+    }
+
+    /// A truncated `MIDlet-1` used to be read by slicing past its end. It now
+    /// leaves the main class empty, which `do_start` reports.
+    #[test]
+    fn a_truncated_midlet_line_leaves_the_main_class_empty() {
+        let msd = SktMsd::parse("app.msd", b"MIDlet-1: Game\nMIDlet-2\n");
+
+        assert!(msd.main_class.is_empty());
+    }
+
+    /// A descriptor in EUC-KR - the handset's own encoding - gives up the
+    /// fields on its Korean lines too, main class included.
+    #[test]
+    fn an_euc_kr_descriptor_keeps_its_korean_lines() {
+        let (name, _, _) = encoding_rs::EUC_KR.encode("MIDlet-Name: 디지몬RPGII\r\nMIDlet-1: 디지몬RPGII,,exceptGame.Digi2Midlet\r\n");
+        let msd = SktMsd::parse("0052634065.msd", &name);
+
+        assert_eq!(msd.main_class, "exceptGame.Digi2Midlet");
+        assert_eq!(msd.properties.get("MIDlet-Name").map(|x| x.as_str()), Some("디지몬RPGII"));
+    }
+
+    /// A line with no colon is not a property, and a descriptor made of them
+    /// parses to nothing rather than panicking.
+    #[test]
+    fn lines_without_a_separator_are_skipped() {
+        let msd = SktMsd::parse("app.msd", b"garbage\n\nmore garbage\n");
+
+        assert!(msd.properties.is_empty());
+        assert!(msd.main_class.is_empty());
     }
 }

@@ -18,7 +18,18 @@ pub enum WieError {
     InvalidMemoryAccess(u32),
     AllocationFailure,
     JavaException(u32), // to pass java exception down to rust
-    JavaExceptionUnwind { context_base: u32, target: u32, next_pc: u32 },
+    /// A guest `try` matched, and this is the long jump back into it.
+    ///
+    /// `frame_sp` is the stack pointer the handler's own frame saved, and it says
+    /// which guest call the catch block belongs to: the guest stack is shared by
+    /// every nested call the host has open, so a handler saved above a call's
+    /// entry belongs to a caller the host has not returned to yet.
+    JavaExceptionUnwind {
+        context_base: u32,
+        target: u32,
+        next_pc: u32,
+        frame_sp: u32,
+    },
     Unimplemented(String),
     FatalError(String),
 }
@@ -33,9 +44,10 @@ impl Display for WieError {
                 context_base,
                 target,
                 next_pc,
+                frame_sp,
             } => write!(
                 f,
-                "Java exception unwind: context_base={context_base:#x}, target={target:#x}, next_pc={next_pc:#x}"
+                "Java exception unwind: context_base={context_base:#x}, target={target:#x}, next_pc={next_pc:#x}, frame_sp={frame_sp:#x}"
             ),
             WieError::Unimplemented(message) => write!(f, "Unimplemented: {message}"),
             WieError::FatalError(message) => write!(f, "Fatal error: {message}"),
@@ -77,6 +89,24 @@ where
     Ok(unsafe { destination.assume_init() })
 }
 
+/// How much of a string to ask for at once, and the alignment a request is kept
+/// inside.
+///
+/// A byte at a time is what this used to read, and a byte costs whatever the
+/// reader costs: on `ArmCore` that is a mutex, a dynamic call and a page lookup
+/// per character, and the guest's Java records are all named by strings - a
+/// field's name is read again on every `get_field`, its class's on every lookup
+/// that walks to it. A title whose paint loop reaches for a field per pixel
+/// pays for those characters more than for its own drawing (귀혼 무사편 plots
+/// its screen through `Graphics.setRGBPixels(x, y, 1, 1, ...)`, so a frame is
+/// thousands of field lookups and tens of thousands of these reads).
+///
+/// The span is kept inside one 4 KiB page because a reader may serve memory in
+/// pages and refuse a request that leaves a mapped one - `ArmCore` does - and
+/// the terminator is normally a few characters away, not a page.
+const STRING_CHUNK: u32 = 64;
+const STRING_CHUNK_ALIGNMENT: u32 = 0x1000;
+
 pub fn read_null_terminated_string_bytes<R>(reader: &R, address: u32) -> Result<Vec<u8>>
 where
     R: ?Sized + ByteRead,
@@ -85,24 +115,137 @@ where
         return Err(WieError::InvalidMemoryAccess(address));
     }
 
-    let mut result = Vec::with_capacity(20);
+    let mut result = Vec::with_capacity(STRING_CHUNK as usize);
     let mut cursor = address;
-    let mut byte = [0; 1];
+    let mut chunk = [0; STRING_CHUNK as usize];
     loop {
+        // A span that stops at the page the cursor is in, so a string at the end
+        // of one never asks for the next.
+        let span = STRING_CHUNK.min(STRING_CHUNK_ALIGNMENT - (cursor & (STRING_CHUNK_ALIGNMENT - 1))) as usize;
+        if span > 1
+            && let Ok(read) = reader.read_bytes(cursor, &mut chunk[..span])
+            && read > 0
+        {
+            if let Some(end) = chunk[..read].iter().position(|byte| *byte == 0) {
+                result.extend_from_slice(&chunk[..end]);
+                return Ok(result);
+            }
+
+            result.extend_from_slice(&chunk[..read]);
+            cursor += read as u32;
+
+            continue;
+        }
+
+        // Whatever the reader would not serve as a span it still has to answer
+        // for a byte, so the refusal a caller sees is the one it always saw.
+        let mut byte = [0; 1];
         let read = reader.read_bytes(cursor, &mut byte)?;
         if read != 1 {
             return Err(WieError::FatalError(format!("Short read at {cursor:#x}: expected 1, got {read}")));
         }
 
         if byte[0] == 0 {
-            break;
+            return Ok(result);
         }
 
         result.push(byte[0]);
         cursor += 1;
     }
+}
 
-    Ok(result)
+/// One guest string, read in chunks and handed over a byte at a time.
+///
+/// [`read_null_terminated_string_bytes`] answers what a whole string is, and
+/// that costs a `Vec` per call. A comparison rarely needs the whole of either
+/// side: `strcmp` parts on the first byte far more often than not, and
+/// 데빌메이크라이 asks for nine thousand of them a second - more than it asks
+/// for anything else, WIPI-C included. This walks the same chunks without
+/// keeping them, so the usual answer costs one read of each string and no
+/// allocation at all.
+///
+/// [`Self::next_byte`] yields `None` at the terminator, and never reads past it.
+pub struct NullTerminatedBytes<'a, R: ?Sized> {
+    reader: &'a R,
+    cursor: u32,
+    chunk: [u8; STRING_CHUNK as usize],
+    filled: usize,
+    at: usize,
+    ended: bool,
+}
+
+impl<'a, R> NullTerminatedBytes<'a, R>
+where
+    R: ?Sized + ByteRead,
+{
+    /// A cursor over the string at `address`, which may not be null - the same
+    /// refusal [`read_null_terminated_string_bytes`] gives.
+    pub fn new(reader: &'a R, address: u32) -> Result<Self> {
+        if address == 0 {
+            return Err(WieError::InvalidMemoryAccess(address));
+        }
+
+        Ok(Self {
+            reader,
+            cursor: address,
+            chunk: [0; STRING_CHUNK as usize],
+            filled: 0,
+            at: 0,
+            ended: false,
+        })
+    }
+
+    /// The next byte of the string, or `None` once its terminator is reached.
+    pub fn next_byte(&mut self) -> Result<Option<u8>> {
+        if self.ended {
+            return Ok(None);
+        }
+
+        if self.at == self.filled {
+            self.fill()?;
+            if self.ended {
+                return Ok(None);
+            }
+        }
+
+        let byte = self.chunk[self.at];
+        self.at += 1;
+
+        if byte == 0 {
+            self.ended = true;
+            return Ok(None);
+        }
+
+        Ok(Some(byte))
+    }
+
+    /// Reads the next chunk, stopping inside the page the cursor is in for the
+    /// reason [`read_null_terminated_string_bytes`] does, and falling back to
+    /// the single byte a reader that refused the span still has to answer for.
+    fn fill(&mut self) -> Result<()> {
+        let span = STRING_CHUNK.min(STRING_CHUNK_ALIGNMENT - (self.cursor & (STRING_CHUNK_ALIGNMENT - 1))) as usize;
+        if span > 1
+            && let Ok(read) = self.reader.read_bytes(self.cursor, &mut self.chunk[..span])
+            && read > 0
+        {
+            self.filled = read;
+            self.at = 0;
+            self.cursor += read as u32;
+
+            return Ok(());
+        }
+
+        let read = self.reader.read_bytes(self.cursor, &mut self.chunk[..1])?;
+        if read != 1 {
+            return Err(WieError::FatalError(format!("Short read at {:#x}: expected 1, got {read}", self.cursor)));
+        }
+
+        self.filled = 1;
+        self.at = 0;
+        self.cursor += 1;
+
+        Ok(())
+    }
 }
 
 pub fn write_null_terminated_string_bytes<W>(writer: &mut W, address: u32, bytes: &[u8]) -> Result<()>
@@ -174,6 +317,19 @@ where
     write_generic(writer, cursor, 0u32)
 }
 
+/// Decodes one `Key:Value` payload of a feature phone app descriptor
+/// (KTF `__adf__`, LGT `app_info`).
+///
+/// Descriptors are written by the handset, so line endings are inconsistent:
+/// archives dumped from LGT handsets frequently use CRLF. A trailing `\r` here
+/// ends up in the AID and turns the jar lookup into `0002A4B1\r.jar`, so
+/// surrounding whitespace is always trimmed.
+pub fn descriptor_value(value: &[u8]) -> String {
+    let text: String = String::from_utf8_lossy(value).into();
+
+    text.trim().into()
+}
+
 pub trait AsAny {
     fn as_any(&self) -> &dyn Any;
 
@@ -236,5 +392,105 @@ mod tests {
         let value = read_null_terminated_string_bytes(&memory, 1).unwrap();
 
         assert_eq!(value, b"test");
+    }
+
+    /// A reader that serves whatever fits and says how much it served, which is
+    /// what a paged memory does at the end of what it has.
+    struct PagedMemory {
+        memory: Vec<u8>,
+    }
+
+    impl ByteRead for PagedMemory {
+        fn read_bytes(&self, address: u32, result: &mut [u8]) -> Result<usize> {
+            let address = address as usize;
+            if address >= self.memory.len() {
+                return Err(WieError::InvalidMemoryAccess(address as u32));
+            }
+
+            let read = result.len().min(self.memory.len() - address);
+            result[..read].copy_from_slice(&self.memory[address..address + read]);
+
+            Ok(read)
+        }
+    }
+
+    /// The cursor spells the same string the whole-string reader does, over a
+    /// reader that serves spans and one that refuses them alike.
+    #[test]
+    fn a_cursor_spells_what_the_whole_string_reader_spells() {
+        fn bytes<R: ?Sized + ByteRead>(reader: &R, address: u32) -> Vec<u8> {
+            let mut cursor = NullTerminatedBytes::new(reader, address).unwrap();
+            let mut out = Vec::new();
+            while let Some(byte) = cursor.next_byte().unwrap() {
+                out.push(byte);
+            }
+            out
+        }
+
+        let paged = PagedMemory {
+            memory: vec![0, b'h', b'e', b'l', b'l', b'o', 0, b'x'],
+        };
+        assert_eq!(bytes(&paged, 1), b"hello");
+        assert_eq!(bytes(&paged, 1), read_null_terminated_string_bytes(&paged, 1).unwrap());
+
+        // A reader that refuses anything but the exact span it is asked for,
+        // which is what sends the whole-string reader down its byte at a time
+        // path - the cursor takes the same one.
+        let strict = StrictMemory {
+            memory: vec![0, b'h', b'i', 0],
+        };
+        assert_eq!(bytes(&strict, 1), b"hi");
+    }
+
+    /// An empty string is the terminator and nothing else, and the cursor stays
+    /// at its end rather than walking into whatever follows.
+    #[test]
+    fn a_cursor_stops_at_the_terminator_and_stays_there() {
+        let memory = PagedMemory {
+            memory: vec![b'x', 0, b'a', b'b', b'c'],
+        };
+
+        let mut cursor = NullTerminatedBytes::new(&memory, 1).unwrap();
+        assert_eq!(cursor.next_byte().unwrap(), None);
+        assert_eq!(cursor.next_byte().unwrap(), None);
+    }
+
+    /// A null pointer is refused, the way the whole-string reader refuses it.
+    #[test]
+    fn a_cursor_refuses_a_null_pointer() {
+        let memory = PagedMemory { memory: vec![0] };
+
+        assert!(NullTerminatedBytes::new(&memory, 0).is_err_and(|error| matches!(error, WieError::InvalidMemoryAccess(0))));
+    }
+
+    /// The span a read asks for is a saving, not a promise: a reader that hands
+    /// back less than it was asked for still has to spell the string, and one
+    /// that refuses the span outright still has to spell it a byte at a time.
+    #[test]
+    fn a_string_reads_the_same_however_much_the_reader_serves_at_once() {
+        let mut memory = vec![0u8; 0x1000 - 8];
+        memory.extend_from_slice(b"a name that runs past the end of its page\0");
+
+        let start = 0x1000 - 8;
+        let paged = PagedMemory { memory: memory.clone() };
+        let strict = StrictMemory { memory };
+
+        assert_eq!(
+            read_null_terminated_string_bytes(&paged, start).unwrap(),
+            b"a name that runs past the end of its page"
+        );
+        assert_eq!(
+            read_null_terminated_string_bytes(&strict, start).unwrap(),
+            b"a name that runs past the end of its page"
+        );
+    }
+
+    /// An unreadable address is still an error, however the read was made.
+    #[test]
+    fn a_string_with_no_memory_under_it_is_refused() {
+        let memory = PagedMemory { memory: vec![b'x'; 4] };
+
+        assert!(read_null_terminated_string_bytes(&memory, 0).is_err());
+        assert!(read_null_terminated_string_bytes(&memory, 8).is_err());
     }
 }

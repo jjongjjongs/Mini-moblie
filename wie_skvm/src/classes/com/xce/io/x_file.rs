@@ -13,6 +13,10 @@ use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 const READ: i32 = 1;
 const READ_RESOURCE: i32 = 8;
 
+/// What `fsavail` answers: the same budget `RecordStore.getSizeAvailable`
+/// reports, so a title sees one amount of free space whichever store it asks.
+const FILE_SYSTEM_CAPACITY: i32 = 1_000_000;
+
 // class com.xce.io.XFile
 pub struct XFile;
 
@@ -27,6 +31,13 @@ impl XFile {
                 JavaMethodProto::new("exists", "(Ljava/lang/String;)Z", Self::exists, MethodAccessFlags::STATIC),
                 JavaMethodProto::new("filesize", "(Ljava/lang/String;)I", Self::filesize, MethodAccessFlags::STATIC),
                 JavaMethodProto::new("unlink", "(Ljava/lang/String;)I", Self::unlink, MethodAccessFlags::STATIC),
+                JavaMethodProto::new("fsavail", "()I", Self::fsavail, MethodAccessFlags::STATIC),
+                JavaMethodProto::new("fsused", "()I", Self::fsused, MethodAccessFlags::STATIC),
+                JavaMethodProto::new("mkdir", "(Ljava/lang/String;)V", Self::mkdir, MethodAccessFlags::STATIC),
+                JavaMethodProto::new("rmdir", "(Ljava/lang/String;)V", Self::rmdir, MethodAccessFlags::STATIC),
+                JavaMethodProto::new("rmrdir", "(Ljava/lang/String;)V", Self::rmrdir, MethodAccessFlags::STATIC),
+                JavaMethodProto::new("flush", "()V", Self::flush, Default::default()),
+                JavaMethodProto::new("readdir", "()Ljava/lang/String;", Self::readdir, Default::default()),
                 JavaMethodProto::new("available", "()I", Self::available, Default::default()),
                 JavaMethodProto::new("read", "([BII)I", Self::read, Default::default()),
                 JavaMethodProto::new("write", "([BII)I", Self::write, Default::default()),
@@ -37,6 +48,16 @@ impl XFile {
                 JavaFieldProto::new("mode", "I", Default::default()),
                 JavaFieldProto::new("is", "Ljava/io/InputStream;", Default::default()),
                 JavaFieldProto::new("raf", "Ljava/io/RandomAccessFile;", Default::default()),
+                // The reference SK-VM XFile keeps these three protected fields,
+                // and a title that subclasses XFile reads them directly. `type`
+                // says where the bytes are: 3 means an in-memory `buf` at
+                // `offset`, anything else means read them off the file/stream.
+                // Ours is always stream- or file-backed, so `type` is never 3
+                // and `buf`/`offset` stay unset. 크레이지버스's com.xce.io.XResource
+                // extends XFile and reaches for `type` in its constructor.
+                JavaFieldProto::new("type", "I", Default::default()),
+                JavaFieldProto::new("buf", "[B", Default::default()),
+                JavaFieldProto::new("offset", "I", Default::default()),
             ],
             access_flags: Default::default(),
         }
@@ -52,6 +73,7 @@ impl XFile {
         tracing::debug!("com.xce.io.XFile::<init>({this:?}, {name:?}, {mode:?})");
 
         let _: () = jvm.invoke_special(&this, "java/lang/Object", "<init>", "()V", ()).await?;
+        Self::require_name(jvm, &name).await?;
 
         if mode == READ_RESOURCE {
             let class = jvm.invoke_virtual(&this, "getClass", "()Ljava/lang/Class;", ()).await?;
@@ -61,6 +83,7 @@ impl XFile {
 
             jvm.put_field(&mut this, "is", "Ljava/io/InputStream;", resource_stream).await?;
             jvm.put_field(&mut this, "mode", "I", mode).await?;
+            jvm.put_field(&mut this, "type", "I", mode).await?;
         } else {
             let file = jvm.new_class("java/io/File", "(Ljava/lang/String;)V", (name,)).await?;
 
@@ -72,6 +95,23 @@ impl XFile {
                 .await?;
             jvm.put_field(&mut this, "raf", "Ljava/io/RandomAccessFile;", raf).await?;
             jvm.put_field(&mut this, "mode", "I", mode).await?;
+            jvm.put_field(&mut this, "type", "I", mode).await?;
+        }
+
+        Ok(())
+    }
+
+    /// A null file name is the title's mistake, and it hears about it as a
+    /// `NullPointerException` it can catch, the way the reference emulator
+    /// answers it (wfeature, `stringArgument`).
+    ///
+    /// It went on into `java.io.File` instead, which took the null and then
+    /// panicked reading the path back - ending the whole run, not the
+    /// title's thread. 택티컬퀘스트 asks `XFile.exists(null)` from its title
+    /// screen, and the first key press there stopped the emulator.
+    async fn require_name(jvm: &Jvm, name: &ClassInstanceRef<String>) -> JvmResult<()> {
+        if name.is_null() {
+            return Err(jvm.exception("java/lang/NullPointerException", "String is null").await);
         }
 
         Ok(())
@@ -80,6 +120,7 @@ impl XFile {
     async fn exists(jvm: &Jvm, _context: &mut WieJvmContext, name: ClassInstanceRef<String>) -> JvmResult<bool> {
         tracing::debug!("com.xce.io.XFile::exists({name:?})");
 
+        Self::require_name(jvm, &name).await?;
         let file = jvm.new_class("java/io/File", "(Ljava/lang/String;)V", (name,)).await?;
         let exists = jvm.invoke_virtual(&file, "exists", "()Z", ()).await?;
 
@@ -89,6 +130,7 @@ impl XFile {
     async fn filesize(jvm: &Jvm, _context: &mut WieJvmContext, name: ClassInstanceRef<String>) -> JvmResult<i32> {
         tracing::debug!("com.xce.io.XFile::filesize({name:?})");
 
+        Self::require_name(jvm, &name).await?;
         let file = jvm.new_class("java/io/File", "(Ljava/lang/String;)V", (name,)).await?;
         let size: i64 = jvm.invoke_virtual(&file, "length", "()J", ()).await?;
 
@@ -99,6 +141,62 @@ impl XFile {
         tracing::warn!("stub com.xce.io.XFile::unlink({name:?})");
 
         Ok(0)
+    }
+
+    /// Free space on the file system, which titles check before saving.
+    ///
+    /// 바운티블루스 asks it in its canvas constructor, before it has drawn
+    /// anything, and turns its save off when fewer than 250 bytes are free.
+    /// Without the method the lookup failed there and ended the thread that
+    /// would have started the game, leaving a black screen. The answer is
+    /// the budget `RecordStore.getSizeAvailable` gives, so the two stores
+    /// agree (wfeature does the same, `xFileAvail`).
+    async fn fsavail(_jvm: &Jvm, _context: &mut WieJvmContext) -> JvmResult<i32> {
+        tracing::debug!("com.xce.io.XFile::fsavail()");
+
+        Ok(FILE_SYSTEM_CAPACITY)
+    }
+
+    async fn fsused(_jvm: &Jvm, _context: &mut WieJvmContext) -> JvmResult<i32> {
+        tracing::debug!("com.xce.io.XFile::fsused()");
+
+        Ok(0)
+    }
+
+    /// Directories are not kept here: every path is a name in one flat store,
+    /// so making or removing one has nothing to do.
+    async fn mkdir(_jvm: &Jvm, _context: &mut WieJvmContext, name: ClassInstanceRef<String>) -> JvmResult<()> {
+        tracing::debug!("com.xce.io.XFile::mkdir({name:?})");
+
+        Ok(())
+    }
+
+    async fn rmdir(_jvm: &Jvm, _context: &mut WieJvmContext, name: ClassInstanceRef<String>) -> JvmResult<()> {
+        tracing::debug!("com.xce.io.XFile::rmdir({name:?})");
+
+        Ok(())
+    }
+
+    async fn rmrdir(_jvm: &Jvm, _context: &mut WieJvmContext, name: ClassInstanceRef<String>) -> JvmResult<()> {
+        tracing::debug!("com.xce.io.XFile::rmrdir({name:?})");
+
+        Ok(())
+    }
+
+    /// Writes reach the file as they are made, so there is nothing buffered
+    /// to push out.
+    async fn flush(_jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<()> {
+        tracing::debug!("com.xce.io.XFile::flush({this:?})");
+
+        Ok(())
+    }
+
+    /// No directory listing: the end of one, which is what a title walking
+    /// an empty directory expects.
+    async fn readdir(_jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<ClassInstanceRef<String>> {
+        tracing::debug!("com.xce.io.XFile::readdir({this:?})");
+
+        Ok(None.into())
     }
 
     async fn available(jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<i32> {

@@ -1,8 +1,10 @@
 mod audio;
 mod event_queue;
 mod file_system;
+mod input_method;
 
 use alloc::{borrow::ToOwned, boxed::Box, string::String, sync::Arc};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use spin::{RwLock, RwLockWriteGuard};
 
@@ -11,16 +13,18 @@ use wie_util::Result;
 use crate::{
     AsyncCallable,
     executor::Executor,
+    local_network::LocalNetwork,
     platform::Platform,
     task::{SleepFuture, YieldFuture},
     task_runner::TaskRunner,
 };
 
-use self::{audio::Audio, event_queue::EventQueue};
+use self::{audio::Audio, event_queue::EventQueue, input_method::InputMethod};
 
 pub use self::{
     event_queue::{Event, KeyCode},
     file_system::FilesystemOverlay,
+    input_method::InputMethodOutput,
 };
 
 #[derive(Clone)]
@@ -32,7 +36,42 @@ pub struct System {
     filesystem: FilesystemOverlay,
     event_queue: Arc<RwLock<EventQueue>>,
     audio: Arc<RwLock<Audio>>,
+    input_method: Arc<RwLock<InputMethod>>,
     task_runner: Arc<dyn TaskRunner>,
+    /// The servers this run answers for itself, in place of ones that have been
+    /// switched off for years. Empty unless the host registered one.
+    local_network: Arc<RwLock<LocalNetwork>>,
+    /// Set once the title has been seen drawing into the LCD frame buffer
+    /// itself. See [`System::title_drives_lcd`].
+    title_drives_lcd: Arc<AtomicBool>,
+    /// Whether this title draws its picture sideways into an upright panel.
+    /// See [`System::title_draws_sideways`].
+    title_draws_sideways: Arc<AtomicBool>,
+    /// Whether this title lays its screens out below a status strip.
+    /// See [`System::title_expects_annunciator`].
+    title_expects_annunciator: Arc<AtomicBool>,
+    /// How many rows that strip takes, or zero for the size table's own answer.
+    /// See [`System::title_annunciator_rows`].
+    title_annunciator_rows: Arc<AtomicU32>,
+    /// Whether this title's clips include their far edge.
+    /// See [`System::title_clip_includes_far_edge`].
+    title_clip_includes_far_edge: Arc<AtomicBool>,
+    /// Whether the screen buffer is wiped before each paint for this title.
+    /// See [`System::title_clears_screen_each_paint`].
+    title_clears_screen_each_paint: Arc<AtomicBool>,
+    /// How many rows below a `Displayable` the platform keeps for itself.
+    /// See [`System::displayable_reserved_rows`].
+    displayable_reserved_rows: Arc<AtomicU32>,
+    /// Whether the MIDP key path delivers the de-facto standard negative nav
+    /// codes. See [`System::midp_uses_standard_key_codes`].
+    midp_uses_standard_key_codes: Arc<AtomicBool>,
+    /// Whether this title reads its keys as the SK-VM handset's positive
+    /// scancodes. See [`System::title_keys_as_skvm_scancodes`].
+    title_keys_as_skvm_scancodes: Arc<AtomicBool>,
+    /// Set once the title has drawn through the SK-VM graphics path
+    /// (`com.skt.m.Graphics2D`), which keeps its own translate and clip on the
+    /// screen graphics between frames. See [`System::title_owns_graphics_state`].
+    title_owns_graphics_state: Arc<AtomicBool>,
 }
 
 impl System {
@@ -41,6 +80,23 @@ impl System {
         T: TaskRunner + 'static,
     {
         let audio_sink = platform.audio_sink();
+
+        let mut local_network = LocalNetwork::new();
+        for endpoint in platform.local_endpoints() {
+            local_network.register(endpoint);
+        }
+
+        // The servers this emulator answers for itself, behind whatever the host
+        // offers: a run that sets one of the diagnostic endpoints is asking to
+        // see the exchange rather than to have it answered.
+        local_network.register(Box::new(crate::local_network::GpangEndpoint::new()));
+
+        // 엑스피드스노보드's ranking/map server, gone for years. Answering it in
+        // process lets the title past the `네트워크 접속 에러` its title screen
+        // shows the moment it dials out. Host-gated, so no other title is
+        // touched.
+        local_network.register(Box::new(crate::local_network::SnowBoardEndpoint));
+
         let platform = Arc::new(platform);
 
         Self {
@@ -51,13 +107,38 @@ impl System {
             platform,
             event_queue: Arc::new(RwLock::new(EventQueue::new())),
             audio: Arc::new(RwLock::new(Audio::new(audio_sink))),
+            input_method: Arc::new(RwLock::new(InputMethod::new())),
             task_runner: Arc::new(task_runner),
+            local_network: Arc::new(RwLock::new(local_network)),
+            title_drives_lcd: Arc::new(AtomicBool::new(false)),
+            title_draws_sideways: Arc::new(AtomicBool::new(false)),
+            title_expects_annunciator: Arc::new(AtomicBool::new(false)),
+            title_annunciator_rows: Arc::new(AtomicU32::new(0)),
+            title_clip_includes_far_edge: Arc::new(AtomicBool::new(false)),
+            title_clears_screen_each_paint: Arc::new(AtomicBool::new(false)),
+            displayable_reserved_rows: Arc::new(AtomicU32::new(0)),
+            midp_uses_standard_key_codes: Arc::new(AtomicBool::new(false)),
+            title_keys_as_skvm_scancodes: Arc::new(AtomicBool::new(false)),
+            title_owns_graphics_state: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub fn tick(&mut self) -> Result<()> {
         let platform = self.platform.clone();
         self.executor.tick(move || platform.now())
+    }
+
+    /// Whether the emulator has nothing runnable until a timer fires (every
+    /// task asleep with its wake-up in the future). The host loop uses this to
+    /// stop early and sleep the leftover budget rather than busy-waiting.
+    pub fn is_idle(&self) -> bool {
+        self.executor.is_idle()
+    }
+
+    /// How long the host may sleep before the emulator has work again, in
+    /// milliseconds. See [`Executor::idle_for`](crate::Executor::idle_for).
+    pub fn idle_for(&self) -> Option<u64> {
+        self.executor.idle_for(self.platform.now())
     }
 
     pub fn spawn<C>(&self, callable: C)
@@ -77,7 +158,7 @@ impl System {
     }
 
     pub fn yield_now(&self) -> YieldFuture {
-        YieldFuture::new()
+        YieldFuture::waiting(&self.executor)
     }
 
     /// Unified filesystem view. Reads consult the persistent platform
@@ -95,6 +176,10 @@ impl System {
         &self.aid
     }
 
+    pub fn local_network(&self) -> RwLockWriteGuard<'_, LocalNetwork> {
+        self.local_network.write()
+    }
+
     pub fn platform(&self) -> &dyn Platform {
         self.platform.as_ref().as_ref()
     }
@@ -105,5 +190,195 @@ impl System {
 
     pub fn event_queue(&self) -> RwLockWriteGuard<'_, EventQueue> {
         self.event_queue.write()
+    }
+
+    /// Whether the title paints the LCD frame buffer itself.
+    ///
+    /// A title whose drawing is a C engine writes that buffer directly and never
+    /// flushes it, because on the handset the buffer is the display. The
+    /// emulator's tick notices the first such frame and says so here, and the
+    /// MIDP layer then stops flushing its own screen image over the top - which
+    /// is the same reason `Display.disablePaint` exists for the clet wrapper,
+    /// reached for a title that never goes through that wrapper.
+    ///
+    /// Stays false for every title that draws through the Java layer, so their
+    /// frames keep reaching the screen the way they always have.
+    pub fn title_drives_lcd(&self) -> bool {
+        self.title_drives_lcd.load(Ordering::SeqCst)
+    }
+
+    pub fn set_title_drives_lcd(&self) {
+        self.title_drives_lcd.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether the title composes a landscape picture and copies it onto its
+    /// upright panel a quarter turn clockwise, because it was written to be
+    /// played with the handset held sideways.
+    ///
+    /// A fact about one title rather than anything the API reports, so it is
+    /// looked up in `crate::quirks` and set here by the emulator that loaded
+    /// the archive. [`crate::present`] is what reads it.
+    pub fn title_draws_sideways(&self) -> bool {
+        self.title_draws_sideways.load(Ordering::SeqCst)
+    }
+
+    pub fn set_title_draws_sideways(&self, sideways: bool) {
+        self.title_draws_sideways.store(sideways, Ordering::SeqCst);
+    }
+
+    /// Whether the title was written for a handset whose `setClip` took in the
+    /// pixel at the far edge of the rectangle as well. Looked up in
+    /// `crate::quirks` and set here by the emulator that loaded the archive;
+    /// the MIDP `Graphics` is what reads it.
+    pub fn title_clip_includes_far_edge(&self) -> bool {
+        self.title_clip_includes_far_edge.load(Ordering::SeqCst)
+    }
+
+    pub fn set_title_clip_includes_far_edge(&self, includes: bool) {
+        self.title_clip_includes_far_edge.store(includes, Ordering::SeqCst);
+    }
+
+    /// Whether the runtime should wipe the screen buffer to black before every
+    /// paint for this title, because it composes each frame over a blank
+    /// surface and leaves the rows it does not draw to whatever was there.
+    /// Looked up in `crate::quirks` and set here by the emulator that loaded
+    /// the archive; the MIDP `Display` is what reads it.
+    pub fn title_clears_screen_each_paint(&self) -> bool {
+        self.title_clears_screen_each_paint.load(Ordering::SeqCst)
+    }
+
+    pub fn set_title_clears_screen_each_paint(&self, clears: bool) {
+        self.title_clears_screen_each_paint.store(clears, Ordering::SeqCst);
+    }
+
+    /// How many rows fewer than the display a `Displayable` reports as its
+    /// height, for the platform's own bar below it. Zero everywhere but on
+    /// SK-VM, whose Canvas is sixteen rows shorter than the display; the
+    /// emulator that loaded the archive sets it.
+    pub fn displayable_reserved_rows(&self) -> u32 {
+        self.displayable_reserved_rows.load(Ordering::SeqCst)
+    }
+
+    pub fn set_displayable_reserved_rows(&self, rows: u32) {
+        self.displayable_reserved_rows.store(rows, Ordering::SeqCst);
+    }
+
+    /// Whether this platform hands a MIDP `Canvas` the de-facto standard nav
+    /// key codes - `KEY_UP` = -1 down through `KEY_FIRE` = -5, the values Nokia
+    /// set and the rest of the J2ME world followed - rather than the positive
+    /// table SK-VM's handsets used. A pure J2ME MIDlet that reads a d-pad
+    /// straight out of `keyPressed` (호국전기이순신 switches on exactly -5..-1)
+    /// gets nothing from the SK-VM codes, so the J2ME emulator sets this and
+    /// SK-VM/WIPI, which share the same key enum, leave it off. `net.wie
+    /// .EventQueue` and the MIDP `Canvas`'s `getGameAction` read it.
+    pub fn midp_uses_standard_key_codes(&self) -> bool {
+        self.midp_uses_standard_key_codes.load(Ordering::SeqCst)
+    }
+
+    pub fn set_midp_uses_standard_key_codes(&self) {
+        self.midp_uses_standard_key_codes.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether this title reads its d-pad, select, clear and soft keys as the
+    /// SK-VM handset's own positive scancodes rather than the org.kwis codes a
+    /// `Card` is handed by default, because its key table is keyed on them.
+    /// Looked up in `crate::quirks` and set here by the emulator that loaded the
+    /// archive; `net.wie.CardCanvas` reads it.
+    pub fn title_keys_as_skvm_scancodes(&self) -> bool {
+        self.title_keys_as_skvm_scancodes.load(Ordering::SeqCst)
+    }
+
+    pub fn set_title_keys_as_skvm_scancodes(&self, uses: bool) {
+        self.title_keys_as_skvm_scancodes.store(uses, Ordering::SeqCst);
+    }
+
+    /// Whether the title keeps its own translate and clip on the screen graphics
+    /// between frames, so the runtime must not reset them after a paint.
+    ///
+    /// An SK-VM title draws through `com.skt.m.Graphics2D` from its own loop and
+    /// leaves the screen graphics translated into its play area (Chaos블레이드
+    /// keeps it at 39,79) frame to frame, rather than re-establishing it from a
+    /// blank each paint the way a MIDP `Canvas` does. Resetting the graphics
+    /// after the paint - which a MIDP title needs, to start its next paint from
+    /// a clean origin - zeroes a translate the SK-VM title still counts on, and
+    /// its next `translate(-39,-79)/translate(39,79)` pair, meant to return to
+    /// the play area, lands at the screen origin instead. A 162x162 white fill
+    /// then sits at (0,0) as a box over the scene. Looked up in `crate::quirks`
+    /// and set by the emulator that loaded the archive; read in
+    /// `Display.handlePaintEvent`.
+    pub fn title_owns_graphics_state(&self) -> bool {
+        self.title_owns_graphics_state.load(Ordering::SeqCst)
+    }
+
+    pub fn set_title_owns_graphics_state(&self) {
+        self.title_owns_graphics_state.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether the title lays its screens out below the handset's status strip,
+    /// so the strip has to be there for them to land where they belong.
+    ///
+    /// The same fact the WIPI-C side reads out of `ANNUNCIATOR_ROWS_PTR`, for
+    /// the titles that reach the strip through `org.kwis.msp.lwc` instead.
+    /// Looked up in `crate::quirks` and set here by the emulator that loaded the
+    /// archive.
+    pub fn title_expects_annunciator(&self) -> bool {
+        self.title_expects_annunciator.load(Ordering::SeqCst)
+    }
+
+    pub fn set_title_expects_annunciator(&self, expects: bool) {
+        self.title_expects_annunciator.store(expects, Ordering::SeqCst);
+    }
+
+    /// How tall that strip is for this title, or `None` to take the height the
+    /// platform's own size table gives the panel's width.
+    pub fn title_annunciator_rows(&self) -> Option<u32> {
+        match self.title_annunciator_rows.load(Ordering::SeqCst) {
+            0 => None,
+            rows => Some(rows),
+        }
+    }
+
+    pub fn set_title_annunciator_rows(&self, rows: Option<u32>) {
+        self.title_annunciator_rows.store(rows.unwrap_or(0), Ordering::SeqCst);
+    }
+
+    pub fn current_input_mode(&self) -> u32 {
+        self.input_method.read().current_mode()
+    }
+
+    pub fn set_current_input_mode(&self, mode: u32) {
+        self.input_method.write().set_current_mode(mode);
+    }
+
+    pub fn input_composition_size(&self) -> usize {
+        self.input_method.read().composition_size()
+    }
+
+    pub fn set_input_composition_size(&self, size: usize) {
+        self.input_method.write().set_composition_size(size);
+    }
+
+    /// Feeds a keypress to the handset's input method.
+    ///
+    /// The guest clock goes with it: multi-tap finishes a character when the
+    /// same key is left alone long enough, and measuring that on guest time
+    /// rather than the host's keeps a frontend that runs ticks in batches
+    /// typing the same text as one running live.
+    /// Lets go of the character the input method is still building, without
+    /// finishing it into anything.
+    ///
+    /// For a field whose whole text has been set from under it: what it was
+    /// composing is either already in that text or was meant to be dropped, so
+    /// finishing it would add a second copy or text nobody asked for.
+    pub fn reset_input_method_composition(&self) {
+        let mode = self.input_method.read().current_mode();
+
+        self.input_method.write().set_current_mode(mode);
+    }
+
+    pub fn handle_input_method(&self, key: i8, event: u32) -> InputMethodOutput {
+        let now = self.platform().now();
+
+        self.input_method.write().handle_input(key, event, now)
     }
 }

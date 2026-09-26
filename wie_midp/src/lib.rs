@@ -2,16 +2,28 @@
 extern crate alloc;
 
 pub mod classes;
+mod fields;
 
 use wie_jvm_support::WieJavaClassProto;
 
-pub fn get_protos() -> [WieJavaClassProto; 26] {
+pub fn get_protos() -> [WieJavaClassProto; 45] {
     [
+        classes::mmpp::media::BackLight::as_proto(),
+        classes::mmpp::media::MediaPlayer::as_proto(),
+        classes::mmpp::media::Vibration::as_proto(),
+        classes::mmpp::microedition::lcdui::GraphicsX::as_proto(),
+        classes::javax::microedition::io::Connection::as_proto(),
+        classes::javax::microedition::io::ConnectionNotFoundException::as_proto(),
+        classes::javax::microedition::io::Connector::as_proto(),
+        classes::javax::microedition::io::InputConnection::as_proto(),
+        classes::javax::microedition::io::OutputConnection::as_proto(),
+        classes::javax::microedition::io::StreamConnection::as_proto(),
         classes::javax::microedition::lcdui::Alert::as_proto(),
         classes::javax::microedition::lcdui::AlertType::as_proto(),
         classes::javax::microedition::lcdui::Canvas::as_proto(),
         classes::javax::microedition::lcdui::ChoiceGroup::as_proto(),
         classes::javax::microedition::lcdui::Command::as_proto(),
+        classes::javax::microedition::lcdui::CommandListener::as_proto(),
         classes::javax::microedition::lcdui::Display::as_proto(),
         classes::javax::microedition::lcdui::Displayable::as_proto(),
         classes::javax::microedition::lcdui::Font::as_proto(),
@@ -28,9 +40,17 @@ pub fn get_protos() -> [WieJavaClassProto; 26] {
         classes::javax::microedition::midlet::MIDlet::as_proto(),
         classes::javax::microedition::rms::InvalidRecordIDException::as_proto(),
         classes::javax::microedition::rms::RecordStore::as_proto(),
+        classes::javax::microedition::rms::RecordEnumeration::as_proto(),
+        classes::javax::microedition::rms::RecordEnumerationImpl::as_proto(),
+        classes::javax::microedition::rms::RecordFilter::as_proto(),
+        classes::javax::microedition::rms::RecordComparator::as_proto(),
         classes::javax::microedition::rms::RecordStoreException::as_proto(),
+        classes::javax::microedition::rms::RecordStoreNotFoundException::as_proto(),
         classes::net::wie::EventQueue::as_proto(),
         classes::net::wie::Launcher::as_proto(),
+        classes::net::wie::LocalSocketInputStream::as_proto(),
+        classes::net::wie::LocalSocketOutputStream::as_proto(),
+        classes::net::wie::LocalStreamConnection::as_proto(),
         classes::net::wie::SmafPlayer::as_proto(),
         classes::net::wie::WieError::as_proto(),
     ]

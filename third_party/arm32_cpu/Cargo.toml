@@ -1,0 +1,23 @@
+[package]
+name = "arm32_cpu"
+description = "An emulator for the ARM32 cpu"
+authors = ["Sean Purcell <me@seanp.xyz>", "Daniel Prilik <danielprilik@gmail.com>", "Inseok Lee <me@dlun.ch>"]
+version = "0.1.0"
+license = "MIT"
+edition = "2018"
+readme = "README.md"
+documentation = "https://docs.rs/arm32_cpu"
+homepage = "https://github.com/dlunch/arm32_cpu"
+repository = "https://github.com/dlunch/arm32_cpu"
+keywords = ["emulator", "emulation", "arm"]
+categories = ["emulators"]
+
+# Upstream's `serde`, `serde-serialize` and `advanced_disasm` are not here. Their
+# dependencies were left behind when this crate was vendored, and the code they
+# gate has since drifted out of building against this copy at all: `Cpu` is
+# `Copy` now and `advanced_disasm` puts a `Capstone` inside it. They named
+# nothing and built nowhere, and any `--all-features` pass - the coverage job is
+# one - stopped on them.
+
+[dependencies]
+log = "0.4"

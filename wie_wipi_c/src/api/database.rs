@@ -33,12 +33,22 @@ use crate::context::WIPICContext;
 #[repr(C)]
 struct DatabaseHandle {
     magic: u32,
-    name: [u8; 32], // TODO hardcoded max size
+    /// The store's name, held in the handle so every op can find its way back
+    /// to the repository. The field is this runtime's own - the guest never
+    /// reads it, it only carries the pointer - so its length is a choice, and
+    /// a short one turned a name a title uses into a store it cannot open.
+    /// 리얼싸커 2009 keeps a save in `recordStore/rms_KOR_RMS_DATA.sav`, which
+    /// is thirty-two characters and was refused for one over a limit of our
+    /// own making.
+    name: [u8; 128],
     read_cursor: u32,
     write_cursor: u32,
     buffer_ptr: u32,
     buffer_len: u32,
     buffer_capacity: u32,
+    /// The mode `MC_dbOpenDataBase` was called with, kept so
+    /// `MC_dbGetAccessMode` can report what the title itself asked for.
+    mode: u32,
 }
 
 const MIN_BUFFER_CAPACITY: u32 = 64;
@@ -46,48 +56,172 @@ const MIN_BUFFER_CAPACITY: u32 = 64;
 // a real DB handle pointer from an unrelated guest pointer (e.g. a C-string
 // name pointer that KTF's slot 6 passes through the same SVC argument slot).
 const DATABASE_HANDLE_MAGIC: u32 = 0x4D434442;
-const MAX_NAME_LEN: usize = 31; // leave a byte for null terminator inside the 32-byte field
+const MAX_NAME_LEN: usize = 127; // leave a byte for the null terminator inside the field above
 
+// LGT's native database keeps fixed-record metadata in the companion `.idx` file.
+// WIE's repository only exposes numbered records, so reserve backend record 0 for
+// the LGT-only metadata that must survive close/reopen. Backend allocation starts at
+// record 1, and the generic/KTF paths never use record 0 as a normal data record.
+const LGT_METADATA_RECORD_ID: u32 = 0;
+const LGT_METADATA_MAGIC: u32 = 0x4C475444; // "LGTD"
+const LGT_METADATA_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LgtDatabaseMetadata {
+    record_size: u32,
+    next_record_id: u32,
+    active_count: u32,
+    free_ids: Vec<u32>,
+}
+
+impl LgtDatabaseMetadata {
+    fn new(record_size: u32) -> Self {
+        Self {
+            record_size,
+            next_record_id: 1,
+            active_count: 0,
+            free_ids: Vec::new(),
+        }
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        let mut data = Vec::with_capacity(20 + self.free_ids.len() * 4);
+        data.extend_from_slice(&LGT_METADATA_MAGIC.to_le_bytes());
+        data.extend_from_slice(&LGT_METADATA_VERSION.to_le_bytes());
+        data.extend_from_slice(&self.record_size.to_le_bytes());
+        data.extend_from_slice(&self.next_record_id.to_le_bytes());
+        data.extend_from_slice(&self.active_count.to_le_bytes());
+        data.extend_from_slice(&(self.free_ids.len() as u32).to_le_bytes());
+        for id in &self.free_ids {
+            data.extend_from_slice(&id.to_le_bytes());
+        }
+        data
+    }
+
+    fn decode(data: &[u8]) -> Option<Self> {
+        if data.len() < 24 {
+            return None;
+        }
+
+        let word = |offset: usize| -> u32 { u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) };
+
+        if word(0) != LGT_METADATA_MAGIC || word(4) != LGT_METADATA_VERSION {
+            return None;
+        }
+
+        let free_count = word(20) as usize;
+        let expected_len = 24usize.checked_add(free_count.checked_mul(4)?)?;
+        if data.len() != expected_len {
+            return None;
+        }
+
+        let mut free_ids = Vec::with_capacity(free_count);
+        for offset in (24..expected_len).step_by(4) {
+            free_ids.push(word(offset));
+        }
+
+        Some(Self {
+            record_size: word(8),
+            next_record_id: word(12),
+            active_count: word(16),
+            free_ids,
+        })
+    }
+}
+
+async fn load_lgt_metadata(db: &mut dyn Database) -> Option<LgtDatabaseMetadata> {
+    let data = db.get(LGT_METADATA_RECORD_ID).await?;
+    LgtDatabaseMetadata::decode(&data)
+}
+
+async fn store_lgt_metadata(db: &mut dyn Database, metadata: &LgtDatabaseMetadata) -> bool {
+    db.set(LGT_METADATA_RECORD_ID, &metadata.encode()).await
+}
+
+/// The mode a title opens a database with when it only wants one that is
+/// already there. Every other mode this entry is called with may bring one
+/// into being.
+const MODE_OPEN_EXISTING: i32 = 1;
+
+/// KTF `MC_dbOpenDataBase(name, mode, type)`.
+///
+/// The second argument is a mode, and the title's own shim layer is what says
+/// so. 던전앤파이터 격투가 carries two wrappers around this call, and the one
+/// at `0x107b20` translates its caller's mode into the platform's before
+/// passing it on:
+///
+/// ```text
+///     cmp r1, #3 ; movs r1, #1      caller 3 -> 1
+///     cmp r1, #1 ; movs r1, #8      caller 1 -> 8
+///     cmp r1, #2 ; movs r1, #4      caller 2 -> 4
+///     cmp r1, #4 ; movs r1, #2      caller 4 -> 2
+/// ```
+///
+/// A record size is not renumbered between 1, 2, 4 and 8 on its way through a
+/// wrapper; a set of mode flags is. The third argument is a type, and both
+/// wrappers pass a constant 1.
+///
+/// Mode 1 opens a database that exists and answers `M_E_NOENT` for one that
+/// does not, which is what the title's other wrapper at `0x107b98` is built
+/// on: it opens with mode 1, closes the handle if it got one, and answers 1
+/// or -1 - an existence test written as an open. Creating the database for
+/// that probe makes it answer yes for a file that was never written, and
+/// 격투가 then loads sixty-eight bytes of options out of a database with
+/// nothing in it and draws a white screen for the rest of the run.
+///
+/// Mode 8 is the mode a title opens with to write, and it does create: it is
+/// what 던파 귀검사편 leaves its options screen with, and what its 이어하기
+/// reads back afterwards.
+///
+/// What this entry must not do, whatever the mode, is delete on the way in.
+/// An earlier reading of mode 4 did, and opening a save wiped it.
 pub async fn open_database(context: &mut dyn WIPICContext, ptr_name: WIPICWord, mode: i32, r#type: i32) -> Result<i32> {
-    tracing::debug!("MC_dbOpenDataBase({ptr_name:#x}, {mode}, {type})");
+    tracing::debug!("MC_dbOpenDataBase({ptr_name:#x}, mode={mode}, type={type})");
 
     // Guest-provided C string — invalid UTF-8 must not bring down the
     // emulator. Treat it as a bad parameter and return -22, matching the
     // fail-soft behaviour of the other name-keyed entry points in this
     // file (`stat_by_name_ktf`, `exists_database_ktf`).
-    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, ptr_name)?) else {
+    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, ptr_name)?).map(store_name) else {
         tracing::warn!("MC_dbOpenDataBase: invalid utf8 name @ {ptr_name:#x}");
         return Ok(-22);
     };
 
-    // Validate before any repository side effects. Mode 4 deletes record 1
-    // up front, so a too-long name reaching that path would wipe data we
-    // can't open a handle for anyway.
+    // Validate before any repository side effects, so a name this file cannot
+    // key by never reaches the repository at all.
     if name.len() > MAX_NAME_LEN {
         tracing::warn!("MC_dbOpenDataBase: name {name:?} too long ({} > {MAX_NAME_LEN})", name.len());
         return Ok(-22); // M_E_BADRECID — closest WIPI parameter-error idiom in this file
     }
 
-    let packaged = read_packaged_database(context, &name).await?;
+    // KTF has no access argument to report back, and `MC_dbGetAccessMode`
+    // answers 1 for a name that exists, so a handle answers the same.
+    open_database_named(context, &name, mode != MODE_OPEN_EXISTING, 1).await
+}
+
+/// The body of an open, once the name is known and the caller has made the
+/// create decision the platform it speaks for makes.
+///
+/// `create` is what the title asked for on KTF and what `open_database_lgt`
+/// has already decided on LGT: whether a database that is not there yet may be
+/// brought into being. A database that exists, or that the archive ships,
+/// seeds the handle's buffer from record 1 so a seek-and-overlay write keeps
+/// the bytes around what it writes - multi-slot saves live at fixed offsets
+/// inside that one record.
+async fn open_database_named(context: &mut dyn WIPICContext, name: &str, create: bool, access: i32) -> Result<i32> {
+    let packaged = packaged_store_bytes(context, name).await?;
 
     let system = context.system();
     let pid = system.pid().to_owned();
-    let exists = system.platform().database_repository().exists(&name, &pid).await;
+    let exists = system.platform().database_repository().exists(name, &pid).await;
 
-    if !exists && packaged.is_none() && mode == 1 {
+    if !exists && packaged.is_none() && !create {
         return Ok(-12); // M_E_NOENT
     }
 
-    // Mode 4 (`MC_DB_CREATE`) wipes any prior contents up front unless the
-    // DB is backed by a packaged resource. Other modes seed the per-handle
-    // buffer with the existing record or packaged data so seek+overlay writes
-    // preserve unrelated bytes (multi-slot saves at fixed byte offsets).
     let initial: Vec<u8> = if exists {
-        let mut db = system.platform().database_repository().open(&name, &pid).await;
-        if mode == 4 && packaged.is_none() {
-            db.delete(1).await;
-            Vec::new()
-        } else if let Some(data) = db.get(1).await {
+        let mut db = system.platform().database_repository().open(name, &pid).await;
+        if let Some(data) = db.get(1).await {
             data
         } else if let Some(data) = packaged {
             db.set(1, &data).await;
@@ -96,13 +230,15 @@ pub async fn open_database(context: &mut dyn WIPICContext, ptr_name: WIPICWord, 
             Vec::new()
         }
     } else if let Some(data) = packaged {
-        let mut db = system.platform().database_repository().open(&name, &pid).await;
+        let mut db = system.platform().database_repository().open(name, &pid).await;
         db.set(1, &data).await;
         data
-    } else if mode == 4 {
-        system.platform().database_repository().open(&name, &pid).await;
-        Vec::new()
     } else {
+        // Nothing there and the title asked for it to exist. Opening it in the
+        // repository is what makes it exist: a title that writes nothing
+        // before closing still expects to find it on the next `MC_dbExists`,
+        // which is how an options screen records that it has been visited.
+        system.platform().database_repository().open(name, &pid).await;
         Vec::new()
     };
 
@@ -110,12 +246,13 @@ pub async fn open_database(context: &mut dyn WIPICContext, ptr_name: WIPICWord, 
 
     let mut handle = DatabaseHandle {
         magic: DATABASE_HANDLE_MAGIC,
-        name: [0; 32],
+        name: [0; 128],
         read_cursor: 0,
         write_cursor: 0,
         buffer_ptr: 0,
         buffer_len: 0,
         buffer_capacity: 0,
+        mode: access as u32,
     };
     handle.name[..name_bytes.len()].copy_from_slice(name_bytes);
 
@@ -136,6 +273,967 @@ pub async fn open_database(context: &mut dyn WIPICContext, ptr_name: WIPICWord, 
     Ok(ptr_handle as _)
 }
 
+/// LGT canonical `MC_dbOpenDataBase` (service 0x1f4).
+///
+/// Native ABI:
+/// `MC_dbOpenDataBase(name, record_size, create, access)`.
+///
+/// Verified native contract:
+/// - null `name` -> -9;
+/// - `create == 0` requires the database to exist, otherwise -12;
+/// - `create == 1` permits creation, but requires `record_size > 0`,
+///   otherwise -9;
+/// - filesystem access must be 1, 2 or 3, otherwise -9;
+/// - the underlying native mode-8 file open preserves an existing database
+///   and creates the backing files only when absent.
+///
+/// WIE's database repository exposes one logical database instead of the
+/// native `.db` / `.idx` pair.  For the valid native create/open forms we
+/// reproduce the externally visible existence/create behaviour and then use
+/// the existing WIE database handle implementation. Native fixed-record
+/// metadata is persisted in the reserved LGT metadata record described below.
+pub async fn open_database_lgt(context: &mut dyn WIPICContext, ptr_name: WIPICWord, record_size: i32, create: i32, access: i32) -> Result<i32> {
+    tracing::debug!("MC_dbOpenDataBase({ptr_name:#x}, record_size={record_size}, create={create}, access={access})");
+
+    if ptr_name == 0 {
+        return Ok(-9);
+    }
+
+    if !matches!(access, 1..=3) {
+        return Ok(-9);
+    }
+
+    if create == 1 && record_size <= 0 {
+        return Ok(-9);
+    }
+
+    // Native builds the `.db` / `.idx` paths with sprintf/strcat and performs
+    // no explicit database-name length or encoding validation here. WIE stores
+    // the logical database name in a fixed-length guest handle and uses a
+    // UTF-8 host repository key, so these two checks are safety adaptations
+    // rather than native MC_dbOpenDataBase error semantics.
+    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, ptr_name)?).map(store_name) else {
+        return Ok(-22);
+    };
+
+    if name.len() > MAX_NAME_LEN {
+        return Ok(-22);
+    }
+
+    let packaged = read_packaged_database(context, &name).await?;
+    let system = context.system();
+    let pid = system.pid().to_owned();
+    let exists = system.platform().database_repository().exists(&name, &pid).await;
+
+    if !exists && packaged.is_none() {
+        if create == 0 {
+            return Ok(-12);
+        }
+
+        if create == 1 {
+            // Native MC_fsOpen mode 8 first opens read/write and, on ENOENT,
+            // retries with O_RDWR | O_CREAT.  Opening the WIE repository is
+            // the logical equivalent of materializing that backing store.
+            system.platform().database_repository().open(&name, &pid).await;
+        }
+    }
+
+    // Native persists record size, next id, active count and the free-list in
+    // the `.idx` file. Preserve the equivalent state in reserved backend record
+    // 0. Once present, persisted metadata wins over a later caller-supplied
+    // record_size, matching native reopen semantics.
+    {
+        let mut repository_db = system.platform().database_repository().open(&name, &pid).await;
+
+        if load_lgt_metadata(repository_db.as_mut()).await.is_none() {
+            let effective_record_size = if record_size > 0 {
+                record_size as u32
+            } else {
+                // A legacy WIE repository may predate LGT metadata. Native
+                // would have the size in `.idx`; the closest migration source
+                // available here is an existing positive record.
+                let ids = repository_db.get_record_ids().await;
+                let mut derived = 0u32;
+                for id in ids {
+                    if id == LGT_METADATA_RECORD_ID {
+                        continue;
+                    }
+                    if let Some(data) = repository_db.get(id).await {
+                        derived = derived.max(data.len() as u32);
+                    }
+                }
+                derived
+            };
+
+            if effective_record_size > 0 {
+                let mut positive_ids: Vec<u32> = repository_db
+                    .get_record_ids()
+                    .await
+                    .into_iter()
+                    .filter(|&id| id != LGT_METADATA_RECORD_ID)
+                    .collect();
+                positive_ids.sort_unstable();
+
+                let next_record_id = positive_ids.last().copied().and_then(|id| id.checked_add(1)).unwrap_or(1);
+
+                let mut metadata = LgtDatabaseMetadata::new(effective_record_size);
+                metadata.next_record_id = next_record_id;
+                metadata.active_count = positive_ids.len() as u32;
+
+                // Exact historic deletion order cannot be reconstructed from a
+                // legacy repository that never stored it. Leave the migrated
+                // free-list empty rather than inventing an ordering.
+                if !store_lgt_metadata(repository_db.as_mut(), &metadata).await {
+                    return Ok(-1);
+                }
+            }
+        }
+    }
+
+    // The LGT wrapper has already made the native create/existence decision
+    // above, so the shared body is told the database may be brought into
+    // being rather than being asked to decide again.
+    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, ptr_name)?).map(store_name) else {
+        return Ok(-9);
+    };
+
+    open_database_named(context, &name, true, access).await
+}
+
+/// LGT canonical `MC_dbGetAccessMode` (service 0x1fd).
+///
+/// Native ABI: `MC_dbGetAccessMode(name)`.
+///
+/// Verified native contract:
+/// - null `name` -> -9;
+/// - names longer than 123 bytes -> -9;
+/// - constructs both `name.db` and `name.idx`;
+/// - probes access namespaces in the exact order 1, 2, 3;
+/// - an access matches only when both companion files exist there;
+/// - returns the first matching access selector;
+/// - if no namespace contains both files -> -12.
+///
+/// Native access 1/2/3 map to distinct filesystem namespaces. WIE's
+/// database repository intentionally collapses those namespaces into one
+/// logical database key, as do the existing LGT open/delete adaptations.
+/// Consequently, once a logical database exists, the only faithful result
+/// representable under the native first-match ordering is access 1.
+///
+/// Packaged databases share that logical namespace and are likewise treated
+/// as present at the canonical first access selector.
+///
+/// WIE repository keys are UTF-8 strings, so invalid UTF-8 is rejected with
+/// the established database-name adaptation (-22) after the native byte-length
+/// validation.
+pub async fn get_access_mode_lgt(context: &mut dyn WIPICContext, ptr_name: WIPICWord) -> Result<i32> {
+    tracing::debug!("MC_dbGetAccessMode({ptr_name:#x}) [LGT]");
+
+    if ptr_name == 0 {
+        return Ok(-9);
+    }
+
+    let name_bytes = read_null_terminated_string_bytes(context, ptr_name)?;
+
+    // Native checks strlen(name) > 123 before constructing the two
+    // 128-byte stack buffers used for `name.db` and `name.idx`.
+    if name_bytes.len() > 123 {
+        return Ok(-9);
+    }
+
+    let Ok(name) = String::from_utf8(name_bytes).map(store_name) else {
+        return Ok(-22);
+    };
+
+    if read_packaged_database(context, &name).await?.is_some() {
+        return Ok(1);
+    }
+
+    let system = context.system();
+    let pid = system.pid().to_owned();
+
+    if system.platform().database_repository().exists(&name, &pid).await {
+        Ok(1)
+    } else {
+        Ok(-12)
+    }
+}
+
+/// LGT canonical `MC_dbGetNumberOfRecords` (service 0x1fe).
+///
+/// Native ABI: `MC_dbGetNumberOfRecords(handle)`.
+///
+/// Verified native contract:
+/// - the argument is an opened database handle;
+/// - an unknown/closed handle returns -2;
+/// - a valid handle returns its native active-record-count field at +0x20;
+/// - the 32-bit field is returned verbatim, with no range or sign validation.
+///
+/// WIE persists the corresponding LGT field as `metadata.active_count`.
+/// Preserve the native raw 32-bit return semantics with a bit-preserving
+/// `u32 -> i32` cast, including malformed/wrapped states such as
+/// `active_count == 0xffff_ffff` returning -1.
+pub async fn get_number_of_records_lgt(context: &mut dyn WIPICContext, db_id: i32) -> Result<i32> {
+    tracing::debug!("MC_dbGetNumberOfRecords({db_id:#x}) [LGT]");
+
+    let Some(handle) = load_handle(context, db_id)? else {
+        return Ok(-2);
+    };
+
+    let Some(mut repository_db) = open_db_for_handle(context, &handle).await else {
+        return Ok(-2);
+    };
+
+    let Some(metadata) = load_lgt_metadata(repository_db.as_mut()).await else {
+        // A canonical LGT-opened handle always has the `.idx`-equivalent
+        // metadata. WIE cannot reproduce a valid native handle whose backing
+        // metadata disappeared independently, so collapse that host-state
+        // inconsistency to the existing database generic failure.
+        return Ok(-1);
+    };
+
+    Ok(metadata.active_count as i32)
+}
+
+/// LGT canonical `MC_dbGetRecordSize` (service 0x1ff).
+///
+/// Native ABI: `MC_dbGetRecordSize(handle)`.
+///
+/// Verified native contract:
+/// - the argument is an opened database handle;
+/// - an unknown/closed handle returns -2;
+/// - a valid handle returns its fixed-record-size field at +0x30;
+/// - the 32-bit field is returned verbatim, with no range or sign validation.
+///
+/// Native `MC_dbOpenDataBase` initializes +0x30 from the `.idx` header when
+/// reopening an existing database, or from the caller-supplied record size when
+/// creating a new one. Select/insert/update/sort all use that same field as the
+/// fixed record width. WIE persists the equivalent value in
+/// `LgtDatabaseMetadata.record_size`.
+///
+/// Preserve the native raw 32-bit return semantics with a bit-preserving
+/// `u32 -> i32` cast.
+pub async fn get_record_size_lgt(context: &mut dyn WIPICContext, db_id: i32) -> Result<i32> {
+    tracing::debug!("MC_dbGetRecordSize({db_id:#x}) [LGT]");
+
+    let Some(handle) = load_handle(context, db_id)? else {
+        return Ok(-2);
+    };
+
+    let Some(mut repository_db) = open_db_for_handle(context, &handle).await else {
+        return Ok(-2);
+    };
+
+    let Some(metadata) = load_lgt_metadata(repository_db.as_mut()).await else {
+        // A canonical LGT-opened handle always has the `.idx`-equivalent
+        // metadata. Missing WIE metadata is therefore a host-state
+        // inconsistency rather than a native representable handle state.
+        return Ok(-1);
+    };
+
+    Ok(metadata.record_size as i32)
+}
+
+/// LGT canonical `MC_dbListDataBases` (service 0x200).
+///
+/// Native ABI: `MC_dbListDataBases(output, capacity)`.
+///
+/// Verified native contract:
+/// - null output or non-positive signed capacity -> -9;
+/// - a valid output buffer is zeroed across the full caller capacity first;
+/// - native filesystem access namespaces are visited in order 1, 2, 3;
+/// - an unavailable namespace (`MC_fsGetCounts == -24`) is skipped;
+/// - only direct root entries ending in `.db` are databases;
+/// - capacity accounting charges the original `.db` filename length plus NUL
+///   for each database, even though the emitted name has the suffix removed;
+/// - after a non-empty namespace scan one additional byte is required;
+/// - an empty representable namespace requires two bytes;
+/// - insufficient capacity -> -18;
+/// - successful output is suffix-free NUL-terminated names followed by one
+///   additional NUL, and the return value is the number of names.
+///
+/// WIE collapses native access namespaces 1/2/3 into one logical repository,
+/// matching the existing LGT open/delete/get-access-mode adaptations. Treat
+/// that repository as access 1 only rather than duplicating every database
+/// three times. Repository enumeration exposes only direct-root logical names;
+/// nested storage paths therefore do not become spurious parent databases.
+///
+/// Repository names are UTF-8 host strings. Their byte lengths are used for
+/// native capacity accounting because the WIPI-C output itself is byte-based.
+pub async fn list_databases_lgt(context: &mut dyn WIPICContext, output: WIPICWord, capacity: i32) -> Result<i32> {
+    tracing::debug!("MC_dbListDataBases({output:#x}, {capacity}) [LGT]");
+
+    if output == 0 || capacity <= 0 {
+        return Ok(-9);
+    }
+
+    let capacity = capacity as usize;
+
+    // Native memset(output, 0, capacity) happens before filesystem enumeration
+    // and therefore also precedes a later -18 short-buffer result.
+    let zeroes = [0u8; 256];
+    let mut cleared = 0usize;
+    while cleared < capacity {
+        let chunk_size = (capacity - cleared).min(zeroes.len());
+        context.write_bytes(output.wrapping_add(cleared as u32), &zeroes[..chunk_size])?;
+        cleared += chunk_size;
+    }
+
+    let system = context.system();
+    let pid = system.pid().to_owned();
+    let mut names = system.platform().database_repository().list(&pid).await;
+
+    // Native preserves MC_fsList ordering, which the repository abstraction
+    // cannot represent consistently across HashMap and host filesystems.
+    // Stabilize the collapsed namespace rather than exposing host iteration
+    // nondeterminism.
+    names.sort();
+    names.dedup();
+
+    let required = if names.is_empty() {
+        2usize
+    } else {
+        let mut required = 1usize;
+        for name in &names {
+            // Native counts strlen("name.db") + 1.
+            let Some(charged) = name.len().checked_add(4) else {
+                return Ok(-18);
+            };
+            let Some(next) = required.checked_add(charged) else {
+                return Ok(-18);
+            };
+            required = next;
+        }
+        required
+    };
+
+    if required > capacity {
+        return Ok(-18);
+    }
+
+    let mut cursor = 0u32;
+    for name in &names {
+        let bytes = name.as_bytes();
+        context.write_bytes(output.wrapping_add(cursor), bytes)?;
+        cursor = cursor.wrapping_add(bytes.len() as u32);
+        context.write_bytes(output.wrapping_add(cursor), &[0])?;
+        cursor = cursor.wrapping_add(1);
+    }
+
+    // Native writes one final terminator after the last stripped database
+    // name. The initial memset already guarantees the byte is zero, but issue
+    // the explicit write to preserve the observable operation.
+    context.write_bytes(output.wrapping_add(cursor), &[0])?;
+
+    Ok(names.len() as i32)
+}
+
+/// LGT canonical `MC_dbInsertRecord` (service 0x1f7).
+///
+/// Native ABI: `MC_dbInsertRecord(handle, data, length)`.
+///
+/// Verified native contract:
+/// - unknown handle -> -2;
+/// - null data or non-positive length -> -9;
+/// - length larger than the database's fixed record size -> -21;
+/// - deleted record ids are reused in LIFO order;
+/// - otherwise `next_record_id` is allocated and incremented;
+/// - short input is zero-padded to exactly the fixed record size;
+/// - success returns the allocated positive record id;
+/// - persistence failures collapse to -1.
+pub async fn insert_record_lgt(context: &mut dyn WIPICContext, db_id: i32, buf_ptr: WIPICWord, buf_len: i32) -> Result<i32> {
+    tracing::debug!("MC_dbInsertRecord({db_id:#x}, {buf_ptr:#x}, {buf_len}) [LGT]");
+
+    let Some(handle) = load_handle(context, db_id)? else {
+        return Ok(-2);
+    };
+
+    if buf_ptr == 0 || buf_len <= 0 {
+        return Ok(-9);
+    }
+
+    let Some(mut repository_db) = open_db_for_handle(context, &handle).await else {
+        return Ok(-2);
+    };
+
+    let Some(mut metadata) = load_lgt_metadata(repository_db.as_mut()).await else {
+        return Ok(-1);
+    };
+
+    let buf_len = buf_len as u32;
+    if buf_len > metadata.record_size {
+        return Ok(-21);
+    }
+
+    let record_id = if let Some(id) = metadata.free_ids.pop() {
+        id
+    } else {
+        let id = metadata.next_record_id;
+        let Some(next) = id.checked_add(1) else {
+            return Ok(-1);
+        };
+        metadata.next_record_id = next;
+        id
+    };
+
+    if record_id == 0 {
+        return Ok(-1);
+    }
+
+    let mut record = vec![0u8; metadata.record_size as usize];
+    context.read_bytes(buf_ptr, &mut record[..buf_len as usize])?;
+
+    if !repository_db.set(record_id, &record).await {
+        return Ok(-1);
+    }
+
+    let Some(active_count) = metadata.active_count.checked_add(1) else {
+        return Ok(-1);
+    };
+    metadata.active_count = active_count;
+
+    if !store_lgt_metadata(repository_db.as_mut(), &metadata).await {
+        // Native may already have written the data record before failing while
+        // updating `.idx`; preserve that partial-write ordering rather than
+        // rolling the record back.
+        return Ok(-1);
+    }
+
+    Ok(record_id as i32)
+}
+
+/// LGT canonical `MC_dbSelectRecord` (service 0x1f8).
+///
+/// Native ABI: `MC_dbSelectRecord(handle, record_id, buffer, length)`.
+///
+/// Verified native contract:
+/// - unknown handle -> -2;
+/// - null buffer or non-positive length -> -9;
+/// - length smaller than the database fixed record size -> -18;
+/// - record id at/after `next_record_id` -> -22;
+/// - a record id present in the persisted free-list -> -22;
+/// - seek/read failure -> -1;
+/// - successful reads return 0, including a short read at physical EOF.
+///
+/// The native implementation seeks to `(record_id - 1) * record_size` in one
+/// contiguous `.db` file and then reads the caller's full requested length.
+/// WIE stores fixed records as separate backend entries, so reproduce that raw
+/// byte-stream view by concatenating successive record slots. Only the starting
+/// id is checked against the free-list, matching the native pre-read validation.
+/// LGT canonical `MC_dbListRecords` (service 0x1fb).
+///
+/// Native ABI: `MC_dbListRecords(handle, output_ids, capacity)`.
+///
+/// Verified native contract:
+/// - unknown handle -> -2;
+/// - null output or non-positive signed capacity -> -9;
+/// - signed capacity smaller than signed `active_count` -> -18;
+/// - candidate ids are scanned from 1 through `next_record_id - 1`;
+/// - ids present in the free-list are skipped;
+/// - active ids are written in ascending numeric order;
+/// - no `.db` payload is read while constructing the list;
+/// - success returns the handle's `active_count` field.
+///
+/// The native loop has an observable off-by-one capacity check: immediately
+/// before each store it rejects only when `capacity < written`, not when the
+/// two are equal. Normally the earlier `capacity < active_count` guard makes
+/// that irrelevant, but preserving it matters for malformed/internally
+/// inconsistent metadata and for the record-id-zero underflow quirk.
+pub async fn list_records_lgt(context: &mut dyn WIPICContext, db_id: i32, buf_ptr: WIPICWord, capacity: i32) -> Result<i32> {
+    tracing::debug!("MC_dbListRecords({db_id:#x}, {buf_ptr:#x}, {capacity}) [LGT]");
+
+    let Some(handle) = load_handle(context, db_id)? else {
+        return Ok(-2);
+    };
+
+    if buf_ptr == 0 || capacity <= 0 {
+        return Ok(-9);
+    }
+
+    let Some(mut repository_db) = open_db_for_handle(context, &handle).await else {
+        return Ok(-2);
+    };
+
+    let Some(metadata) = load_lgt_metadata(repository_db.as_mut()).await else {
+        return Ok(-1);
+    };
+
+    // ARM CMP + BLT performs a signed comparison here.
+    if capacity < metadata.active_count as i32 {
+        return Ok(-18);
+    }
+
+    // Native returns immediately when next_record_id <= 1.
+    let next_record_id = metadata.next_record_id as i32;
+    if next_record_id <= 1 {
+        return Ok(metadata.active_count as i32);
+    }
+
+    let mut written: i32 = 0;
+    let mut record_id: i32 = 1;
+
+    while record_id < next_record_id {
+        let is_free = metadata.free_ids.contains(&(record_id as u32));
+
+        if !is_free {
+            // Exact native quirk: BLT, not BLE. Therefore capacity == written
+            // still permits this store.
+            if capacity < written {
+                return Ok(-18);
+            }
+
+            let offset = (written as u32).wrapping_mul(4);
+            write_generic(context, buf_ptr.wrapping_add(offset), record_id as u32)?;
+            written = written.wrapping_add(1);
+        }
+
+        record_id = record_id.wrapping_add(1);
+    }
+
+    Ok(metadata.active_count as i32)
+}
+
+/// LGT canonical `MC_dbSortRecords` (service 0x1fc).
+///
+/// Native ABI:
+/// `MC_dbSortRecords(handle, output_ids, capacity, comparator, filter)`.
+///
+/// Verified native contract:
+/// - unknown handle -> -2;
+/// - null output or non-positive signed capacity -> -9;
+/// - the active record-id list is first built by `MC_dbListRecords`;
+/// - any negative result from that internal list operation collapses to -1;
+/// - an empty database therefore returns -1 because ListRecords is invoked with
+///   capacity zero;
+/// - candidate ids are processed in ascending active-id order;
+/// - `filter`, when non-null, is invoked as `filter(candidate_payload)` and a
+///   signed result <= 0 excludes that record;
+/// - `comparator`, when non-null, is invoked as
+///   `comparator(existing_payload, candidate_payload)`;
+/// - a signed comparator result > 0 inserts the candidate before the existing
+///   element; otherwise scanning continues;
+/// - with a null comparator, native uses bytewise `memcmp` over exactly the
+///   fixed record size with the same `> 0` insertion rule;
+/// - only record ids are written to the caller's array; payloads are not
+///   modified;
+/// - when an accepted record is encountered with `capacity <= accepted_count`,
+///   native returns -18;
+/// - success returns the number of records accepted by the filter.
+///
+/// Native ignores the return values of its payload `MC_fsSeek`/`MC_fsRead`
+/// calls. Canonical LGT records have fixed-size retained payload slots, so the
+/// repository adaptation uses those slots directly. If malformed backend state
+/// lacks a payload, the calloc-initialized scratch semantics are approximated
+/// with a zero-filled fixed-size record rather than introducing a failure that
+/// native would not return.
+pub async fn sort_records_lgt(
+    context: &mut dyn WIPICContext,
+    db_id: i32,
+    buf_ptr: WIPICWord,
+    capacity: i32,
+    comparator: WIPICWord,
+    filter: WIPICWord,
+) -> Result<i32> {
+    tracing::debug!("MC_dbSortRecords({db_id:#x}, {buf_ptr:#x}, {capacity}, {comparator:#x}, {filter:#x}) [LGT]");
+
+    let Some(handle) = load_handle(context, db_id)? else {
+        return Ok(-2);
+    };
+
+    if buf_ptr == 0 || capacity <= 0 {
+        return Ok(-9);
+    }
+
+    let Some(mut repository_db) = open_db_for_handle(context, &handle).await else {
+        return Ok(-2);
+    };
+
+    let Some(metadata) = load_lgt_metadata(repository_db.as_mut()).await else {
+        return Ok(-1);
+    };
+
+    // Native allocates active_count * 4 and immediately delegates to
+    // MC_dbListRecords with active_count as the signed capacity. In particular,
+    // active_count == 0 makes that call return -9, which SortRecords maps to -1.
+    if metadata.active_count == 0 {
+        return Ok(-1);
+    }
+
+    let active_count = metadata.active_count as i32;
+    if active_count <= 0 {
+        // The internal ListRecords uses a signed capacity and therefore fails
+        // for wrapped/malformed counts with the same generic SortRecords error.
+        return Ok(-1);
+    }
+
+    let mut record_ids = Vec::new();
+    let next_record_id = metadata.next_record_id as i32;
+    if next_record_id > 1 {
+        let mut record_id = 1i32;
+        while record_id < next_record_id {
+            if !metadata.free_ids.contains(&(record_id as u32)) {
+                record_ids.push(record_id as u32);
+            }
+            record_id = record_id.wrapping_add(1);
+        }
+    }
+
+    // This is the observable equivalent of the internal MC_dbListRecords
+    // capacity guard. Any negative result there is collapsed by SortRecords to
+    // -1 rather than propagated.
+    if (record_ids.len() as i32) > active_count {
+        return Ok(-1);
+    }
+
+    let record_size = metadata.record_size as usize;
+    let mut sorted_ids: Vec<u32> = Vec::new();
+
+    for candidate_id in record_ids {
+        // Native scratch is calloc(record_size * 2). Failed/short payload reads
+        // do not become API failures; unread bytes therefore retain zero/prior
+        // scratch contents. Canonical records are fixed-size, while malformed
+        // missing/short backend entries are represented by zero-filled tails.
+        let mut candidate = vec![0u8; record_size];
+        if let Some(data) = repository_db.get(candidate_id).await {
+            let take = data.len().min(record_size);
+            candidate[..take].copy_from_slice(&data[..take]);
+        }
+
+        let candidate_ptr = if record_size == 0 {
+            0
+        } else {
+            let ptr = context.alloc_raw(metadata.record_size)?;
+            context.write_bytes(ptr, &candidate)?;
+            ptr
+        };
+
+        let filter_result = if filter != 0 {
+            let value = context.call_function(filter, &[candidate_ptr]).await? as i32;
+            Some(value)
+        } else {
+            None
+        };
+
+        if let Some(result) = filter_result {
+            if candidate_ptr != 0 {
+                context.free_raw(candidate_ptr, metadata.record_size)?;
+            }
+            if result <= 0 {
+                continue;
+            }
+        }
+
+        // Native checks capacity only after the filter accepted the candidate.
+        if capacity <= sorted_ids.len() as i32 {
+            if candidate_ptr != 0 {
+                context.free_raw(candidate_ptr, metadata.record_size)?;
+            }
+            return Ok(-18);
+        }
+
+        let mut insert_at = sorted_ids.len();
+
+        for (index, &existing_id) in sorted_ids.iter().enumerate() {
+            let mut existing = vec![0u8; record_size];
+            if let Some(data) = repository_db.get(existing_id).await {
+                let take = data.len().min(record_size);
+                existing[..take].copy_from_slice(&data[..take]);
+            }
+
+            let comparison = if comparator != 0 {
+                let existing_ptr = if record_size == 0 {
+                    0
+                } else {
+                    let ptr = context.alloc_raw(metadata.record_size)?;
+                    context.write_bytes(ptr, &existing)?;
+                    ptr
+                };
+
+                let value = context.call_function(comparator, &[existing_ptr, candidate_ptr]).await? as i32;
+
+                if existing_ptr != 0 {
+                    context.free_raw(existing_ptr, metadata.record_size)?;
+                }
+
+                value
+            } else {
+                use core::cmp::Ordering;
+
+                match existing.as_slice().cmp(candidate.as_slice()) {
+                    Ordering::Less => -1,
+                    Ordering::Equal => 0,
+                    Ordering::Greater => 1,
+                }
+            };
+
+            if comparison > 0 {
+                insert_at = index;
+                break;
+            }
+        }
+
+        if candidate_ptr != 0 {
+            context.free_raw(candidate_ptr, metadata.record_size)?;
+        }
+
+        sorted_ids.insert(insert_at, candidate_id);
+    }
+
+    for (index, &record_id) in sorted_ids.iter().enumerate() {
+        let offset = (index as u32).wrapping_mul(4);
+        write_generic(context, buf_ptr.wrapping_add(offset), record_id)?;
+    }
+
+    Ok(sorted_ids.len() as i32)
+}
+
+/// LGT canonical `MC_dbDeleteRecord` (service 0x1fa).
+///
+/// Native ABI: `MC_dbDeleteRecord(handle, record_id)`.
+///
+/// Verified native contract:
+/// - unknown handle -> -2;
+/// - record id at/after `next_record_id` -> -22;
+/// - negative record id -> -1;
+/// - record id 0 is not rejected and is handled like any other non-negative id;
+/// - an id already present in the free-list -> -22;
+/// - deletion appends the id to the free-list without touching the `.db` payload;
+/// - active count is decremented with native 32-bit wrapping arithmetic;
+/// - index persistence/allocation failures collapse to -1;
+/// - success returns 0.
+///
+/// The native implementation also refreshes its internal modification timestamp.
+/// As with `MC_dbUpdateRecord`, that header field is not exposed by the audited DB
+/// exports, so the repository adaptation keeps the existing metadata format.
+pub async fn delete_record_lgt(context: &mut dyn WIPICContext, db_id: i32, rec_id: i32) -> Result<i32> {
+    tracing::debug!("MC_dbDeleteRecord({db_id:#x}, {rec_id}) [LGT]");
+
+    let Some(handle) = load_handle(context, db_id)? else {
+        return Ok(-2);
+    };
+
+    let Some(mut repository_db) = open_db_for_handle(context, &handle).await else {
+        return Ok(-2);
+    };
+
+    let Some(mut metadata) = load_lgt_metadata(repository_db.as_mut()).await else {
+        return Ok(-1);
+    };
+
+    // Native tests the upper bound before testing for a negative id.
+    if (metadata.next_record_id as i32) <= rec_id {
+        return Ok(-22);
+    }
+
+    // Native deliberately permits record id zero here.
+    if rec_id < 0 {
+        return Ok(-1);
+    }
+
+    let record_id = rec_id as u32;
+    if metadata.free_ids.contains(&record_id) {
+        return Ok(-22);
+    }
+
+    // Native deletion is index-only. The physical `.db` bytes remain intact.
+    // Preserving the backend slot is required both for SelectRecord over-read
+    // semantics and for later LIFO reuse by InsertRecord.
+    metadata.free_ids.push(record_id);
+    metadata.active_count = metadata.active_count.wrapping_sub(1);
+
+    if !store_lgt_metadata(repository_db.as_mut(), &metadata).await {
+        return Ok(-1);
+    }
+
+    Ok(0)
+}
+
+/// LGT canonical `MC_dbUpdateRecord` (service 0x1f9).
+///
+/// Native ABI: `MC_dbUpdateRecord(handle, record_id, buffer, length)`.
+///
+/// Verified native contract:
+/// - unknown handle -> -2;
+/// - null buffer or non-positive length -> -9;
+/// - length larger than the fixed record size -> -21;
+/// - record id <= 0 or at/after `next_record_id` -> -22;
+/// - a record id present in the persisted free-list -> -9;
+/// - short updates overwrite only the supplied prefix and preserve the tail;
+/// - seek/write or metadata/header persistence failures collapse to -1;
+/// - success returns 0.
+///
+/// Native also refreshes an internal 64-bit modification timestamp in the
+/// `.idx` header. No exported DB operation inspected so far exposes that field,
+/// so the WIE repository adaptation intentionally does not widen the existing
+/// persistent metadata format solely for this inert native bookkeeping field.
+pub async fn update_record_lgt(context: &mut dyn WIPICContext, db_id: i32, rec_id: i32, buf_ptr: WIPICWord, buf_len: i32) -> Result<i32> {
+    tracing::debug!("MC_dbUpdateRecord({db_id:#x}, {rec_id}, {buf_ptr:#x}, {buf_len}) [LGT]");
+
+    let Some(handle) = load_handle(context, db_id)? else {
+        return Ok(-2);
+    };
+
+    if buf_ptr == 0 || buf_len <= 0 {
+        return Ok(-9);
+    }
+
+    let Some(mut repository_db) = open_db_for_handle(context, &handle).await else {
+        return Ok(-2);
+    };
+
+    let Some(metadata) = load_lgt_metadata(repository_db.as_mut()).await else {
+        return Ok(-1);
+    };
+
+    let buf_len_u32 = buf_len as u32;
+    if buf_len_u32 > metadata.record_size {
+        return Ok(-21);
+    }
+
+    // Native performs both bounds checks before consulting the free-list.
+    if rec_id <= 0 || (metadata.next_record_id as i32) <= rec_id {
+        return Ok(-22);
+    }
+
+    if metadata.free_ids.contains(&(rec_id as u32)) {
+        return Ok(-9);
+    }
+
+    let record_id = rec_id as u32;
+    let Some(mut record) = repository_db.get(record_id).await else {
+        return Ok(-1);
+    };
+
+    // Canonical LGT inserts materialize exactly fixed-size slots. A malformed
+    // shorter backend record cannot reproduce the native fixed-file seek/write
+    // safely, so treat it as the same generic persistence failure.
+    if record.len() < metadata.record_size as usize {
+        return Ok(-1);
+    }
+
+    let mut update = vec![0u8; buf_len as usize];
+    context.read_bytes(buf_ptr, &mut update)?;
+    record[..update.len()].copy_from_slice(&update);
+
+    if !repository_db.set(record_id, &record).await {
+        return Ok(-1);
+    }
+
+    Ok(0)
+}
+
+pub async fn select_record_lgt(context: &mut dyn WIPICContext, db_id: i32, rec_id: i32, buf_ptr: WIPICWord, buf_len: i32) -> Result<i32> {
+    tracing::debug!("MC_dbSelectRecord({db_id:#x}, {rec_id}, {buf_ptr:#x}, {buf_len}) [LGT]");
+
+    let Some(handle) = load_handle(context, db_id)? else {
+        return Ok(-2);
+    };
+
+    if buf_ptr == 0 || buf_len <= 0 {
+        return Ok(-9);
+    }
+
+    let Some(mut repository_db) = open_db_for_handle(context, &handle).await else {
+        return Ok(-2);
+    };
+
+    let Some(metadata) = load_lgt_metadata(repository_db.as_mut()).await else {
+        return Ok(-1);
+    };
+
+    let buf_len_u32 = buf_len as u32;
+    if buf_len_u32 < metadata.record_size {
+        return Ok(-18);
+    }
+
+    // Native performs a signed comparison: next_record_id <= record_id.
+    if (metadata.next_record_id as i32) <= rec_id {
+        return Ok(-22);
+    }
+
+    if metadata.free_ids.contains(&(rec_id as u32)) {
+        return Ok(-22);
+    }
+
+    // Native has no explicit lower-bound test. For the ordinary zero/negative
+    // ids, `(record_id - 1) * record_size` produces a negative SEEK_SET offset
+    // and MC_fsSeek fails; preserve that externally visible result.
+    let byte_offset = rec_id.wrapping_sub(1).wrapping_mul(metadata.record_size as i32);
+    if byte_offset < 0 {
+        return Ok(-1);
+    }
+
+    if metadata.record_size == 0 {
+        return Ok(-1);
+    }
+
+    let mut remaining = buf_len as usize;
+    let mut current_id = rec_id as u32;
+    let mut output = Vec::with_capacity(remaining);
+
+    while remaining > 0 {
+        if current_id >= metadata.next_record_id {
+            break;
+        }
+
+        let Some(record) = repository_db.get(current_id).await else {
+            // The backend entry boundary is the closest equivalent to native
+            // physical EOF/read failure. With canonical LGT writes, allocated
+            // slots are fixed-size and deleted slots retain their payload.
+            break;
+        };
+
+        let take = remaining.min(record.len());
+        output.extend_from_slice(&record[..take]);
+        remaining -= take;
+
+        if take < metadata.record_size as usize {
+            break;
+        }
+
+        let Some(next_id) = current_id.checked_add(1) else {
+            break;
+        };
+        current_id = next_id;
+    }
+
+    if !output.is_empty() {
+        context.write_bytes(buf_ptr, &output)?;
+    }
+
+    Ok(0)
+}
+
+/// LGT canonical `MC_dbCloseDataBase` (service 0x1f5).
+///
+/// Native first searches the global database-handle list. A handle not found
+/// there returns -2. On success the native implementation flushes its header
+/// and index state, closes both backing files, removes the handle from the
+/// global list, frees it, and returns 0.
+///
+/// WIE keeps its logical database buffer write-through, so there is no pending
+/// native-style `.db` / `.idx` metadata to flush here.
+pub async fn close_database_lgt(context: &mut dyn WIPICContext, db_id: i32) -> Result<i32> {
+    tracing::debug!("MC_dbCloseDataBase({db_id:#x}) [LGT]");
+
+    let Some(mut handle) = load_handle(context, db_id)? else {
+        return Ok(-2);
+    };
+
+    if handle.buffer_ptr != 0 && handle.buffer_capacity > 0 {
+        context.free_raw(handle.buffer_ptr, handle.buffer_capacity)?;
+    }
+
+    // Native removes the handle from its global database list before freeing
+    // it. WIE has no equivalent host-side list, so invalidate the guest
+    // sentinel first; otherwise freed memory can still look like a live
+    // DatabaseHandle on a repeated close.
+    handle.magic = 0;
+    write_generic(context, db_id as _, handle)?;
+    context.free_raw(db_id as _, size_of::<DatabaseHandle>() as _)?;
+
+    Ok(0)
+}
+
 pub async fn close_database(context: &mut dyn WIPICContext, db_id: i32) -> Result<i32> {
     tracing::debug!("MC_dbCloseDataBase({db_id:#x})");
 
@@ -153,21 +1251,134 @@ pub async fn close_database(context: &mut dyn WIPICContext, db_id: i32) -> Resul
     Ok(0) // success
 }
 
+/// `MC_dbListRecords` - the record ids this database holds.
+///
+/// **The last argument counts identifiers, not bytes.** The specification calls
+/// it the size of the buffer over an `M_Int32 *`, which reads either way, and
+/// there is no answer that is safe under both: a caller who meant bytes passes
+/// four times what a caller who meant entries does, so serving the count reading
+/// for a byte-meaning caller writes past the array as soon as the database holds
+/// more than a quarter of that number. What settles it is that both the other
+/// list calls in this file already read it as a count - `list_records_lgt`, whose
+/// bounds come from native's own `CMP`/`BLT`, and `list_record_info` beside it -
+/// and that the reference has a title reserving `0x30` bytes of its frame for
+/// twelve ids, handing this call `12`, and going on to read entry three.
+///
+/// This one used to read it as nothing at all: every id went out however small
+/// the buffer was. That is the platform itself overrunning a guest array, and
+/// the failure it causes surfaces nowhere near here - the reference traced one
+/// through a record id read out of an unwritten stack frame, a select that
+/// refused, an index 78 into a table of fourteen and an empty resource name,
+/// before a null was dereferenced three platform calls later.
 pub async fn list_record(context: &mut dyn WIPICContext, db_id: i32, buf_ptr: WIPICWord, buf_len: WIPICWord) -> Result<i32> {
     tracing::debug!("MC_dbListRecords({db_id:#x}, {buf_ptr:#x}, {buf_len})");
 
     let Some(db) = get_database_from_db_id(context, db_id).await? else {
-        return Ok(-25); // M_E_INVALIDHANDLE
+        // Not a handle this runtime handed out, so this is the other call this
+        // slot serves. See `rename_store`.
+        return rename_store(context, db_id as WIPICWord, buf_ptr).await;
     };
+
+    if buf_ptr == 0 || buf_len == 0 {
+        return Ok(-22); // M_E_BADRECID - this path's "bad parameter" idiom
+    }
+
     let ids = db.get_record_ids().await;
 
-    let mut cursor = 0;
-    for &id in &ids {
-        write_generic(context, buf_ptr + cursor, id)?;
-        cursor += size_of::<WIPICWord>() as u32;
+    // Refused and left untouched rather than filled as far as it goes: a title
+    // that gets a short list it did not ask for indexes an entry nobody wrote.
+    if ids.len() as u64 > buf_len as u64 {
+        tracing::warn!("MC_dbListRecords: {} ids do not fit in a buffer of {buf_len}; refused", ids.len());
+
+        return Ok(-18); // M_E_SHORTBUF
+    }
+
+    for (index, &id) in ids.iter().enumerate() {
+        write_generic(context, buf_ptr + (index * size_of::<WIPICWord>()) as u32, id)?;
     }
 
     Ok(ids.len() as _)
+}
+
+/// `MC_fsRename(from, to, access)` - the filesystem's name for this slot.
+///
+/// KTF's storage table is the handset's filesystem as much as it is its
+/// database, and the two share every slot: open, read, write, close, seek,
+/// remove, *rename*, make a directory - the order the filesystem's own calls
+/// come in. Slots 8 and 12 are already read that way here, and this is the
+/// third. Its arguments are `MC_fsRename`'s exactly, down to the access
+/// selector [`filesystem::rename`] documents, which 리얼싸커 2009 passes as 1.
+///
+/// Which of the two readings a call is is settled by its first argument: a
+/// database handle is a block this runtime allocated and stamped, so a name -
+/// which is what the filesystem reading is passed - never looks like one.
+///
+/// 리얼싸커 2009 installs its data the way a careful program writes any file.
+/// It opens a store under a scratch name, streams eighteen resources of 100KB
+/// into it, closes it, and renames it into place. With nothing serving the
+/// rename the store stayed under the scratch name, the title put up `Data
+/// 인스톨에 실패했습니다`, and ended the run on the key that dismissed it.
+///
+/// The repository has no rename of its own, so the records are carried: each
+/// record of the source goes into the destination under its own id, and the
+/// source is then gone. A destination already there is replaced, which is what
+/// renaming onto a name means.
+async fn rename_store(context: &mut dyn WIPICContext, ptr_from: WIPICWord, ptr_to: WIPICWord) -> Result<i32> {
+    if ptr_from == 0 || ptr_to == 0 {
+        return Ok(-22); // M_E_BADRECID - this path's "bad parameter" idiom
+    }
+
+    let (Ok(from), Ok(to)) = (
+        String::from_utf8(read_null_terminated_string_bytes(context, ptr_from)?).map(store_name),
+        String::from_utf8(read_null_terminated_string_bytes(context, ptr_to)?).map(store_name),
+    ) else {
+        return Ok(-22);
+    };
+
+    tracing::debug!("MC_fsRename({from}, {to})");
+
+    if from == to {
+        return Ok(0);
+    }
+
+    let system = context.system();
+    let pid = system.pid().to_owned();
+    let repository = system.platform().database_repository();
+
+    if !repository.exists(&from, &pid).await {
+        return Ok(-12); // M_E_NOENT
+    }
+
+    let records = {
+        let source = repository.open(&from, &pid).await;
+
+        let mut records = Vec::new();
+        for id in source.get_record_ids().await {
+            if let Some(data) = source.get(id).await {
+                records.push((id, data));
+            }
+        }
+
+        records
+    };
+
+    tracing::warn!(
+        "RENAME carrying {} records: {:?}",
+        records.len(),
+        records.iter().map(|(id, d)| (*id, d.len())).collect::<Vec<_>>()
+    );
+    // Gone first, so what ends up under the name is what was renamed onto it
+    // rather than that mixed with whatever was there before.
+    repository.delete(&to, &pid).await;
+
+    let mut destination = repository.open(&to, &pid).await;
+    for (id, data) in records {
+        destination.set(id, &data).await;
+    }
+
+    repository.delete(&from, &pid).await;
+
+    Ok(0)
 }
 
 pub async fn seek_record_single(context: &mut dyn WIPICContext, db_id: i32, offset: i32, origin: i32) -> Result<i32> {
@@ -194,14 +1405,14 @@ pub async fn seek_record_single(context: &mut dyn WIPICContext, db_id: i32, offs
 pub async fn list_record_info(context: &mut dyn WIPICContext, ptr_name: WIPICWord, buf_ptr: WIPICWord, capacity: WIPICWord) -> Result<i32> {
     tracing::debug!("MC_dbListRecordInfo({ptr_name:#x}, {buf_ptr:#x}, {capacity})");
 
-    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, ptr_name)?) else {
+    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, ptr_name)?).map(store_name) else {
         return Ok(-22);
     };
     let system = context.system();
     let pid = system.pid().to_owned();
 
     if !system.platform().database_repository().exists(&name, &pid).await {
-        if let Some(data) = read_packaged_database(context, &name).await? {
+        if let Some(data) = packaged_store_bytes(context, &name).await? {
             if capacity > 0 {
                 write_generic(context, buf_ptr, 1u32)?;
                 write_generic(context, buf_ptr + 4, 0u32)?;
@@ -238,10 +1449,10 @@ pub async fn list_record_info(context: &mut dyn WIPICContext, ptr_name: WIPICWor
 pub async fn exists_database(context: &mut dyn WIPICContext, ptr_name: WIPICWord, r#type: i32) -> Result<i32> {
     tracing::debug!("MC_dbExistsDataBase({ptr_name:#x}, {type})");
 
-    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, ptr_name)?) else {
+    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, ptr_name)?).map(store_name) else {
         return Ok(-22);
     };
-    if read_packaged_database(context, &name).await?.is_some() {
+    if packaged_store_bytes(context, &name).await?.is_some() {
         return Ok(0);
     }
 
@@ -369,10 +1580,57 @@ pub async fn delete_record_ktf(context: &mut dyn WIPICContext, a0: i32, a1: i32)
     Ok(0)
 }
 
+/// LGT canonical `MC_dbDeleteDataBase` (service 0x1f6).
+///
+/// Native ABI: `MC_dbDeleteDataBase(name, access)`.
+///
+/// Verified native contract:
+/// - null `name` -> -9;
+/// - `access` must be 1, 2 or 3, otherwise -9;
+/// - deletion is name-based and does not search the open-database handle list;
+/// - the native `.db` file is removed first and `.idx` second;
+/// - a missing database ultimately maps to -1;
+/// - successful removal returns 0.
+///
+/// WIE stores a database as one logical repository entry rather than separate
+/// `.db` / `.idx` files, so repository deletion is the corresponding atomic
+/// operation. Open handles are deliberately not invalidated here: the native
+/// function performs no database-handle lookup before unlinking its files.
+pub async fn delete_database_lgt(context: &mut dyn WIPICContext, ptr_name: WIPICWord, access: i32) -> Result<i32> {
+    tracing::debug!("MC_dbDeleteDataBase({ptr_name:#x}, access={access}) [LGT]");
+
+    if ptr_name == 0 {
+        return Ok(-9);
+    }
+
+    if !matches!(access, 1..=3) {
+        return Ok(-9);
+    }
+
+    // Native treats the name as raw C bytes. WIE repository keys are UTF-8,
+    // so invalid encoding is a host-side safety adaptation.
+    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, ptr_name)?).map(store_name) else {
+        return Ok(-22);
+    };
+
+    let system = context.system();
+    let pid = system.pid().to_owned();
+
+    if !system.platform().database_repository().exists(&name, &pid).await {
+        return Ok(-1);
+    }
+
+    if system.platform().database_repository().delete(&name, &pid).await {
+        Ok(0)
+    } else {
+        Ok(-1)
+    }
+}
+
 pub async fn delete_database(context: &mut dyn WIPICContext, ptr_name: WIPICWord, flags: i32) -> Result<i32> {
     tracing::debug!("MC_dbDeleteDataBase({ptr_name:#x}, {flags})");
 
-    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, ptr_name)?) else {
+    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, ptr_name)?).map(store_name) else {
         return Ok(-22);
     };
     let system = context.system();
@@ -486,15 +1744,48 @@ pub async fn select_record_ktf(context: &mut dyn WIPICContext, db_id: i32, rec_i
     //     mode=2 on the read path destroys a prefetched buffer during a
     //     subsequent re-open and wipes the saved record). Both are treated
     //     as plain seek-and-rewind.
-    if rec_id >= 0 {
-        let offset = rec_id as u32;
-        handle.read_cursor = offset;
-        handle.write_cursor = offset;
-        write_generic(context, db_id as _, handle)?;
-        return Ok(0);
-    }
+    //   - `(handle, delta, 1)` — seeks from where the cursor already is,
+    //     the way `SEEK_CUR` does, rather than from the start.
+    //
+    // Mode 1 only tells itself apart from mode 0 once a handle has been read
+    // from: on a freshly opened one both land in the same place, which is why
+    // it went unnoticed. 드래곤아이즈2 is the title that reads first - it takes
+    // a four-byte offset out of `bodyImage.dat`'s table and then seeks by it,
+    // and taking that as absolute left it three bytes short of the resource,
+    // where it read a length out of the middle of the previous one, asked for
+    // 49194 bytes of whatever followed, and handed that to `MC_grpCreateImage`
+    // as an image. The whole of its loading screen is images fetched this way;
+    // the one it died on is the only one it seeks to twice.
+    //
+    // What a seek answers is the position it left the cursor at, whichever mode
+    // it was, which is what makes `(0, 1)` the tell this slot has no other call
+    // for. 리얼싸커 2009 needs both halves of that.
+    //
+    // It walks the archive it installed with the tell: `tell()`, then a seek to
+    // `tell() + (entry - window)`, once per entry. Answered zero it seeks to
+    // the delta alone - `-982`, `-986`, `-984`, positions before the first byte
+    // of a 1.7MB file - and the walk that should have crossed the archive stood
+    // still on the first entry until the title called its own data a bad
+    // resource file.
+    //
+    // And it takes each entry's offset from what the seek onto that entry
+    // answered, rather than from what it asked for. Answered zero, every one of
+    // the 94 entries it indexed was written down as starting at byte zero: the
+    // loader read `startup.sh` off the front of the archive, took `PK\x03\x04`
+    // for the name of the module to run, looked for `//PK\x03\x04.dll`, and
+    // put up `Loader Run Failed.` when the archive it had just installed did
+    // not have it.
+    let offset = if mode == 1 {
+        (handle.read_cursor as i64 + rec_id as i64).clamp(0, handle.buffer_len as i64) as u32
+    } else {
+        rec_id as u32
+    };
 
-    Ok(-22) // M_E_BADRECID
+    handle.read_cursor = offset;
+    handle.write_cursor = offset;
+    write_generic(context, db_id as _, handle)?;
+
+    Ok(offset as i32)
 }
 
 /// Slot 5 — KTF custom `db_stat_by_name`. From observed call shape:
@@ -509,27 +1800,51 @@ pub async fn select_record_ktf(context: &mut dyn WIPICContext, db_id: i32, rec_i
 /// the DB exists with a non-trivial payload. The third int is treated as a
 /// size threshold (must exceed 199 bytes). We fill the struct with
 /// `{0, 0, record_size}` and return 0 on hit, -22 on miss.
+///
+/// A packaged database counts as existing, as it does for [`exists_database_ktf`]
+/// and [`get_access_mode_ktf`]: the three answer one question between them, and
+/// a store the archive ships is a store that is there. 드래곤로드 asks this
+/// about its map before it decides whether its data has to be fetched, so an
+/// archive that already carries that data was being told it did not.
 pub async fn stat_by_name_ktf(context: &mut dyn WIPICContext, name_ptr: WIPICWord, out_buf: WIPICWord, mode: i32, _arg3: i32) -> Result<i32> {
     let name = match read_null_terminated_string_bytes(context, name_ptr) {
         Ok(bytes) => match String::from_utf8(bytes) {
-            Ok(s) => s,
+            Ok(s) => store_name(s),
             Err(_) => return Ok(-22),
         },
         Err(_) => return Ok(-22),
     };
 
+    let packaged = packaged_store_bytes(context, &name).await?;
+
     let system = context.system();
     let pid = system.pid().to_owned();
     let exists = system.platform().database_repository().exists(&name, &pid).await;
-    if !exists {
+
+    // This slot answers for the handset's filesystem as much as for its
+    // database - the two share every slot in this table - so a name the title
+    // made through `MC_fsMkDir` has to be found here too. 리얼싸커 2009 makes
+    // `/shared` the moment its own module starts and asks for `shared` on the
+    // next line; told it was not there, it quits without a word.
+    let directory = !exists && packaged.is_none() && system.filesystem().list(&name).await.is_some();
+
+    if !exists && packaged.is_none() && !directory {
         tracing::debug!("db.stat_by_name({name:?}, mode={mode}) -> -22 (not found)");
         return Ok(-22);
     }
 
     // Pull record 1's size as the "valid save" indicator the game checks
-    // against 0xC7 in v2[2].
-    let db = system.platform().database_repository().open(&name, &pid).await;
-    let record_size = db.get(1).await.map(|x| x.len() as u32).unwrap_or(0);
+    // against 0xC7 in v2[2]. What the archive ships stands in for a record
+    // that has not been written yet, the way opening one seeds it.
+    let record_size = if exists {
+        let db = system.platform().database_repository().open(&name, &pid).await;
+        match db.get(1).await {
+            Some(record) => record.len() as u32,
+            None => packaged.map(|data| data.len() as u32).unwrap_or(0),
+        }
+    } else {
+        packaged.map(|data| data.len() as u32).unwrap_or(0)
+    };
 
     if out_buf != 0 {
         write_generic(context, out_buf, 0u32)?;
@@ -541,32 +1856,49 @@ pub async fn stat_by_name_ktf(context: &mut dyn WIPICContext, name_ptr: WIPICWor
     Ok(0)
 }
 
-/// KTF custom slot 16 — `MC_dbExists(name)`. Observed call shape across
+/// "No such record", which is what a WIPI call answers instead of `false`.
+const M_E_NOENT: i32 = -12;
+
+/// KTF custom slot 16 - `MC_dbExists(name)`. Observed call shape across
 /// multiple titles is `(name_ptr, 1, size_hint_or_zero, callback_garbage)`.
-/// Titles call it before deciding whether to take the load or fresh-init
-/// path. Returning 1 unconditionally makes them try to load nonexistent
-/// state on first run and trip later, so we read the C string at `a0` and
-/// answer based on the real persisted state.
+/// Titles call it before deciding whether to take the load or the fresh-init
+/// path.
+///
+/// It answers the way every other WIPI call answers - zero for yes, a negative
+/// error for no - and not the boolean its name suggests. `M_E_NOENT` is what a
+/// title branches to its fresh-init path on, so answering zero for a record
+/// that is not there tells it to load state it never saved: 던파거너편 read
+/// `option.txt` and `coupon.txt` that way, got nothing back, and painted an
+/// empty card fifty times over instead of its splash.
+///
+/// A packaged database counts as existing, the same as it does for
+/// [`exists_database`]: a title that ships its own initial state should be told
+/// it is there.
 pub async fn exists_database_ktf(context: &mut dyn WIPICContext, name_ptr: WIPICWord, _arg1: i32, _arg2: i32) -> Result<i32> {
     let name = match read_null_terminated_string_bytes(context, name_ptr) {
         Ok(bytes) => match String::from_utf8(bytes) {
-            Ok(s) => s,
+            Ok(s) => store_name(s),
             Err(_) => {
-                tracing::warn!("MC_dbExists invalid utf8 name @ {name_ptr:#x}, defaulting to 0");
-                return Ok(0);
+                tracing::warn!("MC_dbExists invalid utf8 name @ {name_ptr:#x}, answering not found");
+                return Ok(M_E_NOENT);
             }
         },
         Err(_) => {
-            tracing::warn!("MC_dbExists unreadable name @ {name_ptr:#x}, defaulting to 0");
-            return Ok(0);
+            tracing::warn!("MC_dbExists unreadable name @ {name_ptr:#x}, answering not found");
+            return Ok(M_E_NOENT);
         }
     };
+
+    if packaged_store_bytes(context, &name).await?.is_some() {
+        tracing::debug!("MC_dbExists({name:?}) -> 0 (packaged)");
+        return Ok(0);
+    }
 
     let system = context.system();
     let pid = system.pid().to_owned();
     let exists = system.platform().database_repository().exists(&name, &pid).await;
 
-    let result = if exists { 1 } else { 0 };
+    let result = if exists { 0 } else { M_E_NOENT };
     tracing::debug!("MC_dbExists({name:?}) -> {result}");
     Ok(result)
 }
@@ -576,6 +1908,167 @@ pub async fn exists_database_ktf(context: &mut dyn WIPICContext, name_ptr: WIPIC
 /// Returns `Ok(None)` for any pointer that's obviously not a handle —
 /// out-of-range, missing the magic sentinel — so callers can return
 /// `M_E_INVALIDHANDLE` instead of panicking on garbage input.
+/// KTF `MC_dbGetNumberOfRecords(handle)`.
+///
+/// The count is the one `MC_dbListRecords` would list, so a title that asks how
+/// many there are and then asks for them gets two answers that agree. KTF's
+/// database is a single stream record, so in practice this is 1 once anything
+/// has been written and 0 before that.
+pub async fn get_number_of_records_ktf(context: &mut dyn WIPICContext, db_id: i32) -> Result<i32> {
+    tracing::debug!("MC_dbGetNumberOfRecords({db_id:#x}) [KTF]");
+
+    let Some(db) = get_database_from_db_id(context, db_id).await? else {
+        return Ok(-25); // M_E_INVALIDHANDLE
+    };
+
+    Ok(db.get_record_ids().await.len() as i32)
+}
+
+/// KTF slot 11: the size of an open record, or the storage still free.
+///
+/// With a handle it is `MC_dbGetRecordSize(handle)`. KTF's database is one
+/// record read and written as a byte stream, so its size is how many bytes that
+/// stream holds. The handle's mirror is the answer rather than the stored record
+/// because the two are kept equal - `stream_write` writes through on every call
+/// - and the mirror is what a read would return.
+///
+/// Without one it is a space query, the way slot 12 is. This table is the
+/// filesystem as much as it is the database, and a title that calls the slot for
+/// the filesystem meaning passes no argument at all: 셔터 영혼의울림 arrives here
+/// with a leftover function pointer in r0, before it has opened anything, and
+/// reads what comes back as the room it has. Told `M_E_INVALIDHANDLE` it painted
+/// `저장공간이 부족 합니다.` across its title screen and went no further; told
+/// the space, it starts. The two are told apart the way `get_access_mode_ktf`
+/// tells its two callers apart - by whether the argument is one of this
+/// runtime's handles - rather than by guessing which meaning the slot has.
+///
+/// Slot 15 asks the same question and is served from here too. 리얼싸커 2009
+/// will not read a save until it has been told how big one is: it opens the
+/// record, seeks to the front, asks twice, and with a zero for an answer closes
+/// the record unread and writes a fresh header over it, so every save it made
+/// came back empty. Answered the size, it reads them.
+pub async fn get_record_size_ktf(context: &mut dyn WIPICContext, db_id: i32) -> Result<i32> {
+    tracing::debug!("MC_dbGetRecordSize({db_id:#x}) [KTF]");
+
+    let Some(handle) = load_handle(context, db_id)? else {
+        return available_storage_ktf(context).await;
+    };
+
+    Ok(handle.buffer_len as i32)
+}
+
+/// KTF `MC_dbGetAccessMode`.
+///
+/// Takes either an open handle or a database name, the way KTF's slot 6 does:
+/// both arrive as one word through the same SVC argument, and a handle is
+/// recognised by the magic this runtime writes at the front of it. Nothing we
+/// have says which of the two KTF passes here - LGT's native takes the name -
+/// so both are answered rather than one guessed at.
+///
+/// A handle reports the mode its `MC_dbOpenDataBase` asked for, which is what
+/// the title itself chose. A name reports 1 when a database of that name exists,
+/// the same collapsed single-namespace answer the LGT path gives, and -12 when
+/// it does not.
+pub async fn get_access_mode_ktf(context: &mut dyn WIPICContext, arg: WIPICWord) -> Result<i32> {
+    tracing::debug!("MC_dbGetAccessMode({arg:#x}) [KTF]");
+
+    if arg == 0 {
+        return Ok(-9); // M_E_INVALID
+    }
+
+    if let Some(handle) = load_handle(context, arg as i32)? {
+        return Ok(handle.mode as i32);
+    }
+
+    let Ok(name) = String::from_utf8(read_null_terminated_string_bytes(context, arg)?) else {
+        return Ok(-22);
+    };
+
+    if packaged_store_bytes(context, &name).await?.is_some() {
+        return Ok(1);
+    }
+
+    let system = context.system();
+    let pid = system.pid().to_owned();
+
+    if system.platform().database_repository().exists(&name, &pid).await {
+        Ok(1)
+    } else {
+        Ok(-12) // M_E_NOENT
+    }
+}
+
+/// The storage one KTF program is allowed to fill, and what
+/// `available_storage_ktf` measures against.
+///
+/// A megabyte is what the reference gives a program, and a title that asks
+/// before it writes is asking against that figure rather than against the
+/// handset's whole card.
+const KTF_STORAGE_LIMIT: usize = 1024 * 1024;
+
+/// KTF slot 12, `MC_fsAvailable()`.
+///
+/// It answers the storage still available, in bytes - not a list, whatever the
+/// name this slot was first given here suggested. This runtime listed database
+/// names into the first argument and returned how many there were, and the
+/// first argument is not a buffer: 이타루스전기 arrives here with whatever was
+/// in r0 and a zero in r1, took the `M_E_INVALID` that produced as the space
+/// left, and painted `980009byte 공간이 부족합니다` over its own download
+/// instead of fetching it.
+///
+/// What the archive itself ships is not storage the player consumed - on a
+/// handset a program's own data arrives with it - so only what a store has
+/// grown past its packaged size counts. Without that a title that packages its
+/// maps and its text as databases reads its own content as a full disk.
+pub async fn available_storage_ktf(context: &mut dyn WIPICContext) -> Result<i32> {
+    let mut stored = Vec::new();
+    {
+        let system = context.system();
+        let pid = system.pid().to_owned();
+
+        for name in system.platform().database_repository().list(&pid).await {
+            let db = system.platform().database_repository().open(&name, &pid).await;
+
+            let mut bytes = 0usize;
+            for id in db.get_record_ids().await {
+                if let Some(record) = db.get(id).await {
+                    bytes += record.len();
+                }
+            }
+
+            stored.push((name, bytes));
+        }
+    }
+
+    let mut used = 0usize;
+    for (name, bytes) in stored {
+        let packaged = context.get_resource_size(&name).await?.unwrap_or(0);
+        used += bytes.saturating_sub(packaged);
+    }
+
+    let available = KTF_STORAGE_LIMIT.saturating_sub(used);
+    tracing::debug!("MC_fsAvailable() -> {available} ({used} of {KTF_STORAGE_LIMIT} used) [KTF]");
+
+    Ok(available as i32)
+}
+
+/// The store a guest name names.
+///
+/// A name is a path in the handset's own storage area, and a store without a
+/// path already sits at that area's root - so `/lo.dsk` and `lo.dsk` are one
+/// store, not two. 리얼싸커 2009 installs its data under a bare name, renames
+/// it into place under a bare name, and then opens it with the rooted one:
+/// keyed apart, that open found nothing where the title had just put 900KB.
+///
+/// Only a leading separator is taken off. A name with a path inside it is a
+/// name a title made on purpose - 이타루스전기 unpacks into `res/img/f` - and
+/// stays as it is.
+fn store_name(name: String) -> String {
+    let trimmed = name.trim_start_matches('/');
+
+    if trimmed.len() == name.len() { name } else { String::from(trimmed) }
+}
+
 fn load_handle(context: &mut dyn WIPICContext, db_id: i32) -> Result<Option<DatabaseHandle>> {
     if db_id < 0x10000 {
         return Ok(None);
@@ -612,17 +2105,883 @@ async fn read_packaged_database(context: &mut dyn WIPICContext, name: &str) -> R
     Ok(Some(context.read_resource(name).await?))
 }
 
+/// What the archive itself ships under this name, wherever it ships it.
+///
+/// KTF's storage table is the handset's filesystem as much as it is its
+/// database - the two share every slot - so a store's packaged content is not
+/// only a jar entry. A program that has extra data to download ships it as
+/// files beside the jar, in the archive's `P/` directory, and a handset's
+/// installer writes them where the program will open them: 이타루스전기 carries
+/// its 980KB that way, `patch.dat` recording that it arrived, and looked for
+/// `patch.dat` at start-up through this table. Reading only the jar answered
+/// "no such store", so the title asked to download what it already had.
+pub(crate) async fn packaged_store_bytes(context: &mut dyn WIPICContext, name: &str) -> Result<Option<Vec<u8>>> {
+    if let Some(packaged) = read_packaged_database(context, name).await? {
+        return Ok(Some(packaged));
+    }
+
+    let filesystem = context.system().filesystem().clone();
+    let Some(size) = filesystem.size(name).await else {
+        return Ok(None);
+    };
+
+    let mut data = vec![0; size];
+    filesystem.read(name, 0, size, &mut data).await;
+
+    tracing::debug!("{name:?} is a file the archive shipped, {size} bytes");
+
+    Ok(Some(data))
+}
+
 #[cfg(test)]
 mod tests {
-    use alloc::boxed::Box;
+    use alloc::{boxed::Box, vec};
 
     use test_utils::TestPlatform;
     use wie_backend::{DefaultTaskRunner, System};
-    use wie_util::{ByteRead, ByteWrite};
+    use wie_util::{ByteRead, ByteWrite, read_generic};
 
+    use alloc::borrow::ToOwned as _;
+
+    use super::MODE_OPEN_EXISTING;
     use crate::context::test::TestContext;
 
-    use super::{delete_database, exists_database, list_record_info, open_database, select_record, stream_read, stream_write, update_record};
+    use super::{
+        LgtDatabaseMetadata, available_storage_ktf, close_database, close_database_lgt, delete_database, delete_database_lgt, delete_record_lgt,
+        exists_database, exists_database_ktf, get_access_mode_ktf, get_access_mode_lgt, get_number_of_records_ktf, get_number_of_records_lgt,
+        get_record_size_ktf, get_record_size_lgt, insert_record_lgt, list_databases_lgt, list_record, list_record_info, list_records_lgt,
+        load_handle, load_lgt_metadata, open_database, open_database_lgt, open_db_for_handle, select_record, select_record_ktf, select_record_lgt,
+        sort_records_lgt, stat_by_name_ktf, store_lgt_metadata, stream_read, stream_write, update_record, update_record_lgt,
+    };
+
+    #[futures_test::test]
+    async fn lgt_native_get_access_mode_matches_native_validation_and_missing_database() {
+        const NAME: u32 = 0x1000;
+
+        let mut context = database_test_context();
+
+        assert_eq!(get_access_mode_lgt(&mut context, 0).await.unwrap(), -9);
+
+        let long_name = alloc::vec![b'a'; 124];
+        context.write_bytes(NAME, &long_name).unwrap();
+        context.write_bytes(NAME + 124, &[0]).unwrap();
+
+        assert_eq!(get_access_mode_lgt(&mut context, NAME).await.unwrap(), -9);
+
+        context.write_bytes(NAME, b"missing\0").unwrap();
+
+        assert_eq!(get_access_mode_lgt(&mut context, NAME).await.unwrap(), -12);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_get_access_mode_returns_first_representable_namespace() {
+        const NAME: u32 = 0x1000;
+
+        let mut context = database_test_context();
+        context.write_bytes(NAME, b"records\0").unwrap();
+
+        // The WIE repository collapses native access namespaces 1/2/3.
+        // Create through access 3 to make that adaptation explicit:
+        // MC_dbGetAccessMode still returns native first-match selector 1.
+        let db_id = open_database_lgt(&mut context, NAME, 4, 1, 3).await.unwrap();
+        assert!(db_id > 0);
+
+        assert_eq!(get_access_mode_lgt(&mut context, NAME).await.unwrap(), 1);
+
+        assert_eq!(close_database_lgt(&mut context, db_id).await.unwrap(), 0);
+
+        assert_eq!(get_access_mode_lgt(&mut context, NAME).await.unwrap(), 1);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_list_databases_validates_arguments_and_empty_capacity() {
+        const OUTPUT: u32 = 0x2000;
+
+        let mut context = database_test_context();
+
+        assert_eq!(list_databases_lgt(&mut context, 0, 16).await.unwrap(), -9);
+        assert_eq!(list_databases_lgt(&mut context, OUTPUT, 0).await.unwrap(), -9);
+        assert_eq!(list_databases_lgt(&mut context, OUTPUT, -1).await.unwrap(), -9);
+
+        context.write_bytes(OUTPUT, &[0xcc; 2]).unwrap();
+        assert_eq!(list_databases_lgt(&mut context, OUTPUT, 1).await.unwrap(), -18);
+
+        let mut one = [0u8; 1];
+        context.read_bytes(OUTPUT, &mut one).unwrap();
+        assert_eq!(one, [0]);
+
+        context.write_bytes(OUTPUT, &[0xcc; 2]).unwrap();
+        assert_eq!(list_databases_lgt(&mut context, OUTPUT, 2).await.unwrap(), 0);
+
+        let mut two = [0u8; 2];
+        context.read_bytes(OUTPUT, &mut two).unwrap();
+        assert_eq!(two, [0, 0]);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_list_databases_preserves_suffix_capacity_quirk_and_zeroes_short_buffer() {
+        const NAME: u32 = 0x1000;
+        const OUTPUT: u32 = 0x2000;
+
+        let mut context = database_test_context();
+        context.write_bytes(NAME, b"a\0").unwrap();
+
+        let db_id = open_database_lgt(&mut context, NAME, 4, 1, 1).await.unwrap();
+        assert!(db_id > 0);
+
+        // Native charges strlen("a.db") + 1 plus one namespace terminator:
+        // 5 + 1 = 6 bytes, although the emitted "a\0\0" occupies only 3.
+        context.write_bytes(OUTPUT, &[0xcc; 5]).unwrap();
+        assert_eq!(list_databases_lgt(&mut context, OUTPUT, 5).await.unwrap(), -18);
+
+        let mut short = [0u8; 5];
+        context.read_bytes(OUTPUT, &mut short).unwrap();
+        assert_eq!(short, [0; 5]);
+
+        context.write_bytes(OUTPUT, &[0xcc; 6]).unwrap();
+        assert_eq!(list_databases_lgt(&mut context, OUTPUT, 6).await.unwrap(), 1);
+
+        let mut exact = [0u8; 6];
+        context.read_bytes(OUTPUT, &mut exact).unwrap();
+        assert_eq!(&exact[..3], b"a\0\0");
+        assert_eq!(&exact[3..], &[0; 3]);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_list_databases_returns_direct_names_once_in_collapsed_namespace() {
+        const NAME: u32 = 0x1000;
+        const OUTPUT: u32 = 0x2000;
+
+        let mut context = database_test_context();
+
+        context.write_bytes(NAME, b"long\0").unwrap();
+        let long_id = open_database_lgt(&mut context, NAME, 4, 1, 3).await.unwrap();
+        assert!(long_id > 0);
+
+        context.write_bytes(NAME, b"a\0").unwrap();
+        let a_id = open_database_lgt(&mut context, NAME, 4, 1, 1).await.unwrap();
+        assert!(a_id > 0);
+
+        // WIE has one representable namespace, so access 3 above must not
+        // duplicate "long". Required native-style capacity is:
+        // 1 + (strlen("a") + 4) + (strlen("long") + 4) = 14.
+        context.write_bytes(OUTPUT, &[0xcc; 14]).unwrap();
+        assert_eq!(list_databases_lgt(&mut context, OUTPUT, 14).await.unwrap(), 2);
+
+        let mut actual = [0u8; 14];
+        context.read_bytes(OUTPUT, &mut actual).unwrap();
+        assert_eq!(&actual[..8], b"a\0long\0\0");
+        assert_eq!(&actual[8..], &[0; 6]);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_list_databases_omits_nested_logical_names() {
+        const NAME: u32 = 0x1000;
+        const OUTPUT: u32 = 0x2000;
+
+        let mut context = database_test_context();
+
+        context.write_bytes(NAME, b"parent/child\0").unwrap();
+        let nested_id = open_database_lgt(&mut context, NAME, 4, 1, 1).await.unwrap();
+        assert!(nested_id > 0);
+
+        context.write_bytes(NAME, b"root\0").unwrap();
+        let root_id = open_database_lgt(&mut context, NAME, 4, 1, 1).await.unwrap();
+        assert!(root_id > 0);
+
+        // Native MC_dbListDataBases scans "/" only. "parent/child.db"
+        // therefore does not become a root database named "parent".
+        // "root.db" is charged as strlen("root.db") + 1, plus the
+        // namespace terminator: 8 + 1 + 1 = 10.
+        context.write_bytes(OUTPUT, &[0xcc; 10]).unwrap();
+        assert_eq!(list_databases_lgt(&mut context, OUTPUT, 10).await.unwrap(), 1);
+
+        let mut actual = [0u8; 10];
+        context.read_bytes(OUTPUT, &mut actual).unwrap();
+        assert_eq!(&actual[..6], b"root\0\0");
+        assert_eq!(&actual[6..], &[0; 4]);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_get_record_size_validates_handle_and_persists_created_size() {
+        const NAME: u32 = 0x1000;
+
+        let mut context = database_test_context();
+        context.write_bytes(NAME, b"records\0").unwrap();
+
+        assert_eq!(get_record_size_lgt(&mut context, 0x1234).await.unwrap(), -2);
+
+        let db_id = open_database_lgt(&mut context, NAME, 12, 1, 1).await.unwrap();
+        assert!(db_id > 0);
+
+        assert_eq!(get_record_size_lgt(&mut context, db_id).await.unwrap(), 12);
+
+        assert_eq!(close_database_lgt(&mut context, db_id).await.unwrap(), 0);
+
+        assert_eq!(get_record_size_lgt(&mut context, db_id).await.unwrap(), -2);
+
+        // Native reopen loads record size from the persisted `.idx` header;
+        // the later caller-supplied value does not replace it.
+        let reopened = open_database_lgt(&mut context, NAME, 99, 0, 1).await.unwrap();
+        assert!(reopened > 0);
+
+        assert_eq!(get_record_size_lgt(&mut context, reopened).await.unwrap(), 12);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_get_record_size_returns_raw_32bit_field() {
+        const NAME: u32 = 0x1000;
+
+        let mut context = database_test_context();
+        context.write_bytes(NAME, b"records\0").unwrap();
+
+        // create==1 only requires signed record_size > 0, so the canonical
+        // creation path cannot directly create a negative/raw-high-bit value.
+        // Mutate only the persisted LGT metadata to verify the getter's native
+        // bit-preserving LDR semantics independently of open validation.
+        let db_id = open_database_lgt(&mut context, NAME, 4, 1, 1).await.unwrap();
+        assert!(db_id > 0);
+
+        let handle = load_handle(&mut context, db_id).unwrap().unwrap();
+        let mut repository_db = open_db_for_handle(&mut context, &handle).await.unwrap();
+        let mut metadata = load_lgt_metadata(repository_db.as_mut()).await.unwrap();
+        metadata.record_size = 0xffff_ffff;
+        assert!(store_lgt_metadata(repository_db.as_mut(), &metadata).await);
+
+        assert_eq!(get_record_size_lgt(&mut context, db_id).await.unwrap(), -1);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_get_number_of_records_validates_handle_and_tracks_active_count() {
+        const NAME: u32 = 0x1000;
+        const DATA: u32 = 0x2000;
+
+        let mut context = database_test_context();
+        context.write_bytes(NAME, b"records\0").unwrap();
+        context.write_bytes(DATA, &[1, 2, 3, 4]).unwrap();
+
+        assert_eq!(get_number_of_records_lgt(&mut context, 0x1234).await.unwrap(), -2);
+
+        let db_id = open_database_lgt(&mut context, NAME, 4, 1, 1).await.unwrap();
+        assert!(db_id > 0);
+
+        assert_eq!(get_number_of_records_lgt(&mut context, db_id).await.unwrap(), 0);
+
+        assert_eq!(insert_record_lgt(&mut context, db_id, DATA, 4).await.unwrap(), 1);
+        assert_eq!(insert_record_lgt(&mut context, db_id, DATA, 4).await.unwrap(), 2);
+
+        assert_eq!(get_number_of_records_lgt(&mut context, db_id).await.unwrap(), 2);
+
+        assert_eq!(delete_record_lgt(&mut context, db_id, 1).await.unwrap(), 0);
+
+        assert_eq!(get_number_of_records_lgt(&mut context, db_id).await.unwrap(), 1);
+
+        assert_eq!(close_database_lgt(&mut context, db_id).await.unwrap(), 0);
+
+        assert_eq!(get_number_of_records_lgt(&mut context, db_id).await.unwrap(), -2);
+
+        let reopened = open_database_lgt(&mut context, NAME, 99, 0, 1).await.unwrap();
+        assert!(reopened > 0);
+
+        assert_eq!(get_number_of_records_lgt(&mut context, reopened).await.unwrap(), 1);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_get_number_of_records_returns_raw_wrapped_count() {
+        const NAME: u32 = 0x1000;
+
+        let mut context = database_test_context();
+        context.write_bytes(NAME, b"records\0").unwrap();
+
+        let db_id = open_database_lgt(&mut context, NAME, 4, 1, 1).await.unwrap();
+        assert!(db_id > 0);
+
+        // Native MC_dbDeleteRecord accepts id 0 while next_record_id > 0
+        // and decrements the unsigned active-count field from 0 to
+        // 0xffff_ffff. MC_dbGetNumberOfRecords simply LDRs that field.
+        assert_eq!(delete_record_lgt(&mut context, db_id, 0).await.unwrap(), 0);
+
+        assert_eq!(get_number_of_records_lgt(&mut context, db_id).await.unwrap(), -1);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_insert_record_validates_handle_and_arguments() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"records\0").unwrap();
+
+        assert_eq!(insert_record_lgt(&mut context, 0x1234, 0x2000, 4).await.unwrap(), -2);
+
+        let db_id = open_database_lgt(&mut context, 0x1000, 4, 1, 1).await.unwrap();
+        assert!(db_id > 0);
+
+        assert_eq!(insert_record_lgt(&mut context, db_id, 0, 4).await.unwrap(), -9);
+        assert_eq!(insert_record_lgt(&mut context, db_id, 0x2000, 0).await.unwrap(), -9);
+
+        context.write_bytes(0x2000, &[1, 2, 3, 4, 5]).unwrap();
+        assert_eq!(insert_record_lgt(&mut context, db_id, 0x2000, 5).await.unwrap(), -21);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_insert_record_returns_ids_and_zero_pads_fixed_records() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"records\0").unwrap();
+
+        let db_id = open_database_lgt(&mut context, 0x1000, 8, 1, 1).await.unwrap();
+        context.write_bytes(0x2000, &[1, 2, 3]).unwrap();
+
+        assert_eq!(insert_record_lgt(&mut context, db_id, 0x2000, 3).await.unwrap(), 1);
+
+        context.write_bytes(0x2010, &[4, 5, 6, 7, 8, 9, 10, 11]).unwrap();
+        assert_eq!(insert_record_lgt(&mut context, db_id, 0x2010, 8).await.unwrap(), 2);
+
+        let handle = load_handle(&mut context, db_id).unwrap().unwrap();
+        let mut db = open_db_for_handle(&mut context, &handle).await.unwrap();
+
+        assert_eq!(db.get(1).await.unwrap(), vec![1, 2, 3, 0, 0, 0, 0, 0]);
+        assert_eq!(db.get(2).await.unwrap(), vec![4, 5, 6, 7, 8, 9, 10, 11]);
+
+        let metadata = load_lgt_metadata(db.as_mut()).await.unwrap();
+        assert_eq!(metadata.record_size, 8);
+        assert_eq!(metadata.next_record_id, 3);
+        assert_eq!(metadata.active_count, 2);
+        assert!(metadata.free_ids.is_empty());
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_insert_record_reuses_persisted_free_ids_lifo() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"records\0").unwrap();
+
+        let db_id = open_database_lgt(&mut context, 0x1000, 4, 1, 1).await.unwrap();
+
+        let handle = load_handle(&mut context, db_id).unwrap().unwrap();
+        {
+            let mut db = open_db_for_handle(&mut context, &handle).await.unwrap();
+            let metadata = LgtDatabaseMetadata {
+                record_size: 4,
+                next_record_id: 6,
+                active_count: 2,
+                free_ids: vec![2, 4, 5],
+            };
+            assert!(store_lgt_metadata(db.as_mut(), &metadata).await);
+        }
+
+        context.write_bytes(0x2000, &[9, 8, 7, 6]).unwrap();
+
+        assert_eq!(insert_record_lgt(&mut context, db_id, 0x2000, 4).await.unwrap(), 5);
+        assert_eq!(insert_record_lgt(&mut context, db_id, 0x2000, 4).await.unwrap(), 4);
+
+        assert_eq!(close_database_lgt(&mut context, db_id).await.unwrap(), 0);
+
+        let reopened = open_database_lgt(&mut context, 0x1000, 99, 1, 1).await.unwrap();
+
+        assert_eq!(insert_record_lgt(&mut context, reopened, 0x2000, 4).await.unwrap(), 2);
+
+        let handle = load_handle(&mut context, reopened).unwrap().unwrap();
+        let mut db = open_db_for_handle(&mut context, &handle).await.unwrap();
+        let metadata = load_lgt_metadata(db.as_mut()).await.unwrap();
+
+        assert_eq!(metadata.record_size, 4);
+        assert_eq!(metadata.next_record_id, 6);
+        assert_eq!(metadata.active_count, 5);
+        assert!(metadata.free_ids.is_empty());
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_list_records_validates_native_arguments_and_capacity() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"records\0").unwrap();
+
+        assert_eq!(list_records_lgt(&mut context, 0x1234, 0x3000, 4).await.unwrap(), -2);
+
+        let db_id = open_database_lgt(&mut context, 0x1000, 4, 1, 1).await.unwrap();
+
+        assert_eq!(list_records_lgt(&mut context, db_id, 0, 4).await.unwrap(), -9);
+        assert_eq!(list_records_lgt(&mut context, db_id, 0x3000, 0).await.unwrap(), -9);
+        assert_eq!(list_records_lgt(&mut context, db_id, 0x3000, -1).await.unwrap(), -9);
+
+        context.write_bytes(0x2100, &[1, 2, 3, 4]).unwrap();
+        context.write_bytes(0x2110, &[5, 6, 7, 8]).unwrap();
+
+        assert_eq!(insert_record_lgt(&mut context, db_id, 0x2100, 4).await.unwrap(), 1);
+        assert_eq!(insert_record_lgt(&mut context, db_id, 0x2110, 4).await.unwrap(), 2);
+
+        assert_eq!(list_records_lgt(&mut context, db_id, 0x3000, 1).await.unwrap(), -18);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_list_records_returns_ascending_active_ids_without_reading_payloads() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"records\0").unwrap();
+
+        let db_id = open_database_lgt(&mut context, 0x1000, 4, 1, 1).await.unwrap();
+
+        let handle = load_handle(&mut context, db_id).unwrap().unwrap();
+        {
+            let mut repository_db = open_db_for_handle(&mut context, &handle).await.unwrap();
+
+            let metadata = LgtDatabaseMetadata {
+                record_size: 4,
+                next_record_id: 7,
+                active_count: 3,
+                free_ids: vec![2, 4, 6],
+            };
+            assert!(store_lgt_metadata(repository_db.as_mut(), &metadata).await);
+
+            // Only two physical payloads exist, and one active id deliberately
+            // has no backend record. Native ListRecords never reads `.db`.
+            assert!(repository_db.set(1, &[1, 1, 1, 1]).await);
+            assert!(repository_db.set(5, &[5, 5, 5, 5]).await);
+        }
+
+        context.write_bytes(0x3000, &[0xaa; 20]).unwrap();
+
+        assert_eq!(list_records_lgt(&mut context, db_id, 0x3000, 3).await.unwrap(), 3);
+
+        let mut out = [0u8; 20];
+        context.read_bytes(0x3000, &mut out).unwrap();
+
+        assert_eq!(u32::from_le_bytes(out[0..4].try_into().unwrap()), 1);
+        assert_eq!(u32::from_le_bytes(out[4..8].try_into().unwrap()), 3);
+        assert_eq!(u32::from_le_bytes(out[8..12].try_into().unwrap()), 5);
+        assert_eq!(&out[12..], &[0xaa; 8]);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_list_records_preserves_signed_count_and_native_off_by_one_quirk() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"records\0").unwrap();
+
+        let db_id = open_database_lgt(&mut context, 0x1000, 4, 1, 1).await.unwrap();
+
+        let handle = load_handle(&mut context, db_id).unwrap().unwrap();
+        {
+            let mut repository_db = open_db_for_handle(&mut context, &handle).await.unwrap();
+
+            // Malformed metadata isolates the native loop behavior:
+            // active_count says one record, but ids 1 and 2 are both active.
+            let metadata = LgtDatabaseMetadata {
+                record_size: 4,
+                next_record_id: 3,
+                active_count: 1,
+                free_ids: vec![],
+            };
+            assert!(store_lgt_metadata(repository_db.as_mut(), &metadata).await);
+        }
+
+        context.write_bytes(0x3000, &[0u8; 12]).unwrap();
+
+        // Native precheck accepts capacity == active_count. Its loop then
+        // allows stores while capacity == written, hence two ids are emitted.
+        assert_eq!(list_records_lgt(&mut context, db_id, 0x3000, 1).await.unwrap(), 1);
+
+        let mut out = [0u8; 12];
+        context.read_bytes(0x3000, &mut out).unwrap();
+        assert_eq!(u32::from_le_bytes(out[0..4].try_into().unwrap()), 1);
+        assert_eq!(u32::from_le_bytes(out[4..8].try_into().unwrap()), 2);
+
+        {
+            let mut repository_db = open_db_for_handle(&mut context, &handle).await.unwrap();
+
+            // DeleteRecord(0) can produce exactly this signed-visible count.
+            let metadata = LgtDatabaseMetadata {
+                record_size: 4,
+                next_record_id: 1,
+                active_count: u32::MAX,
+                free_ids: vec![0],
+            };
+            assert!(store_lgt_metadata(repository_db.as_mut(), &metadata).await);
+        }
+
+        assert_eq!(list_records_lgt(&mut context, db_id, 0x3000, 1).await.unwrap(), -1);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_sort_records_validates_arguments_and_empty_database() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"records\0").unwrap();
+
+        assert_eq!(sort_records_lgt(&mut context, 0x1234, 0x3000, 4, 0, 0).await.unwrap(), -2);
+
+        let db_id = open_database_lgt(&mut context, 0x1000, 4, 1, 1).await.unwrap();
+
+        assert_eq!(sort_records_lgt(&mut context, db_id, 0, 4, 0, 0).await.unwrap(), -9);
+        assert_eq!(sort_records_lgt(&mut context, db_id, 0x3000, 0, 0, 0).await.unwrap(), -9);
+        assert_eq!(sort_records_lgt(&mut context, db_id, 0x3000, -1, 0, 0).await.unwrap(), -9);
+
+        // Native delegates to ListRecords with active_count == 0, receives -9,
+        // and collapses that negative result to -1.
+        assert_eq!(sort_records_lgt(&mut context, db_id, 0x3000, 4, 0, 0).await.unwrap(), -1);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_sort_records_memcmp_orders_ids_by_fixed_payload() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"records\0").unwrap();
+
+        let db_id = open_database_lgt(&mut context, 0x1000, 4, 1, 1).await.unwrap();
+
+        context.write_bytes(0x2100, &[3, 0, 0, 0]).unwrap();
+        context.write_bytes(0x2110, &[1, 0, 0, 0]).unwrap();
+        context.write_bytes(0x2120, &[2, 0, 0, 0]).unwrap();
+
+        assert_eq!(insert_record_lgt(&mut context, db_id, 0x2100, 4).await.unwrap(), 1);
+        assert_eq!(insert_record_lgt(&mut context, db_id, 0x2110, 4).await.unwrap(), 2);
+        assert_eq!(insert_record_lgt(&mut context, db_id, 0x2120, 4).await.unwrap(), 3);
+
+        assert_eq!(sort_records_lgt(&mut context, db_id, 0x3000, 3, 0, 0).await.unwrap(), 3);
+
+        assert_eq!(read_generic::<u32, _>(&context, 0x3000).unwrap(), 2);
+        assert_eq!(read_generic::<u32, _>(&context, 0x3004).unwrap(), 3);
+        assert_eq!(read_generic::<u32, _>(&context, 0x3008).unwrap(), 1);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_sort_records_skips_deleted_ids_and_checks_output_capacity() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"records\0").unwrap();
+
+        let db_id = open_database_lgt(&mut context, 0x1000, 4, 1, 1).await.unwrap();
+
+        for (ptr, bytes) in [
+            (0x2100, [4, 0, 0, 0]),
+            (0x2110, [3, 0, 0, 0]),
+            (0x2120, [2, 0, 0, 0]),
+            (0x2130, [1, 0, 0, 0]),
+        ] {
+            context.write_bytes(ptr, &bytes).unwrap();
+            insert_record_lgt(&mut context, db_id, ptr, 4).await.unwrap();
+        }
+
+        assert_eq!(delete_record_lgt(&mut context, db_id, 2).await.unwrap(), 0);
+
+        // Three active records remain. Capacity two permits two accepted
+        // insertions, then the third accepted candidate hits native <= check.
+        assert_eq!(sort_records_lgt(&mut context, db_id, 0x3000, 2, 0, 0).await.unwrap(), -18);
+
+        assert_eq!(sort_records_lgt(&mut context, db_id, 0x3000, 3, 0, 0).await.unwrap(), 3);
+
+        assert_eq!(read_generic::<u32, _>(&context, 0x3000).unwrap(), 4);
+        assert_eq!(read_generic::<u32, _>(&context, 0x3004).unwrap(), 3);
+        assert_eq!(read_generic::<u32, _>(&context, 0x3008).unwrap(), 1);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_delete_record_matches_native_id_validation() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"records\0").unwrap();
+
+        assert_eq!(delete_record_lgt(&mut context, 0x1234, 1).await.unwrap(), -2);
+
+        let db_id = open_database_lgt(&mut context, 0x1000, 4, 1, 1).await.unwrap();
+
+        context.write_bytes(0x2100, &[1, 2, 3, 4]).unwrap();
+        assert_eq!(insert_record_lgt(&mut context, db_id, 0x2100, 4).await.unwrap(), 1);
+
+        assert_eq!(delete_record_lgt(&mut context, db_id, 2).await.unwrap(), -22);
+        assert_eq!(delete_record_lgt(&mut context, db_id, -1).await.unwrap(), -1);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_delete_record_preserves_payload_and_reuses_id_lifo() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"records\0").unwrap();
+
+        let db_id = open_database_lgt(&mut context, 0x1000, 4, 1, 1).await.unwrap();
+
+        context.write_bytes(0x2100, &[1, 2, 3, 4]).unwrap();
+        context.write_bytes(0x2110, &[5, 6, 7, 8]).unwrap();
+
+        assert_eq!(insert_record_lgt(&mut context, db_id, 0x2100, 4).await.unwrap(), 1);
+        assert_eq!(insert_record_lgt(&mut context, db_id, 0x2110, 4).await.unwrap(), 2);
+
+        assert_eq!(delete_record_lgt(&mut context, db_id, 2).await.unwrap(), 0);
+
+        let handle = load_handle(&mut context, db_id).unwrap().unwrap();
+        {
+            let mut repository_db = open_db_for_handle(&mut context, &handle).await.unwrap();
+
+            assert_eq!(repository_db.get(2).await.unwrap(), vec![5, 6, 7, 8]);
+
+            let metadata = load_lgt_metadata(repository_db.as_mut()).await.unwrap();
+
+            assert_eq!(metadata.free_ids, vec![2]);
+            assert_eq!(metadata.active_count, 1);
+            assert_eq!(metadata.next_record_id, 3);
+        }
+
+        assert_eq!(delete_record_lgt(&mut context, db_id, 2).await.unwrap(), -22);
+
+        context.write_bytes(0x2120, &[9, 9, 9, 9]).unwrap();
+
+        assert_eq!(insert_record_lgt(&mut context, db_id, 0x2120, 4).await.unwrap(), 2);
+
+        let repository_db = open_db_for_handle(&mut context, &handle).await.unwrap();
+
+        assert_eq!(repository_db.get(2).await.unwrap(), vec![9, 9, 9, 9]);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_delete_record_accepts_zero_and_wraps_active_count() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"records\0").unwrap();
+
+        let db_id = open_database_lgt(&mut context, 0x1000, 4, 1, 1).await.unwrap();
+
+        assert_eq!(delete_record_lgt(&mut context, db_id, 0).await.unwrap(), 0);
+
+        let handle = load_handle(&mut context, db_id).unwrap().unwrap();
+        let mut repository_db = open_db_for_handle(&mut context, &handle).await.unwrap();
+
+        let metadata = load_lgt_metadata(repository_db.as_mut()).await.unwrap();
+
+        assert_eq!(metadata.free_ids, vec![0]);
+        assert_eq!(metadata.active_count, u32::MAX);
+        assert_eq!(metadata.next_record_id, 1);
+
+        assert_eq!(delete_record_lgt(&mut context, db_id, 0).await.unwrap(), -22);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_update_record_validates_native_arguments_and_ids() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"records\0").unwrap();
+
+        assert_eq!(update_record_lgt(&mut context, 0x1234, 1, 0x2000, 4).await.unwrap(), -2);
+
+        let db_id = open_database_lgt(&mut context, 0x1000, 4, 1, 1).await.unwrap();
+
+        assert_eq!(update_record_lgt(&mut context, db_id, 1, 0, 4).await.unwrap(), -9);
+        assert_eq!(update_record_lgt(&mut context, db_id, 1, 0x2000, 0).await.unwrap(), -9);
+        assert_eq!(update_record_lgt(&mut context, db_id, 1, 0x2000, 5).await.unwrap(), -21);
+
+        context.write_bytes(0x2100, &[1, 2, 3, 4]).unwrap();
+        assert_eq!(insert_record_lgt(&mut context, db_id, 0x2100, 4).await.unwrap(), 1);
+
+        assert_eq!(update_record_lgt(&mut context, db_id, 0, 0x2000, 4).await.unwrap(), -22);
+        assert_eq!(update_record_lgt(&mut context, db_id, -1, 0x2000, 4).await.unwrap(), -22);
+        assert_eq!(update_record_lgt(&mut context, db_id, 2, 0x2000, 4).await.unwrap(), -22);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_update_record_preserves_tail_on_short_write() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"records\0").unwrap();
+
+        let db_id = open_database_lgt(&mut context, 0x1000, 6, 1, 1).await.unwrap();
+
+        context.write_bytes(0x2100, &[1, 2, 3, 4, 5, 6]).unwrap();
+        assert_eq!(insert_record_lgt(&mut context, db_id, 0x2100, 6).await.unwrap(), 1);
+
+        context.write_bytes(0x2200, &[9, 8, 7]).unwrap();
+        assert_eq!(update_record_lgt(&mut context, db_id, 1, 0x2200, 3).await.unwrap(), 0);
+
+        let handle = load_handle(&mut context, db_id).unwrap().unwrap();
+        let db = open_db_for_handle(&mut context, &handle).await.unwrap();
+        assert_eq!(db.get(1).await.unwrap(), vec![9, 8, 7, 4, 5, 6]);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_update_record_rejects_free_record_with_minus_nine() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"records\0").unwrap();
+
+        let db_id = open_database_lgt(&mut context, 0x1000, 4, 1, 1).await.unwrap();
+
+        context.write_bytes(0x2100, &[1, 2, 3, 4]).unwrap();
+        assert_eq!(insert_record_lgt(&mut context, db_id, 0x2100, 4).await.unwrap(), 1);
+
+        let handle = load_handle(&mut context, db_id).unwrap().unwrap();
+        {
+            let mut db = open_db_for_handle(&mut context, &handle).await.unwrap();
+            let mut metadata = load_lgt_metadata(db.as_mut()).await.unwrap();
+            metadata.free_ids.push(1);
+            metadata.active_count = 0;
+            assert!(store_lgt_metadata(db.as_mut(), &metadata).await);
+        }
+
+        context.write_bytes(0x2200, &[9, 9, 9, 9]).unwrap();
+        assert_eq!(update_record_lgt(&mut context, db_id, 1, 0x2200, 4).await.unwrap(), -9);
+
+        let db = open_db_for_handle(&mut context, &handle).await.unwrap();
+        assert_eq!(db.get(1).await.unwrap(), vec![1, 2, 3, 4]);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_select_record_validates_native_arguments_and_ids() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"records\0").unwrap();
+
+        assert_eq!(select_record_lgt(&mut context, 0x1234, 1, 0x2000, 4).await.unwrap(), -2);
+
+        let db_id = open_database_lgt(&mut context, 0x1000, 4, 1, 1).await.unwrap();
+
+        assert_eq!(select_record_lgt(&mut context, db_id, 1, 0, 4).await.unwrap(), -9);
+        assert_eq!(select_record_lgt(&mut context, db_id, 1, 0x2000, 0).await.unwrap(), -9);
+        assert_eq!(select_record_lgt(&mut context, db_id, 1, 0x2000, 3).await.unwrap(), -18);
+
+        context.write_bytes(0x2100, &[1, 2, 3, 4]).unwrap();
+        assert_eq!(insert_record_lgt(&mut context, db_id, 0x2100, 4).await.unwrap(), 1);
+
+        assert_eq!(select_record_lgt(&mut context, db_id, 2, 0x2000, 4).await.unwrap(), -22);
+        assert_eq!(select_record_lgt(&mut context, db_id, 0, 0x2000, 4).await.unwrap(), -1);
+        assert_eq!(select_record_lgt(&mut context, db_id, -1, 0x2000, 4).await.unwrap(), -1);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_select_record_reads_fixed_and_contiguous_bytes() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"records\0").unwrap();
+
+        let db_id = open_database_lgt(&mut context, 0x1000, 4, 1, 1).await.unwrap();
+
+        context.write_bytes(0x2100, &[1, 2, 3, 4]).unwrap();
+        context.write_bytes(0x2110, &[5, 6, 7, 8]).unwrap();
+        assert_eq!(insert_record_lgt(&mut context, db_id, 0x2100, 4).await.unwrap(), 1);
+        assert_eq!(insert_record_lgt(&mut context, db_id, 0x2110, 4).await.unwrap(), 2);
+
+        context.write_bytes(0x2200, &[0xcc; 12]).unwrap();
+        assert_eq!(select_record_lgt(&mut context, db_id, 1, 0x2200, 4).await.unwrap(), 0);
+        let mut fixed = [0u8; 12];
+        context.read_bytes(0x2200, &mut fixed).unwrap();
+        assert_eq!(&fixed[..4], &[1, 2, 3, 4]);
+        assert_eq!(&fixed[4..], &[0xcc; 8]);
+
+        context.write_bytes(0x2200, &[0xcc; 12]).unwrap();
+        assert_eq!(select_record_lgt(&mut context, db_id, 1, 0x2200, 10).await.unwrap(), 0);
+        let mut contiguous = [0u8; 12];
+        context.read_bytes(0x2200, &mut contiguous).unwrap();
+        assert_eq!(&contiguous[..8], &[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(&contiguous[8..], &[0xcc; 4]);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_select_record_rejects_free_start_but_reads_through_free_slot() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"records\0").unwrap();
+
+        let db_id = open_database_lgt(&mut context, 0x1000, 4, 1, 1).await.unwrap();
+
+        context.write_bytes(0x2100, &[1, 2, 3, 4]).unwrap();
+        context.write_bytes(0x2110, &[9, 8, 7, 6]).unwrap();
+        assert_eq!(insert_record_lgt(&mut context, db_id, 0x2100, 4).await.unwrap(), 1);
+        assert_eq!(insert_record_lgt(&mut context, db_id, 0x2110, 4).await.unwrap(), 2);
+
+        let handle = load_handle(&mut context, db_id).unwrap().unwrap();
+        {
+            let mut db = open_db_for_handle(&mut context, &handle).await.unwrap();
+            let mut metadata = load_lgt_metadata(db.as_mut()).await.unwrap();
+            metadata.free_ids.push(2);
+            metadata.active_count = 1;
+            assert!(store_lgt_metadata(db.as_mut(), &metadata).await);
+        }
+
+        assert_eq!(select_record_lgt(&mut context, db_id, 2, 0x2200, 4).await.unwrap(), -22);
+
+        context.write_bytes(0x2200, &[0xcc; 8]).unwrap();
+        assert_eq!(select_record_lgt(&mut context, db_id, 1, 0x2200, 8).await.unwrap(), 0);
+
+        let mut data = [0u8; 8];
+        context.read_bytes(0x2200, &mut data).unwrap();
+        assert_eq!(data, [1, 2, 3, 4, 9, 8, 7, 6]);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_delete_database_validates_arguments() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"records\0").unwrap();
+
+        assert_eq!(delete_database_lgt(&mut context, 0, 1).await.unwrap(), -9);
+        assert_eq!(delete_database_lgt(&mut context, 0x1000, 0).await.unwrap(), -9);
+        assert_eq!(delete_database_lgt(&mut context, 0x1000, 4).await.unwrap(), -9);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_delete_database_missing_returns_minus_one() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"records\0").unwrap();
+
+        assert_eq!(delete_database_lgt(&mut context, 0x1000, 1).await.unwrap(), -1);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_delete_database_removes_existing_database() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"records\0").unwrap();
+
+        let db_id = open_database_lgt(&mut context, 0x1000, 32, 1, 1).await.unwrap();
+        assert!(db_id > 0);
+
+        assert_eq!(delete_database_lgt(&mut context, 0x1000, 1).await.unwrap(), 0);
+        assert_eq!(delete_database_lgt(&mut context, 0x1000, 1).await.unwrap(), -1);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_close_database_rejects_unknown_handle_with_minus_two() {
+        let mut context = database_test_context();
+
+        assert_eq!(close_database_lgt(&mut context, 0).await.unwrap(), -2);
+        assert_eq!(close_database_lgt(&mut context, 0x1234).await.unwrap(), -2);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_close_database_invalidates_closed_handle() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"records\0").unwrap();
+
+        let db_id = open_database_lgt(&mut context, 0x1000, 32, 1, 1).await.unwrap();
+        assert!(db_id > 0);
+
+        assert_eq!(close_database_lgt(&mut context, db_id).await.unwrap(), 0);
+        assert_eq!(close_database_lgt(&mut context, db_id).await.unwrap(), -2);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_open_database_validates_arguments() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"records\0").unwrap();
+
+        assert_eq!(open_database_lgt(&mut context, 0, 32, 1, 1).await.unwrap(), -9);
+        assert_eq!(open_database_lgt(&mut context, 0x1000, 0, 1, 1).await.unwrap(), -9);
+        assert_eq!(open_database_lgt(&mut context, 0x1000, 32, 1, 0).await.unwrap(), -9);
+        assert_eq!(open_database_lgt(&mut context, 0x1000, 32, 1, 4).await.unwrap(), -9);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_open_database_requires_existing_database_without_create() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"records\0").unwrap();
+
+        assert_eq!(open_database_lgt(&mut context, 0x1000, 32, 0, 1).await.unwrap(), -12);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_open_database_create_materializes_database() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"records\0").unwrap();
+
+        let db_id = open_database_lgt(&mut context, 0x1000, 32, 1, 1).await.unwrap();
+        assert!(db_id > 0);
+        assert_eq!(exists_database(&mut context, 0x1000, 1).await.unwrap(), 0);
+    }
+
+    #[futures_test::test]
+    async fn lgt_native_open_database_create_preserves_existing_contents() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"records\0").unwrap();
+
+        let db_id = open_database_lgt(&mut context, 0x1000, 32, 1, 1).await.unwrap();
+        context.write_bytes(0x2000, &[1, 2, 3, 4]).unwrap();
+        assert_eq!(stream_write(&mut context, db_id, 0x2000, 4).await.unwrap(), 4);
+
+        let reopened = open_database_lgt(&mut context, 0x1000, 32, 1, 1).await.unwrap();
+        assert!(reopened > 0);
+        assert_eq!(stream_read(&mut context, reopened, 0x2100, 4).await.unwrap(), 4);
+
+        let mut data = [0; 4];
+        context.read_bytes(0x2100, &mut data).unwrap();
+        assert_eq!(data, [1, 2, 3, 4]);
+    }
 
     #[futures_test::test]
     async fn lgt_exists_database_reports_missing_and_existing_database() {
@@ -630,7 +2989,7 @@ mod tests {
         context.write_bytes(0x1000, b"records\0").unwrap();
 
         assert_eq!(exists_database(&mut context, 0x1000, 1).await.unwrap(), -12);
-        let db_id = open_database(&mut context, 0x1000, 0, 0).await.unwrap();
+        let db_id = open_database(&mut context, 0x1000, 0, 1).await.unwrap();
         context.write_bytes(0x2000, &[1]).unwrap();
         assert_eq!(stream_write(&mut context, db_id, 0x2000, 1).await.unwrap(), 1);
         assert_eq!(exists_database(&mut context, 0x1000, 1).await.unwrap(), 0);
@@ -642,7 +3001,7 @@ mod tests {
         context.write_bytes(0x1000, b"records\0").unwrap();
 
         assert_eq!(exists_database(&mut context, 0x1000, 1).await.unwrap(), -12);
-        let db_id = open_database(&mut context, 0x1000, 4, 0).await.unwrap();
+        let db_id = open_database(&mut context, 0x1000, 4, 1).await.unwrap();
         assert!(db_id > 0);
         assert_eq!(exists_database(&mut context, 0x1000, 1).await.unwrap(), 0);
     }
@@ -686,13 +3045,420 @@ mod tests {
         context.write_bytes(0x1000, b"kickass\0").unwrap();
 
         assert_eq!(exists_database(&mut context, 0x1000, 1).await.unwrap(), 0);
-        let db_id = open_database(&mut context, 0x1000, 1, 0).await.unwrap();
+        let db_id = open_database(&mut context, 0x1000, 1, 1).await.unwrap();
         assert!(db_id > 0);
         assert_eq!(stream_read(&mut context, db_id, 0x2000, 9).await.unwrap(), 9);
 
         let mut data = [0; 9];
         context.read_bytes(0x2000, &mut data).unwrap();
         assert_eq!(&data, b"seed-data");
+    }
+
+    /// KTF's stream database counts as one record once it holds anything, and
+    /// the count agrees with the record list a title would read next.
+    #[futures_test::test]
+    async fn ktf_counts_the_records_it_would_list() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"save\0").unwrap();
+
+        let db_id = open_database(&mut context, 0x1000, 4, 1).await.unwrap();
+        assert!(db_id > 0);
+        assert_eq!(get_number_of_records_ktf(&mut context, db_id).await.unwrap(), 0);
+
+        context.write_bytes(0x2000, b"12345678").unwrap();
+        assert_eq!(stream_write(&mut context, db_id, 0x2000, 8).await.unwrap(), 8);
+
+        assert_eq!(get_number_of_records_ktf(&mut context, db_id).await.unwrap(), 1);
+        assert_eq!(list_record(&mut context, db_id, 0x3000, 64).await.unwrap(), 1);
+    }
+
+    /// The record size is how many bytes the stream holds, and it grows with
+    /// what is written.
+    #[futures_test::test]
+    async fn ktf_reports_the_size_of_the_stream() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"save\0").unwrap();
+
+        let db_id = open_database(&mut context, 0x1000, 4, 1).await.unwrap();
+        assert_eq!(get_record_size_ktf(&mut context, db_id).await.unwrap(), 0);
+
+        context.write_bytes(0x2000, b"12345678").unwrap();
+        stream_write(&mut context, db_id, 0x2000, 8).await.unwrap();
+
+        assert_eq!(get_record_size_ktf(&mut context, db_id).await.unwrap(), 8);
+    }
+
+    /// A handle that is not one is refused rather than read as a struct.
+    #[futures_test::test]
+    async fn ktf_refuses_a_word_that_is_not_a_handle() {
+        let mut context = database_test_context();
+
+        assert_eq!(get_number_of_records_ktf(&mut context, 0x2000).await.unwrap(), -25);
+    }
+
+    /// Slot 11 called for its filesystem meaning - no handle, whatever was left
+    /// in r0 - answers the space left rather than refusing. 셔터 영혼의울림 reads
+    /// what comes back as the room it has before it opens anything.
+    #[futures_test::test]
+    async fn ktf_record_size_without_a_handle_is_the_space_left() {
+        let mut context = database_test_context();
+
+        let space = get_record_size_ktf(&mut context, 0x2000).await.unwrap();
+
+        assert_eq!(space, available_storage_ktf(&mut context).await.unwrap());
+        assert!(space > 0, "a title reads this as the room it has");
+    }
+
+    /// A KTF open reads a mode, and every mode but 1 brings a database that is
+    /// not there into being.
+    ///
+    /// 던파 귀검사편 leaves its options screen having opened and closed one and
+    /// written nothing, and expects to find it afterwards.
+    #[futures_test::test]
+    async fn ktf_open_to_write_creates_a_database_that_is_not_there() {
+        for mode in [2i32, 4, 8] {
+            let mut context = database_test_context();
+            context.write_bytes(0x1000, b"option.txt\0").unwrap();
+
+            // Nothing there yet, and the title asks for it.
+            assert_eq!(exists_database_ktf(&mut context, 0x1000, 1, 0).await.unwrap(), -12);
+
+            let db_id = open_database(&mut context, 0x1000, mode, 1).await.unwrap();
+            assert!(db_id > 0, "mode {mode} has to open");
+            assert_eq!(close_database(&mut context, db_id).await.unwrap(), 0);
+
+            assert_eq!(
+                exists_database_ktf(&mut context, 0x1000, 1, 0).await.unwrap(),
+                0,
+                "mode {mode} has to leave the database behind"
+            );
+        }
+    }
+
+    /// Mode 1 opens a database that is already there and answers `M_E_NOENT`
+    /// for one that is not, which is what an existence test written as an open
+    /// depends on.
+    ///
+    /// 던전앤파이터 격투가 has one: the wrapper at `0x107b98` opens with mode 1,
+    /// closes the handle if it got one, and answers 1 or -1. Creating the
+    /// database for that probe makes it answer yes for a file nothing ever
+    /// wrote, and the title then loads its options out of an empty database and
+    /// draws a white screen for the rest of the run.
+    #[futures_test::test]
+    async fn ktf_open_existing_refuses_a_database_that_is_not_there() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"option.txt\0").unwrap();
+
+        assert_eq!(open_database(&mut context, 0x1000, MODE_OPEN_EXISTING, 1).await.unwrap(), -12);
+
+        // And the probe leaves nothing behind for the next caller to find.
+        assert_eq!(exists_database_ktf(&mut context, 0x1000, 1, 0).await.unwrap(), -12);
+
+        // One a write mode made is there for mode 1 to open.
+        let created = open_database(&mut context, 0x1000, 8, 1).await.unwrap();
+        assert_eq!(close_database(&mut context, created).await.unwrap(), 0);
+        assert!(open_database(&mut context, 0x1000, MODE_OPEN_EXISTING, 1).await.unwrap() > 0);
+    }
+
+    /// Opening a database does not empty it, whatever record size it is opened
+    /// with. A four byte record used to take the old `mode == 4` branch, which
+    /// deleted record 1 before handing back the handle.
+    #[futures_test::test]
+    async fn ktf_open_keeps_what_the_database_already_holds() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"save.txt\0").unwrap();
+
+        let db_id = open_database(&mut context, 0x1000, 4, 1).await.unwrap();
+        context.write_bytes(0x2000, b"saved").unwrap();
+        assert_eq!(stream_write(&mut context, db_id, 0x2000, 5).await.unwrap(), 5);
+        assert_eq!(close_database(&mut context, db_id).await.unwrap(), 0);
+
+        let reopened = open_database(&mut context, 0x1000, 4, 1).await.unwrap();
+        assert_eq!(stream_read(&mut context, reopened, 0x3000, 5).await.unwrap(), 5);
+
+        let mut read_back = [0u8; 5];
+        context.read_bytes(0x3000, &mut read_back).unwrap();
+        assert_eq!(&read_back, b"saved");
+    }
+
+    /// The third argument is a type, not a create flag: it is a constant 1 in
+    /// both of 격투가's wrappers, and what decides whether a database may be
+    /// made is the mode beside it.
+    #[futures_test::test]
+    async fn ktf_open_takes_the_create_decision_from_the_mode_not_the_type() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"save.txt\0").unwrap();
+
+        let db_id = open_database(&mut context, 0x1000, 8, 0).await.unwrap();
+        assert!(db_id > 0);
+        assert_eq!(close_database(&mut context, db_id).await.unwrap(), 0);
+        assert_eq!(exists_database_ktf(&mut context, 0x1000, 1, 0).await.unwrap(), 0);
+    }
+
+    /// The access mode answers both shapes, and both answer the same thing:
+    /// KTF's `MC_dbOpenDataBase` carries no access argument, so a handle says
+    /// what a name that exists says.
+    #[futures_test::test]
+    async fn ktf_access_mode_answers_a_handle_and_a_name() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"save\0").unwrap();
+
+        let db_id = open_database(&mut context, 0x1000, 4, 1).await.unwrap();
+        assert_eq!(get_access_mode_ktf(&mut context, db_id as u32).await.unwrap(), 1);
+
+        // The same name, now that the database exists, and one that does not.
+        assert_eq!(get_access_mode_ktf(&mut context, 0x1000).await.unwrap(), 1);
+
+        context.write_bytes(0x1100, b"nothing\0").unwrap();
+        assert_eq!(get_access_mode_ktf(&mut context, 0x1100).await.unwrap(), -12);
+
+        assert_eq!(get_access_mode_ktf(&mut context, 0).await.unwrap(), -9);
+    }
+
+    /// Slot 5 answers about a store the archive shipped, which is the same
+    /// answer `MC_dbExists` and `MC_dbOpenDataBase` give about it.
+    ///
+    /// 드래곤로드 asks this about six of its data files before it decides
+    /// whether they have to be fetched over the air. Told they were missing it
+    /// offered the download every launch - and quits after one, asking to be
+    /// restarted - so an archive carrying that very data never reached the
+    /// title screen.
+    #[futures_test::test]
+    async fn ktf_stat_by_name_sees_a_store_the_archive_shipped() {
+        let mut context = database_test_context().with_resource("dragon.map", &[0u8; 4096]);
+        context.write_bytes(0x1000, b"dragon.map\0").unwrap();
+
+        assert_eq!(stat_by_name_ktf(&mut context, 0x1000, 0x3000, 1, 0).await.unwrap(), 0);
+        assert_eq!(read_generic::<u32, _>(&context, 0x3008).unwrap(), 4096, "its size");
+
+        // A name neither stored nor shipped is still a miss.
+        context.write_bytes(0x1100, b"nothing\0").unwrap();
+        assert_eq!(stat_by_name_ktf(&mut context, 0x1100, 0x3000, 1, 0).await.unwrap(), -22);
+    }
+
+    /// Mode 1 seeks from where the cursor already is, the way `SEEK_CUR` does.
+    ///
+    /// On a handle nothing has read from yet the two are the same place, which
+    /// is why every other title got away with it: 45 of 드래곤아이즈2's own 46
+    /// seeks are the only one that handle ever makes. The 46th is not. It reads
+    /// a four-byte offset out of `bodyImage.dat`'s table and then seeks by it,
+    /// and taken as absolute that lands three bytes before the resource rather
+    /// than at it - close enough to read a length out of the previous one and
+    /// hand `MC_grpCreateImage` 49194 bytes that are not an image.
+    #[futures_test::test]
+    async fn a_ktf_seek_of_mode_one_is_relative_to_the_cursor() {
+        // A stand-in for the container: a four-byte offset at 88, and the
+        // resource that offset names.
+        let mut shipped = vec![0u8; 512];
+        shipped[88..92].copy_from_slice(&200u32.to_le_bytes());
+        shipped[292..295].copy_from_slice(b"HIT");
+
+        let mut context = database_test_context().with_resource("bodyImage.dat", &shipped);
+        context.write_bytes(0x1000, b"bodyImage.dat\0").unwrap();
+        let db_id = open_database(&mut context, 0x1000, 4, 1).await.unwrap();
+
+        // Seek to the table entry and read it, exactly as the title does.
+        assert_eq!(select_record_ktf(&mut context, db_id, 88, 1, 0).await.unwrap(), 88);
+        stream_read(&mut context, db_id, 0x2000, 4).await.unwrap();
+        assert_eq!(read_generic::<u32, _>(&context, 0x2000).unwrap(), 200);
+
+        // Seeking by what it read carries on from the cursor, which is now 92,
+        // so the resource is at 292 rather than at 200.
+        assert_eq!(select_record_ktf(&mut context, db_id, 200, 1, 0).await.unwrap(), 292);
+        stream_read(&mut context, db_id, 0x2000, 3).await.unwrap();
+
+        let mut landed = [0u8; 3];
+        context.read_bytes(0x2000, &mut landed).unwrap();
+        assert_eq!(&landed, b"HIT", "a mode 1 seek is relative to the cursor");
+    }
+
+    /// A seek answers where it left the cursor, whichever mode it was.
+    ///
+    /// 리얼싸커 2009 needs both halves. It walks the archive it installed by
+    /// reading a window and then seeking to `tell() + (entry - window)`:
+    /// answered zero the tell makes it ask for the delta alone, which for a
+    /// window it has already read past is a position before the first byte, and
+    /// the walk never leaves the first entry. And it writes each entry's offset
+    /// down from what the seek onto that entry answered, so answered zero every
+    /// entry it indexes starts at byte zero.
+    #[futures_test::test]
+    async fn a_ktf_seek_answers_where_it_landed() {
+        let mut shipped = vec![0u8; 512];
+        shipped[42..45].copy_from_slice(b"HIT");
+
+        let mut context = database_test_context().with_resource("lo.dsk", &shipped);
+        context.write_bytes(0x1000, b"lo.dsk\0").unwrap();
+        let db_id = open_database(&mut context, 0x1000, 4, 1).await.unwrap();
+
+        // The window the title reads first, which leaves the cursor at 256.
+        stream_read(&mut context, db_id, 0x2000, 256).await.unwrap();
+
+        // The tell it makes before working out where the entry began.
+        let here = select_record_ktf(&mut context, db_id, 0, 1, 0).await.unwrap();
+        assert_eq!(here, 256, "a mode 1 seek answers the cursor it left");
+
+        // And the seek it makes from what that told it, which answers the entry
+        // it landed on - the offset the title writes down for that entry.
+        let entry = select_record_ktf(&mut context, db_id, here + (42 - 256), 0, 0).await.unwrap();
+        assert_eq!(entry, 42, "a seek answers the position it left the cursor at");
+
+        stream_read(&mut context, db_id, 0x2000, 3).await.unwrap();
+
+        let mut landed = [0u8; 3];
+        context.read_bytes(0x2000, &mut landed).unwrap();
+        assert_eq!(&landed, b"HIT", "the seek that tell fed lands on the entry");
+    }
+
+    /// Slot 15 asks the size the way slot 11 does.
+    ///
+    /// 리얼싸커 2009 asks here before it will read a save back, and answered
+    /// zero it closes the record unread. The mapping is what carries that, so
+    /// the test is on the table rather than on this function.
+    #[futures_test::test]
+    async fn the_size_of_a_record_is_what_a_handle_holds() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"record/game_sav_1.sav\0").unwrap();
+
+        let db_id = open_database(&mut context, 0x1000, 8, 1).await.unwrap();
+        context.write_bytes(0x2000, b"a saved game").unwrap();
+        stream_write(&mut context, db_id, 0x2000, 12).await.unwrap();
+
+        // Where the cursor is does not change how much is there - the title
+        // seeks to the front before it asks.
+        select_record_ktf(&mut context, db_id, 0, 0, 0).await.unwrap();
+        assert_eq!(get_record_size_ktf(&mut context, db_id).await.unwrap(), 12);
+    }
+
+    /// A store's name is the title's to choose, not a length this runtime gets
+    /// to pick: the field that holds it is ours, and the guest only ever
+    /// carries the pointer.
+    ///
+    /// 리얼싸커 2009 keeps a save in `recordStore/rms_KOR_RMS_DATA.sav`, which
+    /// is thirty-two characters. A thirty-one byte field refused it by one, so
+    /// that save could not be opened at all.
+    #[futures_test::test]
+    async fn a_long_store_name_is_still_a_store() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"recordStore/rms_KOR_RMS_DATA.sav\0").unwrap();
+
+        let db_id = open_database(&mut context, 0x1000, 8, 1).await.unwrap();
+        assert!(db_id > 0, "a thirty-two character name opens");
+
+        context.write_bytes(0x2000, b"save").unwrap();
+        assert_eq!(stream_write(&mut context, db_id, 0x2000, 4).await.unwrap(), 4);
+        close_database(&mut context, db_id).await.unwrap();
+
+        // And the name it was stored under is the one it is found by.
+        assert_eq!(stat_by_name_ktf(&mut context, 0x1000, 0, 1, 0).await.unwrap(), 0);
+    }
+
+    /// This slot answers for the handset's filesystem as much as for its
+    /// database - the two share every slot in this table.
+    ///
+    /// 리얼싸커 2009 makes `/shared` the moment its own module starts and asks
+    /// for `shared` on the next line. Told it was not there, it called
+    /// `MC_knlExit` without a word, which on a handset is the game closing the
+    /// instant it is opened.
+    #[futures_test::test]
+    async fn a_directory_the_title_made_is_found_by_name() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"shared\0").unwrap();
+
+        assert_eq!(stat_by_name_ktf(&mut context, 0x1000, 0, 1, 0).await.unwrap(), -22);
+
+        let filesystem = crate::context::WIPICContext::system(&mut context).filesystem().clone();
+        filesystem.mkdir("/shared").await.expect("mkdir");
+
+        assert_eq!(
+            stat_by_name_ktf(&mut context, 0x1000, 0, 1, 0).await.unwrap(),
+            0,
+            "a directory the title made is a name this slot knows"
+        );
+    }
+
+    /// Slot 12 answers the storage left, in bytes, and the archive's own
+    /// packaged data is not storage the player consumed. 이타루스전기 compares
+    /// what it reads here with the 980009 bytes it is about to download, and
+    /// took the error the old list-shaped answer returned as "no room".
+    #[futures_test::test]
+    async fn ktf_answers_the_storage_it_has_left() {
+        let mut context = database_test_context();
+
+        let empty = available_storage_ktf(&mut context).await.unwrap();
+        assert_eq!(empty as usize, super::KTF_STORAGE_LIMIT);
+
+        context.write_bytes(0x1000, b"save\0").unwrap();
+        let db_id = open_database(&mut context, 0x1000, 4, 1).await.unwrap();
+        context.write_bytes(0x2000, &[7u8; 8]).unwrap();
+        stream_write(&mut context, db_id, 0x2000, 8).await.unwrap();
+
+        let after_a_save = available_storage_ktf(&mut context).await.unwrap();
+        assert_eq!(after_a_save, empty - 8, "only what the player wrote is spent");
+
+        // A store the archive shipped is the program's own data, not the
+        // player's, so it spends nothing.
+        let mut packaged = database_test_context().with_resource("maps", &[0u8; 4096]);
+        packaged.write_bytes(0x1000, b"maps\0").unwrap();
+        let maps = open_database(&mut packaged, 0x1000, 4, 1).await.unwrap();
+        assert!(maps > 0);
+
+        assert_eq!(
+            available_storage_ktf(&mut packaged).await.unwrap() as usize,
+            super::KTF_STORAGE_LIMIT,
+            "packaged bytes are not a full disk"
+        );
+    }
+
+    /// The last argument counts ids. A buffer that cannot hold them all is
+    /// refused and left alone rather than filled past its end - which is what
+    /// this did, whatever number it was handed.
+    #[futures_test::test]
+    async fn listing_records_counts_ids_and_refuses_a_short_buffer() {
+        let mut context = database_test_context();
+        let db_id = open_test_database(&mut context).await;
+        assert!(db_id > 0);
+
+        let pid = crate::context::WIPICContext::system(&mut context).pid().to_owned();
+        {
+            let mut db = crate::context::WIPICContext::system(&mut context)
+                .platform()
+                .database_repository()
+                .open("records", &pid)
+                .await;
+            db.add(b"one").await;
+            db.add(b"two").await;
+            db.add(b"three").await;
+        }
+
+        // Three ids do not fit in two, and nothing is written for the refusal.
+        context.write_bytes(0x3000, &[0xff; 16]).unwrap();
+        assert_eq!(list_record(&mut context, db_id, 0x3000, 2).await.unwrap(), -18);
+
+        let mut untouched = [0u8; 16];
+        context.read_bytes(0x3000, &mut untouched).unwrap();
+        assert_eq!(untouched, [0xff; 16], "a refused list writes nothing");
+
+        // Three fit in three, four bytes each, and the word after them is not
+        // touched either.
+        assert_eq!(list_record(&mut context, db_id, 0x3000, 3).await.unwrap(), 3);
+
+        let mut written = [0u8; 16];
+        context.read_bytes(0x3000, &mut written).unwrap();
+        let mut ids = [
+            u32::from_le_bytes(written[0..4].try_into().unwrap()),
+            u32::from_le_bytes(written[4..8].try_into().unwrap()),
+            u32::from_le_bytes(written[8..12].try_into().unwrap()),
+        ];
+        // Sorted before comparing: what this call fixes is how many ids go out
+        // and where, and nothing here establishes what order native listed them
+        // in.
+        ids.sort_unstable();
+        assert_eq!(ids, [1, 2, 3]);
+        assert_eq!(&written[12..16], &[0xff; 4]);
+
+        // A null buffer and a count of nothing are parameter errors.
+        assert_eq!(list_record(&mut context, db_id, 0, 3).await.unwrap(), -22);
+        assert_eq!(list_record(&mut context, db_id, 0x3000, 0).await.unwrap(), -22);
     }
 
     fn database_test_context() -> TestContext {
@@ -702,6 +3468,34 @@ mod tests {
 
     async fn open_test_database(context: &mut TestContext) -> i32 {
         context.write_bytes(0x1000, b"records\0").unwrap();
-        open_database(context, 0x1000, 0, 0).await.unwrap()
+        open_database(context, 0x1000, 0, 1).await.unwrap()
+    }
+
+    /// `MC_dbExists` answers the way a WIPI call answers - zero for yes, a
+    /// negative error for no - not the boolean its name suggests. It used to
+    /// answer 1 and 0, so a record that was not there read as one that was, and
+    /// a title took its load path over state it had never saved: 던파거너편
+    /// read `option.txt` and `coupon.txt` that way and painted an empty card
+    /// instead of its title screen.
+    #[futures_test::test]
+    async fn a_record_that_is_not_there_is_an_error_not_a_zero() {
+        let mut context = database_test_context();
+
+        context.write_bytes(0x3000, b"absent.txt\0").unwrap();
+        let absent: i32 = exists_database_ktf(&mut context, 0x3000, 1, 0).await.unwrap();
+        assert_eq!(absent, -12, "M_E_NOENT, the code a title takes its fresh-init path on");
+
+        // The same name once something has been written under it.
+        let pid = crate::context::WIPICContext::system(&mut context).pid().to_owned();
+        {
+            let mut db = crate::context::WIPICContext::system(&mut context)
+                .platform()
+                .database_repository()
+                .open("absent.txt", &pid)
+                .await;
+            db.add(b"saved").await;
+        }
+        let present: i32 = exists_database_ktf(&mut context, 0x3000, 1, 0).await.unwrap();
+        assert_eq!(present, 0, "zero is yes");
     }
 }

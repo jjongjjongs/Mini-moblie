@@ -5,18 +5,20 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::mem::size_of;
+use core::mem::{offset_of, size_of};
 
 use java_runtime::classes::java::util::Vector;
 use jvm::{ClassInstanceRef, Jvm, runtime::JavaLangString};
-use wipi_types::ktf::java::WIPIJBInterface;
+use wipi_types::ktf::java::{JavaClass as RawJavaClass, WIPIJBInterface};
 
-use wie_core_arm::{Allocator, ArmCore, EmulatedFunction, ResultWriter, SvcId};
+use wie_backend::YieldFuture;
+use wie_core_arm::{Allocator, ArmCore, EmulatedFunction, ResultWriter, RunFunctionResult, SvcId};
 use wie_jvm_support::JvmSupport;
 use wie_util::{ByteRead, Result, WieError, read_generic, read_null_terminated_string_bytes, write_generic};
 
 use crate::runtime::java::jvm_support::{
-    JavaClassDefinition, JavaClassInstance, JavaMethod, JavaMethodResult, JavaVtable, KtfJvmSupport, KtfJvmWord,
+    JavaClassDefinition, JavaClassInstance, JavaMethod, JavaMethodResult, JavaVtable, KtfJvmSupport, KtfJvmWord, NATIVE_RETURN_TYPE_OFFSET,
+    NATIVE_RETURN_VALUE_OFFSET,
 };
 use crate::runtime::{SVC_CATEGORY_JAVA_INTERFACE, svc_ids::JavaSvcId};
 
@@ -35,8 +37,8 @@ async fn handle_java_interface_svc(core: &mut ArmCore, jvm: &mut Jvm, id: SvcId)
         JavaSvcId::GetField => EmulatedFunction::call(&get_field, core, &mut ()).await?.write(core, lr),
         JavaSvcId::JbUnk4 => EmulatedFunction::call(&jb_unk4, core, &mut ()).await?.write(core, lr),
         JavaSvcId::JbUnk5 => EmulatedFunction::call(&jb_unk5, core, &mut ()).await?.write(core, lr),
-        JavaSvcId::JbUnk7 => EmulatedFunction::call(&jb_unk7, core, &mut ()).await?.write(core, lr),
-        JavaSvcId::JbUnk8 => EmulatedFunction::call(&jb_unk8, core, &mut ()).await?.write(core, lr),
+        JavaSvcId::JbUnk7 => EmulatedFunction::call(&jb_monitor_enter, core, jvm).await?.write(core, lr),
+        JavaSvcId::JbUnk8 => EmulatedFunction::call(&jb_monitor_exit, core, jvm).await?.write(core, lr),
         JavaSvcId::RegisterClass => EmulatedFunction::call(&register_class, core, jvm).await?.write(core, lr),
         JavaSvcId::RegisterJavaString => EmulatedFunction::call(&register_java_string, core, jvm).await?.write(core, lr),
         JavaSvcId::CallNative => EmulatedFunction::call(&call_native, core, &mut ()).await?.write(core, lr),
@@ -99,28 +101,89 @@ pub async fn java_throw(core: &mut ArmCore, jvm: &mut Jvm, ptr_error: KtfJvmWord
     JavaMethod::handle_exception(core, jvm, exception).await
 }
 
-fn map_jump_result(result: core::result::Result<u32, WieError>) -> Result<JavaMethodResult> {
+/// Throws a throwable the title built itself.
+///
+/// The runtime hands AOT code two ways to throw, and they differ in what they
+/// are given. `java_throw` above takes the *name* of a class and makes the
+/// instance itself, which is how the runtime's own checks raise - a null
+/// dereference, an allocation that failed. This one takes an instance that is
+/// already on the heap, which is what a `throw` written in the title compiles
+/// to: allocate, run the constructor, throw the object.
+///
+/// Only the first had a function behind it, and the word for this one was left
+/// zero. 주타이쿤2 reads its save on the way up, has no record to read on a
+/// first run, and its `catch` raises the failure as an object of its own - so
+/// the game's thread jumped to that zero and died before a frame was drawn,
+/// with `Fatal error: jump native address is null` the only thing said about
+/// it. Nothing drained the event queue after that: the queue grew an entry per
+/// key press, the screen stayed black, and the emulator carried on as if the
+/// title were merely quiet.
+pub async fn java_throw_instance(core: &mut ArmCore, jvm: &mut Jvm, ptr_exception: KtfJvmWord, a1: u32) -> Result<JavaMethodResult> {
+    tracing::warn!("java_throw_instance({ptr_exception:#x}, {a1})");
+
+    // `throw null` is a null dereference, and the class the runtime names for
+    // one is the class it names everywhere else.
+    if ptr_exception == 0 {
+        return java_throw_class(core, jvm, "java/lang/NullPointerException").await;
+    }
+
+    let exception = JavaClassInstance::from_raw(ptr_exception, core);
+
+    JavaMethod::handle_exception(core, jvm, Box::new(exception)).await
+}
+
+/// Raises a fresh instance of `name`, the way `java_throw` does for a name the
+/// guest supplies.
+async fn java_throw_class(core: &mut ArmCore, jvm: &mut Jvm, name: &str) -> Result<JavaMethodResult> {
+    let exception = match jvm.new_class(name, "()V", ()).await {
+        Ok(x) => x,
+        Err(x) => return Err(JvmSupport::to_wie_err(jvm, x).await),
+    };
+
+    JavaMethod::handle_exception(core, jvm, exception).await
+}
+
+/// Turns a jump's result into what the supervisor-call return path wants.
+///
+/// `entry_sp` is where the guest call was entered. A catch block whose frame was
+/// saved above that belongs to a caller this call has not returned to, so the
+/// unwind travels on rather than being resumed here - the next call out asks the
+/// same question of its own entry, and the outermost guest call owns the whole
+/// stack.
+pub(crate) fn map_jump_result(entry_sp: u32, result: core::result::Result<u32, WieError>) -> Result<JavaMethodResult> {
     match result {
         Ok(result) => Ok(JavaMethodResult::new(vec![result], None)),
         Err(WieError::JavaExceptionUnwind {
             context_base,
             target,
             next_pc,
-        }) => Ok(JavaMethodResult::new(vec![context_base, target], Some(next_pc))),
+            frame_sp,
+        }) => {
+            if frame_sp > entry_sp {
+                return Err(WieError::JavaExceptionUnwind {
+                    context_base,
+                    target,
+                    next_pc,
+                    frame_sp,
+                });
+            }
+
+            Ok(JavaMethodResult::new(vec![context_base, target], Some(next_pc)))
+        }
         Err(err) => Err(err),
     }
 }
 
-async fn get_java_method(core: &mut ArmCore, _: &mut (), ptr_class: u32, ptr_fullname: u32) -> Result<u32> {
+pub async fn get_java_method(core: &mut ArmCore, _: &mut (), ptr_class: u32, ptr_fullname: u32) -> Result<u32> {
     let fullname = KtfJvmSupport::read_name(core, ptr_fullname)?;
 
     tracing::debug!("get_java_method({ptr_class:#x}, {fullname})");
 
-    // ptr_class might be vtable
+    // ptr_class can also be a JVM-context-relative vtable reference.
     let first_item: u32 = read_generic(core, ptr_class)?;
     let method = if first_item != ptr_class + 4 {
-        // ptr_class is pointer to vtable
-        let vtable = JavaVtable::from_raw(core, first_item);
+        let ptr_vtable: u32 = read_generic(core, ptr_class + offset_of!(RawJavaClass, ptr_vtable) as u32)?;
+        let vtable = JavaVtable::from_raw(core, ptr_vtable);
         let method = vtable.find_method(&fullname.name, &fullname.descriptor)?;
 
         if method.is_none() {
@@ -143,6 +206,11 @@ async fn get_java_method(core: &mut ArmCore, _: &mut (), ptr_class: u32, ptr_ful
     Ok(method.ptr_raw)
 }
 
+// The `#[must_use]` the lint sees is the one `async_recursion` puts on the
+// boxed future it returns, not one written here, and there is no version of
+// that crate without it - `async_trait`'s own was fixed upstream, this one's
+// was not. See `clippy::double_must_use`.
+#[allow(clippy::double_must_use)]
 #[async_recursion::async_recursion]
 async fn find_java_method(class: &JavaClassDefinition, name: &str, descriptor: &str) -> Result<Option<JavaMethod>> {
     let method = class.method(name, descriptor, false)?;
@@ -162,13 +230,22 @@ async fn find_java_method(class: &JavaClassDefinition, name: &str, descriptor: &
 }
 
 async fn java_jump_1(core: &mut ArmCore, _: &mut (), arg1: u32, address: u32) -> Result<JavaMethodResult> {
-    tracing::trace!("java_jump_1({arg1:#x}, {address:#x})");
-
     if address == 0 {
         return Err(WieError::FatalError("jump native address is null".to_string()));
     }
 
-    map_jump_result(core.run_function::<u32>(address, &[arg1, 0, 0]).await)
+    // The trampolines are the last place the guest's own return address is
+    // still in LR: by the time the entry point they jump to runs, `run_function`
+    // has replaced it with its sentinel. It is the only thing that says where
+    // in the title a call came from - which for `java_throw` is which
+    // dereference found a null - so it goes in the line that was already being
+    // written here.
+    let (caller_pc, caller_lr) = core.read_pc_lr().unwrap_or((0, 0));
+    tracing::trace!("java_jump_1({arg1:#x}, {address:#x}) from pc={caller_pc:#x}, lr={caller_lr:#x}");
+
+    let entry_sp = core.save_context().sp;
+
+    map_jump_result(entry_sp, core.run_function::<u32>(address, &[arg1, 0, 0]).await)
 }
 
 async fn register_class(core: &mut ArmCore, jvm: &mut Jvm, ptr_class: u32) -> Result<()> {
@@ -176,21 +253,19 @@ async fn register_class(core: &mut ArmCore, jvm: &mut Jvm, ptr_class: u32) -> Re
 
     let class: JavaClassDefinition = KtfJvmSupport::class_from_raw(core, ptr_class);
     let class_name = class.name()?;
-    if jvm.has_class(&class_name) {
-        return Ok(());
+    if !jvm.has_class(&class_name) {
+        let ktf_class_loader = jvm
+            .get_static_field("net/wie/KtfClassLoader", "instance", "Lnet/wie/KtfClassLoader;")
+            .await
+            .unwrap();
+
+        let result = jvm.register_class(Box::new(class), Some(ktf_class_loader)).await;
+        if let Err(x) = result {
+            return Err(JvmSupport::to_wie_err(jvm, x).await);
+        }
     }
 
-    let ktf_class_loader = jvm
-        .get_static_field("net/wie/KtfClassLoader", "instance", "Lnet/wie/KtfClassLoader;")
-        .await
-        .unwrap();
-
-    let result = jvm.register_class(Box::new(class), Some(ktf_class_loader)).await;
-    if let Err(x) = result {
-        return Err(JvmSupport::to_wie_err(jvm, x).await);
-    }
-
-    // TODO we shouldn't resolve again.
+    // KTF AOT also calls this entry point to initialize classes before static field access.
     let class = jvm.resolve_class(&class_name).await.unwrap();
     jvm.ensure_initialized(&class).await.unwrap();
 
@@ -232,7 +307,7 @@ async fn register_java_string(core: &mut ArmCore, jvm: &mut Jvm, offset: u32, le
     Ok(KtfJvmSupport::class_instance_raw(&instance) as _)
 }
 
-async fn get_field(core: &mut ArmCore, _: &mut (), ptr_class: u32, field_name: u32) -> Result<u32> {
+pub async fn get_field(core: &mut ArmCore, _: &mut (), ptr_class: u32, field_name: u32) -> Result<u32> {
     tracing::debug!("get_field({ptr_class:#x}, {field_name:#x})");
 
     let field_name = KtfJvmSupport::read_name(core, field_name)?;
@@ -264,14 +339,68 @@ async fn jb_unk5(_: &mut ArmCore, _: &mut (), a0: u32, a1: u32) -> Result<u32> {
     Ok(0)
 }
 
-async fn jb_unk7(_: &mut ArmCore, _: &mut (), a0: u32) -> Result<u32> {
-    tracing::warn!("stub jb_unk7({a0:#x})");
+/// The two halves of `synchronized`, as the KTF compiler emits them.
+///
+/// A KTF title is compiled ahead of time to ARM, so the `monitorenter` and
+/// `monitorexit` bytecodes come back out as this pair of one-argument calls
+/// around the region they guard - including the one an exception handler makes
+/// on the way out of a block it is unwinding.
+///
+/// Both were stubs that did nothing, so the JVM never recorded that anything
+/// owned a monitor. The first title to `wait` inside a `synchronized` block was
+/// then told it did not own the monitor it had just entered: 드래곤하트 dies on
+/// its first frame that way, and 레나크사가 catches the same exception and
+/// retries forever.
+///
+/// The monitor is keyed by the instance's address, which is what the JVM uses
+/// for identity, so a second call about the same object finds the same monitor.
+pub(crate) async fn jb_monitor_enter(core: &mut ArmCore, jvm: &mut Jvm, ptr_instance: u32) -> Result<u32> {
+    tracing::trace!("jb_monitor_enter({ptr_instance:#x})");
+
+    // Entering on null is the title's own bug and the JVM has nothing to lock;
+    // say so rather than taking the emulator down over it.
+    if ptr_instance == 0 {
+        tracing::warn!("monitorenter on null");
+
+        return Ok(0);
+    }
+
+    let instance: Box<dyn jvm::ClassInstance> = Box::new(JavaClassInstance::from_raw(ptr_instance, core));
+    if let Err(x) = jvm.monitor_enter(&instance).await {
+        return Err(JvmSupport::to_wie_err(jvm, x).await);
+    }
 
     Ok(0)
 }
 
-async fn jb_unk8(_: &mut ArmCore, _: &mut (), a0: u32) -> Result<u32> {
-    tracing::warn!("stub jb_unk8({a0:#x})");
+pub(crate) async fn jb_monitor_exit(core: &mut ArmCore, jvm: &mut Jvm, ptr_instance: u32) -> Result<u32> {
+    tracing::trace!("jb_monitor_exit({ptr_instance:#x})");
+
+    if ptr_instance == 0 {
+        tracing::warn!("monitorexit on null");
+
+        return Ok(0);
+    }
+
+    let instance: Box<dyn jvm::ClassInstance> = Box::new(JavaClassInstance::from_raw(ptr_instance, core));
+    if let Err(x) = jvm.monitor_exit(&instance).await {
+        return Err(JvmSupport::to_wie_err(jvm, x).await);
+    }
+
+    // Give whoever was waiting on this monitor a turn before carrying on.
+    //
+    // Releasing a monitor wakes a waiter, but waking only marks its task
+    // runnable - on a cooperative executor it cannot actually run until the
+    // thread that released yields. 지크's game loop holds its lock across a
+    // `Thread.sleep(20)` and retakes it the instant it lets go, with nothing
+    // between the release and the next acquire that would yield, so the paint
+    // thread was woken and then beaten to the lock every single time and the
+    // screen stopped updating.
+    //
+    // A handset has two threads and a preemptive scheduler, so releasing a
+    // lock is a point where the waiting thread gets to run. This is that
+    // point.
+    YieldFuture::new().await;
 
     Ok(0)
 }
@@ -284,40 +413,150 @@ async fn call_native(core: &mut ArmCore, _: &mut (), address: u32, ptr_data: u32
     }
 
     // TODO correctly figure out parameter
-    let result = match core.run_function::<u32>(address, &[ptr_data, ptr_data]).await {
+    let entry_sp = core.save_context().sp;
+
+    // A native of the title's own answers in the runtime's return slot rather
+    // than in `r0`; clearing the tag first is what makes the read after this
+    // call this call's answer. See below.
+    let slot = KtfJvmSupport::native_return_slot(core)?;
+    let module_native = core.svc_stub_id(address).is_none();
+    if module_native {
+        write_generic(core, slot + NATIVE_RETURN_TYPE_OFFSET, 0u32)?;
+    }
+
+    let result = match core.run_function::<NativeCallResult>(address, &[ptr_data, ptr_data]).await {
         Ok(result) => result,
         Err(WieError::JavaExceptionUnwind {
             context_base,
             target,
             next_pc,
-        }) => return Ok(JavaMethodResult::new(vec![context_base, target], Some(next_pc))),
+            frame_sp,
+        }) => {
+            if frame_sp > entry_sp {
+                return Err(WieError::JavaExceptionUnwind {
+                    context_base,
+                    target,
+                    next_pc,
+                    frame_sp,
+                });
+            }
+
+            return Ok(JavaMethodResult::new(vec![context_base, target], Some(next_pc)));
+        }
         Err(err) => return Err(err),
     };
 
-    write_generic(core, ptr_data, result)?;
-    write_generic(core, ptr_data + 4, 0u32)?;
+    // Only a native this platform implements answers in `r0`. One compiled into
+    // the title's own module leaves its result in the block, and copying `r0`
+    // over it destroys the answer.
+    //
+    // 던전앤파이터 격투가 is where the two come apart. Its `calcClet` is `()I`,
+    // and the body has a single exit reached down a single path, so `r0` there
+    // is always the 11,036 the epilogue loaded two instructions earlier as a
+    // field offset. `GamePlay.run` spends that as a frame period - one round
+    // every eleven seconds, every round, with no state that skips it: the arms
+    // of the `netGetStateClet` switch all branch back into the same sleep.
+    // Leaving the block alone takes 2,000 ticks from 37 frames to 438.
+    //
+    // Skipping the write for *every* native is what this replaced, and it broke
+    // the same title, because `System.currentTimeMillis` reaches here too and
+    // its answer really is in `r0`. `svc_stub_id` is what tells the two apart:
+    // an address in the stub arena stands for a registration of ours, and a
+    // guest address stands for the title's own code.
+    let tag: u32 = if module_native {
+        read_generic(core, slot + NATIVE_RETURN_TYPE_OFFSET)?
+    } else {
+        0
+    };
+
+    if module_native {
+        // A native compiled into the title's own module does not answer in
+        // `r0`. The AOT C runtime linked into it keeps a return slot at the end
+        // of the JVM exception context - a structure this runtime allocates and
+        // hands over in `InitParam1` - and writes a type tag and the value
+        // there. 격투가's `calcClet` is the case that proves it: `r0` holds the
+        // field offset its epilogue happened to load last (11,036), the block
+        // holds the veneer's spill of `r1`-`r3`, and the slot holds 75 - which
+        // is what the frame loop spends as a frame period, fifteen frames a
+        // second. Reading `r0` slept eleven seconds a frame, the block four
+        // hundred milliseconds, and zero ran it flat out.
+        //
+        // The tag is cleared before the call so the value read after it is this
+        // call's and not one a `void` native left standing.
+        let (value, value_high) = if tag != 0 {
+            (read_generic(core, slot + NATIVE_RETURN_VALUE_OFFSET)?, 0)
+        } else {
+            (0, 0)
+        };
+
+        write_generic(core, ptr_data, value)?;
+        write_generic(core, ptr_data + 4, value_high)?;
+
+        return Ok(JavaMethodResult::new(vec![ptr_data], None));
+    }
+
+    write_generic(core, ptr_data, result.value)?;
+
+    // The container is eight bytes because a Java answer can be sixty-four bits
+    // wide, and only then is the second word the high half. Every other native
+    // leaves it zero: `r1` after a call that returns one word is whatever the
+    // callee happened to be holding, not part of its answer.
+    //
+    // Writing zero unconditionally truncates a `long` to its low word. That is
+    // not a theoretical loss - `System.currentTimeMillis` read through this
+    // path gives a ten-digit number where a handset gives thirteen.
+    let value_high = if JavaMethod::native_entry_returns_wide(core, address) {
+        result.value_high
+    } else {
+        0
+    };
+    write_generic(core, ptr_data + 4, value_high)?;
 
     Ok(JavaMethodResult::new(vec![ptr_data], None))
 }
 
-async fn java_jump_2(core: &mut ArmCore, _: &mut (), arg1: u32, arg2: u32, address: u32) -> Result<JavaMethodResult> {
-    tracing::trace!("java_jump_2({arg1:#x}, {arg2:#x}, {address:#x})");
+/// Both words a native call can leave behind. Which of them is part of the
+/// answer is the caller's question; see `call_native`.
+struct NativeCallResult {
+    value: u32,
+    value_high: u32,
+}
 
+impl RunFunctionResult<NativeCallResult> for NativeCallResult {
+    fn get(core: &ArmCore) -> Self {
+        Self {
+            value: core.read_param(0).unwrap(),
+            value_high: core.read_param(1).unwrap(),
+        }
+    }
+}
+
+async fn java_jump_2(core: &mut ArmCore, _: &mut (), arg1: u32, arg2: u32, address: u32) -> Result<JavaMethodResult> {
     if address == 0 {
         return Err(WieError::FatalError("jump native address is null".to_string()));
     }
 
-    map_jump_result(core.run_function::<u32>(address, &[arg1, arg2, 0]).await)
+    // See `java_jump_1`: the caller is still named here and nowhere after.
+    let (caller_pc, caller_lr) = core.read_pc_lr().unwrap_or((0, 0));
+    tracing::trace!("java_jump_2({arg1:#x}, {arg2:#x}, {address:#x}) from pc={caller_pc:#x}, lr={caller_lr:#x}");
+
+    let entry_sp = core.save_context().sp;
+
+    map_jump_result(entry_sp, core.run_function::<u32>(address, &[arg1, arg2, 0]).await)
 }
 
 async fn java_jump_3(core: &mut ArmCore, _: &mut (), arg1: u32, arg2: u32, arg3: u32, address: u32) -> Result<JavaMethodResult> {
-    tracing::trace!("java_jump_3({arg1:#x}, {arg2:#x}, {arg3:#x}, {address:#x})");
-
     if address == 0 {
         return Err(WieError::FatalError("jump native address is null".to_string()));
     }
 
-    map_jump_result(core.run_function::<u32>(address, &[arg1, arg2, arg3]).await)
+    // See `java_jump_1`: the caller is still named here and nowhere after.
+    let (caller_pc, caller_lr) = core.read_pc_lr().unwrap_or((0, 0));
+    tracing::trace!("java_jump_3({arg1:#x}, {arg2:#x}, {arg3:#x}, {address:#x}) from pc={caller_pc:#x}, lr={caller_lr:#x}");
+
+    let entry_sp = core.save_context().sp;
+
+    map_jump_result(entry_sp, core.run_function::<u32>(address, &[arg1, arg2, arg3]).await)
 }
 
 pub async fn java_new(core: &mut ArmCore, jvm: &mut Jvm, ptr_class: u32) -> Result<u32> {
@@ -356,18 +595,62 @@ pub async fn java_array_new(core: &mut ArmCore, jvm: &mut Jvm, element_type: u32
     Ok(raw)
 }
 
-pub async fn java_check_type(core: &mut ArmCore, jvm: &mut Jvm, ptr_class: u32, ptr_instance: u32, unk: u32) -> Result<u32> {
-    tracing::warn!("stub java_check_type({ptr_class:#x}, {ptr_instance:#x}, {unk:#x})");
+/// Whether `ptr_instance` is an instance of `ptr_class` - the answer a
+/// `checkcast` or an `instanceof` in the title's code is decided by.
+///
+/// The call takes two arguments and no more. The title reaches this through
+/// its own `checkcast` helper - 시네마타이쿤's is at `0x153ed8` - which loads
+/// the resolved class into `r0` and the object into `r1` and branches through
+/// the slot; `r2` is whatever the caller last left there. This read a third
+/// argument off it and answered **yes** whenever it was not zero, which is to
+/// say whenever a register happened to be dirty.
+///
+/// What that cost: 시네마타이쿤 asks three hundred times while drawing one
+/// screen, and every one of them arrived with `r2` holding 1. A cast that
+/// should have failed was taken, the title read fields off an object of
+/// another class, and the class word it got out was not a class - the module's
+/// own assignability walk followed it into unmapped memory and the run ended
+/// on "Invalid memory access" inside `com.mc.b.paint`.
+///
+/// Not every `ptr_class` is a class this can read, though, and that is what
+/// the dirty register was accidentally covering up. A KTF class names itself:
+/// its first word is its own address plus four, which is the same test
+/// `get_java_method` uses to tell a class from a vtable reference. Where that
+/// does not hold, what was passed is not something to answer from, and the
+/// answer stays the lenient yes this has always given - reading it as a class
+/// walks off into whatever the address happens to hold, which is how
+/// 광란의 수족관 and 시네마타이쿤 both died on their first screen when this
+/// asked without checking.
+///
+/// An array is answered yes as well. `is_instance` is asked about the element
+/// class rather than the array type, so an array cast to its own type comes
+/// back no; that is a separate question and answering it here would trade one
+/// bad cast for another.
+pub async fn java_check_type(core: &mut ArmCore, jvm: &mut Jvm, ptr_class: u32, ptr_instance: u32) -> Result<u32> {
+    /// What a KTF class holds in its first word: its own address plus four.
+    fn names_itself(core: &ArmCore, ptr_class: u32) -> bool {
+        matches!(read_generic::<u32, _>(core, ptr_class), Ok(first) if first == ptr_class + 4)
+    }
 
     let instance = JavaClassInstance::from_raw(ptr_instance, core);
 
-    // TODO is it correct?
-    if instance.class()?.name()?.starts_with('[') || unk != 0 {
+    if !names_itself(core, ptr_class) {
+        tracing::debug!("java_check_type({ptr_class:#x}, {ptr_instance:#x}) -> 1 (not a class record)");
+
+        return Ok(1);
+    }
+
+    if instance.class()?.name()?.starts_with('[') {
+        tracing::debug!("java_check_type({ptr_class:#x}, {ptr_instance:#x}) -> 1 (array)");
+
         return Ok(1);
     }
 
     let class = JavaClassDefinition::from_raw(ptr_class, core);
-    let result = jvm.is_instance(&instance, &class.name()?);
+    let class_name = class.name()?;
+    let result = jvm.is_instance(&instance, &class_name);
+
+    tracing::debug!("java_check_type({class_name}, {:?}) -> {result}", instance.class().and_then(|x| x.name()));
 
     Ok(if result { 1 } else { 0 })
 }
