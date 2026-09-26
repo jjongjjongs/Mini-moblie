@@ -477,9 +477,7 @@ final class ControlDialogs {
     }
 
     void mainMenu() {
-        ControlStyle controlStyle;
-        String str;
-        String[] strArr = {"키패드 위치·크기 편집", "버튼별 표시·숨김", "버튼별 연사 ON/OFF", "현재 배치 저장", "저장된 배치 불러오기·삭제", "배치 파일로 백업", "배치 파일에서 복원", "현재 배치 초기화", "게임패드 매핑"};
+        final String[] strArr = {"키패드 위치·크기 편집", "버튼별 표시·숨김", "버튼별 연사 ON/OFF", "현재 배치 저장", "저장된 배치 불러오기·삭제", "배치 파일로 백업", "배치 파일에서 복원", "현재 배치 초기화", "게임패드 매핑"};
         LinearLayout column = column();
         column.addView(this.style.hint("설정을 변경하는 동안 게임을 일시정지합니다."));
         ScrollView scrollView = new ScrollView(this.style.context);
@@ -489,62 +487,15 @@ final class ControlDialogs {
         for (int i = 0; i < 9; i++) {
             final int idx = i;
             if (idx == 0) {
-                controlStyle = this.style;
-                str = "키패드";
+                linearLayout = this.style.section(column, "키패드");
             } else if (idx == 3) {
-                controlStyle = this.style;
-                str = "배치 저장·백업·초기화";
+                linearLayout = this.style.section(column, "배치 저장·백업·초기화");
             } else if (idx == 8) {
-                controlStyle = this.style;
-                str = "게임패드";
-            } else {
-                this.style.menuRow(linearLayout, strArr[idx], new View.OnClickListener() { // from class: com.jjongjjongs.minimobile.ControlDialogs.2
-                    @Override // android.view.View.OnClickListener
-                    public void onClick(View view) {
-                        ControlDialogs controlDialogs;
-                        boolean z = false;
-                        switch (idx) {
-                            case 0:
-                                ControlDialogs.this.s.editor.start();
-                                break;
-                            case 1:
-                                ControlDialogs.this.visibility();
-                                break;
-                            case 2:
-                                ControlDialogs.this.rapidSettings();
-                                break;
-                            case 3:
-                                ControlDialogs.this.saveName(false);
-                                break;
-                            case 4:
-                                ControlDialogs.this.loadSlots(false);
-                                break;
-                            case 5:
-                                controlDialogs = ControlDialogs.this;
-                                z = true;
-                                controlDialogs.pickFile(z);
-                                break;
-                            case 6:
-                                controlDialogs = ControlDialogs.this;
-                                controlDialogs.pickFile(z);
-                                break;
-                            case 7:
-                                ControlDialogs.this.resetLayout();
-                                break;
-                            case ControlGrid.DEFAULT_DP /* 8 */:
-                                ControlDialogs.this.padMenu();
-                                break;
-                        }
-                        create.dismiss();
-                    }
-                });
+                linearLayout = this.style.section(column, "게임패드");
             }
-            linearLayout = controlStyle.section(column, str);
-            this.style.menuRow(linearLayout, strArr[idx], new View.OnClickListener() { // from class: com.jjongjjongs.minimobile.ControlDialogs.2
+            this.style.menuRow(linearLayout, strArr[idx], new View.OnClickListener() {
                 @Override // android.view.View.OnClickListener
                 public void onClick(View view) {
-                    ControlDialogs controlDialogs;
-                    boolean z = false;
                     switch (idx) {
                         case 0:
                             ControlDialogs.this.s.editor.start();
@@ -562,18 +513,15 @@ final class ControlDialogs {
                             ControlDialogs.this.loadSlots(false);
                             break;
                         case 5:
-                            controlDialogs = ControlDialogs.this;
-                            z = true;
-                            controlDialogs.pickFile(z);
+                            ControlDialogs.this.pickFile(true);
                             break;
                         case 6:
-                            controlDialogs = ControlDialogs.this;
-                            controlDialogs.pickFile(z);
+                            ControlDialogs.this.pickFile(false);
                             break;
                         case 7:
                             ControlDialogs.this.resetLayout();
                             break;
-                        case ControlGrid.DEFAULT_DP /* 8 */:
+                        case 8:
                             ControlDialogs.this.padMenu();
                             break;
                     }
@@ -593,47 +541,29 @@ final class ControlDialogs {
     }
 
     void padMenu() {
-        ControlStyle controlStyle;
-        String str;
         LinearLayout column = column();
         column.addView(this.style.hint("게임 키를 고른 뒤 연결할 패드 버튼을 누르세요.\n변경은 바로 저장됩니다. 왼쪽 스틱은 방향키로 동작합니다."));
         this.padRows = new Button[21];
         LinearLayout linearLayout = null;
         for (int i = 0; i < ControlData.ORDER.length; i++) {
             if (i == 0) {
-                controlStyle = this.style;
-                str = "방향·확인";
+                linearLayout = this.style.section(column, "방향·확인");
             } else if (i == 5) {
-                controlStyle = this.style;
-                str = "기능";
+                linearLayout = this.style.section(column, "기능");
             } else if (i == 9) {
-                controlStyle = this.style;
-                str = "숫자·기호";
-            } else {
-                final int i2 = ControlData.ORDER[i];
-                Button mappingRow = this.style.mappingRow();
-                mappingRow.setOnClickListener(new View.OnClickListener() { // from class: com.jjongjjongs.minimobile.ControlDialogs.23
-                    @Override // android.view.View.OnClickListener
-                    public void onClick(View view) {
-                        ControlDialogs.this.capture(i2);
-                    }
-                });
-                this.padRows[i2] = mappingRow;
-                this.style.divider(linearLayout);
-                linearLayout.addView(mappingRow, new LinearLayout.LayoutParams(-1, -2));
+                linearLayout = this.style.section(column, "숫자·기호");
             }
-            linearLayout = controlStyle.section(column, str);
-            final int i22 = ControlData.ORDER[i];
-            Button mappingRow2 = this.style.mappingRow();
-            mappingRow2.setOnClickListener(new View.OnClickListener() { // from class: com.jjongjjongs.minimobile.ControlDialogs.23
+            final int i2 = ControlData.ORDER[i];
+            Button mappingRow = this.style.mappingRow();
+            mappingRow.setOnClickListener(new View.OnClickListener() { // from class: com.jjongjjongs.minimobile.ControlDialogs.23
                 @Override // android.view.View.OnClickListener
                 public void onClick(View view) {
-                    ControlDialogs.this.capture(i22);
+                    ControlDialogs.this.capture(i2);
                 }
             });
-            this.padRows[i22] = mappingRow2;
+            this.padRows[i2] = mappingRow;
             this.style.divider(linearLayout);
-            linearLayout.addView(mappingRow2, new LinearLayout.LayoutParams(-1, -2));
+            linearLayout.addView(mappingRow, new LinearLayout.LayoutParams(-1, -2));
         }
         refreshPadRows();
         ScrollView scrollView = new ScrollView(this.style.context);
