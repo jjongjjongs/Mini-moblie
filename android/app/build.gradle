@@ -142,22 +142,6 @@ android {
     androidResources {
         noCompress += ['wav', 'mp3']
     }
-
-    // Ship one apk per ABI instead of a single fat apk. The native .so is the
-    // bulk of the package, so bundling every ABI into one apk would roughly
-    // double its size once armeabi-v7a joins arm64-v8a; a per-ABI split keeps
-    // each device's download to just the code it can run. `universalApk` still
-    // produces a combined apk on demand for sideloading where the target ABI
-    // is not known ahead of time.
-    splits {
-        abi {
-            enable true
-            reset()
-            //noinspection ChromeOsAbiSupport
-            include(*abis)
-            universalApk true
-        }
-    }
 }
 
 /**
