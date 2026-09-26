@@ -124,16 +124,38 @@ impl SnowBoardConnection {
         packet
     }
 
-    /// A success header for `request`, carrying an empty body.
+    /// The reply to `request`: a success header and whatever body its screen's
+    /// parser (`MainCanvas.ParseData`) needs to reach its completion.
     ///
-    /// Every command the title sends (a map list, the ranking, a notice) reaches
-    /// its completion whether the body it reads back names anything or nothing,
-    /// so the shortest answer it accepts - a success with no records - is one
-    /// header and no body. An empty list lands the title on its own "none yet"
-    /// screen (`맵파일이 없습니다`) rather than the network error a refused
-    /// connect left it on. Later phases fill the body for the commands whose
-    /// screens should show something.
-    fn empty_success(request: &[u8]) -> Vec<u8> {
+    /// `ParseData` skips the forty header bytes and then reads a body whose
+    /// shape depends on the command. A command it reads nothing from is answered
+    /// with the header alone; a command that reads a record count needs at least
+    /// that count, or its read runs off the end of the body and the screen it
+    /// was opening is abandoned.
+    ///
+    /// `0110` is the map screen's command, sent twice: once with the notice flag
+    /// set, whose reply the title takes with an empty body and shows its notice
+    /// board, and once with it clear, whose reply it reads as a map list -
+    /// `readInt` then `readInt` for the count, then that many records. An empty
+    /// list (a zero count) lands it on `맵파일이 없습니다` rather than dropping
+    /// the screen. A later phase fills the records from the bundled maps.
+    fn reply(request: &[u8]) -> Vec<u8> {
+        let mut reply = Self::header(request);
+
+        // The map list: the notice flag the title appends to the request (its
+        // `isnotice`, at offset 40) is clear. Answer with a count of zero.
+        if request.starts_with(b"0110") && request.get(40) != Some(&b'1') {
+            let body = [0u8; 8]; // an unread leading int, then a zero count
+            Self::set_body_length(&mut reply, body.len());
+            reply.extend_from_slice(&body);
+        }
+
+        reply
+    }
+
+    /// The forty byte success header for `request`: the reply command, an empty
+    /// body length, a non-error status and a point, the rest padded.
+    fn header(request: &[u8]) -> Vec<u8> {
         let mut reply_command = [b'0'; 4];
         for (slot, &byte) in reply_command.iter_mut().zip(request.iter()) {
             *slot = byte;
@@ -150,6 +172,12 @@ impl SnowBoardConnection {
         header.push(b'1'); // [24]                          flag
         header.resize(HEADER_LEN, b'0'); // [25..40]        padding
         header
+    }
+
+    /// Writes `length` into a header's `[4..12]` body-length field.
+    fn set_body_length(header: &mut [u8], length: usize) {
+        let digits = alloc::format!("{length:08}");
+        header[4..12].copy_from_slice(digits.as_bytes());
     }
 }
 
@@ -177,8 +205,8 @@ impl LocalConnection for SnowBoardConnection {
         // carries the whole request, and each request opens a fresh connection,
         // so a code in hand is a request to answer.
         if self.outgoing.is_empty() && self.pending.len() >= 4 {
-            let reply = Self::empty_success(&self.pending);
-            tracing::info!("snowboard data: {} -> empty success {}", hex_ascii(&self.pending), hex_ascii(&reply),);
+            let reply = Self::reply(&self.pending);
+            tracing::info!("snowboard data: {} -> {}", hex_ascii(&self.pending), hex_ascii(&reply));
             self.pending.clear();
             self.outgoing.extend_from_slice(&reply);
         }
@@ -254,13 +282,13 @@ mod tests {
     }
 
     #[test]
-    fn a_data_command_is_answered_with_an_empty_success_header() {
+    fn a_command_with_no_body_is_answered_with_the_header_alone() {
         let mut data = SnowBoardConnection {
             is_gateway: false,
             pending: Vec::new(),
             outgoing: Vec::new(),
         };
-        // A map-list request: its code opens the ASCII string, ending in '0'.
+        // A photo request: its code opens the ASCII string, ending in '0'.
         data.write(b"03100100something");
 
         let header = read_all(&mut data);
@@ -269,6 +297,44 @@ mod tests {
         assert_eq!(&header[4..12], b"00000000", "an empty body");
         assert_ne!(&header[12..16], b"0002", "not one of the error statuses");
         assert_eq!(header[24], b'1');
+    }
+
+    #[test]
+    fn the_map_list_request_is_answered_with_a_zero_count_body() {
+        let mut data = SnowBoardConnection {
+            is_gateway: false,
+            pending: Vec::new(),
+            outgoing: Vec::new(),
+        };
+        // The '0110' request the map screen sends with its notice flag clear -
+        // a '0' at offset 40 - is read back as a map list.
+        let mut request = b"0110".to_vec();
+        request.resize(41, b'0');
+        assert_eq!(request[40], b'0', "the notice flag is clear");
+        data.write(&request);
+
+        let reply = read_all(&mut data);
+        assert_eq!(reply.len(), HEADER_LEN + 8, "the header and an eight byte body");
+        assert_eq!(&reply[0..4], b"0111");
+        assert_eq!(&reply[4..12], b"00000008", "the body length is written into the header");
+        assert_eq!(&reply[HEADER_LEN..], &[0u8; 8], "an unread int then a zero count");
+    }
+
+    #[test]
+    fn the_notice_request_is_answered_with_the_header_alone() {
+        let mut data = SnowBoardConnection {
+            is_gateway: false,
+            pending: Vec::new(),
+            outgoing: Vec::new(),
+        };
+        // The same '0110' with the notice flag set - a '1' at offset 40.
+        let mut request = b"0110".to_vec();
+        request.resize(41, b'0');
+        request[40] = b'1';
+        data.write(&request);
+
+        let reply = read_all(&mut data);
+        assert_eq!(reply.len(), HEADER_LEN, "the notice reply is the header alone");
     }
 
     #[test]
