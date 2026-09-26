@@ -100,8 +100,9 @@ struct SnowBoardConnection {
 /// fixed offsets (`NetProcess.Net_ReadHeaderData`):
 ///
 /// ```text
-///   [0..4]   the reply command, the request's four digit code with its last
-///            digit carried from '0' (client) to '1' (server): 0310 -> 0311
+///   [0..4]   the reply command - see `reply_command`. Only four are read;
+///            an unknown one leaves the body-length field unread, so no body
+///            is taken and the parser runs off the end of an empty stream.
 ///   [4..12]  the body length that follows, eight digits, zero padded
 ///   [12..16] a status; 0002, 0003 and 0004 are the errors the title drops on,
 ///            so a success is any other - 0001 here
@@ -110,6 +111,21 @@ struct SnowBoardConnection {
 ///   [25..40] unread padding
 /// ```
 const HEADER_LEN: usize = 40;
+
+/// The four reply commands `Net_ReadHeaderData` reads a body for, chosen by the
+/// request's family digit (its second): the map, notice and list requests
+/// (`01x0`, `02x0`) are all answered `0011`; the photo, ranking and quiz
+/// requests (`03x0`, `05x0`, `07x0`) `0311`, `0511`, `0711`. Any other request
+/// gets `0` + its family + `11`, which the title does not read a body for.
+fn reply_command(request: &[u8]) -> [u8; 4] {
+    match request.get(1) {
+        Some(b'1') | Some(b'2') => *b"0011",
+        Some(b'3') => *b"0311",
+        Some(b'5') => *b"0511",
+        Some(b'7') => *b"0711",
+        family => [b'0', family.copied().unwrap_or(b'0'), b'1', b'1'],
+    }
+}
 
 impl SnowBoardConnection {
     /// The 43 byte confirm, `SUCCESS` and everything past the result left blank.
@@ -133,19 +149,28 @@ impl SnowBoardConnection {
     /// that count, or its read runs off the end of the body and the screen it
     /// was opening is abandoned.
     ///
-    /// `0110` is the map screen's command, sent twice: once with the notice flag
-    /// set, whose reply the title takes with an empty body and shows its notice
-    /// board, and once with it clear, whose reply it reads as a map list -
-    /// `readInt` then `readInt` for the count, then that many records. An empty
-    /// list (a zero count) lands it on `맵파일이 없습니다` rather than dropping
-    /// the screen. A later phase fills the records from the bundled maps.
+    /// The map/notice/list command (`01x0`, `02x0`) is where a body is needed.
+    /// `ParseData` reads it two ways, chosen by the notice flag the title
+    /// appends to the request (its `isnotice`, at offset 40):
+    ///
+    /// - flag set: a notice - eight bytes read into a date string, then an
+    ///   `int`. Twelve zero bytes are a notice with an empty date.
+    /// - flag clear: a map list - an `int`, then an `int` count, then that many
+    ///   records. Eight zero bytes are a leading int and a count of zero, which
+    ///   lands the title on `맵파일이 없습니다` rather than reading off the end
+    ///   of the body and abandoning the screen (a null map array, then a paint
+    ///   that dereferences it). A later phase fills the records from the bundled
+    ///   maps.
     fn reply(request: &[u8]) -> Vec<u8> {
         let mut reply = Self::header(request);
 
-        // The map list: the notice flag the title appends to the request (its
-        // `isnotice`, at offset 40) is clear. Answer with a count of zero.
-        if request.starts_with(b"0110") && request.get(40) != Some(&b'1') {
-            let body = [0u8; 8]; // an unread leading int, then a zero count
+        let is_map_family = matches!(request.get(1), Some(b'1') | Some(b'2'));
+        if is_map_family {
+            let body = if request.get(40) == Some(&b'1') {
+                vec![0u8; 12] // an eight byte date, then an int
+            } else {
+                vec![0u8; 8] // a leading int, then a zero count
+            };
             Self::set_body_length(&mut reply, body.len());
             reply.extend_from_slice(&body);
         }
@@ -156,16 +181,8 @@ impl SnowBoardConnection {
     /// The forty byte success header for `request`: the reply command, an empty
     /// body length, a non-error status and a point, the rest padded.
     fn header(request: &[u8]) -> Vec<u8> {
-        let mut reply_command = [b'0'; 4];
-        for (slot, &byte) in reply_command.iter_mut().zip(request.iter()) {
-            *slot = byte;
-        }
-        // The server's reply carries the request's code with its trailing '0'
-        // turned to '1'.
-        reply_command[3] = b'1';
-
         let mut header = Vec::with_capacity(HEADER_LEN);
-        header.extend_from_slice(&reply_command); // [0..4]  command
+        header.extend_from_slice(&reply_command(request)); // [0..4]  command
         header.extend_from_slice(b"00000000"); // [4..12]   body length: none
         header.extend_from_slice(b"0001"); // [12..16]      status: not an error
         header.extend_from_slice(b"00000000"); // [16..24]  point
@@ -288,19 +305,19 @@ mod tests {
             pending: Vec::new(),
             outgoing: Vec::new(),
         };
-        // A photo request: its code opens the ASCII string, ending in '0'.
+        // A photo request (family '3'): answered 0311, and read for no body.
         data.write(b"03100100something");
 
         let header = read_all(&mut data);
         assert_eq!(header.len(), HEADER_LEN);
-        assert_eq!(&header[0..4], b"0311", "the reply carries the request code, '0' -> '1'");
+        assert_eq!(&header[0..4], b"0311", "the photo family's reply command");
         assert_eq!(&header[4..12], b"00000000", "an empty body");
         assert_ne!(&header[12..16], b"0002", "not one of the error statuses");
         assert_eq!(header[24], b'1');
     }
 
     #[test]
-    fn the_map_list_request_is_answered_with_a_zero_count_body() {
+    fn the_map_list_request_is_answered_0011_with_a_zero_count_body() {
         let mut data = SnowBoardConnection {
             is_gateway: false,
             pending: Vec::new(),
@@ -315,13 +332,13 @@ mod tests {
 
         let reply = read_all(&mut data);
         assert_eq!(reply.len(), HEADER_LEN + 8, "the header and an eight byte body");
-        assert_eq!(&reply[0..4], b"0111");
+        assert_eq!(&reply[0..4], b"0011", "the map family's reply command, which the header parser reads");
         assert_eq!(&reply[4..12], b"00000008", "the body length is written into the header");
         assert_eq!(&reply[HEADER_LEN..], &[0u8; 8], "an unread int then a zero count");
     }
 
     #[test]
-    fn the_notice_request_is_answered_with_the_header_alone() {
+    fn the_notice_request_is_answered_0011_with_a_date_and_int_body() {
         let mut data = SnowBoardConnection {
             is_gateway: false,
             pending: Vec::new(),
@@ -334,7 +351,9 @@ mod tests {
         data.write(&request);
 
         let reply = read_all(&mut data);
-        assert_eq!(reply.len(), HEADER_LEN, "the notice reply is the header alone");
+        assert_eq!(reply.len(), HEADER_LEN + 12, "the header and a twelve byte body");
+        assert_eq!(&reply[0..4], b"0011", "the map family's reply command");
+        assert_eq!(&reply[4..12], b"00000012", "the body length is written into the header");
     }
 
     #[test]
