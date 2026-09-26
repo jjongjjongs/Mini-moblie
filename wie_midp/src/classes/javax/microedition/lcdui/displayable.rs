@@ -34,6 +34,7 @@ impl Displayable {
                 JavaMethodProto::new("getHeight", "()I", Self::get_height, Default::default()),
                 JavaMethodProto::new("showNotify", "()V", Self::show_notify, Default::default()),
                 JavaMethodProto::new("hideNotify", "()V", Self::hide_notify, Default::default()),
+                JavaMethodProto::new("isShown", "()Z", Self::is_shown, Default::default()),
                 // wie private methods...
                 JavaMethodProto::new(
                     "setDisplay",
@@ -154,6 +155,31 @@ impl Displayable {
         tracing::debug!("javax.microedition.lcdui.Displayable::hideNotify({this:?})");
 
         Ok(())
+    }
+
+    /// Whether this displayable is the one currently on the screen.
+    ///
+    /// MIDP's own answer folds in the MIDlet being in the foreground and the
+    /// display being awake; here a displayable is shown exactly when it is the
+    /// current one of the display it was set on. 엑스맨's splash thread spins on
+    /// this before it counts its logo down and calls `startApp` - without the
+    /// method the thread died on `NoSuchMethodError` and the logo never left.
+    async fn is_shown(jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<bool> {
+        tracing::debug!("javax.microedition.lcdui.Displayable::isShown({this:?})");
+
+        let display: ClassInstanceRef<Display> = jvm.get_field(&this, "currentDisplay", "Ljavax/microedition/lcdui/Display;").await?;
+        if display.is_null() {
+            return Ok(false);
+        }
+
+        let current: ClassInstanceRef<Displayable> = jvm
+            .get_field(&display, "currentDisplayable", "Ljavax/microedition/lcdui/Displayable;")
+            .await?;
+        if current.is_null() {
+            return Ok(false);
+        }
+
+        jvm.invoke_virtual(&current, "equals", "(Ljava/lang/Object;)Z", (this.clone(),)).await
     }
 
     async fn handle_key_event(_jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>, event_type: i32, code: i32) -> JvmResult<()> {
