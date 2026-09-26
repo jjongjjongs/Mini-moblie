@@ -514,6 +514,9 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // top-left with the sky and field bands stretched apart; at 176x220 the
     // scene fills the panel and its footer lands on the bottom row.
     (TitlePlatform::Skt, "3503930101", panel(176, 220)),
+    // 엑스맨(X-Men): sizes its screens from getWidth/getHeight, so it fits
+    // whatever panel it is given, but was drawn for a 176x220 handset.
+    (TitlePlatform::Skt, "0053594173", panel(176, 220)),
 ];
 
 /// What to do differently for the title `aid` on `platform`.
