@@ -90,6 +90,14 @@ fn j2me_panel(data: &[u8]) -> Option<(u32, u32)> {
         // 176-tall-ish handset; 192 wide keeps the in-battle command menu, which
         // it draws flush to the left edge, from losing its first column.
         "c3fc1679fb1cf977c27e8c534a502b78" => Some((192, 220)),
+        // 다운타운 열혈강호 (LGT). YulgangCanvas centres a 120x140 playfield with
+        // `rx = (getWidth() - 120) / 2`, `ry = (getHeight() - 140) / 2`, yet only
+        // ever `repaint(0, 0, 120, 143)`s the fixed top-left region. On the
+        // default 240x320 panel it draws the playfield centred (rx 60, ry 90) but
+        // flushes the top-left corner, so the picture lands in the wrong place. A
+        // 120x143 panel puts rx at 0 and the flushed region over the whole screen,
+        // which the host then scales up to fill the device.
+        "de6dad5cb0aecc0679daf4d849538634" => Some((120, 143)),
         _ => None,
     }
 }
