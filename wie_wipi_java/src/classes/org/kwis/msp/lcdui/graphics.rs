@@ -1856,7 +1856,9 @@ mod test {
             let p2 = backend_image.get_pixel(2, 0);
             let p3 = backend_image.get_pixel(3, 0);
 
-            assert_eq!((p1.r, p1.g, p1.b), (0x00, 0x00, 0x00));
+            // x=1 is clipped out, so it keeps the blank mutable image's opaque
+            // white (MIDP) rather than reading black.
+            assert_eq!((p1.r, p1.g, p1.b), (0xff, 0xff, 0xff));
             assert_eq!((p2.r, p2.g, p2.b), (0x00, 0xff, 0x00));
             assert_eq!((p3.r, p3.g, p3.b), (0x00, 0x00, 0xff));
 
