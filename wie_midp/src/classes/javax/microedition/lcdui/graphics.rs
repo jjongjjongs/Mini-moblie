@@ -1349,7 +1349,9 @@ mod test {
             }
             for (x, y) in [(9, 9), (15, 15)] {
                 let color = backend_image.get_pixel(x, y);
-                assert_eq!((color.r, color.g, color.b), (0x00, 0x00, 0x00));
+                // A blank mutable image starts opaque white (MIDP), so an
+                // undrawn or clipped-out pixel reads white, not black.
+                assert_eq!((color.r, color.g, color.b), (0xff, 0xff, 0xff));
             }
 
             Ok(())
@@ -1383,7 +1385,9 @@ mod test {
             assert_eq!((color.r, color.g, color.b), (0xff, 0x00, 0x00));
             for (x, y) in [(9, 9), (15, 15)] {
                 let color = backend_image.get_pixel(x, y);
-                assert_eq!((color.r, color.g, color.b), (0x00, 0x00, 0x00));
+                // A blank mutable image starts opaque white (MIDP), so an
+                // undrawn or clipped-out pixel reads white, not black.
+                assert_eq!((color.r, color.g, color.b), (0xff, 0xff, 0xff));
             }
 
             Ok(())
@@ -1403,7 +1407,9 @@ mod test {
             let backend_image = Image::image(&jvm, &image).await?;
             for (x, y) in [(0, 0), (2, 2), (21, 21)] {
                 let color = backend_image.get_pixel(x, y);
-                assert_eq!((color.r, color.g, color.b), (0x00, 0x00, 0x00));
+                // A blank mutable image starts opaque white (MIDP), so an
+                // undrawn or clipped-out pixel reads white, not black.
+                assert_eq!((color.r, color.g, color.b), (0xff, 0xff, 0xff));
             }
 
             Ok(())
@@ -1428,7 +1434,9 @@ mod test {
             let backend_image = Image::image(&jvm, &image).await?;
             for (x, y) in [(0, 0), (50, 50)] {
                 let color = backend_image.get_pixel(x, y);
-                assert_eq!((color.r, color.g, color.b), (0x00, 0x00, 0x00));
+                // A blank mutable image starts opaque white (MIDP), so an
+                // undrawn or clipped-out pixel reads white, not black.
+                assert_eq!((color.r, color.g, color.b), (0xff, 0xff, 0xff));
             }
 
             Ok(())
@@ -1449,10 +1457,12 @@ mod test {
                 let color = backend_image.get_pixel(2, y);
                 assert_eq!((color.r, color.g, color.b), (0xff, 0x00, 0x00), "y={y}");
             }
+            // A blank mutable image starts opaque white (MIDP), so a pixel
+            // just outside the drawn line reads white, not black.
             let color = backend_image.get_pixel(2, 6);
-            assert_eq!((color.r, color.g, color.b), (0x00, 0x00, 0x00));
+            assert_eq!((color.r, color.g, color.b), (0xff, 0xff, 0xff));
             let color = backend_image.get_pixel(3, 2);
-            assert_eq!((color.r, color.g, color.b), (0x00, 0x00, 0x00));
+            assert_eq!((color.r, color.g, color.b), (0xff, 0xff, 0xff));
 
             Ok(())
         })
@@ -1475,7 +1485,9 @@ mod test {
             let color = backend_image.get_pixel(10, 10);
             assert_eq!((color.r, color.g, color.b), (0xff, 0x00, 0x00));
             let color = backend_image.get_pixel(0, 0);
-            assert_eq!((color.r, color.g, color.b), (0x00, 0x00, 0x00));
+            // A blank mutable image starts opaque white (MIDP), so an
+            // undrawn or clipped-out pixel reads white, not black.
+            assert_eq!((color.r, color.g, color.b), (0xff, 0xff, 0xff));
 
             Ok(())
         })
