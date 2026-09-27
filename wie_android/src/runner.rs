@@ -98,6 +98,11 @@ fn j2me_panel(data: &[u8]) -> Option<(u32, u32)> {
         // 120x143 panel puts rx at 0 and the flushed region over the whole screen,
         // which the host then scales up to fill the device.
         "de6dad5cb0aecc0679daf4d849538634" => Some((120, 143)),
+        // 지혜의검 (LGT, MIDlet "Brain"). Its DESC.jad names the handset it was
+        // drawn for - `MIDletX-LCD-Size:176,200` - and the canvas lays itself
+        // out from getWidth/getHeight, so the default 240x320 panel puts every
+        // screen in the wrong place. Give it the panel it asks for.
+        "297b53452f8f2ee2a811b7961939b310" => Some((176, 200)),
         _ => None,
     }
 }

@@ -282,9 +282,20 @@ impl Display {
             jvm.put_field(&mut this, "__wieRepaintRequestedAt", "J", now.max(1)).await?;
         }
 
-        let platform = context.system().platform();
-        let screen = platform.screen();
-        screen.request_redraw().unwrap();
+        {
+            let platform = context.system().platform();
+            let screen = platform.screen();
+            screen.request_redraw().unwrap();
+        }
+
+        // `repaint` only wakes the event queue; the paint runs on the event
+        // thread. A title that drives its frame from a bare `while (...)
+        // repaint();` loop (지혜의검's canvas thread) never sleeps, so without a
+        // hand-off here its poll never returns and the event thread that would
+        // service the paint never gets the CPU - the screen stays black. Yield
+        // as a spinning wait would, so the paint runs and the spin does not peg
+        // the host either.
+        context.system().yield_now().await;
 
         Ok(())
     }
