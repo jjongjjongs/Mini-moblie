@@ -131,6 +131,10 @@ pub trait Canvas: Send {
     /// path for a color-keyed sprite blit, avoiding the intermediate ARGB array
     /// a `drawRGB` round-trip would allocate on every call.
     fn draw_with_color_key(&mut self, dx: i32, dy: i32, w: u32, h: u32, src: &dyn Image, sx: i32, sy: i32, clip: Clip, color_key565: u16);
+    /// Like [`draw`](Self::draw), but every source pixel's alpha is scaled by
+    /// `alpha` (0-255) before it is blended, so the whole blit is drawn
+    /// translucent. This backs LG's `GraphicsX.setAlpha`.
+    fn draw_with_alpha(&mut self, dx: i32, dy: i32, w: u32, h: u32, src: &dyn Image, sx: i32, sy: i32, clip: Clip, alpha: u8);
     fn draw_line(&mut self, x1: i32, y1: i32, x2: i32, y2: i32, color: Color, clip: Clip);
     fn draw_text(
         &mut self,
@@ -633,6 +637,36 @@ where
 
                 // TODO blend multiple pixels at once for performance
                 self.blend_pixel(px, py, src.get_pixel((sx as i64 + x) as i32, (sy as i64 + y) as i32));
+            }
+        }
+    }
+
+    fn draw_with_alpha(&mut self, dx: i32, dy: i32, w: u32, h: u32, src: &dyn Image, sx: i32, sy: i32, clip: Clip, alpha: u8) {
+        // Bounds exactly as `draw`; only the per-pixel body differs: the source
+        // pixel's own alpha is scaled by the graphics-wide alpha before blending.
+        let x_start = 0i64.max(-(dx as i64)).max(-(sx as i64));
+        let x_end = (w as i64)
+            .min(self.image_buffer.width() as i64 - dx as i64)
+            .min(src.width() as i64 - sx as i64);
+        let y_start = 0i64.max(-(dy as i64)).max(-(sy as i64));
+        let y_end = (h as i64)
+            .min(self.image_buffer.height() as i64 - dy as i64)
+            .min(src.height() as i64 - sy as i64);
+
+        for y in y_start..y_end {
+            for x in x_start..x_end {
+                let px = (dx as i64 + x) as i32;
+                let py = (dy as i64 + y) as i32;
+                if px < clip.x || px >= clip.x + (clip.width as i32) || py < clip.y || py >= clip.y + (clip.height as i32) {
+                    continue;
+                }
+
+                let source = src.get_pixel((sx as i64 + x) as i32, (sy as i64 + y) as i32);
+                let scaled = Color {
+                    a: ((source.a as u16 * alpha as u16 + 127) / 255) as u8,
+                    ..source
+                };
+                self.blend_pixel(px, py, scaled);
             }
         }
     }

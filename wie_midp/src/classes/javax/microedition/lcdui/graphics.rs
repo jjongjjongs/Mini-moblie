@@ -148,6 +148,9 @@ impl Graphics {
                 JavaFieldProto::new("color", "I", Default::default()),
                 JavaFieldProto::new("xorMode", "Z", Default::default()),
                 JavaFieldProto::new("font", "Ljavax/microedition/lcdui/Font;", Default::default()),
+                // LG GraphicsX.setAlpha level, 0-255 (255 opaque). Only the LG
+                // extension writes it; every other title leaves it opaque.
+                JavaFieldProto::new("__wieAlpha", "I", Default::default()),
             ],
             access_flags: Default::default(),
         }
@@ -187,6 +190,7 @@ impl Graphics {
         jvm.put_field(&mut this, "translateY", "I", 0).await?;
         jvm.put_field(&mut this, "color", "I", 0).await?;
         jvm.put_field(&mut this, "xorMode", "Z", false).await?;
+        jvm.put_field(&mut this, "__wieAlpha", "I", 255).await?;
 
         let font: ClassInstanceRef<Font> = jvm
             .invoke_static("javax/microedition/lcdui/Font", "getDefaultFont", "()Ljavax/microedition/lcdui/Font;", ())
@@ -693,8 +697,25 @@ impl Graphics {
         let y = translate_y + y + y_delta;
 
         let clip = Self::clip(jvm, &this).await?;
+        let alpha: i32 = jvm.get_field(&this, "__wieAlpha", "I").await?;
 
-        canvas.draw(x as _, y as _, src_image.width(), src_image.height(), &*src_image, 0, 0, clip);
+        if alpha < 255 {
+            // LG GraphicsX.setAlpha asked for a translucent blit; scale every
+            // source pixel's alpha by it. 지혜의검 fades its overlays this way.
+            canvas.draw_with_alpha(
+                x as _,
+                y as _,
+                src_image.width(),
+                src_image.height(),
+                &*src_image,
+                0,
+                0,
+                clip,
+                alpha.max(0) as u8,
+            );
+        } else {
+            canvas.draw(x as _, y as _, src_image.width(), src_image.height(), &*src_image, 0, 0, clip);
+        }
 
         Ok(())
     }

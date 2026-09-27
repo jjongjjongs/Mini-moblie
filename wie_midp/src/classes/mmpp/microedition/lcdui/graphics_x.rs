@@ -32,6 +32,7 @@ impl GraphicsX {
             methods: vec![
                 JavaMethodProto::new("<init>", "()V", Self::init, Default::default()),
                 JavaMethodProto::new("capture", "(IIII)Ljavax/microedition/lcdui/Image;", Self::capture, Default::default()),
+                JavaMethodProto::new("setAlpha", "(I)V", Self::set_alpha, Default::default()),
             ],
             fields: vec![],
             access_flags: Default::default(),
@@ -42,6 +43,19 @@ impl GraphicsX {
         tracing::debug!("mmpp.microedition.lcdui.GraphicsX::<init>({this:?})");
 
         let _: () = jvm.invoke_special(&this, "java/lang/Object", "<init>", "()V", ()).await?;
+
+        Ok(())
+    }
+
+    /// Sets the translucency applied to later drawing, on LG's 0-256 scale where
+    /// 256 is opaque. 지혜의검 drops it to fade its overlays in and out. Stored on
+    /// the Graphics as a 0-255 alpha that `drawImage` scales its source by.
+    async fn set_alpha(jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>, level: i32) -> JvmResult<()> {
+        tracing::debug!("mmpp.microedition.lcdui.GraphicsX::setAlpha({this:?}, {level})");
+
+        let mut graphics: ClassInstanceRef<Graphics> = Into::<Option<Box<dyn ClassInstance>>>::into(this).into();
+        let alpha = level.clamp(0, 256) * 255 / 256;
+        jvm.put_field(&mut graphics, "__wieAlpha", "I", alpha).await?;
 
         Ok(())
     }
@@ -158,6 +172,64 @@ mod test {
             let red = backend.get_pixel(1, 1); // source (5, 5), the block's corner
             assert_eq!((white.r, white.g, white.b), (0xff, 0xff, 0xff));
             assert_eq!((red.r, red.g, red.b), (0xff, 0x00, 0x00));
+
+            Ok::<(), jvm::JavaError>(())
+        })
+    }
+
+    // setAlpha makes a later drawImage blend at that level. A half-alpha red
+    // source over a white destination lands about halfway between the two.
+    #[test]
+    fn test_set_alpha_makes_draw_image_translucent() -> Result<()> {
+        run_jvm_test(Box::new([get_protos().into()]), |jvm| async move {
+            let source: ClassInstanceRef<Image> = jvm
+                .invoke_static(
+                    "javax/microedition/lcdui/Image",
+                    "createImage",
+                    "(II)Ljavax/microedition/lcdui/Image;",
+                    (4, 4),
+                )
+                .await?;
+            let source_graphics = jvm
+                .new_class(
+                    "javax/microedition/lcdui/Graphics",
+                    "(Ljavax/microedition/lcdui/Image;)V",
+                    (source.clone(),),
+                )
+                .await?;
+            let _: () = jvm.invoke_virtual(&source_graphics, "setColor", "(I)V", (0xff0000,)).await?;
+            let _: () = jvm.invoke_virtual(&source_graphics, "fillRect", "(IIII)V", (0, 0, 4, 4)).await?;
+
+            // Destination starts blank white.
+            let dest: ClassInstanceRef<Image> = jvm
+                .invoke_static(
+                    "javax/microedition/lcdui/Image",
+                    "createImage",
+                    "(II)Ljavax/microedition/lcdui/Image;",
+                    (4, 4),
+                )
+                .await?;
+            let dest_graphics = jvm
+                .new_class(
+                    "javax/microedition/lcdui/Graphics",
+                    "(Ljavax/microedition/lcdui/Image;)V",
+                    (dest.clone(),),
+                )
+                .await?;
+
+            // Half alpha (128 on LG's 0-256 scale), then blit the red source.
+            let _: () = jvm.invoke_virtual(&dest_graphics, "setAlpha", "(I)V", (128,)).await?;
+            let _: () = jvm
+                .invoke_virtual(&dest_graphics, "drawImage", "(Ljavax/microedition/lcdui/Image;III)V", (source, 0, 0, 20))
+                .await?;
+
+            let backend = Image::image(&jvm, &dest).await?;
+            let blended = backend.get_pixel(1, 1);
+            // Red stays full; green/blue rise from 0 toward white, landing near
+            // the midpoint.
+            assert_eq!(blended.r, 0xff);
+            assert!((120..=136).contains(&blended.g), "g was {}", blended.g);
+            assert!((120..=136).contains(&blended.b), "b was {}", blended.b);
 
             Ok::<(), jvm::JavaError>(())
         })
