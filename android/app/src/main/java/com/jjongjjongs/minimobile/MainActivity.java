@@ -277,6 +277,9 @@ public final class MainActivity extends Activity {
     private static final int[] CARRIER_LGT = {Color.rgb(163, 38, 143), Color.rgb(247, 226, 242), Color.rgb(239, 207, 230)};
     private static final int[] CARRIER_ETC = {Color.rgb(100, 117, 104), Color.rgb(238, 243, 239), Color.rgb(226, 233, 228)};
 
+    private static final int LIB_DELETE = Color.rgb(192, 57, 43);       // #c0392b delete button
+    private static final int LIB_SELECT_BG = Color.rgb(243, 250, 245);  // #f3faf5 selected row tint
+
     /**
      * How much stack the emulator thread gets.
      *
@@ -314,9 +317,22 @@ public final class MainActivity extends Activity {
     private String librarySearch = "";
     private String libraryCarrier = "";
     private final java.util.HashMap<String, String> carrierCache = new java.util.HashMap<>();
+    // Cover icons cached by name+size+mtime so refilling the list on each
+    // keystroke or selection tap does not re-read every archive from disk. A
+    // null value is cached too - it means "this archive carries no icon".
+    private final java.util.HashMap<String, Bitmap> iconCache = new java.util.HashMap<>();
     private LinearLayout libraryListContainer;
     private LinearLayout libraryChipRow;
     private TextView librarySectCount;
+
+    // Multi-select delete. selectMode swaps the rows to checkboxes and shows the
+    // action bar; selected holds the chosen games by absolute path; libraryShown
+    // is the current filtered list (what 전체 selects and what a rebuild draws).
+    private boolean selectMode = false;
+    private final java.util.HashSet<String> selected = new java.util.HashSet<>();
+    private java.util.ArrayList<File> libraryShown = new java.util.ArrayList<>();
+    private TextView librarySelectAction;
+    private LinearLayout librarySelectBar;
 
     private GameView gameView;
     private KeypadView keypad;
@@ -718,6 +734,11 @@ public final class MainActivity extends Activity {
         }
 
         if (!playerVisible) {
+            // In the library, back first leaves multi-select rather than the app.
+            if (selectMode) {
+                exitSelectMode();
+                return;
+            }
             super.onBackPressed();
             return;
         }
@@ -834,9 +855,12 @@ public final class MainActivity extends Activity {
         actions.addView(pick, buttonParams(dp(10)));
         content.addView(actions, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(42)));
 
-        // A returning session starts on the full, unfiltered list.
+        // A returning session starts on the full, unfiltered list, not in
+        // selection mode.
         librarySearch = "";
         libraryCarrier = "";
+        selectMode = false;
+        selected.clear();
 
         // Search box: filters the list by title as you type.
         LinearLayout searchBox = new LinearLayout(this);
@@ -896,6 +920,20 @@ public final class MainActivity extends Activity {
         librarySectCount.setTextSize(12f);
         librarySectCount.setTextColor(LIB_MUTED);
         sect.addView(librarySectCount);
+        // A '선택' / '취소' toggle that enters and leaves multi-select.
+        librarySelectAction = new TextView(this);
+        librarySelectAction.setTextSize(12.5f);
+        librarySelectAction.setTypeface(Typeface.DEFAULT_BOLD);
+        librarySelectAction.setTextColor(LIB_GREEN_DEEP);
+        librarySelectAction.setPadding(dp(12), dp(2), dp(2), dp(2));
+        librarySelectAction.setOnClickListener(v -> {
+            if (selectMode) {
+                exitSelectMode();
+            } else {
+                enterSelectMode(null);
+            }
+        });
+        sect.addView(librarySelectAction);
         content.addView(sect);
 
         // The list lives in a container we refill on search/filter changes, so
@@ -903,6 +941,16 @@ public final class MainActivity extends Activity {
         libraryListContainer = new LinearLayout(this);
         libraryListContainer.setOrientation(LinearLayout.VERTICAL);
         content.addView(libraryListContainer);
+
+        // The multi-select action bar, below the list, shown only in select mode.
+        librarySelectBar = new LinearLayout(this);
+        librarySelectBar.setOrientation(LinearLayout.HORIZONTAL);
+        librarySelectBar.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        librarySelectBar.setVisibility(View.GONE);
+        LinearLayout.LayoutParams barParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        barParams.topMargin = dp(14);
+        content.addView(librarySelectBar, barParams);
+
         refreshLibraryList();
 
         ScrollView scroll = new ScrollView(this);
@@ -1690,10 +1738,11 @@ public final class MainActivity extends Activity {
             }
             shown.add(game);
         }
+        libraryShown = shown;
 
-        if (librarySectCount != null) {
-            librarySectCount.setText(shown.size() + "개");
-        }
+        // Drop any selection that filtering has hidden, so 삭제 only ever acts on
+        // what is on screen.
+        selected.retainAll(pathsOf(shown));
 
         libraryListContainer.removeAllViews();
         if (shown.isEmpty() && all.length > 0) {
@@ -1703,6 +1752,182 @@ public final class MainActivity extends Activity {
         } else {
             libraryListContainer.addView(buildGameList(shown.toArray(new File[0])));
         }
+
+        updateSelectionUi();
+    }
+
+    private java.util.HashSet<String> pathsOf(java.util.List<File> files) {
+        java.util.HashSet<String> paths = new java.util.HashSet<>();
+        for (File file : files) {
+            paths.add(file.getAbsolutePath());
+        }
+        return paths;
+    }
+
+    // --- multi-select delete ---------------------------------------------
+
+    private void enterSelectMode(File preselect) {
+        selectMode = true;
+        if (preselect != null) {
+            selected.add(preselect.getAbsolutePath());
+        }
+        refreshLibraryList();
+    }
+
+    private void exitSelectMode() {
+        selectMode = false;
+        selected.clear();
+        refreshLibraryList();
+    }
+
+    private void toggleSelect(File game) {
+        String path = game.getAbsolutePath();
+        if (!selected.remove(path)) {
+            selected.add(path);
+        }
+        refreshLibraryList();
+    }
+
+    /** Updates the section count, the 선택/취소 toggle, and the action bar. */
+    private void updateSelectionUi() {
+        int shownCount = libraryShown.size();
+        if (librarySectCount != null) {
+            librarySectCount.setText(selectMode
+                    ? (shownCount + "개 중 " + selected.size() + "개 선택")
+                    : (shownCount + "개"));
+        }
+        if (librarySelectAction != null) {
+            librarySelectAction.setText(selectMode ? "취소" : "선택");
+            // Nothing to select when the (filtered) list is empty.
+            librarySelectAction.setVisibility(!selectMode && shownCount == 0 ? View.GONE : View.VISIBLE);
+        }
+        if (librarySelectBar == null) {
+            return;
+        }
+        librarySelectBar.removeAllViews();
+        if (!selectMode) {
+            librarySelectBar.setVisibility(View.GONE);
+            return;
+        }
+        librarySelectBar.setVisibility(View.VISIBLE);
+        librarySelectBar.setBackground(roundedRect(LIB_SURFACE, LIB_LINE, 1, 14));
+        librarySelectBar.setPadding(dp(14), dp(9), dp(12), dp(9));
+
+        long totalBytes = 0;
+        for (String path : selected) {
+            totalBytes += new File(path).length();
+        }
+        TextView count = new TextView(this);
+        count.setTextColor(LIB_INK);
+        count.setTextSize(13.5f);
+        count.setTypeface(Typeface.DEFAULT_BOLD);
+        count.setText(selected.isEmpty() ? "게임 선택" : (selected.size() + "개 선택 · " + formatSize(totalBytes)));
+        librarySelectBar.addView(count, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        // A single selected game keeps its per-game menu (세이브·초기화) reachable.
+        if (selected.size() == 1) {
+            File one = onlySelectedGame();
+            if (one != null) {
+                TextView more = new TextView(this);
+                more.setText("⋯");
+                styleSelectButton(more, false);
+                more.setOnClickListener(v -> showGameMenu(one));
+                LinearLayout.LayoutParams moreParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                moreParams.rightMargin = dp(8);
+                librarySelectBar.addView(more, moreParams);
+            }
+        }
+
+        boolean allSelected = shownCount > 0 && selected.size() >= shownCount;
+        TextView all = new TextView(this);
+        all.setText(allSelected ? "해제" : "전체");
+        styleSelectButton(all, false);
+        all.setOnClickListener(v -> {
+            if (allSelected) {
+                selected.clear();
+            } else {
+                selected.addAll(pathsOf(libraryShown));
+            }
+            refreshLibraryList();
+        });
+        LinearLayout.LayoutParams allParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        allParams.rightMargin = dp(8);
+        librarySelectBar.addView(all, allParams);
+
+        TextView delete = new TextView(this);
+        delete.setText("삭제");
+        styleSelectButton(delete, true);
+        boolean any = !selected.isEmpty();
+        delete.setAlpha(any ? 1f : 0.4f);
+        delete.setOnClickListener(v -> {
+            if (any) {
+                confirmDeleteSelected();
+            }
+        });
+        librarySelectBar.addView(delete);
+    }
+
+    /** The one selected game while exactly one is chosen, else null. */
+    private File onlySelectedGame() {
+        for (File game : libraryShown) {
+            if (selected.contains(game.getAbsolutePath())) {
+                return game;
+            }
+        }
+        return null;
+    }
+
+    private void styleSelectButton(TextView button, boolean danger) {
+        button.setTextSize(13f);
+        button.setTypeface(Typeface.DEFAULT_BOLD);
+        button.setGravity(android.view.Gravity.CENTER);
+        button.setPadding(dp(14), dp(8), dp(14), dp(8));
+        if (danger) {
+            button.setTextColor(Color.WHITE);
+            button.setBackground(roundedRect(LIB_DELETE, 0, 0, 10));
+        } else {
+            button.setTextColor(LIB_GREEN_DEEP);
+            button.setBackground(roundedRect(LIB_GREEN_SOFT, LIB_GREEN_LINE, 1, 10));
+        }
+    }
+
+    private void confirmDeleteSelected() {
+        ArrayList<File> targets = new ArrayList<>();
+        for (File game : libraryShown) {
+            if (selected.contains(game.getAbsolutePath())) {
+                targets.add(game);
+            }
+        }
+        if (targets.isEmpty()) {
+            return;
+        }
+
+        StringBuilder names = new StringBuilder();
+        int listed = Math.min(targets.size(), 8);
+        for (int i = 0; i < listed; i++) {
+            names.append("• ").append(displayName(targets.get(i))).append('\n');
+        }
+        if (targets.size() > listed) {
+            names.append("… 외 ").append(targets.size() - listed).append("개");
+        }
+
+        new AlertDialog.Builder(this)
+                .setTitle(targets.size() + "개 게임을 삭제할까요?")
+                .setMessage("목록에서 삭제됩니다. 저장한 내용은 그대로 남습니다.\n\n" + names.toString().trim())
+                .setNegativeButton("취소", null)
+                .setPositiveButton("삭제", (dialog, which) -> {
+                    int removed = 0;
+                    for (File game : targets) {
+                        if (game.delete()) {
+                            removed++;
+                        }
+                    }
+                    Toast.makeText(this, removed + "개 삭제됨", Toast.LENGTH_SHORT).show();
+                    selectMode = false;
+                    selected.clear();
+                    showLibrary();
+                })
+                .show();
     }
 
     /** Rebuilds the carrier filter chips with the given per-bucket counts. */
@@ -1828,6 +2053,17 @@ public final class MainActivity extends Activity {
         return bucket;
     }
 
+    /** The archive's cover icon, cached by name+size+mtime (null = no icon). */
+    private Bitmap cachedIcon(File game) {
+        String key = game.getName() + ":" + game.length() + ":" + game.lastModified();
+        if (iconCache.containsKey(key)) {
+            return iconCache.get(key);
+        }
+        Bitmap bitmap = readArchiveIcon(game);
+        iconCache.put(key, bitmap);
+        return bitmap;
+    }
+
     /** Reads a game archive fully into memory (games are small - a few hundred KB). */
     private byte[] readGameBytes(File game) throws java.io.IOException {
         try (FileInputStream input = new FileInputStream(game)) {
@@ -1906,9 +2142,26 @@ public final class MainActivity extends Activity {
         row.setGravity(android.view.Gravity.CENTER_VERTICAL);
         row.setPadding(dp(12), dp(10), dp(12), dp(10));
 
+        boolean isSelected = selected.contains(game.getAbsolutePath());
+        if (selectMode) {
+            row.setBackgroundColor(isSelected ? LIB_SELECT_BG : Color.TRANSPARENT);
+
+            // A checkbox leads the row; ticked ones fill green.
+            TextView check = new TextView(this);
+            check.setText(isSelected ? "✓" : "");
+            check.setTextColor(Color.WHITE);
+            check.setTextSize(13f);
+            check.setTypeface(Typeface.DEFAULT_BOLD);
+            check.setGravity(android.view.Gravity.CENTER);
+            check.setBackground(roundedRect(isSelected ? LIB_GREEN : LIB_BG, isSelected ? LIB_GREEN : Color.rgb(205, 216, 209), isSelected ? 0 : 2, 6));
+            LinearLayout.LayoutParams checkParams = new LinearLayout.LayoutParams(dp(22), dp(22));
+            checkParams.rightMargin = dp(10);
+            row.addView(check, checkParams);
+        }
+
         // Cover: the archive's own icon if it carries one, otherwise a colour
         // tile with the title's first character.
-        Bitmap bitmap = readArchiveIcon(game);
+        Bitmap bitmap = cachedIcon(game);
         View cover;
         if (bitmap != null) {
             ImageView icon = new ImageView(this);
@@ -1973,20 +2226,28 @@ public final class MainActivity extends Activity {
         meta.addView(metaLine);
         row.addView(meta, metaParams);
 
-        // A round, soft-green play affordance on the right.
-        TextView play = new TextView(this);
-        play.setText("▶");
-        play.setTextSize(11f);
-        play.setTextColor(LIB_GREEN);
-        play.setGravity(android.view.Gravity.CENTER);
-        play.setBackground(circle(LIB_GREEN_SOFT));
-        row.addView(play, new LinearLayout.LayoutParams(dp(29), dp(29)));
+        // A round, soft-green play affordance on the right - only when not
+        // selecting, where a row tap toggles instead of playing.
+        if (!selectMode) {
+            TextView play = new TextView(this);
+            play.setText("▶");
+            play.setTextSize(11f);
+            play.setTextColor(LIB_GREEN);
+            play.setGravity(android.view.Gravity.CENTER);
+            play.setBackground(circle(LIB_GREEN_SOFT));
+            row.addView(play, new LinearLayout.LayoutParams(dp(29), dp(29)));
+        }
 
-        row.setOnClickListener(v -> showPlayer(game));
-        row.setOnLongClickListener(v -> {
-            showGameMenu(game);
-            return true;
-        });
+        if (selectMode) {
+            row.setOnClickListener(v -> toggleSelect(game));
+        } else {
+            row.setOnClickListener(v -> showPlayer(game));
+            // Long-press starts multi-select with this game already ticked.
+            row.setOnLongClickListener(v -> {
+                enterSelectMode(game);
+                return true;
+            });
+        }
 
         return row;
     }
