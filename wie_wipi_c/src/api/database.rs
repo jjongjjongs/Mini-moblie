@@ -582,6 +582,13 @@ pub async fn list_databases_lgt(context: &mut dyn WIPICContext, output: WIPICWor
     let pid = system.pid().to_owned();
     let mut names = system.platform().database_repository().list(&pid).await;
 
+    // Native MC_dbListDataBases scans the repository root ("/") only, so a
+    // nested storage path a title kept under its own name (e.g.
+    // "parent/child") is not a root database and must not be listed - neither
+    // as itself nor as a spurious parent. Drop anything below the root before
+    // it is counted or emitted.
+    names.retain(|name| !name.contains('/') && !name.contains('\\'));
+
     // Native preserves MC_fsList ordering, which the repository abstraction
     // cannot represent consistently across HashMap and host filesystems.
     // Stabilize the collapsed namespace rather than exposing host iteration
