@@ -29,6 +29,7 @@ impl MediaPlayer {
                 JavaMethodProto::new("<init>", "()V", Self::init, Default::default()),
                 JavaMethodProto::new("setMediaLocation", "(Ljava/lang/String;)V", Self::set_media_location, Default::default()),
                 JavaMethodProto::new("setVolumeLevel", "(Ljava/lang/String;)V", Self::set_volume_level, Default::default()),
+                JavaMethodProto::new("setPlayBackLoop", "(Z)V", Self::set_play_back_loop, Default::default()),
                 JavaMethodProto::new("start", "()V", Self::start, Default::default()),
                 JavaMethodProto::new("stop", "()V", Self::stop, Default::default()),
             ],
@@ -36,6 +37,7 @@ impl MediaPlayer {
                 JavaFieldProto::new("__wieLocation", "Ljava/lang/String;", Default::default()),
                 JavaFieldProto::new("__wieVolume", "Ljava/lang/String;", Default::default()),
                 JavaFieldProto::new("__wieHandle", "I", Default::default()),
+                JavaFieldProto::new("__wieLoop", "Z", Default::default()),
             ],
             access_flags: Default::default(),
         }
@@ -93,6 +95,17 @@ impl MediaPlayer {
         Ok(())
     }
 
+    async fn set_play_back_loop(jvm: &Jvm, _context: &mut WieJvmContext, mut this: ClassInstanceRef<Self>, loop_: bool) -> JvmResult<()> {
+        tracing::debug!("mmpp.media.MediaPlayer::setPlayBackLoop({this:?}, {loop_:?})");
+
+        // Remembered here and applied on `start`, so a title's looping BGM
+        // repeats while its one-shot cues (left at false) play once. 열혈강호2
+        // sets this on every clip it loads in `loadSnd`.
+        jvm.put_field(&mut this, "__wieLoop", "Z", loop_).await?;
+
+        Ok(())
+    }
+
     async fn start(jvm: &Jvm, context: &mut WieJvmContext, mut this: ClassInstanceRef<Self>) -> JvmResult<()> {
         tracing::debug!("mmpp.media.MediaPlayer::start({this:?})");
 
@@ -122,10 +135,12 @@ impl MediaPlayer {
             }
         }
 
+        let loop_: bool = jvm.get_field(&this, "__wieLoop", "Z").await?;
+
         let system = context.system();
-        // These titles reuse one player for one-shot cues, starting it fresh
-        // each time, so the clip plays once rather than looping.
-        system.audio().play(system, handle as u32, false).ok();
+        // One-shot cues start fresh each time and play once; a clip flagged by
+        // `setPlayBackLoop(true)` (e.g. BGM) repeats instead.
+        system.audio().play(system, handle as u32, loop_).ok();
 
         Ok(())
     }
@@ -175,6 +190,7 @@ mod test {
             let player: ClassInstanceRef<()> = jvm.new_class("mmpp/media/MediaPlayer", "()V", ()).await?.into();
             assert!(!player.is_null());
             // With no location set, start and stop are quiet no-ops.
+            let _: () = jvm.invoke_virtual(&player, "setPlayBackLoop", "(Z)V", (true,)).await?;
             let _: () = jvm.invoke_virtual(&player, "start", "()V", ()).await?;
             let _: () = jvm.invoke_virtual(&player, "stop", "()V", ()).await?;
             Ok::<(), jvm::JavaError>(())
