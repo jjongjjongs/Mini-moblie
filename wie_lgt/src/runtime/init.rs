@@ -2401,12 +2401,15 @@ async fn resolve_own_fields(core: &mut ArmCore, context: &InitSvcContext) -> Res
         // which is usually but not always to one of its own fields: reading
         // another object's field puts that field's row in the reading class's
         // range too. Falling back to the global search keeps those resolving.
+        // Bound once as a reference so both lookups reuse the same closure
+        // without a borrow at each call site (which beta clippy flags).
+        let find_in = &find_in;
         let slot = {
             let app_classes = context.app_classes.lock();
             owner
                 .and_then(|owner| app_classes.iter().find(|class| class.name == owner))
-                .and_then(&find_in)
-                .or_else(|| app_classes.iter().find_map(&find_in))
+                .and_then(find_in)
+                .or_else(|| app_classes.iter().find_map(find_in))
         };
 
         if let Some(slot) = slot {
