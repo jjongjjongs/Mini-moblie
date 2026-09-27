@@ -789,6 +789,39 @@ pub fn save_ids(data: &[u8]) -> Option<SaveIds> {
     })
 }
 
+/// The carrier a title runs under, for the library's badge and filter:
+/// `"KTF"`, `"LGT"`, `"SKT"`, or `""` when nothing claims it (a plain J2ME jar
+/// or an archive no format recognises), which the library shows as 기타.
+///
+/// This mirrors the order [`build_emulator`] picks an emulator in, so the badge
+/// names the emulator the title would actually run under.
+pub fn carrier(data: &[u8]) -> &'static str {
+    let Ok(files) = extract_zip(data) else {
+        return "";
+    };
+
+    if KtfEmulator::loadable_archive(&files) {
+        return "KTF";
+    }
+    if LgtEmulator::loadable_archive(&files) {
+        return "LGT";
+    }
+    if SktEmulator::loadable_archive(&files) {
+        return "SKT";
+    }
+
+    let jar = packaged_jar(&files).unwrap_or_else(|| data.to_vec());
+    if KtfEmulator::loadable_jar(&jar) {
+        "KTF"
+    } else if LgtEmulator::loadable_jar(&jar) {
+        "LGT"
+    } else if SktEmulator::loadable_jar(&jar) {
+        "SKT"
+    } else {
+        ""
+    }
+}
+
 /// Describes an archive without running it, for `nativeInspect`. Only used for
 /// diagnostics, so every failure is reported as text rather than an error.
 pub fn inspect(data: &[u8]) -> String {

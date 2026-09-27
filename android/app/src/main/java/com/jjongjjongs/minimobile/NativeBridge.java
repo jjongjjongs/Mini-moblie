@@ -119,6 +119,14 @@ final class NativeBridge {
     static native String nativeInspect(byte[] archive);
 
     /**
+     * The carrier a title runs under, for the library's badge and filter.
+     *
+     * @return {@code "KTF"}, {@code "LGT"}, {@code "SKT"}, or empty when nothing
+     * claims it (a plain J2ME jar or an unrecognised archive)
+     */
+    static native String nativeDetectCarrier(byte[] archive);
+
+    /**
      * Where an archive's saved data sits under the runtime directory. Only the
      * loader knows how an archive names itself, and the two names differ:
      * record stores go under the product id, written files under the

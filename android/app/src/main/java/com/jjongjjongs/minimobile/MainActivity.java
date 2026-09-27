@@ -41,6 +41,7 @@ import android.view.ViewOutlineProvider;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -269,6 +270,13 @@ public final class MainActivity extends Activity {
     private static final int LIB_GREEN_LINE = Color.rgb(199, 232, 209);// #c7e8d1 button border
     private static final int LIB_GREEN_SOFTER = Color.rgb(238, 248, 241);// #eef8f1 empty tile
 
+    // Carrier badge/chip colours as {ink, soft fill, line}, soft tones chosen to
+    // sit on the light library ground rather than the loud brand colours.
+    private static final int[] CARRIER_SKT = {Color.rgb(194, 65, 12), Color.rgb(253, 234, 221), Color.rgb(246, 211, 189)};
+    private static final int[] CARRIER_KTF = {Color.rgb(29, 95, 191), Color.rgb(226, 236, 251), Color.rgb(207, 224, 247)};
+    private static final int[] CARRIER_LGT = {Color.rgb(163, 38, 143), Color.rgb(247, 226, 242), Color.rgb(239, 207, 230)};
+    private static final int[] CARRIER_ETC = {Color.rgb(100, 117, 104), Color.rgb(238, 243, 239), Color.rgb(226, 233, 228)};
+
     /**
      * How much stack the emulator thread gets.
      *
@@ -298,6 +306,18 @@ public final class MainActivity extends Activity {
 
     private AndroidAudioOutput audioOutput;
     private File gamesDir;
+
+    // Library search + carrier filter state. librarySearch is the typed query;
+    // libraryCarrier is "" for 전체 or one of "KTF"/"LGT"/"SKT"/"ETC". Carriers
+    // are detected once per archive and cached by name+size+mtime so the list
+    // does not re-read every file on each keystroke.
+    private String librarySearch = "";
+    private String libraryCarrier = "";
+    private final java.util.HashMap<String, String> carrierCache = new java.util.HashMap<>();
+    private LinearLayout libraryListContainer;
+    private LinearLayout libraryChipRow;
+    private TextView librarySectCount;
+
     private GameView gameView;
     private KeypadView keypad;
     private TextView playerStatus;
@@ -814,9 +834,54 @@ public final class MainActivity extends Activity {
         actions.addView(pick, buttonParams(dp(10)));
         content.addView(actions, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(42)));
 
-        // Section header: title on the left, live count on the right.
-        File[] games = gamesDir.listFiles(File::isFile);
-        int count = games == null ? 0 : games.length;
+        // A returning session starts on the full, unfiltered list.
+        librarySearch = "";
+        libraryCarrier = "";
+
+        // Search box: filters the list by title as you type.
+        LinearLayout searchBox = new LinearLayout(this);
+        searchBox.setOrientation(LinearLayout.HORIZONTAL);
+        searchBox.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        searchBox.setBackground(roundedRect(LIB_GREEN_SOFTER, LIB_LINE, 1, 12));
+        searchBox.setPadding(dp(12), dp(2), dp(10), dp(2));
+        TextView mag = new TextView(this);
+        mag.setText("🔍");
+        mag.setTextSize(13f);
+        mag.setPadding(0, 0, dp(8), 0);
+        searchBox.addView(mag);
+        EditText search = new EditText(this);
+        search.setHint("게임 검색…");
+        search.setTextSize(14f);
+        search.setTextColor(LIB_INK);
+        search.setHintTextColor(LIB_MUTED);
+        search.setSingleLine(true);
+        search.setBackground(null);
+        search.setPadding(0, dp(8), 0, dp(8));
+        search.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH);
+        search.addTextChangedListener(new android.text.TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
+            @Override public void onTextChanged(CharSequence s, int a, int b, int c) {}
+            @Override public void afterTextChanged(android.text.Editable e) {
+                librarySearch = e.toString().trim();
+                refreshLibraryList();
+            }
+        });
+        searchBox.addView(search, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        LinearLayout.LayoutParams searchParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        searchParams.topMargin = dp(14);
+        content.addView(searchBox, searchParams);
+
+        // Carrier filter chips (전체 / SKT / KTF / LGT / 기타), rebuilt with live
+        // counts each refresh.
+        libraryChipRow = new LinearLayout(this);
+        libraryChipRow.setOrientation(LinearLayout.HORIZONTAL);
+        libraryChipRow.setPadding(0, dp(10), 0, 0);
+        HorizontalScrollView chipScroll = new HorizontalScrollView(this);
+        chipScroll.setHorizontalScrollBarEnabled(false);
+        chipScroll.addView(libraryChipRow);
+        content.addView(chipScroll);
+
+        // Section header: title on the left, live (filtered) count on the right.
         LinearLayout sect = new LinearLayout(this);
         sect.setOrientation(LinearLayout.HORIZONTAL);
         sect.setGravity(android.view.Gravity.CENTER_VERTICAL);
@@ -827,15 +892,18 @@ public final class MainActivity extends Activity {
         sectTitle.setTypeface(Typeface.DEFAULT_BOLD);
         sectTitle.setTextColor(LIB_INK);
         sect.addView(sectTitle, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        TextView sectCount = new TextView(this);
-        sectCount.setText(count + "개");
-        sectCount.setTextSize(12f);
-        sectCount.setTextColor(LIB_MUTED);
-        sect.addView(sectCount);
+        librarySectCount = new TextView(this);
+        librarySectCount.setTextSize(12f);
+        librarySectCount.setTextColor(LIB_MUTED);
+        sect.addView(librarySectCount);
         content.addView(sect);
 
-        // One rounded surface with hairline dividers between rows.
-        content.addView(buildGameList(games));
+        // The list lives in a container we refill on search/filter changes, so
+        // the whole screen (and the keyboard) does not rebuild on each keystroke.
+        libraryListContainer = new LinearLayout(this);
+        libraryListContainer.setOrientation(LinearLayout.VERTICAL);
+        content.addView(libraryListContainer);
+        refreshLibraryList();
 
         ScrollView scroll = new ScrollView(this);
         scroll.setVerticalScrollBarEnabled(false);
@@ -1583,6 +1651,196 @@ public final class MainActivity extends Activity {
                 .show();
     }
 
+    /**
+     * Refills the game list for the current search text and carrier filter, and
+     * rebuilds the carrier chips with live counts. Called on each keystroke and
+     * chip tap, so it only touches the list container - not the whole screen -
+     * to keep the search field and its keyboard alive.
+     */
+    private void refreshLibraryList() {
+        if (libraryListContainer == null) {
+            return;
+        }
+
+        File[] all = gamesDir.listFiles(File::isFile);
+        if (all == null) {
+            all = new File[0];
+        }
+        Arrays.sort(all, Comparator.comparing(File::getName, String.CASE_INSENSITIVE_ORDER));
+
+        int skt = 0, ktf = 0, lgt = 0, etc = 0;
+        for (File game : all) {
+            switch (carrierBucket(game)) {
+                case "SKT": skt++; break;
+                case "KTF": ktf++; break;
+                case "LGT": lgt++; break;
+                default: etc++; break;
+            }
+        }
+        rebuildCarrierChips(all.length, skt, ktf, lgt, etc);
+
+        String query = librarySearch.toLowerCase(java.util.Locale.ROOT);
+        ArrayList<File> shown = new ArrayList<>();
+        for (File game : all) {
+            if (!libraryCarrier.isEmpty() && !carrierBucket(game).equals(libraryCarrier)) {
+                continue;
+            }
+            if (!query.isEmpty() && !displayName(game).toLowerCase(java.util.Locale.ROOT).contains(query)) {
+                continue;
+            }
+            shown.add(game);
+        }
+
+        if (librarySectCount != null) {
+            librarySectCount.setText(shown.size() + "개");
+        }
+
+        libraryListContainer.removeAllViews();
+        if (shown.isEmpty() && all.length > 0) {
+            // The library has games, but none match the filter - a different
+            // empty state from the "import your first game" one.
+            libraryListContainer.addView(buildNoMatchState());
+        } else {
+            libraryListContainer.addView(buildGameList(shown.toArray(new File[0])));
+        }
+    }
+
+    /** Rebuilds the carrier filter chips with the given per-bucket counts. */
+    private void rebuildCarrierChips(int total, int skt, int ktf, int lgt, int etc) {
+        if (libraryChipRow == null) {
+            return;
+        }
+        libraryChipRow.removeAllViews();
+        libraryChipRow.addView(carrierChip("전체", total, "", 0));
+        if (skt > 0) {
+            libraryChipRow.addView(carrierChip("SKT", skt, "SKT", CARRIER_SKT[0]));
+        }
+        if (ktf > 0) {
+            libraryChipRow.addView(carrierChip("KTF", ktf, "KTF", CARRIER_KTF[0]));
+        }
+        if (lgt > 0) {
+            libraryChipRow.addView(carrierChip("LGT", lgt, "LGT", CARRIER_LGT[0]));
+        }
+        if (etc > 0) {
+            libraryChipRow.addView(carrierChip("기타", etc, "ETC", CARRIER_ETC[0]));
+        }
+    }
+
+    /** One carrier filter chip; `dotColor` 0 means no colour dot (전체). */
+    private View carrierChip(String label, int count, String value, int dotColor) {
+        boolean selected = libraryCarrier.equals(value);
+
+        LinearLayout chip = new LinearLayout(this);
+        chip.setOrientation(LinearLayout.HORIZONTAL);
+        chip.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        chip.setPadding(dp(11), dp(6), dp(11), dp(6));
+        chip.setBackground(roundedRect(
+                selected ? LIB_GREEN_SOFT : LIB_BG,
+                selected ? LIB_GREEN_LINE : LIB_LINE, 1, 999));
+
+        if (dotColor != 0) {
+            View dot = new View(this);
+            dot.setBackground(circle(dotColor));
+            LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(dp(8), dp(8));
+            dotParams.rightMargin = dp(6);
+            chip.addView(dot, dotParams);
+        }
+
+        TextView text = new TextView(this);
+        text.setText(label + "  " + count);
+        text.setTextSize(12f);
+        text.setTypeface(Typeface.DEFAULT_BOLD);
+        text.setTextColor(selected ? LIB_GREEN_DEEP : LIB_MUTED);
+        chip.addView(text);
+
+        chip.setOnClickListener(v -> {
+            libraryCarrier = value;
+            refreshLibraryList();
+        });
+
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        params.rightMargin = dp(7);
+        chip.setLayoutParams(params);
+        return chip;
+    }
+
+    /** Empty state shown when a search or filter matches nothing. */
+    private View buildNoMatchState() {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setGravity(android.view.Gravity.CENTER_HORIZONTAL);
+        box.setPadding(dp(16), dp(36), dp(16), dp(36));
+
+        TextView et = new TextView(this);
+        et.setText("검색 결과가 없어요");
+        et.setTextSize(15f);
+        et.setTypeface(Typeface.DEFAULT_BOLD);
+        et.setTextColor(LIB_INK);
+        et.setGravity(android.view.Gravity.CENTER);
+        box.addView(et);
+
+        TextView es = new TextView(this);
+        es.setText("다른 검색어나 통신사를 눌러보세요.");
+        es.setTextSize(12.5f);
+        es.setTextColor(LIB_MUTED);
+        es.setGravity(android.view.Gravity.CENTER);
+        es.setPadding(0, dp(6), 0, 0);
+        box.addView(es);
+
+        return box;
+    }
+
+    /** Badge colours {ink, soft, line} for a carrier bucket. */
+    private int[] carrierColors(String bucket) {
+        switch (bucket) {
+            case "SKT": return CARRIER_SKT;
+            case "KTF": return CARRIER_KTF;
+            case "LGT": return CARRIER_LGT;
+            default: return CARRIER_ETC;
+        }
+    }
+
+    /**
+     * Which carrier bucket a game falls in: "SKT", "KTF", "LGT", or "ETC" for
+     * anything the native detector does not claim. The native result is cached
+     * by name+size+mtime so the list does not re-read the file on each refresh.
+     */
+    private String carrierBucket(File game) {
+        String key = game.getName() + ":" + game.length() + ":" + game.lastModified();
+        String cached = carrierCache.get(key);
+        if (cached != null) {
+            return cached;
+        }
+
+        String bucket = "ETC";
+        try {
+            byte[] data = readGameBytes(game);
+            String carrier = NativeBridge.nativeDetectCarrier(data);
+            if (carrier != null && !carrier.isEmpty()) {
+                bucket = carrier;
+            }
+        } catch (Throwable ignored) {
+            // Unreadable or unrecognised: treated as 기타.
+        }
+
+        carrierCache.put(key, bucket);
+        return bucket;
+    }
+
+    /** Reads a game archive fully into memory (games are small - a few hundred KB). */
+    private byte[] readGameBytes(File game) throws java.io.IOException {
+        try (FileInputStream input = new FileInputStream(game)) {
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream((int) Math.max(1, game.length()));
+            byte[] chunk = new byte[8192];
+            int read;
+            while ((read = input.read(chunk)) != -1) {
+                out.write(chunk, 0, read);
+            }
+            return out.toByteArray();
+        }
+    }
+
     /** The rounded list card, or the empty state when nothing is imported. */
     private View buildGameList(File[] games) {
         if (games == null || games.length == 0) {
@@ -1692,12 +1950,15 @@ public final class MainActivity extends Activity {
         metaLine.setGravity(android.view.Gravity.CENTER_VERTICAL);
         metaLine.setPadding(0, dp(2), 0, 0);
 
+        // Carrier badge in place of the old file-extension tag.
+        String bucket = carrierBucket(game);
+        int[] colors = carrierColors(bucket);
         TextView tag = new TextView(this);
-        tag.setText(archiveTag(game));
+        tag.setText(bucket.equals("ETC") ? "기타" : bucket);
         tag.setTextSize(10f);
         tag.setTypeface(Typeface.DEFAULT_BOLD);
-        tag.setTextColor(LIB_GREEN_DEEP);
-        tag.setBackground(roundedRect(LIB_GREEN_SOFT, 0, 0, 6));
+        tag.setTextColor(colors[0]);
+        tag.setBackground(roundedRect(colors[1], colors[2], 1, 6));
         tag.setPadding(dp(6), dp(1), dp(6), dp(1));
         LinearLayout.LayoutParams tagParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         tagParams.rightMargin = dp(6);
@@ -1728,14 +1989,6 @@ public final class MainActivity extends Activity {
         });
 
         return row;
-    }
-
-    /** Uppercase archive extension used as the row's small tag chip. */
-    private String archiveTag(File game) {
-        String fileName = game.getName();
-        int dot = fileName.lastIndexOf('.');
-        String ext = dot >= 0 ? fileName.substring(dot + 1) : "";
-        return ext.isEmpty() ? "게임" : ext.toUpperCase(java.util.Locale.ROOT);
     }
 
     private String formatSize(long bytes) {

@@ -404,6 +404,27 @@ pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativ
     guard_string(&env, || runner::inspect(&data))
 }
 
+/// `nativeDetectCarrier(byte[] archive) -> String`
+///
+/// The carrier a title runs under - `"KTF"`, `"LGT"`, `"SKT"`, or `""` when
+/// nothing claims it - for the library's badge and filter. See
+/// [`runner::carrier`].
+///
+/// # Safety
+/// Called by the JVM with valid `env` and `archive` references.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativeDetectCarrier(
+    env: JNIEnv,
+    _class: JClass,
+    archive: JByteArray,
+) -> jstring {
+    let Ok(data) = env.convert_byte_array(&archive) else {
+        return empty_string(&env);
+    };
+
+    guard_string(&env, || runner::carrier(&data).to_owned())
+}
+
 /// `nativeSaveIds(byte[] archive) -> String`
 ///
 /// The two directory names, newline separated, that an archive's saved data
