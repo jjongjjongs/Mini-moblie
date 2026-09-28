@@ -957,14 +957,14 @@ public final class MainActivity extends Activity {
         libraryListContainer.setOrientation(LinearLayout.VERTICAL);
         content.addView(libraryListContainer);
 
-        // The multi-select action bar, below the list, shown only in select mode.
+        // The multi-select action bar is created here but pinned to the bottom
+        // of the screen (added to root below the scroll, not inside it), so it
+        // stays reachable without scrolling the list to its end. Shown only in
+        // select mode.
         librarySelectBar = new LinearLayout(this);
         librarySelectBar.setOrientation(LinearLayout.HORIZONTAL);
         librarySelectBar.setGravity(android.view.Gravity.CENTER_VERTICAL);
         librarySelectBar.setVisibility(View.GONE);
-        LinearLayout.LayoutParams barParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        barParams.topMargin = dp(14);
-        content.addView(librarySelectBar, barParams);
 
         refreshLibraryList();
 
@@ -972,6 +972,13 @@ public final class MainActivity extends Activity {
         scroll.setVerticalScrollBarEnabled(false);
         scroll.addView(content);
         root.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        // Pinned under the scroll: it holds the bottom while the list moves
+        // behind it. root already carries the navigation-bar inset, so this sits
+        // just above it.
+        LinearLayout.LayoutParams barParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        barParams.setMargins(dp(14), dp(6), dp(14), dp(12));
+        root.addView(librarySelectBar, barParams);
 
         applyStatusBarInset(root);
         setContentView(root);
