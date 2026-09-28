@@ -304,6 +304,7 @@ pub fn register_stdlib_svc_handler(core: &mut ArmCore, system: &System, save_poi
             x if x == StdlibSvcId::Strpbrk as u32 => EmulatedFunction::call(&strpbrk, core, &mut ()).await?.write(core, lr),
             x if x == StdlibSvcId::Strstr as u32 => EmulatedFunction::call(&strstr, core, &mut ()).await?.write(core, lr),
             x if x == StdlibSvcId::Strlen as u32 => EmulatedFunction::call(&stdlib::strlen, core, &mut ()).await?.write(core, lr),
+            x if x == StdlibSvcId::Strtok as u32 => EmulatedFunction::call(&strtok, core, &mut ()).await?.write(core, lr),
             x if x == StdlibSvcId::Memcpy as u32 => EmulatedFunction::call(&stdlib::memcpy, core, &mut ()).await?.write(core, lr),
             x if x == StdlibSvcId::Memmove as u32 => EmulatedFunction::call(&stdlib::memmove, core, &mut ()).await?.write(core, lr),
             x if x == StdlibSvcId::Memcmp as u32 => EmulatedFunction::call(&stdlib::memcmp, core, &mut ()).await?.write(core, lr),
@@ -879,6 +880,52 @@ async fn strpbrk(core: &mut ArmCore, _: &mut (), ptr_str: u32, ptr_accept: u32) 
     }
 
     Ok(0)
+}
+
+/// Where the last `strtok` left off, so a `strtok(NULL, ...)` continuation knows
+/// where to resume. `strtok` is non-reentrant by definition - the C library
+/// keeps exactly this one hidden pointer - so a process-global static matches
+/// its contract; a title walks one string to its end before starting another.
+static STRTOK_SAVED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// `strtok(s, delim)`. Splits `s` into tokens separated by any byte in `delim`,
+/// writing a NUL over each separator in place and returning each token in turn;
+/// a `NULL` `s` resumes where the previous call stopped. Left unimplemented it
+/// returned zero, so a title that lays its dialogue out by splitting the text on
+/// `\r` got no lines at all and drew an empty box (야구전설's intro).
+async fn strtok(core: &mut ArmCore, _: &mut (), ptr_str: u32, ptr_delim: u32) -> Result<u32> {
+    use core::sync::atomic::Ordering::Relaxed;
+
+    // The caller's string on the first call, the saved position on a NULL
+    // continuation. A saved position of zero means the last string is spent.
+    let cursor = if ptr_str != 0 { ptr_str } else { STRTOK_SAVED.load(Relaxed) };
+    if cursor == 0 {
+        return Ok(0);
+    }
+
+    let delim = read_null_terminated_string_bytes(core, ptr_delim)?;
+    let rest = read_null_terminated_string_bytes(core, cursor)?;
+
+    // Skip the run of separators before the token. Nothing but separators (or an
+    // empty string) means there is no token left.
+    let skip = rest.iter().take_while(|b| delim.contains(b)).count();
+    if skip == rest.len() {
+        STRTOK_SAVED.store(0, Relaxed);
+        return Ok(0);
+    }
+    let token = cursor + skip as u32;
+
+    // The token runs to the next separator, or to the end of the string.
+    match rest[skip..].iter().position(|b| delim.contains(b)) {
+        Some(offset) => {
+            let separator = token + offset as u32;
+            core.write_bytes(separator, &[0u8])?;
+            STRTOK_SAVED.store(separator + 1, Relaxed);
+        }
+        None => STRTOK_SAVED.store(0, Relaxed),
+    }
+
+    Ok(token)
 }
 
 /// `memchr(s, c, n)`. Returns the address of the first `c` within the first `n`

@@ -609,6 +609,7 @@ pub enum StdlibSvcId {
     Strpbrk = 0x40f,
     Strstr = 0x410,
     Strlen = 0x411,
+    Strtok = 0x413,
     Memcpy = 0x414,
     Memmove = 0x415,
     Memcmp = 0x416,
