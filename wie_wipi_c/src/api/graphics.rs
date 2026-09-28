@@ -571,6 +571,16 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
         // thousand of these a second in its menus. See
         // `FrameBuffer::read_rect_rgb565`.
         if let Some((left, top, cols, rows, mut pixels)) = framebuffer.read_rect_rgb565(context, x, y, w, h)? {
+            // TEMP DIAGNOSTIC (몬스터마스터): the destinations this fill is about
+            // to run the operation over, so the log can show dst -> result and
+            // say whether the operation preserves what is under it (blend/key,
+            // so text survives) or just writes the fill (opaque, covering text).
+            let probe_before: alloc::vec::Vec<u16> = if tracing::enabled!(tracing::Level::INFO) && w >= 20 && h >= 8 {
+                pixels.iter().take(8).copied().collect()
+            } else {
+                alloc::vec::Vec::new()
+            };
+
             for destination in pixels.iter_mut() {
                 *destination = match pixel_op::apply(kind, *destination, source, source_first) {
                     Some(result) => result,
@@ -580,6 +590,16 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
                         context.call_function(function, &[a as WIPICWord, b as WIPICWord, gctx.param1]).await? as u16
                     }
                 };
+            }
+
+            if !probe_before.is_empty() {
+                let after: alloc::vec::Vec<u16> = pixels.iter().take(8).copied().collect();
+                tracing::info!(
+                    "FILL op {kind:?} rect=({x},{y},{w},{h}) src={:#06x} dst={:04x?} -> {:04x?}",
+                    source,
+                    probe_before,
+                    after
+                );
             }
 
             framebuffer.write_rect_rgb565(context, left, top, cols, rows, &pixels)?;
