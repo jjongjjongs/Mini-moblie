@@ -2422,15 +2422,20 @@ public final class MainActivity extends Activity {
 
     /** What a long press offers: move the saves about, or drop the game. */
     private void showGameMenu(File game) {
+        // The two actions shared with the batch menu (📁 폴더 내보내기, 📥 폴더
+        // 불러오기, 🗑 초기화) keep the same icons there; the save-zip pair and
+        // 목록에서 삭제 get their own so nothing collides.
+        MenuItem[] items = {
+                new MenuItem("📤", "세이브 파일 꺼내기 (.zip)", "", "세이브를 .zip 으로 백업", false),
+                new MenuItem("📦", "세이브 불러오기 (.zip)", "", ".zip 세이브를 되돌리기", false),
+                new MenuItem("📁", "데이터 폴더로 내보내기", "", "다운로드/Mini Mobile 폴더로", false),
+                new MenuItem("📥", "데이터 폴더에서 불러오기", "", "폴더의 내용을 게임에 적용", false),
+                new MenuItem("🗑", "게임 데이터 초기화", "", "세이브·기록을 모두 삭제", true),
+                new MenuItem("✕", "목록에서 삭제", "", "목록에서만 삭제 (세이브는 유지)", true),
+        };
         new AlertDialog.Builder(this)
                 .setTitle(displayName(game))
-                .setItems(new CharSequence[]{
-                        "세이브 파일 꺼내기 (.zip)",
-                        "세이브 불러오기 (.zip)",
-                        "데이터 폴더로 내보내기",
-                        "데이터 폴더에서 불러오기",
-                        "게임 데이터 초기화",
-                        "목록에서 삭제"}, (dialog, which) -> {
+                .setAdapter(menuAdapter(items), (dialog, which) -> {
                     if (which == 0) {
                         exportSaves(game);
                     } else if (which == 1) {
@@ -2460,21 +2465,15 @@ public final class MainActivity extends Activity {
             return;
         }
         String n = "(" + games.size() + "개)";
-        BatchItem[] items = {
-                new BatchItem("📤", "세이브 파일 꺼내기", n, "각 게임의 .zip 을 세이브 폴더로", false),
-                new BatchItem("📁", "데이터 폴더로 내보내기", n, "다운로드/Mini Mobile/게임 이름 에 저장", false),
-                new BatchItem("📥", "데이터 폴더에서 불러오기", n, "각 폴더의 내용을 게임에 적용", false),
-                new BatchItem("🗑", "게임 데이터 초기화", n, "세이브·기록을 모두 삭제", true),
-        };
-        ArrayAdapter<BatchItem> adapter = new ArrayAdapter<BatchItem>(this, 0, items) {
-            @Override
-            public View getView(int position, View convertView, ViewGroup parent) {
-                return batchItemView(getItem(position));
-            }
+        MenuItem[] items = {
+                new MenuItem("📤", "세이브 파일 꺼내기", n, "각 게임의 .zip 을 세이브 폴더로", false),
+                new MenuItem("📁", "데이터 폴더로 내보내기", n, "다운로드/Mini Mobile/게임 이름 에 저장", false),
+                new MenuItem("📥", "데이터 폴더에서 불러오기", n, "각 폴더의 내용을 게임에 적용", false),
+                new MenuItem("🗑", "게임 데이터 초기화", n, "세이브·기록을 모두 삭제", true),
         };
         new AlertDialog.Builder(this)
                 .setTitle(games.size() + "개 게임에 적용")
-                .setAdapter(adapter, (dialog, which) -> {
+                .setAdapter(menuAdapter(items), (dialog, which) -> {
                     if (which == 0) {
                         batchExportSaves(games);
                     } else if (which == 1) {
@@ -2489,15 +2488,19 @@ public final class MainActivity extends Activity {
                 .show();
     }
 
-    /** One batch-menu row: emoji, title, a count in the accent colour, subtitle. */
-    private static final class BatchItem {
+    /**
+     * One icon row for a game-actions menu: an emoji in a tinted badge, a bold
+     * title, an optional count in the accent colour (the batch menu's "(N개)"),
+     * and a one-line subtitle. Shared by the batch menu and the single-game menu.
+     */
+    private static final class MenuItem {
         final String emoji;
         final String title;
-        final String count;
+        final String count;    // "" for the single-game menu
         final String subtitle;
         final boolean danger;
 
-        BatchItem(String emoji, String title, String count, String subtitle, boolean danger) {
+        MenuItem(String emoji, String title, String count, String subtitle, boolean danger) {
             this.emoji = emoji;
             this.title = title;
             this.count = count;
@@ -2506,8 +2509,18 @@ public final class MainActivity extends Activity {
         }
     }
 
-    /** Builds the view for one {@link BatchItem}, matching the library palette. */
-    private View batchItemView(BatchItem item) {
+    /** An {@link ArrayAdapter} that renders each {@link MenuItem} via {@link #menuItemView}. */
+    private ArrayAdapter<MenuItem> menuAdapter(MenuItem[] items) {
+        return new ArrayAdapter<MenuItem>(this, 0, items) {
+            @Override
+            public View getView(int position, View convertView, ViewGroup parent) {
+                return menuItemView(getItem(position));
+            }
+        };
+    }
+
+    /** Builds the view for one {@link MenuItem}, matching the library palette. */
+    private View menuItemView(MenuItem item) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(android.view.Gravity.CENTER_VERTICAL);
@@ -2529,12 +2542,16 @@ public final class MainActivity extends Activity {
         title.setTextSize(15f);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setTextColor(LIB_INK);
-        // The title stays ink; only the "(N개)" count takes the accent colour.
-        String full = item.title + " " + item.count;
-        SpannableString span = new SpannableString(full);
-        span.setSpan(new ForegroundColorSpan(item.danger ? LIB_DELETE : LIB_GREEN_DEEP),
-                item.title.length() + 1, full.length(), Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
-        title.setText(span);
+        if (item.count == null || item.count.isEmpty()) {
+            title.setText(item.title);
+        } else {
+            // The title stays ink; only the "(N개)" count takes the accent colour.
+            String full = item.title + " " + item.count;
+            SpannableString span = new SpannableString(full);
+            span.setSpan(new ForegroundColorSpan(item.danger ? LIB_DELETE : LIB_GREEN_DEEP),
+                    item.title.length() + 1, full.length(), Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+            title.setText(span);
+        }
         text.addView(title);
 
         TextView sub = new TextView(this);
