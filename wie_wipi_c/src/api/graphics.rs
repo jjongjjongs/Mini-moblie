@@ -595,7 +595,9 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
             if !probe_before.is_empty() {
                 let after: alloc::vec::Vec<u16> = pixels.iter().take(8).copied().collect();
                 tracing::info!(
-                    "FILL op {kind:?} rect=({x},{y},{w},{h}) src={:#06x} dst={:04x?} -> {:04x?}",
+                    "FILL op {kind:?} fn={:#x} param={} src={:#06x} rect=({x},{y},{w},{h}) dst={:04x?} -> {:04x?}",
+                    function,
+                    gctx.param1,
                     source,
                     probe_before,
                     after
