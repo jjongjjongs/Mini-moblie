@@ -2419,18 +2419,76 @@ public final class MainActivity extends Activity {
     private void showGameMenu(File game) {
         new AlertDialog.Builder(this)
                 .setTitle(displayName(game))
-                .setItems(new CharSequence[]{"세이브 파일 꺼내기", "세이브 불러오기", "게임 데이터 초기화", "목록에서 삭제"}, (dialog, which) -> {
+                .setItems(new CharSequence[]{
+                        "세이브 파일 꺼내기 (.zip)",
+                        "세이브 불러오기 (.zip)",
+                        "데이터 폴더로 내보내기",
+                        "데이터 폴더에서 불러오기",
+                        "게임 데이터 초기화",
+                        "목록에서 삭제"}, (dialog, which) -> {
                     if (which == 0) {
                         exportSaves(game);
                     } else if (which == 1) {
                         importSaves(game);
                     } else if (which == 2) {
+                        exportDataFolder(game);
+                    } else if (which == 3) {
+                        restoreDataFolder(game);
+                    } else if (which == 4) {
                         confirmErase(game);
                     } else {
                         confirmDelete(game);
                     }
                 })
                 .setNegativeButton("취소", null)
+                .show();
+    }
+
+    /**
+     * Mirrors a game's save data out to its browsable folder,
+     * {@code 다운로드/Mini Mobile/<game>/}, refreshing whatever was there.
+     */
+    private void exportDataFolder(File game) {
+        String title = displayName(game);
+        withDownloadPermission(() -> {
+            Toast.makeText(this, "데이터 폴더로 내보내는 중...", Toast.LENGTH_SHORT).show();
+            emulatorThread.execute(() -> {
+                try {
+                    DataFolder.Result result = DataFolder.export(this, game, title);
+                    runOnUiThread(() -> Toast.makeText(
+                            this,
+                            result == null
+                                    ? "저장된 내용이 없습니다."
+                                    : (result.path + " 에 저장 (파일 " + result.files + "개)"),
+                            Toast.LENGTH_LONG).show());
+                } catch (Exception e) {
+                    runOnUiThread(() -> Toast.makeText(this, "내보내기 실패: " + e.getMessage(), Toast.LENGTH_LONG).show());
+                }
+            });
+        });
+    }
+
+    /** Reads a game's data folder back into its saves, overwriting them. */
+    private void restoreDataFolder(File game) {
+        String title = displayName(game);
+        new AlertDialog.Builder(this)
+                .setTitle(displayName(game))
+                .setMessage("데이터 폴더(" + DataFolder.displayPath(title) + ")의 내용을 지금 저장된 내용에 덮어씁니다.\n덮어쓴 뒤에는 되돌릴 수 없습니다.")
+                .setNegativeButton("취소", null)
+                .setPositiveButton("불러오기", (dialog, which) -> withDownloadPermission(() ->
+                        emulatorThread.execute(() -> {
+                            try {
+                                DataFolder.Result result = DataFolder.restore(this, title);
+                                runOnUiThread(() -> Toast.makeText(
+                                        this,
+                                        result == null
+                                                ? "폴더에 세이브 데이터가 없습니다."
+                                                : ("폴더에서 불러왔습니다 (파일 " + result.files + "개). 게임을 다시 시작하면 적용됩니다."),
+                                        Toast.LENGTH_LONG).show());
+                            } catch (Exception e) {
+                                runOnUiThread(() -> Toast.makeText(this, "불러오기 실패: " + e.getMessage(), Toast.LENGTH_LONG).show());
+                            }
+                        })))
                 .show();
     }
 
