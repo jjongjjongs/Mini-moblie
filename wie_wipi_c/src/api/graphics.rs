@@ -538,6 +538,25 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
 
     let color = context_color(&framebuffer, &gctx);
 
+    // TEMP DIAGNOSTIC (몬스터마스터): does this fill sit over text already in the
+    // buffer? If the panel fills cover the direct-written glyphs, that is why the
+    // box interiors come out blank while the title and labels (no fill over them)
+    // show. Only sizeable fills covering many text-coloured pixels are logged,
+    // and only when the INFO log is on.
+    if tracing::enabled!(tracing::Level::INFO)
+        && w >= 20
+        && h >= 8
+        && let Some((_, _, _, _, under)) = framebuffer.read_rect_rgb565(context, x, y, w, h)?
+    {
+        let text = under.iter().filter(|&&p| p == 0x41c4 || p == 0x2922 || p == 0x0000).count();
+        if text > 20 {
+            tracing::info!(
+                "FILL over-text rect=({x},{y},{w},{h}) fill={:#06x} textpx={text}",
+                Rgb565Pixel::from_color(color)
+            );
+        }
+    }
+
     // A fill goes through the title's own operation too - 드래곤하트2 lays two
     // hundred of them through a live one in a single capture - so the colour
     // meets what is already there rather than covering it.
