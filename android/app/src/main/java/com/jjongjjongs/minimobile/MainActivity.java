@@ -501,6 +501,8 @@ public final class MainActivity extends Activity {
         // Favourites persist across runs, keyed by the archive's file name.
         favorites.addAll(getSharedPreferences("mini_ui", MODE_PRIVATE).getStringSet("favorites", java.util.Collections.emptySet()));
 
+        seedDataFoldersOnce();
+
         // The rotate button says one thing while the phone turns its own screen
         // and another while it does not, and the player can be left running
         // while that setting is changed from the notification shade.
@@ -2449,6 +2451,41 @@ public final class MainActivity extends Activity {
                 })
                 .setNegativeButton("취소", null)
                 .show();
+    }
+
+    /**
+     * On the first run, drops a short guide file into 다운로드/Mini Mobile/ and
+     * its 세이브/ subfolder so both show up in a file manager before the first
+     * export. Only where it needs no permission prompt (Android 10+); on older
+     * devices the folders appear on the first export, which asks for storage
+     * anyway. Runs once, tracked by a preference.
+     */
+    private void seedDataFoldersOnce() {
+        if (Downloads.needsPermission()) {
+            return;
+        }
+
+        SharedPreferences prefs = getSharedPreferences("mini_ui", MODE_PRIVATE);
+        if (prefs.getBoolean("folders_seeded", false)) {
+            return;
+        }
+        prefs.edit().putBoolean("folders_seeded", true).apply();
+
+        new Thread(() -> {
+            try {
+                Downloads.writeInto(this, DataFolder.ROOT, "읽어주세요.txt", "text/plain",
+                        ("이 폴더는 Mini Mobile 앱의 게임 데이터가 저장되는 곳입니다.\n\n"
+                                + "- 세이브/ : '세이브 파일 꺼내기'로 만든 세이브 백업(.zip)\n"
+                                + "- <게임 이름>/ : '데이터 폴더로 내보내기'로 꺼낸 세이브 데이터 파일\n\n"
+                                + "게임 메뉴에서 내보내기를 하면 이 폴더가 채워집니다.\n").getBytes("UTF-8"));
+                Downloads.writeInto(this, Downloads.SAVES_DIR, "읽어주세요.txt", "text/plain",
+                        ("이 폴더에는 게임 세이브 백업(.zip)이 저장됩니다.\n\n"
+                                + "- 앱에서 '세이브 파일 꺼내기'를 하면 '<게임 이름> 세이브.zip'이 여기 저장됩니다.\n"
+                                + "- '세이브 불러오기'를 누르면 이 폴더의 세이브를 골라 되돌릴 수 있습니다.\n").getBytes("UTF-8"));
+            } catch (Exception ignored) {
+                // Best effort: the folders still appear on the first real export.
+            }
+        }, "seed-folders").start();
     }
 
     /**
