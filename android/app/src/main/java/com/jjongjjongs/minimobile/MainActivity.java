@@ -1902,18 +1902,22 @@ public final class MainActivity extends Activity {
         count.setText(selected.isEmpty() ? "게임 선택" : (selected.size() + "개 선택 · " + formatSize(totalBytes)));
         librarySelectBar.addView(count, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        // A single selected game keeps its per-game menu (세이브·초기화) reachable.
-        if (selected.size() == 1) {
-            File one = onlySelectedGame();
-            if (one != null) {
-                TextView more = new TextView(this);
-                more.setText("⋯");
-                styleSelectButton(more, false);
+        // ⋯ opens the actions menu. One game keeps its full per-game menu
+        // (which also has the per-game 세이브 불러오기·삭제); two or more open the
+        // batch menu, each action applying to every selected game at once.
+        if (!selected.isEmpty()) {
+            TextView more = new TextView(this);
+            more.setText("⋯");
+            styleSelectButton(more, false);
+            if (selected.size() == 1) {
+                File one = selectedGames().get(0);
                 more.setOnClickListener(v -> showGameMenu(one));
-                LinearLayout.LayoutParams moreParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                moreParams.rightMargin = dp(8);
-                librarySelectBar.addView(more, moreParams);
+            } else {
+                more.setOnClickListener(v -> showBatchMenu());
             }
+            LinearLayout.LayoutParams moreParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            moreParams.rightMargin = dp(8);
+            librarySelectBar.addView(more, moreParams);
         }
 
         boolean allSelected = shownCount > 0 && selected.size() >= shownCount;
@@ -1945,14 +1949,15 @@ public final class MainActivity extends Activity {
         librarySelectBar.addView(delete);
     }
 
-    /** The one selected game while exactly one is chosen, else null. */
-    private File onlySelectedGame() {
+    /** The selected games, in the order they appear in the (filtered) list. */
+    private ArrayList<File> selectedGames() {
+        ArrayList<File> games = new ArrayList<>();
         for (File game : libraryShown) {
             if (selected.contains(game.getAbsolutePath())) {
-                return game;
+                games.add(game);
             }
         }
-        return null;
+        return games;
     }
 
     private void styleSelectButton(TextView button, boolean danger) {
@@ -1970,28 +1975,14 @@ public final class MainActivity extends Activity {
     }
 
     private void confirmDeleteSelected() {
-        ArrayList<File> targets = new ArrayList<>();
-        for (File game : libraryShown) {
-            if (selected.contains(game.getAbsolutePath())) {
-                targets.add(game);
-            }
-        }
+        ArrayList<File> targets = selectedGames();
         if (targets.isEmpty()) {
             return;
         }
 
-        StringBuilder names = new StringBuilder();
-        int listed = Math.min(targets.size(), 8);
-        for (int i = 0; i < listed; i++) {
-            names.append("• ").append(displayName(targets.get(i))).append('\n');
-        }
-        if (targets.size() > listed) {
-            names.append("… 외 ").append(targets.size() - listed).append("개");
-        }
-
         new AlertDialog.Builder(this)
                 .setTitle(targets.size() + "개 게임을 삭제할까요?")
-                .setMessage("목록에서 삭제됩니다. 저장한 내용은 그대로 남습니다.\n\n" + names.toString().trim())
+                .setMessage("목록에서 삭제됩니다. 저장한 내용은 그대로 남습니다.\n\n" + batchNames(targets))
                 .setNegativeButton("취소", null)
                 .setPositiveButton("삭제", (dialog, which) -> {
                     int removed = 0;
@@ -2450,6 +2441,188 @@ public final class MainActivity extends Activity {
                     }
                 })
                 .setNegativeButton("취소", null)
+                .show();
+    }
+
+    /**
+     * The batch menu shown from ⋯ in select mode: each action runs over every
+     * selected game at once and reports a single summary. Save import (one .zip
+     * routed by id into one game) stays per-game and is not offered here.
+     */
+    private void showBatchMenu() {
+        ArrayList<File> games = selectedGames();
+        if (games.isEmpty()) {
+            return;
+        }
+        int n = games.size();
+        new AlertDialog.Builder(this)
+                .setTitle(n + "개 게임에 적용")
+                .setItems(new CharSequence[]{
+                        "세이브 파일 꺼내기 (" + n + "개)",
+                        "데이터 폴더로 내보내기 (" + n + "개)",
+                        "데이터 폴더에서 불러오기 (" + n + "개)",
+                        "게임 데이터 초기화 (" + n + "개)"}, (dialog, which) -> {
+                    if (which == 0) {
+                        batchExportSaves(games);
+                    } else if (which == 1) {
+                        batchExportDataFolder(games);
+                    } else if (which == 2) {
+                        confirmBatchRestore(games);
+                    } else {
+                        confirmBatchErase(games);
+                    }
+                })
+                .setNegativeButton("취소", null)
+                .show();
+    }
+
+    /** A bulleted list of the games, capped so a long selection stays readable. */
+    private String batchNames(ArrayList<File> games) {
+        StringBuilder names = new StringBuilder();
+        int listed = Math.min(games.size(), 8);
+        for (int i = 0; i < listed; i++) {
+            names.append("• ").append(displayName(games.get(i))).append('\n');
+        }
+        if (games.size() > listed) {
+            names.append("… 외 ").append(games.size() - listed).append("개");
+        }
+        return names.toString().trim();
+    }
+
+    /**
+     * One toast line for a finished batch: the lead (which carries the success
+     * count) when anything succeeded, then how many were skipped for having no
+     * data and how many failed.
+     */
+    private String batchSummary(String doneLead, String emptyNote, int done, int empty, int failed) {
+        StringBuilder sb = new StringBuilder();
+        if (done > 0) {
+            sb.append(doneLead);
+        }
+        if (empty > 0) {
+            if (sb.length() > 0) {
+                sb.append(" · ");
+            }
+            sb.append(empty).append("개는 ").append(emptyNote);
+        }
+        if (failed > 0) {
+            if (sb.length() > 0) {
+                sb.append(" · ");
+            }
+            sb.append(failed).append("개 실패");
+        }
+        return sb.length() == 0 ? "처리할 내용이 없습니다." : sb.toString();
+    }
+
+    /** {@link #exportSaves} over every selected game, with one summary toast. */
+    private void batchExportSaves(ArrayList<File> games) {
+        withDownloadPermission(() -> {
+            Toast.makeText(this, games.size() + "개 세이브를 꺼내는 중...", Toast.LENGTH_SHORT).show();
+            emulatorThread.execute(() -> {
+                int done = 0, empty = 0, failed = 0;
+                for (File game : games) {
+                    try {
+                        if (SaveExporter.export(this, game, displayName(game)) == null) {
+                            empty++;
+                        } else {
+                            done++;
+                        }
+                    } catch (Exception e) {
+                        failed++;
+                    }
+                }
+                final int fDone = done, fEmpty = empty, fFailed = failed;
+                runOnUiThread(() -> Toast.makeText(this,
+                        batchSummary(fDone + "개 꺼냄 · 다운로드/Mini Mobile/세이브", "저장된 내용 없음", fDone, fEmpty, fFailed),
+                        Toast.LENGTH_LONG).show());
+            });
+        });
+    }
+
+    /** {@link #exportDataFolder} over every selected game, one summary toast. */
+    private void batchExportDataFolder(ArrayList<File> games) {
+        withDownloadPermission(() -> {
+            Toast.makeText(this, games.size() + "개를 데이터 폴더로 내보내는 중...", Toast.LENGTH_SHORT).show();
+            emulatorThread.execute(() -> {
+                int done = 0, empty = 0, failed = 0;
+                for (File game : games) {
+                    try {
+                        if (DataFolder.export(this, game, displayName(game)) == null) {
+                            empty++;
+                        } else {
+                            done++;
+                        }
+                    } catch (Exception e) {
+                        failed++;
+                    }
+                }
+                final int fDone = done, fEmpty = empty, fFailed = failed;
+                runOnUiThread(() -> Toast.makeText(this,
+                        batchSummary(fDone + "개 내보냄 · 다운로드/Mini Mobile", "저장된 내용 없음", fDone, fEmpty, fFailed),
+                        Toast.LENGTH_LONG).show());
+            });
+        });
+    }
+
+    /**
+     * {@link #restoreDataFolder} over every selected game. Confirmed first, as
+     * it overwrites each game's saved data from its folder and cannot be undone.
+     */
+    private void confirmBatchRestore(ArrayList<File> games) {
+        new AlertDialog.Builder(this)
+                .setTitle(games.size() + "개 데이터 폴더에서 불러오기")
+                .setMessage("각 게임의 데이터 폴더(다운로드/Mini Mobile/<게임 이름>)의 내용을 지금 저장된 내용에 덮어씁니다.\n덮어쓴 뒤에는 되돌릴 수 없습니다.\n\n" + batchNames(games))
+                .setNegativeButton("취소", null)
+                .setPositiveButton("불러오기", (dialog, which) -> withDownloadPermission(() ->
+                        emulatorThread.execute(() -> {
+                            int done = 0, empty = 0, failed = 0;
+                            for (File game : games) {
+                                try {
+                                    if (DataFolder.restore(this, displayName(game)) == null) {
+                                        empty++;
+                                    } else {
+                                        done++;
+                                    }
+                                } catch (Exception e) {
+                                    failed++;
+                                }
+                            }
+                            final int fDone = done, fEmpty = empty, fFailed = failed;
+                            runOnUiThread(() -> Toast.makeText(this,
+                                    batchSummary(fDone + "개 불러옴 · 게임을 다시 시작하면 적용됩니다", "폴더에 데이터 없음", fDone, fEmpty, fFailed),
+                                    Toast.LENGTH_LONG).show());
+                        })))
+                .show();
+    }
+
+    /**
+     * {@link #confirmErase} over every selected game. Confirmed first with the
+     * list of games, as it removes each one's saves and cannot be undone.
+     */
+    private void confirmBatchErase(ArrayList<File> games) {
+        new AlertDialog.Builder(this)
+                .setTitle(games.size() + "개 게임 데이터 초기화")
+                .setMessage("선택한 게임이 저장한 내용을 모두 지웁니다.\n세이브도 함께 지워지고, 되돌릴 수 없습니다.\n남겨두려면 먼저 \"세이브 파일 꺼내기\"로 백업하세요.\n\n" + batchNames(games))
+                .setNegativeButton("취소", null)
+                .setPositiveButton(games.size() + "개 초기화", (dialog, which) ->
+                        emulatorThread.execute(() -> {
+                            int done = 0, empty = 0, failed = 0;
+                            for (File game : games) {
+                                try {
+                                    if (SaveEraser.erase(this, game) == 0) {
+                                        empty++;
+                                    } else {
+                                        done++;
+                                    }
+                                } catch (Exception e) {
+                                    failed++;
+                                }
+                            }
+                            final int fDone = done, fEmpty = empty, fFailed = failed;
+                            runOnUiThread(() -> Toast.makeText(this,
+                                    batchSummary(fDone + "개 초기화됨", "저장된 내용 없음", fDone, fEmpty, fFailed),
+                                    Toast.LENGTH_LONG).show());
+                        }))
                 .show();
     }
 
