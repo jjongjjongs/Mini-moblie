@@ -63,6 +63,16 @@ impl LgtWIPICContext {
 
 #[async_trait::async_trait]
 impl WIPICContext for LgtWIPICContext {
+    /// EXPERIMENT (몬스터마스터): hand a title's pixel operation the source
+    /// first, as KTF does. Its menu operation, given the destination first,
+    /// answers the panel the glyph lands on rather than recolouring the glyph -
+    /// exactly the "draws no text anywhere" failure the trait note describes -
+    /// so every list box came out with its item text erased. To be verified
+    /// against other LGT titles before it is kept.
+    fn pixel_op_takes_source_first(&self) -> bool {
+        true
+    }
+
     fn alloc_raw(&mut self, size: WIPICWord) -> Result<WIPICWord> {
         Allocator::alloc(&mut self.core, size)
     }
