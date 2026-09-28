@@ -1386,8 +1386,10 @@ pub async fn flush_lcd(
         // those direct writes reached this buffer: a nonzero count over the
         // menu rows means the glyphs landed and something later hides them; a
         // zero count means the writes never arrived where we flush from.
-        let (white, beige, top, bottom) = count_menu_text(&*src_canvas);
-        tracing::info!("FRAME text-colours white={white} beige={beige} rows={top}..={bottom}");
+        let palette = count_menu_text(&*src_canvas);
+        for (code, count, top, bottom) in palette {
+            tracing::info!("FRAME colour {code:#06x}: count={count} rows={top}..={bottom}");
+        }
 
         // And the frame itself, on the rounds the off-screen surfaces are drawn
         // on. This is the one picture a reader can hold a screenshot against,
@@ -1814,35 +1816,45 @@ static FLUSHES: AtomicU32 = AtomicU32::new(0);
 /// Enough to tell a surface that was drawn on from one that was not, which is
 /// the question a missing sprite asks. Counting colours stops at 512 - past
 /// that the answer is "a picture" either way.
-/// TEMP DIAGNOSTIC (몬스터마스터): white (0xffff) and beige (0xa48b in 565)
-/// pixel counts in a frame, and the first and last row either colour appears
-/// on, or `-1..=-1` when neither does. See the call in [`flush_lcd`].
-fn count_menu_text(image: &dyn Image) -> (u32, u32, i32, i32) {
-    const WHITE: u16 = 0xffff;
-    const BEIGE: u16 = 0xa48b;
+/// TEMP DIAGNOSTIC (몬스터마스터): for each colour the menu draws in - the two
+/// dark browns and black it writes its text in, plus the white/beige/cream of
+/// the panels - how many pixels of it are in the frame and the first and last
+/// row it appears on. The text is blitted straight into the framebuffer, so
+/// this says whether the dark glyph writes survive to the frame we present:
+/// text colours present over the menu rows mean the glyphs are there (a
+/// contrast or display problem); absent while the panel colours are present
+/// means a later panel fill covered them.
+///
+/// The 565 codes are `MC_grpGetPixelFromRGB` of the RGB the log shows the game
+/// query: brown 0x463924→0x41c4, brown 0x2e2617→0x2922, black 0x0000, white
+/// 0xffff, beige 0xa2925f→0xa48b, cream 0xf1e6bc→0xf737.
+fn count_menu_text(image: &dyn Image) -> [(u16, u32, i32, i32); 6] {
+    let mut palette: [(u16, u32, i32, i32); 6] = [
+        (0x41c4, 0, -1, -1),
+        (0x2922, 0, -1, -1),
+        (0x0000, 0, -1, -1),
+        (0xffff, 0, -1, -1),
+        (0xa48b, 0, -1, -1),
+        (0xf737, 0, -1, -1),
+    ];
 
     let (w, h) = (image.width() as i32, image.height() as i32);
-    let (mut white, mut beige) = (0u32, 0u32);
-    let (mut top, mut bottom) = (-1i32, -1i32);
-
     for py in 0..h {
         for px in 0..w {
             let packed = Rgb565Pixel::from_color(image.get_pixel(px, py));
-            if packed == WHITE || packed == BEIGE {
-                if packed == WHITE {
-                    white += 1;
-                } else {
-                    beige += 1;
+            for entry in palette.iter_mut() {
+                if entry.0 == packed {
+                    entry.1 += 1;
+                    if entry.2 < 0 {
+                        entry.2 = py;
+                    }
+                    entry.3 = py;
                 }
-                if top < 0 {
-                    top = py;
-                }
-                bottom = py;
             }
         }
     }
 
-    (white, beige, top, bottom)
+    palette
 }
 
 fn surface_content(canvas: &dyn Image) -> (usize, u32) {
