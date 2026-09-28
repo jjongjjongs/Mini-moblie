@@ -2568,7 +2568,7 @@ public final class MainActivity extends Activity {
                         return;
                     }
 
-                    Toast.makeText(this, "다운로드 폴더에 저장: " + result.name + " (" + result.files + "개)", Toast.LENGTH_LONG).show();
+                    Toast.makeText(this, "다운로드/Mini Mobile/세이브 에 저장: " + result.name + " (" + result.files + "개)", Toast.LENGTH_LONG).show();
                 });
             } catch (Exception e) {
                 runOnUiThread(() -> Toast.makeText(this, "꺼내기 실패: " + e.getMessage(), Toast.LENGTH_LONG).show());
@@ -2583,11 +2583,47 @@ public final class MainActivity extends Activity {
      * title's menu; the file can sit in Downloads or any other folder.
      */
     private void importSaves(File game) {
+        // The saves the app exported sit in Mini Mobile/세이브; list them so one
+        // can be picked straight from there, with a fallback to the file picker
+        // for a save that lives somewhere else (a friend's, a cloud download).
+        List<Downloads.SaveFile> saves = Downloads.listSaves(this);
+
+        if (saves.isEmpty()) {
+            new AlertDialog.Builder(this)
+                    .setTitle("세이브 불러오기")
+                    .setMessage("다운로드/Mini Mobile/세이브 폴더에 세이브가 없습니다.\n다른 위치에서 세이브(.zip)를 고르시겠어요?")
+                    .setNegativeButton("취소", null)
+                    .setPositiveButton("파일 선택", (dialog, which) -> openSavePicker())
+                    .show();
+            return;
+        }
+
+        CharSequence[] items = new CharSequence[saves.size() + 1];
+        for (int i = 0; i < saves.size(); i++) {
+            items[i] = saves.get(i).name;
+        }
+        items[saves.size()] = "다른 위치에서 찾기…";
+
         new AlertDialog.Builder(this)
-                .setTitle(displayName(game))
-                .setMessage("세이브 파일(.zip)을 골라 지금 저장된 내용에 덮어씁니다.\n덮어쓴 뒤에는 되돌릴 수 없습니다.")
+                .setTitle("세이브 불러오기")
+                .setItems(items, (dialog, which) -> {
+                    if (which == saves.size()) {
+                        openSavePicker();
+                        return;
+                    }
+                    Downloads.SaveFile picked = saves.get(which);
+                    confirmRestoreFrom(picked.name, picked.uri);
+                })
                 .setNegativeButton("취소", null)
-                .setPositiveButton("파일 선택", (dialog, which) -> openSavePicker())
+                .show();
+    }
+
+    private void confirmRestoreFrom(String name, Uri uri) {
+        new AlertDialog.Builder(this)
+                .setTitle(name)
+                .setMessage("이 세이브를 지금 저장된 내용에 덮어씁니다.\n덮어쓴 뒤에는 되돌릴 수 없습니다.")
+                .setNegativeButton("취소", null)
+                .setPositiveButton("불러오기", (dialog, which) -> importSaveNow(uri))
                 .show();
     }
 

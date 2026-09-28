@@ -73,7 +73,7 @@ final class SaveExporter {
         }
 
         String name = Downloads.safeName(title) + " 세이브.zip";
-        Downloads.write(context, name, "application/zip", buffer.toByteArray());
+        Downloads.writeInto(context, Downloads.SAVES_DIR, name, "application/zip", buffer.toByteArray());
 
         return new Result(name, files);
     }
