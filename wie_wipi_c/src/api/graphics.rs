@@ -502,6 +502,14 @@ pub async fn put_pixel(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
 
     let color = context_color(&framebuffer, &gctx);
 
+    // The title's own operation runs for a single pixel too, exactly as it does
+    // for a fill - the reference draws every pixel through it. 몬스터마스터 plots
+    // its menu glyphs one pixel at a time through a magenta-keyed operation, and
+    // skipping it here wrote the raw colour and lost the text.
+    if fill_rect_with_op(context, &framebuffer, &gctx, x, y, 1, 1, color).await? {
+        return Ok(());
+    }
+
     // One pixel is two bytes; staging the surface to move them is what held a
     // handset's AP at its top clock through 드래곤하트2's menus. A colour that
     // is not opaque is composed with what is under it, which is the canvas
@@ -515,6 +523,101 @@ pub async fn put_pixel(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
     canvas.flush()?;
 
     Ok(())
+}
+
+/// Composes `color` over the pixels of `(x, y, w, h)` through the context's own
+/// pixel operation, when it has one.
+///
+/// `Ok(true)` when the context carries an operation and the rectangle was
+/// written through it; `Ok(false)` when it has none, so the caller takes its
+/// normal opaque (direct or canvas) path. The rectangle is expected already
+/// clipped by the caller, exactly as [`fill_rect`] clips before calling.
+///
+/// The reference runs its `WPGrp_PixelOperation` for every primitive, not only
+/// fills - see [`pixel_op`] - so `MC_grpPutPixel` and `MC_grpDrawLine` go
+/// through here as well. A title that draws its text and thin rules by the pixel
+/// through an operation-bearing context (몬스터마스터's menus do, with a
+/// magenta-keyed operation) had those writes land raw while its filled boxes
+/// went through the operation, so the boxes showed and the words did not.
+#[allow(clippy::too_many_arguments)]
+async fn fill_rect_with_op(
+    context: &mut dyn WIPICContext,
+    framebuffer: &FrameBuffer,
+    gctx: &WIPICGraphicsContext,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    color: Color,
+) -> Result<bool> {
+    let Some((kind, function)) = pixel_op::of_context(context, gctx.pixel_op_func_ptr, gctx.param1).await? else {
+        return Ok(false);
+    };
+
+    let source = Rgb565Pixel::from_color(color);
+    let source_first = context.pixel_op_takes_source_first();
+
+    // Read and write back only the rectangle, row by row, rather than staging
+    // the whole surface (see `FrameBuffer::read_rect_rgb565`).
+    if let Some((left, top, cols, rows, mut pixels)) = framebuffer.read_rect_rgb565(context, x, y, w, h)? {
+        for destination in pixels.iter_mut() {
+            *destination = match pixel_op::apply(kind, *destination, source, source_first) {
+                Some(result) => result,
+                None => {
+                    let (a, b) = pixel_op::arguments(source_first, *destination, source);
+
+                    context.call_function(function, &[a as WIPICWord, b as WIPICWord, gctx.param1]).await? as u16
+                }
+            };
+        }
+
+        framebuffer.write_rect_rgb565(context, left, top, cols, rows, &pixels)?;
+
+        return Ok(true);
+    }
+
+    // A depth the row reader cannot pack (a 32bpp surface): stage it through the
+    // canvas, as this path always has.
+    let existing = {
+        let canvas = framebuffer.canvas(context)?;
+        let surface = canvas.image();
+        let (width, height) = (surface.width() as i32, surface.height() as i32);
+
+        let mut existing = Vec::new();
+        for row in y..y + h {
+            for col in x..x + w {
+                if col < 0 || col >= width || row < 0 || row >= height {
+                    continue;
+                }
+
+                existing.push((col, row, Rgb565Pixel::from_color(surface.get_pixel(col, row))));
+            }
+        }
+
+        existing
+    };
+
+    let mut filled = Vec::with_capacity(existing.len());
+    for &(col, row, destination) in &existing {
+        let result = match pixel_op::apply(kind, destination, source, source_first) {
+            Some(result) => result,
+            None => {
+                let (a, b) = pixel_op::arguments(source_first, destination, source);
+
+                context.call_function(function, &[a as WIPICWord, b as WIPICWord, gctx.param1]).await? as u16
+            }
+        };
+
+        filled.push((col, row, result));
+    }
+
+    let mut canvas = framebuffer.canvas(context)?;
+    for (col, row, pixel) in filled {
+        canvas.put_pixel(col, row, Rgb565Pixel::to_color(pixel));
+    }
+    canvas.flush()?;
+
+    Ok(true)
 }
 
 pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr, x: i32, y: i32, w: i32, h: i32, p_gctx: WIPICWord) -> Result<()> {
@@ -541,72 +644,7 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
     // A fill goes through the title's own operation too - 드래곤하트2 lays two
     // hundred of them through a live one in a single capture - so the colour
     // meets what is already there rather than covering it.
-    if let Some((kind, function)) = pixel_op::of_context(context, gctx.pixel_op_func_ptr, gctx.param1).await? {
-        let source = Rgb565Pixel::from_color(color);
-        let source_first = context.pixel_op_takes_source_first();
-
-        // Read and write back only the rectangle. The two canvas round trips
-        // this used to make - one to look at what was under the fill, one to
-        // put the result back - staged the whole surface twice for a rectangle
-        // that is usually a few pixels across, and 드래곤하트2 lays two
-        // thousand of these a second in its menus. See
-        // `FrameBuffer::read_rect_rgb565`.
-        if let Some((left, top, cols, rows, mut pixels)) = framebuffer.read_rect_rgb565(context, x, y, w, h)? {
-            for destination in pixels.iter_mut() {
-                *destination = match pixel_op::apply(kind, *destination, source, source_first) {
-                    Some(result) => result,
-                    None => {
-                        let (a, b) = pixel_op::arguments(source_first, *destination, source);
-
-                        context.call_function(function, &[a as WIPICWord, b as WIPICWord, gctx.param1]).await? as u16
-                    }
-                };
-            }
-
-            framebuffer.write_rect_rgb565(context, left, top, cols, rows, &pixels)?;
-
-            return Ok(());
-        }
-
-        let existing = {
-            let canvas = framebuffer.canvas(context)?;
-            let surface = canvas.image();
-            let (width, height) = (surface.width() as i32, surface.height() as i32);
-
-            let mut existing = Vec::new();
-            for row in y..y + h {
-                for col in x..x + w {
-                    if col < 0 || col >= width || row < 0 || row >= height {
-                        continue;
-                    }
-
-                    existing.push((col, row, Rgb565Pixel::from_color(surface.get_pixel(col, row))));
-                }
-            }
-
-            existing
-        };
-
-        let mut filled = Vec::with_capacity(existing.len());
-        for &(col, row, destination) in &existing {
-            let result = match pixel_op::apply(kind, destination, source, source_first) {
-                Some(result) => result,
-                None => {
-                    let (a, b) = pixel_op::arguments(source_first, destination, source);
-
-                    context.call_function(function, &[a as WIPICWord, b as WIPICWord, gctx.param1]).await? as u16
-                }
-            };
-
-            filled.push((col, row, result));
-        }
-
-        let mut canvas = framebuffer.canvas(context)?;
-        for (col, row, pixel) in filled {
-            canvas.put_pixel(col, row, Rgb565Pixel::to_color(pixel));
-        }
-        canvas.flush()?;
-
+    if fill_rect_with_op(context, &framebuffer, &gctx, x, y, w, h, color).await? {
         return Ok(());
     }
 
@@ -2749,7 +2787,7 @@ pub async fn draw_line(context: &mut dyn WIPICContext, dst: WIPICIndirectPtr, x1
     //
     // A sloped line still goes through the canvas: its pixels are the
     // rasteriser's to choose, and standing in for it would be guessing at them.
-    if color.a == 0xff && (x1 == x2 || y1 == y2) {
+    if x1 == x2 || y1 == y2 {
         let (left, top) = (x1.min(x2), y1.min(y2));
         let width = (x1.max(x2) as i64 - left as i64) + 1;
         let height = (y1.max(y2) as i64 - top as i64) + 1;
@@ -2761,7 +2799,13 @@ pub async fn draw_line(context: &mut dyn WIPICContext, dst: WIPICIndirectPtr, x1
                 return Ok(());
             };
 
-            if framebuffer.fill_rect_direct(context, left, top, width as _, height as _, color)? {
+            // A rule goes through the title's operation the same as a fill; the
+            // reference runs it for every primitive. See `fill_rect_with_op`.
+            if fill_rect_with_op(context, &framebuffer, &gctx, left, top, width, height, color).await? {
+                return Ok(());
+            }
+
+            if color.a == 0xff && framebuffer.fill_rect_direct(context, left, top, width as _, height as _, color)? {
                 return Ok(());
             }
         }
