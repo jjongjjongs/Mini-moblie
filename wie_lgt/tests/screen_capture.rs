@@ -327,6 +327,8 @@ fn key_by_name(name: &str) -> Option<wie_backend::KeyCode> {
         "OK" | "FIRE" => OK,
         "LEFT_SOFT" | "LSK" => LEFT_SOFT_KEY,
         "RIGHT_SOFT" | "RSK" => RIGHT_SOFT_KEY,
+        "VOLUME_UP" | "VOLUP" | "L" => VOLUME_UP,
+        "VOLUME_DOWN" | "VOLDOWN" | "R" => VOLUME_DOWN,
         "CLEAR" | "CLR" => CLEAR,
         "CALL" | "SEND" => CALL,
         "HANGUP" | "END" => HANGUP,
