@@ -1379,6 +1379,16 @@ pub async fn flush_lcd(
             src_canvas.height(),
         );
 
+        // TEMP DIAGNOSTIC (몬스터마스터): its menu text is blitted straight into
+        // the framebuffer, outside the MC_grp calls, in white (0xffff) and the
+        // beige it queries from MC_grpGetPixelFromRGB (0xa48b in 565). Counting
+        // those two colours in the frame we are about to present says whether
+        // those direct writes reached this buffer: a nonzero count over the
+        // menu rows means the glyphs landed and something later hides them; a
+        // zero count means the writes never arrived where we flush from.
+        let (white, beige, top, bottom) = count_menu_text(&*src_canvas);
+        tracing::info!("FRAME text-colours white={white} beige={beige} rows={top}..={bottom}");
+
         // And the frame itself, on the rounds the off-screen surfaces are drawn
         // on. This is the one picture a reader can hold a screenshot against,
         // which is what says whether a surface reached the screen.
@@ -1804,6 +1814,37 @@ static FLUSHES: AtomicU32 = AtomicU32::new(0);
 /// Enough to tell a surface that was drawn on from one that was not, which is
 /// the question a missing sprite asks. Counting colours stops at 512 - past
 /// that the answer is "a picture" either way.
+/// TEMP DIAGNOSTIC (몬스터마스터): white (0xffff) and beige (0xa48b in 565)
+/// pixel counts in a frame, and the first and last row either colour appears
+/// on, or `-1..=-1` when neither does. See the call in [`flush_lcd`].
+fn count_menu_text(image: &dyn Image) -> (u32, u32, i32, i32) {
+    const WHITE: u16 = 0xffff;
+    const BEIGE: u16 = 0xa48b;
+
+    let (w, h) = (image.width() as i32, image.height() as i32);
+    let (mut white, mut beige) = (0u32, 0u32);
+    let (mut top, mut bottom) = (-1i32, -1i32);
+
+    for py in 0..h {
+        for px in 0..w {
+            let packed = Rgb565Pixel::from_color(image.get_pixel(px, py));
+            if packed == WHITE || packed == BEIGE {
+                if packed == WHITE {
+                    white += 1;
+                } else {
+                    beige += 1;
+                }
+                if top < 0 {
+                    top = py;
+                }
+                bottom = py;
+            }
+        }
+    }
+
+    (white, beige, top, bottom)
+}
+
 fn surface_content(canvas: &dyn Image) -> (usize, u32) {
     use alloc::collections::BTreeSet;
 
