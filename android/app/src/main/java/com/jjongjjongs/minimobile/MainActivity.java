@@ -280,6 +280,12 @@ public final class MainActivity extends Activity {
     private static final int LIB_DELETE = Color.rgb(192, 57, 43);       // #c0392b delete button
     private static final int LIB_SELECT_BG = Color.rgb(243, 250, 245);  // #f3faf5 selected row tint
 
+    private static final int LIB_STAR = Color.rgb(230, 167, 0);         // #e6a700 favourite star
+    private static final int LIB_STAR_OFF = Color.rgb(194, 204, 197);   // #c2ccc5 unfavourited star
+    private static final int LIB_STAR_SOFT = Color.rgb(253, 243, 214);  // #fdf3d6 ⭐ chip fill
+    private static final int LIB_STAR_LINE = Color.rgb(242, 224, 168);  // #f2e0a8 ⭐ chip border
+    private static final int LIB_STAR_INK = Color.rgb(154, 116, 0);     // #9a7400 ⭐ chip text
+
     /**
      * How much stack the emulator thread gets.
      *
@@ -316,6 +322,10 @@ public final class MainActivity extends Activity {
     // does not re-read every file on each keystroke.
     private String librarySearch = "";
     private String libraryCarrier = "";
+    // Favourites: a set of game file names, and whether the ⭐ chip is narrowing
+    // the list to them. Favourited games also float to the top of the mixed list.
+    private final java.util.HashSet<String> favorites = new java.util.HashSet<>();
+    private boolean libraryFavOnly = false;
     private final java.util.HashMap<String, String> carrierCache = new java.util.HashMap<>();
     // Cover icons cached by name+size+mtime so refilling the list on each
     // keystroke or selection tap does not re-read every archive from disk. A
@@ -324,6 +334,7 @@ public final class MainActivity extends Activity {
     private LinearLayout libraryListContainer;
     private LinearLayout libraryChipRow;
     private TextView librarySectCount;
+    private TextView librarySectTitle;
 
     // Multi-select delete. selectMode swaps the rows to checkboxes and shows the
     // action bar; selected holds the chosen games by absolute path; libraryShown
@@ -486,6 +497,9 @@ public final class MainActivity extends Activity {
         if (!gamesDir.exists()) {
             gamesDir.mkdirs();
         }
+
+        // Favourites persist across runs, keyed by the archive's file name.
+        favorites.addAll(getSharedPreferences("mini_ui", MODE_PRIVATE).getStringSet("favorites", java.util.Collections.emptySet()));
 
         // The rotate button says one thing while the phone turns its own screen
         // and another while it does not, and the player can be left running
@@ -859,6 +873,7 @@ public final class MainActivity extends Activity {
         // selection mode.
         librarySearch = "";
         libraryCarrier = "";
+        libraryFavOnly = false;
         selectMode = false;
         selected.clear();
 
@@ -910,12 +925,12 @@ public final class MainActivity extends Activity {
         sect.setOrientation(LinearLayout.HORIZONTAL);
         sect.setGravity(android.view.Gravity.CENTER_VERTICAL);
         sect.setPadding(dp(2), dp(16), dp(2), dp(8));
-        TextView sectTitle = new TextView(this);
-        sectTitle.setText("게임 목록");
-        sectTitle.setTextSize(13f);
-        sectTitle.setTypeface(Typeface.DEFAULT_BOLD);
-        sectTitle.setTextColor(LIB_INK);
-        sect.addView(sectTitle, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        librarySectTitle = new TextView(this);
+        librarySectTitle.setText("게임 목록");
+        librarySectTitle.setTextSize(13f);
+        librarySectTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        librarySectTitle.setTextColor(LIB_INK);
+        sect.addView(librarySectTitle, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         librarySectCount = new TextView(this);
         librarySectCount.setTextSize(12f);
         librarySectCount.setTextColor(LIB_MUTED);
@@ -1716,7 +1731,7 @@ public final class MainActivity extends Activity {
         }
         Arrays.sort(all, Comparator.comparing(File::getName, String.CASE_INSENSITIVE_ORDER));
 
-        int skt = 0, ktf = 0, lgt = 0, etc = 0;
+        int skt = 0, ktf = 0, lgt = 0, etc = 0, fav = 0;
         for (File game : all) {
             switch (carrierBucket(game)) {
                 case "SKT": skt++; break;
@@ -1724,12 +1739,18 @@ public final class MainActivity extends Activity {
                 case "LGT": lgt++; break;
                 default: etc++; break;
             }
+            if (isFavorite(game)) {
+                fav++;
+            }
         }
-        rebuildCarrierChips(all.length, skt, ktf, lgt, etc);
+        rebuildCarrierChips(all.length, fav, skt, ktf, lgt, etc);
 
         String query = librarySearch.toLowerCase(java.util.Locale.ROOT);
         ArrayList<File> shown = new ArrayList<>();
         for (File game : all) {
+            if (libraryFavOnly && !isFavorite(game)) {
+                continue;
+            }
             if (!libraryCarrier.isEmpty() && !carrierBucket(game).equals(libraryCarrier)) {
                 continue;
             }
@@ -1750,10 +1771,55 @@ public final class MainActivity extends Activity {
             // empty state from the "import your first game" one.
             libraryListContainer.addView(buildNoMatchState());
         } else {
-            libraryListContainer.addView(buildGameList(shown.toArray(new File[0])));
+            // Favourites float to the top as their own group, unless we are
+            // already showing only favourites (the ⭐ chip) or there is no mix.
+            ArrayList<File> favs = new ArrayList<>();
+            ArrayList<File> rest = new ArrayList<>();
+            for (File game : shown) {
+                (isFavorite(game) ? favs : rest).add(game);
+            }
+            if (!libraryFavOnly && !favs.isEmpty() && !rest.isEmpty()) {
+                libraryListContainer.addView(listSubheader("★  즐겨찾기", LIB_STAR_INK));
+                libraryListContainer.addView(buildGameList(favs.toArray(new File[0])));
+                libraryListContainer.addView(listSubheader("그 외 게임", LIB_MUTED));
+                libraryListContainer.addView(buildGameList(rest.toArray(new File[0])));
+            } else {
+                libraryListContainer.addView(buildGameList(shown.toArray(new File[0])));
+            }
         }
 
         updateSelectionUi();
+    }
+
+    /** A small group heading inside the list container. */
+    private TextView listSubheader(String text, int color) {
+        TextView header = new TextView(this);
+        header.setText(text);
+        header.setTextSize(11.5f);
+        header.setTypeface(Typeface.DEFAULT_BOLD);
+        header.setTextColor(color);
+        header.setPadding(dp(4), dp(12), dp(4), dp(6));
+        return header;
+    }
+
+    // --- favourites ------------------------------------------------------
+
+    private String favoriteKey(File game) {
+        return game.getName();
+    }
+
+    private boolean isFavorite(File game) {
+        return favorites.contains(favoriteKey(game));
+    }
+
+    private void toggleFavorite(File game) {
+        String key = favoriteKey(game);
+        if (!favorites.remove(key)) {
+            favorites.add(key);
+        }
+        getSharedPreferences("mini_ui", MODE_PRIVATE).edit()
+                .putStringSet("favorites", new java.util.HashSet<>(favorites)).apply();
+        refreshLibraryList();
     }
 
     private java.util.HashSet<String> pathsOf(java.util.List<File> files) {
@@ -1791,6 +1857,9 @@ public final class MainActivity extends Activity {
     /** Updates the section count, the 선택/취소 toggle, and the action bar. */
     private void updateSelectionUi() {
         int shownCount = libraryShown.size();
+        if (librarySectTitle != null) {
+            librarySectTitle.setText(libraryFavOnly ? "즐겨찾기" : "게임 목록");
+        }
         if (librarySectCount != null) {
             librarySectCount.setText(selectMode
                     ? (shownCount + "개 중 " + selected.size() + "개 선택")
@@ -1931,12 +2000,16 @@ public final class MainActivity extends Activity {
     }
 
     /** Rebuilds the carrier filter chips with the given per-bucket counts. */
-    private void rebuildCarrierChips(int total, int skt, int ktf, int lgt, int etc) {
+    private void rebuildCarrierChips(int total, int fav, int skt, int ktf, int lgt, int etc) {
         if (libraryChipRow == null) {
             return;
         }
         libraryChipRow.removeAllViews();
         libraryChipRow.addView(carrierChip("전체", total, "", 0));
+        // The ⭐ chip toggles favourites-only, and shows only when some exist.
+        if (fav > 0) {
+            libraryChipRow.addView(favoriteChip(fav));
+        }
         if (skt > 0) {
             libraryChipRow.addView(carrierChip("SKT", skt, "SKT", CARRIER_SKT[0]));
         }
@@ -1980,6 +2053,35 @@ public final class MainActivity extends Activity {
 
         chip.setOnClickListener(v -> {
             libraryCarrier = value;
+            refreshLibraryList();
+        });
+
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        params.rightMargin = dp(7);
+        chip.setLayoutParams(params);
+        return chip;
+    }
+
+    /** The ⭐ chip: an independent toggle that narrows the list to favourites. */
+    private View favoriteChip(int count) {
+        boolean on = libraryFavOnly;
+
+        LinearLayout chip = new LinearLayout(this);
+        chip.setOrientation(LinearLayout.HORIZONTAL);
+        chip.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        chip.setPadding(dp(11), dp(6), dp(11), dp(6));
+        chip.setBackground(roundedRect(on ? LIB_STAR_SOFT : LIB_BG, on ? LIB_STAR_LINE : LIB_LINE, 1, 999));
+
+        TextView text = new TextView(this);
+        text.setText("⭐ 즐겨찾기  " + count);
+        text.setTextSize(12f);
+        text.setTypeface(Typeface.DEFAULT_BOLD);
+        text.setTextColor(on ? LIB_STAR_INK : LIB_MUTED);
+        chip.addView(text);
+
+        chip.setOnClickListener(v -> {
+            libraryFavOnly = !libraryFavOnly;
             refreshLibraryList();
         });
 
@@ -2226,9 +2328,20 @@ public final class MainActivity extends Activity {
         meta.addView(metaLine);
         row.addView(meta, metaParams);
 
-        // A round, soft-green play affordance on the right - only when not
-        // selecting, where a row tap toggles instead of playing.
+        // A favourite star then the play affordance on the right - only when
+        // not selecting, where a row tap toggles the checkbox instead.
         if (!selectMode) {
+            boolean fav = isFavorite(game);
+            TextView star = new TextView(this);
+            star.setText(fav ? "★" : "☆");
+            star.setTextSize(16f);
+            star.setTextColor(fav ? LIB_STAR : LIB_STAR_OFF);
+            star.setGravity(android.view.Gravity.CENTER);
+            star.setOnClickListener(v -> toggleFavorite(game));
+            LinearLayout.LayoutParams starParams = new LinearLayout.LayoutParams(dp(30), dp(30));
+            starParams.rightMargin = dp(2);
+            row.addView(star, starParams);
+
             TextView play = new TextView(this);
             play.setText("▶");
             play.setTextSize(11f);
