@@ -538,25 +538,6 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
 
     let color = context_color(&framebuffer, &gctx);
 
-    // TEMP DIAGNOSTIC (몬스터마스터): does this fill sit over text already in the
-    // buffer? If the panel fills cover the direct-written glyphs, that is why the
-    // box interiors come out blank while the title and labels (no fill over them)
-    // show. Only sizeable fills covering many text-coloured pixels are logged,
-    // and only when the INFO log is on.
-    if tracing::enabled!(tracing::Level::INFO)
-        && w >= 20
-        && h >= 8
-        && let Some((_, _, _, _, under)) = framebuffer.read_rect_rgb565(context, x, y, w, h)?
-    {
-        let text = under.iter().filter(|&&p| p == 0x41c4 || p == 0x2922 || p == 0x0000).count();
-        if text > 20 {
-            tracing::info!(
-                "FILL over-text rect=({x},{y},{w},{h}) fill={:#06x} textpx={text}",
-                Rgb565Pixel::from_color(color)
-            );
-        }
-    }
-
     // A fill goes through the title's own operation too - 드래곤하트2 lays two
     // hundred of them through a live one in a single capture - so the colour
     // meets what is already there rather than covering it.
@@ -571,16 +552,6 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
         // thousand of these a second in its menus. See
         // `FrameBuffer::read_rect_rgb565`.
         if let Some((left, top, cols, rows, mut pixels)) = framebuffer.read_rect_rgb565(context, x, y, w, h)? {
-            // TEMP DIAGNOSTIC (몬스터마스터): the destinations this fill is about
-            // to run the operation over, so the log can show dst -> result and
-            // say whether the operation preserves what is under it (blend/key,
-            // so text survives) or just writes the fill (opaque, covering text).
-            let probe_before: alloc::vec::Vec<u16> = if tracing::enabled!(tracing::Level::INFO) && w >= 20 && h >= 8 {
-                pixels.iter().take(8).copied().collect()
-            } else {
-                alloc::vec::Vec::new()
-            };
-
             for destination in pixels.iter_mut() {
                 *destination = match pixel_op::apply(kind, *destination, source, source_first) {
                     Some(result) => result,
@@ -590,18 +561,6 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
                         context.call_function(function, &[a as WIPICWord, b as WIPICWord, gctx.param1]).await? as u16
                     }
                 };
-            }
-
-            if !probe_before.is_empty() {
-                let after: alloc::vec::Vec<u16> = pixels.iter().take(8).copied().collect();
-                tracing::info!(
-                    "FILL op {kind:?} fn={:#x} param={} src={:#06x} rect=({x},{y},{w},{h}) dst={:04x?} -> {:04x?}",
-                    function,
-                    gctx.param1,
-                    source,
-                    probe_before,
-                    after
-                );
             }
 
             framebuffer.write_rect_rgb565(context, left, top, cols, rows, &pixels)?;
@@ -1420,34 +1379,12 @@ pub async fn flush_lcd(
             src_canvas.height(),
         );
 
-        // TEMP DIAGNOSTIC (몬스터마스터): its menu text is blitted straight into
-        // the framebuffer, outside the MC_grp calls, in white (0xffff) and the
-        // beige it queries from MC_grpGetPixelFromRGB (0xa48b in 565). Counting
-        // those two colours in the frame we are about to present says whether
-        // those direct writes reached this buffer: a nonzero count over the
-        // menu rows means the glyphs landed and something later hides them; a
-        // zero count means the writes never arrived where we flush from.
-        let palette = count_menu_text(&*src_canvas);
-        for (code, count, top, bottom) in palette {
-            tracing::info!("FRAME colour {code:#06x}: count={count} rows={top}..={bottom}");
-        }
-
         // And the frame itself, on the rounds the off-screen surfaces are drawn
         // on. This is the one picture a reader can hold a screenshot against,
         // which is what says whether a surface reached the screen.
         if FLUSHES.load(Ordering::Relaxed).is_multiple_of(OFFSCREEN_TRACE_EVERY) {
             for line in surface_thumbnail(&*src_canvas) {
                 tracing::info!("FRAME |{line}|");
-            }
-
-            // TEMP DIAGNOSTIC (몬스터마스터): two full menu rows at native
-            // resolution, each pixel a letter for the colour it is - T dark
-            // text (0x41c4/0x2922), K black, W white, b beige, c cream, .
-            // anything else. Readable glyph runs mean the text is placed right
-            // and it is a contrast problem; a flat run or a smear means the
-            // direct blit is landing the glyphs in the wrong place.
-            for row in [110i32, 150i32] {
-                tracing::info!("FRAME row {row}: {}", menu_row_legend(&*src_canvas, row));
             }
         }
     }
@@ -1867,73 +1804,6 @@ static FLUSHES: AtomicU32 = AtomicU32::new(0);
 /// Enough to tell a surface that was drawn on from one that was not, which is
 /// the question a missing sprite asks. Counting colours stops at 512 - past
 /// that the answer is "a picture" either way.
-/// TEMP DIAGNOSTIC (몬스터마스터): for each colour the menu draws in - the two
-/// dark browns and black it writes its text in, plus the white/beige/cream of
-/// the panels - how many pixels of it are in the frame and the first and last
-/// row it appears on. The text is blitted straight into the framebuffer, so
-/// this says whether the dark glyph writes survive to the frame we present:
-/// text colours present over the menu rows mean the glyphs are there (a
-/// contrast or display problem); absent while the panel colours are present
-/// means a later panel fill covered them.
-///
-/// The 565 codes are `MC_grpGetPixelFromRGB` of the RGB the log shows the game
-/// query: brown 0x463924→0x41c4, brown 0x2e2617→0x2922, black 0x0000, white
-/// 0xffff, beige 0xa2925f→0xa48b, cream 0xf1e6bc→0xf737.
-fn count_menu_text(image: &dyn Image) -> [(u16, u32, i32, i32); 6] {
-    let mut palette: [(u16, u32, i32, i32); 6] = [
-        (0x41c4, 0, -1, -1),
-        (0x2922, 0, -1, -1),
-        (0x0000, 0, -1, -1),
-        (0xffff, 0, -1, -1),
-        (0xa48b, 0, -1, -1),
-        (0xf737, 0, -1, -1),
-    ];
-
-    let (w, h) = (image.width() as i32, image.height() as i32);
-    for py in 0..h {
-        for px in 0..w {
-            let packed = Rgb565Pixel::from_color(image.get_pixel(px, py));
-            for entry in palette.iter_mut() {
-                if entry.0 == packed {
-                    entry.1 += 1;
-                    if entry.2 < 0 {
-                        entry.2 = py;
-                    }
-                    entry.3 = py;
-                }
-            }
-        }
-    }
-
-    palette
-}
-
-/// TEMP DIAGNOSTIC (몬스터마스터): one framebuffer row as a legend string, a
-/// letter per pixel for the colour it is. See the call in [`flush_lcd`].
-fn menu_row_legend(image: &dyn Image, y: i32) -> alloc::string::String {
-    use alloc::string::String;
-
-    let (w, h) = (image.width() as i32, image.height() as i32);
-    if y < 0 || y >= h {
-        return String::new();
-    }
-
-    let mut out = String::with_capacity(w as usize);
-    for x in 0..w {
-        let packed = Rgb565Pixel::from_color(image.get_pixel(x, y));
-        out.push(match packed {
-            0x41c4 | 0x2922 => 'T',
-            0x0000 => 'K',
-            0xffff => 'W',
-            0xa48b => 'b',
-            0xf737 => 'c',
-            _ => '.',
-        });
-    }
-
-    out
-}
-
 fn surface_content(canvas: &dyn Image) -> (usize, u32) {
     use alloc::collections::BTreeSet;
 
