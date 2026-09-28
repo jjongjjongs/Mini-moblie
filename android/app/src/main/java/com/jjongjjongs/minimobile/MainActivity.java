@@ -2433,7 +2433,7 @@ public final class MainActivity extends Activity {
                 new MenuItem("🗑", "게임 데이터 초기화", "", "세이브·기록을 모두 삭제", true),
                 new MenuItem("✕", "목록에서 삭제", "", "목록에서만 삭제 (세이브는 유지)", true),
         };
-        new AlertDialog.Builder(this)
+        lightAlert()
                 .setTitle(displayName(game))
                 .setAdapter(menuAdapter(items), (dialog, which) -> {
                     if (which == 0) {
@@ -2471,7 +2471,7 @@ public final class MainActivity extends Activity {
                 new MenuItem("📥", "데이터 폴더에서 불러오기", n, "각 폴더의 내용을 게임에 적용", false),
                 new MenuItem("🗑", "게임 데이터 초기화", n, "세이브·기록을 모두 삭제", true),
         };
-        new AlertDialog.Builder(this)
+        lightAlert()
                 .setTitle(games.size() + "개 게임에 적용")
                 .setAdapter(menuAdapter(items), (dialog, which) -> {
                     if (which == 0) {
@@ -2507,6 +2507,16 @@ public final class MainActivity extends Activity {
             this.subtitle = subtitle;
             this.danger = danger;
         }
+    }
+
+    /**
+     * An {@link AlertDialog.Builder} forced to the light dialog theme, so the
+     * icon-row menus keep their white sheet and dark text stay readable even
+     * when the device (and the default dialog theme) is dark - which left the
+     * ink titles and grey subtitles all but invisible.
+     */
+    private AlertDialog.Builder lightAlert() {
+        return new AlertDialog.Builder(new android.view.ContextThemeWrapper(this, android.R.style.Theme_Material_Light_Dialog_Alert));
     }
 
     /** An {@link ArrayAdapter} that renders each {@link MenuItem} via {@link #menuItemView}. */
