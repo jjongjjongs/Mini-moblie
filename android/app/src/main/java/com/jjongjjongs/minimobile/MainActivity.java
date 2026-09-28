@@ -28,7 +28,10 @@ import android.os.SystemClock;
 import android.provider.OpenableColumns;
 import android.provider.Settings;
 import android.text.InputFilter;
+import android.text.Spannable;
+import android.text.SpannableString;
 import android.text.TextUtils;
+import android.text.style.ForegroundColorSpan;
 import android.util.Log;
 import android.util.SparseArray;
 import android.view.InputDevice;
@@ -38,6 +41,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewOutlineProvider;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
@@ -278,6 +282,7 @@ public final class MainActivity extends Activity {
     private static final int[] CARRIER_ETC = {Color.rgb(100, 117, 104), Color.rgb(238, 243, 239), Color.rgb(226, 233, 228)};
 
     private static final int LIB_DELETE = Color.rgb(192, 57, 43);       // #c0392b delete button
+    private static final int LIB_RED_SOFT = Color.rgb(253, 236, 235);   // #fdeceb danger icon tile
     private static final int LIB_SELECT_BG = Color.rgb(243, 250, 245);  // #f3faf5 selected row tint
 
     private static final int LIB_STAR = Color.rgb(230, 167, 0);         // #e6a700 favourite star
@@ -2454,14 +2459,22 @@ public final class MainActivity extends Activity {
         if (games.isEmpty()) {
             return;
         }
-        int n = games.size();
+        String n = "(" + games.size() + "개)";
+        BatchItem[] items = {
+                new BatchItem("📤", "세이브 파일 꺼내기", n, "각 게임의 .zip 을 세이브 폴더로", false),
+                new BatchItem("📁", "데이터 폴더로 내보내기", n, "다운로드/Mini Mobile/게임 이름 에 저장", false),
+                new BatchItem("📥", "데이터 폴더에서 불러오기", n, "각 폴더의 내용을 게임에 적용", false),
+                new BatchItem("🗑", "게임 데이터 초기화", n, "세이브·기록을 모두 삭제", true),
+        };
+        ArrayAdapter<BatchItem> adapter = new ArrayAdapter<BatchItem>(this, 0, items) {
+            @Override
+            public View getView(int position, View convertView, ViewGroup parent) {
+                return batchItemView(getItem(position));
+            }
+        };
         new AlertDialog.Builder(this)
-                .setTitle(n + "개 게임에 적용")
-                .setItems(new CharSequence[]{
-                        "세이브 파일 꺼내기 (" + n + "개)",
-                        "데이터 폴더로 내보내기 (" + n + "개)",
-                        "데이터 폴더에서 불러오기 (" + n + "개)",
-                        "게임 데이터 초기화 (" + n + "개)"}, (dialog, which) -> {
+                .setTitle(games.size() + "개 게임에 적용")
+                .setAdapter(adapter, (dialog, which) -> {
                     if (which == 0) {
                         batchExportSaves(games);
                     } else if (which == 1) {
@@ -2474,6 +2487,67 @@ public final class MainActivity extends Activity {
                 })
                 .setNegativeButton("취소", null)
                 .show();
+    }
+
+    /** One batch-menu row: emoji, title, a count in the accent colour, subtitle. */
+    private static final class BatchItem {
+        final String emoji;
+        final String title;
+        final String count;
+        final String subtitle;
+        final boolean danger;
+
+        BatchItem(String emoji, String title, String count, String subtitle, boolean danger) {
+            this.emoji = emoji;
+            this.title = title;
+            this.count = count;
+            this.subtitle = subtitle;
+            this.danger = danger;
+        }
+    }
+
+    /** Builds the view for one {@link BatchItem}, matching the library palette. */
+    private View batchItemView(BatchItem item) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(18), dp(11), dp(18), dp(11));
+
+        TextView icon = new TextView(this);
+        icon.setText(item.emoji);
+        icon.setTextSize(15f);
+        icon.setGravity(android.view.Gravity.CENTER);
+        icon.setBackground(roundedRect(item.danger ? LIB_RED_SOFT : LIB_GREEN_SOFTER, 0, 0, 9));
+        LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(dp(34), dp(34));
+        iconParams.rightMargin = dp(12);
+        row.addView(icon, iconParams);
+
+        LinearLayout text = new LinearLayout(this);
+        text.setOrientation(LinearLayout.VERTICAL);
+
+        TextView title = new TextView(this);
+        title.setTextSize(15f);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setTextColor(LIB_INK);
+        // The title stays ink; only the "(N개)" count takes the accent colour.
+        String full = item.title + " " + item.count;
+        SpannableString span = new SpannableString(full);
+        span.setSpan(new ForegroundColorSpan(item.danger ? LIB_DELETE : LIB_GREEN_DEEP),
+                item.title.length() + 1, full.length(), Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+        title.setText(span);
+        text.addView(title);
+
+        TextView sub = new TextView(this);
+        sub.setText(item.subtitle);
+        sub.setTextSize(11.5f);
+        sub.setTextColor(LIB_MUTED);
+        LinearLayout.LayoutParams subParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        subParams.topMargin = dp(1);
+        text.addView(sub, subParams);
+
+        row.addView(text, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        return row;
     }
 
     /** A bulleted list of the games, capped so a long selection stays readable. */
