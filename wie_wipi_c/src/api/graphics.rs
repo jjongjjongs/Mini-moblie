@@ -1398,6 +1398,16 @@ pub async fn flush_lcd(
             for line in surface_thumbnail(&*src_canvas) {
                 tracing::info!("FRAME |{line}|");
             }
+
+            // TEMP DIAGNOSTIC (몬스터마스터): two full menu rows at native
+            // resolution, each pixel a letter for the colour it is - T dark
+            // text (0x41c4/0x2922), K black, W white, b beige, c cream, .
+            // anything else. Readable glyph runs mean the text is placed right
+            // and it is a contrast problem; a flat run or a smear means the
+            // direct blit is landing the glyphs in the wrong place.
+            for row in [110i32, 150i32] {
+                tracing::info!("FRAME row {row}: {}", menu_row_legend(&*src_canvas, row));
+            }
         }
     }
 
@@ -1855,6 +1865,32 @@ fn count_menu_text(image: &dyn Image) -> [(u16, u32, i32, i32); 6] {
     }
 
     palette
+}
+
+/// TEMP DIAGNOSTIC (몬스터마스터): one framebuffer row as a legend string, a
+/// letter per pixel for the colour it is. See the call in [`flush_lcd`].
+fn menu_row_legend(image: &dyn Image, y: i32) -> alloc::string::String {
+    use alloc::string::String;
+
+    let (w, h) = (image.width() as i32, image.height() as i32);
+    if y < 0 || y >= h {
+        return String::new();
+    }
+
+    let mut out = String::with_capacity(w as usize);
+    for x in 0..w {
+        let packed = Rgb565Pixel::from_color(image.get_pixel(x, y));
+        out.push(match packed {
+            0x41c4 | 0x2922 => 'T',
+            0x0000 => 'K',
+            0xffff => 'W',
+            0xa48b => 'b',
+            0xf737 => 'c',
+            _ => '.',
+        });
+    }
+
+    out
 }
 
 fn surface_content(canvas: &dyn Image) -> (usize, u32) {
