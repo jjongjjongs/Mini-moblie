@@ -105,6 +105,24 @@ pub struct TitleQuirks {
     /// between frames, so the runtime must not reset them after a paint. See
     /// [`crate::System::title_owns_graphics_state`].
     pub owns_graphics_state: bool,
+
+    /// Whether the runtime should repaint the whole scene each pass rather than
+    /// only the region the title asked for, because the regions it asks for do
+    /// not cover everything that has to be redrawn and stale pixels are left
+    /// standing.
+    ///
+    /// `net.wie.CardCanvas` paints only the dirty region a `Card.repaint` marks,
+    /// so that an ez-i title typing a dialogue out one glyph cell at a time
+    /// leaves the rest of the box standing. A title driven through
+    /// `org.kwis.msp.lwc` breaks that assumption: its `ProxyCard` asks for
+    /// partial regions that fall short of where an earlier screen drew (its
+    /// title band, a divider rule), and those earlier pixels are never inside a
+    /// later region, so they stay on screen under the new one. 학교가는 길 (LGT
+    /// 00023917) is where that shows: its comic select screen kept the title
+    /// laid over it and the building screen kept a stray red rule, until the
+    /// region was ignored and the scene painted whole. `net.wie.CardCanvas`
+    /// reads this.
+    pub repaints_whole_frame: bool,
 }
 
 const fn panel(width: u32, height: u32) -> TitleQuirks {
@@ -117,6 +135,7 @@ const fn panel(width: u32, height: u32) -> TitleQuirks {
         clears_screen_each_paint: false,
         keys_as_skvm_scancodes: false,
         owns_graphics_state: false,
+        repaints_whole_frame: false,
     }
 }
 
@@ -130,6 +149,7 @@ const fn annunciator() -> TitleQuirks {
         clears_screen_each_paint: false,
         keys_as_skvm_scancodes: false,
         owns_graphics_state: false,
+        repaints_whole_frame: false,
     }
 }
 
@@ -144,6 +164,7 @@ const fn annunciator_of(rows: u32) -> TitleQuirks {
         clears_screen_each_paint: false,
         keys_as_skvm_scancodes: false,
         owns_graphics_state: false,
+        repaints_whole_frame: false,
     }
 }
 
@@ -157,6 +178,7 @@ const fn sideways() -> TitleQuirks {
         clears_screen_each_paint: false,
         keys_as_skvm_scancodes: false,
         owns_graphics_state: false,
+        repaints_whole_frame: false,
     }
 }
 
@@ -172,6 +194,7 @@ const fn clears_frame() -> TitleQuirks {
         clears_screen_each_paint: true,
         keys_as_skvm_scancodes: false,
         owns_graphics_state: false,
+        repaints_whole_frame: false,
     }
 }
 
@@ -199,6 +222,7 @@ const fn clip_includes_far_edge() -> TitleQuirks {
         clears_screen_each_paint: false,
         keys_as_skvm_scancodes: false,
         owns_graphics_state: false,
+        repaints_whole_frame: false,
     }
 }
 
@@ -214,6 +238,7 @@ const fn skvm_scancode_keys() -> TitleQuirks {
         clears_screen_each_paint: false,
         keys_as_skvm_scancodes: true,
         owns_graphics_state: false,
+        repaints_whole_frame: false,
     }
 }
 
@@ -229,6 +254,24 @@ const fn owns_graphics_state() -> TitleQuirks {
         clears_screen_each_paint: false,
         keys_as_skvm_scancodes: false,
         owns_graphics_state: true,
+        repaints_whole_frame: false,
+    }
+}
+
+/// A title whose paint regions do not cover everything that has to be redrawn,
+/// so the scene has to be painted whole each pass. See
+/// [`TitleQuirks::repaints_whole_frame`].
+const fn repaints_whole_frame() -> TitleQuirks {
+    TitleQuirks {
+        screen_size: None,
+        expects_annunciator: false,
+        annunciator_rows: None,
+        drawn_sideways: false,
+        clip_includes_far_edge: false,
+        clears_screen_each_paint: false,
+        keys_as_skvm_scancodes: false,
+        owns_graphics_state: false,
+        repaints_whole_frame: true,
     }
 }
 
@@ -340,6 +383,13 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // off-screen buffer of its own, and copies that onto the screen a quarter
     // turn clockwise - the handset was meant to be turned sideways to play it.
     (TitlePlatform::Lgt, "000323B3", sideways()),
+    // 학교가는 길: an org.kwis.msp.lwc title whose ProxyCard repaints partial
+    // regions that leave the previous screen's own pixels standing - its comic
+    // select screen kept the title band drawn over it, and the building screen
+    // kept a red divider rule from the screen before. The regions it marks
+    // never cover those, so nothing clears them until the scene is painted
+    // whole. See TitleQuirks::repaints_whole_frame.
+    (TitlePlatform::Lgt, "00023917", repaints_whole_frame()),
     (TitlePlatform::Skt, "3826345643", clip_includes_far_edge()),
     // 얼라이브: drawn for a 176x220 handset - its title sky, menu and the city
     // under them, and every screen after, are laid out 176 wide and down to
@@ -603,6 +653,15 @@ mod tests {
     fn a_title_without_the_wipe_rule_does_not_get_it() {
         assert!(!title_quirks(TitlePlatform::Skt, "0027684826").clears_screen_each_paint);
         assert!(!title_quirks(TitlePlatform::Skt, "0145741367").clears_screen_each_paint);
+    }
+
+    /// 학교가는 길 has to paint its scene whole; a title without the rule keeps
+    /// painting only what it asked for.
+    #[test]
+    fn the_whole_frame_repaint_is_one_titles_and_not_every_titles() {
+        assert!(title_quirks(TitlePlatform::Lgt, "00023917").repaints_whole_frame);
+        assert!(!title_quirks(TitlePlatform::Lgt, "000323B3").repaints_whole_frame);
+        assert!(!TitleQuirks::default().repaints_whole_frame);
     }
 
     /// Ids are assigned per carrier, so an entry must not answer for the same

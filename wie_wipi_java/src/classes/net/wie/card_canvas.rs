@@ -183,7 +183,7 @@ impl CardCanvas {
         Ok(())
     }
 
-    async fn paint(jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>, g: ClassInstanceRef<MidpGraphics>) -> JvmResult<()> {
+    async fn paint(jvm: &Jvm, context: &mut WieJvmContext, this: ClassInstanceRef<Self>, g: ClassInstanceRef<MidpGraphics>) -> JvmResult<()> {
         tracing::debug!("net.wie.CardCanvas::paint({this:?}, {g:?})");
 
         // MIDP may reuse a Graphics instance whose translate/clip/color state
@@ -202,7 +202,12 @@ impl CardCanvas {
         // for one 10x10 glyph cell at a time and letting the rest of the box
         // stand, and repainting the lot unclipped wiped every letter but the
         // newest.
-        let region = Self::take_dirty_region(jvm, &this).await?;
+        //
+        // A few titles ask for regions that fall short of what has to be
+        // redrawn and leave an earlier screen's pixels standing; those paint the
+        // whole scene each pass instead. See `TitleQuirks::repaints_whole_frame`.
+        let force_full = context.system().title_repaints_whole_frame();
+        let region = Self::take_dirty_region(jvm, &this, force_full).await?;
 
         // The docked card is the background layer; the pushed-card stack draws
         // on top of it.
@@ -267,11 +272,14 @@ impl CardCanvas {
     ///
     /// `None` means "paint everything": either the title asked for the whole
     /// canvas, or this pass was not asked for at all - a redraw the platform
-    /// itself wanted - and a full paint is what that has always meant.
+    /// itself wanted - and a full paint is what that has always meant. A title
+    /// whose regions leave stale pixels standing asks for a full paint every
+    /// pass through `force_full`, and the pending region is still cleared so it
+    /// does not carry into a pass that does not.
     ///
     /// The rectangle is in canvas coordinates, which is what `Card.repaint`
     /// hands the canvas.
-    async fn take_dirty_region(jvm: &Jvm, this: &ClassInstanceRef<Self>) -> JvmResult<Option<(i32, i32, i32, i32)>> {
+    async fn take_dirty_region(jvm: &Jvm, this: &ClassInstanceRef<Self>, force_full: bool) -> JvmResult<Option<(i32, i32, i32, i32)>> {
         let mut this = this.clone();
 
         let x: i32 = jvm.get_field(&this, "__wieDirtyX", "I").await?;
@@ -282,7 +290,7 @@ impl CardCanvas {
         jvm.put_field(&mut this, "__wieDirtyWidth", "I", 0).await?;
         jvm.put_field(&mut this, "__wieDirtyHeight", "I", 0).await?;
 
-        if width <= 0 || height <= 0 {
+        if force_full || width <= 0 || height <= 0 {
             return Ok(None);
         }
 

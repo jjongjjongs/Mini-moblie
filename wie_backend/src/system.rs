@@ -72,6 +72,9 @@ pub struct System {
     /// (`com.skt.m.Graphics2D`), which keeps its own translate and clip on the
     /// screen graphics between frames. See [`System::title_owns_graphics_state`].
     title_owns_graphics_state: Arc<AtomicBool>,
+    /// Whether the scene is painted whole each pass rather than only the region
+    /// the title asked for. See [`System::title_repaints_whole_frame`].
+    title_repaints_whole_frame: Arc<AtomicBool>,
 }
 
 impl System {
@@ -120,6 +123,7 @@ impl System {
             midp_uses_standard_key_codes: Arc::new(AtomicBool::new(false)),
             title_keys_as_skvm_scancodes: Arc::new(AtomicBool::new(false)),
             title_owns_graphics_state: Arc::new(AtomicBool::new(false)),
+            title_repaints_whole_frame: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -312,6 +316,19 @@ impl System {
 
     pub fn set_title_owns_graphics_state(&self) {
         self.title_owns_graphics_state.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether the runtime paints the whole scene each pass for this title,
+    /// rather than only the region a `Card.repaint` marked, because the regions
+    /// it marks leave earlier screens' pixels standing where no later region
+    /// reaches them. Looked up in `crate::quirks` and set here by the emulator
+    /// that loaded the archive; `net.wie.CardCanvas` reads it.
+    pub fn title_repaints_whole_frame(&self) -> bool {
+        self.title_repaints_whole_frame.load(Ordering::SeqCst)
+    }
+
+    pub fn set_title_repaints_whole_frame(&self, repaints: bool) {
+        self.title_repaints_whole_frame.store(repaints, Ordering::SeqCst);
     }
 
     /// Whether the title lays its screens out below the handset's status strip,
