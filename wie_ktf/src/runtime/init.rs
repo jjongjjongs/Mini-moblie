@@ -442,6 +442,17 @@ const VM_CONTEXT_STACK: u32 = 0x34;
 /// module when it is handed one of these instead of a class.
 const VM_CONTEXT_JVM: u32 = 0x38;
 
+/// Where the VM context keeps the module interface (`MNInterface`), at `+0x3c`.
+///
+/// The ordinary module reaches this interface through a global of its own, set
+/// from what `get_interface` handed it. A relocated module reaches the very
+/// same functions a second way - a run of thunks compiled into its image, each
+/// `mov r0, fp; ldr r0, [r0, #0x3c]; ldr r0, [r0, #slot]; mov pc, r0`, so the
+/// word here is the interface table and `+slot` is one of its entries. o2jam's
+/// `Clet.startApp` walks straight into that run; left zero, the first thunk
+/// jumps through `[0 + slot]` and faults on the low address the slot names.
+const VM_CONTEXT_INTERFACE: u32 = 0x3c;
+
 fn module_vm_context(core: &mut ArmCore, ptr_jvm_context: u32) -> Result<u32> {
     let context = Allocator::alloc(core, VM_CONTEXT_SIZE)?;
     for word in (0..VM_CONTEXT_SIZE).step_by(size_of::<u32>()) {
@@ -746,7 +757,25 @@ async fn module_invoke(core: &mut ArmCore, jvm: &Jvm, native: bool) -> Result<Ja
             write_generic(core, arguments + index * size_of::<u32>() as u32, word)?;
         }
 
-        let result = core.run_function::<u32>(raw.fn_body_native_or_exception_table, &[0, arguments]).await;
+        // A native method's own record names the entry to jump to at
+        // `fn_body_native_or_exception_table`. The ordinary module fills that in
+        // from its `fn_init` - for a platform native it is the runtime's stub,
+        // and for one of the module's own it is a little trampoline that hands
+        // the argument block to the method's block-argument entry. A relocated
+        // module has no `fn_init`, so its own native methods reach here with
+        // that word still zero while `fn_body` already holds that entry.
+        // o2jam's `Clet.startClet`/`paintClet` are exactly this.
+        //
+        // The trampoline only ever passes the block along in `r0`, so calling
+        // `fn_body` with the block there is what it would have done. The block
+        // is the same one the platform path builds - the receiver first, then
+        // the arguments - which is the layout the entry reads, its first
+        // argument at `[r0 + 4]`.
+        let result = if raw.fn_body_native_or_exception_table == 0 {
+            core.run_function::<u32>(raw.fn_body, &[arguments]).await
+        } else {
+            core.run_function::<u32>(raw.fn_body_native_or_exception_table, &[0, arguments]).await
+        };
 
         Allocator::free(core, arguments, words * size_of::<u32>() as u32)?;
 
@@ -1155,8 +1184,10 @@ pub async fn load_native(
 ) -> Result<ExeInterfaceFunctions> {
     let bss_size = parse_bss_size(filename)?;
 
-    // Which of the two kinds of module this is. See `crate::module`.
-    let relocated = crate::module::RelocatedModule::parse(data);
+    // Which of the two kinds of module this is. See `crate::module`. A
+    // relocated one names this same bss in its header; that match is what tells
+    // it from an ordinary module, so the parse takes it.
+    let relocated = crate::module::RelocatedModule::parse(data, bss_size);
 
     core.load(data, IMAGE_BASE, data.len() + bss_size as usize)?;
 
@@ -1247,6 +1278,8 @@ pub async fn load_native(
             let vm_context = module_vm_context(core, ptr_jvm_context)?;
             let pool = module.base(IMAGE_BASE) + module.constant_pool(data)?;
             write_generic(core, vm_context + VM_CONTEXT_POOL, pool)?;
+            let interface = get_module_interface(core)?;
+            write_generic(core, vm_context + VM_CONTEXT_INTERFACE, interface)?;
             core.reserve_fp(vm_context);
             write_generic(
                 core,
