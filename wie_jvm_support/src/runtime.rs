@@ -181,7 +181,18 @@ where
     }
 
     fn now(&self) -> u64 {
-        self.system.platform().now().raw()
+        // The Java clock is milliseconds since the Unix epoch - what
+        // System.currentTimeMillis, java.util.Date and Calendar all read. The
+        // host's own now() is a monotonic count from the run's start (kept that
+        // way so a capture is deterministic), so a fixed epoch base is added to
+        // it. Without one a title that formats currentTimeMillis as the 13-digit
+        // timestamp it is on a handset reads off the end of the two-digit number
+        // it gets instead: 귀신사냥2007 appends it to a buffer and takes its tenth
+        // character, which threw StringIndexOutOfBounds and stopped the run.
+        // The scheduler reads the platform clock directly, not through here, so
+        // its timing is unchanged.
+        const EPOCH_BASE_MILLIS: u64 = 1_230_768_000_000; // 2009-01-01 UTC
+        EPOCH_BASE_MILLIS + self.system.platform().now().raw()
     }
 
     fn current_task_id(&self) -> u64 {
