@@ -24,6 +24,7 @@ impl OEMDevice {
             methods: vec![
                 JavaMethodProto::new("<init>", "()V", Self::init, Default::default()),
                 JavaMethodProto::new("enableSleep", "(Z)Z", Self::enable_sleep, Default::default()),
+                JavaMethodProto::new("getSYSTheme", "()Lwec/SYSTheme;", Self::get_sys_theme, Default::default()),
             ],
             fields: vec![],
             access_flags: Default::default(),
@@ -43,5 +44,17 @@ impl OEMDevice {
         tracing::debug!("wec.OEMDevice::enableSleep({enable})");
 
         Ok(true)
+    }
+
+    /// The handset's UI-theme record, which a title reads to match the system
+    /// look. 귀신사냥2007 asks for it in its `MainCanvas` initializer. A default
+    /// theme is handed back; a title that reads a member of it that is not there
+    /// fails by name.
+    async fn get_sys_theme(jvm: &Jvm, _: &mut WieJvmContext, _this: ClassInstanceRef<Self>) -> JvmResult<ClassInstanceRef<()>> {
+        tracing::debug!("wec.OEMDevice::getSYSTheme()");
+
+        let theme = jvm.new_class("wec/SYSTheme", "()V", ()).await?;
+
+        Ok(theme.into())
     }
 }

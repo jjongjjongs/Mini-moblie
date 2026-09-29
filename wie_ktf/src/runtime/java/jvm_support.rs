@@ -32,7 +32,7 @@ use self::{
     classes::{
         com::ktf::kfc::{GForm, GMenubarForm, GMsgBox, GProgressBar, GTextField, GTextListener},
         net::wie::{ClassLoaderContext, KtfClassLoader},
-        wec::{DMInfo, GatewayIP, OEMDevice},
+        wec::{DMInfo, GatewayIP, OEMDevice, SYSTheme},
     },
     name::JavaFullName,
 };
@@ -193,6 +193,7 @@ impl KtfJvmSupport {
             DMInfo::as_proto(),
             OEMDevice::as_proto(),
             GatewayIP::as_proto(),
+            SYSTheme::as_proto(),
             GForm::as_proto(),
             GMenubarForm::as_proto(),
             GMsgBox::as_proto(),

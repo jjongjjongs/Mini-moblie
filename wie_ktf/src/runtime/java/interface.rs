@@ -265,9 +265,19 @@ async fn register_class(core: &mut ArmCore, jvm: &mut Jvm, ptr_class: u32) -> Re
         }
     }
 
-    // KTF AOT also calls this entry point to initialize classes before static field access.
-    let class = jvm.resolve_class(&class_name).await.unwrap();
-    jvm.ensure_initialized(&class).await.unwrap();
+    // KTF AOT also calls this entry point to initialize classes before static
+    // field access. A class initializer runs the title's own code, which can
+    // throw - a class it names is absent, a value it reads is not what it
+    // expects - and that is a Java exception the title's caller is entitled to
+    // catch, not a reason to stop the whole run. Propagate it as one rather than
+    // unwrapping it into a panic.
+    let class = match jvm.resolve_class(&class_name).await {
+        Ok(class) => class,
+        Err(x) => return Err(JvmSupport::to_wie_err(jvm, x).await),
+    };
+    if let Err(x) = jvm.ensure_initialized(&class).await {
+        return Err(JvmSupport::to_wie_err(jvm, x).await);
+    }
 
     Ok(())
 }
