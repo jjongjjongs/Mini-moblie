@@ -174,6 +174,61 @@ pub fn lgt_local_cash_response(request: &[u8]) -> Option<Vec<u8>> {
 
     Some(response)
 }
+
+/// What answers the "WM" login 섯다맞고 opens its session with.
+///
+/// 섯다맞고 (`0002D8A3`) opens a billing socket to `211.43.222.180:22000` and
+/// writes one frame before it will leave its `네트워크 오류 / 접속에
+/// 실패하였습니다.` notice. Both directions carry the same little-endian header:
+///
+/// ```text
+/// [0..2]   "WM"
+/// [2..4]   u16 LE - the whole frame's length, header included
+/// [4..]          the body
+/// ```
+///
+/// The login it writes is 60 bytes, its body opening `08 00 09 00` and then the
+/// subscriber number, the handset name (`Emulator` here), the aid and the
+/// version:
+///
+/// ```text
+/// 57 4d 3c 00 08 00 09 00 "01077405004" 00 "Emulator" 00 02 00 00
+///   "0002D8A3" 00 00 00 00 "Ver1.0.1" 00 00 00 00 01 00 00 00
+/// ```
+///
+/// The reply is read by the callback at `0x672c`, which the title registers with
+/// `MC_netSetReadCB`. It reads four bytes, refuses a header whose `[0..2]` is not
+/// `"WM"` (`0x6766`/`0x676c`), takes `[2..4]` as the frame's whole length and
+/// reads the rest, assembling the frame at `0x1506618`.
+///
+/// `0xb648` is what reads the assembled frame. It takes a three-letter command
+/// out of `[0xc..0xf]` and matches it - `0xb5b4` - against `IPC`, `PAC`, `UPC`,
+/// `DNC`, `SLC`, `DLC` and `FPC`; anything else falls to `0xb742`, which draws
+/// the `접속에 실패하였습니다.` the title cannot get past. `IPC` is the login's
+/// own answer, and its handler `0xb66e` reads the status byte at `[0x1a]`: a
+/// **0** goes on and loads the title's `ta_data.dat`, and anything else draws the
+/// same failure notice. So the answer is an `IPC` frame with that status zero.
+///
+/// `None` for anything that is not this login: the `"WM"` marker and the
+/// `08 00 09 00` command are what say a frame is it.
+pub fn lgt_local_seotda_response(request: &[u8]) -> Option<Vec<u8>> {
+    // "WM" and the login command 0x0008/0x0009, little end first.
+    if request.get(..2) != Some(b"WM".as_slice()) || request.get(4..8) != Some(&[0x08, 0x00, 0x09, 0x00]) {
+        return None;
+    }
+
+    // The frame the assembler at 0x1506618 lays out: "WM", its own length, then a
+    // body the command reader indexes by fixed offset - the three-letter command
+    // at [0xc] and the status byte at [0x1a]. Sized to reach that status byte.
+    const TOTAL: usize = 0x20;
+    let mut frame = vec![0u8; TOTAL];
+    frame[0..2].copy_from_slice(b"WM");
+    frame[2..4].copy_from_slice(&(TOTAL as u16).to_le_bytes());
+    frame[0xc..0xf].copy_from_slice(b"IPC");
+    frame[0x1a] = 0; // the status IPC's handler reads: zero goes on.
+
+    Some(frame)
+}
 /// What GAMEVIL's server answers one of its titles' purchases with.
 ///
 /// 제노니아1 (`00027BAA`) opens a billing socket to `218.145.70.36:31206` and
@@ -8725,6 +8780,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
     lgt_local_maguer2011_response(request)
         .or_else(|| lgt_local_granted_response(request))
         .or_else(|| lgt_local_cash_response(request))
+        .or_else(|| lgt_local_seotda_response(request))
         // Before the 제노니아 packet matcher, which claims these by their length
         // and answers with a status this title's purchase receiver refuses.
         .or_else(|| lgt_local_supersoccer_response(request))
@@ -9227,6 +9283,42 @@ mod tests {
     use alloc::{vec, vec::Vec};
 
     use super::*;
+
+    /// 섯다맞고's login, off the wire: "WM", the frame length little end first,
+    /// the command 0x0008/0x0009 and then its fields.
+    const SEOTDA_LOGIN: &[u8] = &[
+        0x57, 0x4d, 0x3c, 0x00, 0x08, 0x00, 0x09, 0x00, // WM, len 60, cmd 8/9
+        0x30, 0x31, 0x30, 0x37, 0x37, 0x34, 0x30, 0x35, 0x30, 0x30, 0x34, 0x00, // "01077405004"
+        0x45, 0x6d, 0x75, 0x6c, 0x61, 0x74, 0x6f, 0x72, 0x00, // "Emulator"
+        0x02, 0x00, 0x00, 0x30, 0x30, 0x30, 0x32, 0x44, 0x38, 0x41, 0x33, 0x00, 0x00, 0x00, 0x00, // "0002D8A3"
+        0x56, 0x65, 0x72, 0x31, 0x2e, 0x30, 0x2e, 0x31, 0x00, 0x00, 0x00, 0x00, // "Ver1.0.1"
+        0x01, 0x00, 0x00, 0x00,
+    ];
+
+    /// The login is answered with an `IPC` frame whose status byte is zero: the
+    /// command the reader takes from `[0xc]` is what keeps it off its network
+    /// notice, and the zero at `[0x1a]` is what its `IPC` handler goes on from.
+    #[test]
+    fn a_seotda_login_is_answered_ipc_granted() {
+        let reply = lgt_local_seotda_response(SEOTDA_LOGIN).expect("the login is answered");
+
+        assert_eq!(&reply[0..2], b"WM", "the marker its reader refuses a frame without");
+        assert_eq!(
+            u16::from_le_bytes(reply[2..4].try_into().unwrap()) as usize,
+            reply.len(),
+            "the whole-frame length its reader reads the body by",
+        );
+        assert_eq!(&reply[0xc..0xf], b"IPC", "the command that dispatches, not the network-error default");
+        assert_eq!(reply[0x1a], 0, "the status IPC goes on from");
+    }
+
+    /// Only its login is: a frame without the marker, or without the command, is
+    /// none of this.
+    #[test]
+    fn only_the_seotda_login_is_answered() {
+        assert_eq!(lgt_local_seotda_response(b"WM\x04\x00\x00\x00"), None);
+        assert_eq!(lgt_local_seotda_response(&[0xff, 0xff, 0x00, 0x06, 0x00, 0x00]), None);
+    }
 
     /// What 퀸스크라운 sends between its session and its licence, off the wire.
     const QUEENS_CROWN_AGREEMENT: [u8; 7] = [
