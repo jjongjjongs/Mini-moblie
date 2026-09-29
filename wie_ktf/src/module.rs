@@ -57,20 +57,33 @@ pub struct RelocatedModule {
 }
 
 impl RelocatedModule {
-    /// Whether `data` is one of these, read from the shape of its own header.
+    /// Whether `data` is one of these, told apart from an ordinary module by
+    /// its header's bss word matching `expected_bss` - the size named by the
+    /// `client.binN` filename.
     ///
-    /// The test is the relocation table checking out: the count has to fit the
-    /// file, every offset it names has to fall inside the image that follows
-    /// it, and the offsets have to climb. A module of the ordinary kind starts
-    /// with Thumb code, whose first words are far too small to be a count that
-    /// fits, so it never reaches the rest.
-    pub fn parse(data: &[u8]) -> Option<Self> {
+    /// This is wfeature's own discriminator: it refuses a `client.binN` whose
+    /// first word does not match the suffix ("KTF client image %q suffix names
+    /// BSS %d but image specifies %d"). An ordinary module opens with a Thumb
+    /// stub whose first word would equal the suffix only by accident, so the
+    /// match all but names the kind on its own; the structural checks below -
+    /// a count that fits the file, and every offset word aligned and inside
+    /// the image that follows - only reject a corrupt header.
+    ///
+    /// The offsets are *not* required to climb. o2jam's table is sorted in
+    /// three runs rather than end to end, and a global-sort test read it as
+    /// ordinary code and ran its header bytes as a stub. Order does not matter
+    /// to [`Self::relocate`], which applies each offset on its own.
+    pub fn parse(data: &[u8], expected_bss: u32) -> Option<Self> {
         let word = |index: usize| {
             let at = index * size_of::<u32>();
             Some(u32::from_le_bytes(data.get(at..at + 4)?.try_into().ok()?))
         };
 
         let bss_size = word(0)?;
+        if bss_size != expected_bss {
+            return None;
+        }
+
         let relocations = word(1)? as usize;
         if relocations == 0 {
             return None;
@@ -82,21 +95,12 @@ impl RelocatedModule {
             return None;
         }
 
-        // Sorted, word aligned, and every one of them inside the image that
-        // follows. A module of the ordinary kind starts with Thumb code, whose
-        // first words are far too small to be a count that fits, so it never
-        // gets this far.
-        let mut previous = None;
+        // Word aligned, and every one of them inside the image that follows.
         for index in 0..relocations {
             let offset = word(HEADER_WORDS + index)?;
             if offset as usize >= image_size || offset % size_of::<u32>() as u32 != 0 {
                 return None;
             }
-
-            if previous.is_some_and(|previous| offset < previous) {
-                return None;
-            }
-            previous = Some(offset);
         }
 
         Some(Self {
@@ -294,10 +298,34 @@ mod tests {
     fn a_relocated_module_is_read_off_its_own_header() {
         let data = relocated(&[8, 0xc, 0x10, 0x20], &[0u8; 0x40]);
 
-        let module = RelocatedModule::parse(&data).expect("a relocated module");
+        let module = RelocatedModule::parse(&data, 64).expect("a relocated module");
         assert_eq!(module.bss_size, 64);
         assert_eq!(module.relocations, 4);
         assert_eq!(module.image_offset, (2 + 4) * 4);
+    }
+
+    /// The header's bss word has to match the size the filename names. A word
+    /// that does not - which is what an ordinary module's Thumb stub leaves
+    /// here - is not one of these, whatever the rest of the header looks like.
+    #[test]
+    fn a_header_whose_bss_belies_the_filename_is_not_one() {
+        let data = relocated(&[8, 0xc, 0x10, 0x20], &[0u8; 0x40]);
+
+        assert!(RelocatedModule::parse(&data, 65).is_none());
+    }
+
+    /// o2jam's relocation table is sorted in runs, not end to end: it steps
+    /// back three times over its 443 offsets. Order is nothing to the parse -
+    /// every offset is applied on its own - so a table that does not climb is
+    /// still read as one.
+    #[test]
+    fn a_table_that_does_not_climb_is_still_one() {
+        // Two runs, the second starting below where the first left off.
+        let data = relocated(&[0x10, 0x20, 0x2c, 8, 0xc], &[0u8; 0x40]);
+
+        let module = RelocatedModule::parse(&data, 64).expect("a relocated module");
+        assert_eq!(module.relocations, 5);
+        assert_eq!(module.offsets(&data).collect::<Vec<_>>(), vec![0x10, 0x20, 0x2c, 8, 0xc]);
     }
 
     /// The module every other archive carries, which starts with its own Thumb
@@ -309,7 +337,10 @@ mod tests {
             0x04, 0xe0, 0xc0, 0x46, 0x24, 0x02, 0x04, 0x20, 0x01, 0x00, 0x02, 0x00, 0x01, 0xb5, 0x15, 0x49,
         ];
 
-        assert!(RelocatedModule::parse(&data).is_none());
+        // Even taking its first word for the expected bss - so the match that
+        // guards the front lets it by - the count that follows overruns the
+        // file, so it is still not read as one.
+        assert!(RelocatedModule::parse(&data, 0x46c0_e004).is_none());
     }
 
     /// Nothing is read out of a file too short to hold what its header claims.
@@ -318,19 +349,19 @@ mod tests {
         let mut data = relocated(&[8, 0xc], &[0u8; 0x40]);
         data.truncate(16);
 
-        assert!(RelocatedModule::parse(&data).is_none());
+        assert!(RelocatedModule::parse(&data, 64).is_none());
 
         // A count that leaves no image behind it is not one either.
-        assert!(RelocatedModule::parse(&relocated(&[8, 0xc], &[])).is_none());
+        assert!(RelocatedModule::parse(&relocated(&[8, 0xc], &[]), 64).is_none());
     }
 
     /// An offset outside the image it is meant to point into is not a
     /// relocation, whatever else the header looks like.
     #[test]
     fn an_offset_past_the_image_is_not_one() {
-        assert!(RelocatedModule::parse(&relocated(&[8, 0x400], &[0u8; 0x40])).is_none());
+        assert!(RelocatedModule::parse(&relocated(&[8, 0x400], &[0u8; 0x40]), 64).is_none());
         // Nor is an unaligned one.
-        assert!(RelocatedModule::parse(&relocated(&[8, 0xd], &[0u8; 0x40])).is_none());
+        assert!(RelocatedModule::parse(&relocated(&[8, 0xd], &[0u8; 0x40]), 64).is_none());
     }
 
     /// The image's base is behind the header and the table, and the entry is
@@ -345,7 +376,7 @@ mod tests {
         image[0x24..0x28].copy_from_slice(&0x52745u32.to_le_bytes());
 
         let data = relocated(&[8, 0xc], &image);
-        let module = RelocatedModule::parse(&data).expect("a relocated module");
+        let module = RelocatedModule::parse(&data, 64).expect("a relocated module");
 
         assert_eq!(module.base(0x100000), 0x100000 + (2 + 2) * 4);
         assert_eq!(module.entry(&data, 0x100000).unwrap(), 0x100000 + (2 + 2) * 4 + 0x52745);
@@ -355,7 +386,7 @@ mod tests {
     #[test]
     fn the_offsets_are_the_table() {
         let data = relocated(&[0x10, 0x20, 0x2c], &[0u8; 0x40]);
-        let module = RelocatedModule::parse(&data).expect("a relocated module");
+        let module = RelocatedModule::parse(&data, 64).expect("a relocated module");
 
         assert_eq!(module.offsets(&data).collect::<Vec<_>>(), vec![0x10, 0x20, 0x2c]);
     }
