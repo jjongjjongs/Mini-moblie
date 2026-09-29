@@ -324,10 +324,12 @@ pub fn lgt_local_miniheroes2_response(request: &[u8]) -> Option<Vec<u8>> {
 ///
 /// `None` for anything that is not one of this protocol's frames.
 pub fn lgt_local_apf2_response(request: &[u8]) -> Option<Vec<u8>> {
-    // A u16be length that counts itself and equals the frame, and the 0x30 the
-    // payload always opens with. The header is length(2) + type(2), so the 0x30
-    // is at offset 4.
-    if request.len() < 5 || u16::from_be_bytes([request[0], request[1]]) as usize != request.len() || request[4] != 0x30 {
+    // A u16be length that counts itself and equals the frame, a message type
+    // whose high byte is zero (the types are small: 0, 1, 0x14), and the 0x30
+    // the payload always opens with at offset 4 (past length(2) + type(2)). The
+    // zero type high byte is what parts these from 이노티아's records, which sit at
+    // the same u16be length but carry a 0x30 where the type's high byte is.
+    if request.len() < 5 || u16::from_be_bytes([request[0], request[1]]) as usize != request.len() || request[2] != 0x00 || request[4] != 0x30 {
         return None;
     }
 
@@ -339,6 +341,47 @@ pub fn lgt_local_apf2_response(request: &[u8]) -> Option<Vec<u8>> {
     frame.extend_from_slice(message_type);
     frame.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
     Some(frame)
+}
+
+/// What answers EA프로야구2010's login.
+///
+/// EA프로야구2010 (`0002E1D2`) opens a billing socket to `210.222.18.28:20102`
+/// and speaks a length-prefixed binary protocol with a four-byte big-endian
+/// length that counts itself: `[u32be length][u8 command][fields]`. Its read
+/// side (callback `0x1cc0`) accumulates into a 20480-byte buffer and feeds the
+/// stream to a decoder, which is why the device log shows repeated
+/// `MC_netSocketRead(1, _, 20480)`.
+///
+/// The device capture leaves its login unanswered: a 34-byte command-`0x10`
+/// frame, `00 00 00 22 10 00 00 00 0b "01049290824" 00 00 00 06 "V1.0.2"
+/// 00 05 02 28` - the command, then the subscriber number and the build version
+/// as `[u32be length][bytes]` fields, then a trailer. With no reply the title
+/// polls the socket and sends a bare four-byte keepalive, `00 00 00 04` (a
+/// length that counts only itself, i.e. an empty body), which is what fixes the
+/// length as prefix-inclusive.
+///
+/// This is the length-prefixed "granted" family [`AckEndpoint`] documents, the
+/// same one 액션퍼즐패밀리2 authenticates through a frame at a time. The login is
+/// answered with its command echoed and an all-zero status under a `u32be`
+/// length that counts itself: `00 00 00 09 10 00 00 00 00`. A device capture
+/// says whether the title wants real content - a roster, an account - behind the
+/// status, since it reads with a 20480-byte buffer.
+///
+/// The four-byte big-endian length keeps this off both the little-endian
+/// matchers and 액션퍼즐패밀리2's `u16be` one: a 34-byte frame's `u16be` prefix is
+/// `0x0000`, not 34, so [`lgt_local_apf2_response`] passes it by.
+///
+/// `None` for anything that is not the command-`0x10` login.
+pub fn lgt_local_ea_baseball_response(request: &[u8]) -> Option<Vec<u8>> {
+    // A u32be length that counts itself and equals the frame, and the 0x10
+    // login command right behind it.
+    if request.len() < 9 || u32::from_be_bytes([request[0], request[1], request[2], request[3]]) as usize != request.len() || request[4] != 0x10 {
+        return None;
+    }
+
+    // Echo the command, then an all-zero status, under a u32be length that
+    // counts itself: [00 00 00 09][10][00 00 00 00].
+    Some(vec![0x00, 0x00, 0x00, 0x09, 0x10, 0x00, 0x00, 0x00, 0x00])
 }
 
 /// What GAMEVIL's server answers one of its titles' purchases with.
@@ -8895,6 +8938,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_seotda_response(request))
         .or_else(|| lgt_local_miniheroes2_response(request))
         .or_else(|| lgt_local_apf2_response(request))
+        .or_else(|| lgt_local_ea_baseball_response(request))
         // Before the 제노니아 packet matcher, which claims these by their length
         // and answers with a status this title's purchase receiver refuses.
         .or_else(|| lgt_local_supersoccer_response(request))
@@ -9524,6 +9568,42 @@ mod tests {
         wrong_header[4] = 0x31;
         assert_eq!(lgt_local_apf2_response(&wrong_header), None, "not the login header");
         assert_eq!(lgt_local_apf2_response(&[0x00, 0x05, 0x00, 0x01, 0x31]), None, "not the follow-up");
+    }
+
+    /// EA프로야구2010's 34-byte command-0x10 login, off the wire: a u32be
+    /// length, the command, then the subscriber and version as length-prefixed
+    /// fields, then a trailer.
+    const EA_BASEBALL_LOGIN: &[u8] = &[
+        0x00, 0x00, 0x00, 0x22, // u32be length = 34
+        0x10, // command
+        0x00, 0x00, 0x00, 0x0b, // field length 11
+        0x30, 0x31, 0x30, 0x34, 0x39, 0x32, 0x39, 0x30, 0x38, 0x32, 0x34, // "01049290824"
+        0x00, 0x00, 0x00, 0x06, // field length 6
+        0x56, 0x31, 0x2e, 0x30, 0x2e, 0x32, // "V1.0.2"
+        0x00, 0x05, 0x02, 0x28, // trailer
+    ];
+
+    /// Its login is granted with its command echoed and an all-zero status under
+    /// a u32be length that counts itself.
+    #[test]
+    fn the_ea_baseball_login_is_granted() {
+        assert_eq!(EA_BASEBALL_LOGIN.len(), 34, "the 34-byte login the capture caught");
+        let reply = lgt_local_ea_baseball_response(EA_BASEBALL_LOGIN).expect("the login is answered");
+
+        assert_eq!(reply, [0x00, 0x00, 0x00, 0x09, 0x10, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    /// Only its command-0x10 login is: not the bare four-byte keepalive, not a
+    /// wrong command, not a length that disagrees with the frame.
+    #[test]
+    fn only_the_ea_baseball_login_is_answered() {
+        assert_eq!(lgt_local_ea_baseball_response(&[0x00, 0x00, 0x00, 0x04]), None, "the empty keepalive");
+        let mut wrong_command = EA_BASEBALL_LOGIN.to_vec();
+        wrong_command[4] = 0x11;
+        assert_eq!(lgt_local_ea_baseball_response(&wrong_command), None, "not command 0x10");
+        let mut wrong_length = EA_BASEBALL_LOGIN.to_vec();
+        wrong_length.push(0x00);
+        assert_eq!(lgt_local_ea_baseball_response(&wrong_length), None, "length disagrees with the frame");
     }
 
     /// What 퀸스크라운 sends between its session and its licence, off the wire.
