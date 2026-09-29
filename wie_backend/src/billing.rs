@@ -250,25 +250,42 @@ pub fn lgt_local_seotda_response(request: &[u8]) -> Option<Vec<u8>> {
 /// pending flag, which is what carries the title on. So the answer is one `'@'`
 /// frame, an eight-digit length of `1`, and an `'A'` body.
 ///
-/// A first shaping to read off a device log: the framing is what `0x780b4` and
-/// `0x117d4` read, and the `'A'` body is the login's own answer, but whether the
-/// title wants more behind it is what the next capture would say.
+/// The title authenticates in two stages. `'A'` closes the first, at
+/// `211.239.165.14:7205`, and the title then opens `211.239.165.13:8036` and
+/// writes an `"MH"` frame - `"MH"`, six ASCII digits of the frame's own length,
+/// and a body - which `0x780b4` frames the same way and `0x1193c` (the branch for
+/// a server that is not `.14`) dispatches by a two-letter command: `ZZ`, `FF`,
+/// `BB`, `IS`, `IR`, `CS`, `CR`, `XX`. `ZZ` (`0x11958`) is the one that takes no
+/// field out of the body - it clears the receive buffers and returns - so it is
+/// the safest first shaping for this second stage; a device capture says whether
+/// the title wants game data behind it.
 ///
-/// `None` for anything that is not this login: the `"@A"` marker and the
-/// `A_LGT_` the auth string opens with are what say a frame is it.
+/// `None` for anything that is neither stage: the `"@A"`/`A_LGT_` marker of the
+/// login, or the `"MH"` and six ASCII digits of the second stage's frame.
 pub fn lgt_local_miniheroes2_response(request: &[u8]) -> Option<Vec<u8>> {
-    if request.get(..2) != Some(b"@A".as_slice()) || !request.windows(6).any(|window| window == b"A_LGT_") {
-        return None;
+    // Stage one: the A_LGT_ login at 211.239.165.14.
+    if request.get(..2) == Some(b"@A".as_slice()) && request.windows(6).any(|window| window == b"A_LGT_") {
+        // '@', a byte the reader steps over, eight ASCII digits of body length,
+        // and the 'A' body its handler dispatches on.
+        let mut frame = Vec::new();
+        frame.extend_from_slice(b"@A");
+        frame.extend_from_slice(b"00000001");
+        frame.push(b'A');
+        return Some(frame);
     }
 
-    // '@', a byte the reader steps over, eight ASCII digits of body length, and
-    // the 'A' body its handler dispatches on.
-    let mut frame = Vec::new();
-    frame.extend_from_slice(b"@A");
-    frame.extend_from_slice(b"00000001");
-    frame.push(b'A');
+    // Stage two: the "MH" frame at 211.239.165.13, whose length is six ASCII
+    // digits. Answered with the ZZ its dispatcher reads no body field out of.
+    if request.get(..2) == Some(b"MH".as_slice()) && request.get(2..8).is_some_and(|len| len.iter().all(u8::is_ascii_digit)) {
+        // "MH", six ASCII digits of the frame's whole length, then the "ZZ" body.
+        let mut frame = Vec::new();
+        frame.extend_from_slice(b"MH");
+        frame.extend_from_slice(b"000010"); // 2 + 6 + 2
+        frame.extend_from_slice(b"ZZ");
+        return Some(frame);
+    }
 
-    Some(frame)
+    None
 }
 /// What GAMEVIL's server answers one of its titles' purchases with.
 ///
@@ -9376,11 +9393,27 @@ mod tests {
         assert_eq!(reply[10], b'A', "the command its body dispatcher reads");
     }
 
-    /// Only its login is: neither the `"@A"` marker nor a stray `A_LGT_` alone is.
+    /// Its second stage, at 211.239.165.13, is an "MH" frame answered with an
+    /// "MH" frame whose six-digit length covers a "ZZ" body.
     #[test]
-    fn only_the_miniheroes2_login_is_answered() {
+    fn a_miniheroes2_stage_two_is_answered_zz() {
+        // "MH", six digits of length, ten spaces and the 1TDZ the capture caught.
+        let request = b"MH000022          1TDZ";
+        let reply = lgt_local_miniheroes2_response(request).expect("the second stage is answered");
+
+        assert_eq!(&reply[..2], b"MH", "the marker its framer refuses a frame without");
+        assert_eq!(&reply[2..8], b"000010", "the six-digit whole-frame length its framer reads by");
+        assert_eq!(reply.len(), 10, "the length it declares");
+        assert_eq!(&reply[8..10], b"ZZ", "the command its dispatcher reads no body field out of");
+    }
+
+    /// Only its two stages are: neither a bare `"@A"` nor an `"MH"` without a
+    /// digit length is.
+    #[test]
+    fn only_the_miniheroes2_frames_are_answered() {
         assert_eq!(lgt_local_miniheroes2_response(b"@A no auth string here"), None);
         assert_eq!(lgt_local_miniheroes2_response(b"WM\x3c\x00A_LGT_x"), None);
+        assert_eq!(lgt_local_miniheroes2_response(b"MHnotdigit"), None);
     }
 
     /// What 퀸스크라운 sends between its session and its licence, off the wire.
