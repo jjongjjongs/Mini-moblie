@@ -232,6 +232,44 @@ pub fn lgt_local_seotda_response(request: &[u8]) -> Option<Vec<u8>> {
 
     Some(frame)
 }
+
+/// What answers 미니게임히어로즈2's `A_LGT_` login.
+///
+/// 미니게임히어로즈2 (`00030F5B`) opens a billing socket to `211.239.165.14:7205`
+/// and writes a 63-byte frame - `"@A"`, a little-endian length, and then the
+/// `A_LGT_...` string that names the title, its version and the handset - before
+/// it will leave `인증 중`.
+///
+/// The reply is accumulated by `0x78234` and framed by `0x780b4`, which - having
+/// stored `211.239.165.14` at the session's `[0xd]` - reads a frame that opens
+/// with `'@'` (`0x780fc`), takes eight ASCII digits at `[2..10]` as the body's
+/// length (`atoi`, `0x78134`), and hands the body at `[0xa]` to `0x117d4`.
+/// `0x117d4` dispatches the body by its first byte - `'A'`, `'B'`, `'C'`, `'!'`,
+/// `"FF"`, `"BB"` - and the login's own answer is `'A'`, whose handler `0x77d68`
+/// takes nothing out of the body: it closes the billing socket and clears the
+/// pending flag, which is what carries the title on. So the answer is one `'@'`
+/// frame, an eight-digit length of `1`, and an `'A'` body.
+///
+/// A first shaping to read off a device log: the framing is what `0x780b4` and
+/// `0x117d4` read, and the `'A'` body is the login's own answer, but whether the
+/// title wants more behind it is what the next capture would say.
+///
+/// `None` for anything that is not this login: the `"@A"` marker and the
+/// `A_LGT_` the auth string opens with are what say a frame is it.
+pub fn lgt_local_miniheroes2_response(request: &[u8]) -> Option<Vec<u8>> {
+    if request.get(..2) != Some(b"@A".as_slice()) || !request.windows(6).any(|window| window == b"A_LGT_") {
+        return None;
+    }
+
+    // '@', a byte the reader steps over, eight ASCII digits of body length, and
+    // the 'A' body its handler dispatches on.
+    let mut frame = Vec::new();
+    frame.extend_from_slice(b"@A");
+    frame.extend_from_slice(b"00000001");
+    frame.push(b'A');
+
+    Some(frame)
+}
 /// What GAMEVIL's server answers one of its titles' purchases with.
 ///
 /// 제노니아1 (`00027BAA`) opens a billing socket to `218.145.70.36:31206` and
@@ -8784,6 +8822,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_granted_response(request))
         .or_else(|| lgt_local_cash_response(request))
         .or_else(|| lgt_local_seotda_response(request))
+        .or_else(|| lgt_local_miniheroes2_response(request))
         // Before the 제노니아 packet matcher, which claims these by their length
         // and answers with a status this title's purchase receiver refuses.
         .or_else(|| lgt_local_supersoccer_response(request))
@@ -9320,6 +9359,28 @@ mod tests {
     fn only_the_seotda_login_is_answered() {
         assert_eq!(lgt_local_seotda_response(b"WM\x04\x00\x00\x00"), None);
         assert_eq!(lgt_local_seotda_response(&[0xff, 0xff, 0x00, 0x06, 0x00, 0x00]), None);
+    }
+
+    /// 미니게임히어로즈2's login, off the wire: "@A", a little-endian length and
+    /// the `A_LGT_` string that names it.
+    const MINIHEROES2_LOGIN: &[u8] = b"@A\x3f\x00\x00\x00            A_LGT_MiniHeroes2_1.0.0_SPH-9600_WIPI";
+
+    /// Its login is answered with a `'@'` frame whose eight-digit length is one
+    /// and whose body is the `'A'` its handler dispatches on.
+    #[test]
+    fn a_miniheroes2_login_is_answered_a() {
+        let reply = lgt_local_miniheroes2_response(MINIHEROES2_LOGIN).expect("the login is answered");
+
+        assert_eq!(&reply[..1], b"@", "the marker its framer refuses a frame without");
+        assert_eq!(&reply[2..10], b"00000001", "the eight ASCII digits its framer reads the body length by");
+        assert_eq!(reply[10], b'A', "the command its body dispatcher reads");
+    }
+
+    /// Only its login is: neither the `"@A"` marker nor a stray `A_LGT_` alone is.
+    #[test]
+    fn only_the_miniheroes2_login_is_answered() {
+        assert_eq!(lgt_local_miniheroes2_response(b"@A no auth string here"), None);
+        assert_eq!(lgt_local_miniheroes2_response(b"WM\x3c\x00A_LGT_x"), None);
     }
 
     /// What 퀸스크라운 sends between its session and its licence, off the wire.
