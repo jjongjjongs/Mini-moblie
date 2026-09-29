@@ -201,13 +201,16 @@ pub fn lgt_local_cash_response(request: &[u8]) -> Option<Vec<u8>> {
 /// `"WM"` (`0x6766`/`0x676c`), takes `[2..4]` as the frame's whole length and
 /// reads the rest, assembling the frame at `0x1506618`.
 ///
-/// `0xb648` is what reads the assembled frame. It takes a three-letter command
-/// out of `[0xc..0xf]` and matches it - `0xb5b4` - against `IPC`, `PAC`, `UPC`,
-/// `DNC`, `SLC`, `DLC` and `FPC`; anything else falls to `0xb742`, which draws
-/// the `접속에 실패하였습니다.` the title cannot get past. `IPC` is the login's
-/// own answer, and its handler `0xb66e` reads the status byte at `[0x1a]`: a
-/// **0** goes on and loads the title's `ta_data.dat`, and anything else draws the
-/// same failure notice. So the answer is an `IPC` frame with that status zero.
+/// `0x69e4` then dispatches the assembled frame by a connection mode the title
+/// sets from the server's own address at `0x64de`: `211.43.222.180` - the one
+/// this login reaches - is mode **0**, `211.234.231.177` mode 1, anything else
+/// mode 2. Mode 0 takes a numeric command out of `[6]`, subtracts one and indexes
+/// nine handlers at `0x331bc`; the login's command is `9`, and `0xb1e8` is its
+/// handler. It reads nothing from the frame at all - it sets the title's
+/// authenticated flag (`[0x150766d] = 1`) and returns - so any `"WM"` frame whose
+/// `[6]` is `9` is the answer that carries the login past its network notice.
+/// (Modes 1 and 2, which a different server drives, dispatch a three-letter
+/// command out of `[0xc]` instead - `IPC`/`PAC`/… - and are not this login.)
 ///
 /// `None` for anything that is not this login: the `"WM"` marker and the
 /// `08 00 09 00` command are what say a frame is it.
@@ -218,14 +221,14 @@ pub fn lgt_local_seotda_response(request: &[u8]) -> Option<Vec<u8>> {
     }
 
     // The frame the assembler at 0x1506618 lays out: "WM", its own length, then a
-    // body the command reader indexes by fixed offset - the three-letter command
-    // at [0xc] and the status byte at [0x1a]. Sized to reach that status byte.
-    const TOTAL: usize = 0x20;
+    // body whose command byte the mode-0 dispatcher reads at [6]. Command 9 is the
+    // login; its handler sets the authenticated flag with no other field read, so
+    // the login command is echoed back and the rest left zero.
+    const TOTAL: usize = 0x10;
     let mut frame = vec![0u8; TOTAL];
     frame[0..2].copy_from_slice(b"WM");
     frame[2..4].copy_from_slice(&(TOTAL as u16).to_le_bytes());
-    frame[0xc..0xf].copy_from_slice(b"IPC");
-    frame[0x1a] = 0; // the status IPC's handler reads: zero goes on.
+    frame[4..8].copy_from_slice(&[0x08, 0x00, 0x09, 0x00]); // [6] == 9, the login command
 
     Some(frame)
 }
@@ -9295,11 +9298,11 @@ mod tests {
         0x01, 0x00, 0x00, 0x00,
     ];
 
-    /// The login is answered with an `IPC` frame whose status byte is zero: the
-    /// command the reader takes from `[0xc]` is what keeps it off its network
-    /// notice, and the zero at `[0x1a]` is what its `IPC` handler goes on from.
+    /// The login is answered with a `"WM"` frame whose command byte at `[6]` is
+    /// `9`: mode 0 dispatches that to the handler that sets the authenticated flag
+    /// and carries the title off its network notice.
     #[test]
-    fn a_seotda_login_is_answered_ipc_granted() {
+    fn a_seotda_login_is_answered_command_nine() {
         let reply = lgt_local_seotda_response(SEOTDA_LOGIN).expect("the login is answered");
 
         assert_eq!(&reply[0..2], b"WM", "the marker its reader refuses a frame without");
@@ -9308,8 +9311,7 @@ mod tests {
             reply.len(),
             "the whole-frame length its reader reads the body by",
         );
-        assert_eq!(&reply[0xc..0xf], b"IPC", "the command that dispatches, not the network-error default");
-        assert_eq!(reply[0x1a], 0, "the status IPC goes on from");
+        assert_eq!(reply[6], 9, "the login command the mode-0 dispatcher indexes its handler by");
     }
 
     /// Only its login is: a frame without the marker, or without the command, is
