@@ -91,7 +91,19 @@ impl JvmImplementation for KtfJvmImplementation {
     }
 
     async fn define_array_class(&self, jvm: &Jvm, element_type_name: &str) -> JvmResult<Box<dyn ClassDefinition>> {
-        let class_name = format!("[{element_type_name}");
+        // A primitive element type is one descriptor character (JVMS 4.3.2) -
+        // 'B', 'C', 'D' and the rest, all uppercase. A title can hand it the
+        // lowercase form: 테일즈 판타지 makes a double array whose element the
+        // handset took as 'd' rather than 'D', a letter the descriptor grammar
+        // has none of, so the array's element type later fails to parse and the
+        // run panics. Fold a lone lowercase primitive letter back to the case
+        // the grammar defines; a class name (`Ljava/lang/String;`) or a nested
+        // array (`[I`) is longer than one character and is left as it is.
+        let class_name = if element_type_name.len() == 1 {
+            format!("[{}", element_type_name.as_bytes()[0].to_ascii_uppercase() as char)
+        } else {
+            format!("[{element_type_name}")
+        };
         let class = JavaArrayClassDefinition::new(&mut self.core.clone(), jvm, &class_name).await.unwrap();
 
         Ok(Box::new(class) as Box<_>)
