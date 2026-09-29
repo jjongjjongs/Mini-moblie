@@ -288,32 +288,46 @@ pub fn lgt_local_miniheroes2_response(request: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
-/// What answers 액션퍼즐패밀리2's login.
+/// What answers 액션퍼즐패밀리2's handshake.
 ///
 /// 액션퍼즐패밀리2 (`00027D2D`, 컴투스) opens a billing socket to
 /// `211.115.66.250:15133` and speaks a length-prefixed binary protocol:
-/// `[u16be length, counting the prefix][u16 message type][payload]`. Its read
-/// side (callback `0x2d340`) reads the two-byte length first, then the rest of
-/// the frame, which is why the device log shows a `MC_netSocketRead(1, _, 2)`
-/// before the write.
+/// `[u16be length, counting the prefix][u16 message type][payload]`, where the
+/// payload always opens with `0x30`. Its read side (callback `0x2d340`) reads
+/// the two-byte length first, then the rest of the frame, which is why the
+/// device log shows a `MC_netSocketRead(1, _, 2)` before each write.
 ///
-/// The device capture has two frames go unanswered:
+/// The handshake is a run of these frames, each of which must be granted before
+/// the next is sent. The device capture confirmed:
 /// - the 73-byte type-0 login, `00 49 00 00 30 03 f9 ...` then the build's
-///   version (`"1.0.2"`) and the subscriber number;
-/// - a 5-byte type-1 frame, `00 05 00 01 30`.
+///   version (`"1.0.2"`) and the subscriber number - answered with
+///   `00 08 00 00 00 00 00 00`, which the title accepts (it reads the two-byte
+///   length, then the six-byte body) and moves on to:
+/// - a 58-byte type-0x14 frame, `00 3a 00 14 30 0a 03 f7 "Emulator" ...`, the
+///   handset model;
+/// - a 5-byte type-1 frame, `00 05 00 01 30` (seen before the login was
+///   answered).
 ///
 /// This is the length-prefixed "granted" family [`AckEndpoint`] documents: a
 /// reply that carries the request's own message type and an all-zero status is
-/// how the server says yes. So each frame is answered with its echoed type and a
-/// four-byte zero status, wrapped in the same `u16be` length. A device capture
-/// says whether a later state wants real content behind the status.
+/// how the server says yes. So every frame this protocol shapes - a `u16be`
+/// length that counts itself and equals the frame, a `0x30` at the head of the
+/// payload - is answered with its echoed type and a four-byte zero status under
+/// a `u16be` length of eight. A device capture says whether a later state wants
+/// real content behind the status.
 ///
-/// `None` for anything that is not one of the two frames.
+/// The `u16be` length is what keeps this off the little-endian matchers
+/// (`lgt_local_gamevil_packet_response`, `lgt_local_supersoccer_response`): a
+/// frame whose big-endian length equals its own size has a little-endian length
+/// that does not, and the reverse, so the two families never take each other's
+/// frames.
+///
+/// `None` for anything that is not one of this protocol's frames.
 pub fn lgt_local_apf2_response(request: &[u8]) -> Option<Vec<u8>> {
-    let is_login = request.len() == 73 && request.get(..7) == Some(&[0x00, 0x49, 0x00, 0x00, 0x30, 0x03, 0xf9]);
-    let is_follow_up = request == [0x00, 0x05, 0x00, 0x01, 0x30];
-
-    if !is_login && !is_follow_up {
+    // A u16be length that counts itself and equals the frame, and the 0x30 the
+    // payload always opens with. The header is length(2) + type(2), so the 0x30
+    // is at offset 4.
+    if request.len() < 5 || u16::from_be_bytes([request[0], request[1]]) as usize != request.len() || request[4] != 0x30 {
         return None;
     }
 
@@ -9485,6 +9499,18 @@ mod tests {
         let reply = lgt_local_apf2_response(&[0x00, 0x05, 0x00, 0x01, 0x30]).expect("the follow-up is answered");
 
         assert_eq!(reply, [0x00, 0x08, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    /// The 58-byte type-0x14 frame the title sends once its login is granted -
+    /// its handset model - is granted the same way, its type echoed back.
+    #[test]
+    fn the_apf2_handset_frame_is_granted() {
+        let mut frame = vec![0x00, 0x3a, 0x00, 0x14, 0x30, 0x0a, 0x03, 0xf7];
+        frame.extend_from_slice(b"Emulator");
+        frame.resize(0x3a, 0x00);
+        let reply = lgt_local_apf2_response(&frame).expect("the handset frame is answered");
+
+        assert_eq!(reply, [0x00, 0x08, 0x00, 0x14, 0x00, 0x00, 0x00, 0x00]);
     }
 
     /// Only the two 액션퍼즐패밀리2 frames are: not a wrong length, not a wrong
