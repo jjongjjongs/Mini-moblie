@@ -386,6 +386,14 @@ pub fn lgt_local_ea_baseball_response(request: &[u8]) -> Option<Vec<u8>> {
     // The bare four-byte poll the title's timer sends while it waits: a u32be
     // length of four and no body. Answered with the same empty frame.
     if request == [0x00, 0x00, 0x00, 0x04] {
+        // DIAGNOSTIC(ea-접속): the title's connect result protocol is not yet
+        // reversed - it takes this empty answer as a failure and drops to its
+        // offline path. Trace the control flow the moment it finishes reading
+        // this reply, so a device log (where the title actually connects, which
+        // it will not do under the slow headless harness) shows where the
+        // success/failure branch is. Harmless: the reply and the title's
+        // behaviour are unchanged, only a branch trace is written to the log.
+        crate::probe::arm_when_drained("ea-poll-decision", 5000);
         return Some(vec![0x00, 0x00, 0x00, 0x04]);
     }
 
