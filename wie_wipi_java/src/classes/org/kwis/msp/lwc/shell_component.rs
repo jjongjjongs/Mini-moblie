@@ -256,6 +256,14 @@ impl ShellComponent {
         // Native +0x7c.
         jvm.put_field(&mut this, "shellState", "Z", state).await?;
 
+        // The shell fills the display it is given. Native sizes itself to it
+        // here; without it Component.w/h keep their 1x1 default and a title that
+        // lays its screens out from getWidth()/getHeight() collapses.
+        let width: i32 = jvm.invoke_virtual(&display, "getWidth", "()I", ()).await?;
+        let height: i32 = jvm.invoke_virtual(&display, "getHeight", "()I", ()).await?;
+        jvm.put_field(&mut this, "w", "I", width).await?;
+        jvm.put_field(&mut this, "h", "I", height).await?;
+
         let proxy: ClassInstanceRef<ProxyCard> = jvm
             .new_class(
                 "org/kwis/msp/lwc/ProxyCard",
