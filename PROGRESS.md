@@ -63,18 +63,31 @@
 - **폴라폴리2007 (KTF 01037216)**: 게임 타이머 콜백이 `MC_grpFillRect` 후 내부
   연결 구조 null 역참조(주소 72). 깊은 게임 로직.
 
-## 작업 중 (다음)
+### 나이트세이버 / KnightSaver (MIDP, 2e7a6c31 → 3.jar) — 크래시 해결 ✅
+- 순수 MIDP-1.0 J2ME MIDlet (MANIFEST.MF/DESC.jad), bare-jar 경로(wie_j2me).
+- 크래시: 로고 스플래시의 `MainCanvas.PlaySound([B)V`가
+  `NoSuchMethodError mmpp/media/MediaPlayer.setMediaSource:([B)V`.
+- 근본 원인: `MediaPlayer`가 location(경로) 기반 클립 로드만 지원. 이 게임은
+  jar에서 직접 `.mmf` 바이트를 읽어 `setMediaSource([B)V`로 넘김.
+- 수정 (`wie_midp/.../mmpp/media/media_player.rs`, 커밋 48dfa18): `setMediaSource([B)V`
+  추가 — 바이트 배열을 저장하고 stale location/handle을 지운 뒤, `start`에서 그
+  바이트를 SMAF 경로로 로드(없으면 기존 location 폴백). 파싱 실패는 무해한 no-op.
+- 부수: J2ME headless probe 하니스 추가(`wie_j2me/tests/probe.rs`, env `WIE_J2ME_JAR`).
+- 결과: 2000틱 무크래시 실행. 기기 확인 대기.
 
-### 나이트세이버 / KnightSaver (MIDP, 2e7a6c31 → 3.jar)
-- 순수 MIDP-1.0 J2ME MIDlet (MANIFEST.MF/DESC.jad).
-- 크래시: `NoSuchMethodError mmpp/media/MediaPlayer.setMediaSource:([B)V`.
-- 방향: `mmpp.media.MediaPlayer`에 `setMediaSource([B)V` 구현.
+## 미해결 — 게스트 메모리 손상 (에뮬레이터 API 문제 아님)
 
 ### LGTTAXI (LGT 00029288, c7275845 → 00029288.jar)
-- 크래시: `net.wie.WieError: Allocation failure at net/wie/CletWrapper.startApp`.
-- firmware libc 스텁(mprotect, vsnprintf, __android_log_print,
-  pthread_mutex_init, strchr) + `MC_miscBackLight` 이후 할당 실패.
-- 방향: 어떤 할당이 실패하는지(과대 크기 요청? 스텁의 잘못된 반환값?) 추적.
+- 크래시: `net.wie.WieError: Allocation failure at net/wie/CletWrapper.startApp`
+  (첫 실행 시). 두 번째 실행(저장 데이터 존재)은 정상(800틱, 204프레임).
+- 진단: 어떤 할당도 과대 크기를 요청하지 않음(최대 0xd9d). list 힙(0x40000000)의
+  한 블록 헤더 워드(0x4016ccb4)가 게스트 데이터(size≈0x7ff…, in_use)로 덮여 체인이
+  깨지고, 이후 정상 할당이 "no free block"으로 실패. 손상 write는 API 호출 사이의
+  게스트 ARM 명령이 낸 것(첫 실행의 튜토리얼 리소스 로드 루프 중, 오래된 저주소
+  블록으로의 wild/UAF write로 추정).
+- 결론: 우리 인라인-헤더 힙 레이아웃이 게스트의 잘못된 write에 민감해 생기는 문제.
+  실기기와 힙 레이아웃이 달라 재현되는 것으로, 누락 API가 아니라 게스트 측 손상.
+  단순 API 구현으로 고칠 수 없음. (두 번째 실행은 첫 실행 경로를 건너뛰어 동작.)
 
 ## 테스트/커밋 규칙
 - 커밋 전 `cargo fmt` + `cargo clippy --workspace` 필수.
