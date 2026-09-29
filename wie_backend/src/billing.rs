@@ -288,6 +288,45 @@ pub fn lgt_local_miniheroes2_response(request: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
+/// What answers 액션퍼즐패밀리2's login.
+///
+/// 액션퍼즐패밀리2 (`00027D2D`, 컴투스) opens a billing socket to
+/// `211.115.66.250:15133` and speaks a length-prefixed binary protocol:
+/// `[u16be length, counting the prefix][u16 message type][payload]`. Its read
+/// side (callback `0x2d340`) reads the two-byte length first, then the rest of
+/// the frame, which is why the device log shows a `MC_netSocketRead(1, _, 2)`
+/// before the write.
+///
+/// The device capture has two frames go unanswered:
+/// - the 73-byte type-0 login, `00 49 00 00 30 03 f9 ...` then the build's
+///   version (`"1.0.2"`) and the subscriber number;
+/// - a 5-byte type-1 frame, `00 05 00 01 30`.
+///
+/// This is the length-prefixed "granted" family [`AckEndpoint`] documents: a
+/// reply that carries the request's own message type and an all-zero status is
+/// how the server says yes. So each frame is answered with its echoed type and a
+/// four-byte zero status, wrapped in the same `u16be` length. A device capture
+/// says whether a later state wants real content behind the status.
+///
+/// `None` for anything that is not one of the two frames.
+pub fn lgt_local_apf2_response(request: &[u8]) -> Option<Vec<u8>> {
+    let is_login = request.len() == 73 && request.get(..7) == Some(&[0x00, 0x49, 0x00, 0x00, 0x30, 0x03, 0xf9]);
+    let is_follow_up = request == [0x00, 0x05, 0x00, 0x01, 0x30];
+
+    if !is_login && !is_follow_up {
+        return None;
+    }
+
+    // Echo the request's two-byte message type, then an all-zero status, under a
+    // u16be length that counts itself: [00 08][type][00 00 00 00].
+    let message_type = &request[2..4];
+    let mut frame = Vec::with_capacity(8);
+    frame.extend_from_slice(&[0x00, 0x08]);
+    frame.extend_from_slice(message_type);
+    frame.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+    Some(frame)
+}
+
 /// What GAMEVIL's server answers one of its titles' purchases with.
 ///
 /// 제노니아1 (`00027BAA`) opens a billing socket to `218.145.70.36:31206` and
@@ -8841,6 +8880,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_cash_response(request))
         .or_else(|| lgt_local_seotda_response(request))
         .or_else(|| lgt_local_miniheroes2_response(request))
+        .or_else(|| lgt_local_apf2_response(request))
         // Before the 제노니아 packet matcher, which claims these by their length
         // and answers with a status this title's purchase receiver refuses.
         .or_else(|| lgt_local_supersoccer_response(request))
@@ -9415,6 +9455,49 @@ mod tests {
         assert_eq!(lgt_local_miniheroes2_response(b"@A no auth string here"), None);
         assert_eq!(lgt_local_miniheroes2_response(b"WM\x3c\x00A_LGT_x"), None);
         assert_eq!(lgt_local_miniheroes2_response(b"MHnotdigit"), None);
+    }
+
+    /// 액션퍼즐패밀리2's 73-byte type-0 login, off the wire: a `u16be` length,
+    /// a `u16` type of 0, the build's header and version, and the subscriber.
+    const APF2_LOGIN: &[u8] = &[
+        0x00, 0x49, 0x00, 0x00, 0x30, 0x03, 0xf9, 0x00, 0x00, 0x02, 0x05, // length, type 0, header
+        0x31, 0x2e, 0x30, 0x2e, 0x32, // "1.0.2"
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x31, 0x30, 0x34, 0x36, 0x31, 0x31, 0x39,
+        0x32, 0x36, 0x39, // "01046119269"
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30,
+        0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30,
+    ];
+
+    /// Its login is answered with a frame carrying the request's own message
+    /// type (`0`) and an all-zero status under a `u16be` length: `00 08 00 00
+    /// 00 00 00 00`.
+    #[test]
+    fn the_apf2_login_is_granted_with_echoed_type_and_zero_status() {
+        assert_eq!(APF2_LOGIN.len(), 73, "the 73-byte login the capture caught");
+        let reply = lgt_local_apf2_response(APF2_LOGIN).expect("the login is answered");
+
+        assert_eq!(reply, [0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    /// Its 5-byte type-1 follow-up is granted with its own type echoed back.
+    #[test]
+    fn the_apf2_follow_up_is_granted_with_its_type() {
+        let reply = lgt_local_apf2_response(&[0x00, 0x05, 0x00, 0x01, 0x30]).expect("the follow-up is answered");
+
+        assert_eq!(reply, [0x00, 0x08, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    /// Only the two 액션퍼즐패밀리2 frames are: not a wrong length, not a wrong
+    /// header.
+    #[test]
+    fn only_the_apf2_frames_are_answered() {
+        let mut wrong_length = APF2_LOGIN.to_vec();
+        wrong_length.push(0x00);
+        assert_eq!(lgt_local_apf2_response(&wrong_length), None, "not 73 bytes");
+        let mut wrong_header = APF2_LOGIN.to_vec();
+        wrong_header[4] = 0x31;
+        assert_eq!(lgt_local_apf2_response(&wrong_header), None, "not the login header");
+        assert_eq!(lgt_local_apf2_response(&[0x00, 0x05, 0x00, 0x01, 0x31]), None, "not the follow-up");
     }
 
     /// What 퀸스크라운 sends between its session and its licence, off the wire.
