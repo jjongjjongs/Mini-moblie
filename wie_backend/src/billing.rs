@@ -371,8 +371,24 @@ pub fn lgt_local_apf2_response(request: &[u8]) -> Option<Vec<u8>> {
 /// matchers and 액션퍼즐패밀리2's `u16be` one: a 34-byte frame's `u16be` prefix is
 /// `0x0000`, not 34, so [`lgt_local_apf2_response`] passes it by.
 ///
-/// `None` for anything that is not the command-`0x10` login.
+/// A device capture confirmed the login is accepted - the title does not
+/// re-send it - but then it sits on a `연결중` screen, still reading the socket
+/// with a 20480-byte buffer and sending the bare `00 00 00 04` poll from its
+/// timer, waiting for the server's data push. With the format of that push
+/// unknown, this answers the poll with the empty frame handed back - a
+/// prefix-only `00 00 00 04`, the "nothing further" a server would send when it
+/// has no data queued - to see whether an empty data set lets the title leave
+/// the screen. If it does not, the push carries content the title needs and
+/// there is nothing behind an empty answer to give it.
+///
+/// `None` for anything that is neither the command-`0x10` login nor the poll.
 pub fn lgt_local_ea_baseball_response(request: &[u8]) -> Option<Vec<u8>> {
+    // The bare four-byte poll the title's timer sends while it waits: a u32be
+    // length of four and no body. Answered with the same empty frame.
+    if request == [0x00, 0x00, 0x00, 0x04] {
+        return Some(vec![0x00, 0x00, 0x00, 0x04]);
+    }
+
     // A u32be length that counts itself and equals the frame, and the 0x10
     // login command right behind it.
     if request.len() < 9 || u32::from_be_bytes([request[0], request[1], request[2], request[3]]) as usize != request.len() || request[4] != 0x10 {
@@ -9593,17 +9609,31 @@ mod tests {
         assert_eq!(reply, [0x00, 0x00, 0x00, 0x09, 0x10, 0x00, 0x00, 0x00, 0x00]);
     }
 
-    /// Only its command-0x10 login is: not the bare four-byte keepalive, not a
-    /// wrong command, not a length that disagrees with the frame.
+    /// The bare four-byte poll the title's timer sends while it waits is
+    /// answered with the same empty frame.
+    #[test]
+    fn the_ea_baseball_poll_is_answered_empty() {
+        assert_eq!(
+            lgt_local_ea_baseball_response(&[0x00, 0x00, 0x00, 0x04]),
+            Some(vec![0x00, 0x00, 0x00, 0x04])
+        );
+    }
+
+    /// Otherwise only its command-0x10 login is: not a wrong command, not a
+    /// length that disagrees with the frame.
     #[test]
     fn only_the_ea_baseball_login_is_answered() {
-        assert_eq!(lgt_local_ea_baseball_response(&[0x00, 0x00, 0x00, 0x04]), None, "the empty keepalive");
         let mut wrong_command = EA_BASEBALL_LOGIN.to_vec();
         wrong_command[4] = 0x11;
         assert_eq!(lgt_local_ea_baseball_response(&wrong_command), None, "not command 0x10");
         let mut wrong_length = EA_BASEBALL_LOGIN.to_vec();
         wrong_length.push(0x00);
         assert_eq!(lgt_local_ea_baseball_response(&wrong_length), None, "length disagrees with the frame");
+        assert_eq!(
+            lgt_local_ea_baseball_response(&[0x00, 0x00, 0x00, 0x05, 0x10]),
+            None,
+            "a five-byte frame is not the poll"
+        );
     }
 
     /// What 퀸스크라운 sends between its session and its licence, off the wire.
