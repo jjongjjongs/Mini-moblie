@@ -23,6 +23,26 @@ pub(crate) fn buffer_size(width: u32, height: u32, bytes_per_pixel: u32) -> Resu
     Ok((size, bpl))
 }
 
+/// Rows of slack to leave past a pixel buffer's own bytes.
+///
+/// A title's own renderer, drawing straight into an image it holds, can run
+/// past the last row: 아무이유없어 fills a 57×58 image a few rows long and its
+/// stores land in the words just past it. On the handset those words are still
+/// inside the granularity its allocator handed out; here the buffer is sized to
+/// the pixel exactly, so the stray stores fall on the next block's allocation
+/// header and canary and take the heap down a few allocations later. A band of
+/// rows past the image absorbs the overrun the way the handset's allocator
+/// incidentally does - the overrun measured here is three to four rows, so this
+/// leaves comfortable margin - without changing any size the drawing code reads
+/// back (that stays `buffer_size`). It is the per-image counterpart of the
+/// `SURFACE_GUARD_ROWS` a draw surface already carries.
+const IMAGE_GUARD_ROWS: u32 = 64;
+
+fn alloc_with_guard(context: &mut dyn WIPICContext, size: u32, bpl: u32) -> Result<WIPICIndirectPtr> {
+    let guard = bpl.saturating_mul(IMAGE_GUARD_ROWS).saturating_add(16);
+    context.alloc(size.saturating_add(guard))
+}
+
 /// `source` composed over `under`, exactly as `ImageBufferCanvas::blend_pixel`
 /// composes them - the same f32 factor and the same truncation, so a blit that
 /// goes the direct way lands on the same byte as one that went through the
@@ -55,7 +75,7 @@ impl FrameBuffer {
         let bytes_per_pixel = bpp / 8;
 
         let (size, bpl) = buffer_size(width, height, bytes_per_pixel)?;
-        let buf = context.alloc(size)?;
+        let buf = alloc_with_guard(context, size, bpl)?;
 
         Ok(Self(WIPICFramebuffer {
             width,
@@ -68,7 +88,7 @@ impl FrameBuffer {
 
     pub fn from_image(context: &mut dyn WIPICContext, image: &dyn Image) -> Result<Self> {
         let (size, bpl) = buffer_size(image.width(), image.height(), image.bytes_per_pixel())?;
-        let buf = context.alloc(size)?;
+        let buf = alloc_with_guard(context, size, bpl)?;
 
         context.write_bytes(context.data_ptr(buf)?, &image.raw())?;
 

@@ -75,19 +75,21 @@
 - 부수: J2ME headless probe 하니스 추가(`wie_j2me/tests/probe.rs`, env `WIE_J2ME_JAR`).
 - 결과: 2000틱 무크래시 실행. 기기 확인 대기.
 
-## 미해결 — 게스트 메모리 손상 (에뮬레이터 API 문제 아님)
-
-### LGTTAXI (LGT 00029288, c7275845 → 00029288.jar)
-- 크래시: `net.wie.WieError: Allocation failure at net/wie/CletWrapper.startApp`
-  (첫 실행 시). 두 번째 실행(저장 데이터 존재)은 정상(800틱, 204프레임).
-- 진단: 어떤 할당도 과대 크기를 요청하지 않음(최대 0xd9d). list 힙(0x40000000)의
-  한 블록 헤더 워드(0x4016ccb4)가 게스트 데이터(size≈0x7ff…, in_use)로 덮여 체인이
-  깨지고, 이후 정상 할당이 "no free block"으로 실패. 손상 write는 API 호출 사이의
-  게스트 ARM 명령이 낸 것(첫 실행의 튜토리얼 리소스 로드 루프 중, 오래된 저주소
-  블록으로의 wild/UAF write로 추정).
-- 결론: 우리 인라인-헤더 힙 레이아웃이 게스트의 잘못된 write에 민감해 생기는 문제.
-  실기기와 힙 레이아웃이 달라 재현되는 것으로, 누락 API가 아니라 게스트 측 손상.
-  단순 API 구현으로 고칠 수 없음. (두 번째 실행은 첫 실행 경로를 건너뛰어 동작.)
+### 아무이유없어 / LGTTAXI (LGT 00029288, c7275845) — 크래시 해결 ✅
+- 크래시: `net.wie.WieError: Allocation failure`. 첫 실행은 튜토리얼에서, 재실행은
+  스플래시(SN Mobile/GOW ARTS) 다음 화면에서.
+- 근본 원인: 게임 자체 렌더러가 `MC_grpCreateImage`로 만든 이미지 플레인(예: 57×58
+  RGB565)에 직접 픽셀을 그리는데, 선언한 높이보다 3~4행 더 써서 버퍼 끝을 넘김.
+  실기기는 할당 granularity의 여유로 흡수하지만, 우리는 픽셀에 딱 맞게 할당해서
+  그 stray store가 바로 뒤 블록의 할당 헤더/canary(예: 0x4016ccb4 위치)를 덮음 →
+  힙 체인이 깨지고 몇 할당 뒤 "no free block"으로 죽음. (게스트 w16 픽셀 store 두
+  개가 canary를 덮는 것을 watchpoint로 확인.)
+- 수정 (`wie_wipi_c/.../graphics/framebuffer.rs`): 이미지/프레임버퍼 픽셀 버퍼를
+  `IMAGE_GUARD_ROWS`(64행)만큼 여유 있게 할당(`alloc_with_guard`). 드로잉 코드가
+  읽는 논리 크기(`buffer_size`)는 그대로라 렌더링엔 영향 없음. draw surface가 이미
+  갖는 `SURFACE_GUARD_ROWS`의 이미지 판.
+- 결과: 첫 실행/재실행 모두 8000틱·2049프레임 무크래시. KTF/LGT/wipi_c 전체
+  테스트(48/115/453) 통과. 기기 확인 대기.
 
 ## 테스트/커밋 규칙
 - 커밋 전 `cargo fmt` + `cargo clippy --workspace` 필수.
