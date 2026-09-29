@@ -607,12 +607,22 @@ pub async fn sprintk(
     a3: WIPICWord,
     a4: WIPICWord,
     a5: WIPICWord,
+    a6: WIPICWord,
+    a7: WIPICWord,
+    a8: WIPICWord,
 ) -> Result<WIPICWord> {
-    tracing::debug!("MC_knlSprintk({dest:#x}, {ptr_format:#x}, {a0}, {a1}, {a2}, {a3}, {a4}, {a5})",);
+    // Nine variadic words, not the six the earlier binding read. The first two
+    // arrive in r2/r3 and the rest off the stack, so a format that names more
+    // than six was handed `0`/`(null)` for the ones past the sixth: 메이플스토리's
+    // hunt tracker formats "%s%s%s%s%d%s%d%s" (eight arguments), so its required
+    // count (the seventh) came out `0` and its trailing name (the eighth)
+    // `(null)`, leaving "빨간달팽이 (1/0(null)" where "(1/5)" belonged. Reading
+    // through the eighth (with one to spare) puts the real values back.
+    tracing::debug!("MC_knlSprintk({dest:#x}, {ptr_format:#x}, {a0}, {a1}, {a2}, {a3}, {a4}, {a5}, {a6}, {a7}, {a8})",);
 
     let format_string = read_null_terminated_string_bytes(context, ptr_format)?;
 
-    let result = sprintf(context, &format_string, &[a0, a1, a2, a3, a4, a5])?;
+    let result = sprintf(context, &format_string, &[a0, a1, a2, a3, a4, a5, a6, a7, a8])?;
 
     write_null_terminated_string_bytes(context, dest, &result)?;
 
@@ -1062,7 +1072,7 @@ mod test {
 
         write_null_terminated_string_bytes(&mut context, format, "%d".as_bytes()).unwrap();
         sprintk
-            .call(&mut context, Box::new([dest, format, 1234, 0, 0, 0, 0, 0, 0, 0]))
+            .call(&mut context, Box::new([dest, format, 1234, 0, 0, 0, 0, 0, 0, 0, 0]))
             .await
             .unwrap();
         let result = read_null_terminated_string_bytes(&context, dest).unwrap();
@@ -1070,11 +1080,34 @@ mod test {
 
         write_null_terminated_string_bytes(&mut context, format, "test %02d".as_bytes()).unwrap();
         sprintk
-            .call(&mut context, Box::new([dest, format, 1, 0, 0, 0, 0, 0, 0, 0]))
+            .call(&mut context, Box::new([dest, format, 1, 0, 0, 0, 0, 0, 0, 0, 0]))
             .await
             .unwrap();
         let result = read_null_terminated_string_bytes(&context, dest).unwrap();
         assert_eq!(String::from_utf8(result).unwrap(), "test 01");
+
+        // 메이플스토리's hunt tracker: "%s%s%s%s%d%s%d%s" takes eight arguments.
+        // The sixth-argument binding used to run out at the seventh (the
+        // required count) and eighth (its name), printing them 0 and (null);
+        // with nine words read the seventh and eighth arrive from the stack.
+        let s_open = context.alloc_raw(2).unwrap();
+        let s_slash = context.alloc_raw(2).unwrap();
+        let s_close = context.alloc_raw(2).unwrap();
+        let s_empty = context.alloc_raw(1).unwrap();
+        write_null_terminated_string_bytes(&mut context, s_open, "(".as_bytes()).unwrap();
+        write_null_terminated_string_bytes(&mut context, s_slash, "/".as_bytes()).unwrap();
+        write_null_terminated_string_bytes(&mut context, s_close, ")".as_bytes()).unwrap();
+        write_null_terminated_string_bytes(&mut context, s_empty, "".as_bytes()).unwrap();
+        write_null_terminated_string_bytes(&mut context, format, "%s%s%s%s%d%s%d%s".as_bytes()).unwrap();
+        sprintk
+            .call(
+                &mut context,
+                Box::new([dest, format, s_empty, s_empty, s_empty, s_open, 1, s_slash, 5, s_close, 0]),
+            )
+            .await
+            .unwrap();
+        let result = read_null_terminated_string_bytes(&context, dest).unwrap();
+        assert_eq!(String::from_utf8(result).unwrap(), "(1/5)");
 
         Ok(())
     }

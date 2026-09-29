@@ -384,10 +384,18 @@ impl EmulatedFunction<(), WIPICMethodResult, ()> for CMethodProxy {
         let a6 = u32::get(core, 6);
         let a7 = u32::get(core, 7);
         let a8 = u32::get(core, 8);
+        // Nine words is one short for a variadic slot with eight arguments (two
+        // in registers, six on the stack): 메이플스토리's hunt tracker formats with
+        // eight, so read through the eleventh, all off the caller's frame.
+        let a9 = u32::get(core, 9);
+        let a10 = u32::get(core, 10);
 
         let result = self
             .body
-            .call(&mut self.context.clone(), vec![a0, a1, a2, a3, a4, a5, a6, a7, a8].into_boxed_slice())
+            .call(
+                &mut self.context.clone(),
+                vec![a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10].into_boxed_slice(),
+            )
             .await?;
 
         Ok(WIPICMethodResult { result })
