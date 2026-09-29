@@ -287,6 +287,43 @@ pub fn lgt_local_miniheroes2_response(request: &[u8]) -> Option<Vec<u8>> {
 
     None
 }
+
+/// What answers 09대박맞고-왕후의길's login.
+///
+/// 09대박맞고 (`0002AABE`) opens a billing socket and writes a 28-byte login
+/// frame that opens `14 00 01 00` - the device capture shows the wrapped write
+/// as 136 bytes, which is the 108-byte `MC_netSocketWrite` header over a 28-byte
+/// application frame. `01 00` is the command; the title's read side dispatches
+/// this as its "state 1".
+///
+/// The state-1 handler at `0x5c1b8` reads a `u16` at the reply's offset 0 as the
+/// result (`0x5c1c8`), stores it (`0x5c1d8`), and branches on it (`0x5c1da`):
+/// `0` falls through to the body parse at `0x5c1e2`, anything else jumps straight
+/// to the transition `0x5c7bc`. The transition re-reads that stored result word
+/// and, for `0`, advances the handshake (`0x5c7f8` -> `0x5ca9a` -> `bl 0x5c0c4`,
+/// which sets `[base+0x7034] = 2`); a non-zero result (e.g. `0x8101`) drops it to
+/// the error state `8`. So the login is answered by a reply whose first `u16` is
+/// `0`.
+///
+/// The success body parse (`0x5c1e2`) `memset`s a scratch, `memcpy`s 0x15 bytes
+/// from offset 2, then reads a handful of fixed fields (cursor reaches ~39) and a
+/// final length-delimited field bounded to 600. None of those are validated here
+/// (they are only stored), and when their length fields are `0` the delimited
+/// read consumes nothing. So a zero-filled body carries the title past auth with
+/// an empty session record, and a device capture says whether a later state wants
+/// real fields behind it; 48 zero bytes cover the fixed reads with room to spare.
+///
+/// `None` for anything that is not the 28-byte `14 00 01 00` login.
+pub fn lgt_local_daebak_response(request: &[u8]) -> Option<Vec<u8>> {
+    if request.len() != 28 || request.get(..4) != Some(&[0x14, 0x00, 0x01, 0x00]) {
+        return None;
+    }
+
+    // Result u16 == 0 at offset 0 is success; the rest is the zero session body
+    // the success path reads its (empty) fields out of.
+    Some(vec![0u8; 48])
+}
+
 /// What GAMEVIL's server answers one of its titles' purchases with.
 ///
 /// 제노니아1 (`00027BAA`) opens a billing socket to `218.145.70.36:31206` and
@@ -8840,6 +8877,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_cash_response(request))
         .or_else(|| lgt_local_seotda_response(request))
         .or_else(|| lgt_local_miniheroes2_response(request))
+        .or_else(|| lgt_local_daebak_response(request))
         // Before the 제노니아 packet matcher, which claims these by their length
         // and answers with a status this title's purchase receiver refuses.
         .or_else(|| lgt_local_supersoccer_response(request))
@@ -9414,6 +9452,40 @@ mod tests {
         assert_eq!(lgt_local_miniheroes2_response(b"@A no auth string here"), None);
         assert_eq!(lgt_local_miniheroes2_response(b"WM\x3c\x00A_LGT_x"), None);
         assert_eq!(lgt_local_miniheroes2_response(b"MHnotdigit"), None);
+    }
+
+    /// 09대박맞고's 28-byte login, off the wire: it opens `14 00 01 00` (the
+    /// device capture wrapped it as 136 = 108 header + 28) and the rest is body.
+    const DAEBAK_LOGIN: &[u8] = &[
+        0x14, 0x00, 0x01, 0x00, // length word, command 01 00 (state 1)
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // subscriber/handset body
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+
+    /// Its login is answered with a body whose first `u16` - the result the
+    /// state-1 handler reads at offset 0 - is `0`, which the transition reads as
+    /// success and advances the handshake on.
+    #[test]
+    fn a_daebak_login_is_answered_result_zero() {
+        let reply = lgt_local_daebak_response(DAEBAK_LOGIN).expect("the login is answered");
+
+        assert!(reply.len() >= 40, "long enough for the success path's fixed field reads");
+        assert_eq!(&reply[0..2], &[0x00, 0x00], "the result u16 the handler branches to success on");
+    }
+
+    /// Only the 28-byte `14 00 01 00` login is: not a wrong length, not a wrong
+    /// opener.
+    #[test]
+    fn only_the_daebak_login_is_answered() {
+        assert_eq!(lgt_local_daebak_response(&[0x14, 0x00, 0x01, 0x00]), None, "too short");
+        let mut wrong_opener = DAEBAK_LOGIN.to_vec();
+        wrong_opener[2] = 0x02;
+        assert_eq!(lgt_local_daebak_response(&wrong_opener), None, "not command 01 00");
+        assert_eq!(
+            lgt_local_daebak_response(&[0xff, 0xff, 0x00, 0x1c]),
+            None,
+            "an ffff frame is another handler's"
+        );
     }
 
     /// What 퀸스크라운 sends between its session and its licence, off the wire.
