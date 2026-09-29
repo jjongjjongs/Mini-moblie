@@ -383,6 +383,10 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // off-screen buffer of its own, and copies that onto the screen a quarter
     // turn clockwise - the handset was meant to be turned sideways to play it.
     (TitlePlatform::Lgt, "000323B3", sideways()),
+    // 질주쾌감스케쳐: the same, from its terms screen on - it lays every frame
+    // out sideways for a handset held landscape, so the picture reaches the
+    // upright panel a quarter turn off until it is turned back.
+    (TitlePlatform::Lgt, "00031347", sideways()),
     // 학교가는 길: an org.kwis.msp.lwc title whose ProxyCard repaints partial
     // regions that leave the previous screen's own pixels standing - its comic
     // select screen kept the title band drawn over it, and the building screen
