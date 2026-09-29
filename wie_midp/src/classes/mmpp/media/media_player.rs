@@ -1,22 +1,26 @@
-use alloc::vec;
+use alloc::{vec, vec::Vec};
+
+use bytemuck::cast_vec;
 
 use java_class_proto::{JavaFieldProto, JavaMethodProto};
 use java_runtime::classes::java::lang::String;
-use jvm::{ClassInstanceRef, Jvm, Result as JvmResult, runtime::JavaIoInputStream, runtime::JavaLangClassLoader, runtime::JavaLangString};
+use jvm::{Array, ClassInstanceRef, Jvm, Result as JvmResult, runtime::JavaIoInputStream, runtime::JavaLangClassLoader, runtime::JavaLangString};
 
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 
 // class mmpp.media.MediaPlayer
 //
-// LG WIPI's location-based sound player: a title points it at a resource with
-// `setMediaLocation`, sets a volume, and starts and stops it. 호국전기이순신
-// makes one in its GeneralCanvas and drives every sound through it - a `.mmf`
-// (Yamaha SMAF) clip named by a jar path like `/sound/m_sel.mmf`.
+// LG WIPI's sound player: a title points it at a clip, sets a volume, and
+// starts and stops it. 호국전기이순신 makes one in its GeneralCanvas and drives
+// every sound through it - a `.mmf` (Yamaha SMAF) clip named by a jar path like
+// `/sound/m_sel.mmf` through `setMediaLocation`.
 //
-// The clip is loaded from the classpath the first time it is started and kept
-// under a handle so a restart of the same location does not parse it again;
-// changing the location drops the old handle. Playback runs through the same
-// SMAF path as `net.wie.SmafPlayer`.
+// The clip is either named by a classpath resource (`setMediaLocation`) or
+// handed over whole as bytes (`setMediaSource`): 나이트세이버 reads each `.mmf`
+// out of its own jar itself and passes the bytes in, naming no location. Either
+// way it is loaded the first time it is started and kept under a handle so a
+// restart does not parse it again; naming a new clip drops the old handle.
+// Playback runs through the same SMAF path as `net.wie.SmafPlayer`.
 pub struct MediaPlayer;
 
 impl MediaPlayer {
@@ -28,6 +32,7 @@ impl MediaPlayer {
             methods: vec![
                 JavaMethodProto::new("<init>", "()V", Self::init, Default::default()),
                 JavaMethodProto::new("setMediaLocation", "(Ljava/lang/String;)V", Self::set_media_location, Default::default()),
+                JavaMethodProto::new("setMediaSource", "([B)V", Self::set_media_source, Default::default()),
                 JavaMethodProto::new("setVolumeLevel", "(Ljava/lang/String;)V", Self::set_volume_level, Default::default()),
                 JavaMethodProto::new("setPlayBackLoop", "(Z)V", Self::set_play_back_loop, Default::default()),
                 JavaMethodProto::new("start", "()V", Self::start, Default::default()),
@@ -35,6 +40,7 @@ impl MediaPlayer {
             ],
             fields: vec![
                 JavaFieldProto::new("__wieLocation", "Ljava/lang/String;", Default::default()),
+                JavaFieldProto::new("__wieSource", "[B", Default::default()),
                 JavaFieldProto::new("__wieVolume", "Ljava/lang/String;", Default::default()),
                 JavaFieldProto::new("__wieHandle", "I", Default::default()),
                 JavaFieldProto::new("__wieLoop", "Z", Default::default()),
@@ -80,6 +86,30 @@ impl MediaPlayer {
         Ok(())
     }
 
+    async fn set_media_source(
+        jvm: &Jvm,
+        context: &mut WieJvmContext,
+        mut this: ClassInstanceRef<Self>,
+        source: ClassInstanceRef<Array<i8>>,
+    ) -> JvmResult<()> {
+        tracing::debug!("mmpp.media.MediaPlayer::setMediaSource({this:?}, {source:?})");
+
+        // A clip handed over whole invalidates any loaded one; drop the old
+        // handle so `start` loads the bytes now held.
+        let handle: i32 = jvm.get_field(&this, "__wieHandle", "I").await?;
+        if handle >= 0 {
+            context.system().audio().close(handle as u32).ok();
+            jvm.put_field(&mut this, "__wieHandle", "I", -1).await?;
+        }
+
+        // The bytes win over a location: naming a source is the title saying it
+        // holds the clip itself, so a stale location must not be loaded instead.
+        jvm.put_field(&mut this, "__wieLocation", "Ljava/lang/String;", None).await?;
+        jvm.put_field(&mut this, "__wieSource", "[B", source).await?;
+
+        Ok(())
+    }
+
     async fn set_volume_level(
         jvm: &Jvm,
         _context: &mut WieJvmContext,
@@ -112,15 +142,28 @@ impl MediaPlayer {
         let mut handle: i32 = jvm.get_field(&this, "__wieHandle", "I").await?;
 
         if handle < 0 {
-            let location: ClassInstanceRef<String> = jvm.get_field(&this, "__wieLocation", "Ljava/lang/String;").await?;
-            if location.is_null() {
-                return Ok(());
-            }
-            let path = JavaLangString::to_rust_string(jvm, &location).await?;
+            // A source given as bytes is loaded as it is; otherwise the clip is
+            // read from the classpath by its location. A title uses one or the
+            // other, and a set source has already cleared any location.
+            let source: ClassInstanceRef<Array<i8>> = jvm.get_field(&this, "__wieSource", "[B").await?;
+            let (data, what) = if !source.is_null() {
+                let length = jvm.array_length(&source).await?;
+                let data: Vec<i8> = jvm.load_array(&source, 0, length).await?;
 
-            let Some(data) = Self::read_resource(jvm, &path).await? else {
-                tracing::warn!("mmpp.media.MediaPlayer::start: clip not found: {path:?}");
-                return Ok(());
+                (cast_vec(data), "source".into())
+            } else {
+                let location: ClassInstanceRef<String> = jvm.get_field(&this, "__wieLocation", "Ljava/lang/String;").await?;
+                if location.is_null() {
+                    return Ok(());
+                }
+                let path = JavaLangString::to_rust_string(jvm, &location).await?;
+
+                let Some(data) = Self::read_resource(jvm, &path).await? else {
+                    tracing::warn!("mmpp.media.MediaPlayer::start: clip not found: {path:?}");
+                    return Ok(());
+                };
+
+                (data, path)
             };
 
             match context.system().audio().load_smaf(&data) {
@@ -129,7 +172,7 @@ impl MediaPlayer {
                     jvm.put_field(&mut this, "__wieHandle", "I", handle).await?;
                 }
                 Err(error) => {
-                    tracing::warn!("mmpp.media.MediaPlayer::start: cannot load {path:?}: {error:?}");
+                    tracing::warn!("mmpp.media.MediaPlayer::start: cannot load {what:?}: {error:?}");
                     return Ok(());
                 }
             }
@@ -191,6 +234,24 @@ mod test {
             assert!(!player.is_null());
             // With no location set, start and stop are quiet no-ops.
             let _: () = jvm.invoke_virtual(&player, "setPlayBackLoop", "(Z)V", (true,)).await?;
+            let _: () = jvm.invoke_virtual(&player, "start", "()V", ()).await?;
+            let _: () = jvm.invoke_virtual(&player, "stop", "()V", ()).await?;
+            Ok::<(), jvm::JavaError>(())
+        })
+    }
+
+    /// A clip handed over as bytes resolves the method 나이트세이버 calls and
+    /// starts without a location; bytes that are not a clip are a quiet no-op
+    /// rather than a fault.
+    #[test]
+    fn media_player_takes_a_source_as_bytes() -> Result<()> {
+        run_jvm_test(Box::new([get_protos().into()]), |jvm| async move {
+            let player: ClassInstanceRef<()> = jvm.new_class("mmpp/media/MediaPlayer", "()V", ()).await?.into();
+
+            let mut source = jvm.instantiate_array("B", 4).await?;
+            jvm.store_array(&mut source, 0, [1i8, 2, 3, 4]).await?;
+
+            let _: () = jvm.invoke_virtual(&player, "setMediaSource", "([B)V", (source,)).await?;
             let _: () = jvm.invoke_virtual(&player, "start", "()V", ()).await?;
             let _: () = jvm.invoke_virtual(&player, "stop", "()V", ()).await?;
             Ok::<(), jvm::JavaError>(())
