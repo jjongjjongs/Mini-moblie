@@ -32,7 +32,7 @@ use self::{
     classes::{
         com::ktf::kfc::{GForm, GMenubarForm, GMsgBox, GTextField, GTextListener},
         net::wie::{ClassLoaderContext, KtfClassLoader},
-        wec::DMInfo,
+        wec::{DMInfo, GatewayIP, OEMDevice},
     },
     name::JavaFullName,
 };
@@ -191,6 +191,8 @@ impl KtfJvmSupport {
         // ones: an LGT or SKT title loads the shared two and not these.
         let ktf_protos: Box<[_]> = Box::new([
             DMInfo::as_proto(),
+            OEMDevice::as_proto(),
+            GatewayIP::as_proto(),
             GForm::as_proto(),
             GMenubarForm::as_proto(),
             GMsgBox::as_proto(),
