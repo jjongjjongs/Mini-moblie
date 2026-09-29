@@ -134,7 +134,7 @@ pub async fn java_throw_instance(core: &mut ArmCore, jvm: &mut Jvm, ptr_exceptio
 
 /// Raises a fresh instance of `name`, the way `java_throw` does for a name the
 /// guest supplies.
-async fn java_throw_class(core: &mut ArmCore, jvm: &mut Jvm, name: &str) -> Result<JavaMethodResult> {
+pub async fn java_throw_class(core: &mut ArmCore, jvm: &mut Jvm, name: &str) -> Result<JavaMethodResult> {
     let exception = match jvm.new_class(name, "()V", ()).await {
         Ok(x) => x,
         Err(x) => return Err(JvmSupport::to_wie_err(jvm, x).await),

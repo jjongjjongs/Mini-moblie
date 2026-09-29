@@ -21,8 +21,8 @@ use crate::{
         SVC_CATEGORY_INIT, SVC_CATEGORY_MODULE, SVC_CATEGORY_MODULE_CLASS, SVC_CATEGORY_MODULE_JUMP,
         java::{
             interface::{
-                get_java_method, get_wipi_jb_interface, java_array_new, java_check_type, java_class_load, java_new, java_throw, java_throw_instance,
-                jb_monitor_enter, jb_monitor_exit, map_jump_result,
+                get_java_method, get_wipi_jb_interface, java_array_new, java_check_type, java_class_load, java_new, java_throw, java_throw_class,
+                java_throw_instance, jb_monitor_enter, jb_monitor_exit, map_jump_result,
             },
             jvm_support::{JavaMethodResult, JavaVtable, KtfJvmSupport},
         },
@@ -678,6 +678,13 @@ const MODULE_MONITOR_EXIT: u32 = 3;
 /// runtime needs to do there.
 const MODULE_POLL: u32 = 4;
 
+/// The jump table's sixth entry, which a compiled method tail-jumps to when it
+/// finds an array index out of the array's bounds. The handset throws
+/// `ArrayIndexOutOfBoundsException` from here; a title that reads past an array
+/// (테일즈 판타지 does, in its startApp) leans on that being what happens rather
+/// than a runtime that stops.
+const MODULE_ARRAY_INDEX_OUT_OF_BOUNDS: u32 = 5;
+
 /// How many words the module leaves on the stack when it jumps.
 ///
 /// Its call sites put the first three arguments in `r1`, `r2` and `r3` and the
@@ -846,6 +853,11 @@ async fn handle_module_jump_svc(core: &mut ArmCore, jvm: &mut Jvm, id: SvcId) ->
         MODULE_MONITOR_ENTER => return jb_monitor_enter(core, jvm, core.read_param(0)?).await?.write(core, lr),
         MODULE_MONITOR_EXIT => return jb_monitor_exit(core, jvm, core.read_param(0)?).await?.write(core, lr),
         MODULE_POLL => return 0u32.write(core, lr),
+        MODULE_ARRAY_INDEX_OUT_OF_BOUNDS => {
+            return java_throw_class(core, jvm, "java/lang/ArrayIndexOutOfBoundsException")
+                .await?
+                .write(core, lr);
+        }
         _ => (),
     }
 
