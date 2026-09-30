@@ -36,7 +36,20 @@ impl Network {
         Ok(())
     }
 
-    async fn connect(_: &Jvm, _: &mut WieJvmContext) -> JvmResult<i32> {
+    async fn connect(_: &Jvm, context: &mut WieJvmContext) -> JvmResult<i32> {
+        // 오즈-천공의 기사단 (aid 00026DBF) has no offline branch behind a
+        // "connected" result: told it is online it opens its own game server and,
+        // when that server (gone for years) does not answer, drops to the menu
+        // with "서버와의 접속이 끊어졌습니다". The specification's answer for a
+        // handset with no coverage is -1 - the attempt failed - which is what
+        // sends such a title down its offline path instead, on to character
+        // creation offline. A working WIPI player answers -1 here for every
+        // title; this keeps the online result other titles were given and refuses
+        // only the one known to need it, so nothing else is disturbed.
+        if context.system().aid().eq_ignore_ascii_case("00026DBF") {
+            return Ok(-1);
+        }
+
         Ok(1)
     }
 
