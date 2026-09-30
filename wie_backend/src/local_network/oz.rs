@@ -66,9 +66,9 @@ struct OzConnection {
     request: Vec<u8>,
     /// What is left to hand back.
     outgoing: Vec<u8>,
-    /// A poll reply is queued and, once the title has read all of it, the probe
-    /// should be armed on the dispatch that follows.
-    arm_on_drain: bool,
+    /// A poll reply is queued and the probe should be armed the moment the
+    /// title starts reading it, to trace the parse and dispatch that follow.
+    arm_pending: bool,
     /// The probe is armed only once, on the first poll reply.
     armed: bool,
 }
@@ -119,10 +119,13 @@ impl LocalConnection for OzConnection {
             tracing::info!("oz {HOST}:{PORT}: {} -> {}", hex(&frame), hex(&reply));
 
             // The poll (type 0) is the one the title keeps re-sending; arm the
-            // probe once the title has read this reply, to trace the dispatch
-            // that rejects it. The login (type 1) is left alone.
+            // probe the moment the title starts reading this reply, so the trace
+            // covers the receiver reading the frame and the dispatch it runs on
+            // it - the parse completes right after the last byte is read, so
+            // arming on the drain caught the idle loop just past it instead. The
+            // login (type 1) is left alone.
             if message_type == 0 && !self.armed {
-                self.arm_on_drain = true;
+                self.arm_pending = true;
             }
 
             self.outgoing.extend_from_slice(&reply);
@@ -134,17 +137,17 @@ impl LocalConnection for OzConnection {
             return LocalRead::Pending;
         }
 
-        let take = out.len().min(self.outgoing.len());
-        out[..take].copy_from_slice(&self.outgoing[..take]);
-        self.outgoing.drain(..take);
-
-        // DIAGNOSTIC(oz-connect): the title has now read all of the poll reply;
-        // trace the branches of the dispatch it runs on it.
-        if self.outgoing.is_empty() && self.arm_on_drain && !self.armed {
-            self.arm_on_drain = false;
+        // DIAGNOSTIC(oz-connect): the title is about to read the poll reply;
+        // trace from here through its parse and the dispatch that rejects it.
+        if self.arm_pending && !self.armed {
+            self.arm_pending = false;
             self.armed = true;
             crate::probe::arm("oz-connect", TRACE_BRANCHES);
         }
+
+        let take = out.len().min(self.outgoing.len());
+        out[..take].copy_from_slice(&self.outgoing[..take]);
+        self.outgoing.drain(..take);
 
         LocalRead::Data(take)
     }
