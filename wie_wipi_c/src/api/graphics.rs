@@ -539,50 +539,56 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
     let color = context_color(&framebuffer, &gctx);
 
     // DIAGNOSTIC(ea-menu): EA프로야구2010's mode-select buttons and its logo
-    // render black on first entry and correctly once a game has been played -
-    // the same menu, drawn two ways. The title paints them pixel by pixel with
-    // 1x1 fills, and the logo's pixels are not merely black on the broken pass,
-    // they are never asked for at all, so a control-flow branch inside the
-    // title decides between the two. To read that branch out of the title's own
-    // `binary.mod`, arm the control-flow probe at the start of a menu frame -
-    // once over a broken (black) pass and once over a good (grey) pass - so one
+    // render black on first entry and correctly once the title's graphics have
+    // been loaded (a game, or even the connecting screen, does it). The button
+    // background is a solid black rect placeholder and the real button/logo
+    // artwork is simply not drawn - the logo's pixels are never asked for at
+    // all on the broken pass - so a control-flow branch inside the title
+    // decides between the two. To read that branch out of the title's own
+    // `binary.mod`, arm the control-flow probe at the start of a frame - once
+    // over a broken (no-artwork) pass and once over a good pass - so one
     // handset log holds both traces and the diff is the branch.
     //
-    // The button whose background fill is roughly (14,104,77,26) is the marker:
-    // its colour on the frame just drawn says whether the menu is rendering
-    // black or grey, and the menu is stable frame to frame, so the previous
-    // frame's colour predicts this one's. The full-screen clear that opens each
-    // frame is where the probe is armed, because both the logo decision and the
-    // buttons come after it.
+    // The trigger for the good pass is the logo pixel (100,25) drawn any colour
+    // but black: whenever the artwork path runs it paints the logo grey there,
+    // and unlike the button - which may switch from one black rect to a
+    // per-pixel graphic - the logo is a reliable per-pixel marker on every
+    // screen that runs the path. The full-screen clear that opens a frame is
+    // where the probe is armed, because the artwork decision comes after it;
+    // the frame just drawn predicts this one, so a flag set mid-frame arms the
+    // next clear.
     {
         static MENU_SEEN: AtomicBool = AtomicBool::new(false);
-        static LAST_BTN_BLACK: AtomicBool = AtomicBool::new(false);
+        static LOGO_DRAWN: AtomicBool = AtomicBool::new(false);
         static CAPTURED_BLACK: AtomicBool = AtomicBool::new(false);
         static CAPTURED_GRAY: AtomicBool = AtomicBool::new(false);
 
         let is_menu_button = (70..=84).contains(&w) && (22..=30).contains(&h) && (10..=22).contains(&x) && (98..=110).contains(&y);
         if is_menu_button {
-            let black = color.r == 0 && color.g == 0 && color.b == 0;
-            LAST_BTN_BLACK.store(black, Ordering::Relaxed);
             MENU_SEEN.store(true, Ordering::Relaxed);
             tracing::info!(
-                "EA-BTN fill ({x},{y},{w},{h}) rgb=#{:02x}{:02x}{:02x} a={:#x} op_ptr={:#x}",
+                "EA-BTN fill ({x},{y},{w},{h}) rgb=#{:02x}{:02x}{:02x} a={:#x}",
                 color.r,
                 color.g,
                 color.b,
-                color.a,
-                gctx.pixel_op_func_ptr
+                color.a
             );
         }
 
+        let hits_logo = x <= 100 && 100 < x + w && y <= 25 && 25 < y + h;
+        let non_black = color.r != 0 || color.g != 0 || color.b != 0;
+        if hits_logo && non_black && !LOGO_DRAWN.swap(true, Ordering::Relaxed) {
+            tracing::info!("EA-LOGO first non-black at ({x},{y}) rgb=#{:02x}{:02x}{:02x}", color.r, color.g, color.b);
+        }
+
         let is_full_clear = x == 0 && y == 0 && w >= 200 && h >= 280;
-        if is_full_clear && MENU_SEEN.load(Ordering::Relaxed) {
-            if LAST_BTN_BLACK.load(Ordering::Relaxed) {
-                if !CAPTURED_BLACK.swap(true, Ordering::Relaxed) {
-                    wie_backend::probe::arm("ea-menu-black", 8000);
+        if is_full_clear {
+            if LOGO_DRAWN.load(Ordering::Relaxed) {
+                if !CAPTURED_GRAY.swap(true, Ordering::Relaxed) {
+                    wie_backend::probe::arm("ea-menu-gray", 8000);
                 }
-            } else if !CAPTURED_GRAY.swap(true, Ordering::Relaxed) {
-                wie_backend::probe::arm("ea-menu-gray", 8000);
+            } else if MENU_SEEN.load(Ordering::Relaxed) && !CAPTURED_BLACK.swap(true, Ordering::Relaxed) {
+                wie_backend::probe::arm("ea-menu-black", 8000);
             }
         }
     }
