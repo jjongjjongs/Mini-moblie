@@ -389,28 +389,41 @@ pub fn lgt_local_ea_baseball_response(request: &[u8]) -> Option<Vec<u8>> {
         return Some(vec![0x00, 0x00, 0x00, 0x04]);
     }
 
-    // A u32be length that counts itself and equals the frame, and the 0x10
-    // login command right behind it.
-    if request.len() < 9 || u32::from_be_bytes([request[0], request[1], request[2], request[3]]) as usize != request.len() || request[4] != 0x10 {
+    // A u32be length that counts itself and equals the frame, with a command
+    // byte right behind it. The title's connect decoder (binary.mod 0xaa018)
+    // dispatches server frames on that byte through a jump table (0x12415c): it
+    // services the odd reply commands 0x11, 0x13, ... 0xd1 and drops the even
+    // request commands (0x10, 0xd0, ...) the title itself sends. So each request
+    // the title sends is answered with the next odd command up.
+    if request.len() < 5 || u32::from_be_bytes([request[0], request[1], request[2], request[3]]) as usize != request.len() {
         return None;
     }
 
-    // DIAGNOSTIC(ea-connect): trace what the title does the moment it finishes
-    // reading this reply, to confirm the command-0x11 dispatch reaches the
-    // login-success path. See `wie_wipi_c::api::net`'s `drained()`.
-    crate::probe::arm_when_drained("ea-connect", 40000);
+    match request[4] {
+        // The 34-byte login: subscriber number and build version as
+        // `[u32be length][bytes]` fields behind the command, then a trailer. Its
+        // reply is command 0x11 (handler 0x98474): it reads a signed status and
+        // takes the success path when that status is zero. The body past the
+        // status reads as zero because the title copies this frame into a heap
+        // block the reference (and now this build - see
+        // `wie_lgt::runtime::firmware_link`) hands out zeroed.
+        0x10 if request.len() >= 9 => Some(vec![0x00, 0x00, 0x00, 0x09, 0x11, 0x00, 0x00, 0x00, 0x00]),
 
-    // The title's connect decoder (binary.mod 0xaa018) dispatches server frames
-    // on their command byte through a jump table (0x12415c): it services the odd
-    // reply commands 0x11, 0x13, 0x21, ... and drops everything else, including
-    // the 0x10 the title itself sent. Echoing 0x10 was therefore ignored and the
-    // title sat on 연결중 waiting for a reply it recognises. The login reply it
-    // wants is command 0x11 (its handler is 0x98474): it reads a signed status
-    // and takes the success path when that status is zero. So answer with 0x11
-    // and an all-zero status. The body past it reads as zero because the title
-    // copies this frame into a heap block the reference (and now this build - see
-    // `wie_lgt::runtime::firmware_link`) hands out zeroed.
-    Some(vec![0x00, 0x00, 0x00, 0x09, 0x11, 0x00, 0x00, 0x00, 0x00])
+        // Once the login is granted the title sends the session/account request
+        // `00 00 00 09 d0 00 00 00 01`, and with no reply it fell back to 접속
+        // 실패. Its reply is command 0xd1 (handler 0x96884): that handler reads a
+        // single u16 status and stores the connected flag when it is zero,
+        // failing on anything else. Answer with 0xd1 and an all-zero status.
+        0xd0 => {
+            // DIAGNOSTIC(ea-connect): trace what the title does the moment it
+            // finishes reading this reply, to see whether the 0xd1 grant lets it
+            // leave 접속 실패 or whether it sends a further request.
+            crate::probe::arm_when_drained("ea-connect", 40000);
+            Some(vec![0x00, 0x00, 0x00, 0x09, 0xd1, 0x00, 0x00, 0x00, 0x00])
+        }
+
+        _ => None,
+    }
 }
 
 /// What GAMEVIL's server answers one of its titles' purchases with.
@@ -9623,6 +9636,18 @@ mod tests {
         // is the request it sent and drops); an all-zero status is the success
         // path in handler 0x98474.
         assert_eq!(reply, [0x00, 0x00, 0x00, 0x09, 0x11, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    /// After the login is granted the title sends its session/account request,
+    /// command 0xd0, which is answered with command 0xd1 and an all-zero status -
+    /// the success path in handler 0x96884.
+    #[test]
+    fn the_ea_baseball_session_is_granted() {
+        let request = [0x00, 0x00, 0x00, 0x09, 0xd0, 0x00, 0x00, 0x00, 0x01];
+        assert_eq!(
+            lgt_local_ea_baseball_response(&request),
+            Some(vec![0x00, 0x00, 0x00, 0x09, 0xd1, 0x00, 0x00, 0x00, 0x00])
+        );
     }
 
     /// The bare four-byte poll the title's timer sends while it waits is
