@@ -100,6 +100,23 @@ impl System {
         // touched.
         local_network.register(Box::new(crate::local_network::SnowBoardEndpoint));
 
+        // 오즈-천공의 기사단's own game server (socket://210.222.18.25:31000), gone
+        // for years. Its 새로하기 opens this the moment character creation
+        // begins, and with nothing answering, the connect times out and the
+        // title throws its `연결에 실패하였습니다.` and drops back to the menu.
+        // Answer it in process instead, with the length-prefixed framing the
+        // title measures as (`[u32be length][u32be type][payload]`, the length
+        // covering the whole frame - `Framing::default`), so the connect
+        // succeeds and each handshake frame is granted. Host-gated, so no other
+        // title is touched. This carries the connect and the handshake; whether
+        // character creation needs more than the granted handshake - the title
+        // was earlier seen to poll a further request whose answer it did not
+        // accept - a device run past this point will say.
+        local_network.register(Box::new(crate::local_network::AckEndpoint::new(
+            crate::local_network::CaptureAddress::HostPort("210.222.18.25".into(), 31000),
+            crate::local_network::Framing::default(),
+        )));
+
         let platform = Arc::new(platform);
 
         Self {
