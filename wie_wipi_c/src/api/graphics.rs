@@ -1149,33 +1149,46 @@ pub async fn draw_image(
     // colours the plane actually being drawn holds. One colour means the source
     // is solid (a decode or fill fault); a real shape that still blocks is a
     // compositing fault.
-    {
-        static SEEN: spin::Mutex<alloc::collections::BTreeSet<u32>> = spin::Mutex::new(alloc::collections::BTreeSet::new());
-        let first = {
-            let mut seen = SEEN.lock();
-            seen.len() < 500 && seen.insert(image_handle)
-        };
-        if first && tracing::enabled!(tracing::Level::INFO) {
-            let src_fb = FrameBuffer(source);
-            if let Ok(src_image) = src_fb.image(context) {
-                let (sw, sh) = (src_image.width() as i32, src_image.height() as i32);
-                let mut colours = alloc::collections::BTreeSet::new();
-                'count: for yy in 0..sh.min(48) {
-                    for xx in 0..sw.min(48) {
-                        let p = src_image.get_pixel(xx, yy);
-                        colours.insert((p.r, p.g, p.b, p.a));
-                        if colours.len() > 40 {
-                            break 'count;
-                        }
+    //
+    // Logged continuously (not once per handle) because the coloured glyphs are
+    // created before the help screen and a handset log keeps only its tail, so a
+    // first-sight-only report is rotated away. A glyph-sized sprite carrying an
+    // opaque non-black colour is a coloured glyph - the suspect - so those are
+    // sampled every so often, along with the up-to-three colours the plane holds
+    // and whether it is solid.
+    if tracing::enabled!(tracing::Level::INFO) && (1..=24).contains(&w) && (1..=24).contains(&h) {
+        let src_fb = FrameBuffer(source);
+        if let Ok(src_image) = src_fb.image(context) {
+            let (sw, sh) = (src_image.width() as i32, src_image.height() as i32);
+            let mut colours = alloc::collections::BTreeSet::new();
+            'count: for yy in 0..sh.min(48) {
+                for xx in 0..sw.min(48) {
+                    let p = src_image.get_pixel(xx, yy);
+                    colours.insert((p.r, p.g, p.b, p.a));
+                    if colours.len() > 40 {
+                        break 'count;
                     }
                 }
-                let (r, g, b, a) = colours.iter().next().copied().unwrap_or((0, 0, 0, 0));
-                tracing::info!(
-                    "IMG-DRAW h={image_handle:#x} blit={w}x{h} src={sw}x{sh} keyed={keyed} masked={} op={:#x} colours={} first=#{r:02x}{g:02x}{b:02x}/a{a:02x}",
-                    image.mask.buf.0 != 0,
-                    grp_ctx.pixel_op_func_ptr,
-                    colours.len(),
-                );
+            }
+            let coloured = colours
+                .iter()
+                .any(|&(r, g, b, a)| a != 0 && (r != 0 || g != 0 || b != 0) && !(r == g && g == b));
+            if coloured || colours.len() <= 1 {
+                static N: AtomicU32 = AtomicU32::new(0);
+                if N.fetch_add(1, Ordering::Relaxed).is_multiple_of(64) {
+                    let sample: alloc::vec::Vec<_> = colours
+                        .iter()
+                        .take(3)
+                        .map(|&(r, g, b, a)| alloc::format!("#{r:02x}{g:02x}{b:02x}/a{a:02x}"))
+                        .collect();
+                    tracing::info!(
+                        "IMG-DRAW h={image_handle:#x} blit={w}x{h} src={sw}x{sh} keyed={keyed} masked={} op={:#x} colours={} {}",
+                        image.mask.buf.0 != 0,
+                        grp_ctx.pixel_op_func_ptr,
+                        colours.len(),
+                        sample.join(" ")
+                    );
+                }
             }
         }
     }
