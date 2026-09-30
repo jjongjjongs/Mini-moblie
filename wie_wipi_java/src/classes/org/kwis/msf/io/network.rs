@@ -40,17 +40,24 @@ impl Network {
         // The specification's three answers: 0 when access is already available,
         // 1 when it was just established, -1 when it failed.
         //
-        // 오즈-천공의 기사단 (aid 00026DBF) is the one title that needs 0 rather
-        // than the usual answer. Its character-creation path calls this, and on
-        // any answer but 0 ("just established" or "failed") it takes a branch
-        // that ends on "서버와의 접속이 끊어졌습니다" and returns to the menu -
-        // the two outcomes are only a few instructions apart in its own code. On
-        // 0 it goes one call further to URL.find, whose SchemeNotFoundException it
-        // catches and carries on offline into character creation (see
-        // `url.rs`'s refusal). Answering 0 claims a connection this platform does
-        // not have, so it is given only to this title, and every other title
-        // keeps the "just established" answer it was written around.
-        if context.system().aid().eq_ignore_ascii_case("00026DBF") {
+        // 오즈-천공의 기사단 is the title that needs 0 rather than the usual
+        // answer, in both its builds. Its character-creation path calls this,
+        // and on any answer but 0 ("just established" or "failed") it takes a
+        // branch that ends on "서버와의 접속이 끊어졌습니다" and returns to the
+        // menu - the two outcomes are only a few instructions apart in its own
+        // code. On 0 it goes one call further and opens its server.
+        //
+        // The LGT build (aid 00026DBF) then reaches URL.find on a dead game
+        // server, whose SchemeNotFoundException it catches to carry on offline
+        // (see `url.rs`'s refusal). The KTF build (aid 0103CD8A) instead reaches
+        // URL.find on its carrier relay, answered in process (see
+        // `local_network::relay`), and its 새로하기 creates the character
+        // through that. Both need the connection claimed here first, and
+        // answering 0 claims a connection this platform does not have, so it is
+        // given only to these titles; every other title keeps the "just
+        // established" answer it was written around.
+        let aid = context.system().aid();
+        if aid.eq_ignore_ascii_case("00026DBF") || aid.eq_ignore_ascii_case("0103CD8A") {
             return Ok(0);
         }
 
