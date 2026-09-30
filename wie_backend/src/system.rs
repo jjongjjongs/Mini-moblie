@@ -100,6 +100,14 @@ impl System {
         // touched.
         local_network.register(Box::new(crate::local_network::SnowBoardEndpoint));
 
+        // The carrier relay middleware `com.vdigm.billcom.relay` (`01039AD6`) a
+        // KTF title dials through to create its save slot. The gateway at
+        // `wipiwicgsfg.magicn.com:17096` has been gone for years; answering it
+        // in process lets 오즈-천공의 기사단's 새로하기 reach character-name
+        // entry rather than stopping on `서버와의 접속이 끊어졌습니다`.
+        // Host-gated, so no other title is touched.
+        local_network.register(Box::new(crate::local_network::RelayEndpoint));
+
         let platform = Arc::new(platform);
 
         Self {
