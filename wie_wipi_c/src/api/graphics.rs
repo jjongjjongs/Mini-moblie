@@ -538,23 +538,53 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
 
     let color = context_color(&framebuffer, &gctx);
 
-    // DIAGNOSTIC(ea-button): EA프로야구2010's mode-select buttons and its logo
-    // render black on first entry and correctly once a game has been played.
-    // The title paints them pixel by pixel with 1x1 fills, so log every fill
-    // that lands on a first-button pixel (50,115) or a logo pixel (100,25) with
-    // its colour, alpha and whether a pixel operation is live. This says which
-    // it is: the title asking for black, a blend over a black background, or a
-    // real colour that never reaches the screen.
-    if (x <= 50 && 50 < x + w && y <= 115 && 115 < y + h) || (x <= 100 && 100 < x + w && y <= 25 && 25 < y + h) {
-        tracing::info!(
-            "EA-BTN fill ({x},{y},{w},{h}) rgb=#{:02x}{:02x}{:02x} a={:#x} op_ptr={:#x} alpha={:#x}",
-            color.r,
-            color.g,
-            color.b,
-            color.a,
-            gctx.pixel_op_func_ptr,
-            gctx.alpha
-        );
+    // DIAGNOSTIC(ea-menu): EA프로야구2010's mode-select buttons and its logo
+    // render black on first entry and correctly once a game has been played -
+    // the same menu, drawn two ways. The title paints them pixel by pixel with
+    // 1x1 fills, and the logo's pixels are not merely black on the broken pass,
+    // they are never asked for at all, so a control-flow branch inside the
+    // title decides between the two. To read that branch out of the title's own
+    // `binary.mod`, arm the control-flow probe at the start of a menu frame -
+    // once over a broken (black) pass and once over a good (grey) pass - so one
+    // handset log holds both traces and the diff is the branch.
+    //
+    // The button whose background fill is roughly (14,104,77,26) is the marker:
+    // its colour on the frame just drawn says whether the menu is rendering
+    // black or grey, and the menu is stable frame to frame, so the previous
+    // frame's colour predicts this one's. The full-screen clear that opens each
+    // frame is where the probe is armed, because both the logo decision and the
+    // buttons come after it.
+    {
+        static MENU_SEEN: AtomicBool = AtomicBool::new(false);
+        static LAST_BTN_BLACK: AtomicBool = AtomicBool::new(false);
+        static CAPTURED_BLACK: AtomicBool = AtomicBool::new(false);
+        static CAPTURED_GRAY: AtomicBool = AtomicBool::new(false);
+
+        let is_menu_button = (70..=84).contains(&w) && (22..=30).contains(&h) && (10..=22).contains(&x) && (98..=110).contains(&y);
+        if is_menu_button {
+            let black = color.r == 0 && color.g == 0 && color.b == 0;
+            LAST_BTN_BLACK.store(black, Ordering::Relaxed);
+            MENU_SEEN.store(true, Ordering::Relaxed);
+            tracing::info!(
+                "EA-BTN fill ({x},{y},{w},{h}) rgb=#{:02x}{:02x}{:02x} a={:#x} op_ptr={:#x}",
+                color.r,
+                color.g,
+                color.b,
+                color.a,
+                gctx.pixel_op_func_ptr
+            );
+        }
+
+        let is_full_clear = x == 0 && y == 0 && w >= 200 && h >= 280;
+        if is_full_clear && MENU_SEEN.load(Ordering::Relaxed) {
+            if LAST_BTN_BLACK.load(Ordering::Relaxed) {
+                if !CAPTURED_BLACK.swap(true, Ordering::Relaxed) {
+                    wie_backend::probe::arm("ea-menu-black", 30000);
+                }
+            } else if !CAPTURED_GRAY.swap(true, Ordering::Relaxed) {
+                wie_backend::probe::arm("ea-menu-gray", 30000);
+            }
+        }
     }
 
     // A fill goes through the title's own operation too - 드래곤하트2 lays two
