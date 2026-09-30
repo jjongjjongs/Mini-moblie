@@ -545,50 +545,32 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
     // artwork is simply not drawn - the logo's pixels are never asked for at
     // all on the broken pass - so a control-flow branch inside the title
     // decides between the two. To read that branch out of the title's own
-    // `binary.mod`, arm the control-flow probe at the start of a frame - once
-    // over a broken (no-artwork) pass and once over a good pass - so one
-    // handset log holds both traces and the diff is the branch.
+    // `binary.mod`, the control-flow probe is armed at a frame boundary (see
+    // `flush_lcd`) over a broken pass and over a good pass; the diff is the
+    // branch.
     //
-    // The trigger for the good pass is the logo pixel (100,25) drawn any colour
-    // but black: whenever the artwork path runs it paints the logo grey there,
-    // and unlike the button - which may switch from one black rect to a
-    // per-pixel graphic - the logo is a reliable per-pixel marker on every
-    // screen that runs the path. The full-screen clear that opens a frame is
-    // where the probe is armed, because the artwork decision comes after it;
-    // the frame just drawn predicts this one, so a flag set mid-frame arms the
-    // next clear.
+    // Here each frame is only tagged. A solid black rect at the mode-select
+    // button (14,104,77,26) means this frame is drawing the broken menu; the
+    // logo pixel (100,25) painted any colour but black means the artwork path
+    // ran, which is the reliable marker because - unlike the button, which may
+    // switch from a black rect to a per-pixel graphic - the logo is drawn pixel
+    // by pixel on every screen that runs the path, the connecting screen
+    // included. `flush_lcd` reads the tags and arms the next frame.
     {
-        static MENU_SEEN: AtomicBool = AtomicBool::new(false);
-        static LOGO_DRAWN: AtomicBool = AtomicBool::new(false);
-        static CAPTURED_BLACK: AtomicBool = AtomicBool::new(false);
-        static CAPTURED_GRAY: AtomicBool = AtomicBool::new(false);
-
         let is_menu_button = (70..=84).contains(&w) && (22..=30).contains(&h) && (10..=22).contains(&x) && (98..=110).contains(&y);
-        if is_menu_button {
-            MENU_SEEN.store(true, Ordering::Relaxed);
-            tracing::info!(
-                "EA-BTN fill ({x},{y},{w},{h}) rgb=#{:02x}{:02x}{:02x} a={:#x}",
-                color.r,
-                color.g,
-                color.b,
-                color.a
-            );
+        let black = color.r == 0 && color.g == 0 && color.b == 0;
+        if is_menu_button && black {
+            EA_BROKEN_FRAME.store(true, Ordering::Relaxed);
+            if !EA_BROKEN_LOGGED.swap(true, Ordering::Relaxed) {
+                tracing::info!("EA-BTN first black rect at ({x},{y},{w},{h})");
+            }
         }
 
         let hits_logo = x <= 100 && 100 < x + w && y <= 25 && 25 < y + h;
-        let non_black = color.r != 0 || color.g != 0 || color.b != 0;
-        if hits_logo && non_black && !LOGO_DRAWN.swap(true, Ordering::Relaxed) {
-            tracing::info!("EA-LOGO first non-black at ({x},{y}) rgb=#{:02x}{:02x}{:02x}", color.r, color.g, color.b);
-        }
-
-        let is_full_clear = x == 0 && y == 0 && w >= 200 && h >= 280;
-        if is_full_clear {
-            if LOGO_DRAWN.load(Ordering::Relaxed) {
-                if !CAPTURED_GRAY.swap(true, Ordering::Relaxed) {
-                    wie_backend::probe::arm("ea-menu-gray", 8000);
-                }
-            } else if MENU_SEEN.load(Ordering::Relaxed) && !CAPTURED_BLACK.swap(true, Ordering::Relaxed) {
-                wie_backend::probe::arm("ea-menu-black", 8000);
+        if hits_logo && !black {
+            EA_CORRECT_FRAME.store(true, Ordering::Relaxed);
+            if !EA_LOGO_LOGGED.swap(true, Ordering::Relaxed) {
+                tracing::info!("EA-LOGO first non-black at ({x},{y}) rgb=#{:02x}{:02x}{:02x}", color.r, color.g, color.b);
             }
         }
     }
@@ -1397,6 +1379,19 @@ fn blend_pairs(
     pairs
 }
 
+// DIAGNOSTIC(ea-menu): shared between `fill_rect`, which tags the frame it is
+// drawing, and `flush_lcd`, which arms the control-flow probe at the frame
+// boundary. See the block in `fill_rect` for what the two states mean and why
+// the boundary - not a full-screen clear, which not every screen issues - is
+// where a trace has to begin to catch the artwork gate at a frame's start.
+static EA_BROKEN_FRAME: AtomicBool = AtomicBool::new(false);
+static EA_CORRECT_FRAME: AtomicBool = AtomicBool::new(false);
+static EA_CAPTURED_BLACK: AtomicBool = AtomicBool::new(false);
+static EA_CAPTURED_GRAY: AtomicBool = AtomicBool::new(false);
+/// One-shot so a device log names each state once rather than every frame.
+static EA_LOGO_LOGGED: AtomicBool = AtomicBool::new(false);
+static EA_BROKEN_LOGGED: AtomicBool = AtomicBool::new(false);
+
 pub async fn flush_lcd(
     context: &mut dyn WIPICContext,
     i: WIPICWord,
@@ -1406,6 +1401,22 @@ pub async fn flush_lcd(
     w: WIPICWord,
     h: WIPICWord,
 ) -> Result<()> {
+    // Arm over the frame about to start, whose category the frame just drawn
+    // predicts: a correct frame (the logo painted) takes priority, so a run
+    // that reaches one is not spent on the black menu it passed through first.
+    // Reset the tags so each frame is judged on its own primitives.
+    {
+        let broken = EA_BROKEN_FRAME.swap(false, Ordering::Relaxed);
+        let correct = EA_CORRECT_FRAME.swap(false, Ordering::Relaxed);
+        if correct {
+            if !EA_CAPTURED_GRAY.swap(true, Ordering::Relaxed) {
+                wie_backend::probe::arm("ea-menu-gray", 8000);
+            }
+        } else if broken && !EA_CAPTURED_BLACK.swap(true, Ordering::Relaxed) {
+            wie_backend::probe::arm("ea-menu-black", 8000);
+        }
+    }
+
     tracing::debug!("MC_grpFlushLcd({i:#x}, {:#x}, {x:#x}, {y:#x}, {w:#x}, {h:#x})", framebuffer.0);
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(framebuffer)?)?);
