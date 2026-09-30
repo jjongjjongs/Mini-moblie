@@ -579,10 +579,10 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
         if is_full_clear && MENU_SEEN.load(Ordering::Relaxed) {
             if LAST_BTN_BLACK.load(Ordering::Relaxed) {
                 if !CAPTURED_BLACK.swap(true, Ordering::Relaxed) {
-                    wie_backend::probe::arm("ea-menu-black", 30000);
+                    wie_backend::probe::arm("ea-menu-black", 8000);
                 }
             } else if !CAPTURED_GRAY.swap(true, Ordering::Relaxed) {
-                wie_backend::probe::arm("ea-menu-gray", 30000);
+                wie_backend::probe::arm("ea-menu-gray", 8000);
             }
         }
     }
