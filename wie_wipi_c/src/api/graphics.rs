@@ -568,12 +568,15 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
             }
         }
 
-        // A substantial non-black rect overlapping the button interior
-        // (14,104)-(91,130) - the button background drawn as artwork. The size
-        // floor keeps the button's own text glyphs, which are small and would
-        // be painted over a black rect on the broken menu too, from counting.
-        let inside_button = x < 91 && x + w > 14 && y < 130 && y + h > 104 && w >= 20 && h >= 12;
-        if inside_button && !black {
+        // Non-black paint overlapping the button interior (14,104)-(91,130) -
+        // the button drawn as artwork, whether a grey rect or pixel by pixel -
+        // but only on a frame that did not also draw the black rect. On the
+        // broken menu the black rect is laid first and its label text painted
+        // over it, so text there would otherwise read as "good"; guarding on
+        // the frame's own black rect keeps the broken menu broken and needs no
+        // size floor, so a per-pixel grey button is caught too.
+        let inside_button = x < 91 && x + w > 14 && y < 130 && y + h > 104;
+        if inside_button && !black && !EA_BROKEN_FRAME.load(Ordering::Relaxed) {
             EA_CORRECT_FRAME.store(true, Ordering::Relaxed);
             if !EA_LOGO_LOGGED.swap(true, Ordering::Relaxed) {
                 tracing::info!(
