@@ -395,19 +395,22 @@ pub fn lgt_local_ea_baseball_response(request: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    // DIAGNOSTIC(ea-connect): to reverse the connect-success branch, trace what
-    // the title does the moment it finishes reading this login reply. EA's
-    // decoder is a runtime-registered jump table reached through bx-register
-    // veneers, so static reading cannot follow it; the control-flow probe records
-    // the parse and the branch that decides 접속 성공 vs 실패 (or "keep waiting"),
-    // read against the title's own binary.mod. `drained()` (see
-    // `wie_wipi_c::api::net`) starts it when the game has all of this reply.
-    // Bounded and self-limiting; to be removed once the branch is located.
+    // DIAGNOSTIC(ea-connect): trace what the title does the moment it finishes
+    // reading this reply, to confirm the command-0x11 dispatch reaches the
+    // login-success path. See `wie_wipi_c::api::net`'s `drained()`.
     crate::probe::arm_when_drained("ea-connect", 40000);
 
-    // Echo the command, then an all-zero status, under a u32be length that
-    // counts itself: [00 00 00 09][10][00 00 00 00].
-    Some(vec![0x00, 0x00, 0x00, 0x09, 0x10, 0x00, 0x00, 0x00, 0x00])
+    // The title's connect decoder (binary.mod 0xaa018) dispatches server frames
+    // on their command byte through a jump table (0x12415c): it services the odd
+    // reply commands 0x11, 0x13, 0x21, ... and drops everything else, including
+    // the 0x10 the title itself sent. Echoing 0x10 was therefore ignored and the
+    // title sat on 연결중 waiting for a reply it recognises. The login reply it
+    // wants is command 0x11 (its handler is 0x98474): it reads a signed status
+    // and takes the success path when that status is zero. So answer with 0x11
+    // and an all-zero status. The body past it reads as zero because the title
+    // copies this frame into a heap block the reference (and now this build - see
+    // `wie_lgt::runtime::firmware_link`) hands out zeroed.
+    Some(vec![0x00, 0x00, 0x00, 0x09, 0x11, 0x00, 0x00, 0x00, 0x00])
 }
 
 /// What GAMEVIL's server answers one of its titles' purchases with.
@@ -9616,7 +9619,10 @@ mod tests {
         assert_eq!(EA_BASEBALL_LOGIN.len(), 34, "the 34-byte login the capture caught");
         let reply = lgt_local_ea_baseball_response(EA_BASEBALL_LOGIN).expect("the login is answered");
 
-        assert_eq!(reply, [0x00, 0x00, 0x00, 0x09, 0x10, 0x00, 0x00, 0x00, 0x00]);
+        // Command 0x11 is the reply command the title's decoder services (0x10
+        // is the request it sent and drops); an all-zero status is the success
+        // path in handler 0x98474.
+        assert_eq!(reply, [0x00, 0x00, 0x00, 0x09, 0x11, 0x00, 0x00, 0x00, 0x00]);
     }
 
     /// The bare four-byte poll the title's timer sends while it waits is
