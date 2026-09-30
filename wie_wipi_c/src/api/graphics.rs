@@ -549,44 +549,14 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
     // `flush_lcd`) over a broken pass and over a good pass; the diff is the
     // branch.
     //
-    // Here each frame is only tagged, and both tags key on the *same* screen -
-    // the mode-select menu - so the two traces differ only by the gate, not by
-    // being different screens. A solid black rect at the mode-select button
-    // (14,104,77,26) is the broken menu. Any non-black paint landing *inside*
-    // that button's rectangle is the good menu: the button drawn as artwork,
-    // whether as a grey rect or pixel by pixel. The logo, by contrast, is
-    // painted on the connecting screen too, so it would have tagged a different
-    // screen; the button interior is only ever coloured on the menu itself.
-    // `flush_lcd` reads the tags and arms the next frame.
-    {
-        let black = color.r == 0 && color.g == 0 && color.b == 0;
-        let is_menu_button = (70..=84).contains(&w) && (22..=30).contains(&h) && (10..=22).contains(&x) && (98..=110).contains(&y);
-        if is_menu_button && black {
-            EA_BROKEN_FRAME.store(true, Ordering::Relaxed);
-            if !EA_BROKEN_LOGGED.swap(true, Ordering::Relaxed) {
-                tracing::info!("EA-BTN first black rect at ({x},{y},{w},{h})");
-            }
-        }
-
-        // Non-black paint overlapping the button interior (14,104)-(91,130) -
-        // the button drawn as artwork, whether a grey rect or pixel by pixel -
-        // but only on a frame that did not also draw the black rect. On the
-        // broken menu the black rect is laid first and its label text painted
-        // over it, so text there would otherwise read as "good"; guarding on
-        // the frame's own black rect keeps the broken menu broken and needs no
-        // size floor, so a per-pixel grey button is caught too.
-        let inside_button = x < 91 && x + w > 14 && y < 130 && y + h > 104;
-        if inside_button && !black && !EA_BROKEN_FRAME.load(Ordering::Relaxed) {
-            EA_CORRECT_FRAME.store(true, Ordering::Relaxed);
-            if !EA_LOGO_LOGGED.swap(true, Ordering::Relaxed) {
-                tracing::info!(
-                    "EA-MENU grey button paint at ({x},{y},{w},{h}) rgb=#{:02x}{:02x}{:02x}",
-                    color.r,
-                    color.g,
-                    color.b
-                );
-            }
-        }
+    // Here a frame is only marked as a menu frame - one that paints anything
+    // over the mode-select button's rectangle (14,104)-(91,130). Both the
+    // black menu and the grey menu draw there, so this does not try to tell
+    // them apart; `flush_lcd` does that by sequence and by how full the frame
+    // is. Keying off the button, not the logo, keeps the connecting screen -
+    // which paints the logo but nothing in the button band - from counting.
+    if x < 91 && x + w > 14 && y < 130 && y + h > 104 {
+        EA_BUTTON_DRAWN.store(true, Ordering::Relaxed);
     }
 
     // A fill goes through the title's own operation too - 드래곤하트2 lays two
@@ -1398,13 +1368,17 @@ fn blend_pairs(
 // boundary. See the block in `fill_rect` for what the two states mean and why
 // the boundary - not a full-screen clear, which not every screen issues - is
 // where a trace has to begin to catch the artwork gate at a frame's start.
-static EA_BROKEN_FRAME: AtomicBool = AtomicBool::new(false);
-static EA_CORRECT_FRAME: AtomicBool = AtomicBool::new(false);
+/// Set by `fill_rect` when a frame paints anything over the mode-select
+/// button's rectangle, and read (then cleared) by `flush_lcd`. Both the black
+/// menu and the grey menu draw there, so this marks "a menu frame" without
+/// having to tell which - the two are told apart by sequence instead.
+static EA_BUTTON_DRAWN: AtomicBool = AtomicBool::new(false);
+/// A gameplay frame has been presented since the black menu was captured. A
+/// menu frame after this is the grey one. Set on a non-black count only a
+/// full playfield reaches, well clear of any menu's.
+static EA_GAME_PLAYED: AtomicBool = AtomicBool::new(false);
 static EA_CAPTURED_BLACK: AtomicBool = AtomicBool::new(false);
 static EA_CAPTURED_GRAY: AtomicBool = AtomicBool::new(false);
-/// One-shot so a device log names each state once rather than every frame.
-static EA_LOGO_LOGGED: AtomicBool = AtomicBool::new(false);
-static EA_BROKEN_LOGGED: AtomicBool = AtomicBool::new(false);
 
 pub async fn flush_lcd(
     context: &mut dyn WIPICContext,
@@ -1415,22 +1389,6 @@ pub async fn flush_lcd(
     w: WIPICWord,
     h: WIPICWord,
 ) -> Result<()> {
-    // Arm over the frame about to start, whose category the frame just drawn
-    // predicts: a correct frame (the logo painted) takes priority, so a run
-    // that reaches one is not spent on the black menu it passed through first.
-    // Reset the tags so each frame is judged on its own primitives.
-    {
-        let broken = EA_BROKEN_FRAME.swap(false, Ordering::Relaxed);
-        let correct = EA_CORRECT_FRAME.swap(false, Ordering::Relaxed);
-        if correct {
-            if !EA_CAPTURED_GRAY.swap(true, Ordering::Relaxed) {
-                wie_backend::probe::arm("ea-menu-gray", 8000);
-            }
-        } else if broken && !EA_CAPTURED_BLACK.swap(true, Ordering::Relaxed) {
-            wie_backend::probe::arm("ea-menu-black", 8000);
-        }
-    }
-
     tracing::debug!("MC_grpFlushLcd({i:#x}, {:#x}, {x:#x}, {y:#x}, {w:#x}, {h:#x})", framebuffer.0);
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(framebuffer)?)?);
@@ -1458,6 +1416,26 @@ pub async fn flush_lcd(
             src_canvas.width(),
             src_canvas.height(),
         );
+
+        // DIAGNOSTIC(ea-menu): arm the control-flow probe over the frame about
+        // to start, telling the black menu from the grey one by sequence rather
+        // than by how the button is painted, which earlier guesses got wrong.
+        // The frame just drawn predicts this one. The first menu frame - the
+        // button drawn, and the frame light enough to be a menu not a playfield
+        // - is the black one. A full playfield (a non-black count no menu comes
+        // near) after that says a game has been entered; the next menu frame is
+        // the grey one. Both traces then key on the same mode-select menu and
+        // diverge only at the artwork gate.
+        let menu_frame = EA_BUTTON_DRAWN.swap(false, Ordering::Relaxed) && non_black < 56_000;
+        if menu_frame && !EA_CAPTURED_BLACK.swap(true, Ordering::Relaxed) {
+            wie_backend::probe::arm("ea-menu-black", 8000);
+            tracing::info!("EA-MENU black menu frame (non_black={non_black}); armed ea-menu-black");
+        } else if EA_CAPTURED_BLACK.load(Ordering::Relaxed) && non_black > 58_000 && !EA_GAME_PLAYED.swap(true, Ordering::Relaxed) {
+            tracing::info!("EA-MENU gameplay seen (non_black={non_black}); next menu frame arms ea-menu-gray");
+        } else if menu_frame && EA_GAME_PLAYED.load(Ordering::Relaxed) && !EA_CAPTURED_GRAY.swap(true, Ordering::Relaxed) {
+            wie_backend::probe::arm("ea-menu-gray", 8000);
+            tracing::info!("EA-MENU grey menu frame (non_black={non_black}); armed ea-menu-gray");
+        }
 
         // And the frame itself, on the rounds the off-screen surfaces are drawn
         // on. This is the one picture a reader can hold a screenshot against,
