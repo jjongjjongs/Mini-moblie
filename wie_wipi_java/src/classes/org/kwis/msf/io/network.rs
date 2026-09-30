@@ -37,17 +37,21 @@ impl Network {
     }
 
     async fn connect(_: &Jvm, context: &mut WieJvmContext) -> JvmResult<i32> {
-        // 오즈-천공의 기사단 (aid 00026DBF) has no offline branch behind a
-        // "connected" result: told it is online it opens its own game server and,
-        // when that server (gone for years) does not answer, drops to the menu
-        // with "서버와의 접속이 끊어졌습니다". The specification's answer for a
-        // handset with no coverage is -1 - the attempt failed - which is what
-        // sends such a title down its offline path instead, on to character
-        // creation offline. A working WIPI player answers -1 here for every
-        // title; this keeps the online result other titles were given and refuses
-        // only the one known to need it, so nothing else is disturbed.
+        // The specification's three answers: 0 when access is already available,
+        // 1 when it was just established, -1 when it failed.
+        //
+        // 오즈-천공의 기사단 (aid 00026DBF) is the one title that needs 0 rather
+        // than the usual answer. Its character-creation path calls this, and on
+        // any answer but 0 ("just established" or "failed") it takes a branch
+        // that ends on "서버와의 접속이 끊어졌습니다" and returns to the menu -
+        // the two outcomes are only a few instructions apart in its own code. On
+        // 0 it goes one call further to URL.find, whose SchemeNotFoundException it
+        // catches and carries on offline into character creation (see
+        // `url.rs`'s refusal). Answering 0 claims a connection this platform does
+        // not have, so it is given only to this title, and every other title
+        // keeps the "just established" answer it was written around.
         if context.system().aid().eq_ignore_ascii_case("00026DBF") {
-            return Ok(-1);
+            return Ok(0);
         }
 
         Ok(1)
