@@ -400,6 +400,18 @@ async fn setup_current_process(core: &mut ArmCore, plan: &FirmwareInitPlan) -> R
     core.write_bytes(process, &vec![0u8; PROCESS_STRUCT_SIZE as usize])?;
     core.write_bytes(process + PROCESS_NAME_OFFSET, b"wie\0")?;
     let heap = Allocator::alloc(core, PROCESS_HEAP_SIZE)?;
+    // The reference firmware hands `dmemory` a zeroed heap - its allocator gives
+    // out (and recycles) zeroed blocks - and a native title leans on that: it
+    // allocates a struct and reads fields it never wrote as zero. Our
+    // `Allocator::alloc` returns whatever the arena last held, so those fields
+    // come up as stale bytes. EA프로야구2010's 도전과제 screen is where it shows:
+    // the challenge/roster records sit in dmemory blocks whose unset team-name
+    // and condition pointers are read straight into `MC_knlSprintk("%s", ...)`,
+    // and a stale pointer prints as garbage ("(|r ▲▲)") where a zeroed one would
+    // read as an empty/locked entry. Zero the whole heap once, before
+    // `dmemory_initheap_ex` lays its free list over it, so every block dmemory
+    // hands out starts as the reference's does.
+    core.write_bytes(heap, &vec![0u8; PROCESS_HEAP_SIZE as usize])?;
 
     // dmemory_initheap_ex(alloc_out = process+0x1c, type = "os", 1,
     //                     name = process+148, heap_base, heap_size).
