@@ -965,6 +965,17 @@ pub async fn create_image(
 
     hold_image_source(context, memory.0, image_data.0);
 
+    // DIAGNOSTIC(anymom): pair every sprite handle with the format it decoded
+    // to - size and whether it carries an alpha mask - so an IMG-DRAW block can
+    // be traced back to how its source was built.
+    tracing::info!(
+        "IMG-NEW h={:#x} {}x{} masked={} len={len}",
+        memory.0,
+        image.img.width,
+        image.img.height,
+        image.mask.buf.0 != 0
+    );
+
     Ok(1) // MC_GRP_IMAGE_DONE
 }
 
@@ -1117,6 +1128,7 @@ pub async fn draw_image(
         return Ok(());
     }
 
+    let image_handle = image.0;
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(framebuffer)?)?);
     let image: WIPICImage = read_generic(context, context.data_ptr(image)?)?;
 
@@ -1129,6 +1141,44 @@ pub async fn draw_image(
     // A title's own pixel operation decides what every pixel becomes, and it is
     // read before the canvas takes the context.
     let grp_ctx = read_context(context, context.graphics_context_layout(), graphics_context)?;
+
+    // DIAGNOSTIC(anymom): 아무이유없어 draws all text - black and coloured - by
+    // blitting per-glyph sprites, yet its coloured glyphs land as solid blocks.
+    // Report each distinct sprite once: its blit size, whether it is keyed or
+    // alpha-masked, whether a pixel operation is live, and how many distinct
+    // colours the plane actually being drawn holds. One colour means the source
+    // is solid (a decode or fill fault); a real shape that still blocks is a
+    // compositing fault.
+    {
+        static SEEN: spin::Mutex<alloc::collections::BTreeSet<u32>> = spin::Mutex::new(alloc::collections::BTreeSet::new());
+        let first = {
+            let mut seen = SEEN.lock();
+            seen.len() < 500 && seen.insert(image_handle)
+        };
+        if first && tracing::enabled!(tracing::Level::INFO) {
+            let src_fb = FrameBuffer(source);
+            if let Ok(src_image) = src_fb.image(context) {
+                let (sw, sh) = (src_image.width() as i32, src_image.height() as i32);
+                let mut colours = alloc::collections::BTreeSet::new();
+                'count: for yy in 0..sh.min(48) {
+                    for xx in 0..sw.min(48) {
+                        let p = src_image.get_pixel(xx, yy);
+                        colours.insert((p.r, p.g, p.b, p.a));
+                        if colours.len() > 40 {
+                            break 'count;
+                        }
+                    }
+                }
+                let (r, g, b, a) = colours.iter().next().copied().unwrap_or((0, 0, 0, 0));
+                tracing::info!(
+                    "IMG-DRAW h={image_handle:#x} blit={w}x{h} src={sw}x{sh} keyed={keyed} masked={} op={:#x} colours={} first=#{r:02x}{g:02x}{b:02x}/a{a:02x}",
+                    image.mask.buf.0 != 0,
+                    grp_ctx.pixel_op_func_ptr,
+                    colours.len(),
+                );
+            }
+        }
+    }
 
     // Only the part of the blit the context's clip allows. A clet that wants
     // one cell of a sprite sheet sets the clip to where that cell is to land
