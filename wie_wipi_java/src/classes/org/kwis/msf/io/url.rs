@@ -89,6 +89,22 @@ impl URL {
             return Socket::local_billing(jvm, context).await;
         }
 
+        // A dead game server a title only reaches to gate an offline feature is
+        // best refused with the exception `find` declares - not a socket that
+        // answers but never sends the push the title waits for, and not the
+        // IOException a failed dial raises. 오즈-천공의 기사단's 새로하기 opens
+        // socket://210.222.18.25:31000 to gate character creation and catches
+        // SchemeNotFoundException around it, going on to create the character
+        // offline; answering that socket left it on CONNECTING for ever, and the
+        // dial's IOException dropped it back to the menu. Refusing the way the
+        // spec refuses a scheme it cannot serve is what lets it through - as a
+        // working WIPI player (which refuses every non-relay socket this way)
+        // does. Scheme-gated, so no other title is touched.
+        if is_offline_refused_server(&host, port) {
+            tracing::info!("org.kwis.msf.io.URL::find({url:?}) refused so the title takes its offline path");
+            return Err(jvm.exception("org/kwis/msf/io/SchemeNotFoundException", &url).await);
+        }
+
         // A server this run answers for itself takes the connection instead of
         // the network. Nothing is registered on an ordinary run, so this costs
         // one lock and falls through.
@@ -197,6 +213,17 @@ fn scheme_of(url: &str) -> &str {
     url.split_once("://").map_or("socket", |(scheme, _)| scheme)
 }
 
+/// Whether `host:port` is a dead game server best refused with
+/// `SchemeNotFoundException` so the title takes the offline path behind its
+/// `find` catch, rather than dialled (its IOException drops such a title) or
+/// answered (its handshake then waits on a server push that never comes).
+///
+/// 오즈-천공의 기사단's own server. Listed here rather than answered by a local
+/// endpoint because the fix is the absence of a socket, not the presence of one.
+fn is_offline_refused_server(host: &str, port: u16) -> bool {
+    (host, port) == ("210.222.18.25", 31000)
+}
+
 /// Whether `url` names the carrier's billing gateway rather than a server of
 /// the title's own. The scheme is spelled `BillSocket` by most titles here, but
 /// schemes are not case sensitive.
@@ -228,6 +255,19 @@ mod tests {
         assert!(!is_billing_scheme("socket://218.38.12.48:5100"));
         assert!(!is_billing_scheme("BillSocket:218.50.3.88:2508"));
         assert!(!is_billing_scheme("218.50.3.88:2508"));
+    }
+
+    #[test]
+    fn refuses_only_the_dead_game_server_offline_titles_catch() {
+        use super::is_offline_refused_server;
+
+        // 오즈-천공의 기사단's server is refused so it takes its offline path.
+        assert!(is_offline_refused_server("210.222.18.25", 31000));
+
+        // A different host or port is left to the ordinary connect.
+        assert!(!is_offline_refused_server("210.222.18.25", 20102));
+        assert!(!is_offline_refused_server("210.222.18.28", 31000));
+        assert!(!is_offline_refused_server("218.38.12.48", 5100));
     }
 
     #[test]

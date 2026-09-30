@@ -100,18 +100,6 @@ impl System {
         // touched.
         local_network.register(Box::new(crate::local_network::SnowBoardEndpoint));
 
-        // 오즈-천공의 기사단's own game server (socket://210.222.18.25:31000), gone
-        // for years. Its 새로하기 opens this the moment character creation
-        // begins, and with nothing answering, the connect times out and the
-        // title throws its `연결에 실패하였습니다.` and drops back to the menu.
-        // Answered in process so the connect and the login handshake go
-        // through; the title then sits on CONNECTING, polling a request whose
-        // granted-shaped answer it does not accept. Host-gated, so no other
-        // title is touched. DIAGNOSTIC(oz-connect): this endpoint arms the
-        // control-flow probe on the first poll reply so a device run traces the
-        // dispatch that gates the screen.
-        local_network.register(Box::new(crate::local_network::OzKnightsEndpoint));
-
         let platform = Arc::new(platform);
 
         Self {

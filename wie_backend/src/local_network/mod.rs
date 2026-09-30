@@ -26,7 +26,6 @@ mod capture;
 mod dragoneyes;
 mod funter;
 mod gpang;
-mod oz;
 mod snowboard;
 
 pub use self::{
@@ -35,7 +34,6 @@ pub use self::{
     dragoneyes::DragonEyesEndpoint,
     funter::FunterEndpoint,
     gpang::GpangEndpoint,
-    oz::OzKnightsEndpoint,
     snowboard::SnowBoardEndpoint,
 };
 
