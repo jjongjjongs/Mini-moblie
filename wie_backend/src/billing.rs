@@ -395,6 +395,16 @@ pub fn lgt_local_ea_baseball_response(request: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
+    // DIAGNOSTIC(ea-connect): to reverse the connect-success branch, trace what
+    // the title does the moment it finishes reading this login reply. EA's
+    // decoder is a runtime-registered jump table reached through bx-register
+    // veneers, so static reading cannot follow it; the control-flow probe records
+    // the parse and the branch that decides 접속 성공 vs 실패 (or "keep waiting"),
+    // read against the title's own binary.mod. `drained()` (see
+    // `wie_wipi_c::api::net`) starts it when the game has all of this reply.
+    // Bounded and self-limiting; to be removed once the branch is located.
+    crate::probe::arm_when_drained("ea-connect", 40000);
+
     // Echo the command, then an all-zero status, under a u32be length that
     // counts itself: [00 00 00 09][10][00 00 00 00].
     Some(vec![0x00, 0x00, 0x00, 0x09, 0x10, 0x00, 0x00, 0x00, 0x00])
