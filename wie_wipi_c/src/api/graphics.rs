@@ -2792,8 +2792,33 @@ pub async fn set_rgb_pixels(
     Ok(())
 }
 
-pub async fn get_image_framebuffer(_context: &mut dyn WIPICContext, image: WIPICIndirectPtr) -> Result<WIPICIndirectPtr> {
+pub async fn get_image_framebuffer(context: &mut dyn WIPICContext, image: WIPICIndirectPtr) -> Result<WIPICIndirectPtr> {
     tracing::debug!("MC_grpGetImageFrameBuffer({:#x})", image.0);
+
+    // DIAGNOSTIC(anymom): the handle returned points at the img plane (offset 0),
+    // but a masked image is drawn from its mask plane - so a title that fetches
+    // this buffer and writes into it, then draws the image, has its writes drawn
+    // only if the image is not masked. Report each image whose buffer is fetched
+    // once: its size and whether it is masked. A masked one here is the smoking
+    // gun for the coloured help text going missing.
+    if image.0 != 0 && tracing::enabled!(tracing::Level::INFO) {
+        let ptr = context.data_ptr(image)?;
+        let img: WIPICImage = read_generic(context, ptr)?;
+        let masked = img.mask.buf.0 != 0;
+        // Masked fetches are the suspects, sampled continuously so a late log
+        // window still holds them; anything else, once per handle for coverage.
+        let report = if masked {
+            static N: AtomicU32 = AtomicU32::new(0);
+            N.fetch_add(1, Ordering::Relaxed).is_multiple_of(64)
+        } else {
+            static SEEN: spin::Mutex<alloc::collections::BTreeSet<u32>> = spin::Mutex::new(alloc::collections::BTreeSet::new());
+            let mut seen = SEEN.lock();
+            seen.len() < 100 && seen.insert(image.0)
+        };
+        if report {
+            tracing::info!("IMG-FB h={:#x} {}x{} masked={masked}", image.0, img.img.width, img.img.height);
+        }
+    }
 
     // WIPICImage starts with `img: WIPICFramebuffer` at offset 0,
     // so the image handle doubles as a framebuffer handle.
