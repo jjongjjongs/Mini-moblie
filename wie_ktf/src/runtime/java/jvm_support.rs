@@ -88,7 +88,18 @@ struct KtfJvmSupportContext {
 const SUPPORT_CONTEXT_BASE: u32 = 0x7fff0000;
 
 /// How many class records the JVM context carries.
-const VTABLE_COUNT: usize = 128;
+///
+/// This is a wie-side ceiling, not one the guest imposes: an object carries a
+/// word offset into this array (see [`KtfJvmSupport::get_vtable_index`]), the
+/// array is allocated on the 256 MB guest heap, and the offset is a plain `u32`,
+/// so the only cost of a larger ceiling is the array's bytes and the linear scan
+/// each instantiation makes. A class that dispatches virtually needs one record,
+/// and a large title has many: 오즈-천공의 기사단's KTF build loads past 128
+/// while entering the game world - both 새로하기 after character creation and
+/// 이어하기 into an existing character - and every instantiation after the array
+/// filled failed with "no room for a … vtable", which took the app down. This is
+/// sized for such a title with room to spare rather than for the smallest one.
+const VTABLE_COUNT: usize = 1024;
 
 /// How far apart two vtable indices are, which is a class record in words.
 ///
