@@ -220,6 +220,17 @@ impl KtfJvmSupport {
             return Ok((jvm, system_class_loader));
         }
 
+        // The environment and handset properties a title reads through
+        // `java.lang.System.getProperty`, whose table is otherwise empty. A
+        // title that reads one and uses it without a length check would meet an
+        // empty string: 오즈-천공의 기사단 takes the first four digits of its
+        // subscriber number to build its network request, and an empty
+        // `PHONENUMBER` sent it into a `substring(0, 4)` that threw. Set before
+        // the loader's constructor runs the title's own init.
+        if let Err(err) = Self::set_system_properties(&jvm).await {
+            return Err(JvmSupport::to_wie_err(&jvm, err).await);
+        }
+
         // find client.bin
         let binary_name = match binary_name {
             Some(name) => JavaLangString::from_rust_string(&jvm, name).await.unwrap(),
@@ -257,6 +268,62 @@ impl KtfJvmSupport {
         };
 
         Ok((jvm, class_loader))
+    }
+
+    /// Fills `java.lang.System`'s property table with the CLDC environment a
+    /// title expects and the handset's subscriber number, which some titles read
+    /// from here rather than through `HandsetProperty`.
+    ///
+    /// `PHONENUMBER` and `MIN` come from `HandsetProperty`, the one place that
+    /// recovers the number, so the WIPI-C and Java readers name the same
+    /// handset.
+    async fn set_system_properties(jvm: &Jvm) -> jvm::Result<()> {
+        // `setProperty` answers the previous value, which is null the first
+        // time a key is set, so the result is read as a nullable reference
+        // rather than a `Box` that cannot hold null.
+        type Str = java_runtime::classes::java::lang::String;
+
+        for (key, value) in [
+            ("microedition.configuration", "CLDC-1.0"),
+            ("microedition.profiles", "MIDP-1.0"),
+            ("microedition.encoding", "EUC-KR"),
+            ("microedition.locale", "ko_KR"),
+            ("microedition.platform", "j2me"),
+        ] {
+            let key = JavaLangString::from_rust_string(jvm, key).await?;
+            let value = JavaLangString::from_rust_string(jvm, value).await?;
+            let _: ClassInstanceRef<Str> = jvm
+                .invoke_static(
+                    "java/lang/System",
+                    "setProperty",
+                    "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/Object;",
+                    (key, value),
+                )
+                .await?;
+        }
+
+        for key in ["PHONENUMBER", "MIN"] {
+            let name = JavaLangString::from_rust_string(jvm, key).await?;
+            let value: ClassInstanceRef<Str> = jvm
+                .invoke_static(
+                    "org/kwis/msp/handset/HandsetProperty",
+                    "getSystemProperty",
+                    "(Ljava/lang/String;)Ljava/lang/String;",
+                    (name,),
+                )
+                .await?;
+            let key = JavaLangString::from_rust_string(jvm, key).await?;
+            let _: ClassInstanceRef<Str> = jvm
+                .invoke_static(
+                    "java/lang/System",
+                    "setProperty",
+                    "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/Object;",
+                    (key, value),
+                )
+                .await?;
+        }
+
+        Ok(())
     }
 
     /// The jar's `client.bin*`, found by walking it through the JVM.
