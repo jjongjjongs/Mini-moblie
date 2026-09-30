@@ -1104,6 +1104,62 @@ pub async fn decode_next_image(context: &mut dyn WIPICContext, image: WIPICIndir
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Carries writes a title made into a masked image's own frame buffer over to
+/// the mask plane it is drawn from.
+///
+/// A title recolours or recomposes text by fetching an image's frame buffer
+/// (`MC_grpGetImageFrameBuffer`, which hands back the img plane) and writing
+/// fresh pixels into it, then drawing the image - 아무이유없어 does this on
+/// every help and menu screen. A masked image, though, is drawn from its
+/// separate mask plane, so those writes never reach the screen and the text
+/// comes down as a solid block of its old colour. Copy the img plane's colour
+/// into the mask plane, keeping the mask's own alpha, so the write shows while
+/// the shape stays. Only the region about to be drawn is touched, and because
+/// the screen is 16bpp the img plane's RGB565 colour is exactly what would
+/// reach it anyway - an image whose buffer the title never wrote to is drawn
+/// identically.
+fn carry_img_colour_into_mask(context: &mut dyn WIPICContext, image: &WIPICImage, sx: i32, sy: i32, w: i32, h: i32) -> Result<()> {
+    if image.mask.buf.0 == 0 || image.img.buf.0 == 0 {
+        return Ok(());
+    }
+    let (iw, ih) = (image.img.width as i32, image.img.height as i32);
+    if (iw, ih) != (image.mask.width as i32, image.mask.height as i32) {
+        return Ok(());
+    }
+
+    let (x0, y0) = (sx.max(0), sy.max(0));
+    let (x1, y1) = ((sx + w).min(iw), (sy + h).min(ih));
+    if x0 >= x1 || y0 >= y1 {
+        return Ok(());
+    }
+
+    let img_ptr = context.data_ptr(image.img.buf)?;
+    let mask_ptr = context.data_ptr(image.mask.buf)?;
+    let (img_bpl, mask_bpl) = (image.img.bpl, image.mask.bpl);
+    let cols = (x1 - x0) as usize;
+
+    let mut img_row = alloc::vec![0u8; cols * 2];
+    let mut mask_row = alloc::vec![0u8; cols * 4];
+    for y in y0..y1 {
+        let img_off = img_ptr + y as WIPICWord * img_bpl + x0 as WIPICWord * 2;
+        let mask_off = mask_ptr + y as WIPICWord * mask_bpl + x0 as WIPICWord * 4;
+        context.read_bytes(img_off, &mut img_row)?;
+        context.read_bytes(mask_off, &mut mask_row)?;
+
+        for i in 0..cols {
+            let colour = Rgb565Pixel::to_color(u16::from_le_bytes([img_row[i * 2], img_row[i * 2 + 1]]));
+            // ArgbPixel bytes are [b, g, r, a]; keep the alpha, replace colour.
+            mask_row[i * 4] = colour.b;
+            mask_row[i * 4 + 1] = colour.g;
+            mask_row[i * 4 + 2] = colour.r;
+        }
+
+        context.write_bytes(mask_off, &mask_row)?;
+    }
+
+    Ok(())
+}
+
 pub async fn draw_image(
     context: &mut dyn WIPICContext,
     framebuffer: WIPICIndirectPtr,
@@ -1205,6 +1261,12 @@ pub async fn draw_image(
     let Some((dx, dy, w, h, sx, sy)) = clipped_blit(&context_clip(&grp_ctx), dx, dy, w, h, sx, sy) else {
         return Ok(());
     };
+
+    // Reflect any writes the title made into the image's own frame buffer, which
+    // is the img plane, onto the mask plane a masked image is drawn from.
+    if !keyed {
+        carry_img_colour_into_mask(context, &image, sx, sy, w, h)?;
+    }
 
     // Asked before anything takes the context, because asking runs the title's
     // own code. Without it 드래곤하트2's glow lands as an opaque disc.
@@ -3951,6 +4013,96 @@ mod tests {
             })
             .count();
         assert_eq!(kept, 46, "transparent pixels were overwritten - a block bug");
+    }
+
+    /// 아무이유없어 recolours text by fetching an image's frame buffer
+    /// (`MC_grpGetImageFrameBuffer`, ~760/s on its help screen), writing fresh
+    /// pixels into it, and drawing the image. The fetched buffer is the img
+    /// plane, but a masked image is drawn from its mask plane - so those writes
+    /// must still reach the screen. Model that: recolour a masked glyph's img
+    /// plane green, draw it, and the opaque pixels must come out green.
+    #[futures_test::test]
+    async fn anymom_writes_into_a_masked_image_buffer_are_drawn() {
+        const MAINMENU_SUB0: &[u8] = &[
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x1c, 0x00, 0x00, 0x00,
+            0x17, 0x08, 0x03, 0x00, 0x00, 0x00, 0x2f, 0x14, 0xdf, 0x65, 0x00, 0x00, 0x00, 0x12, 0x50, 0x4c, 0x54, 0x45, 0xff, 0xff, 0xff, 0x5b, 0x5b,
+            0x5b, 0xff, 0xff, 0xff, 0xe7, 0xe7, 0xe7, 0xd9, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5b, 0x90, 0xda, 0x0b, 0x00, 0x00, 0x00, 0x01, 0x74, 0x52,
+            0x4e, 0x53, 0x00, 0x40, 0xe6, 0xd8, 0x66, 0x00, 0x00, 0x00, 0x49, 0x49, 0x44, 0x41, 0x54, 0x78, 0x5e, 0xb5, 0xc9, 0xcb, 0x0a, 0x80, 0x30,
+            0x10, 0x43, 0xd1, 0xa4, 0xea, 0xff, 0xff, 0xb2, 0xc1, 0x2c, 0x06, 0x86, 0x4e, 0x1f, 0x60, 0xcf, 0x26, 0x90, 0x8b, 0x56, 0x80, 0x94, 0x91,
+            0x8e, 0x77, 0xc7, 0x3f, 0xb1, 0x89, 0xf6, 0xb2, 0x93, 0x51, 0x86, 0x91, 0x45, 0x94, 0x95, 0x98, 0xed, 0xc4, 0xe7, 0x13, 0x7b, 0x3c, 0x8a,
+            0xcf, 0x58, 0x9b, 0x44, 0x90, 0xda, 0x84, 0x06, 0xe9, 0x44, 0x04, 0x66, 0x8e, 0x78, 0x01, 0x68, 0xbc, 0x07, 0x30, 0xd8, 0x7b, 0x42, 0xec,
+            0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ];
+        let mut context = test_context();
+
+        let pgc_handle = context.alloc(core::mem::size_of::<super::WIPICGraphicsContext>() as u32).unwrap();
+        let pgc = context.data_ptr(pgc_handle).unwrap();
+        init_context(&mut context, pgc).await.unwrap();
+
+        let source = context.alloc(MAINMENU_SUB0.len() as u32).unwrap();
+        let source_addr = context.data_ptr(source).unwrap();
+        context.write_bytes(source_addr, MAINMENU_SUB0).unwrap();
+        let ptr_image = context.alloc_raw(4).unwrap();
+        create_image(&mut context, ptr_image, source, 0, MAINMENU_SUB0.len() as u32)
+            .await
+            .unwrap();
+        let image_word: super::WIPICWord = read_generic(&context, ptr_image).unwrap();
+        let image_handle = super::WIPICIndirectPtr(image_word);
+
+        // The title fetches this buffer and writes into it. It is the img plane.
+        let fetched = super::get_image_framebuffer(&mut context, image_handle).await.unwrap();
+        let img_fb: wipi_types::wipic::WIPICFramebuffer = read_generic(&context, context.data_ptr(fetched).unwrap()).unwrap();
+        let green = Rgb565Pixel::from_color(Color {
+            a: 0xff,
+            r: 0,
+            g: 0xff,
+            b: 0,
+        });
+        {
+            let mut bytes = alloc::vec::Vec::new();
+            for _ in 0..28 * 23 {
+                bytes.extend_from_slice(&green.to_le_bytes());
+            }
+            let img_ptr = context.data_ptr(img_fb.buf).unwrap();
+            context.write_bytes(img_ptr, &bytes).unwrap();
+        }
+
+        let blue = Rgb565Pixel::from_color(Color {
+            a: 0xff,
+            r: 0,
+            g: 0,
+            b: 0xff,
+        });
+        let dest_fb = super::FrameBuffer::new(&mut context, 28, 23, 16).unwrap();
+        {
+            let mut bytes = alloc::vec::Vec::new();
+            for _ in 0..28 * 23 {
+                bytes.extend_from_slice(&blue.to_le_bytes());
+            }
+            let buf_ptr = context.data_ptr(dest_fb.0.buf).unwrap();
+            context.write_bytes(buf_ptr, &bytes).unwrap();
+        }
+        let destination = context.alloc(core::mem::size_of::<wipi_types::wipic::WIPICFramebuffer>() as u32).unwrap();
+        let dest_addr = context.data_ptr(destination).unwrap();
+        write_generic(&mut context, dest_addr, dest_fb.0).unwrap();
+
+        draw_image(&mut context, destination, 0, 0, 28, 23, image_handle, 0, 0, pgc)
+            .await
+            .unwrap();
+
+        let handle = read_generic(&context, context.data_ptr(destination).unwrap()).unwrap();
+        let drawn = super::FrameBuffer(handle).image(&mut context).unwrap();
+
+        // (2,2) is an opaque pixel of the glyph; after recolouring the img plane
+        // green it must draw green, not the mask plane's original red.
+        let c = drawn.get_pixel(2, 2);
+        assert!(
+            c.g > 150 && c.r < 90 && c.b < 90,
+            "img-plane write was lost: opaque pixel drew #{:02x}{:02x}{:02x}, expected green",
+            c.r,
+            c.g,
+            c.b
+        );
     }
 
     fn test_context() -> TestContext {
