@@ -538,6 +538,25 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
 
     let color = context_color(&framebuffer, &gctx);
 
+    // DIAGNOSTIC(ea-button): EA프로야구2010's mode-select buttons and its logo
+    // render black on first entry and correctly once a game has been played.
+    // The title paints them pixel by pixel with 1x1 fills, so log every fill
+    // that lands on a first-button pixel (50,115) or a logo pixel (100,25) with
+    // its colour, alpha and whether a pixel operation is live. This says which
+    // it is: the title asking for black, a blend over a black background, or a
+    // real colour that never reaches the screen.
+    if (x <= 50 && 50 < x + w && y <= 115 && 115 < y + h) || (x <= 100 && 100 < x + w && y <= 25 && 25 < y + h) {
+        tracing::info!(
+            "EA-BTN fill ({x},{y},{w},{h}) rgb=#{:02x}{:02x}{:02x} a={:#x} op_ptr={:#x} alpha={:#x}",
+            color.r,
+            color.g,
+            color.b,
+            color.a,
+            gctx.pixel_op_func_ptr,
+            gctx.alpha
+        );
+    }
+
     // A fill goes through the title's own operation too - 드래곤하트2 lays two
     // hundred of them through a live one in a single capture - so the colour
     // meets what is already there rather than covering it.
