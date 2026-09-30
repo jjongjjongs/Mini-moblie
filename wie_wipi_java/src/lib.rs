@@ -6,7 +6,7 @@ pub mod classes;
 
 use wie_jvm_support::WieJavaClassProto;
 
-pub fn get_protos() -> [WieJavaClassProto; 70] {
+pub fn get_protos() -> [WieJavaClassProto; 71] {
     [
         crate::classes::org::kwis::msf::io::Message::as_proto(),
         crate::classes::org::kwis::msf::io::Network::as_proto(),
@@ -68,6 +68,7 @@ pub fn get_protos() -> [WieJavaClassProto; 70] {
         crate::classes::org::kwis::msp::media::MediaUnavailableException::as_proto(),
         crate::classes::org::kwis::msp::media::MediaUnsupportedException::as_proto(),
         crate::classes::java::io::UnavailableException::as_proto(),
+        crate::classes::org::kwis::msf::core::Kernel::as_proto(),
         crate::classes::org::kwis::msf::core::ProgramExitException::as_proto(),
         crate::classes::org::kwis::msp::media::PlayListener::as_proto(),
         crate::classes::org::kwis::msp::media::Player::as_proto(),

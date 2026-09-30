@@ -1,3 +1,4 @@
+mod kernel;
 mod program_exit_exception;
 
-pub use self::program_exit_exception::ProgramExitException;
+pub use self::{kernel::Kernel, program_exit_exception::ProgramExitException};
