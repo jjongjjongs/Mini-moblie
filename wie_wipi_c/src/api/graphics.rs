@@ -1212,43 +1212,49 @@ pub async fn draw_image(
     // opaque non-black colour is a coloured glyph - the suspect - so those are
     // sampled every so often, along with the up-to-three colours the plane holds
     // and whether it is solid.
-    // Text-strip shaped: wide but short, so a per-glyph blit and a whole
-    // pre-rendered coloured word both qualify, while a tall game sprite does
-    // not. The coloured help text lands as word-width blocks, so the width cap
-    // has to reach a phrase, not a letter.
-    if tracing::enabled!(tracing::Level::INFO) && (1..=240).contains(&w) && (1..=24).contains(&h) {
-        let src_fb = FrameBuffer(source);
-        if let Ok(src_image) = src_fb.image(context) {
-            let (sw, sh) = (src_image.width() as i32, src_image.height() as i32);
-            let mut colours = alloc::collections::BTreeSet::new();
-            'count: for yy in 0..sh.min(48) {
-                for xx in 0..sw.min(160) {
-                    let p = src_image.get_pixel(xx, yy);
-                    colours.insert((p.r, p.g, p.b, p.a));
-                    if colours.len() > 40 {
-                        break 'count;
+    // A census of every sprite drawn, one line per image handle, so the body's
+    // coloured blocks - whatever size or path they take - cannot slip the
+    // filter. The seen set is cleared every few thousand blits so a handle first
+    // drawn before the help screen is reported again once it is on screen,
+    // surviving the log's tail. Each line carries the sprite's size, keyed vs
+    // alpha-masked, any live pixel operation, and up to four of the colours the
+    // drawn plane holds - one colour means a solid block.
+    if tracing::enabled!(tracing::Level::INFO) {
+        static SEEN: spin::Mutex<alloc::collections::BTreeSet<u32>> = spin::Mutex::new(alloc::collections::BTreeSet::new());
+        static SINCE_RESET: AtomicU32 = AtomicU32::new(0);
+        if SINCE_RESET.fetch_add(1, Ordering::Relaxed).is_multiple_of(3000) {
+            SEEN.lock().clear();
+        }
+        let first = {
+            let mut seen = SEEN.lock();
+            seen.len() < 400 && seen.insert(image_handle)
+        };
+        if first {
+            let src_fb = FrameBuffer(source);
+            if let Ok(src_image) = src_fb.image(context) {
+                let (sw, sh) = (src_image.width() as i32, src_image.height() as i32);
+                let mut colours = alloc::collections::BTreeSet::new();
+                'count: for yy in 0..sh.min(64) {
+                    for xx in 0..sw.min(160) {
+                        let p = src_image.get_pixel(xx, yy);
+                        colours.insert((p.r, p.g, p.b, p.a));
+                        if colours.len() > 40 {
+                            break 'count;
+                        }
                     }
                 }
-            }
-            let coloured = colours
-                .iter()
-                .any(|&(r, g, b, a)| a != 0 && (r != 0 || g != 0 || b != 0) && !(r == g && g == b));
-            if coloured || colours.len() <= 1 {
-                static N: AtomicU32 = AtomicU32::new(0);
-                if N.fetch_add(1, Ordering::Relaxed).is_multiple_of(8) {
-                    let sample: alloc::vec::Vec<_> = colours
-                        .iter()
-                        .take(3)
-                        .map(|&(r, g, b, a)| alloc::format!("#{r:02x}{g:02x}{b:02x}/a{a:02x}"))
-                        .collect();
-                    tracing::info!(
-                        "IMG-DRAW h={image_handle:#x} blit={w}x{h} src={sw}x{sh} keyed={keyed} masked={} op={:#x} colours={} {}",
-                        image.mask.buf.0 != 0,
-                        grp_ctx.pixel_op_func_ptr,
-                        colours.len(),
-                        sample.join(" ")
-                    );
-                }
+                let sample: alloc::vec::Vec<_> = colours
+                    .iter()
+                    .take(4)
+                    .map(|&(r, g, b, a)| alloc::format!("#{r:02x}{g:02x}{b:02x}/a{a:02x}"))
+                    .collect();
+                tracing::info!(
+                    "IMG-DRAW h={image_handle:#x} blit={w}x{h} src={sw}x{sh} keyed={keyed} masked={} op={:#x} colours={} {}",
+                    image.mask.buf.0 != 0,
+                    grp_ctx.pixel_op_func_ptr,
+                    colours.len(),
+                    sample.join(" ")
+                );
             }
         }
     }
