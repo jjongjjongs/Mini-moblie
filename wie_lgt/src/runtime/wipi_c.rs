@@ -542,6 +542,33 @@ pub(crate) fn try_fast_wipic_getter(core: &mut ArmCore) -> Result<bool> {
         // so the image handle doubles as a framebuffer handle — return as is.
         _ => core.read_param(0)?,
     };
+    // DIAGNOSTIC(anymom): the title composes its coloured text by fetching a
+    // buffer here and writing pixels straight into it, so log which buffer each
+    // pointer/image fetch hands back - the screen, an offscreen, or an image
+    // (with its size and whether it carries a mask) - to find the compose
+    // target. Throttled and only for the two compose-relevant getters.
+    if matches!(id, ID_GET_FRAMEBUFFER_POINTER | ID_GET_IMAGE_FRAMEBUFFER) && tracing::enabled!(tracing::Level::INFO) {
+        static N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+        if N.fetch_add(1, core::sync::atomic::Ordering::Relaxed).is_multiple_of(256) {
+            let h = core.read_param(0).unwrap_or(0);
+            let fb: Result<WIPICFramebuffer> = read_generic(core, h);
+            if h != 0
+                && let Ok(fb) = fb
+            {
+                let mask_buf: u32 = read_generic(core, h + 0x24).unwrap_or(0);
+                let screen: u32 = read_generic(core, 0x7fff1000u32).unwrap_or(0);
+                tracing::info!(
+                    "FB-GET id={:#x} h={h:#x} {}x{} bpp={} maskbuf={mask_buf:#x} is_screen={} ret={result:#x}",
+                    id,
+                    fb.width,
+                    fb.height,
+                    fb.bpp,
+                    h == screen
+                );
+            }
+        }
+    }
+
     core.write_return_value(&[result])?;
     core.set_next_pc(ret)?;
     Ok(true)
