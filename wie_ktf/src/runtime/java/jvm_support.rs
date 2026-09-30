@@ -302,7 +302,7 @@ impl KtfJvmSupport {
                 .await?;
         }
 
-        for key in ["PHONENUMBER", "MIN"] {
+        for key in ["PHONENUMBER", "MIN", "PHONEMODEL", "WIPISTANDARDVERSION"] {
             let name = JavaLangString::from_rust_string(jvm, key).await?;
             let value: ClassInstanceRef<Str> = jvm
                 .invoke_static(

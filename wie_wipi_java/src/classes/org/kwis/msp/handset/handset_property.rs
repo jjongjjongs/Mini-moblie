@@ -87,6 +87,15 @@ impl HandsetProperty {
             // full volume at its top step rather than stopping short.
             "VOLUMELEVEL" => "5",
             "DS_LOCK" => "0",
+            // The handset model and the WIPI platform version. A title reads
+            // these to build the header of its network request and takes a fixed
+            // prefix of each - 오즈-천공의 기사단's KTF build does
+            // `getProperty("PHONEMODEL").substring(0, 4)` - so the empty string a
+            // stub returns throws StringIndexOutOfBoundsException before the
+            // request is even sent. A non-empty value long enough for that prefix
+            // is what lets it through.
+            "PHONEMODEL" => "Emulator",
+            "WIPISTANDARDVERSION" => "1.2.1",
             "PHONENUMBER" => {
                 recovered = Self::subscriber_number(jvm, context).await;
                 recovered.as_str()
