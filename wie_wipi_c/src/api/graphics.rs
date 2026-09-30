@@ -549,16 +549,18 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
     // `flush_lcd`) over a broken pass and over a good pass; the diff is the
     // branch.
     //
-    // Here each frame is only tagged. A solid black rect at the mode-select
-    // button (14,104,77,26) means this frame is drawing the broken menu; the
-    // logo pixel (100,25) painted any colour but black means the artwork path
-    // ran, which is the reliable marker because - unlike the button, which may
-    // switch from a black rect to a per-pixel graphic - the logo is drawn pixel
-    // by pixel on every screen that runs the path, the connecting screen
-    // included. `flush_lcd` reads the tags and arms the next frame.
+    // Here each frame is only tagged, and both tags key on the *same* screen -
+    // the mode-select menu - so the two traces differ only by the gate, not by
+    // being different screens. A solid black rect at the mode-select button
+    // (14,104,77,26) is the broken menu. Any non-black paint landing *inside*
+    // that button's rectangle is the good menu: the button drawn as artwork,
+    // whether as a grey rect or pixel by pixel. The logo, by contrast, is
+    // painted on the connecting screen too, so it would have tagged a different
+    // screen; the button interior is only ever coloured on the menu itself.
+    // `flush_lcd` reads the tags and arms the next frame.
     {
-        let is_menu_button = (70..=84).contains(&w) && (22..=30).contains(&h) && (10..=22).contains(&x) && (98..=110).contains(&y);
         let black = color.r == 0 && color.g == 0 && color.b == 0;
+        let is_menu_button = (70..=84).contains(&w) && (22..=30).contains(&h) && (10..=22).contains(&x) && (98..=110).contains(&y);
         if is_menu_button && black {
             EA_BROKEN_FRAME.store(true, Ordering::Relaxed);
             if !EA_BROKEN_LOGGED.swap(true, Ordering::Relaxed) {
@@ -566,11 +568,20 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
             }
         }
 
-        let hits_logo = x <= 100 && 100 < x + w && y <= 25 && 25 < y + h;
-        if hits_logo && !black {
+        // A substantial non-black rect overlapping the button interior
+        // (14,104)-(91,130) - the button background drawn as artwork. The size
+        // floor keeps the button's own text glyphs, which are small and would
+        // be painted over a black rect on the broken menu too, from counting.
+        let inside_button = x < 91 && x + w > 14 && y < 130 && y + h > 104 && w >= 20 && h >= 12;
+        if inside_button && !black {
             EA_CORRECT_FRAME.store(true, Ordering::Relaxed);
             if !EA_LOGO_LOGGED.swap(true, Ordering::Relaxed) {
-                tracing::info!("EA-LOGO first non-black at ({x},{y}) rgb=#{:02x}{:02x}{:02x}", color.r, color.g, color.b);
+                tracing::info!(
+                    "EA-MENU grey button paint at ({x},{y},{w},{h}) rgb=#{:02x}{:02x}{:02x}",
+                    color.r,
+                    color.g,
+                    color.b
+                );
             }
         }
     }
