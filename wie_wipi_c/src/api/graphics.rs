@@ -1103,7 +1103,6 @@ pub async fn decode_next_image(context: &mut dyn WIPICContext, image: WIPICIndir
     Ok(0)
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Carries writes a title made into a masked image's own frame buffer over to
 /// the mask plane it is drawn from.
 ///
@@ -1160,6 +1159,7 @@ fn carry_img_colour_into_mask(context: &mut dyn WIPICContext, image: &WIPICImage
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn draw_image(
     context: &mut dyn WIPICContext,
     framebuffer: WIPICIndirectPtr,
