@@ -2645,6 +2645,12 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
     const CASH_SHOP_REQUEST: u16 = 0x0004;
     const CASH_SHOP_ANSWER: u16 = 0x0005;
 
+    /// What 메이플 시그너스's shop sends next, once its slot sync is granted: a
+    /// header-only query (no body). Answered with the family's granted result
+    /// the same way, command one past it.
+    const CASH_QUERY_REQUEST: u16 = 0x002a;
+    const CASH_QUERY_ANSWER: u16 = 0x002b;
+
     /// The results `0xb234` goes on from. They are not the same value: the
     /// register step stops on 0 where the other two go on from it.
     const AUTH_GRANTED: u8 = 0;
@@ -2725,6 +2731,8 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
         // large slot body so no shorter frame under this command is taken for
         // it. Answered with the family's granted result as a first shaping.
         CASH_SHOP_REQUEST if body.len() >= 64 => (CASH_SHOP_ANSWER, vec![AUTH_GRANTED, 0, 0]),
+        // The header-only query it sends after the slot sync is granted.
+        CASH_QUERY_REQUEST if body.is_empty() => (CASH_QUERY_ANSWER, vec![AUTH_GRANTED, 0, 0]),
         _ => return None,
     };
 
