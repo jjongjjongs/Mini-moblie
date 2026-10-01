@@ -110,7 +110,7 @@ impl Image {
         Ok(())
     }
 
-    async fn create_image(jvm: &Jvm, _: &mut WieJvmContext, width: i32, height: i32) -> JvmResult<ClassInstanceRef<Image>> {
+    async fn create_image(jvm: &Jvm, context: &mut WieJvmContext, width: i32, height: i32) -> JvmResult<ClassInstanceRef<Image>> {
         tracing::debug!("javax.microedition.lcdui.Image::createImage({width}, {height})");
 
         let bytes_per_pixel = 4;
@@ -122,11 +122,23 @@ impl Image {
         // BackImg - blitted the untouched rows as transparent, and the previous
         // frame (its menu, a stale logo) showed through the gap. Opaque white
         // covers it, the way a handset does.
+        //
+        // 던전앤파이터 격투가 is a per-title exception (see
+        // `TitleQuirks::blank_mutable_image_transparent`): the white fill drives
+        // its native engine down a framebuffer path this runtime does not model
+        // exactly and faults it, so for that title alone the buffer starts
+        // transparent, the way it did before the white fill.
+        let fill = if context.system().title_blank_mutable_image_transparent() {
+            0x00
+        } else {
+            0xff
+        };
+
         Self::create_image_instance(
             jvm,
             width as _,
             height as _,
-            &vec![0xff; (width * height * bytes_per_pixel) as usize],
+            &vec![fill; (width * height * bytes_per_pixel) as usize],
             bytes_per_pixel as _,
         )
         .await

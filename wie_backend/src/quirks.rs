@@ -123,6 +123,27 @@ pub struct TitleQuirks {
     /// region was ignored and the scene painted whole. `net.wie.CardCanvas`
     /// reads this.
     pub repaints_whole_frame: bool,
+
+    /// Whether a freshly created mutable `Image` (`Image.createImage(w, h)`)
+    /// starts fully transparent for this title, rather than the opaque white
+    /// MIDP specifies and this runtime fills by default.
+    ///
+    /// The white default is correct and most titles want it - 미니스포츠클럽
+    /// composes its scene into the lower rows of a screen-sized back buffer and
+    /// relies on the untouched rows covering the frame behind it. 던전앤파이터
+    /// 격투가 is the exception, and it is a workaround for an emulator
+    /// interaction rather than a trait of the title: its native engine, driven
+    /// through the Java layer, composes into a 240x296 mutable back buffer, and
+    /// on the white fill it follows a path that hands its own C blitter a
+    /// framebuffer's indirect-pointer handle as if it were the pixel address
+    /// and stores an intro sprite (`/img/39.gsg`) over the handle's header,
+    /// corrupting it and faulting the next draw out of bounds. The handset runs
+    /// the same engine on the same white buffer without faulting, so the fault
+    /// is this runtime's; until the engine's framebuffer path is modelled
+    /// exactly, starting this title's mutable images transparent keeps it on
+    /// the path it took before the white fill and renders as it did on the
+    /// handset. Read through [`crate::System::title_blank_mutable_image_transparent`].
+    pub blank_mutable_image_transparent: bool,
 }
 
 const fn panel(width: u32, height: u32) -> TitleQuirks {
@@ -136,6 +157,24 @@ const fn panel(width: u32, height: u32) -> TitleQuirks {
         keys_as_skvm_scancodes: false,
         owns_graphics_state: false,
         repaints_whole_frame: false,
+        blank_mutable_image_transparent: false,
+    }
+}
+
+/// A 240x296 title whose mutable images must start transparent rather than the
+/// opaque white MIDP specifies. See [`TitleQuirks::blank_mutable_image_transparent`].
+const fn panel_transparent_mutable(width: u32, height: u32) -> TitleQuirks {
+    TitleQuirks {
+        screen_size: Some((width, height)),
+        expects_annunciator: false,
+        annunciator_rows: None,
+        drawn_sideways: false,
+        clip_includes_far_edge: false,
+        clears_screen_each_paint: false,
+        keys_as_skvm_scancodes: false,
+        owns_graphics_state: false,
+        repaints_whole_frame: false,
+        blank_mutable_image_transparent: true,
     }
 }
 
@@ -150,6 +189,7 @@ const fn annunciator() -> TitleQuirks {
         keys_as_skvm_scancodes: false,
         owns_graphics_state: false,
         repaints_whole_frame: false,
+        blank_mutable_image_transparent: false,
     }
 }
 
@@ -165,6 +205,7 @@ const fn annunciator_of(rows: u32) -> TitleQuirks {
         keys_as_skvm_scancodes: false,
         owns_graphics_state: false,
         repaints_whole_frame: false,
+        blank_mutable_image_transparent: false,
     }
 }
 
@@ -179,6 +220,7 @@ const fn sideways() -> TitleQuirks {
         keys_as_skvm_scancodes: false,
         owns_graphics_state: false,
         repaints_whole_frame: false,
+        blank_mutable_image_transparent: false,
     }
 }
 
@@ -195,6 +237,7 @@ const fn clears_frame() -> TitleQuirks {
         keys_as_skvm_scancodes: false,
         owns_graphics_state: false,
         repaints_whole_frame: false,
+        blank_mutable_image_transparent: false,
     }
 }
 
@@ -223,6 +266,7 @@ const fn clip_includes_far_edge() -> TitleQuirks {
         keys_as_skvm_scancodes: false,
         owns_graphics_state: false,
         repaints_whole_frame: false,
+        blank_mutable_image_transparent: false,
     }
 }
 
@@ -239,6 +283,7 @@ const fn skvm_scancode_keys() -> TitleQuirks {
         keys_as_skvm_scancodes: true,
         owns_graphics_state: false,
         repaints_whole_frame: false,
+        blank_mutable_image_transparent: false,
     }
 }
 
@@ -255,6 +300,7 @@ const fn owns_graphics_state() -> TitleQuirks {
         keys_as_skvm_scancodes: false,
         owns_graphics_state: true,
         repaints_whole_frame: false,
+        blank_mutable_image_transparent: false,
     }
 }
 
@@ -272,6 +318,7 @@ const fn repaints_whole_frame() -> TitleQuirks {
         keys_as_skvm_scancodes: false,
         owns_graphics_state: false,
         repaints_whole_frame: true,
+        blank_mutable_image_transparent: false,
     }
 }
 
@@ -335,7 +382,7 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     (TitlePlatform::Ktf, "01037EBF", annunciator_of(16)),
     // 던전앤파이터 격투가: draws 296 rows into the 320 its descriptor asks for
     // and leaves the rest alone, so the panel is the 296 it draws.
-    (TitlePlatform::Ktf, "0103BF27", panel(240, 296)),
+    (TitlePlatform::Ktf, "0103BF27", panel_transparent_mutable(240, 296)),
     // 겟앰프드: its descriptor says 240*320, but every full-screen picture it
     // carries - title, menu, each map - is 240x296, and it centres its popup
     // frame in whatever height the screen reports. Told 320 it put the frame at

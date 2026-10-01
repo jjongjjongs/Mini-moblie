@@ -75,6 +75,9 @@ pub struct System {
     /// Whether the scene is painted whole each pass rather than only the region
     /// the title asked for. See [`System::title_repaints_whole_frame`].
     title_repaints_whole_frame: Arc<AtomicBool>,
+    /// Whether a fresh mutable `Image` starts transparent rather than opaque
+    /// white for this title. See [`System::title_blank_mutable_image_transparent`].
+    title_blank_mutable_image_transparent: Arc<AtomicBool>,
 }
 
 impl System {
@@ -145,6 +148,7 @@ impl System {
             title_keys_as_skvm_scancodes: Arc::new(AtomicBool::new(false)),
             title_owns_graphics_state: Arc::new(AtomicBool::new(false)),
             title_repaints_whole_frame: Arc::new(AtomicBool::new(false)),
+            title_blank_mutable_image_transparent: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -350,6 +354,19 @@ impl System {
 
     pub fn set_title_repaints_whole_frame(&self, repaints: bool) {
         self.title_repaints_whole_frame.store(repaints, Ordering::SeqCst);
+    }
+
+    /// Whether a freshly created mutable `Image` starts fully transparent for
+    /// this title rather than the opaque white MIDP specifies. Looked up in
+    /// `crate::quirks` and set here by the emulator that loaded the archive;
+    /// `Image.createImage` reads it. See
+    /// [`crate::quirks::TitleQuirks::blank_mutable_image_transparent`].
+    pub fn title_blank_mutable_image_transparent(&self) -> bool {
+        self.title_blank_mutable_image_transparent.load(Ordering::SeqCst)
+    }
+
+    pub fn set_title_blank_mutable_image_transparent(&self, transparent: bool) {
+        self.title_blank_mutable_image_transparent.store(transparent, Ordering::SeqCst);
     }
 
     /// Whether the title lays its screens out below the handset's status strip,
