@@ -2656,6 +2656,11 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
     const CASH_PAGE_REQUEST: u16 = 0x002e;
     const CASH_PAGE_ANSWER: u16 = 0x002f;
 
+    /// The one-byte command the shop sends on buying an item (candy and the
+    /// rest). Granted the same way so the purchase goes through.
+    const CASH_BUY_REQUEST: u16 = 0x002c;
+    const CASH_BUY_ANSWER: u16 = 0x002d;
+
     /// The results `0xb234` goes on from. They are not the same value: the
     /// register step stops on 0 where the other two go on from it.
     const AUTH_GRANTED: u8 = 0;
@@ -2740,6 +2745,8 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
         CASH_QUERY_REQUEST if body.is_empty() => (CASH_QUERY_ANSWER, vec![AUTH_GRANTED, 0, 0]),
         // The one-byte category/page query after that.
         CASH_PAGE_REQUEST if body.len() == 1 => (CASH_PAGE_ANSWER, vec![AUTH_GRANTED, 0, 0]),
+        // The one-byte buy command (candy and the rest).
+        CASH_BUY_REQUEST if body.len() == 1 => (CASH_BUY_ANSWER, vec![AUTH_GRANTED, 0, 0]),
         _ => return None,
     };
 
