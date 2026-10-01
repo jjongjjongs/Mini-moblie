@@ -2661,6 +2661,22 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
     const CASH_BUY_REQUEST: u16 = 0x002c;
     const CASH_BUY_ANSWER: u16 = 0x002d;
 
+    /// 메이플스토리 도적편's 피그미 알 부화 opens `211.115.203.9:20113` and writes
+    /// this family's frame under command `0x000e`: the subscriber's number and a
+    /// `u16` egg code behind it. Its reader (`0x2fc38`, command `0x000f`) takes a
+    /// zero status byte as a granted charge and goes on to hatch - writing a
+    /// `NoCharge` receipt so it does not charge again - where a non-zero one is an
+    /// error screen. What it reads past the status is three `u32` fields and three
+    /// fixed-width strings, and all of them only feed the confirmation it draws;
+    /// none gate the hatch, so the granted result carries them as zero.
+    const HATCH_REQUEST: u16 = 0x000e;
+    const HATCH_ANSWER: u16 = 0x000f;
+    /// The whole of what `0x2fc38` reads for a granted result, every field left
+    /// zero: the status, three `u32`, a name length (`0`, so no first string),
+    /// the two fixed-width strings behind it (`0x23` then `0x0a` bytes) and the
+    /// trailing count (`0`, so nothing past them).
+    const HATCH_BODY: usize = 1 + 4 * 3 + 1 + 0x23 + 0x0a + 1;
+
     /// The results `0xb234` goes on from. They are not the same value: the
     /// register step stops on 0 where the other two go on from it.
     const AUTH_GRANTED: u8 = 0;
@@ -2747,6 +2763,10 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
         CASH_PAGE_REQUEST if body.len() == 1 => (CASH_PAGE_ANSWER, vec![AUTH_GRANTED, 0, 0]),
         // The one-byte buy command (candy and the rest).
         CASH_BUY_REQUEST if body.len() == 1 => (CASH_BUY_ANSWER, vec![AUTH_GRANTED, 0, 0]),
+        // 도적편's egg-hatch charge, told from a bare command by the subscriber
+        // digits leading its body. Granted with a zero status and zeroed fields,
+        // the whole of what its reader takes.
+        HATCH_REQUEST if body.len() >= 13 && body[..11].iter().all(u8::is_ascii_digit) => (HATCH_ANSWER, vec![0u8; HATCH_BODY]),
         _ => return None,
     };
 
@@ -12501,6 +12521,30 @@ mod tests {
         let mut other = request;
         other[12] = 0x00;
         assert!(lgt_local_marked_command_response(&other).is_none());
+    }
+
+    /// 도적편's egg-hatch charge is granted under command `0x0f` with a zero
+    /// status, and the reply carries the whole of what its reader takes.
+    #[test]
+    fn the_egg_hatch_charge_is_granted() {
+        // What the title writes: the subscriber's number and a u16 egg code, the
+        // 21-byte frame its own screen showed on the wire.
+        let request = [
+            0x15, 0x00, 0x00, 0x00, 0xff, 0xff, 0x0e, 0x00, b'0', b'1', b'0', b'4', b'6', b'1', b'1', b'9', b'2', b'6', b'9', 0x08, 0x00,
+        ];
+        assert_eq!(request.len(), 0x15);
+
+        let response = lgt_local_marked_command_response(&request).unwrap();
+
+        // The length counts the whole frame, the marker and the answering
+        // command are in place, and the status that follows is the granted zero.
+        assert_eq!(u32::from_le_bytes(response[0..4].try_into().unwrap()) as usize, response.len());
+        assert_eq!(&response[4..6], &[0xff, 0xff]);
+        assert_eq!(u16::from_le_bytes(response[6..8].try_into().unwrap()), 0x000f);
+        assert_eq!(response[8], 0x00);
+        // The body past the marker is the command and every field its reader
+        // walks: 0x3e bytes in all (the two-byte command and the 0x3c payload).
+        assert_eq!(response.len() - 6, 0x3e);
     }
 
     /// A frame that is not that request is left alone, whether it is another
