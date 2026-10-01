@@ -9021,7 +9021,14 @@ fn adler32(data: &[u8]) -> u32 {
 /// keyed by their own request shapes and answered as each is captured. `None`
 /// for anything that is not this exact session-open request, whose type bytes,
 /// `u32` marker and self-describing Adler trailer are what identify it.
-fn lgt_local_daebak_response(request: &[u8]) -> Option<Vec<u8>> {
+///
+/// Unlike the other answers here, this one is **not** in [`response`]'s chain:
+/// its frame is the shared shape of a whole family of LGT 맞고 titles built on
+/// the same engine (거성맞고 and the rest), and most of them are standalone and
+/// want the connection to fail so they go on offline. So it is gated by the
+/// application id at the one call site that serves 대박맞고 (`0002AABE`) and
+/// reaches no other title, rather than matched by shape alone.
+pub fn lgt_local_daebak_response(request: &[u8]) -> Option<Vec<u8>> {
     /// The request's body, ahead of its four-byte Adler trailer.
     const BODY: usize = 24;
     /// The twelve-byte reply header, with the body length at `[5]`.
@@ -9056,7 +9063,6 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
     // `lgt_local_maguer2011_response` - so nothing else can be taken for it,
     // and it cannot take anything else.
     lgt_local_maguer2011_response(request)
-        .or_else(|| lgt_local_daebak_response(request))
         .or_else(|| lgt_local_granted_response(request))
         .or_else(|| lgt_local_cash_response(request))
         .or_else(|| lgt_local_seotda_response(request))
@@ -13246,7 +13252,15 @@ mod daebak_tests {
             12,
             "the length the framer reads at [5] is the body's"
         );
-        assert_eq!(response(&SESSION_OPEN), Some(reply));
+    }
+
+    /// The shared, shape-only chain does not claim this frame: it is answered
+    /// only through the application-id-gated call site, so a same-engine title
+    /// (거성맞고 and the rest) that sends the identical frame is left to fail its
+    /// connection and go on offline as it did before.
+    #[test]
+    fn the_shared_chain_leaves_it_for_the_gated_site() {
+        assert_eq!(response(&SESSION_OPEN), None);
     }
 
     /// The sixteen-byte field a later run may fill is not matched on, so the
