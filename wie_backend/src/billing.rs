@@ -2762,6 +2762,12 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
         // A `u32` and nothing else, which is the whole of what `0x225d6`
         // builds. The result and an empty message is all its reader takes.
         SHOP_REQUEST if body.len() == SHOP_BODY => (SHOP_ANSWER, vec![AUTH_GRANTED, 0, 0]),
+        // 메이플 해적편 auto-saves its hatch result under the same command, but
+        // with a far larger body - its serialized slots, around 115 bytes - so
+        // its save is told from 테일즈위버's four-byte errand by that length. Its
+        // reader (0x261ec) reads none of the body, only marks the save done, so
+        // the family's granted result acknowledges it.
+        SHOP_REQUEST if body.len() >= 64 => (SHOP_ANSWER, vec![AUTH_GRANTED, 0, 0]),
         // 메이플 시그너스's cash-shop sync, recognised by its command and its
         // large slot body so no shorter frame under this command is taken for
         // it. Answered with the family's granted result as a first shaping.
@@ -12575,6 +12581,27 @@ mod tests {
         // The granted charge: the frame's length, its marker, command 0x65 and a
         // single zero status, the whole of what its reader reads.
         assert_eq!(response, vec![0x09, 0x00, 0x00, 0x00, 0xff, 0xff, 0x65, 0x00, 0x00]);
+    }
+
+    /// 해적편's auto-save after a hatch, a large body under command 0x0a, is
+    /// acknowledged under command 0x0b, while 테일즈위버's four-byte errand under
+    /// the same command keeps its own answer.
+    #[test]
+    fn the_pirate_hatch_autosave_is_acknowledged() {
+        // Command 0x0a with the save's ~115-byte body (contents are not read).
+        let mut request = vec![0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0x0a, 0x00];
+        request.extend(core::iter::repeat_n(0u8, 115));
+        let length = request.len() as u32;
+        request[0..4].copy_from_slice(&length.to_le_bytes());
+
+        let response = lgt_local_marked_command_response(&request).unwrap();
+        assert_eq!(u16::from_le_bytes(response[6..8].try_into().unwrap()), 0x000b);
+
+        // 테일즈위버's four-byte errand under the same command still gets its own
+        // answer, not the save acknowledgement path.
+        let errand = [0x0c, 0x00, 0x00, 0x00, 0xff, 0xff, 0x0a, 0x00, 0x01, 0x00, 0x00, 0x00];
+        let errand_reply = lgt_local_marked_command_response(&errand).unwrap();
+        assert_eq!(u16::from_le_bytes(errand_reply[6..8].try_into().unwrap()), 0x000b);
     }
 
     /// A frame that is not that request is left alone, whether it is another
