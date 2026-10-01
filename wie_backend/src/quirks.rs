@@ -391,22 +391,6 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // offers its own keypad and the title takes the WIPI keys that drive from it,
     // those bottom 80 rows are cropped away so the 320-row scene shows alone.
     (TitlePlatform::Lgt, "0002FBB4", panel(240, 400).with_bottom_cropped(80)),
-    // 초코초코타이쿤 (게임빌): drawn for the same 240x400 LGT handset. Its scenes
-    // - the witch's dialogue over the town, the TIME GAUGE puzzle, the star shop -
-    // are laid out over the full 400 rows, so on the default 240x320 panel their
-    // bottom 80 (the dialogue's speaker portrait, the puzzle's lowest block row,
-    // the shop's confirm line) fell past the panel and were cut. Unlike 놈4 this
-    // one draws no on-screen keypad of its own, so the whole 400 is its scene and
-    // nothing is cropped.
-    (TitlePlatform::Lgt, "00029F79", panel(240, 400)),
-    // KBO 프로야구 2009 (LGT, ZIO interactive): drawn for the 240x400 LGT handset.
-    // Its title and main menu happen to place everything inside the top 320, but
-    // its deeper screens - 연습모드's team-select and roster - lay out to the full
-    // 400 with the `현재자산 ... BP` bar on the last rows, so on the default 240x320
-    // panel that bar (and the row above it) fell past the bottom and were cut. The
-    // 240x400 panel is the one it was drawn for; the KTF build of this title
-    // (01035ACD) is a separate 240x320 layout and keeps its own entry.
-    (TitlePlatform::Lgt, "0002A8D4", panel(240, 400)),
     // 판타지나이트: without the strip its bottom 24 rows keep a stale band.
     (TitlePlatform::Lgt, "0002787C", annunciator()),
     // 프로야구 2009.
