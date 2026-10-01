@@ -2701,6 +2701,25 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
     const PIRATE_END_REQUEST: u16 = 0x0016;
     const PIRATE_END_ANSWER: u16 = 0x0017;
 
+    /// 해적편's egg-hatch confirmation step, the one it writes to the gateway
+    /// before the charge the rest of this family recognises. The write builder
+    /// (`0x251a0`, command `0x0006`) carries only a short category body - a live
+    /// capture shows `01 00`, the category its item-range switch picked - not the
+    /// subscriber digits the charge frames lead with.
+    ///
+    /// Its reader (`0x2592a`, command `0x0007`) parses the same confirmation body
+    /// 도적편's hatch reader takes under `0x000f`: a status, three `u32`, a
+    /// length-prefixed name and the two fixed-width strings and trailing count
+    /// behind it ([`HATCH_BODY`]). The status it reads sits where this family's
+    /// frame keeps a high byte of the length, which a frame this short leaves
+    /// zero, so the result is granted either way; the rest only feeds the
+    /// confirmation it draws and none of it gates the hatch. Left unanswered, the
+    /// read callback the title arms never fires and the hatch waits on it before
+    /// it ever reaches its `0x000c` save or `0x0016` close. Granted with the body
+    /// zeroed, the whole of what the reader takes, so the hatch goes on.
+    const PIRATE_CONFIRM_REQUEST: u16 = 0x0006;
+    const PIRATE_CONFIRM_ANSWER: u16 = 0x0007;
+
     /// The results `0xb234` goes on from. They are not the same value: the
     /// register step stops on 0 where the other two go on from it.
     const AUTH_GRANTED: u8 = 0;
@@ -2800,6 +2819,11 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
         // 해적편's egg-hatch charge, told apart the same way. Its reader takes
         // only the status, so the granted result is that single zero byte.
         PIRATE_HATCH_REQUEST if body.len() >= 12 && body[..11].iter().all(u8::is_ascii_digit) => (PIRATE_HATCH_ANSWER, vec![AUTH_GRANTED]),
+        // 해적편's egg-hatch confirmation step, its short category body telling it
+        // from the subscriber-led charge frames. Its reader takes the 도적편-style
+        // confirmation body and none of it gates the hatch, so the granted result
+        // carries that body zeroed.
+        PIRATE_CONFIRM_REQUEST if body.len() <= 4 => (PIRATE_CONFIRM_ANSWER, vec![0u8; HATCH_BODY]),
         // 해적편's post-save sync step. No other title in this family speaks this
         // command, and its reader reads none of the body, so the granted result
         // finishes the save.
@@ -12604,6 +12628,46 @@ mod tests {
         // The granted charge: the frame's length, its marker, command 0x65 and a
         // single zero status, the whole of what its reader reads.
         assert_eq!(response, vec![0x09, 0x00, 0x00, 0x00, 0xff, 0xff, 0x65, 0x00, 0x00]);
+    }
+
+    /// 해적편's egg-hatch confirmation step (command 0x06), the frame a device
+    /// capture caught on the wire, is granted under command 0x07 with the
+    /// 도적편-style confirmation body its reader walks, every field zero.
+    #[test]
+    fn the_pirate_egg_hatch_confirmation_is_granted() {
+        // What the title writes: command 0x06 and the short category body its
+        // item-range switch picked, the 10-byte frame it showed on the wire.
+        let request = [0x0a, 0x00, 0x00, 0x00, 0xff, 0xff, 0x06, 0x00, 0x01, 0x00];
+        assert_eq!(request.len(), 0x0a);
+
+        let response = lgt_local_marked_command_response(&request).unwrap();
+
+        // The length counts the whole frame and the marker and answering command
+        // are in place.
+        assert_eq!(u32::from_le_bytes(response[0..4].try_into().unwrap()) as usize, response.len());
+        assert_eq!(&response[4..6], &[0xff, 0xff]);
+        assert_eq!(u16::from_le_bytes(response[6..8].try_into().unwrap()), 0x0007);
+
+        // The reader takes a status it treats as granted only when zero and then
+        // fields that only feed the confirmation it draws; the whole payload is
+        // zero, so the status is granted wherever the reader reads it and no
+        // field gates the hatch. The body past the marker is the command and the
+        // 0x3c-byte payload its reader walks - the same 0x3e bytes the 0x0e hatch
+        // answers with.
+        assert!(response[8..].iter().all(|&byte| byte == 0));
+        assert_eq!(response.len() - 6, 0x3e);
+    }
+
+    /// A command-6 frame that carries a long body is not this confirmation step,
+    /// so it is left for another matcher rather than granted here.
+    #[test]
+    fn a_long_command_6_body_is_not_the_confirmation() {
+        let mut request = vec![0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0x06, 0x00];
+        request.extend(core::iter::repeat_n(0u8, 16));
+        let length = request.len() as u32;
+        request[0..4].copy_from_slice(&length.to_le_bytes());
+
+        assert_eq!(lgt_local_marked_command_response(&request), None);
     }
 
     /// 해적편's auto-save after a hatch, a large body under command 0x0a, is
