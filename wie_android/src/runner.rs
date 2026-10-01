@@ -98,6 +98,13 @@ fn j2me_panel(data: &[u8]) -> Option<(u32, u32)> {
         // 120x143 panel puts rx at 0 and the flushed region over the whole screen,
         // which the host then scales up to fill the device.
         "de6dad5cb0aecc0679daf4d849538634" => Some((120, 143)),
+        // 다운타운 나무 (ManaStone, MIDlet "Tree"), a sibling of 다운타운 열혈강호.
+        // It composes into a 120x123 back buffer, then stacks a `bar` strip at
+        // y123 and the ManaStone logo at y133 beneath it - the logo only where
+        // `getHeight()` clears 133 - so its picture runs to y144. On the default
+        // 240x320 panel that all lands in the top-left corner; a 120x144 panel
+        // fills it, which the host then scales up to the device.
+        "8cfb68600ac24fb8345162bc612e408b" => Some((120, 144)),
         // 지혜의검 (LGT, MIDlet "Brain"). Its DESC.jad names the handset it was
         // drawn for - `MIDletX-LCD-Size:176,200` - and the canvas lays itself
         // out from getWidth/getHeight, so the default 240x320 panel puts every
