@@ -108,16 +108,15 @@ impl System {
         // Host-gated, so no other title is touched.
         local_network.register(Box::new(crate::local_network::RelayEndpoint));
 
-        // 질주쾌감 스케쳐's ranking server `www.200km.co.kr` (210.222.17.233:16482),
-        // gone for years. Taking the connection in process lets the title send
-        // its ranking request - which it builds and prints through its own
-        // `midd_SocketSend Data = %s` debug line - so the protocol can be read
-        // off a capture before an answering endpoint is written. This records
-        // and answers nothing, so it is host-gated to that one server and
-        // touches no other title; it is a step toward the real endpoint, not the
-        // endpoint itself.
+        // 질주쾌감 스케쳐2's shop/billing server (222.231.31.45:28013), gone for
+        // years. Its connect hangs pending against the dead host, so a purchase
+        // never leaves the shop. Taking the connection in process lets the title
+        // send its pipe-delimited purchase request (`|109|`, `|111|`, `|3|`, …)
+        // so the protocol can be read off a capture before an answering endpoint
+        // is written. This records and answers nothing, host-gated to that one
+        // server; a step toward the real endpoint, not the endpoint itself.
         local_network.register(Box::new(crate::local_network::CaptureEndpoint::new(
-            crate::local_network::CaptureAddress::HostPort(alloc::string::String::from("210.222.17.233"), 16482),
+            crate::local_network::CaptureAddress::HostPort(alloc::string::String::from("222.231.31.45"), 28013),
         )));
 
         let platform = Arc::new(platform);
