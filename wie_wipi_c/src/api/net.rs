@@ -976,18 +976,13 @@ struct LgtBillingGateway {
     /// Whether an answer has been queued that no read has been turned away
     /// from yet. See [`LgtBillingGateway::read`].
     settling: bool,
-    /// The running title's application id, so an answer a whole engine's titles
-    /// would otherwise share by frame shape can be given to the one title it is
-    /// right for. See the gate in [`LgtBillingGateway::write`].
-    aid: String,
 }
 
 impl LgtBillingGateway {
-    fn new(aid: String) -> Self {
+    fn new() -> Self {
         Self {
             pending: Vec::new(),
             settling: false,
-            aid,
         }
     }
 }
@@ -1001,18 +996,7 @@ impl wie_backend::LocalConnection for LgtBillingGateway {
             return;
         };
 
-        // 09대박맞고 (`0002AABE`) is answered its session-open here, gated by its
-        // own application id: the frame is the shared shape of a whole engine's
-        // 맞고 titles (거성맞고 and the rest), and the standalone ones among them
-        // want this connection to fail so they go on offline, so the answer is
-        // given only to the title it is right for and the rest fall through.
-        let daebak = self
-            .aid
-            .eq_ignore_ascii_case("0002AABE")
-            .then(|| wie_backend::billing::lgt_local_daebak_response(request))
-            .flatten();
-
-        let Some(response) = daebak.or_else(|| wie_backend::billing::response(request)) else {
+        let Some(response) = wie_backend::billing::response(request) else {
             // Trace the frame itself, not just its length. An unanswered
             // request is the one worth seeing: it is how a title's protocol
             // gets read off a device log in the first place, and a bare length
@@ -1415,7 +1399,7 @@ pub async fn socket_connect(
             let system = context.system();
             let mut local_network = system.local_network();
 
-            local_network.open("LGT billing gateway", Box::new(LgtBillingGateway::new(aid.clone())))
+            local_network.open("LGT billing gateway", Box::new(LgtBillingGateway::new()))
         };
 
         {
