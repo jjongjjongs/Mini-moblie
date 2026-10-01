@@ -2677,6 +2677,15 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
     /// trailing count (`0`, so nothing past them).
     const HATCH_BODY: usize = 1 + 4 * 3 + 1 + 0x23 + 0x0a + 1;
 
+    /// 메이플스토리 해적편's 알 부화 opens the family's `211.115.203.30:10012`
+    /// (where 도적편 opens its own server) and writes command `0x0064`: the
+    /// subscriber's number and a one-byte egg code behind it. Its reader
+    /// (`0x266da`, command `0x0065`) reads nothing from the body but the status
+    /// byte - a zero is the granted charge it hatches from, a non-zero an error
+    /// screen - so the granted result is that status alone.
+    const PIRATE_HATCH_REQUEST: u16 = 0x0064;
+    const PIRATE_HATCH_ANSWER: u16 = 0x0065;
+
     /// The results `0xb234` goes on from. They are not the same value: the
     /// register step stops on 0 where the other two go on from it.
     const AUTH_GRANTED: u8 = 0;
@@ -2767,6 +2776,9 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
         // digits leading its body. Granted with a zero status and zeroed fields,
         // the whole of what its reader takes.
         HATCH_REQUEST if body.len() >= 13 && body[..11].iter().all(u8::is_ascii_digit) => (HATCH_ANSWER, vec![0u8; HATCH_BODY]),
+        // 해적편's egg-hatch charge, told apart the same way. Its reader takes
+        // only the status, so the granted result is that single zero byte.
+        PIRATE_HATCH_REQUEST if body.len() >= 12 && body[..11].iter().all(u8::is_ascii_digit) => (PIRATE_HATCH_ANSWER, vec![AUTH_GRANTED]),
         _ => return None,
     };
 
@@ -12545,6 +12557,24 @@ mod tests {
         // The body past the marker is the command and every field its reader
         // walks: 0x3e bytes in all (the two-byte command and the 0x3c payload).
         assert_eq!(response.len() - 6, 0x3e);
+    }
+
+    /// 해적편's egg-hatch charge, byte for byte off its own screen, is granted
+    /// under command 0x65 with the status byte its reader takes.
+    #[test]
+    fn the_pirate_egg_hatch_charge_is_granted() {
+        // What the title writes: command 0x64, the subscriber's number and a
+        // one-byte egg code, the 20-byte frame it showed on the wire.
+        let request = [
+            0x14, 0x00, 0x00, 0x00, 0xff, 0xff, 0x64, 0x00, b'0', b'1', b'0', b'0', b'0', b'0', b'0', b'0', b'0', b'0', b'0', 0x15,
+        ];
+        assert_eq!(request.len(), 0x14);
+
+        let response = lgt_local_marked_command_response(&request).unwrap();
+
+        // The granted charge: the frame's length, its marker, command 0x65 and a
+        // single zero status, the whole of what its reader reads.
+        assert_eq!(response, vec![0x09, 0x00, 0x00, 0x00, 0xff, 0xff, 0x65, 0x00, 0x00]);
     }
 
     /// A frame that is not that request is left alone, whether it is another
