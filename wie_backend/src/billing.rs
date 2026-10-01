@@ -9125,16 +9125,15 @@ fn magu_frame(body: &[u8]) -> Option<Vec<u8>> {
 ///          u32 BE - the price (3000)
 /// ```
 ///
-/// The server has been gone for years. Answer the way the reader reads a granted
-/// charge: a big-endian length and a body it takes as success. Everything the
-/// parser reads past the result it only draws on the confirmation, so the body
-/// is zeroed.
+/// The server has been gone for years. The reader takes the reply as a granted
+/// registration only when it echoes the request it sent - a body that does not
+/// match the subscriber, content id and price it wrote comes back as 네트워크
+/// 에러, where the request echoed verbatim takes it past 등록중 into the game (a
+/// device capture confirms: a zeroed body drew the error, the request echoed
+/// back cleared it). So the answer is the request's own bytes.
 fn lgt_local_chessmaster_response(request: &[u8]) -> Option<Vec<u8>> {
     /// The length prefix both ends carry, big end first.
     const FRAME_HEAD: usize = 4;
-    /// The body a granted result carries - enough for every field the reader
-    /// walks, all of it zero.
-    const GRANTED_BODY: usize = 32;
 
     if request.len() < FRAME_HEAD {
         return None;
@@ -9163,11 +9162,9 @@ fn lgt_local_chessmaster_response(request: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    let mut response = Vec::with_capacity(FRAME_HEAD + GRANTED_BODY);
-    response.extend_from_slice(&(GRANTED_BODY as u32).to_be_bytes());
-    response.resize(FRAME_HEAD + GRANTED_BODY, 0);
-
-    Some(response)
+    // The reply the reader reads as granted is the request echoed back: its own
+    // big-endian length and the subscriber, content id and price behind it.
+    Some(request.to_vec())
 }
 
 #[cfg(test)]
@@ -9190,6 +9187,15 @@ mod chessmaster_tests {
         // ez-i stand-in before was what had it allocate 192 MiB and die.
         let length = u32::from_be_bytes([reply[0], reply[1], reply[2], reply[3]]) as usize;
         assert_eq!(length, reply.len() - 4);
+    }
+
+    #[test]
+    fn the_registration_is_answered_by_echoing_the_request() {
+        // The reader reads the reply as a granted registration only when it
+        // matches the request it sent; a device capture showed a zeroed body drew
+        // 네트워크 에러 where the request echoed back took it into the game.
+        let reply = lgt_local_chessmaster_response(&REGISTER).expect("the registration is answered");
+        assert_eq!(reply, REGISTER.to_vec());
     }
 
     #[test]
