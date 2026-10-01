@@ -2693,6 +2693,14 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
     const PIRATE_SYNC_REQUEST: u16 = 0x000c;
     const PIRATE_SYNC_ANSWER: u16 = 0x000d;
 
+    /// The empty-bodied command 해적편 closes its save session with. It is read
+    /// back over `WPBill_Read` like every step before it, so the save's 저장중
+    /// screen waits on a reply even though the reply's command dispatches nowhere
+    /// (0x17 falls to the dispatcher's default). Answered so the read completes
+    /// and the session ends.
+    const PIRATE_END_REQUEST: u16 = 0x0016;
+    const PIRATE_END_ANSWER: u16 = 0x0017;
+
     /// The results `0xb234` goes on from. They are not the same value: the
     /// register step stops on 0 where the other two go on from it.
     const AUTH_GRANTED: u8 = 0;
@@ -2796,6 +2804,10 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
         // command, and its reader reads none of the body, so the granted result
         // finishes the save.
         PIRATE_SYNC_REQUEST if body.len() >= 8 => (PIRATE_SYNC_ANSWER, vec![AUTH_GRANTED, 0, 0]),
+        // 해적편's empty-bodied save-session end. Answered so its WPBill_Read
+        // round-trip completes; the reply's command dispatches nowhere, which is
+        // all this step needs.
+        PIRATE_END_REQUEST if body.is_empty() => (PIRATE_END_ANSWER, vec![AUTH_GRANTED, 0, 0]),
         _ => return None,
     };
 
@@ -12627,6 +12639,17 @@ mod tests {
 
         let response = lgt_local_marked_command_response(&request).unwrap();
         assert_eq!(u16::from_le_bytes(response[6..8].try_into().unwrap()), 0x000d);
+        assert_eq!(u32::from_le_bytes(response[0..4].try_into().unwrap()) as usize, response.len());
+    }
+
+    /// 해적편's empty-bodied save-session end (command 0x16) is answered under
+    /// command 0x17 so its read completes.
+    #[test]
+    fn the_pirate_save_session_end_is_answered() {
+        let request = [0x08, 0x00, 0x00, 0x00, 0xff, 0xff, 0x16, 0x00];
+
+        let response = lgt_local_marked_command_response(&request).unwrap();
+        assert_eq!(u16::from_le_bytes(response[6..8].try_into().unwrap()), 0x0017);
         assert_eq!(u32::from_le_bytes(response[0..4].try_into().unwrap()) as usize, response.len());
     }
 
