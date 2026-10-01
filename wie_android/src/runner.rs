@@ -105,6 +105,13 @@ fn j2me_panel(data: &[u8]) -> Option<(u32, u32)> {
         // 240x320 panel that all lands in the top-left corner; a 120x144 panel
         // fills it, which the host then scales up to the device.
         "8cfb68600ac24fb8345162bc612e408b" => Some((120, 144)),
+        // 다운타운 햄버거타이쿤 (mobileone, MIDlet "Burger"). It hardcodes no
+        // resolution and lays itself out from getWidth/getHeight, so it fills any
+        // panel - but its art and fonts are a fixed size, so the default 240x320
+        // spaces everything out with the menu and the shop drawn small against a
+        // lot of empty room. The 128x160 it was drawn for packs the picture back
+        // in, which the host then scales up to the device.
+        "f70b755c0455e1b42d363976472246c8" => Some((128, 160)),
         // 지혜의검 (LGT, MIDlet "Brain"). Its DESC.jad names the handset it was
         // drawn for - `MIDletX-LCD-Size:176,200` - and the canvas lays itself
         // out from getWidth/getHeight, so the default 240x320 panel puts every
