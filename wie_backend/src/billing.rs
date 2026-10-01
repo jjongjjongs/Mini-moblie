@@ -2720,6 +2720,20 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
     const PIRATE_CONFIRM_REQUEST: u16 = 0x0006;
     const PIRATE_CONFIRM_ANSWER: u16 = 0x0007;
 
+    /// 시그너스기사단 로컬캐시상점's purchase confirmation, the same shape 해적편's
+    /// `0x0006` takes in a different title of this family. Entering the cash shop
+    /// writes command `0x005a` with the short `01 00` category body, then its
+    /// reader waits on the answer `0x005b`.
+    ///
+    /// That reader (`0x15980`, reached as command `0x4d + 0x0e`) reads the status
+    /// where every frame of this family keeps a high byte of its length - zero for
+    /// a frame this short, so granted - and then the confirmation body
+    /// 도적편's hatch reader takes ([`HATCH_BODY`]), none of which gates the
+    /// purchase. Left unanswered the shop's read callback never fires and it waits
+    /// on `0x005b` forever. Granted with that body zeroed, so the shop goes on.
+    const CYGNUS_CASH_REQUEST: u16 = 0x005a;
+    const CYGNUS_CASH_ANSWER: u16 = 0x005b;
+
     /// The results `0xb234` goes on from. They are not the same value: the
     /// register step stops on 0 where the other two go on from it.
     const AUTH_GRANTED: u8 = 0;
@@ -2824,6 +2838,11 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
         // confirmation body and none of it gates the hatch, so the granted result
         // carries that body zeroed.
         PIRATE_CONFIRM_REQUEST if body.len() <= 4 => (PIRATE_CONFIRM_ANSWER, vec![0u8; HATCH_BODY]),
+        // 시그너스기사단's cash-shop purchase confirmation, told apart by its short
+        // category body the same way. Its reader takes the 도적편-style confirmation
+        // body and none of it gates the purchase, so the granted result carries it
+        // zeroed.
+        CYGNUS_CASH_REQUEST if body.len() <= 4 => (CYGNUS_CASH_ANSWER, vec![0u8; HATCH_BODY]),
         // 해적편's post-save sync step. No other title in this family speaks this
         // command, and its reader reads none of the body, so the granted result
         // finishes the save.
@@ -12755,6 +12774,21 @@ mod tests {
         // field gates the hatch. The body past the marker is the command and the
         // 0x3c-byte payload its reader walks - the same 0x3e bytes the 0x0e hatch
         // answers with.
+        assert!(response[8..].iter().all(|&byte| byte == 0));
+        assert_eq!(response.len() - 6, 0x3e);
+    }
+
+    /// 시그너스기사단's cash-shop confirmation (command 0x5a), the frame a device
+    /// capture caught, is granted under command 0x5b with the same zeroed
+    /// confirmation body.
+    #[test]
+    fn the_cygnus_cash_shop_confirmation_is_granted() {
+        let request = [0x0a, 0x00, 0x00, 0x00, 0xff, 0xff, 0x5a, 0x00, 0x01, 0x00];
+        let response = lgt_local_marked_command_response(&request).unwrap();
+
+        assert_eq!(u32::from_le_bytes(response[0..4].try_into().unwrap()) as usize, response.len());
+        assert_eq!(&response[4..6], &[0xff, 0xff]);
+        assert_eq!(u16::from_le_bytes(response[6..8].try_into().unwrap()), 0x005b);
         assert!(response[8..].iter().all(|&byte| byte == 0));
         assert_eq!(response.len() - 6, 0x3e);
     }
