@@ -348,6 +348,12 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // bottom of whatever height it is told, so its 320 rows of screen need a
     // 400-row panel underneath them.
     (TitlePlatform::Lgt, "00030F5B", panel(240, 400)),
+    // 놈4 (GAMEVIL): the same engine. It draws its screen in the top `height-80`
+    // and its own on-screen keypad (▲▼◀▶ ok 취소) along the bottom 80 rows, so on
+    // the default 240x320 panel the screen is squeezed into 240 rows and the
+    // keypad lands below the panel, leaving a stale band. Its screens are 320
+    // rows, so they want the same 240x400 panel the keypad sits under.
+    (TitlePlatform::Lgt, "0002FBB4", panel(240, 400)),
     // 판타지나이트: without the strip its bottom 24 rows keep a stale band.
     (TitlePlatform::Lgt, "0002787C", annunciator()),
     // 프로야구 2009.
