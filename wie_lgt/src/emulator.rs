@@ -203,6 +203,7 @@ impl LgtEmulator {
         system.set_title_expects_annunciator(annunciator);
         system.set_title_annunciator_rows(title_quirks(TitlePlatform::Lgt, aid).annunciator_rows);
         system.set_title_repaints_whole_frame(title_quirks(TitlePlatform::Lgt, aid).repaints_whole_frame);
+        system.set_title_present_crop_bottom(title_quirks(TitlePlatform::Lgt, aid).present_crop_bottom);
 
         for (filename, data) in files {
             let filename = filename.trim_start_matches("P/");

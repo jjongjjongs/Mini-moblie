@@ -78,6 +78,9 @@ pub struct System {
     /// Whether a fresh mutable `Image` starts transparent rather than opaque
     /// white for this title. See [`System::title_blank_mutable_image_transparent`].
     title_blank_mutable_image_transparent: Arc<AtomicBool>,
+    /// How many rows are cropped from the bottom of the frame before it reaches
+    /// the screen. See [`System::title_present_crop_bottom`].
+    title_present_crop_bottom: Arc<AtomicU32>,
 }
 
 impl System {
@@ -149,6 +152,7 @@ impl System {
             title_owns_graphics_state: Arc::new(AtomicBool::new(false)),
             title_repaints_whole_frame: Arc::new(AtomicBool::new(false)),
             title_blank_mutable_image_transparent: Arc::new(AtomicBool::new(false)),
+            title_present_crop_bottom: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -367,6 +371,18 @@ impl System {
 
     pub fn set_title_blank_mutable_image_transparent(&self, transparent: bool) {
         self.title_blank_mutable_image_transparent.store(transparent, Ordering::SeqCst);
+    }
+
+    /// How many rows to drop from the bottom of a finished frame before it
+    /// reaches the screen, `0` for none. Looked up in `crate::quirks` and set
+    /// here by the emulator that loaded the archive; `crate::present` reads it.
+    /// See [`crate::quirks::TitleQuirks::present_crop_bottom`].
+    pub fn title_present_crop_bottom(&self) -> u32 {
+        self.title_present_crop_bottom.load(Ordering::SeqCst)
+    }
+
+    pub fn set_title_present_crop_bottom(&self, rows: u32) {
+        self.title_present_crop_bottom.store(rows, Ordering::SeqCst);
     }
 
     /// Whether the title lays its screens out below the handset's status strip,

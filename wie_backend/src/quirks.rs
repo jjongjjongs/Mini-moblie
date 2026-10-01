@@ -144,6 +144,21 @@ pub struct TitleQuirks {
     /// the path it took before the white fill and renders as it did on the
     /// handset. Read through [`crate::System::title_blank_mutable_image_transparent`].
     pub blank_mutable_image_transparent: bool,
+
+    /// How many rows to drop from the bottom of the frame before it reaches the
+    /// screen, `0` for none.
+    ///
+    /// A GAMEVIL title draws its scene in the top `height - 80` rows and its own
+    /// on-screen keypad (▲▼◀▶ ok 취소) along the bottom 80, meant for a
+    /// touchscreen handset. 놈4 (LGT 0002FBB4) is given a 240x400 panel so its
+    /// 320-row scene is not squeezed, which leaves that keypad on the bottom 80.
+    /// WIE already offers the player a keypad of its own, and the title takes the
+    /// WIPI direction/OK key events it drives, so the on-screen one is redundant;
+    /// cropping those 80 rows away shows the 320-row scene alone. The title still
+    /// lays out for the panel it was given - only what the host shows is trimmed.
+    /// See `wie_backend::present`, read through
+    /// [`crate::System::title_present_crop_bottom`].
+    pub present_crop_bottom: u32,
 }
 
 const fn panel(width: u32, height: u32) -> TitleQuirks {
@@ -158,6 +173,7 @@ const fn panel(width: u32, height: u32) -> TitleQuirks {
         owns_graphics_state: false,
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
+        present_crop_bottom: 0,
     }
 }
 
@@ -175,6 +191,7 @@ const fn panel_transparent_mutable(width: u32, height: u32) -> TitleQuirks {
         owns_graphics_state: false,
         repaints_whole_frame: false,
         blank_mutable_image_transparent: true,
+        present_crop_bottom: 0,
     }
 }
 
@@ -190,6 +207,7 @@ const fn annunciator() -> TitleQuirks {
         owns_graphics_state: false,
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
+        present_crop_bottom: 0,
     }
 }
 
@@ -206,6 +224,7 @@ const fn annunciator_of(rows: u32) -> TitleQuirks {
         owns_graphics_state: false,
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
+        present_crop_bottom: 0,
     }
 }
 
@@ -221,6 +240,7 @@ const fn sideways() -> TitleQuirks {
         owns_graphics_state: false,
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
+        present_crop_bottom: 0,
     }
 }
 
@@ -238,6 +258,7 @@ const fn clears_frame() -> TitleQuirks {
         owns_graphics_state: false,
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
+        present_crop_bottom: 0,
     }
 }
 
@@ -267,6 +288,7 @@ const fn clip_includes_far_edge() -> TitleQuirks {
         owns_graphics_state: false,
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
+        present_crop_bottom: 0,
     }
 }
 
@@ -284,6 +306,7 @@ const fn skvm_scancode_keys() -> TitleQuirks {
         owns_graphics_state: false,
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
+        present_crop_bottom: 0,
     }
 }
 
@@ -301,6 +324,7 @@ const fn owns_graphics_state() -> TitleQuirks {
         owns_graphics_state: true,
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
+        present_crop_bottom: 0,
     }
 }
 
@@ -319,6 +343,7 @@ const fn repaints_whole_frame() -> TitleQuirks {
         owns_graphics_state: false,
         repaints_whole_frame: true,
         blank_mutable_image_transparent: false,
+        present_crop_bottom: 0,
     }
 }
 
@@ -341,6 +366,16 @@ impl TitleQuirks {
             ..self
         }
     }
+
+    /// This entry, with the bottom `rows` cropped from the frame before it
+    /// reaches the screen the way
+    /// [`present_crop_bottom`](Self::present_crop_bottom) describes.
+    const fn with_bottom_cropped(self, rows: u32) -> Self {
+        Self {
+            present_crop_bottom: rows,
+            ..self
+        }
+    }
 }
 
 const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
@@ -352,8 +387,10 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // and its own on-screen keypad (▲▼◀▶ ok 취소) along the bottom 80 rows, so on
     // the default 240x320 panel the screen is squeezed into 240 rows and the
     // keypad lands below the panel, leaving a stale band. Its screens are 320
-    // rows, so they want the same 240x400 panel the keypad sits under.
-    (TitlePlatform::Lgt, "0002FBB4", panel(240, 400)),
+    // rows, so they want a 240x400 panel the keypad sits under - and since WIE
+    // offers its own keypad and the title takes the WIPI keys that drive from it,
+    // those bottom 80 rows are cropped away so the 320-row scene shows alone.
+    (TitlePlatform::Lgt, "0002FBB4", panel(240, 400).with_bottom_cropped(80)),
     // 판타지나이트: without the strip its bottom 24 rows keep a stale band.
     (TitlePlatform::Lgt, "0002787C", annunciator()),
     // 프로야구 2009.
