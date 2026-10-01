@@ -106,8 +106,10 @@ impl BillFrame {
 /// is for reading.
 pub fn bill_frame_trace(frame: &[u8]) -> String {
     // Enough for a whole request. 제노니아1's is 72 bytes and a 64-byte cap cut
-    // off the end of it, which is the half that says what the title asked for.
-    const SHOWN: usize = 256;
+    // off the end of it, which is the half that says what the title asked for;
+    // 메이플스토리 시그너스기사단's cash-shop sync is 428, and reading its answer
+    // off a capture needs the whole of it.
+    const SHOWN: usize = 1024;
 
     let bytes: Vec<String> = frame.iter().take(SHOWN).map(|byte| format!("{byte:02x}")).collect();
     let bytes = format!("{}{}", bytes.join(" "), if frame.len() > SHOWN { " ..." } else { "" });
@@ -2634,6 +2636,15 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
     /// The `u32` `0x225d6` builds its body out of, which is the whole of it.
     const SHOP_BODY: usize = 4;
 
+    /// What 메이플스토리 시그너스기사단's 로컬캐시상점 sends on entering the
+    /// cash shop: a 420-byte body of its current ten slots. Its local shop reads
+    /// its item data from the archive, the same way 테일즈위버's does, so the
+    /// first answer tried is the family's bare granted result. (If its reader
+    /// wants the catalogue behind that, a full capture of the request says so -
+    /// `bill_frame_trace` now shows the whole 428-byte frame.)
+    const CASH_SHOP_REQUEST: u16 = 0x0004;
+    const CASH_SHOP_ANSWER: u16 = 0x0005;
+
     /// The results `0xb234` goes on from. They are not the same value: the
     /// register step stops on 0 where the other two go on from it.
     const AUTH_GRANTED: u8 = 0;
@@ -2710,6 +2721,10 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
         // A `u32` and nothing else, which is the whole of what `0x225d6`
         // builds. The result and an empty message is all its reader takes.
         SHOP_REQUEST if body.len() == SHOP_BODY => (SHOP_ANSWER, vec![AUTH_GRANTED, 0, 0]),
+        // 메이플 시그너스's cash-shop sync, recognised by its command and its
+        // large slot body so no shorter frame under this command is taken for
+        // it. Answered with the family's granted result as a first shaping.
+        CASH_SHOP_REQUEST if body.len() >= 64 => (CASH_SHOP_ANSWER, vec![AUTH_GRANTED, 0, 0]),
         _ => return None,
     };
 
@@ -13131,5 +13146,46 @@ mod ktf_download_tests {
     #[test]
     fn the_gateway_answers_a_listing() {
         assert_eq!(response(BLADEMASTER2_INVENTORY), ktf_local_download_response(BLADEMASTER2_INVENTORY));
+    }
+}
+
+#[cfg(test)]
+mod maple_cash_shop_tests {
+    use super::*;
+
+    /// The cash-shop sync 메이플스토리 시그너스기사단's 로컬캐시상점 sends on
+    /// entering the shop: the `211.115.203.30:10012` family frame
+    /// (`[u32 length][0xffff][command][body]`), command `0x0004`, with a large
+    /// slot body. It is answered with the family's granted result, command one
+    /// past the request's.
+    #[test]
+    fn the_cash_shop_sync_is_granted() {
+        const BODY: usize = 420;
+        let total = 8 + BODY;
+
+        let mut request = Vec::with_capacity(total);
+        request.extend_from_slice(&(total as u32).to_le_bytes());
+        request.extend_from_slice(&0xffffu16.to_le_bytes());
+        request.extend_from_slice(&0x0004u16.to_le_bytes());
+        request.resize(total, 0);
+
+        let reply = response(&request).expect("the cash-shop sync is answered");
+
+        assert_eq!(&reply[0..4], &(11u32).to_le_bytes(), "a granted frame: header and a three-byte result");
+        assert_eq!(&reply[4..6], &0xffffu16.to_le_bytes(), "the marker");
+        assert_eq!(&reply[6..8], &0x0005u16.to_le_bytes(), "command one past the request");
+        assert_eq!(&reply[8..11], &[0, 0, 0], "a granted result");
+    }
+
+    /// A short frame under the same command is not taken for the sync.
+    #[test]
+    fn a_short_command_four_is_not_the_sync() {
+        let mut request = Vec::new();
+        request.extend_from_slice(&(10u32).to_le_bytes());
+        request.extend_from_slice(&0xffffu16.to_le_bytes());
+        request.extend_from_slice(&0x0004u16.to_le_bytes());
+        request.extend_from_slice(&[0, 0]);
+
+        assert_eq!(lgt_local_marked_command_response(&request), None);
     }
 }
