@@ -95,6 +95,8 @@ impl Graphics {
                 JavaMethodProto::new("reset", "()V", Self::reset, Default::default()),
                 // WIPI wrapper bridge only; this is not part of the MIDP Graphics API.
                 JavaMethodProto::new("setXORMode", "(Z)V", Self::set_xor_mode, MethodAccessFlags::PRIVATE),
+                JavaMethodProto::new("setXORMode", "(I)V", Self::set_xor_mode_argb, Default::default()),
+                JavaMethodProto::new("setPaintMode", "()V", Self::set_paint_mode, Default::default()),
                 JavaMethodProto::new("getFont", "()Ljavax/microedition/lcdui/Font;", Self::get_font, Default::default()),
                 JavaMethodProto::new("setColor", "(I)V", Self::set_color, Default::default()),
                 JavaMethodProto::new("setColor", "(III)V", Self::set_color_by_rgb, Default::default()),
@@ -237,6 +239,32 @@ impl Graphics {
         tracing::debug!("javax.microedition.lcdui.Graphics::setXORMode({this:?}, {xor_mode})");
 
         jvm.put_field(&mut this, "xorMode", "Z", xor_mode).await?;
+
+        Ok(())
+    }
+
+    /// `setXORMode(int)` / `setPaintMode()` - the alternating-draw pair some
+    /// handsets add to MIDP's `Graphics`, like AWT's. 창세기전외전 (softmax)
+    /// draws its battle cursor in XOR and lifts it by drawing again, and links
+    /// against both at load, so the whole screen died with a `NoSuchMethodError`
+    /// the moment a fight began.
+    ///
+    /// This runtime's XOR is `dest ^= src`, which already gives the one property
+    /// such a title relies on - a shape drawn twice leaves the screen as it was -
+    /// so the alternation colour the argument carries is not modelled; the call
+    /// only turns XOR on, and `setPaintMode` turns it back off.
+    async fn set_xor_mode_argb(jvm: &Jvm, _: &mut WieJvmContext, mut this: ClassInstanceRef<Self>, color: i32) -> JvmResult<()> {
+        tracing::debug!("javax.microedition.lcdui.Graphics::setXORMode({this:?}, {color:#x})");
+
+        jvm.put_field(&mut this, "xorMode", "Z", true).await?;
+
+        Ok(())
+    }
+
+    async fn set_paint_mode(jvm: &Jvm, _: &mut WieJvmContext, mut this: ClassInstanceRef<Self>) -> JvmResult<()> {
+        tracing::debug!("javax.microedition.lcdui.Graphics::setPaintMode({this:?})");
+
+        jvm.put_field(&mut this, "xorMode", "Z", false).await?;
 
         Ok(())
     }
