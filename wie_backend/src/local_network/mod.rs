@@ -22,6 +22,7 @@
 //! for the `-1` a closed socket carries, or for the billing gateway's `-2`.
 
 mod ack;
+mod billing_gateway;
 mod capture;
 mod dragoneyes;
 mod funter;
@@ -31,6 +32,7 @@ mod snowboard;
 
 pub use self::{
     ack::{AckEndpoint, Framing},
+    billing_gateway::BillingGatewayEndpoint,
     capture::{CaptureAddress, CaptureEndpoint},
     dragoneyes::DragonEyesEndpoint,
     funter::FunterEndpoint,

@@ -109,14 +109,16 @@ impl System {
         local_network.register(Box::new(crate::local_network::RelayEndpoint));
 
         // 질주쾌감 스케쳐2's shop/billing server (222.231.31.45:28013), gone for
-        // years. Its connect hangs pending against the dead host, so a purchase
-        // never leaves the shop. Taking the connection in process lets the title
-        // send its pipe-delimited purchase request (`|109|`, `|111|`, `|3|`, …)
-        // so the protocol can be read off a capture before an answering endpoint
-        // is written. This records and answers nothing, host-gated to that one
-        // server; a step toward the real endpoint, not the endpoint itself.
-        local_network.register(Box::new(crate::local_network::CaptureEndpoint::new(
-            crate::local_network::CaptureAddress::HostPort(alloc::string::String::from("222.231.31.45"), 28013),
+        // years. The title opens a plain socket to it and writes the carrier
+        // billing frame `ff ff 12 00 68 00 <subscriber> 03` - the `0x68`
+        // purchase - by hand; dialed at the dead host the read never answers and
+        // the shop shows `구매 실패`. Answered in process with the family's
+        // `granted` frame, the purchase goes through. Host-gated, so no other
+        // title is touched.
+        local_network.register(Box::new(crate::local_network::BillingGatewayEndpoint::new(
+            "billing(222.231.31.45:28013)",
+            "222.231.31.45",
+            28013,
         )));
 
         let platform = Arc::new(platform);
