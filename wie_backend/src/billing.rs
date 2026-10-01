@@ -2686,6 +2686,13 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
     const PIRATE_HATCH_REQUEST: u16 = 0x0064;
     const PIRATE_HATCH_ANSWER: u16 = 0x0065;
 
+    /// After the hatch save, 해적편 sends a second sync step under command
+    /// `0x000c` - a ~30-byte body it reads nothing back from. Its reader
+    /// (`0x26236`, command `0x000d`) only walks its own save slots and marks them
+    /// done, so the granted result lets the hatch's 저장중 screen finish.
+    const PIRATE_SYNC_REQUEST: u16 = 0x000c;
+    const PIRATE_SYNC_ANSWER: u16 = 0x000d;
+
     /// The results `0xb234` goes on from. They are not the same value: the
     /// register step stops on 0 where the other two go on from it.
     const AUTH_GRANTED: u8 = 0;
@@ -2785,6 +2792,10 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
         // 해적편's egg-hatch charge, told apart the same way. Its reader takes
         // only the status, so the granted result is that single zero byte.
         PIRATE_HATCH_REQUEST if body.len() >= 12 && body[..11].iter().all(u8::is_ascii_digit) => (PIRATE_HATCH_ANSWER, vec![AUTH_GRANTED]),
+        // 해적편's post-save sync step. No other title in this family speaks this
+        // command, and its reader reads none of the body, so the granted result
+        // finishes the save.
+        PIRATE_SYNC_REQUEST if body.len() >= 8 => (PIRATE_SYNC_ANSWER, vec![AUTH_GRANTED, 0, 0]),
         _ => return None,
     };
 
@@ -12602,6 +12613,21 @@ mod tests {
         let errand = [0x0c, 0x00, 0x00, 0x00, 0xff, 0xff, 0x0a, 0x00, 0x01, 0x00, 0x00, 0x00];
         let errand_reply = lgt_local_marked_command_response(&errand).unwrap();
         assert_eq!(u16::from_le_bytes(errand_reply[6..8].try_into().unwrap()), 0x000b);
+    }
+
+    /// 해적편's post-save sync step (command 0x0c) is granted under command 0x0d,
+    /// the byte-for-byte frame it showed on the wire.
+    #[test]
+    fn the_pirate_post_save_sync_is_granted() {
+        let request = [
+            0x26, 0x00, 0x00, 0x00, 0xff, 0xff, 0x0c, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x9a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(request.len(), 0x26);
+
+        let response = lgt_local_marked_command_response(&request).unwrap();
+        assert_eq!(u16::from_le_bytes(response[6..8].try_into().unwrap()), 0x000d);
+        assert_eq!(u32::from_le_bytes(response[0..4].try_into().unwrap()) as usize, response.len());
     }
 
     /// A frame that is not that request is left alone, whether it is another
