@@ -1385,21 +1385,6 @@ pub async fn socket_connect(
             return Ok(M_E_NOTCONN);
         }
 
-        // 09대박맞고-왕후의길 (`0002AABE`) opens this billing connection at
-        // startup and sits on its connecting screen waiting for a session-open
-        // reply the carrier gateway - gone for years - would have sent. The
-        // engine it is built on plays offline (거성맞고, the same engine, never
-        // opens this connection at all and runs fine), so refusing the connect
-        // lets this title fall through to that offline path rather than wait.
-        // Gated to its own application id, so no other title's billing is
-        // touched - and the same-engine titles that never dial this never reach
-        // here anyway.
-        if context.system().aid().eq_ignore_ascii_case("0002AABE") {
-            tracing::info!("09대박맞고: refusing the billing connect so it goes on offline");
-
-            return Ok(M_E_NOTCONN);
-        }
-
         let aid = alloc::string::String::from(context.system().aid());
         let subscriber = crate::api::kernel::subscriber_number(context).await;
         let current_time = context.system().platform().now().raw();
