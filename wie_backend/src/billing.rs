@@ -2651,6 +2651,11 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
     const CASH_QUERY_REQUEST: u16 = 0x002a;
     const CASH_QUERY_ANSWER: u16 = 0x002b;
 
+    /// And the one-byte query it sends after that (a category or page). Granted
+    /// the same way; its one byte is not read here.
+    const CASH_PAGE_REQUEST: u16 = 0x002e;
+    const CASH_PAGE_ANSWER: u16 = 0x002f;
+
     /// The results `0xb234` goes on from. They are not the same value: the
     /// register step stops on 0 where the other two go on from it.
     const AUTH_GRANTED: u8 = 0;
@@ -2733,6 +2738,8 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
         CASH_SHOP_REQUEST if body.len() >= 64 => (CASH_SHOP_ANSWER, vec![AUTH_GRANTED, 0, 0]),
         // The header-only query it sends after the slot sync is granted.
         CASH_QUERY_REQUEST if body.is_empty() => (CASH_QUERY_ANSWER, vec![AUTH_GRANTED, 0, 0]),
+        // The one-byte category/page query after that.
+        CASH_PAGE_REQUEST if body.len() == 1 => (CASH_PAGE_ANSWER, vec![AUTH_GRANTED, 0, 0]),
         _ => return None,
     };
 
