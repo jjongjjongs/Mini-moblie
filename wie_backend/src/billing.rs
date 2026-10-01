@@ -9092,11 +9092,112 @@ fn magu_frame(body: &[u8]) -> Option<Vec<u8>> {
     Some(frame)
 }
 
+/// 체스마스터's 정식판 등록 charge, answered so its 등록중 screen clears.
+///
+/// The title opens `BillSocket://211.233.19.21:20001` and its reader thread
+/// (`i.run`, `0x76c70`) reads a four-byte big-endian length off the front of
+/// the reply before anything else. Its request is big-endian too, and ASCII
+/// where this family is usually binary:
+///
+/// ```text
+/// [0..4]   u32 BE - the payload's length, the bytes that follow these four
+/// [4..]    the subscriber's number, ASCII digits, NUL-terminated
+///          the content id, ASCII, NUL-terminated ("0010002B7E6001")
+///          u32 BE - the price (3000)
+/// ```
+///
+/// The server has been gone for years. Answer the way the reader reads a granted
+/// charge: a big-endian length and a body it takes as success. Everything the
+/// parser reads past the result it only draws on the confirmation, so the body
+/// is zeroed.
+fn lgt_local_chessmaster_response(request: &[u8]) -> Option<Vec<u8>> {
+    /// The length prefix both ends carry, big end first.
+    const FRAME_HEAD: usize = 4;
+    /// The body a granted result carries - enough for every field the reader
+    /// walks, all of it zero.
+    const GRANTED_BODY: usize = 32;
+
+    if request.len() < FRAME_HEAD {
+        return None;
+    }
+
+    let payload_length = u32::from_be_bytes([request[0], request[1], request[2], request[3]]) as usize;
+    if payload_length != request.len() - FRAME_HEAD {
+        return None;
+    }
+
+    // The subscriber's number leads the body as NUL-terminated ASCII digits -
+    // the same least that tells this family's charges from one another.
+    let payload = &request[FRAME_HEAD..];
+    let subscriber_end = payload.iter().position(|&byte| byte == 0)?;
+    if subscriber_end < 10 || !payload[..subscriber_end].iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+
+    // The content id follows it, NUL-terminated, then the four-byte price.
+    let rest = &payload[subscriber_end + 1..];
+    let id_end = rest.iter().position(|&byte| byte == 0)?;
+    if id_end == 0 || !rest[..id_end].iter().all(u8::is_ascii_alphanumeric) {
+        return None;
+    }
+    if rest.len() < id_end + 1 + 4 {
+        return None;
+    }
+
+    let mut response = Vec::with_capacity(FRAME_HEAD + GRANTED_BODY);
+    response.extend_from_slice(&(GRANTED_BODY as u32).to_be_bytes());
+    response.resize(FRAME_HEAD + GRANTED_BODY, 0);
+
+    Some(response)
+}
+
+#[cfg(test)]
+mod chessmaster_tests {
+    use super::*;
+
+    /// The 36 bytes 체스마스터 wrote to its billing gateway, byte for byte off
+    /// the wire: `01055866703` registering content `0010002B7E6001` for 3000원.
+    const REGISTER: [u8; 36] = [
+        0x00, 0x00, 0x00, 0x20, 0x30, 0x31, 0x30, 0x35, 0x35, 0x38, 0x36, 0x36, 0x37, 0x30, 0x33, 0x00, 0x30, 0x30, 0x31, 0x30, 0x30, 0x30, 0x30,
+        0x32, 0x42, 0x37, 0x45, 0x36, 0x30, 0x30, 0x31, 0x00, 0x00, 0x00, 0x0b, 0xb8,
+    ];
+
+    #[test]
+    fn the_registration_is_answered_with_a_big_endian_length_it_can_read() {
+        let reply = lgt_local_chessmaster_response(&REGISTER).expect("the registration is answered");
+
+        // The reader takes a four-byte big-endian length first, so the length has
+        // to describe the body that follows it - the 0x0c000100 it read off the
+        // ez-i stand-in before was what had it allocate 192 MiB and die.
+        let length = u32::from_be_bytes([reply[0], reply[1], reply[2], reply[3]]) as usize;
+        assert_eq!(length, reply.len() - 4);
+    }
+
+    #[test]
+    fn only_a_big_endian_framed_registration_is_claimed() {
+        // The ez-i SDK's own 28-byte request is little-endian framed; its first
+        // four bytes as a big-endian length do not describe it, so it is left for
+        // the ez-i stand-in rather than taken here.
+        let ezi: [u8; 28] = [
+            0x18, 0x00, 0x01, 0x00, b'0', b'1', b'0', b'5', b'5', b'8', b'6', b'6', b'7', b'0', b'3', 0x00, 0x39, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(lgt_local_chessmaster_response(&ezi), None);
+
+        // A frame whose big-endian length fits but whose body is not a
+        // subscriber-led registration is not this charge either.
+        let mut bogus = REGISTER;
+        bogus[4] = b'-';
+        assert_eq!(lgt_local_chessmaster_response(&bogus), None);
+    }
+}
+
 pub fn response(request: &[u8]) -> Option<Vec<u8>> {
     // First: its signature is four things at once - see
     // `lgt_local_maguer2011_response` - so nothing else can be taken for it,
     // and it cannot take anything else.
     lgt_local_maguer2011_response(request)
+        .or_else(|| lgt_local_chessmaster_response(request))
         .or_else(|| lgt_local_granted_response(request))
         .or_else(|| lgt_local_cash_response(request))
         .or_else(|| lgt_local_seotda_response(request))

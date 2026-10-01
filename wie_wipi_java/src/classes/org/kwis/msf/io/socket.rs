@@ -42,21 +42,24 @@ const BILLING_RESPONSE: [u8; 20] = [
 
 /// The billing gateway, as a local-network connection.
 ///
-/// The answer is armed when the connection opens and again whenever the SDK
-/// sends a request, so it is there whichever order the SDK reads and writes in -
-/// the reference SDK writes its 28 byte request and then reads, but a stream
-/// opened and read without one still finds the answer waiting, which is what
-/// the stand-in stream this replaces always did.
+/// The answer is shaped when the SDK sends its request and waits there for the
+/// read that follows. Nothing is queued before that write: `SocketInputStream`
+/// waits out an empty read the way a live socket waits out a would-block, so a
+/// reader that runs ahead of the write (the ez-i titles read on their own
+/// thread) blocks until the answer its own request shaped is ready, rather than
+/// taking a reply meant for no request at all. 체스마스터 is why this matters -
+/// it opens `BillSocket://` and its reader reads a four-byte big-endian length
+/// first, so a reply pre-queued before its request (the ez-i SDK's own, whose
+/// first four bytes read big-endian are 0x0c000100 ≈ 192 MiB) had it allocate
+/// that much and die on the spot with 등록중 never clearing.
 struct BillingGateway {
-    /// What is left of the answer to hand back.
+    /// What is left of the answer to hand back, empty until a request shapes one.
     pending: Vec<u8>,
 }
 
 impl BillingGateway {
-    fn armed() -> Self {
-        Self {
-            pending: BILLING_RESPONSE.to_vec(),
-        }
+    fn new() -> Self {
+        Self { pending: Vec::new() }
     }
 }
 
@@ -174,7 +177,7 @@ impl Socket {
             let system = context.system();
             let mut local_network = system.local_network();
 
-            local_network.open("billing gateway", Box::new(BillingGateway::armed()))
+            local_network.open("billing gateway", Box::new(BillingGateway::new()))
         };
 
         let Some(descriptor) = descriptor else {
@@ -326,7 +329,7 @@ mod billing_gateway_tests {
         // The shop stops on whichever of the two goes unanswered, so both have
         // to come back whole.
         for frame in [SUDDEN_ATTACK_PURCHASE, SUDDEN_ATTACK_MEDALS] {
-            let mut gateway = BillingGateway::armed();
+            let mut gateway = BillingGateway::new();
             gateway.write(&frame);
 
             let body = read_framed(&mut gateway);
@@ -342,7 +345,7 @@ mod billing_gateway_tests {
     fn a_purchase_is_answered_the_way_it_reads_as_granted() {
         let _guard = ONE_AT_A_TIME.lock();
 
-        let mut gateway = BillingGateway::armed();
+        let mut gateway = BillingGateway::new();
         gateway.write(&SUDDEN_ATTACK_PURCHASE);
 
         // Zero is what its parser has to leave behind for the shop to draw
