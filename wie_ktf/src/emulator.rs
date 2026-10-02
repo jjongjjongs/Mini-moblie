@@ -196,6 +196,7 @@ impl KtfEmulator {
         system.set_title_annunciator_rows(title_quirks(TitlePlatform::Ktf, aid).annunciator_rows);
         system.set_title_clears_screen_each_paint(title_quirks(TitlePlatform::Ktf, aid).clears_screen_each_paint);
         system.set_title_blank_mutable_image_transparent(title_quirks(TitlePlatform::Ktf, aid).blank_mutable_image_transparent);
+        system.set_title_present_crop_bottom(title_quirks(TitlePlatform::Ktf, aid).present_crop_bottom);
 
         for (path, data) in files {
             let path = packaged_name(path).unwrap_or(path);

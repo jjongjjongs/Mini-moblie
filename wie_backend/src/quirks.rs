@@ -444,6 +444,13 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // 던전앤파이터 격투가: draws 296 rows into the 320 its descriptor asks for
     // and leaves the rest alone, so the panel is the 296 it draws.
     (TitlePlatform::Ktf, "0103BF27", panel_transparent_mutable(240, 296)),
+    // 인형뽑기타이쿤: every screen - title, menu, town and the cutscenes between
+    // - leaves the bottom 24 rows of its 240x320 panel alone for the handset's
+    // soft-key strip, which our buffer showed as a white band. It reserves that
+    // strip from the height it is told, so a shorter panel only moves the band up;
+    // instead keep the full 320 it draws for and crop the 24-row strip away as the
+    // frame reaches the screen.
+    (TitlePlatform::Ktf, "0102E32F", panel(240, 320).with_bottom_cropped(24)),
     // 겟앰프드: its descriptor says 240*320, but every full-screen picture it
     // carries - title, menu, each map - is 240x296, and it centres its popup
     // frame in whatever height the screen reports. Told 320 it put the frame at
@@ -523,13 +530,6 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // 광개토대왕정벌기: drawn for a 176x216 handset. Size it to that panel so its
     // screens fill the display instead of sitting in the top-left of the default.
     (TitlePlatform::Skt, "0047856534", panel(176, 216)),
-    // 인형뽑기타이쿤: draws a fixed 240x200 scene and centres it in whatever
-    // screen height it is handed, so on the 240x320 default it sat in the middle
-    // with a 60-row black band above and below. Sizing it to 240x200 lands the
-    // scene edge to edge. Its descriptor (`1.msd`) carries no DD-ProgName, so the
-    // id falls back to the filename stem `1` - the generic key is unfortunate but
-    // is the one both the save layer and the screen lookup actually compute.
-    (TitlePlatform::Skt, "1", panel(240, 200)),
     // 썸머스케치: a 2003 ensony title laid out for a 120x160 handset. It takes
     // the screen size it is told and draws to it, but its art sits at a fixed
     // size, so on the 240x320 default its title, menu and scenes shrink into the
@@ -895,10 +895,12 @@ mod tests {
         assert_eq!(title_quirks(TitlePlatform::Skt, "0027765524").screen_size, Some((120, 160)));
     }
 
-    /// 인형뽑기타이쿤 (descriptor id "1") fills a 240x200 panel.
+    /// 인형뽑기타이쿤 (KTF) keeps its 240x320 panel but crops the 24-row soft-key
+    /// strip off the bottom of the frame.
     #[test]
-    fn pick_the_doll_asks_for_its_240x200_scene() {
-        assert_eq!(title_quirks(TitlePlatform::Skt, "1").screen_size, Some((240, 200)));
+    fn pick_the_doll_ktf_crops_its_softkey_strip() {
+        assert_eq!(title_quirks(TitlePlatform::Ktf, "0102E32F").screen_size, Some((240, 320)));
+        assert_eq!(title_quirks(TitlePlatform::Ktf, "0102E32F").present_crop_bottom, 24);
     }
 
     /// An id appearing twice for one platform would make the table's answer
