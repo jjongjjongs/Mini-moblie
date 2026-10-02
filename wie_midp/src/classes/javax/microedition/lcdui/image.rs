@@ -183,6 +183,20 @@ impl Image {
     ) -> JvmResult<ClassInstanceRef<Image>> {
         tracing::debug!("javax.microedition.lcdui.Image::createImage({data:?}, {image_offset}, {image_length})");
 
+        // The spec throws ArrayIndexOutOfBoundsException when the region falls
+        // outside the array. Games read a tile strip by slicing a fixed-size
+        // tile out of it until the read runs off the end, and catch the throw to
+        // stop - 광개토대왕정벌기 reads 424-byte tiles out of its 10176-byte
+        // tiledata0.dat that way. Check the range so that overrun turns into the
+        // catchable Java exception the game expects, not a host panic that takes
+        // the whole emulator down.
+        let array_length = jvm.array_length(&data).await? as i64;
+        if image_offset < 0 || image_length < 0 || image_offset as i64 + image_length as i64 > array_length {
+            return Err(jvm
+                .exception("java/lang/ArrayIndexOutOfBoundsException", "createImage range is outside the array")
+                .await);
+        }
+
         let mut image_data = vec![0; image_length as usize];
         jvm.array_raw_buffer(&data).await?.read(image_offset as _, &mut image_data)?;
 
