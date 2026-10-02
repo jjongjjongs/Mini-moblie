@@ -559,6 +559,9 @@ public final class MainActivity extends Activity {
         // as focus is lost.
         if (!hasFocus) {
             releaseKeypad();
+        } else if (playerVisible) {
+            // Regaining focus clears sticky immersive, so put it back.
+            setImmersive(true);
         }
     }
 
@@ -805,6 +808,8 @@ public final class MainActivity extends Activity {
         setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
         // The home screen is light, so the status-bar icons must go dark.
         setLightStatusBar(true);
+        // The library is an ordinary screen with its bars.
+        setImmersive(false);
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -2420,6 +2425,37 @@ public final class MainActivity extends Activity {
         getWindow().setStatusBarColor(light ? LIB_BG : COLOR_PANEL);
     }
 
+    /** The status- and navigation-bar flags immersive mode owns. */
+    private static final int IMMERSIVE_FLAGS =
+            View.SYSTEM_UI_FLAG_FULLSCREEN
+            | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+            | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
+
+    /**
+     * Sticky immersive while the player is up: the status and navigation bars
+     * hide so the game and keypad have the whole screen, and a swipe in from an
+     * edge brings them back translucent for a moment before they slide away
+     * again. Off for the library, which is an ordinary screen with its bars.
+     *
+     * Only the immersive flags are touched, so the light/dark status-bar icon
+     * choice {@link #setLightStatusBar} makes is left as it is. The system
+     * clears sticky immersive whenever the window loses and regains focus - a
+     * dialog, the shade, coming back from the background - so
+     * {@link #onWindowFocusChanged} re-applies it.
+     */
+    private void setImmersive(boolean on) {
+        View decor = getWindow().getDecorView();
+        int flags = decor.getSystemUiVisibility();
+        if (on) {
+            flags |= IMMERSIVE_FLAGS;
+        } else {
+            flags &= ~IMMERSIVE_FLAGS;
+        }
+        decor.setSystemUiVisibility(flags);
+    }
+
     /** What a long press offers: move the saves about, or drop the game. */
     private void showGameMenu(File game) {
         // The two actions shared with the batch menu (📁 폴더 내보내기, 📥 폴더
@@ -3718,6 +3754,9 @@ public final class MainActivity extends Activity {
         orientationPinned = false;
         // The player is a dark device again, so restore light status-bar icons.
         setLightStatusBar(false);
+        // The game and keypad take the whole screen; the bars come back on a
+        // swipe from an edge and slide away again.
+        setImmersive(true);
 
         // Persistent views, kept across rotations so the last frame and any
         // held keys survive a re-layout instead of being torn down.
