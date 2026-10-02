@@ -158,26 +158,28 @@ impl XDisplay {
     }
 
     /// Draws a `src_width` by `src_height` region of `src` at (`x`, `y`) on
-    /// `graphics`, transparent where `mask` says so or - with no mask - where the
-    /// source is the magenta colour-key.
+    /// `graphics`, transparent where the source is the magenta colour-key and,
+    /// where a `mask` is given, clipped by it.
     ///
-    /// SK-VM's vendor sprite blit covers two cases. With a mask it is the 1-bit
-    /// two-pass technique a device with no alpha uses: the mask carries white
-    /// where the sprite shows through to what is already on screen and black
-    /// where its own pixels replace it, the source carries the sprite's colours
-    /// on black, and `dest = (dest AND mask) OR src` then leaves the background
-    /// untouched and the sprite opaque.
+    /// The source carries its own transparency as a colour-key: magenta (0xF81F
+    /// in RGB565, the 255,0,255 the vendor tool fills around a sprite) is the one
+    /// colour that does not draw. 다크슬레이어2 draws everything this way - its
+    /// font glyphs, its field tiles and its sprites all sit on magenta - so
+    /// copying a region opaque left every one boxed in magenta, and over a light
+    /// background the magenta was the picture.
     ///
-    /// With no mask the source carries its own transparency as a colour-key:
-    /// magenta (0xF81F in RGB565, the 255,0,255 the vendor tool fills around a
-    /// sprite) is the one colour that does not draw. 다크슬레이어2 draws almost
-    /// everything this way - its font glyphs and its field sprites alike sit on
-    /// magenta - so copying the region opaque left every glyph and sprite boxed
-    /// in magenta, and over a light background the magenta was the picture. A
-    /// region with no magenta in it, such as a solid bar, copies through whole.
-    /// Only `flag` 0 (no transform) is evidenced; any other is drawn as if 0 and
-    /// noted. The reference emulator (wfeature, `xDisplayDrawImageEx`) reads the
-    /// same arguments - `src` is the fifth, and the second is the mask.
+    /// The second image is not the 1-bit AND/OR sprite mask the name suggests.
+    /// It is the size of the whole destination surface, not of the source tile,
+    /// and the title fills it white: it is a destination-space stencil, white
+    /// where drawing is allowed and black where it is held back, read at the
+    /// destination pixel rather than the source. 다크슬레이어2 composes its field
+    /// into a 182x154 off-screen buffer and passes that buffer's own all-white
+    /// stencil with every tile; read as an AND/OR mask instead, `dest AND white`
+    /// kept the white the buffer starts as and `OR src` could not darken it, so
+    /// the whole field drew white under the character. Honoured as a stencil it
+    /// lets every tile through, and a genuinely black stencil pixel still holds
+    /// its dest. Only `flag` 0 (no transform) is evidenced; any other is drawn as
+    /// if 0 and noted.
     #[allow(clippy::too_many_arguments)]
     async fn draw_image_ex(
         jvm: &Jvm,
@@ -210,6 +212,8 @@ impl XDisplay {
             return Ok(());
         }
 
+        const MAGENTA_565: u16 = 0xF81F;
+
         let translate_x: i32 = jvm.get_field(&graphics, "translateX", "I").await?;
         let translate_y: i32 = jvm.get_field(&graphics, "translateY", "I").await?;
         let (dx, dy) = (x + translate_x, y + translate_y);
@@ -221,12 +225,14 @@ impl XDisplay {
         let mut canvas = Image::canvas(jvm, &target).await?;
 
         if mask.is_null() {
-            // No mask: the source's own magenta is its transparency.
-            const MAGENTA_565: u16 = 0xF81F;
+            // The source's own magenta is its transparency.
             canvas.draw_with_color_key(dx, dy, src_width as u32, src_height as u32, &*src_image, src_x, src_y, clip, MAGENTA_565);
             return Ok(());
         }
 
+        // A stencil the size of the destination, read at the destination pixel:
+        // the source's magenta is still what makes the sprite transparent, and a
+        // black stencil pixel is the only thing that holds a source pixel back.
         let mask_image = Image::image(jvm, &mask).await?;
         let (width, height) = (canvas.image().width() as i32, canvas.image().height() as i32);
 
@@ -244,15 +250,17 @@ impl XDisplay {
                 }
 
                 let source = src_image.get_pixel(source_x, source_y);
-                let m = mask_image.get_pixel(source_x.min(mask_image.width() as i32 - 1), source_y.min(mask_image.height() as i32 - 1));
-                let d = canvas.image().get_pixel(px, py);
-                let color = Color {
-                    a: 0xff,
-                    r: (d.r & m.r) | source.r,
-                    g: (d.g & m.g) | source.g,
-                    b: (d.b & m.b) | source.b,
-                };
-                canvas.put_pixel(px, py, color);
+                let source565 = (((source.r as u16) << 8) & 0xf800) | (((source.g as u16) << 3) & 0x07e0) | ((source.b as u16 >> 3) & 0x001f);
+                if source565 == MAGENTA_565 {
+                    continue;
+                }
+
+                let m = mask_image.get_pixel(px.min(mask_image.width() as i32 - 1), py.min(mask_image.height() as i32 - 1));
+                if m.r == 0 && m.g == 0 && m.b == 0 {
+                    continue;
+                }
+
+                canvas.put_pixel(px, py, Color { a: 0xff, ..source });
             }
         }
 
