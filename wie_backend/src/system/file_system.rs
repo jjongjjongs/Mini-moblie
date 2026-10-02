@@ -89,6 +89,14 @@ pub struct FilesystemOverlay {
     /// Whether a read may fall back to a packaged entry whose name differs
     /// only in case. Off unless the platform layer turns it on.
     case_insensitive_reads: Arc<AtomicBool>,
+    /// Paths deleted through the overlay. The platform layer forgets a removed
+    /// file, but the packaged virtual layer cannot, so a delete of a file that
+    /// ships in the archive would otherwise still read as present. A tombstone
+    /// hides the packaged copy so the file stays gone until something writes it
+    /// again. 광개토대왕정벌기's 새로하기 deletes its packaged save (`war`,
+    /// `map`, `GT_set`) and then spins until it reads as gone; without this it
+    /// never did and new game hung.
+    removed: Arc<Mutex<BTreeSet<String>>>,
 }
 
 impl FilesystemOverlay {
@@ -98,6 +106,7 @@ impl FilesystemOverlay {
             virtual_files: Arc::new(Mutex::new(HashMap::new())),
             aid: Arc::from(aid),
             case_insensitive_reads: Arc::new(AtomicBool::new(false)),
+            removed: Arc::new(Mutex::new(BTreeSet::new())),
         }
     }
 
@@ -165,6 +174,9 @@ impl FilesystemOverlay {
         if self.platform.filesystem().exists(&self.aid, &normalized).await {
             return true;
         }
+        if self.removed.lock().contains(&normalized) {
+            return false;
+        }
         let normalized = self.resolve_read(normalized).await;
         self.virtual_files.lock().contains_key(&normalized)
     }
@@ -207,6 +219,9 @@ impl FilesystemOverlay {
         if let Some(size) = self.platform.filesystem().size(&self.aid, &normalized).await {
             return Some(size);
         }
+        if self.removed.lock().contains(&normalized) {
+            return None;
+        }
         let normalized = self.resolve_read(normalized).await;
         self.virtual_files.lock().get(&normalized).map(|d| d.len())
     }
@@ -217,6 +232,9 @@ impl FilesystemOverlay {
         let plat_fs = self.platform.filesystem();
         if plat_fs.exists(&self.aid, &normalized).await {
             return plat_fs.read(&self.aid, &normalized, offset, count, buf).await;
+        }
+        if self.removed.lock().contains(&normalized) {
+            return None;
         }
 
         let normalized = self.resolve_read(normalized).await;
@@ -237,7 +255,10 @@ impl FilesystemOverlay {
 
         self.materialize(&normalized).await;
 
-        self.platform.filesystem().write(&self.aid, &normalized, offset, data).await
+        let written = self.platform.filesystem().write(&self.aid, &normalized, offset, data).await;
+        // The file is back in the writable layer, so it is no longer deleted.
+        self.removed.lock().remove(&normalized);
+        written
     }
 
     pub async fn truncate(&self, path: &str, len: usize) {
@@ -253,6 +274,8 @@ impl FilesystemOverlay {
         }
 
         self.platform.filesystem().truncate(&self.aid, &normalized, len).await;
+        // Truncating (re)creates a writable file, so it is no longer deleted.
+        self.removed.lock().remove(&normalized);
     }
 
     /// Copies a packaged file into the writable layer before it is modified.
@@ -270,6 +293,12 @@ impl FilesystemOverlay {
     /// reports as 인증실패, refusing to start.
     async fn materialize(&self, normalized: &str) {
         if self.platform.filesystem().exists(&self.aid, normalized).await {
+            return;
+        }
+
+        // A deleted file starts empty when it is written again, rather than
+        // coming back to the packaged bytes it was deleted to be rid of.
+        if self.removed.lock().contains(normalized) {
             return;
         }
 
@@ -291,7 +320,17 @@ impl FilesystemOverlay {
             return false;
         };
 
-        self.platform.filesystem().remove(&self.aid, &normalized).await
+        let removed_from_platform = self.platform.filesystem().remove(&self.aid, &normalized).await;
+
+        // A packaged copy would still read as present, so record a tombstone to
+        // hide it; a later write clears it. Report success when the file existed
+        // in either layer, since it is gone from the overlay's view afterwards.
+        let shadowed_packaged = self.virtual_files.lock().contains_key(&self.resolve_read(normalized.clone()).await);
+        if shadowed_packaged {
+            self.removed.lock().insert(normalized);
+        }
+
+        removed_from_platform || shadowed_packaged
     }
 
     pub async fn mkdir(&self, path: &str) -> core::result::Result<(), crate::platform::FilesystemMkdirError> {
@@ -408,6 +447,12 @@ impl FilesystemOverlay {
                 continue;
             };
             if rest.is_empty() {
+                continue;
+            }
+
+            // A tombstoned direct child is deleted and must not be listed; a
+            // deeper path still implies its directory, so only skip exact files.
+            if !rest.contains('/') && self.removed.lock().contains(key) {
                 continue;
             }
 
@@ -776,6 +821,41 @@ mod tests {
         let mut buf = [0u8; 4];
         assert_eq!(fs.read("cfg.dat", 0, 4, &mut buf).await, Some(4));
         assert_eq!(buf, [1, 2, 3, 4]);
+    }
+
+    /// 광개토대왕정벌기's 새로하기 deletes its packaged save and waits for it to
+    /// read as gone. Removing a packaged file tombstones it, so it no longer
+    /// exists, has no size, and reads as missing.
+    #[futures_test::test]
+    async fn a_removed_packaged_file_stays_gone() {
+        let fs = setup();
+        fs.add_virtual("war", vec![1, 2, 3]);
+        assert!(fs.exists("war").await);
+
+        assert!(fs.remove("war").await);
+
+        assert!(!fs.exists("war").await);
+        assert_eq!(fs.size("war").await, None);
+        let mut buf = [0u8; 3];
+        assert_eq!(fs.read("war", 0, 3, &mut buf).await, None);
+        assert!(!fs.list("").await.unwrap_or_default().iter().any(|e| e == "war"));
+    }
+
+    /// Writing a tombstoned file brings it back - with what was written, not the
+    /// packaged bytes it was deleted to be rid of.
+    #[futures_test::test]
+    async fn a_removed_packaged_file_comes_back_empty_when_written_again() {
+        let fs = setup();
+        fs.add_virtual("war", vec![0xAA, 0xBB, 0xCC, 0xDD]);
+
+        assert!(fs.remove("war").await);
+        fs.write("war", 0, &[9]).await;
+
+        assert!(fs.exists("war").await);
+        assert_eq!(fs.size("war").await, Some(1));
+        let mut buf = [0u8; 1];
+        assert_eq!(fs.read("war", 0, 1, &mut buf).await, Some(1));
+        assert_eq!(buf, [9]);
     }
 
     /// 영웅서기5 rewrites the directory at the front of its packaged `kickass`
