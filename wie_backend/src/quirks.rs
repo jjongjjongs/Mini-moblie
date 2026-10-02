@@ -503,6 +503,14 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // whole. See TitleQuirks::repaints_whole_frame.
     (TitlePlatform::Lgt, "00023917", repaints_whole_frame()),
     (TitlePlatform::Skt, "3826345643", clip_includes_far_edge()),
+    // 몬스터보이: composes its field map a tile at a time, clipping each 16x16
+    // cell with `setClip(x, y, 15, 15)` before it blits the tile sheet. The
+    // handset it was drawn for counted the far edge in, so 15 reached the
+    // sixteenth pixel; on the exclusive-clip default each tile fell a pixel short
+    // on its right and bottom and left the fill under the map showing through as
+    // an orange grid over every screen. Counting the far edge in draws the whole
+    // cell and the grid is gone.
+    (TitlePlatform::Skt, "0052335225", clip_includes_far_edge()),
     // 얼라이브: drawn for a 176x220 handset - its title sky, menu and the city
     // under them, and every screen after, are laid out 176 wide and down to
     // row 220. On the 240x320 default it drew in the left 176 columns, left
