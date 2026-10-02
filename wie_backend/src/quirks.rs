@@ -523,6 +523,13 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // 광개토대왕정벌기: drawn for a 176x216 handset. Size it to that panel so its
     // screens fill the display instead of sitting in the top-left of the default.
     (TitlePlatform::Skt, "0047856534", panel(176, 216)),
+    // 인형뽑기타이쿤: draws a fixed 240x200 scene and centres it in whatever
+    // screen height it is handed, so on the 240x320 default it sat in the middle
+    // with a 60-row black band above and below. Sizing it to 240x200 lands the
+    // scene edge to edge. Its descriptor (`1.msd`) carries no DD-ProgName, so the
+    // id falls back to the filename stem `1` - the generic key is unfortunate but
+    // is the one both the save layer and the screen lookup actually compute.
+    (TitlePlatform::Skt, "1", panel(240, 200)),
     // 썸머스케치: a 2003 ensony title laid out for a 120x160 handset. It takes
     // the screen size it is told and draws to it, but its art sits at a fixed
     // size, so on the 240x320 default its title, menu and scenes shrink into the
@@ -886,6 +893,12 @@ mod tests {
     #[test]
     fn summer_sketch_asks_for_its_120x160_handset() {
         assert_eq!(title_quirks(TitlePlatform::Skt, "0027765524").screen_size, Some((120, 160)));
+    }
+
+    /// 인형뽑기타이쿤 (descriptor id "1") fills a 240x200 panel.
+    #[test]
+    fn pick_the_doll_asks_for_its_240x200_scene() {
+        assert_eq!(title_quirks(TitlePlatform::Skt, "1").screen_size, Some((240, 200)));
     }
 
     /// An id appearing twice for one platform would make the table's answer
