@@ -35,6 +35,12 @@ impl XDisplay {
                     Self::copy_lcd,
                     MethodAccessFlags::STATIC,
                 ),
+                JavaMethodProto::new(
+                    "drawImageEx",
+                    "(Ljavax/microedition/lcdui/Graphics;Ljavax/microedition/lcdui/Image;IILjavax/microedition/lcdui/Image;IIIII)V",
+                    Self::draw_image_ex,
+                    MethodAccessFlags::STATIC,
+                ),
             ],
             fields: vec![
                 JavaFieldProto::new("width", "I", FieldAccessFlags::STATIC),
@@ -149,6 +155,97 @@ impl XDisplay {
         }
 
         Self::copy_screen(jvm, &image, x, y, width, height).await
+    }
+
+    /// Draws a `src_width` by `src_height` region of `src` at (`x`, `y`) on
+    /// `graphics`, made transparent by `mask`.
+    ///
+    /// SK-VM's vendor sprite blit, the two-pass 1-bit technique a device with no
+    /// alpha uses: the mask carries white where the sprite is to show through to
+    /// what is already on screen and black where its own pixels replace it, and
+    /// the source carries the sprite's colours on black. `dest = (dest AND mask)
+    /// OR src` then leaves the background untouched and the sprite opaque. A null
+    /// mask is an opaque blit - a straight copy of the region - which is how
+    /// 다크슬레이어2 draws the solid bars it has no transparency to keep. Only
+    /// `flag` 0 (no transform) is evidenced; any other is drawn as if 0 and
+    /// noted. The reference emulator (wfeature, `xDisplayDrawImageEx`) reads the
+    /// same arguments - `src` is the fifth, and the second is the mask.
+    #[allow(clippy::too_many_arguments)]
+    async fn draw_image_ex(
+        jvm: &Jvm,
+        _context: &mut WieJvmContext,
+        mut graphics: ClassInstanceRef<Graphics>,
+        mask: ClassInstanceRef<Image>,
+        x: i32,
+        y: i32,
+        src: ClassInstanceRef<Image>,
+        src_x: i32,
+        src_y: i32,
+        src_width: i32,
+        src_height: i32,
+        flag: i32,
+    ) -> JvmResult<()> {
+        tracing::debug!(
+            "com.xce.lcdui.XDisplay::drawImageEx({graphics:?}, {mask:?}, {x}, {y}, {src:?}, {src_x}, {src_y}, {src_width}, {src_height}, {flag})"
+        );
+
+        if graphics.is_null() {
+            return Err(jvm.exception("java/lang/NullPointerException", "graphics is null").await);
+        }
+        if src.is_null() {
+            return Err(jvm.exception("java/lang/NullPointerException", "src is null").await);
+        }
+        if flag != 0 {
+            tracing::warn!("com.xce.lcdui.XDisplay::drawImageEx flag {flag} drawn as 0");
+        }
+        if src_width <= 0 || src_height <= 0 {
+            return Ok(());
+        }
+
+        let translate_x: i32 = jvm.get_field(&graphics, "translateX", "I").await?;
+        let translate_y: i32 = jvm.get_field(&graphics, "translateY", "I").await?;
+        let (dx, dy) = (x + translate_x, y + translate_y);
+        let clip = Graphics::clip(jvm, &graphics).await?;
+
+        let src_image = Image::image(jvm, &src).await?;
+        let mask_image = if mask.is_null() { None } else { Some(Image::image(jvm, &mask).await?) };
+
+        let target = Graphics::image(jvm, &mut graphics).await?;
+        let mut canvas = Image::canvas(jvm, &target).await?;
+        let (width, height) = (canvas.image().width() as i32, canvas.image().height() as i32);
+
+        for row in 0..src_height {
+            for column in 0..src_width {
+                let (source_x, source_y) = (src_x + column, src_y + row);
+                if source_x < 0 || source_y < 0 || source_x >= src_image.width() as i32 || source_y >= src_image.height() as i32 {
+                    continue;
+                }
+
+                let (px, py) = (dx + column, dy + row);
+                let inside_clip = px >= clip.x && px < clip.x + clip.width as i32 && py >= clip.y && py < clip.y + clip.height as i32;
+                if !inside_clip || px < 0 || py < 0 || px >= width || py >= height {
+                    continue;
+                }
+
+                let source = src_image.get_pixel(source_x, source_y);
+                let color = match &mask_image {
+                    None => Color { a: 0xff, ..source },
+                    Some(mask_image) => {
+                        let m = mask_image.get_pixel(source_x.min(mask_image.width() as i32 - 1), source_y.min(mask_image.height() as i32 - 1));
+                        let d = canvas.image().get_pixel(px, py);
+                        Color {
+                            a: 0xff,
+                            r: (d.r & m.r) | source.r,
+                            g: (d.g & m.g) | source.g,
+                            b: (d.b & m.b) | source.b,
+                        }
+                    }
+                };
+                canvas.put_pixel(px, py, color);
+            }
+        }
+
+        Ok(())
     }
 
     /// The screen: the image the current display's canvas paints into and the

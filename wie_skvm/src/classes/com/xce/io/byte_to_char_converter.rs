@@ -29,6 +29,7 @@ impl ByteToCharConverter {
             methods: vec![
                 JavaMethodProto::new("<init>", "()V", Self::init, Default::default()),
                 JavaMethodProto::new("convert", "([BII[CII)I", Self::convert, Default::default()),
+                JavaMethodProto::new("flush", "([CII)I", Self::flush, Default::default()),
                 JavaMethodProto::new(
                     "getConverter",
                     "(Ljava/lang/String;)Lcom/xce/io/ByteToCharConverter;",
@@ -97,6 +98,31 @@ impl ByteToCharConverter {
         jvm.store_array(&mut output, out_start as _, chars).await?;
 
         Ok(written)
+    }
+
+    /// Flushes whatever a multibyte sequence split across two `convert` calls
+    /// left pending, writing it into `output[out_start..out_end]` and answering
+    /// how many chars that was.
+    ///
+    /// `sun.io`'s converters carry the lead byte of a two-byte character over
+    /// to the next call when the input ends mid-character; `flush` is how a
+    /// caller drains that tail once the last bytes are in. This one decodes each
+    /// `convert` whole and keeps nothing between calls, so there is never a tail
+    /// to drain and the answer is always zero. 다크슬레이어2 decodes its EUC-KR
+    /// resource strings through `ByteToCharEUC_KR` and calls `flush` after
+    /// `convert` on its loading thread; without the method that thread died on
+    /// `NoSuchMethodError` and never posted the event that leaves the splash.
+    async fn flush(
+        _jvm: &Jvm,
+        _context: &mut WieJvmContext,
+        this: ClassInstanceRef<Self>,
+        _output: ClassInstanceRef<Array<u16>>,
+        out_start: i32,
+        out_end: i32,
+    ) -> JvmResult<i32> {
+        tracing::debug!("com.xce.io.ByteToCharConverter::flush({this:?}, {out_start}, {out_end})");
+
+        Ok(0)
     }
 }
 
