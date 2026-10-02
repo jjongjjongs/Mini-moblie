@@ -561,7 +561,7 @@ public final class MainActivity extends Activity {
             releaseKeypad();
         } else if (playerVisible) {
             // Regaining focus clears sticky immersive, so put it back.
-            setImmersive(true);
+            applyImmersive(true);
         }
     }
 
@@ -809,7 +809,7 @@ public final class MainActivity extends Activity {
         // The home screen is light, so the status-bar icons must go dark.
         setLightStatusBar(true);
         // The library is an ordinary screen with its bars.
-        setImmersive(false);
+        applyImmersive(false);
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -2445,7 +2445,7 @@ public final class MainActivity extends Activity {
      * dialog, the shade, coming back from the background - so
      * {@link #onWindowFocusChanged} re-applies it.
      */
-    private void setImmersive(boolean on) {
+    private void applyImmersive(boolean on) {
         View decor = getWindow().getDecorView();
         int flags = decor.getSystemUiVisibility();
         if (on) {
@@ -3756,7 +3756,7 @@ public final class MainActivity extends Activity {
         setLightStatusBar(false);
         // The game and keypad take the whole screen; the bars come back on a
         // swipe from an edge and slide away again.
-        setImmersive(true);
+        applyImmersive(true);
 
         // Persistent views, kept across rotations so the last frame and any
         // held keys survive a re-layout instead of being torn down.
