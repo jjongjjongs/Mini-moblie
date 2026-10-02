@@ -61,41 +61,50 @@ impl ByteToCharConverter {
         Ok(converter.into())
     }
 
-    /// Decodes `input[in_start..in_end]` into `output[out_start..out_end]`,
-    /// returning how many chars were written.
+    /// Decodes `in_length` bytes of `input` from `in_offset` into `output` from
+    /// `out_offset`, up to `out_length` chars, returning how many were written.
+    ///
+    /// SK-VM's `convert` takes an offset and a length for each buffer, not the
+    /// start and end indices `sun.io`'s own `convert` takes. 다크슬레이어2 reads
+    /// its UI strings out of one resource buffer back to back - `convert(buf,
+    /// 127, 4, ...)`, then `convert(buf, 131, 11, ...)`, each offset the last
+    /// plus its length - so read as end indices the second argument fell below
+    /// the first and every string came back empty, which is why the menus drew
+    /// their boxes with no text in them. The reference emulator reads the same
+    /// two as an offset and a count.
     ///
     /// `sun.io` throws when the output buffer fills before the input runs out.
-    /// This stops at `out_end` and reports what fitted instead: a title that
+    /// This stops at `out_length` and reports what fitted instead: a title that
     /// sized its buffer correctly cannot tell the difference, and one that did
     /// not gets a short answer rather than an exception it has no handler for.
-    // The argument list is `sun.io`'s, so it is as long as the descriptor says.
+    // The argument list is the descriptor's, so it is as long as the descriptor says.
     #[allow(clippy::too_many_arguments)]
     async fn convert(
         jvm: &Jvm,
         _context: &mut WieJvmContext,
         this: ClassInstanceRef<Self>,
         input: ClassInstanceRef<Array<i8>>,
-        in_start: i32,
-        in_end: i32,
+        in_offset: i32,
+        in_length: i32,
         mut output: ClassInstanceRef<Array<u16>>,
-        out_start: i32,
-        out_end: i32,
+        out_offset: i32,
+        out_length: i32,
     ) -> JvmResult<i32> {
-        tracing::debug!("com.xce.io.ByteToCharConverter::convert({this:?}, {input:?}, {in_start}, {in_end}, {out_start}, {out_end})");
+        tracing::debug!("com.xce.io.ByteToCharConverter::convert({this:?}, {input:?}, {in_offset}, {in_length}, {out_offset}, {out_length})");
 
-        if in_start < 0 || in_end < in_start || out_start < 0 || out_end < out_start {
+        if in_offset < 0 || in_length <= 0 || out_offset < 0 || out_length <= 0 {
             return Ok(0);
         }
 
-        let bytes: alloc::vec::Vec<i8> = jvm.load_array(&input, in_start as _, (in_end - in_start) as _).await?;
+        let bytes: alloc::vec::Vec<i8> = jvm.load_array(&input, in_offset as _, in_length as _).await?;
         let bytes = bytemuck::cast_slice::<i8, u8>(&bytes);
 
         let decoded = encoding_rs::EUC_KR.decode(bytes).0;
 
-        let chars = decoded.encode_utf16().take((out_end - out_start) as _).collect::<alloc::vec::Vec<_>>();
+        let chars = decoded.encode_utf16().take(out_length as _).collect::<alloc::vec::Vec<_>>();
         let written = chars.len() as i32;
 
-        jvm.store_array(&mut output, out_start as _, chars).await?;
+        jvm.store_array(&mut output, out_offset as _, chars).await?;
 
         Ok(written)
     }
@@ -117,10 +126,10 @@ impl ByteToCharConverter {
         _context: &mut WieJvmContext,
         this: ClassInstanceRef<Self>,
         _output: ClassInstanceRef<Array<u16>>,
-        out_start: i32,
-        out_end: i32,
+        out_offset: i32,
+        out_length: i32,
     ) -> JvmResult<i32> {
-        tracing::debug!("com.xce.io.ByteToCharConverter::flush({this:?}, {out_start}, {out_end})");
+        tracing::debug!("com.xce.io.ByteToCharConverter::flush({this:?}, {out_offset}, {out_length})");
 
         Ok(0)
     }
@@ -174,6 +183,36 @@ mod tests {
 
             assert_eq!(written, 2);
             assert_eq!(text, "안녕");
+
+            Ok(())
+        })
+    }
+
+    /// The second and fifth arguments are lengths, not end indices: a title
+    /// that reads back-to-back substrings passes a rising offset with each
+    /// one's own length, so decoding has to start at the offset and run for the
+    /// length. 안녕 sits here eight bytes into the buffer.
+    #[test]
+    fn a_substring_is_decoded_from_its_offset_for_its_length() -> Result<()> {
+        run_jvm_test(protos(), |jvm| async move {
+            let converter = jvm.new_class("com/xce/io/ByteToCharEUC_KR", "()V", ()).await?;
+
+            // eight bytes of filler, then 안녕 (four EUC-KR bytes), then filler.
+            let buffer = [0u8, 0, 0, 0, 0, 0, 0, 0, 0xBE, 0xC8, 0xB3, 0xE7, 0x41, 0x42];
+            let mut input = jvm.instantiate_array("B", buffer.len() as _).await?;
+            jvm.store_array(&mut input, 0, buffer.iter().map(|x| *x as i8).collect::<Vec<_>>())
+                .await?;
+            let output = jvm.instantiate_array("C", 64).await?;
+
+            let written: i32 = jvm
+                .invoke_virtual(&converter, "convert", "([BII[CII)I", (input, 8i32, 4i32, output.clone(), 0i32, 64i32))
+                .await?;
+
+            let output: ClassInstanceRef<Array<u16>> = output.into();
+            let chars: Vec<u16> = jvm.load_array(&output, 0, written.max(0) as _).await?;
+
+            assert_eq!(written, 2);
+            assert_eq!(String::from_utf16_lossy(&chars), "안녕");
 
             Ok(())
         })

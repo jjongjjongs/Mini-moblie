@@ -93,6 +93,31 @@ impl Platform for CapturePlatform {
     }
 }
 
+fn key_by_name(name: &str) -> Option<wie_backend::KeyCode> {
+    use wie_backend::KeyCode::*;
+    Some(match name.to_ascii_uppercase().as_str() {
+        "UP" => UP,
+        "DOWN" => DOWN,
+        "LEFT" => LEFT,
+        "RIGHT" => RIGHT,
+        "OK" | "FIRE" => OK,
+        "CLEAR" | "CLR" => CLEAR,
+        "NUM0" => NUM0,
+        "NUM1" => NUM1,
+        "NUM2" => NUM2,
+        "NUM3" => NUM3,
+        "NUM4" => NUM4,
+        "NUM5" => NUM5,
+        "NUM6" => NUM6,
+        "NUM7" => NUM7,
+        "NUM8" => NUM8,
+        "NUM9" => NUM9,
+        "HASH" => HASH,
+        "STAR" => STAR,
+        _ => return None,
+    })
+}
+
 #[test]
 fn skt_probe() {
     let Ok(path) = std::env::var("WIE_SKT_ZIP") else {
@@ -127,11 +152,50 @@ fn skt_probe() {
         }
     };
 
+    // `WIE_SCRIPT="tick:KEY,tick:KEY"` presses are held 20 ticks each.
+    let script: Vec<(u32, wie_backend::KeyCode)> = std::env::var("WIE_SCRIPT")
+        .ok()
+        .map(|s| {
+            s.split(',')
+                .filter(|x| !x.trim().is_empty())
+                .map(|pair| {
+                    let (t, k) = pair.split_once(':').expect("tick:KEY");
+                    (t.trim().parse().unwrap(), key_by_name(k.trim()).expect("key name"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // `WIE_FDUMP_DIR` + `WIE_FDUMP_EVERY` dump a PPM every N ticks into the dir.
+    let fdump_dir = std::env::var("WIE_FDUMP_DIR").ok();
+    let fdump_every: u32 = std::env::var("WIE_FDUMP_EVERY").ok().and_then(|x| x.parse().ok()).unwrap_or(250);
+    if let Some(dir) = &fdump_dir {
+        let _ = std::fs::create_dir_all(dir);
+    }
+
     let mut ticks = 0;
     let mut stopped = None;
     while ticks < ticks_limit && !exited.load(Ordering::SeqCst) {
         if ticks % 40 == 0 {
             emulator.handle_event(Event::Redraw);
+        }
+        if let Some(dir) = &fdump_dir {
+            if ticks > 0 && ticks % fdump_every == 0 {
+                let c = screen.captured.lock().unwrap();
+                if !c.pixels.is_empty() {
+                    let mut ppm = format!("P6\n{} {}\n255\n", c.width, c.height).into_bytes();
+                    ppm.extend_from_slice(&c.pixels);
+                    let _ = std::fs::write(format!("{dir}/t{ticks:06}.ppm"), ppm);
+                }
+            }
+        }
+        for &(at, key) in &script {
+            if ticks == at {
+                emulator.handle_event(Event::Keydown(key));
+            }
+            if ticks == at + 20 {
+                emulator.handle_event(Event::Keyup(key));
+            }
         }
         if let Err(error) = emulator.tick() {
             stopped = Some(error);

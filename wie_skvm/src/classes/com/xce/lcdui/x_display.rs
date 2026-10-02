@@ -158,16 +158,24 @@ impl XDisplay {
     }
 
     /// Draws a `src_width` by `src_height` region of `src` at (`x`, `y`) on
-    /// `graphics`, made transparent by `mask`.
+    /// `graphics`, transparent where `mask` says so or - with no mask - where the
+    /// source is the magenta colour-key.
     ///
-    /// SK-VM's vendor sprite blit, the two-pass 1-bit technique a device with no
-    /// alpha uses: the mask carries white where the sprite is to show through to
-    /// what is already on screen and black where its own pixels replace it, and
-    /// the source carries the sprite's colours on black. `dest = (dest AND mask)
-    /// OR src` then leaves the background untouched and the sprite opaque. A null
-    /// mask is an opaque blit - a straight copy of the region - which is how
-    /// 다크슬레이어2 draws the solid bars it has no transparency to keep. Only
-    /// `flag` 0 (no transform) is evidenced; any other is drawn as if 0 and
+    /// SK-VM's vendor sprite blit covers two cases. With a mask it is the 1-bit
+    /// two-pass technique a device with no alpha uses: the mask carries white
+    /// where the sprite shows through to what is already on screen and black
+    /// where its own pixels replace it, the source carries the sprite's colours
+    /// on black, and `dest = (dest AND mask) OR src` then leaves the background
+    /// untouched and the sprite opaque.
+    ///
+    /// With no mask the source carries its own transparency as a colour-key:
+    /// magenta (0xF81F in RGB565, the 255,0,255 the vendor tool fills around a
+    /// sprite) is the one colour that does not draw. 다크슬레이어2 draws almost
+    /// everything this way - its font glyphs and its field sprites alike sit on
+    /// magenta - so copying the region opaque left every glyph and sprite boxed
+    /// in magenta, and over a light background the magenta was the picture. A
+    /// region with no magenta in it, such as a solid bar, copies through whole.
+    /// Only `flag` 0 (no transform) is evidenced; any other is drawn as if 0 and
     /// noted. The reference emulator (wfeature, `xDisplayDrawImageEx`) reads the
     /// same arguments - `src` is the fifth, and the second is the mask.
     #[allow(clippy::too_many_arguments)]
@@ -208,10 +216,18 @@ impl XDisplay {
         let clip = Graphics::clip(jvm, &graphics).await?;
 
         let src_image = Image::image(jvm, &src).await?;
-        let mask_image = if mask.is_null() { None } else { Some(Image::image(jvm, &mask).await?) };
 
         let target = Graphics::image(jvm, &mut graphics).await?;
         let mut canvas = Image::canvas(jvm, &target).await?;
+
+        if mask.is_null() {
+            // No mask: the source's own magenta is its transparency.
+            const MAGENTA_565: u16 = 0xF81F;
+            canvas.draw_with_color_key(dx, dy, src_width as u32, src_height as u32, &*src_image, src_x, src_y, clip, MAGENTA_565);
+            return Ok(());
+        }
+
+        let mask_image = Image::image(jvm, &mask).await?;
         let (width, height) = (canvas.image().width() as i32, canvas.image().height() as i32);
 
         for row in 0..src_height {
@@ -228,18 +244,13 @@ impl XDisplay {
                 }
 
                 let source = src_image.get_pixel(source_x, source_y);
-                let color = match &mask_image {
-                    None => Color { a: 0xff, ..source },
-                    Some(mask_image) => {
-                        let m = mask_image.get_pixel(source_x.min(mask_image.width() as i32 - 1), source_y.min(mask_image.height() as i32 - 1));
-                        let d = canvas.image().get_pixel(px, py);
-                        Color {
-                            a: 0xff,
-                            r: (d.r & m.r) | source.r,
-                            g: (d.g & m.g) | source.g,
-                            b: (d.b & m.b) | source.b,
-                        }
-                    }
+                let m = mask_image.get_pixel(source_x.min(mask_image.width() as i32 - 1), source_y.min(mask_image.height() as i32 - 1));
+                let d = canvas.image().get_pixel(px, py);
+                let color = Color {
+                    a: 0xff,
+                    r: (d.r & m.r) | source.r,
+                    g: (d.g & m.g) | source.g,
+                    b: (d.b & m.b) | source.b,
                 };
                 canvas.put_pixel(px, py, color);
             }
