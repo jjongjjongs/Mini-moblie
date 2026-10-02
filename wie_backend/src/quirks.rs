@@ -391,6 +391,20 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // offers its own keypad and the title takes the WIPI keys that drive from it,
     // those bottom 80 rows are cropped away so the 320-row scene shows alone.
     (TitlePlatform::Lgt, "0002FBB4", panel(240, 400).with_bottom_cropped(80)),
+    // 초코초코타이쿤 (게임빌): a native C engine that composes its scene below the
+    // handset's 24-row status strip - its タイムゲージ machine starts one strip
+    // down and fills the rest, with the cacao-block targets and their counts on
+    // the last rows. Without the strip reserved the whole scene lands 24 rows low
+    // (a black band above it) and those bottom rows - the targets, the counts,
+    // the `#:SKIP`/key bar - fall off the panel. Reserving the strip puts the
+    // scene back at the top and brings its bottom back onto the screen.
+    (TitlePlatform::Lgt, "00029F79", annunciator()),
+    // KBO 프로야구 2009 (LGT, ZIO interactive): the same - it lays its screens out
+    // below the 24-row strip (the batter view's `*:게임메뉴`/`#:작전메뉴` bar, the
+    // roster's `현재자산` line are on the last rows), so without it reserved the
+    // scene sits a strip low and that bottom bar is cut. Its KTF build (01035ACD)
+    // draws the whole panel itself and keeps its own 240x320 entry.
+    (TitlePlatform::Lgt, "0002A8D4", annunciator()),
     // 판타지나이트: without the strip its bottom 24 rows keep a stale band.
     (TitlePlatform::Lgt, "0002787C", annunciator()),
     // 프로야구 2009.
