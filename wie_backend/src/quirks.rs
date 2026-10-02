@@ -520,9 +520,9 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // in draws each region whole. It is sized to a 176x220 handset so its
     // screens fill the panel instead of leaving a margin.
     (TitlePlatform::Skt, "0052550560", panel(176, 220).with_clip_including_far_edge()),
-    // 광개토대왕정벌기: drawn for a 176x220 handset. Size it to that panel so its
+    // 광개토대왕정벌기: drawn for a 176x216 handset. Size it to that panel so its
     // screens fill the display instead of sitting in the top-left of the default.
-    (TitlePlatform::Skt, "0047856534", panel(176, 220)),
+    (TitlePlatform::Skt, "0047856534", panel(176, 216)),
     // 얼라이브: drawn for a 176x220 handset - its title sky, menu and the city
     // under them, and every screen after, are laid out 176 wide and down to
     // row 220. On the 240x320 default it drew in the left 176 columns, left
@@ -870,10 +870,10 @@ mod tests {
         assert_eq!(title_quirks(TitlePlatform::Skt, "0052550560").screen_size, Some((176, 220)));
     }
 
-    /// 광개토대왕정벌기 fills a 176x220 panel.
+    /// 광개토대왕정벌기 fills a 176x216 panel.
     #[test]
     fn gwanggaeto_asks_for_its_176_wide_handset() {
-        assert_eq!(title_quirks(TitlePlatform::Skt, "0047856534").screen_size, Some((176, 220)));
+        assert_eq!(title_quirks(TitlePlatform::Skt, "0047856534").screen_size, Some((176, 216)));
     }
 
     /// An id appearing twice for one platform would make the table's answer

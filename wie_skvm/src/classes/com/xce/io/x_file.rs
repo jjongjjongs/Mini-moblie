@@ -189,10 +189,19 @@ impl XFile {
         Ok(size as _)
     }
 
-    async fn unlink(_jvm: &Jvm, _context: &mut WieJvmContext, name: ClassInstanceRef<String>) -> JvmResult<i32> {
-        tracing::warn!("stub com.xce.io.XFile::unlink({name:?})");
+    async fn unlink(jvm: &Jvm, _context: &mut WieJvmContext, name: ClassInstanceRef<String>) -> JvmResult<i32> {
+        tracing::debug!("com.xce.io.XFile::unlink({name:?})");
 
-        Ok(0)
+        // Delete the named file. 광개토대왕정벌기's 새로하기 wipes the old save and
+        // then spins its main loop polling XFile.exists until the file is gone; a
+        // stub that never deleted left exists true forever, so new game hung on a
+        // frozen screen. Delete through java.io.File so the backing file really
+        // goes away. Return 0 on success and -1 otherwise, the usual unlink sense.
+        Self::require_name(jvm, &name).await?;
+        let file = jvm.new_class("java/io/File", "(Ljava/lang/String;)V", (name,)).await?;
+        let deleted: bool = jvm.invoke_virtual(&file, "delete", "()Z", ()).await?;
+
+        Ok(if deleted { 0 } else { -1 })
     }
 
     /// Free space on the file system, which titles check before saving.
