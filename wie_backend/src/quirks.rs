@@ -523,12 +523,12 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // 광개토대왕정벌기: drawn for a 176x216 handset. Size it to that panel so its
     // screens fill the display instead of sitting in the top-left of the default.
     (TitlePlatform::Skt, "0047856534", panel(176, 216)),
-    // 썸머스케치: a 2003 ensony title laid out for a 176x208 handset. It takes
+    // 썸머스케치: a 2003 ensony title laid out for a 120x160 handset. It takes
     // the screen size it is told and draws to it, but its art sits at a fixed
     // size, so on the 240x320 default its title, menu and scenes shrink into the
-    // top of the screen with a dead band below. Sizing it to 176x208 fills the
-    // panel with the least wasted margin.
-    (TitlePlatform::Skt, "0027765524", panel(176, 208)),
+    // top of the screen with a dead band below. Sizing it to 120x160 fills the
+    // panel - title, menu and scenes all reach every edge.
+    (TitlePlatform::Skt, "0027765524", panel(120, 160)),
     // 얼라이브: drawn for a 176x220 handset - its title sky, menu and the city
     // under them, and every screen after, are laid out 176 wide and down to
     // row 220. On the 240x320 default it drew in the left 176 columns, left
@@ -882,10 +882,10 @@ mod tests {
         assert_eq!(title_quirks(TitlePlatform::Skt, "0047856534").screen_size, Some((176, 216)));
     }
 
-    /// 썸머스케치 fills a 176x208 panel.
+    /// 썸머스케치 fills a 120x160 panel.
     #[test]
-    fn summer_sketch_asks_for_its_176x208_handset() {
-        assert_eq!(title_quirks(TitlePlatform::Skt, "0027765524").screen_size, Some((176, 208)));
+    fn summer_sketch_asks_for_its_120x160_handset() {
+        assert_eq!(title_quirks(TitlePlatform::Skt, "0027765524").screen_size, Some((120, 160)));
     }
 
     /// An id appearing twice for one platform would make the table's answer
