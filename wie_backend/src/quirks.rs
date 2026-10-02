@@ -405,6 +405,10 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // scene sits a strip low and that bottom bar is cut. Its KTF build (01035ACD)
     // draws the whole panel itself and keeps its own 240x320 entry.
     (TitlePlatform::Lgt, "0002A8D4", annunciator()),
+    // 베이징올림픽 2008 (LGT, ZIO interactive): the same ZIO engine as KBO 2009,
+    // composing below the 24-row strip, so without it reserved every screen lands
+    // a strip low with its bottom row cut.
+    (TitlePlatform::Lgt, "0002728F", annunciator()),
     // 판타지나이트: without the strip its bottom 24 rows keep a stale band.
     (TitlePlatform::Lgt, "0002787C", annunciator()),
     // 프로야구 2009.
