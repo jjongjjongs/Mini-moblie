@@ -325,7 +325,10 @@ impl FilesystemOverlay {
         // A packaged copy would still read as present, so record a tombstone to
         // hide it; a later write clears it. Report success when the file existed
         // in either layer, since it is gone from the overlay's view afterwards.
-        let shadowed_packaged = self.virtual_files.lock().contains_key(&self.resolve_read(normalized.clone()).await);
+        // resolve_read takes the virtual_files lock itself, so resolve first and
+        // only then lock - taking the lock around the call would re-enter it.
+        let resolved = self.resolve_read(normalized.clone()).await;
+        let shadowed_packaged = self.virtual_files.lock().contains_key(&resolved);
         if shadowed_packaged {
             self.removed.lock().insert(normalized);
         }
@@ -839,6 +842,20 @@ mod tests {
         let mut buf = [0u8; 3];
         assert_eq!(fs.read("war", 0, 3, &mut buf).await, None);
         assert!(!fs.list("").await.unwrap_or_default().iter().any(|e| e == "war"));
+    }
+
+    /// remove resolves the packaged name before it locks the virtual layer.
+    /// SK-VM turns case-insensitive reads on, which makes that resolve take the
+    /// same lock; doing it inside the lock re-enters a non-reentrant spinlock
+    /// and the delete hangs - which is exactly how 광개토대왕정벌기 froze.
+    #[futures_test::test]
+    async fn remove_does_not_deadlock_with_case_insensitive_reads() {
+        let fs = setup();
+        fs.enable_case_insensitive_reads();
+        fs.add_virtual("war", vec![1, 2, 3]);
+
+        assert!(fs.remove("war").await);
+        assert!(!fs.exists("war").await);
     }
 
     /// Writing a tombstoned file brings it back - with what was written, not the
