@@ -127,6 +127,9 @@ impl Graphics {
                 JavaMethodProto::new("setClip", "(IIII)V", Self::set_clip, Default::default()),
                 JavaMethodProto::new("clipRect", "(IIII)V", Self::clip_rect, Default::default()),
                 JavaMethodProto::new("getColor", "()I", Self::get_color, Default::default()),
+                JavaMethodProto::new("getRedComponent", "()I", Self::get_red_component, Default::default()),
+                JavaMethodProto::new("getGreenComponent", "()I", Self::get_green_component, Default::default()),
+                JavaMethodProto::new("getBlueComponent", "()I", Self::get_blue_component, Default::default()),
                 JavaMethodProto::new("getClipX", "()I", Self::get_clip_x, Default::default()),
                 JavaMethodProto::new("getClipY", "()I", Self::get_clip_y, Default::default()),
                 JavaMethodProto::new("getClipWidth", "()I", Self::get_clip_width, Default::default()),
@@ -954,6 +957,36 @@ impl Graphics {
         let color: i32 = jvm.get_field(&this, "color", "I").await?;
 
         Ok(color)
+    }
+
+    /// The red, green and blue of the current colour, each 0-255, which the MIDP
+    /// `Graphics` answers off the `0x00RRGGBB` it keeps.
+    ///
+    /// 모바일크래프트 reads all three back to mix its own shade of the colour it
+    /// has just set - it is its first paint's first act - so without them the
+    /// paint died on a `NoSuchMethodError` before the title drew.
+    async fn get_red_component(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<i32> {
+        tracing::debug!("javax.microedition.lcdui.Graphics::getRedComponent({this:?})");
+
+        let color: i32 = jvm.get_field(&this, "color", "I").await?;
+
+        Ok((color >> 16) & 0xff)
+    }
+
+    async fn get_green_component(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<i32> {
+        tracing::debug!("javax.microedition.lcdui.Graphics::getGreenComponent({this:?})");
+
+        let color: i32 = jvm.get_field(&this, "color", "I").await?;
+
+        Ok((color >> 8) & 0xff)
+    }
+
+    async fn get_blue_component(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<i32> {
+        tracing::debug!("javax.microedition.lcdui.Graphics::getBlueComponent({this:?})");
+
+        let color: i32 = jvm.get_field(&this, "color", "I").await?;
+
+        Ok(color & 0xff)
     }
 
     async fn get_clip_x(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Graphics>) -> JvmResult<i32> {

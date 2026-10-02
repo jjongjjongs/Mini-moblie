@@ -532,6 +532,11 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // default it played in a small box in the middle of the screen. 144 rows
     // is the Canvas of a 120x160 handset, the sixteen soft-key rows under it.
     (TitlePlatform::Skt, "0054532850", panel(120, 160)),
+    // 모바일크래프트: a 2004 title laid out 120 wide and centred on the Canvas -
+    // its title art, its menu and its battlefield all stand about 120x140 - so
+    // on the 240x320 default it drew in a small square adrift in the middle of
+    // the screen. The 120x160 handset it was made for is the panel that fills.
+    (TitlePlatform::Skt, "3507010790", panel(120, 160)),
     // 로맨스소드: drawn for a 176-wide handset - its title art comes in 120- and
     // 176-wide variants (main_logo_120, main_logo_176) chosen off getWidth(). On
     // the 240x320 default it took the width>=240 branch, asked for a
@@ -836,6 +841,13 @@ mod tests {
     #[test]
     fn dark_slayer_2_asks_for_the_panel_its_scene_fills() {
         assert_eq!(title_quirks(TitlePlatform::Skt, "0049884301").screen_size, Some((240, 208)));
+    }
+
+    /// 모바일크래프트 is a 120-wide title centred on the Canvas, so it asks for the
+    /// 120x160 handset it was drawn for rather than the 240x320 default.
+    #[test]
+    fn mobile_craft_asks_for_its_120_wide_handset() {
+        assert_eq!(title_quirks(TitlePlatform::Skt, "3507010790").screen_size, Some((120, 160)));
     }
 
     /// An id appearing twice for one platform would make the table's answer
