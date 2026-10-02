@@ -511,6 +511,14 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // an orange grid over every screen. Counting the far edge in draws the whole
     // cell and the grid is gone.
     (TitlePlatform::Skt, "0052335225", clip_includes_far_edge()),
+    // 동방사신기: drawn for a handset whose clip took in its far edge. It clips
+    // the whole screen with `setClip(0, 0, 239, 319)` where 239 and 319 are the
+    // last pixel, not a width and a height - and its field a tile at a time the
+    // same way - so on the exclusive-clip default the screen lost its last row
+    // and column and every tile fell a pixel short, which showed as the grid
+    // over the field and the torn bands across the menu. Counting the far edge
+    // in draws each region whole.
+    (TitlePlatform::Skt, "0052550560", clip_includes_far_edge()),
     // 얼라이브: drawn for a 176x220 handset - its title sky, menu and the city
     // under them, and every screen after, are laid out 176 wide and down to
     // row 220. On the 240x320 default it drew in the left 176 columns, left
@@ -848,6 +856,13 @@ mod tests {
     #[test]
     fn mobile_craft_asks_for_its_120_wide_handset() {
         assert_eq!(title_quirks(TitlePlatform::Skt, "3507010790").screen_size, Some((120, 160)));
+    }
+
+    /// 동방사신기 sizes its clips to the far edge, so it counts it in.
+    #[test]
+    fn dongbang_counts_the_clips_far_edge_in() {
+        assert!(title_quirks(TitlePlatform::Skt, "0052550560").clip_includes_far_edge);
+        assert_eq!(title_quirks(TitlePlatform::Skt, "0052550560").screen_size, None);
     }
 
     /// An id appearing twice for one platform would make the table's answer
