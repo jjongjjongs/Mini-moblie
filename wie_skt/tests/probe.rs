@@ -22,9 +22,11 @@ struct Captured {
     frames: u32,
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 struct CaptureScreen {
     captured: Arc<Mutex<Captured>>,
+    width: u32,
+    height: u32,
 }
 
 impl Screen for CaptureScreen {
@@ -45,10 +47,10 @@ impl Screen for CaptureScreen {
         c.pixels = pixels;
     }
     fn width(&self) -> u32 {
-        240
+        self.width
     }
     fn height(&self) -> u32 {
-        320
+        self.height
     }
 }
 
@@ -132,9 +134,22 @@ fn skt_probe() {
     let archive = std::fs::read(&path).expect("read archive");
     let files = extract_zip(&archive).expect("extract archive");
 
+    // A host sizes its screen from the title's own quirk before the emulator
+    // exists; `WIE_SCR_W`/`WIE_SCR_H` force a size instead, to try others.
+    let (screen_w, screen_h) = match SktEmulator::screen_size(&archive) {
+        Some((w, h)) => (w, h),
+        None => (240, 320),
+    };
+    let screen_w = std::env::var("WIE_SCR_W").ok().and_then(|x| x.parse().ok()).unwrap_or(screen_w);
+    let screen_h = std::env::var("WIE_SCR_H").ok().and_then(|x| x.parse().ok()).unwrap_or(screen_h);
+
     let exited = Arc::new(AtomicBool::new(false));
     let exited_clone = exited.clone();
-    let screen = CaptureScreen::default();
+    let screen = CaptureScreen {
+        captured: Default::default(),
+        width: screen_w,
+        height: screen_h,
+    };
     let platform = Box::new(CapturePlatform {
         inner: TestPlatform::with_event_handler(move |event| match event {
             TestPlatformEvent::Stdout(buf) => eprint!("[stdout] {}", String::from_utf8_lossy(&buf)),

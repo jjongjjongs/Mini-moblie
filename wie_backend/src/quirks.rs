@@ -536,6 +536,15 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // there and drew into a small box adrift on the black default. Its full
     // background mbg176 is 176x202, so the 176 panel is the one it composes for.
     (TitlePlatform::Skt, "0052039193", panel(176, 208)),
+    // 다크슬레이어2: lays itself out to whatever screen it is told, but its field
+    // is a fixed 182x154 view with a status panel under it that together stand
+    // 195 rows tall, and it centres that block on the Canvas. On the 240x320
+    // default the block sat in the middle with a wide black band above and below
+    // it; the title, the cutscenes and every other screen centre the same way
+    // and leave the same bands. A 240x208 panel is the smallest the field block,
+    // the title and the dialogue all fit, so told that size the game fills the
+    // screen with no content lost - only the unused black is gone.
+    (TitlePlatform::Skt, "0049884301", panel(240, 208)),
     // 바운티블루스: drawn for a 128-wide handset - its field, portraits and
     // dialogue art are 128 wide - and it lays the screen out from the Canvas
     // height (`getHeight() + 16`): a 144-row field and a 32-row status panel
@@ -812,6 +821,13 @@ mod tests {
         assert!(quirks.drawn_sideways);
         assert_eq!(quirks.screen_size, None);
         assert!(!quirks.expects_annunciator);
+    }
+
+    /// 다크슬레이어2 centres a fixed-height scene on the Canvas, so a panel sized
+    /// to that scene wraps it with no black band rather than the 240x320 default.
+    #[test]
+    fn dark_slayer_2_asks_for_the_panel_its_scene_fills() {
+        assert_eq!(title_quirks(TitlePlatform::Skt, "0049884301").screen_size, Some((240, 208)));
     }
 
     /// An id appearing twice for one platform would make the table's answer
