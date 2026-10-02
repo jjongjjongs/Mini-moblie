@@ -5,6 +5,7 @@ use java_constants::MethodAccessFlags;
 use java_runtime::classes::java::{
     io::{InputStream, RandomAccessFile},
     lang::String,
+    util::zip::ZipEntry,
 };
 use jvm::{Array, ClassInstanceRef, Jvm, Result as JvmResult, runtime::JavaLangString};
 
@@ -28,6 +29,12 @@ impl XFile {
             interfaces: vec![],
             methods: vec![
                 JavaMethodProto::new("<init>", "(Ljava/lang/String;I)V", Self::init, Default::default()),
+                JavaMethodProto::new(
+                    "<init>",
+                    "(Ljava/lang/String;Ljava/lang/String;)V",
+                    Self::init_in_archive,
+                    Default::default(),
+                ),
                 JavaMethodProto::new("exists", "(Ljava/lang/String;)Z", Self::exists, MethodAccessFlags::STATIC),
                 JavaMethodProto::new("filesize", "(Ljava/lang/String;)I", Self::filesize, MethodAccessFlags::STATIC),
                 JavaMethodProto::new("unlink", "(Ljava/lang/String;)I", Self::unlink, MethodAccessFlags::STATIC),
@@ -97,6 +104,51 @@ impl XFile {
             jvm.put_field(&mut this, "mode", "I", mode).await?;
             jvm.put_field(&mut this, "type", "I", mode).await?;
         }
+
+        Ok(())
+    }
+
+    /// Opens the entry `entry` of the archive `archive`, to be read like a
+    /// resource.
+    ///
+    /// SK-VM's XFile takes an archive and a name inside it as well as a name and
+    /// a mode: 프린세스메이커4 keeps its scenario text in a `data.jar` beside the
+    /// application and reads each `data<n>.txt` out of it through `new
+    /// XFile("data.jar", "data" + n + ".txt")`, on the thread that paints its
+    /// first in-game screen; without the constructor that paint died on a
+    /// `NoSuchMethodError` the moment the game began. The entry is read-only and
+    /// stream-backed, the same as a resource opened by name, so the read,
+    /// available and close that follow all take the resource path.
+    async fn init_in_archive(
+        jvm: &Jvm,
+        _context: &mut WieJvmContext,
+        mut this: ClassInstanceRef<Self>,
+        archive: ClassInstanceRef<String>,
+        entry: ClassInstanceRef<String>,
+    ) -> JvmResult<()> {
+        tracing::debug!("com.xce.io.XFile::<init>({this:?}, {archive:?}, {entry:?})");
+
+        let _: () = jvm.invoke_special(&this, "java/lang/Object", "<init>", "()V", ()).await?;
+        Self::require_name(jvm, &archive).await?;
+        Self::require_name(jvm, &entry).await?;
+
+        let file = jvm.new_class("java/io/File", "(Ljava/lang/String;)V", (archive,)).await?;
+        let zip = jvm.new_class("java/util/zip/ZipFile", "(Ljava/io/File;)V", (file,)).await?;
+
+        let zip_entry: ClassInstanceRef<ZipEntry> = jvm
+            .invoke_virtual(&zip, "getEntry", "(Ljava/lang/String;)Ljava/util/zip/ZipEntry;", (entry,))
+            .await?;
+        if zip_entry.is_null() {
+            return Err(jvm.exception("java/io/FileNotFoundException", "entry not found in archive").await);
+        }
+
+        let resource_stream: ClassInstanceRef<InputStream> = jvm
+            .invoke_virtual(&zip, "getInputStream", "(Ljava/util/zip/ZipEntry;)Ljava/io/InputStream;", (zip_entry,))
+            .await?;
+
+        jvm.put_field(&mut this, "is", "Ljava/io/InputStream;", resource_stream).await?;
+        jvm.put_field(&mut this, "mode", "I", READ_RESOURCE).await?;
+        jvm.put_field(&mut this, "type", "I", READ_RESOURCE).await?;
 
         Ok(())
     }
@@ -309,5 +361,126 @@ impl XFile {
         let raf = jvm.get_field(&this, "raf", "Ljava/io/RandomAccessFile;").await?;
 
         Ok(raf)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::{boxed::Box, vec, vec::Vec};
+
+    use jvm::{Array, ClassInstanceRef, runtime::JavaLangString};
+
+    use test_utils::run_jvm_test_with_files;
+    use wie_util::Result;
+
+    use crate::get_protos;
+
+    fn protos() -> Box<[Box<[wie_jvm_support::WieJavaClassProto]>]> {
+        Box::new([wie_midp::get_protos().into(), get_protos().into()])
+    }
+
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &byte in data {
+            crc ^= byte as u32;
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+            }
+        }
+        !crc
+    }
+
+    /// A one-entry zip with the entry stored, not deflated.
+    fn stored_zip(name: &str, data: &[u8]) -> Vec<u8> {
+        let name = name.as_bytes();
+        let crc = crc32(data);
+        let size = data.len() as u32;
+        let mut zip = Vec::new();
+
+        // local file header, then the entry's data
+        zip.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        zip.extend_from_slice(&20u16.to_le_bytes());
+        zip.extend_from_slice(&[0u8; 8]); // flags, method (stored), time, date
+        zip.extend_from_slice(&crc.to_le_bytes());
+        zip.extend_from_slice(&size.to_le_bytes());
+        zip.extend_from_slice(&size.to_le_bytes());
+        zip.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(name);
+        zip.extend_from_slice(data);
+
+        // central directory
+        let central_offset = zip.len() as u32;
+        zip.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+        zip.extend_from_slice(&20u16.to_le_bytes());
+        zip.extend_from_slice(&20u16.to_le_bytes());
+        zip.extend_from_slice(&[0u8; 8]); // flags, method, time, date
+        zip.extend_from_slice(&crc.to_le_bytes());
+        zip.extend_from_slice(&size.to_le_bytes());
+        zip.extend_from_slice(&size.to_le_bytes());
+        zip.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        zip.extend_from_slice(&[0u8; 8]); // extra len, comment len, disk start, internal attrs
+        zip.extend_from_slice(&0u32.to_le_bytes()); // external attrs
+        zip.extend_from_slice(&0u32.to_le_bytes()); // local header offset
+        zip.extend_from_slice(name);
+        let central_size = zip.len() as u32 - central_offset;
+
+        // end of central directory
+        zip.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        zip.extend_from_slice(&[0u8; 4]); // disks
+        zip.extend_from_slice(&1u16.to_le_bytes());
+        zip.extend_from_slice(&1u16.to_le_bytes());
+        zip.extend_from_slice(&central_size.to_le_bytes());
+        zip.extend_from_slice(&central_offset.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+
+        zip
+    }
+
+    /// The two-name constructor reads a named entry out of the archive.
+    #[test]
+    fn an_entry_is_read_out_of_an_archive() -> Result<()> {
+        let archive = stored_zip("data0.txt", b"PRINCESS");
+
+        run_jvm_test_with_files(protos(), &[("data.jar", archive)], |jvm| async move {
+            let name = JavaLangString::from_rust_string(&jvm, "data.jar").await?;
+            let entry = JavaLangString::from_rust_string(&jvm, "data0.txt").await?;
+            let xfile = jvm
+                .new_class("com/xce/io/XFile", "(Ljava/lang/String;Ljava/lang/String;)V", (name, entry))
+                .await?;
+
+            let available: i32 = jvm.invoke_virtual(&xfile, "available", "()I", ()).await?;
+            assert_eq!(available, 8);
+
+            let buffer = jvm.instantiate_array("B", 8).await?;
+            let read: i32 = jvm.invoke_virtual(&xfile, "read", "([BII)I", (buffer.clone(), 0i32, 8i32)).await?;
+            let _: () = jvm.invoke_virtual(&xfile, "close", "()V", ()).await?;
+
+            let buffer: ClassInstanceRef<Array<i8>> = buffer.into();
+            let bytes: Vec<i8> = jvm.load_array(&buffer, 0, read.max(0) as _).await?;
+            assert_eq!(bytes.into_iter().map(|x| x as u8).collect::<Vec<_>>(), b"PRINCESS");
+
+            Ok(())
+        })
+    }
+
+    /// A name the archive does not hold is a `FileNotFoundException` the title
+    /// can catch, not a failure of the run.
+    #[test]
+    fn a_name_not_in_the_archive_is_file_not_found() -> Result<()> {
+        let archive = stored_zip("data0.txt", b"X");
+
+        run_jvm_test_with_files(protos(), &[("data.jar", archive)], |jvm| async move {
+            let name = JavaLangString::from_rust_string(&jvm, "data.jar").await?;
+            let entry = JavaLangString::from_rust_string(&jvm, "missing.txt").await?;
+
+            let result = jvm
+                .new_class("com/xce/io/XFile", "(Ljava/lang/String;Ljava/lang/String;)V", (name, entry))
+                .await;
+
+            assert!(result.is_err());
+
+            Ok(())
+        })
     }
 }
