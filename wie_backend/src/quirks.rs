@@ -530,6 +530,17 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // 광개토대왕정벌기: drawn for a 176x216 handset. Size it to that panel so its
     // screens fill the display instead of sitting in the top-left of the default.
     (TitlePlatform::Skt, "0047856534", panel(176, 216)),
+    // 인형뽑기타이쿤 (SK-VM): every full-screen background it ships is 176x202
+    // (vil_map, school_bg, room_bg, intro_bg, dollshopbg, ...), so that is the
+    // handset it was drawn for. On the 240x320 default it drew each 176-wide
+    // screen into the top-left and left the 64 columns and 118 rows outside it
+    // holding whatever the last screen had put there - the menu girl's arm stayed
+    // down the right of the town, and the menu's own items spread down a screen
+    // twice as tall as the art. Sizing it to 176x202 lands every screen whole and
+    // matches the KTF build. Its descriptor (1.msd) carries no DD-ProgName, so the
+    // id falls back to the filename stem "1", which is what the screen lookup and
+    // the save layer both compute for it.
+    (TitlePlatform::Skt, "1", panel(176, 202)),
     // 썸머스케치: a 2003 ensony title laid out for a 120x160 handset. It takes
     // the screen size it is told and draws to it, but its art sits at a fixed
     // size, so on the 240x320 default its title, menu and scenes shrink into the
@@ -887,6 +898,12 @@ mod tests {
     #[test]
     fn gwanggaeto_asks_for_its_176_wide_handset() {
         assert_eq!(title_quirks(TitlePlatform::Skt, "0047856534").screen_size, Some((176, 216)));
+    }
+
+    /// 인형뽑기타이쿤 (SK-VM, descriptor id "1") fills a 176x202 panel.
+    #[test]
+    fn pick_the_doll_skvm_asks_for_its_176x202_handset() {
+        assert_eq!(title_quirks(TitlePlatform::Skt, "1").screen_size, Some((176, 202)));
     }
 
     /// 썸머스케치 fills a 120x160 panel.
