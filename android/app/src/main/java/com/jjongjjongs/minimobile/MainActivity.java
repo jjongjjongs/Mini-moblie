@@ -77,7 +77,8 @@ import java.util.Locale;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipInputStream;
-import java.nio.ShortBuffer;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 
 /**
@@ -4556,6 +4557,21 @@ public final class MainActivity extends Activity {
         // crisp (sharp pixels) instead of the blur bilinear filtering gives.
         private final Paint paint = new Paint();
         private Bitmap bitmap;
+        /**
+         * A direct buffer the frame's pixels are copied into before they reach
+         * {@link Bitmap#copyPixelsFromBuffer}.
+         *
+         * Handing that method the array-backed {@code ShortBuffer.wrap(frame, 2,
+         * ...)} directly made it reach the backing {@code short[]} through
+         * {@code GetPrimitiveArrayCritical} at the wrap's non-zero offset, and
+         * the matching release freed a pointer that offset had moved off its
+         * allocation - "invalid address passed to free", a native SIGABRT in
+         * {@code ReleasePrimitiveArrayCritical} seen on arm64 / Android 7. A
+         * direct buffer is read straight from its own memory, so that JNI path
+         * is never taken. Reused across frames and grown only when a larger
+         * screen needs it.
+         */
+        private ByteBuffer pixelBuffer;
         /** In landscape the screen is centered at its own aspect; see onMeasure. */
         boolean landscape;
 
@@ -4608,7 +4624,18 @@ public final class MainActivity extends Activity {
                 }
             }
 
-            bitmap.copyPixelsFromBuffer(ShortBuffer.wrap(frame, 2, width * height));
+            // Copy the pixels (frame[2..]) into a direct buffer and hand that to
+            // copyPixelsFromBuffer, rather than the array-backed wrap - see the
+            // pixelBuffer field for why the wrap crashed on some devices. Native
+            // order keeps the RGB565 shorts in the byte layout the bitmap stores.
+            int needed = width * height * 2;
+            if (pixelBuffer == null || pixelBuffer.capacity() < needed) {
+                pixelBuffer = ByteBuffer.allocateDirect(needed).order(ByteOrder.nativeOrder());
+            }
+            pixelBuffer.clear();
+            pixelBuffer.asShortBuffer().put(frame, 2, width * height);
+            pixelBuffer.limit(needed);
+            bitmap.copyPixelsFromBuffer(pixelBuffer);
             invalidate();
         }
 
