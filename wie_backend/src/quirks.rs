@@ -541,6 +541,13 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // id falls back to the filename stem "1", which is what the screen lookup and
     // the save layer both compute for it.
     (TitlePlatform::Skt, "1", panel(176, 202)),
+    // 맛대맛: an adaptive SK-VM title - it reads the screen size once and lays
+    // every screen out from it - but its art is a fixed size, so on the 240x320
+    // default each screen's pieces anchored to the top and bottom edges with a
+    // dead checkered band between them, which read as scattered graphics. It is
+    // 240 wide (its titles and portraits fill that) and its layout closes up at
+    // 240 tall, so size it to a 240x240 panel.
+    (TitlePlatform::Skt, "0051017321", panel(240, 240)),
     // 썸머스케치: a 2003 ensony title laid out for a 120x160 handset. It takes
     // the screen size it is told and draws to it, but its art sits at a fixed
     // size, so on the 240x320 default its title, menu and scenes shrink into the
@@ -898,6 +905,12 @@ mod tests {
     #[test]
     fn gwanggaeto_asks_for_its_176_wide_handset() {
         assert_eq!(title_quirks(TitlePlatform::Skt, "0047856534").screen_size, Some((176, 216)));
+    }
+
+    /// 맛대맛 lays out to a 240x240 panel.
+    #[test]
+    fn taste_vs_taste_asks_for_its_240x240_panel() {
+        assert_eq!(title_quirks(TitlePlatform::Skt, "0051017321").screen_size, Some((240, 240)));
     }
 
     /// 인형뽑기타이쿤 (SK-VM, descriptor id "1") fills a 176x202 panel.
