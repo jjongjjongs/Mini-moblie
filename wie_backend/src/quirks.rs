@@ -372,25 +372,6 @@ const fn repaints_whole_frame() -> TitleQuirks {
     }
 }
 
-/// A title that read a zero `setClip` extent as the drawing surface's own edge.
-/// See [`TitleQuirks::clip_zero_fills_surface`].
-const fn clip_zero_fills_surface() -> TitleQuirks {
-    TitleQuirks {
-        screen_size: None,
-        expects_annunciator: false,
-        annunciator_rows: None,
-        drawn_sideways: false,
-        clip_includes_far_edge: false,
-        clears_screen_each_paint: false,
-        keys_as_skvm_scancodes: false,
-        owns_graphics_state: false,
-        repaints_whole_frame: false,
-        blank_mutable_image_transparent: false,
-        present_crop_bottom: 0,
-        clip_zero_fills_surface: true,
-    }
-}
-
 impl TitleQuirks {
     /// This entry, for a title that also clips the way
     /// [`clip_includes_far_edge`](Self::clip_includes_far_edge) describes.
@@ -417,6 +398,16 @@ impl TitleQuirks {
     const fn with_bottom_cropped(self, rows: u32) -> Self {
         Self {
             present_crop_bottom: rows,
+            ..self
+        }
+    }
+
+    /// This entry, for a title that also read a zero `setClip` extent as the
+    /// drawing surface's edge the way
+    /// [`clip_zero_fills_surface`](Self::clip_zero_fills_surface) describes.
+    const fn with_clip_zero_filling_surface(self) -> Self {
+        Self {
+            clip_zero_fills_surface: true,
             ..self
         }
     }
@@ -598,10 +589,11 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // outside it and the text never showed, though the box, the menus and the
     // help screen (which clip with real heights) all drew. The SK-VM handset
     // took the zero to mean "to the bottom of the surface", so filling a zero
-    // extent with the surface's own puts the story text back. Its layout is
-    // centred on whatever panel it is given and matches the handset at the
-    // 240x320 default, so it asks for no panel of its own.
-    (TitlePlatform::Skt, "0054563061", clip_zero_fills_surface()),
+    // extent with the surface's own puts the story text back. It is drawn for a
+    // 176-wide handset - its widest art is exactly 176 and its cutscenes fill
+    // that panel edge to edge - so on the 240x320 default each scene sat centred
+    // with a black border; the 176x220 panel it was made for fills the screen.
+    (TitlePlatform::Skt, "0054563061", panel(176, 220).with_clip_zero_filling_surface()),
     // 썸머스케치: a 2003 ensony title laid out for a 120x160 handset. It takes
     // the screen size it is told and draws to it, but its art sits at a fixed
     // size, so on the 240x320 default its title, menu and scenes shrink into the
@@ -988,13 +980,13 @@ mod tests {
     }
 
     /// 타워오브바벨3 reads a zero `setClip` extent as the surface's edge, and
-    /// asks for no panel of its own.
+    /// fills the 176x220 panel it was drawn for.
     #[test]
     fn tower_of_babel_3_fills_a_zero_clip_to_the_surface() {
         let quirks = title_quirks(TitlePlatform::Skt, "0054563061");
 
         assert!(quirks.clip_zero_fills_surface);
-        assert_eq!(quirks.screen_size, None);
+        assert_eq!(quirks.screen_size, Some((176, 220)));
     }
 
     /// The zero-clip rule is one title's, not every title's.
