@@ -104,6 +104,8 @@ fn key_by_name(name: &str) -> Option<wie_backend::KeyCode> {
         "RIGHT" => RIGHT,
         "OK" | "FIRE" => OK,
         "CLEAR" | "CLR" => CLEAR,
+        "LSK" | "LEFT_SOFT_KEY" => LEFT_SOFT_KEY,
+        "RSK" | "RIGHT_SOFT_KEY" => RIGHT_SOFT_KEY,
         "NUM0" => NUM0,
         "NUM1" => NUM1,
         "NUM2" => NUM2,

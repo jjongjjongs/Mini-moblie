@@ -8,7 +8,10 @@ use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 
 use crate::classes::{
     javax::microedition::lcdui::{Display, Graphics, display::HOST_PAINT_STAND_DOWN_MS},
-    net::wie::{KeyboardEventType, MIDPKeyCode, STD_KEY_DOWN, STD_KEY_FIRE, STD_KEY_LEFT, STD_KEY_RIGHT, STD_KEY_UP},
+    net::wie::{
+        KeyboardEventType, MIDPKeyCode, STD_KEY_CLEAR, STD_KEY_DOWN, STD_KEY_FIRE, STD_KEY_LEFT, STD_KEY_RIGHT, STD_KEY_SOFT1, STD_KEY_SOFT2,
+        STD_KEY_UP,
+    },
 };
 
 // abstract class javax.microedition.lcdui.Canvas
@@ -233,6 +236,23 @@ impl Canvas {
                 STD_KEY_LEFT => 2,  // LEFT
                 STD_KEY_RIGHT => 5, // RIGHT
                 STD_KEY_FIRE => 8,  // FIRE
+                // A title that drives its own soft keys (no MIDP commands)
+                // reads them through getGameAction as GAME_C and GAME_D, the two
+                // actions a handset reserves for its soft keys. 다운타운
+                // 미니게임천국2 switches on exactly those for its menu entry and
+                // list paging, so with the soft keys answering 0 (no action) its
+                // L and R buttons did nothing. Without this they were dead for
+                // every such title.
+                STD_KEY_SOFT1 => 11, // GAME_C (left soft key)
+                STD_KEY_SOFT2 => 12, // GAME_D (right soft key)
+                // The handset's clear/C key. A title of this kind reads it as
+                // GAME_B, the action it steps back out of a menu on - 다운타운
+                // 미니게임천국2 treats GAME_B the same as FIRE throughout, so its
+                // 게임방법/환경설정/랭킹 screens all return to the menu on it. With
+                // the key answering 0 the dedicated 뒤로가기 button did nothing;
+                // it was dead for every such title, whereas a title that wants
+                // the clear key for text still reads the raw code in keyPressed.
+                STD_KEY_CLEAR => 10, // GAME_B (clear / back key)
                 _ => 0,
             };
 
