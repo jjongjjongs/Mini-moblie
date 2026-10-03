@@ -56,6 +56,9 @@ pub struct System {
     /// Whether this title's clips include their far edge.
     /// See [`System::title_clip_includes_far_edge`].
     title_clip_includes_far_edge: Arc<AtomicBool>,
+    /// Whether a zero `setClip` extent clips to the surface edge for this title.
+    /// See [`System::title_clip_zero_fills_surface`].
+    title_clip_zero_fills_surface: Arc<AtomicBool>,
     /// Whether the screen buffer is wiped before each paint for this title.
     /// See [`System::title_clears_screen_each_paint`].
     title_clears_screen_each_paint: Arc<AtomicBool>,
@@ -145,6 +148,7 @@ impl System {
             title_expects_annunciator: Arc::new(AtomicBool::new(false)),
             title_annunciator_rows: Arc::new(AtomicU32::new(0)),
             title_clip_includes_far_edge: Arc::new(AtomicBool::new(false)),
+            title_clip_zero_fills_surface: Arc::new(AtomicBool::new(false)),
             title_clears_screen_each_paint: Arc::new(AtomicBool::new(false)),
             displayable_reserved_rows: Arc::new(AtomicU32::new(0)),
             midp_uses_standard_key_codes: Arc::new(AtomicBool::new(false)),
@@ -269,6 +273,19 @@ impl System {
 
     pub fn set_title_clip_includes_far_edge(&self, includes: bool) {
         self.title_clip_includes_far_edge.store(includes, Ordering::SeqCst);
+    }
+
+    /// Whether the title was written for a handset whose `setClip` read a zero
+    /// width or height as "clip to the drawing surface's own edge" rather than
+    /// the empty region MIDP specifies. Looked up in `crate::quirks` and set
+    /// here by the emulator that loaded the archive; the MIDP `Graphics` is
+    /// what reads it.
+    pub fn title_clip_zero_fills_surface(&self) -> bool {
+        self.title_clip_zero_fills_surface.load(Ordering::SeqCst)
+    }
+
+    pub fn set_title_clip_zero_fills_surface(&self, fills: bool) {
+        self.title_clip_zero_fills_surface.store(fills, Ordering::SeqCst);
     }
 
     /// Whether the runtime should wipe the screen buffer to black before every
