@@ -3141,7 +3141,16 @@ public final class MainActivity extends Activity {
             // The message shown in the title bar is cut off at one line, so the
             // whole of it goes at the top of the file.
             String error = NativeBridge.nativeLastError();
-            String header = "wie " + NativeBridge.nativeVersion() + "\n"
+            // The apk's version code, so a log says which build produced it -
+            // the development build is replaced on every push and the installed
+            // one is easy to mistake for a newer release.
+            long versionCode = -1;
+            try {
+                android.content.pm.PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+                versionCode = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P ? info.getLongVersionCode() : info.versionCode;
+            } catch (Exception ignored) {
+            }
+            String header = "wie " + NativeBridge.nativeVersion() + " (build " + versionCode + ")\n"
                     + "game: " + title + "\n"
                     + "running: " + (NativeBridge.nativeRunning() != 0) + "\n"
                     + "filter: " + NativeBridge.nativeLogFilter() + "\n"
