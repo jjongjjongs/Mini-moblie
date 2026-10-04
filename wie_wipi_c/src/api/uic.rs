@@ -2233,6 +2233,13 @@ async fn uic_text_clear(context: &mut dyn WIPICContext, component: WIPICWord) ->
     Ok(())
 }
 
+/// Whether `key` is a keypad character the input method composes with: a digit,
+/// `*`, or `#`. These are the only keys a text box builds its text from; the app
+/// forwards everything else (navigation, soft keys) for its own use.
+fn uic_is_keypad_char(key: i32) -> bool {
+    matches!(key, 48..=57 | 42 | 35)
+}
+
 async fn uic_handle_text(context: &mut dyn WIPICContext, component: WIPICWord, key: i32) -> Result<u32> {
     let text_ptr: WIPICWord = read_generic(context, component + 0x44)?;
     if text_ptr == 0 {
@@ -2311,9 +2318,17 @@ async fn uic_handle_text(context: &mut dyn WIPICContext, component: WIPICWord, k
 
             context.system().set_input_composition_size(0);
         }
-        _ => {
+        // A keypad character: the digits, `*` and `#` the input method reads.
+        // These are what compose, in whichever mode the box is in.
+        key if uic_is_keypad_char(key) => {
             uic_text_process_default_input(context, component, key as u8 as i8).await?;
         }
+        // Anything else is a key the component has no use for - a navigation or
+        // action key the app forwards the same way it forwards a character
+        // (미니게임천국 sends its OK as `-5`). Leave it for the app: answering
+        // "consumed" would swallow a key the game still needs, and running the
+        // default path for it would wipe the composition in progress.
+        _ => return Ok(0),
     }
 
     let current = uic_read_c_string(context, text_ptr)?;
@@ -2366,7 +2381,14 @@ pub async fn handle_event(context: &mut dyn WIPICContext, component: WIPICWord, 
         }
     }
 
-    if !matches!(event, 502 | 504) {
+    // The key event that drives the built-in input. LGT's firmware spells a key
+    // press 502 and a release 504; KTF's spells the press 2 (and the release 3,
+    // which is deliberately not here - the IME composes one step per key-down,
+    // and running it again on the way up would type every character twice).
+    // 미니게임천국 forwards its ranking-name keys this way - (2, '0'..='9') for the
+    // digits, (2, '#') for space - and with only 502/504 recognised they reached
+    // the component as no-ops, so the name stayed empty and the game sat waiting.
+    if !matches!(event, 502 | 504 | 2) {
         return Ok(result);
     }
 
@@ -3111,7 +3133,7 @@ mod tests {
     use super::{
         TM_FIELDS, UIC_DRAW_MARKER_BASE, UIC_EMPTY_LABEL, UIC_TIMER_MARKER_TEXT, add_list_item, add_menu_item, configure, create, delete_text,
         destroy, get_active_list_item, get_active_menu_item, get_class, get_class_name, get_cursor_pos, get_font, get_geometry, get_label,
-        get_list_item, get_max_text_size, get_menu_item, get_text, get_text_size, get_time, insert_text, is_instance, remove_list_item,
+        get_list_item, get_max_text_size, get_menu_item, get_text, get_text_size, get_time, handle_event, insert_text, is_instance, remove_list_item,
         remove_menu_item, repaint, set_active_list_item, set_active_menu_item, set_bg_color, set_callback, set_cursor_pos, set_enable,
         set_event_handler, set_fg_color, set_font, set_label, set_label_alignment, set_max_text_size, set_time, set_time_long, set_time_mask,
         uic_color_to_rgb565, uic_read_c_string, uic_repaint_rect, uic_skip_time_separator,
@@ -3433,6 +3455,45 @@ mod tests {
         let end = buf.iter().position(|&byte| byte == 0).unwrap_or(buf.len());
         buf.truncate(end);
         buf
+    }
+
+    /// KTF's firmware spells a key press `2`, where LGT's spells it `502`.
+    /// 미니게임천국 forwards its ranking-name digits to the text box that way;
+    /// with only 502/504 recognised they composed nothing and the box stayed
+    /// empty. A digit sent as a KTF press has to reach the text the same as a
+    /// 502 would; the release that follows (event `3`) must not type it a second
+    /// time; and a navigation key the app forwards alongside them - its OK, `-5`
+    /// - has to pass straight back so the app still acts on it.
+    #[futures_test::test]
+    async fn ktf_key_press_event_types_into_a_text_box() {
+        let mut context = TestContext::with_system(wie_backend::System::new(
+            alloc::boxed::Box::new(test_utils::TestPlatform::new()),
+            "test-pid",
+            "test-aid",
+            wie_backend::DefaultTaskRunner,
+        ));
+        init_text_component(&mut context, b"\0", 20, 0);
+        write_generic(&mut context, COMPONENT + 0x20, 1u32).unwrap(); // enabled
+        write_generic(&mut context, COMPONENT + 0x28, 0u32).unwrap(); // no event handler
+        write_generic(&mut context, COMPONENT + 0x60, 0u32).unwrap(); // no draw callback
+        context.system().set_current_input_mode(0); // English multi-tap
+
+        // A digit forwarded as a KTF press composes, and the box consumes it.
+        let pressed = handle_event(&mut context, COMPONENT, 2, b'2' as i32, 0).await.unwrap();
+        assert_eq!(pressed, 1);
+        assert_eq!(read_text(&context, 20), b"a");
+
+        // The release behind it (event 3) is not a second press: the character
+        // must not be typed again.
+        let released = handle_event(&mut context, COMPONENT, 3, b'2' as i32, 0).await.unwrap();
+        assert_eq!(released, 0);
+        assert_eq!(read_text(&context, 20), b"a");
+
+        // A navigation key the app forwards the same way (OK = -5) is left for
+        // the app: not consumed, and the composition is untouched.
+        let nav = handle_event(&mut context, COMPONENT, 2, -5, 0).await.unwrap();
+        assert_eq!(nav, 0);
+        assert_eq!(read_text(&context, 20), b"a");
     }
 
     #[futures_test::test]
