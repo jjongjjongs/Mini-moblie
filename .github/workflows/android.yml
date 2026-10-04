@@ -46,14 +46,15 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      # Swatinem/rust-cache keys on the lockfile *and* the compiler, saves on
+      # every run, and - crucially - cleans the workspace's own crates out of
+      # the cached `target` before saving, so a source-only change to a crate
+      # like wie_wipi_c is always recompiled. The hand-rolled cache this
+      # replaced keyed only on Cargo.lock and never re-saved: a change that did
+      # not touch Cargo.lock restored a stale `target`, cargo reused the
+      # pre-change artifacts, and the apk shipped a .so without the change.
       - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: android-cargo-${{ hashFiles('Cargo.lock') }}
+        uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
