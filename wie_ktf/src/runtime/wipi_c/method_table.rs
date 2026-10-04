@@ -259,6 +259,36 @@ pub fn get_database_interface(core: &mut ArmCore) -> Result<WIPICDatabaseInterfa
     })
 }
 
+/// The two uic slots KTF has and LGT does not, placed by [`get_uic_method_table`].
+const KTF_UIC_UNKNOWN_SLOTS: [u16; 2] = [12, 25];
+
+/// KTF's uic table.
+///
+/// It is not LGT's. The two agree up to `MC_uicSetEnable` at 11, but KTF has
+/// two slots LGT does not, and everything after them sits further along:
+///
+/// - 미니게임천국2 and 3 set a text box's font through slot 15 - the call
+///   passes a font and drops the answer - which LGT numbers 14. One slot more
+///   lies somewhere in 12-14.
+/// - 010100D5 and 이타루스전기 read the date through slot 26 - create a
+///   DateTimeComponent, hand slot 26 a `struct tm`, read year, month and day
+///   back - which LGT numbers 24. The second extra slot lies in 16-25.
+/// - The name-entry box fills, clears, sizes and reads back through 32
+///   `(c, 0, text, strlen)`, 33 `(c, 0, -1)`, 35 `(c, 13)`, 36 `(c)` and
+///   37 `(c, 0, buf, size + 1)`: LGT's insert, delete, set-max-size,
+///   text-size and get-text, each two along.
+///
+/// Read as LGT's order, the box was never given the default name, never
+/// cleared and never sized, and the name the player typed was asked for
+/// through `MC_uicAddListItem`: the game got nothing back and registered
+/// either nothing or the name it already had.
+///
+/// Where in 12-14 and 16-25 the two extra slots sit, and what they are, no
+/// title we have says. They are placed right after `MC_uicSetEnable` and
+/// right before `MC_uicGetTime`, and are not served: they answer
+/// [`gen_missing`], and a title reaching one is named in the log. KTF has no counterpart to LGT's
+/// own `LGTC_uicSetCursorPos`/`GetCursorPos`; they stay after the list
+/// calls only so nothing that served before stops serving.
 pub fn get_uic_method_table() -> Vec<WIPICMethodBody> {
     vec![
         uic::create_application_context.into_body(),
@@ -273,6 +303,7 @@ pub fn get_uic_method_table() -> Vec<WIPICMethodBody> {
         uic::configure.into_body(),
         uic::get_geometry.into_body(),
         uic::set_enable.into_body(),
+        gen_missing(WIPICTableId::Uic, 12),
         uic::set_callback.into_body(),
         uic::set_event_handler.into_body(),
         uic::set_font.into_body(),
@@ -285,6 +316,7 @@ pub fn get_uic_method_table() -> Vec<WIPICMethodBody> {
         uic::set_time_mask.into_body(),
         uic::set_time.into_body(),
         uic::set_time_long.into_body(),
+        gen_missing(WIPICTableId::Uic, 25),
         uic::get_time.into_body(),
         uic::add_menu_item.into_body(),
         uic::get_menu_item.into_body(),
@@ -304,8 +336,8 @@ pub fn get_uic_method_table() -> Vec<WIPICMethodBody> {
         uic::get_active_list_item.into_body(),
         uic::get_cursor_pos.into_body(),
         uic::set_cursor_pos.into_body(),
-        gen_stub(43, "OEMC_uicSetLineGap"),
-        gen_stub(44, "OEMC_uicGetLineGap"),
+        gen_stub(45, "OEMC_uicSetLineGap"),
+        gen_stub(46, "OEMC_uicGetLineGap"),
     ]
 }
 
@@ -738,6 +770,7 @@ pub fn get_served_method_body(table_id: WIPICTableId, function_id: u16) -> Optio
                 None
             }
         }
+        WIPICTableId::Uic if KTF_UIC_UNKNOWN_SLOTS.contains(&function_id) => None,
         WIPICTableId::Uic => get_uic_method_table().into_iter().nth(function_id as usize),
         WIPICTableId::Media => get_media_method_table().into_iter().nth(function_id as usize),
         WIPICTableId::Net => get_net_method_table().into_iter().nth(function_id as usize),
@@ -836,6 +869,55 @@ mod tests {
         // cap would take one away that this runtime serves.
         assert!(get_served_method_body(WIPICTableId::Kernel, WIPIC_TABLE_FUNCTIONS).is_some());
         assert!(get_method_body(WIPICTableId::Kernel, WIPIC_TABLE_FUNCTIONS).is_some());
+    }
+
+    /// What each entry of [`get_uic_method_table`] calls, read from this file:
+    /// the bodies are closures and cannot say which function they are.
+    fn uic_table_entries() -> Vec<&'static str> {
+        let source = include_str!("method_table.rs");
+        let start = source.find("pub fn get_uic_method_table()").unwrap();
+        let body = &source[start..];
+        let body = &body[body.find("vec![").unwrap() + 5..body.find("\n    ]\n").unwrap()];
+
+        body.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| line.trim_end_matches(','))
+            .collect()
+    }
+
+    #[test]
+    fn the_uic_slots_the_minigame_titles_call_are_the_ones_they_mean() {
+        // Read from 미니게임천국2/3's name entry and from the date reads of
+        // 010100D5 and 이타루스전기 - what each call passes and what it does
+        // with the answer. See `get_uic_method_table`.
+        let entries = uic_table_entries();
+        for (slot, entry) in [
+            (2, "uic::create.into_body()"),
+            (5, "uic::paint.into_body()"),
+            (8, "uic::handle_event.into_body()"),
+            (9, "uic::configure.into_body()"),
+            (11, "uic::set_enable.into_body()"),
+            (15, "uic::set_font.into_body()"),
+            (26, "uic::get_time.into_body()"),
+            (32, "uic::insert_text.into_body()"),
+            (33, "uic::delete_text.into_body()"),
+            (35, "uic::set_max_text_size.into_body()"),
+            (36, "uic::get_text_size.into_body()"),
+            (37, "uic::get_text.into_body()"),
+        ] {
+            assert_eq!(entries[slot], entry, "uic slot {slot}");
+        }
+    }
+
+    #[test]
+    fn the_uic_slots_no_title_has_named_are_not_served() {
+        let entries = uic_table_entries();
+        for slot in KTF_UIC_UNKNOWN_SLOTS {
+            assert_eq!(entries[slot as usize], format!("gen_missing(WIPICTableId::Uic, {slot})"));
+            assert!(get_served_method_body(WIPICTableId::Uic, slot).is_none());
+            assert!(get_method_body(WIPICTableId::Uic, slot).is_some());
+        }
     }
 
     #[test]
