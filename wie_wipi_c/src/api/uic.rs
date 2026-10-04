@@ -2370,12 +2370,21 @@ pub async fn handle_event(context: &mut dyn WIPICContext, component: WIPICWord, 
     // event only, so the next device log says which gate fails (a wrong type, a
     // disabled box, a guest-set handler at +0x28, or a freed/zero text buffer).
     if matches!(event, 2 | 3 | 502 | 504) {
-        let enabled_d: u32 = read_generic(context, component + 0x20).unwrap_or(u32::MAX);
-        let handler_d: u32 = read_generic(context, component + 0x28).unwrap_or(u32::MAX);
         let text_ptr_d: u32 = read_generic(context, component + 0x44).unwrap_or(u32::MAX);
-        let capacity_d: u32 = read_generic(context, component + 0x48).unwrap_or(u32::MAX);
+        // Resolve the pointer the way every other WIPI-C handle is resolved and
+        // read the same fields there: if the real struct lives at
+        // data_ptr(component), the uic functions are reading the raw handle.
+        let (rtype, ren, rtp, rcap) = match context.data_ptr(WIPICIndirectPtr(component)) {
+            Ok(d) => (
+                read_generic::<u32, _>(context, d).unwrap_or(u32::MAX),
+                read_generic::<u32, _>(context, d + 0x20).unwrap_or(u32::MAX),
+                read_generic::<u32, _>(context, d + 0x44).unwrap_or(u32::MAX),
+                read_generic::<u32, _>(context, d + 0x48).unwrap_or(u32::MAX),
+            ),
+            Err(_) => (0xdead_dead, 0xdead_dead, 0xdead_dead, 0xdead_dead),
+        };
         tracing::debug!(
-            "MGHDIAG handle_event comp={component:#x} type={component_type} enabled={enabled_d} handler={handler_d:#x} text_ptr={text_ptr_d:#x} capacity={capacity_d} event={event} key={key}"
+            "MGHDIAG comp={component:#x} direct[type={component_type} text_ptr={text_ptr_d:#x}] resolved[type={rtype} enabled={ren} text_ptr={rtp:#x} capacity={rcap}] event={event} key={key}"
         );
     }
 
