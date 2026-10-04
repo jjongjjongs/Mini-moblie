@@ -120,6 +120,12 @@ impl WIPICContext for KtfWIPICContext {
         Ok(base + 8) // all data has offset of 8 bytes
     }
 
+    /// `alloc` puts the data twelve bytes past the handle - the handle cell,
+    /// then the size - so the handle is twelve bytes back.
+    fn handle_of(&self, data: WIPICWord) -> WIPICWord {
+        data - 12
+    }
+
     fn system(&mut self) -> &mut System {
         &mut self.system
     }

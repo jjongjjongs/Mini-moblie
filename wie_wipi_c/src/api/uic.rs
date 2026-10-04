@@ -24,6 +24,33 @@ fn uic_draw_marker(component_type: WIPICWord) -> WIPICWord {
     UIC_DRAW_MARKER_BASE + component_type
 }
 
+/// The struct behind the component pointer a title passes in.
+///
+/// `MC_uicCreate` allocates the component with `alloc` and returns that handle,
+/// so the pointer a title holds is a handle, and the struct is wherever
+/// `data_ptr` says - as for every other WIPI-C object. On LGT the two are the
+/// same address, which is why reading the handle directly went unnoticed; on
+/// KTF the handle is a cell twelve bytes before the struct, and read directly it
+/// is not a component at all. 미니게임천국, the first KTF title to use UIC, had
+/// every call land on that cell: its name box was never configured or enabled,
+/// so the keys it forwarded composed nothing.
+///
+/// A pointer that does not resolve is passed through, so a null or invalid one
+/// is rejected by the same checks as before.
+fn uic_struct(context: &dyn WIPICContext, component: WIPICWord) -> WIPICWord {
+    if component == 0 {
+        return 0;
+    }
+
+    context.data_ptr(WIPICIndirectPtr(component)).unwrap_or(component)
+}
+
+/// The handle the title holds for a component struct - what its callbacks and
+/// handlers are given, since that is the pointer they will pass back in.
+fn uic_handle(context: &dyn WIPICContext, component: WIPICWord) -> WIPICWord {
+    context.handle_of(component)
+}
+
 async fn uic_dispatch_draw(context: &mut dyn WIPICContext, component: WIPICWord, graphics_context: WIPICWord) -> Result<()> {
     let draw: WIPICWord = read_generic(context, component + 0x24)?;
     if (UIC_DRAW_MARKER_BASE + 1..=UIC_DRAW_MARKER_BASE + 5).contains(&draw) {
@@ -35,7 +62,7 @@ async fn uic_dispatch_draw(context: &mut dyn WIPICContext, component: WIPICWord,
     }
 
     if draw != 0 {
-        context.call_function(draw, &[component, graphics_context]).await?;
+        context.call_function(draw, &[uic_handle(context, component), graphics_context]).await?;
     }
 
     Ok(())
@@ -217,6 +244,8 @@ pub async fn create(context: &mut dyn WIPICContext, pac: WIPICWord, cls: WIPICWo
 pub async fn destroy(context: &mut dyn WIPICContext, component: WIPICWord) -> Result<()> {
     tracing::debug!("MC_uicDestroy({component:#x})");
 
+    let component = uic_struct(context, component);
+
     if component == 0 {
         return Ok(());
     }
@@ -229,7 +258,9 @@ pub async fn destroy(context: &mut dyn WIPICContext, component: WIPICWord) -> Re
     let callback: WIPICWord = read_generic(context, component + 0x2c)?;
     if callback != 0 {
         let callback_context: WIPICWord = read_generic(context, component + 0x38)?;
-        context.call_function(callback, &[component, 0, callback_context]).await?;
+        context
+            .call_function(callback, &[uic_handle(context, component), 0, callback_context])
+            .await?;
     }
 
     match component_type {
@@ -284,7 +315,10 @@ pub async fn destroy(context: &mut dyn WIPICContext, component: WIPICWord) -> Re
     }
 
     write_generic(context, component, 0u32)?;
-    context.free(WIPICIndirectPtr(component))?;
+
+    // Freed by the handle the title held, not the struct it resolved to.
+    let handle = uic_handle(context, component);
+    context.free(WIPICIndirectPtr(handle))?;
 
     Ok(())
 }
@@ -323,6 +357,13 @@ fn uic_repaint_rect(
 pub async fn repaint(context: &mut dyn WIPICContext, component: WIPICWord, x: i32, y: i32, width: i32, height: i32) -> Result<()> {
     tracing::debug!("MC_uicRepaint({component:#x}, {x}, {y}, {width}, {height})");
 
+    let component = uic_struct(context, component);
+    repaint_at(context, component, x, y, width, height).await
+}
+
+/// `MC_uicRepaint` on a component already resolved to its struct - what the
+/// built-in handlers repaint through.
+async fn repaint_at(context: &mut dyn WIPICContext, component: WIPICWord, x: i32, y: i32, width: i32, height: i32) -> Result<()> {
     if component == 0 {
         return Ok(());
     }
@@ -357,6 +398,8 @@ pub async fn configure(
     flags: WIPICWord,
 ) -> Result<()> {
     tracing::debug!("MC_uicConfigure({component:#x}, {x}, {y}, {width}, {height}, {flags:#x})");
+
+    let component = uic_struct(context, component);
 
     if component == 0 {
         return Ok(());
@@ -394,6 +437,8 @@ pub async fn get_geometry(
     height: WIPICWord,
 ) -> Result<()> {
     tracing::debug!("MC_uicGetGeometry({component:#x}, {x:#x}, {y:#x}, {width:#x}, {height:#x})");
+
+    let component = uic_struct(context, component);
 
     if component == 0 {
         return Ok(());
@@ -441,6 +486,8 @@ pub async fn set_callback(
 ) -> Result<WIPICWord> {
     tracing::debug!("MC_uicSetCallback({component:#x}, {selector}, {callback:#x}, {callback_context:#x})");
 
+    let component = uic_struct(context, component);
+
     if component == 0 {
         return Ok(0);
     }
@@ -479,6 +526,8 @@ pub async fn set_callback(
 pub async fn set_event_handler(context: &mut dyn WIPICContext, component: WIPICWord, handler: WIPICWord) -> Result<WIPICWord> {
     tracing::debug!("MC_uicSetEventHandler({component:#x}, {handler:#x})");
 
+    let component = uic_struct(context, component);
+
     if component == 0 {
         return Ok(0);
     }
@@ -502,6 +551,8 @@ pub async fn set_event_handler(context: &mut dyn WIPICContext, component: WIPICW
 pub async fn set_font(context: &mut dyn WIPICContext, component: WIPICWord, font: WIPICWord) -> Result<WIPICWord> {
     tracing::debug!("MC_uicSetFont({component:#x}, {font:#x})");
 
+    let component = uic_struct(context, component);
+
     if component == 0 {
         return Ok(0);
     }
@@ -523,6 +574,8 @@ pub async fn set_font(context: &mut dyn WIPICContext, component: WIPICWord, font
 /// NULL or invalid components return 0.
 pub async fn get_font(context: &mut dyn WIPICContext, component: WIPICWord) -> Result<WIPICWord> {
     tracing::debug!("MC_uicGetFont({component:#x})");
+
+    let component = uic_struct(context, component);
 
     if component == 0 {
         return Ok(0);
@@ -549,6 +602,8 @@ fn uic_color_to_rgb565(color: WIPICWord) -> WIPICWord {
 pub async fn set_fg_color(context: &mut dyn WIPICContext, component: WIPICWord, color: WIPICWord) -> Result<WIPICWord> {
     tracing::debug!("MC_uicSetFgColor({component:#x}, {color:#x})");
 
+    let component = uic_struct(context, component);
+
     if component == 0 {
         return Ok(0);
     }
@@ -572,6 +627,8 @@ pub async fn set_fg_color(context: &mut dyn WIPICContext, component: WIPICWord, 
 /// return 0 and leave memory untouched.
 pub async fn set_bg_color(context: &mut dyn WIPICContext, component: WIPICWord, color: WIPICWord) -> Result<WIPICWord> {
     tracing::debug!("MC_uicSetBgColor({component:#x}, {color:#x})");
+
+    let component = uic_struct(context, component);
 
     if component == 0 {
         return Ok(0);
@@ -602,6 +659,8 @@ pub async fn set_bg_color(context: &mut dyn WIPICContext, component: WIPICWord, 
 /// also writes one extra NUL byte immediately after the requested region.
 pub async fn set_label(context: &mut dyn WIPICContext, component: WIPICWord, label: WIPICWord) -> Result<WIPICWord> {
     tracing::debug!("MC_uicSetLabel({component:#x}, {label:#x})");
+
+    let component = uic_struct(context, component);
 
     if component == 0 {
         return Ok(0);
@@ -654,6 +713,8 @@ pub async fn set_label(context: &mut dyn WIPICContext, component: WIPICWord, lab
 pub async fn get_label(context: &mut dyn WIPICContext, component: WIPICWord) -> Result<WIPICIndirectPtr> {
     tracing::debug!("MC_uicGetLabel({component:#x})");
 
+    let component = uic_struct(context, component);
+
     if component == 0 {
         return Ok(WIPICIndirectPtr(0));
     }
@@ -680,6 +741,8 @@ pub async fn get_label(context: &mut dyn WIPICContext, component: WIPICWord) -> 
 /// alignment at +0x48 is returned and the new value is stored there.
 pub async fn set_label_alignment(context: &mut dyn WIPICContext, component: WIPICWord, alignment: WIPICWord) -> Result<i32> {
     tracing::debug!("MC_uicSetLabelAlignment({component:#x}, {alignment:#x})");
+
+    let component = uic_struct(context, component);
 
     if component == 0 {
         return Ok(0);
@@ -713,6 +776,8 @@ pub async fn set_label_alignment(context: &mut dyn WIPICContext, component: WIPI
 pub async fn set_time_mask(context: &mut dyn WIPICContext, component: WIPICWord, mask: WIPICWord) -> Result<i32> {
     tracing::debug!("MC_uicSetTimeMask({component:#x}, {mask:#x})");
 
+    let component = uic_struct(context, component);
+
     if component == 0 {
         return Ok(0);
     }
@@ -743,7 +808,9 @@ pub async fn set_time_mask(context: &mut dyn WIPICContext, component: WIPICWord,
         let callback: WIPICWord = read_generic(context, component + 0xa0)?;
         if callback != 0 {
             let callback_context: WIPICWord = read_generic(context, component + 0xa4)?;
-            context.call_function(callback, &[component, 0, callback_context]).await?;
+            context
+                .call_function(callback, &[uic_handle(context, component), 0, callback_context])
+                .await?;
         }
     }
 
@@ -774,6 +841,8 @@ pub async fn set_time_mask(context: &mut dyn WIPICContext, component: WIPICWord,
 /// the map with no frames at all.
 pub async fn get_time(context: &mut dyn WIPICContext, component: WIPICWord, tm: WIPICWord) -> Result<i32> {
     tracing::debug!("MC_uicGetTime({component:#x}, {tm:#x})");
+
+    let component = uic_struct(context, component);
 
     if component == 0 {
         return Ok(0);
@@ -814,7 +883,9 @@ pub async fn get_time(context: &mut dyn WIPICContext, component: WIPICWord, tm: 
         let callback: WIPICWord = read_generic(context, component + 0xa0)?;
         if callback != 0 {
             let callback_context: WIPICWord = read_generic(context, component + 0xa4)?;
-            return Ok(context.call_function(callback, &[component, 0, callback_context]).await? as i32);
+            return Ok(context
+                .call_function(callback, &[uic_handle(context, component), 0, callback_context])
+                .await? as i32);
         }
     }
 
@@ -836,6 +907,8 @@ pub async fn get_time(context: &mut dyn WIPICContext, component: WIPICWord, tm: 
 /// native strcmp result as -1/0/1.
 pub async fn set_time(context: &mut dyn WIPICContext, component: WIPICWord, tm: WIPICWord) -> Result<i32> {
     tracing::debug!("MC_uicSetTime({component:#x}, {tm:#x})");
+
+    let component = uic_struct(context, component);
 
     if component == 0 {
         return Ok(0);
@@ -877,7 +950,9 @@ pub async fn set_time(context: &mut dyn WIPICContext, component: WIPICWord, tm: 
         let callback: WIPICWord = read_generic(context, component + 0xa0)?;
         if callback != 0 {
             let callback_context: WIPICWord = read_generic(context, component + 0xa4)?;
-            return Ok(context.call_function(callback, &[component, 0, callback_context]).await? as i32);
+            return Ok(context
+                .call_function(callback, &[uic_handle(context, component), 0, callback_context])
+                .await? as i32);
         }
     }
 
@@ -897,6 +972,8 @@ pub async fn set_time(context: &mut dyn WIPICContext, component: WIPICWord, tm: 
 /// contract as `MC_uicSetTime`.
 pub async fn set_time_long(context: &mut dyn WIPICContext, component: WIPICWord, time: WIPICWord) -> Result<i32> {
     tracing::debug!("MC_uicSetTimeLong({component:#x}, {time:#x})");
+
+    let component = uic_struct(context, component);
 
     if component == 0 {
         return Ok(0);
@@ -934,7 +1011,9 @@ pub async fn set_time_long(context: &mut dyn WIPICContext, component: WIPICWord,
         let callback: WIPICWord = read_generic(context, component + 0xa0)?;
         if callback != 0 {
             let callback_context: WIPICWord = read_generic(context, component + 0xa4)?;
-            return Ok(context.call_function(callback, &[component, 0, callback_context]).await? as i32);
+            return Ok(context
+                .call_function(callback, &[uic_handle(context, component), 0, callback_context])
+                .await? as i32);
         }
     }
 
@@ -950,6 +1029,8 @@ pub async fn set_time_long(context: &mut dyn WIPICContext, component: WIPICWord,
 /// start/stop their internal timers.
 pub async fn set_enable(context: &mut dyn WIPICContext, component: WIPICWord, enable: WIPICWord) -> Result<()> {
     tracing::debug!("MC_uicSetEnable({component:#x}, {enable:#x})");
+
+    let component = uic_struct(context, component);
 
     if component == 0 {
         return Ok(());
@@ -973,7 +1054,8 @@ pub async fn set_enable(context: &mut dyn WIPICContext, component: WIPICWord, en
                 if callback == UIC_TIMER_MARKER_TIME {
                     uic_schedule_component_timer(context, component, 2, 1000)?;
                 } else {
-                    kernel::set_timer(context, timer, 1000, 0, component).await?;
+                    let handle = uic_handle(context, component);
+                    kernel::set_timer(context, timer, 1000, 0, handle).await?;
                 }
             }
         }
@@ -989,7 +1071,8 @@ pub async fn set_enable(context: &mut dyn WIPICContext, component: WIPICWord, en
                 if callback == UIC_TIMER_MARKER_TEXT {
                     uic_schedule_component_timer(context, component, 3, 500)?;
                 } else {
-                    kernel::set_timer(context, timer, 500, 0, component).await?;
+                    let handle = uic_handle(context, component);
+                    kernel::set_timer(context, timer, 500, 0, handle).await?;
                 }
             }
         }
@@ -1009,6 +1092,8 @@ pub async fn set_enable(context: &mut dyn WIPICContext, component: WIPICWord, en
 /// +0x5c change callback, +0x64 callback context.
 pub async fn insert_text(context: &mut dyn WIPICContext, component: WIPICWord, position: i32, source: WIPICWord, length: i32) -> Result<i32> {
     tracing::debug!("MC_uicInsertText({component:#x}, {position}, {source:#x}, {length})");
+
+    let component = uic_struct(context, component);
 
     if component == 0 {
         return Ok(0);
@@ -1086,7 +1171,9 @@ pub async fn insert_text(context: &mut dyn WIPICContext, component: WIPICWord, p
         let callback: WIPICWord = read_generic(context, component + 0x5c)?;
         if callback != 0 {
             let callback_context: WIPICWord = read_generic(context, component + 0x64)?;
-            context.call_function(callback, &[component, 0, callback_context]).await?;
+            context
+                .call_function(callback, &[uic_handle(context, component), 0, callback_context])
+                .await?;
         }
     }
 
@@ -1101,6 +1188,13 @@ pub async fn insert_text(context: &mut dyn WIPICContext, component: WIPICWord, p
 pub async fn delete_text(context: &mut dyn WIPICContext, component: WIPICWord, position: i32, length: i32) -> Result<()> {
     tracing::debug!("MC_uicDeleteText({component:#x}, {position}, {length})");
 
+    let component = uic_struct(context, component);
+    delete_text_at(context, component, position, length).await
+}
+
+/// `MC_uicDeleteText` on a component already resolved to its struct - what the
+/// built-in text handling deletes through.
+async fn delete_text_at(context: &mut dyn WIPICContext, component: WIPICWord, position: i32, length: i32) -> Result<()> {
     if component == 0 || length < -1 || length == 0 {
         return Ok(());
     }
@@ -1178,7 +1272,9 @@ pub async fn delete_text(context: &mut dyn WIPICContext, component: WIPICWord, p
         let callback: WIPICWord = read_generic(context, component + 0x5c)?;
         if callback != 0 {
             let callback_context: WIPICWord = read_generic(context, component + 0x64)?;
-            context.call_function(callback, &[component, 0, callback_context]).await?;
+            context
+                .call_function(callback, &[uic_handle(context, component), 0, callback_context])
+                .await?;
         }
     }
 
@@ -1192,6 +1288,8 @@ pub async fn delete_text(context: &mut dyn WIPICContext, component: WIPICWord, p
 /// 32-bit max-text-size/capacity field stored at +0x48 unchanged.
 pub async fn get_max_text_size(context: &mut dyn WIPICContext, component: WIPICWord) -> Result<i32> {
     tracing::debug!("MC_uicGetMaxTextSize({component:#x})");
+
+    let component = uic_struct(context, component);
 
     if component == 0 {
         return Ok(0);
@@ -1219,6 +1317,8 @@ pub async fn get_max_text_size(context: &mut dyn WIPICContext, component: WIPICW
 /// capacity and +0x4c cursor fields are not consulted.
 pub async fn get_text_size(context: &mut dyn WIPICContext, component: WIPICWord) -> Result<i32> {
     tracing::debug!("MC_uicGetTextSize({component:#x})");
+
+    let component = uic_struct(context, component);
 
     if component == 0 {
         return Ok(0);
@@ -1266,6 +1366,8 @@ pub async fn get_text_size(context: &mut dyn WIPICContext, component: WIPICWord)
 /// return value is the suffix length.
 pub async fn get_text(context: &mut dyn WIPICContext, component: WIPICWord, position: i32, output: WIPICWord, buflen: i32) -> Result<i32> {
     tracing::debug!("MC_uicGetText({component:#x}, {position}, {output:#x}, {buflen})");
+
+    let component = uic_struct(context, component);
 
     if component == 0 {
         return Ok(0);
@@ -1325,6 +1427,8 @@ pub async fn get_text(context: &mut dyn WIPICContext, component: WIPICWord, posi
 /// exact allocation size required by `free_raw`.
 pub async fn set_max_text_size(context: &mut dyn WIPICContext, component: WIPICWord, size: i32) -> Result<i32> {
     tracing::debug!("MC_uicSetMaxTextSize({component:#x}, {size})");
+
+    let component = uic_struct(context, component);
 
     if component == 0 || size < 0 {
         return Ok(0);
@@ -1409,6 +1513,8 @@ fn uic_class_name(component_type: WIPICWord) -> Option<(WIPICWord, &'static [u8]
 pub async fn get_class_name(context: &mut dyn WIPICContext, component: WIPICWord) -> Result<WIPICIndirectPtr> {
     tracing::debug!("MC_uicGetClassName({component:#x})");
 
+    let component = uic_struct(context, component);
+
     if component == 0 {
         return Ok(WIPICIndirectPtr(0));
     }
@@ -1430,6 +1536,8 @@ pub async fn get_class_name(context: &mut dyn WIPICContext, component: WIPICWord
 /// match and 0 otherwise.
 pub async fn is_instance(context: &mut dyn WIPICContext, component: WIPICWord, psz: WIPICWord) -> Result<i32> {
     tracing::debug!("MC_uicIsInstance({component:#x}, {psz:#x})");
+
+    let component = uic_struct(context, component);
 
     if component == 0 || psz == 0 {
         return Ok(0);
@@ -1462,6 +1570,8 @@ pub async fn is_instance(context: &mut dyn WIPICContext, component: WIPICWord, p
 pub async fn paint(context: &mut dyn WIPICContext, component: WIPICWord, graphics_context: WIPICWord) -> Result<()> {
     tracing::debug!("MC_uicPaint({component:#x}, {graphics_context:#x})");
 
+    let component = uic_struct(context, component);
+
     if component == 0 {
         return Ok(());
     }
@@ -1482,7 +1592,9 @@ pub async fn paint(context: &mut dyn WIPICContext, component: WIPICWord, graphic
     let callback: WIPICWord = read_generic(context, component + 0x30)?;
     if callback != 0 {
         let callback_context: WIPICWord = read_generic(context, component + 0x3c)?;
-        context.call_function(callback, &[component, 0, callback_context]).await?;
+        context
+            .call_function(callback, &[uic_handle(context, component), 0, callback_context])
+            .await?;
     }
 
     Ok(())
@@ -1567,7 +1679,7 @@ fn uic_get_active_item_pos(selected: i32, count: i32, scroll: i32) -> Option<(i3
 }
 
 async fn uic_repaint_component(context: &mut dyn WIPICContext, component: WIPICWord) -> Result<()> {
-    repaint(context, component, 0, 0, -1, -1).await
+    repaint_at(context, component, 0, 0, -1, -1).await
 }
 
 async fn uic_selection_changed(context: &mut dyn WIPICContext, component: WIPICWord, old_selected: i32) -> Result<()> {
@@ -1579,7 +1691,9 @@ async fn uic_selection_changed(context: &mut dyn WIPICContext, component: WIPICW
     let callback: WIPICWord = read_generic(context, component + 0x54)?;
     if callback != 0 {
         let callback_context: WIPICWord = read_generic(context, component + 0x58)?;
-        context.call_function(callback, &[component, selected as u32, callback_context]).await?;
+        context
+            .call_function(callback, &[uic_handle(context, component), selected as u32, callback_context])
+            .await?;
     }
 
     Ok(())
@@ -1615,7 +1729,7 @@ async fn uic_handle_menu(context: &mut dyn WIPICContext, component: WIPICWord, k
             if callback != 0 {
                 let callback_context: WIPICWord = read_generic(context, component + 0x40)?;
                 context
-                    .call_function(callback, &[component, old_selected as u32, callback_context])
+                    .call_function(callback, &[uic_handle(context, component), old_selected as u32, callback_context])
                     .await?;
             }
             uic_selection_changed(context, component, old_selected).await?;
@@ -1638,7 +1752,7 @@ async fn uic_handle_list(context: &mut dyn WIPICContext, component: WIPICWord, k
         if callback != 0 {
             let callback_context: WIPICWord = read_generic(context, component + 0x40)?;
             context
-                .call_function(callback, &[component, old_selected as u32, callback_context])
+                .call_function(callback, &[uic_handle(context, component), old_selected as u32, callback_context])
                 .await?;
         }
         uic_selection_changed(context, component, old_selected).await?;
@@ -1797,7 +1911,9 @@ async fn uic_datetime_timer_callback(context: &mut dyn WIPICContext, component: 
     let callback: WIPICWord = read_generic(context, component + 0x30)?;
     if callback != 0 {
         let callback_context: WIPICWord = read_generic(context, component + 0x3c)?;
-        context.call_function(callback, &[component, 0, callback_context]).await?;
+        context
+            .call_function(callback, &[uic_handle(context, component), 0, callback_context])
+            .await?;
     }
 
     context.free_raw(gctx, gctx_size)?;
@@ -1809,7 +1925,8 @@ async fn uic_datetime_timer_callback(context: &mut dyn WIPICContext, component: 
     if callback == UIC_TIMER_MARKER_TIME {
         uic_schedule_component_timer(context, component, 2, 1000)?;
     } else {
-        kernel::set_timer(context, timer, 1000, 0, component).await?;
+        let handle = uic_handle(context, component);
+        kernel::set_timer(context, timer, 1000, 0, handle).await?;
     }
     Ok(())
 }
@@ -1827,7 +1944,9 @@ async fn uic_text_timer_callback(context: &mut dyn WIPICContext, component: WIPI
     let callback: WIPICWord = read_generic(context, component + 0x30)?;
     if callback != 0 {
         let callback_context: WIPICWord = read_generic(context, component + 0x3c)?;
-        context.call_function(callback, &[component, 0, callback_context]).await?;
+        context
+            .call_function(callback, &[uic_handle(context, component), 0, callback_context])
+            .await?;
     }
 
     context.free_raw(gctx, gctx_size)?;
@@ -1838,7 +1957,8 @@ async fn uic_text_timer_callback(context: &mut dyn WIPICContext, component: WIPI
     if callback == UIC_TIMER_MARKER_TEXT {
         uic_schedule_component_timer(context, component, 3, 500)?;
     } else {
-        kernel::set_timer(context, timer, 500, 0, component).await?;
+        let handle = uic_handle(context, component);
+        kernel::set_timer(context, timer, 500, 0, handle).await?;
     }
 
     Ok(())
@@ -2000,7 +2120,9 @@ async fn uic_handle_datetime(context: &mut dyn WIPICContext, component: WIPICWor
                 let callback: WIPICWord = read_generic(context, component + 0xa0)?;
                 if callback != 0 {
                     let callback_context: WIPICWord = read_generic(context, component + 0xa4)?;
-                    context.call_function(callback, &[component, 0, callback_context]).await?;
+                    context
+                        .call_function(callback, &[uic_handle(context, component), 0, callback_context])
+                        .await?;
                 }
             }
         }
@@ -2022,7 +2144,9 @@ async fn uic_text_changed_callback(context: &mut dyn WIPICContext, component: WI
     let callback: WIPICWord = read_generic(context, component + 0x5c)?;
     if callback != 0 {
         let callback_context: WIPICWord = read_generic(context, component + 0x64)?;
-        context.call_function(callback, &[component, 0, callback_context]).await?;
+        context
+            .call_function(callback, &[uic_handle(context, component), 0, callback_context])
+            .await?;
     }
     Ok(())
 }
@@ -2204,7 +2328,7 @@ async fn uic_text_clear(context: &mut dyn WIPICContext, component: WIPICWord) ->
         // Native intentionally uses public MC_uicDeleteText here rather
         // than WPUic_DeleteText, so preserve its callback behavior.
         let position = (cursor as usize).saturating_sub(composition_size);
-        delete_text(context, component, position as i32, composition_size as i32).await?;
+        delete_text_at(context, component, position as i32, composition_size as i32).await?;
 
         let output = context.system().handle_input_method(-16, 2);
 
@@ -2228,7 +2352,7 @@ async fn uic_text_clear(context: &mut dyn WIPICContext, component: WIPICWord) ->
     let position = cursor.saturating_sub(width) as i32;
 
     // Native no-composition CLEAR also uses public MC_uicDeleteText.
-    delete_text(context, component, position, width as i32).await?;
+    delete_text_at(context, component, position, width as i32).await?;
     context.system().set_input_composition_size(0);
     Ok(())
 }
@@ -2336,14 +2460,18 @@ async fn uic_handle_text(context: &mut dyn WIPICContext, component: WIPICWord, k
         let callback: WIPICWord = read_generic(context, component + 0x5c)?;
         if callback != 0 {
             let callback_context: WIPICWord = read_generic(context, component + 0x64)?;
-            context.call_function(callback, &[component, 0, callback_context]).await?;
+            context
+                .call_function(callback, &[uic_handle(context, component), 0, callback_context])
+                .await?;
         }
     }
 
     let callback: WIPICWord = read_generic(context, component + 0x60)?;
     if callback != 0 {
         let callback_context: WIPICWord = read_generic(context, component + 0x68)?;
-        context.call_function(callback, &[component, 0, callback_context]).await?;
+        context
+            .call_function(callback, &[uic_handle(context, component), 0, callback_context])
+            .await?;
     }
 
     Ok(1)
@@ -2358,36 +2486,13 @@ async fn uic_handle_text(context: &mut dyn WIPICContext, component: WIPICWord, k
 pub async fn handle_event(context: &mut dyn WIPICContext, component: WIPICWord, event: WIPICWord, key: i32, extra: WIPICWord) -> Result<u32> {
     tracing::debug!("MC_uicHandleEvent({component:#x}, {event}, {key}, {extra:#x})");
 
+    let component = uic_struct(context, component);
+
     if component == 0 {
         return Ok(0);
     }
 
     let component_type: u32 = read_generic(context, component)?;
-
-    // DIAGNOSTIC(mgh-input): 미니게임천국 forwards its ranking-name keys here and
-    // they compose nothing, with no repaint - so the built-in path is bailing
-    // before it runs. Dump the component fields each gate keys on, for a key
-    // event only, so the next device log says which gate fails (a wrong type, a
-    // disabled box, a guest-set handler at +0x28, or a freed/zero text buffer).
-    if matches!(event, 2 | 3 | 502 | 504) {
-        let text_ptr_d: u32 = read_generic(context, component + 0x44).unwrap_or(u32::MAX);
-        // Resolve the pointer the way every other WIPI-C handle is resolved and
-        // read the same fields there: if the real struct lives at
-        // data_ptr(component), the uic functions are reading the raw handle.
-        let (rtype, ren, rtp, rcap) = match context.data_ptr(WIPICIndirectPtr(component)) {
-            Ok(d) => (
-                read_generic::<u32, _>(context, d).unwrap_or(u32::MAX),
-                read_generic::<u32, _>(context, d + 0x20).unwrap_or(u32::MAX),
-                read_generic::<u32, _>(context, d + 0x44).unwrap_or(u32::MAX),
-                read_generic::<u32, _>(context, d + 0x48).unwrap_or(u32::MAX),
-            ),
-            Err(_) => (0xdead_dead, 0xdead_dead, 0xdead_dead, 0xdead_dead),
-        };
-        tracing::debug!(
-            "MGHDIAG comp={component:#x} direct[type={component_type} text_ptr={text_ptr_d:#x}] resolved[type={rtype} enabled={ren} text_ptr={rtp:#x} capacity={rcap}] event={event} key={key}"
-        );
-    }
-
     if !(1..=5).contains(&component_type) {
         return Ok(0);
     }
@@ -2400,7 +2505,9 @@ pub async fn handle_event(context: &mut dyn WIPICContext, component: WIPICWord, 
     let mut result = 0;
     let handler: WIPICWord = read_generic(context, component + 0x28)?;
     if handler != 0 {
-        result = context.call_function(handler, &[component, event, key as u32, extra]).await?;
+        result = context
+            .call_function(handler, &[uic_handle(context, component), event, key as u32, extra])
+            .await?;
         if result == 1 {
             return Ok(1);
         }
@@ -2460,6 +2567,8 @@ pub async fn handle_event(context: &mut dyn WIPICContext, component: WIPICWord, 
 /// zero-based index.
 pub async fn add_menu_item(context: &mut dyn WIPICContext, component: WIPICWord, label: WIPICWord, image: WIPICWord) -> Result<i32> {
     tracing::debug!("MC_uicAddMenuItem({component:#x}, {label:#x}, {image:#x})");
+
+    let component = uic_struct(context, component);
 
     if component == 0 {
         return Ok(0);
@@ -2545,6 +2654,8 @@ pub async fn add_menu_item(context: &mut dyn WIPICContext, component: WIPICWord,
 /// returns the previous count, which is the new item's zero-based index.
 pub async fn add_list_item(context: &mut dyn WIPICContext, component: WIPICWord, label: WIPICWord, image: WIPICWord) -> Result<i32> {
     tracing::debug!("MC_uicAddListItem({component:#x}, {label:#x}, {image:#x})");
+
+    let component = uic_struct(context, component);
 
     if component == 0 {
         return Ok(0);
@@ -2637,6 +2748,8 @@ pub async fn add_list_item(context: &mut dyn WIPICContext, component: WIPICWord,
 pub async fn remove_list_item(context: &mut dyn WIPICContext, component: WIPICWord, index: WIPICWord) -> Result<i32> {
     tracing::debug!("MC_uicRemoveListItem({component:#x}, {index})");
 
+    let component = uic_struct(context, component);
+
     if component == 0 {
         return Ok(0);
     }
@@ -2687,7 +2800,9 @@ pub async fn remove_list_item(context: &mut dyn WIPICContext, component: WIPICWo
         let callback: WIPICWord = read_generic(context, component + 0x54)?;
         if callback != 0 {
             let callback_context: WIPICWord = read_generic(context, component + 0x58)?;
-            context.call_function(callback, &[component, 0, callback_context]).await?;
+            context
+                .call_function(callback, &[uic_handle(context, component), 0, callback_context])
+                .await?;
         }
     }
 
@@ -2718,6 +2833,8 @@ pub async fn remove_list_item(context: &mut dyn WIPICContext, component: WIPICWo
 /// successful removal returns 1.
 pub async fn remove_menu_item(context: &mut dyn WIPICContext, component: WIPICWord, index: WIPICWord) -> Result<i32> {
     tracing::debug!("MC_uicRemoveMenuItem({component:#x}, {index})");
+
+    let component = uic_struct(context, component);
 
     if component == 0 {
         return Ok(0);
@@ -2769,7 +2886,9 @@ pub async fn remove_menu_item(context: &mut dyn WIPICContext, component: WIPICWo
         let callback: WIPICWord = read_generic(context, component + 0x54)?;
         if callback != 0 {
             let callback_context: WIPICWord = read_generic(context, component + 0x58)?;
-            context.call_function(callback, &[component, 0, callback_context]).await?;
+            context
+                .call_function(callback, &[uic_handle(context, component), 0, callback_context])
+                .await?;
         }
     }
 
@@ -2795,6 +2914,8 @@ pub async fn remove_menu_item(context: &mut dyn WIPICContext, component: WIPICWo
 /// `callback(component, 0, +0x58 context)`. The callback result is discarded.
 pub async fn set_active_list_item(context: &mut dyn WIPICContext, component: WIPICWord, selected: i32) -> Result<i32> {
     tracing::debug!("MC_uicSetActiveListItem({component:#x}, {selected})");
+
+    let component = uic_struct(context, component);
 
     if component == 0 {
         return Ok(-1);
@@ -2823,7 +2944,9 @@ pub async fn set_active_list_item(context: &mut dyn WIPICContext, component: WIP
         let callback: WIPICWord = read_generic(context, component + 0x54)?;
         if callback != 0 {
             let callback_context: WIPICWord = read_generic(context, component + 0x58)?;
-            context.call_function(callback, &[component, 0, callback_context]).await?;
+            context
+                .call_function(callback, &[uic_handle(context, component), 0, callback_context])
+                .await?;
         }
     }
 
@@ -2847,6 +2970,8 @@ pub async fn set_active_list_item(context: &mut dyn WIPICContext, component: WIP
 /// and +0x54 is nonzero. The callback return value is discarded.
 pub async fn set_active_menu_item(context: &mut dyn WIPICContext, component: WIPICWord, selected: i32) -> Result<i32> {
     tracing::debug!("MC_uicSetActiveMenuItem({component:#x}, {selected})");
+
+    let component = uic_struct(context, component);
 
     if component == 0 {
         return Ok(-1);
@@ -2875,7 +3000,9 @@ pub async fn set_active_menu_item(context: &mut dyn WIPICContext, component: WIP
         let callback: WIPICWord = read_generic(context, component + 0x54)?;
         if callback != 0 {
             let callback_context: WIPICWord = read_generic(context, component + 0x58)?;
-            context.call_function(callback, &[component, 0, callback_context]).await?;
+            context
+                .call_function(callback, &[uic_handle(context, component), 0, callback_context])
+                .await?;
         }
     }
 
@@ -2891,6 +3018,8 @@ pub async fn set_active_menu_item(context: &mut dyn WIPICContext, component: WIP
 /// returns the signed 32-bit active-item value stored at +0x48 unchanged.
 pub async fn get_active_list_item(context: &mut dyn WIPICContext, component: WIPICWord) -> Result<i32> {
     tracing::debug!("MC_uicGetActiveListItem({component:#x})");
+
+    let component = uic_struct(context, component);
 
     if component == 0 {
         return Ok(-1);
@@ -2928,6 +3057,8 @@ pub async fn get_active_list_item(context: &mut dyn WIPICContext, component: WIP
 /// failure returns -1.
 pub async fn set_cursor_pos(context: &mut dyn WIPICContext, component: WIPICWord, position: i32) -> Result<i32> {
     tracing::debug!("LGTC_uicSetCursorPos({component:#x}, {position})");
+
+    let component = uic_struct(context, component);
 
     if component == 0 {
         return Ok(-1);
@@ -2979,6 +3110,8 @@ pub async fn set_cursor_pos(context: &mut dyn WIPICContext, component: WIPICWord
 pub async fn get_cursor_pos(context: &mut dyn WIPICContext, component: WIPICWord) -> Result<i32> {
     tracing::debug!("LGTC_uicGetCursorPos({component:#x})");
 
+    let component = uic_struct(context, component);
+
     if component == 0 {
         return Ok(-1);
     }
@@ -3004,6 +3137,8 @@ pub async fn get_cursor_pos(context: &mut dyn WIPICContext, component: WIPICWord
 /// returns the signed 32-bit active-item value stored at +0x48 unchanged.
 pub async fn get_active_menu_item(context: &mut dyn WIPICContext, component: WIPICWord) -> Result<i32> {
     tracing::debug!("MC_uicGetActiveMenuItem({component:#x})");
+
+    let component = uic_struct(context, component);
 
     if component == 0 {
         return Ok(-1);
@@ -3047,6 +3182,8 @@ pub async fn get_list_item(
     image: WIPICWord,
 ) -> Result<i32> {
     tracing::debug!("MC_uicGetListItem({component:#x}, {index}, {label:#x}, {buflen}, {image:#x})");
+
+    let component = uic_struct(context, component);
 
     if component == 0 {
         return Ok(0);
@@ -3109,6 +3246,8 @@ pub async fn get_menu_item(
     image: WIPICWord,
 ) -> Result<i32> {
     tracing::debug!("MC_uicGetMenuItem({component:#x}, {index}, {label:#x}, {buflen}, {image:#x})");
+
+    let component = uic_struct(context, component);
 
     if component == 0 {
         return Ok(0);
@@ -3550,6 +3689,81 @@ mod tests {
         let text_ptr: u32 = read_generic(&context, component + 0x44).unwrap();
         let text = uic_read_c_string(&context, text_ptr).unwrap();
         assert!(!text.is_empty(), "the composed jamo must reach the text buffer");
+    }
+
+    /// The same sequence on a KTF heap, where `MC_uicCreate`'s return is an
+    /// indirect handle and the struct is twelve bytes past it. Every call has
+    /// to go through the handle the title holds - the device logs showed each
+    /// one landing on the handle cell instead, so the box was never configured
+    /// or enabled and no key composed.
+    #[futures_test::test]
+    async fn ktf_handle_name_entry_composes_through_the_handle() {
+        let mut context = TestContext::with_system(wie_backend::System::new(
+            alloc::boxed::Box::new(test_utils::TestPlatform::new()),
+            "test-pid",
+            "test-aid",
+            wie_backend::DefaultTaskRunner,
+        ));
+        context.set_ktf_handles(true);
+
+        let handle = create(&mut context, 0, 3).await.unwrap().0;
+        let component = context.data_ptr(wipi_types::wipic::WIPICIndirectPtr(handle)).unwrap();
+        assert_ne!(handle, component, "a KTF handle is not the struct");
+        assert_eq!(read_generic::<u32, _>(&context, component).unwrap(), 3);
+
+        configure(&mut context, handle, 70, 158, 100, 18, 3).await.unwrap();
+        set_max_text_size(&mut context, handle, 0).await.unwrap();
+        set_enable(&mut context, handle, 1).await.unwrap();
+        context.system().set_current_input_mode(3);
+
+        assert_eq!(
+            read_generic::<i32, _>(&context, component + 0x04).unwrap(),
+            70,
+            "configure reached the struct"
+        );
+        assert_eq!(
+            read_generic::<u32, _>(&context, component + 0x20).unwrap(),
+            1,
+            "set_enable reached the struct"
+        );
+
+        assert_eq!(handle_event(&mut context, handle, 2, b'8' as i32, 0).await.unwrap(), 1);
+        assert!(
+            get_text_size(&mut context, handle).await.unwrap() > 0,
+            "the jamo is in the box the title reads back"
+        );
+
+        // And the handle is what goes back to the heap.
+        destroy(&mut context, handle).await.unwrap();
+        assert_eq!(context.frees_of(handle), 1);
+        assert_eq!(context.frees_of(component), 0);
+    }
+
+    /// A title's own event handler is given the handle it holds, not the
+    /// struct the call resolved to - it will pass that pointer straight back.
+    #[futures_test::test]
+    async fn ktf_handle_event_handler_receives_the_handle() {
+        static SEEN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+        let mut context = TestContext::with_system(wie_backend::System::new(
+            alloc::boxed::Box::new(test_utils::TestPlatform::new()),
+            "test-pid",
+            "test-aid",
+            wie_backend::DefaultTaskRunner,
+        ));
+        context.set_ktf_handles(true);
+        context.set_guest_function(|_, args| {
+            SEEN.store(args[0], core::sync::atomic::Ordering::Relaxed);
+            0
+        });
+
+        let handle = create(&mut context, 0, 3).await.unwrap().0;
+        set_enable(&mut context, handle, 1).await.unwrap();
+        set_event_handler(&mut context, handle, 0x5000).await.unwrap();
+
+        handle_event(&mut context, handle, 3, b'8' as i32, 0).await.unwrap();
+
+        assert_eq!(SEEN.load(core::sync::atomic::Ordering::Relaxed), handle);
     }
 
     #[futures_test::test]

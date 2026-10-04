@@ -23,6 +23,13 @@ pub trait WIPICContext: ByteRead + ByteWrite + Send + Sync {
     fn free_raw_unsized(&mut self, address: WIPICWord) -> Result<()>;
     fn raw_alloc_size(&self, address: WIPICWord) -> Result<WIPICWord>;
     fn data_ptr(&self, memory: WIPICIndirectPtr) -> Result<WIPICWord>;
+    /// The handle `alloc` returned for the data at `data` - the inverse of
+    /// `data_ptr`, for code that resolved a handle and has to give the title
+    /// back the pointer it holds. Where a handle is the data's own address, as
+    /// on LGT, that is the address itself.
+    fn handle_of(&self, data: WIPICWord) -> WIPICWord {
+        data
+    }
     async fn call_function(&mut self, address: WIPICWord, args: &[WIPICWord]) -> Result<WIPICWord>;
     fn system(&mut self) -> &mut System;
     fn network_state(&self) -> SharedNetworkState;
@@ -139,7 +146,7 @@ pub mod test {
     use wipi_types::wipic::{WIPICIndirectPtr, WIPICWord};
 
     use wie_backend::{Instant, System};
-    use wie_util::{ByteRead, ByteWrite, Result, WieError};
+    use wie_util::{ByteRead, ByteWrite, Result, WieError, read_generic, write_generic};
 
     use super::{WIPICContext, WIPICMethodBody};
     use crate::api::{
@@ -188,6 +195,10 @@ pub mod test {
         graphics_context_layout: ContextLayout,
         /// Whether this handset refuses a clip of no size.
         refuses_empty_clip: bool,
+        /// Whether `alloc` hands out KTF's indirect handles - a cell pointing
+        /// at a header, the data twelve bytes in - rather than the address of
+        /// the data itself, which is what LGT does.
+        ktf_handles: bool,
         /// Every address given back, in the order it was given back. A live
         /// list only says whether a block is held; this says who let go of it
         /// and how many times, which is what a test about ownership needs.
@@ -217,6 +228,12 @@ pub mod test {
             self.refuses_empty_clip = refuses;
         }
 
+        /// Stands in for a KTF handset, whose `alloc` returns an indirect
+        /// handle that has to go through `data_ptr` to reach the data.
+        pub fn set_ktf_handles(&mut self, ktf: bool) {
+            self.ktf_handles = ktf;
+        }
+
         #[allow(clippy::new_without_default)]
         pub fn new() -> Self {
             Self {
@@ -238,6 +255,7 @@ pub mod test {
                 pixel_op_takes_source_first: false,
                 graphics_context_layout: ContextLayout::Lgt,
                 refuses_empty_clip: false,
+                ktf_handles: false,
                 freed: Vec::new(),
             }
         }
@@ -262,6 +280,7 @@ pub mod test {
                 pixel_op_takes_source_first: false,
                 graphics_context_layout: ContextLayout::Lgt,
                 refuses_empty_clip: false,
+                ktf_handles: false,
                 freed: Vec::new(),
             }
         }
@@ -304,7 +323,18 @@ pub mod test {
         }
 
         fn alloc(&mut self, size: WIPICWord) -> Result<WIPICIndirectPtr> {
-            Ok(WIPICIndirectPtr(Self::alloc_raw(self, size)?))
+            if !self.ktf_handles {
+                return Ok(WIPICIndirectPtr(Self::alloc_raw(self, size)?));
+            }
+
+            // KTF's layout: the handle is a cell holding the address of a
+            // header, the size sits in that header, and the data follows it -
+            // twelve bytes past the handle.
+            let handle = Self::alloc_raw(self, size + 12)?;
+            write_generic(self, handle, handle + 4)?;
+            write_generic(self, handle + 4, size)?;
+
+            Ok(WIPICIndirectPtr(handle))
         }
 
         fn free(&mut self, memory: WIPICIndirectPtr) -> Result<()> {
@@ -344,7 +374,16 @@ pub mod test {
         }
 
         fn data_ptr(&self, memory: WIPICIndirectPtr) -> Result<WIPICWord> {
-            Ok(memory.0)
+            if !self.ktf_handles {
+                return Ok(memory.0);
+            }
+
+            let base: WIPICWord = read_generic(self, memory.0)?;
+            Ok(base + 8)
+        }
+
+        fn handle_of(&self, data: WIPICWord) -> WIPICWord {
+            if self.ktf_handles { data - 12 } else { data }
         }
 
         async fn call_function(&mut self, address: WIPICWord, args: &[WIPICWord]) -> Result<WIPICWord> {
