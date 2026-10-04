@@ -3496,6 +3496,37 @@ mod tests {
         assert_eq!(read_text(&context, 20), b"a");
     }
 
+    /// The whole of 미니게임천국's ranking name-entry setup, in the order the game
+    /// does it - including MC_uicSetMaxTextSize(0), which frees the text buffer -
+    /// then a digit typed the KTF way. A regression guard for the real sequence,
+    /// not just a bare component: the freed-buffer step must not stop the digit
+    /// from composing into the box.
+    #[futures_test::test]
+    async fn ktf_name_entry_sequence_composes_a_digit() {
+        let mut context = TestContext::with_system(wie_backend::System::new(
+            alloc::boxed::Box::new(test_utils::TestPlatform::new()),
+            "test-pid",
+            "test-aid",
+            wie_backend::DefaultTaskRunner,
+        ));
+
+        let component = create(&mut context, 0, 3).await.unwrap().0;
+        configure(&mut context, component, 70, 158, 100, 18, 3).await.unwrap();
+        set_max_text_size(&mut context, component, 0).await.unwrap();
+        set_enable(&mut context, component, 1).await.unwrap();
+        context.system().set_current_input_mode(3); // KO, as MC_imSetCurrentMode(3)
+
+        // '8' forwarded as a KTF press. In 천지인 it is the ㅅㅎㅆ key, so the box
+        // takes a jamo; whatever the exact one, the press is consumed and the
+        // composition reaches the text.
+        let consumed = handle_event(&mut context, component, 2, b'8' as i32, 0).await.unwrap();
+        assert_eq!(consumed, 1, "a digit forwarded as a KTF press must be consumed");
+
+        let text_ptr: u32 = read_generic(&context, component + 0x44).unwrap();
+        let text = uic_read_c_string(&context, text_ptr).unwrap();
+        assert!(!text.is_empty(), "the composed jamo must reach the text buffer");
+    }
+
     #[futures_test::test]
     async fn lgt_uic_get_max_text_size_returns_native_capacity() {
         let mut context = TestContext::new();
