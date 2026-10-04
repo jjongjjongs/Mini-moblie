@@ -772,15 +772,17 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // top-left with the sky and field bands stretched apart; at 176x220 the
     // scene fills the panel and its footer lands on the bottom row.
     (TitlePlatform::Skt, "3503930101", panel(176, 220)),
-    // 프린스메이커 온달편 (Muncle, SK-VM): drawn for a 128x160 handset - its
-    // title art is 128x112 and its windows and bars 120 to 128 wide - but it
-    // sizes its backdrops and anchors its message bar, menu icons and map
-    // from getWidth/getHeight. On the 240x320 default those pieces spread to
-    // the far edges and corners while the fixed-size art stayed small, so the
+    // 프린스메이커 온달편 (Muncle, SK-VM): drawn for a 128x128 handset - its
+    // title art is 128x112 and its windows, bars and scenes 120 to 128 wide -
+    // but it sizes its backdrops and anchors its message bar, menu icons and
+    // map from getWidth/getHeight. On the 240x320 default those pieces spread
+    // to the far edges and corners while the fixed-size art stayed small: the
     // title sat off to the right, the dialogue box ran the full height and the
-    // map, icons and message bar were strewn around the schedule screen. At
-    // 128x160 the title, story and schedule screens each fit together.
-    (TitlePlatform::Skt, "0054980867", panel(128, 160)),
+    // map, icons and message bar were strewn around the schedule screen. Taller
+    // 128-wide panels still left the menu floating in sky and a band of empty
+    // rows between the schedule window and the message bar; at 128x128 the
+    // menu, story, schedule and training scenes each fit together edge to edge.
+    (TitlePlatform::Skt, "0054980867", panel(128, 128)),
     // 포키의 모험 (Funtory, SK-VM): drawn for a 176x220 handset - its title
     // art is `title_bg_176.png`, 176x220 - but it takes the ground strip and
     // the scrolling layers' edges from `getWidth`. On the 240x320 default the
@@ -953,10 +955,10 @@ mod tests {
         assert_eq!(title_quirks(TitlePlatform::Ktf, "0102E32F").present_crop_bottom, 24);
     }
 
-    /// 프린스메이커 온달편 fills the 128x160 panel its art was drawn for.
+    /// 프린스메이커 온달편 fills the 128x128 panel its art was drawn for.
     #[test]
-    fn prince_maker_fills_its_128x160_panel() {
-        assert_eq!(title_quirks(TitlePlatform::Skt, "0054980867").screen_size, Some((128, 160)));
+    fn prince_maker_fills_its_128x128_panel() {
+        assert_eq!(title_quirks(TitlePlatform::Skt, "0054980867").screen_size, Some((128, 128)));
     }
 
     /// 포키의 모험 fills the 176x220 panel its art was drawn for.
