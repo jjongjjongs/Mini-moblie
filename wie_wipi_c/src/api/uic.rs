@@ -2363,6 +2363,22 @@ pub async fn handle_event(context: &mut dyn WIPICContext, component: WIPICWord, 
     }
 
     let component_type: u32 = read_generic(context, component)?;
+
+    // DIAGNOSTIC(mgh-input): 미니게임천국 forwards its ranking-name keys here and
+    // they compose nothing, with no repaint - so the built-in path is bailing
+    // before it runs. Dump the component fields each gate keys on, for a key
+    // event only, so the next device log says which gate fails (a wrong type, a
+    // disabled box, a guest-set handler at +0x28, or a freed/zero text buffer).
+    if matches!(event, 2 | 3 | 502 | 504) {
+        let enabled_d: u32 = read_generic(context, component + 0x20).unwrap_or(u32::MAX);
+        let handler_d: u32 = read_generic(context, component + 0x28).unwrap_or(u32::MAX);
+        let text_ptr_d: u32 = read_generic(context, component + 0x44).unwrap_or(u32::MAX);
+        let capacity_d: u32 = read_generic(context, component + 0x48).unwrap_or(u32::MAX);
+        tracing::debug!(
+            "MGHDIAG handle_event comp={component:#x} type={component_type} enabled={enabled_d} handler={handler_d:#x} text_ptr={text_ptr_d:#x} capacity={capacity_d} event={event} key={key}"
+        );
+    }
+
     if !(1..=5).contains(&component_type) {
         return Ok(0);
     }
