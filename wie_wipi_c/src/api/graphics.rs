@@ -2693,9 +2693,39 @@ fn encode_bmp(image: &dyn Image, x: i32, y: i32, width: usize, height: usize) ->
 pub async fn repaint(context: &mut dyn WIPICContext, lcd: i32, x: i32, y: i32, width: i32, height: i32) -> Result<()> {
     tracing::debug!("MC_grpRepaint({lcd}, {x}, {y}, {width}, {height})");
 
-    let platform = context.system().platform();
-    let screen = platform.screen();
-    screen.request_redraw().unwrap();
+    // The other half of `MC_grpFlushLcd`. A title that composes its scene into
+    // the screen frame buffer has two ways of putting it on the LCD: name the
+    // buffer in `MC_grpFlushLcd`, or - having drawn into the one the platform
+    // already holds for it - ask for that one with `MC_grpRepaint`. Both reach
+    // the panel on the handset; here only the flush did, and repaint merely
+    // asked the host to redraw a frame nothing had presented.
+    //
+    // 이타루스전기 draws its loading screens with `MC_grpFlushLcd` and then, once
+    // in the field, switches to `MC_grpRepaint` for every frame. The flushes set
+    // `TITLE_FLUSHES_LCD`, which stands `KtfEmulator::present_lcd` down - so
+    // after the switch no path presented at all and the display froze on the
+    // last loading flush. Present the screen surface the same way the flush
+    // does, so the two calls are interchangeable to a title that mixes them.
+    let handle: WIPICWord = read_generic(context, SCREEN_FRAMEBUFFER_PTR)?;
+    if handle == 0 {
+        // No screen frame buffer taken: a title drawing through the Java layer,
+        // whose frames reach the screen by the MIDP paint. Nothing to present
+        // here; just ask the host to redraw, as this always did.
+        context.system().platform().screen().request_redraw()?;
+
+        return Ok(());
+    }
+
+    let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(WIPICIndirectPtr(handle))?)?);
+    let src_canvas = framebuffer.image(context)?;
+
+    // Repaint drives the LCD, the same as a flush: the watcher must stand down
+    // so it does not paint the whole buffer over a partial repaint, and the
+    // MIDP layer must not flush its own screen image over the top.
+    TITLE_FLUSHES_LCD.store(true, Ordering::Relaxed);
+    context.system().set_title_drives_lcd();
+
+    present_region(context.system(), &*src_canvas, x, y, width, height);
 
     Ok(())
 }
