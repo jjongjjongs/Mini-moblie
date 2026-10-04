@@ -9,3 +9,4 @@ Changes made here since the copy:
   type, and `getfield`/`putfield` look it up from the class the instruction
   names. A subclass field with a superclass field's name and type was the same
   field before. Covered by `test_data/src/FieldShadowing.java`.
+- `java.util.Calendar.setTimeZone(TimeZone)`, which was missing.

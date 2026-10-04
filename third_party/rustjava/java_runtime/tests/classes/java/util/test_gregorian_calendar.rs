@@ -104,3 +104,30 @@ async fn test_calendar_cldc11_time_and_comparison_api() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_calendar_set_time_zone() -> Result<()> {
+    let jvm = test_jvm().await?;
+
+    let calendar: ClassInstanceRef<Object> = jvm
+        .invoke_static("java/util/Calendar", "getInstance", "()Ljava/util/Calendar;", ())
+        .await?;
+    let id = JavaLangString::from_rust_string(&jvm, "GMT").await?;
+    let time_zone: ClassInstanceRef<Object> = jvm
+        .invoke_static("java/util/TimeZone", "getTimeZone", "(Ljava/lang/String;)Ljava/util/TimeZone;", (id,))
+        .await?;
+
+    let _: () = jvm
+        .invoke_virtual(&calendar, "setTimeZone", "(Ljava/util/TimeZone;)V", (time_zone.clone(),))
+        .await?;
+    let _: () = jvm.invoke_virtual(&calendar, "setTimeInMillis", "(J)V", (737521516000i64,)).await?;
+
+    let set: ClassInstanceRef<Object> = jvm.invoke_virtual(&calendar, "getTimeZone", "()Ljava/util/TimeZone;", ()).await?;
+    let set_id = jvm.invoke_virtual(&set, "getID", "()Ljava/lang/String;", ()).await?;
+    assert_eq!(JavaLangString::to_rust_string(&jvm, &set_id).await?, "GMT");
+
+    let hour: i32 = jvm.invoke_virtual(&calendar, "get", "(I)I", (11,)).await?;
+    assert_eq!(3, hour);
+
+    Ok(())
+}

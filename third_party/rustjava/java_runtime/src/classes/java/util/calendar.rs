@@ -35,6 +35,7 @@ impl Calendar {
                 JavaMethodProto::new("setTimeInMillis", "(J)V", Self::set_time_in_millis, Default::default()),
                 JavaMethodProto::new("getTimeInMillis", "()J", Self::get_time_in_millis, Default::default()),
                 JavaMethodProto::new("getTimeZone", "()Ljava/util/TimeZone;", Self::get_time_zone, Default::default()),
+                JavaMethodProto::new("setTimeZone", "(Ljava/util/TimeZone;)V", Self::set_time_zone, Default::default()),
                 JavaMethodProto::new("equals", "(Ljava/lang/Object;)Z", Self::equals, Default::default()),
                 JavaMethodProto::new("hashCode", "()I", Self::hash_code, Default::default()),
                 JavaMethodProto::new("before", "(Ljava/lang/Object;)Z", Self::before, Default::default()),
@@ -134,6 +135,21 @@ impl Calendar {
     async fn get_time_zone(jvm: &Jvm, _: &mut RuntimeContext, this: ClassInstanceRef<Self>) -> Result<ClassInstanceRef<TimeZone>> {
         tracing::debug!("java.util.Calendar::getTimeZone({this:?})");
         jvm.get_field(&this, "timeZone", "Ljava/util/TimeZone;").await
+    }
+
+    /// Moves the calendar to `time_zone`, keeping the instant it holds, so the
+    /// fields `get` reads are that instant's in the new zone.
+    async fn set_time_zone(jvm: &Jvm, _: &mut RuntimeContext, mut this: ClassInstanceRef<Self>, time_zone: ClassInstanceRef<TimeZone>) -> Result<()> {
+        tracing::debug!("java.util.Calendar::setTimeZone({this:?}, {time_zone:?})");
+
+        if time_zone.is_null() {
+            return Err(jvm.exception("java/lang/NullPointerException", "timeZone").await);
+        }
+
+        jvm.put_field(&mut this, "timeZone", "Ljava/util/TimeZone;", time_zone).await?;
+        let _: () = jvm.invoke_virtual(&this, "computeFields", "()V", ()).await?;
+
+        Ok(())
     }
 
     async fn equals(jvm: &Jvm, _: &mut RuntimeContext, this: ClassInstanceRef<Self>, other: ClassInstanceRef<Object>) -> Result<bool> {
