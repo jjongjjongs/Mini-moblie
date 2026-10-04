@@ -1,18 +1,22 @@
-use alloc::vec;
+use alloc::{boxed::Box, format, vec};
 
 use java_class_proto::{JavaFieldProto, JavaMethodProto};
-use java_constants::MethodAccessFlags;
+use java_constants::{FieldAccessFlags, MethodAccessFlags};
 use java_runtime::classes::java::{
     io::{InputStream, RandomAccessFile},
     lang::String,
     util::zip::ZipEntry,
 };
-use jvm::{Array, ClassInstanceRef, Jvm, Result as JvmResult, runtime::JavaLangString};
+use jvm::{Array, ClassInstance, ClassInstanceRef, Jvm, Result as JvmResult, runtime::JavaLangString};
 
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 
 const READ: i32 = 1;
 const READ_RESOURCE: i32 = 8;
+
+/// How many bytes of archive entries [`XFile`] keeps unpacked before it lets
+/// them go and starts over. See `XFile::init_in_archive`.
+const ARCHIVE_CACHE_LIMIT: i32 = 4 * 1024 * 1024;
 
 /// What `fsavail` answers: the same budget `RecordStore.getSizeAvailable`
 /// reports, so a title sees one amount of free space whichever store it asks.
@@ -65,6 +69,11 @@ impl XFile {
                 JavaFieldProto::new("type", "I", Default::default()),
                 JavaFieldProto::new("buf", "[B", Default::default()),
                 JavaFieldProto::new("offset", "I", Default::default()),
+                // Entries already unpacked out of an archive, by archive, its
+                // length and entry name, and how many bytes they hold. See
+                // `init_in_archive`.
+                JavaFieldProto::new("archiveEntries", "Ljava/util/Hashtable;", FieldAccessFlags::STATIC),
+                JavaFieldProto::new("archiveEntryBytes", "I", FieldAccessFlags::STATIC),
             ],
             access_flags: Default::default(),
         }
@@ -119,6 +128,21 @@ impl XFile {
     /// `NoSuchMethodError` the moment the game began. The entry is read-only and
     /// stream-backed, the same as a resource opened by name, so the read,
     /// available and close that follow all take the resource path.
+    ///
+    /// The entry is named as a resource is, from the archive's root, and may
+    /// start with a `/` that the archive's own entry names do not have.
+    /// 테일즈판타지2 reads its battle art out of the `add0.jar` it downloads
+    /// as `new XFile("/add0.jar", "/m/16.png")`, where the jar holds `m/16.png`;
+    /// looking the name up as given found nothing, every monster and
+    /// background came back null, and the battle stopped on the first one it
+    /// drew. A leading `/` is dropped before the lookup.
+    ///
+    /// That title also reads the art back out of the archive every time it
+    /// draws it - a dozen entries a battle frame - and each read here meant
+    /// loading the whole archive and unpacking the entry again, which held a
+    /// handset's frame for most of a second. An entry is unpacked once and kept,
+    /// keyed by the archive's length as well as the names, so an archive the
+    /// title downloads again is read afresh.
     async fn init_in_archive(
         jvm: &Jvm,
         _context: &mut WieJvmContext,
@@ -132,9 +156,42 @@ impl XFile {
         Self::require_name(jvm, &archive).await?;
         Self::require_name(jvm, &entry).await?;
 
+        let archive_name = JavaLangString::to_rust_string(jvm, &archive).await?;
+        let entry_name = JavaLangString::to_rust_string(jvm, &entry).await?;
+        let entry_name = entry_name.strip_prefix('/').unwrap_or(&entry_name);
+
         let file = jvm.new_class("java/io/File", "(Ljava/lang/String;)V", (archive,)).await?;
+        let archive_length: i64 = jvm.invoke_virtual(&file, "length", "()J", ()).await?;
+
+        let key = JavaLangString::from_rust_string(jvm, &format!("{archive_name}\0{archive_length}\0{entry_name}")).await?;
+        let entries = Self::archive_entries(jvm).await?;
+        let cached: ClassInstanceRef<Array<i8>> = jvm
+            .invoke_virtual(&entries, "get", "(Ljava/lang/Object;)Ljava/lang/Object;", (key.clone(),))
+            .await?;
+
+        let data = if cached.is_null() {
+            let data = Self::unpack_entry(jvm, file, entry_name).await?;
+            Self::keep_entry(jvm, entries, key, &data).await?;
+            data
+        } else {
+            cached
+        };
+
+        let resource_stream = jvm.new_class("java/io/ByteArrayInputStream", "([B)V", (data,)).await?;
+
+        jvm.put_field(&mut this, "is", "Ljava/io/InputStream;", resource_stream).await?;
+        jvm.put_field(&mut this, "mode", "I", READ_RESOURCE).await?;
+        jvm.put_field(&mut this, "type", "I", READ_RESOURCE).await?;
+
+        Ok(())
+    }
+
+    /// The bytes of `entry` in the archive `file`, or `FileNotFoundException`
+    /// when the archive does not hold it.
+    async fn unpack_entry(jvm: &Jvm, file: Box<dyn ClassInstance>, entry: &str) -> JvmResult<ClassInstanceRef<Array<i8>>> {
         let zip = jvm.new_class("java/util/zip/ZipFile", "(Ljava/io/File;)V", (file,)).await?;
 
+        let entry = JavaLangString::from_rust_string(jvm, entry).await?;
         let zip_entry: ClassInstanceRef<ZipEntry> = jvm
             .invoke_virtual(&zip, "getEntry", "(Ljava/lang/String;)Ljava/util/zip/ZipEntry;", (entry,))
             .await?;
@@ -142,13 +199,68 @@ impl XFile {
             return Err(jvm.exception("java/io/FileNotFoundException", "entry not found in archive").await);
         }
 
-        let resource_stream: ClassInstanceRef<InputStream> = jvm
+        let stream: ClassInstanceRef<InputStream> = jvm
             .invoke_virtual(&zip, "getInputStream", "(Ljava/util/zip/ZipEntry;)Ljava/io/InputStream;", (zip_entry,))
             .await?;
+        let length: i32 = jvm.invoke_virtual(&stream, "available", "()I", ()).await?;
+        let data = jvm.instantiate_array("B", length as _).await?;
+        let mut read = 0;
+        while read < length {
+            let count: i32 = jvm
+                .invoke_virtual(&stream, "read", "([BII)I", (data.clone(), read, length - read))
+                .await?;
+            if count <= 0 {
+                break;
+            }
+            read += count;
+        }
 
-        jvm.put_field(&mut this, "is", "Ljava/io/InputStream;", resource_stream).await?;
-        jvm.put_field(&mut this, "mode", "I", READ_RESOURCE).await?;
-        jvm.put_field(&mut this, "type", "I", READ_RESOURCE).await?;
+        Ok(data.into())
+    }
+
+    /// The table of unpacked archive entries, made on first use.
+    async fn archive_entries(jvm: &Jvm) -> JvmResult<Box<dyn ClassInstance>> {
+        let entries: Option<Box<dyn ClassInstance>> = jvm
+            .get_static_field("com/xce/io/XFile", "archiveEntries", "Ljava/util/Hashtable;")
+            .await?;
+        if let Some(entries) = entries {
+            return Ok(entries);
+        }
+
+        let entries = jvm.new_class("java/util/Hashtable", "()V", ()).await?;
+        jvm.put_static_field("com/xce/io/XFile", "archiveEntries", "Ljava/util/Hashtable;", entries.clone())
+            .await?;
+
+        Ok(entries)
+    }
+
+    /// Keeps `data` under `key`, first letting every kept entry go if keeping
+    /// it would pass [`ARCHIVE_CACHE_LIMIT`].
+    async fn keep_entry(
+        jvm: &Jvm,
+        entries: Box<dyn ClassInstance>,
+        key: Box<dyn ClassInstance>,
+        data: &ClassInstanceRef<Array<i8>>,
+    ) -> JvmResult<()> {
+        let length = jvm.array_length(data).await? as i32;
+        let kept: i32 = jvm.get_static_field("com/xce/io/XFile", "archiveEntryBytes", "I").await?;
+
+        let kept = if kept + length > ARCHIVE_CACHE_LIMIT {
+            let _: () = jvm.invoke_virtual(&entries, "clear", "()V", ()).await?;
+            0
+        } else {
+            kept
+        };
+
+        let _: Option<Box<dyn ClassInstance>> = jvm
+            .invoke_virtual(
+                &entries,
+                "put",
+                "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+                (key, data.clone()),
+            )
+            .await?;
+        jvm.put_static_field("com/xce/io/XFile", "archiveEntryBytes", "I", kept + length).await?;
 
         Ok(())
     }
@@ -468,6 +580,54 @@ mod tests {
             let buffer: ClassInstanceRef<Array<i8>> = buffer.into();
             let bytes: Vec<i8> = jvm.load_array(&buffer, 0, read.max(0) as _).await?;
             assert_eq!(bytes.into_iter().map(|x| x as u8).collect::<Vec<_>>(), b"PRINCESS");
+
+            Ok(())
+        })
+    }
+
+    /// An entry named from the archive's root with a leading `/` is the entry
+    /// stored without one: 테일즈판타지2 opens `new XFile("/add0.jar",
+    /// "/m/16.png")` for the `m/16.png` its downloaded jar holds.
+    #[test]
+    fn an_entry_named_with_a_leading_slash_is_found() -> Result<()> {
+        let archive = stored_zip("m/16.png", b"MONSTER");
+
+        run_jvm_test_with_files(protos(), &[("add0.jar", archive)], |jvm| async move {
+            let name = JavaLangString::from_rust_string(&jvm, "/add0.jar").await?;
+            let entry = JavaLangString::from_rust_string(&jvm, "/m/16.png").await?;
+            let xfile = jvm
+                .new_class("com/xce/io/XFile", "(Ljava/lang/String;Ljava/lang/String;)V", (name, entry))
+                .await?;
+
+            let available: i32 = jvm.invoke_virtual(&xfile, "available", "()I", ()).await?;
+            assert_eq!(available, 7);
+
+            Ok(())
+        })
+    }
+
+    /// An entry opened again - from the entries already unpacked - reads the
+    /// same bytes, each open from its own start.
+    #[test]
+    fn an_entry_opened_twice_reads_the_same_bytes() -> Result<()> {
+        let archive = stored_zip("bg/0.png", b"FIELD");
+
+        run_jvm_test_with_files(protos(), &[("add0.jar", archive)], |jvm| async move {
+            for _ in 0..2 {
+                let name = JavaLangString::from_rust_string(&jvm, "/add0.jar").await?;
+                let entry = JavaLangString::from_rust_string(&jvm, "/bg/0.png").await?;
+                let xfile = jvm
+                    .new_class("com/xce/io/XFile", "(Ljava/lang/String;Ljava/lang/String;)V", (name, entry))
+                    .await?;
+
+                let buffer = jvm.instantiate_array("B", 5).await?;
+                let read: i32 = jvm.invoke_virtual(&xfile, "read", "([BII)I", (buffer.clone(), 0i32, 5i32)).await?;
+                let _: () = jvm.invoke_virtual(&xfile, "close", "()V", ()).await?;
+
+                let buffer: ClassInstanceRef<Array<i8>> = buffer.into();
+                let bytes: Vec<i8> = jvm.load_array(&buffer, 0, read.max(0) as _).await?;
+                assert_eq!(bytes.into_iter().map(|x| x as u8).collect::<Vec<_>>(), b"FIELD");
+            }
 
             Ok(())
         })
