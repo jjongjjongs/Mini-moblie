@@ -772,6 +772,13 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // top-left with the sky and field bands stretched apart; at 176x220 the
     // scene fills the panel and its footer lands on the bottom row.
     (TitlePlatform::Skt, "3503930101", panel(176, 220)),
+    // 포키의 모험 (Funtory, SK-VM): drawn for a 176x220 handset - its title
+    // art is `title_bg_176.png`, 176x220 - but it takes the ground strip and
+    // the scrolling layers' edges from `getWidth`. On the 240x320 default the
+    // fixed-size pictures sat centred in white borders while the ground and the
+    // flying monsters ran on to the full width, so the scenes overlapped each
+    // other and the screen's edge. At 176x220 every layer meets the edge.
+    (TitlePlatform::Skt, "0050079226", panel(176, 220)),
     // 엑스맨(X-Men): sizes its screens from getWidth/getHeight, so it fits
     // whatever panel it is given, but was drawn for a 176x220 handset.
     (TitlePlatform::Skt, "0053594173", panel(176, 220)),
@@ -935,6 +942,12 @@ mod tests {
     fn pick_the_doll_ktf_crops_its_softkey_strip() {
         assert_eq!(title_quirks(TitlePlatform::Ktf, "0102E32F").screen_size, Some((240, 320)));
         assert_eq!(title_quirks(TitlePlatform::Ktf, "0102E32F").present_crop_bottom, 24);
+    }
+
+    /// 포키의 모험 fills the 176x220 panel its art was drawn for.
+    #[test]
+    fn poky_adventure_fills_its_176x220_panel() {
+        assert_eq!(title_quirks(TitlePlatform::Skt, "0050079226").screen_size, Some((176, 220)));
     }
 
     /// 타워오브바벨3 fills the 176x220 panel it was drawn for.
