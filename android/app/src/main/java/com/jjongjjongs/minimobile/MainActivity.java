@@ -4517,15 +4517,25 @@ public final class MainActivity extends Activity {
 
     private void applyStatusBarInset(View view) {
         view.setOnApplyWindowInsetsListener((v, insets) -> {
-            // Reserve all four system-bar insets, not just top and bottom: in
-            // landscape a device can put its navigation bar on the left or the
-            // right edge, and without the side padding the number pad would
-            // slide under it.
+            // Reserve the navigation bar's space on the bottom and the sides - in
+            // landscape a device can put the bar on the left or the right edge,
+            // and without the side padding the number pad would slide under it.
+            //
+            // Use the *stable* insets there, not the live system-window ones:
+            // sticky immersive hides the navigation bar, which collapses the live
+            // bottom and side insets to zero while it is hidden, and padding by
+            // that let the keypad drop to the very edge of the screen - under
+            // where the bar sits - the moment immersive was turned on. The stable
+            // insets are the space the bars occupy when shown and do not come and
+            // go as immersive hides them, so the keypad keeps its place.
+            //
+            // The top stays on the live inset so the screen still runs edge to
+            // edge under the hidden status bar, which is the point of immersive.
             v.setPadding(
-                    insets.getSystemWindowInsetLeft(),
+                    insets.getStableInsetLeft(),
                     insets.getSystemWindowInsetTop(),
-                    insets.getSystemWindowInsetRight(),
-                    insets.getSystemWindowInsetBottom());
+                    insets.getStableInsetRight(),
+                    insets.getStableInsetBottom());
             return insets;
         });
     }
