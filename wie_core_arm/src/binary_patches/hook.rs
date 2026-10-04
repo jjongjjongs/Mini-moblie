@@ -183,6 +183,29 @@ pub fn resolve_hooks(core: &mut ArmCore, entry: &Entry, scan_ranges: &[(u32, u32
     Ok(installed)
 }
 
+/// Whether a patched routine was handed a null pointer, and a note in the log
+/// if it was.
+///
+/// These hooks stand in for the title's own compiled libc. The title's version
+/// would have read or written address 0 and carried on with whatever the
+/// handset's low page holds; ours refuses the access and the refusal is fatal,
+/// which ends the whole title over a call its own code survived. LOA-혼돈의
+/// 서곡's settings screen calls `strcpy(dst, NULL)` while it builds its
+/// descriptions, and that one call took the emulator down with
+/// `Invalid memory access; address: 0`.
+///
+/// So a null argument makes the routine do nothing rather than fail. `strcpy`
+/// still terminates its destination, because its caller reads one back.
+fn null_arg(name: &str, args: &[(&str, u32)]) -> bool {
+    let Some((which, _)) = args.iter().find(|(_, value)| *value == 0) else {
+        return false;
+    };
+
+    tracing::warn!("hook {name}: {which} is null; standing down rather than faulting the title");
+
+    true
+}
+
 /// Patch the SVC instruction at every hook PC and register the dispatcher.
 /// `hooks` must already be the fully expanded list from `resolve_hooks`. The
 /// dispatcher is registered even when `hooks` is empty so that any later SVC
@@ -259,7 +282,9 @@ async fn handle_binary_patch_svc(core: &mut ArmCore, registry: &mut Registry) ->
                 )
             };
             tracing::trace!("hook memcpy(ptr_dst={dst:#x}, ptr_src={src:#x}, len={len:#x})");
-            stdlib::memcpy(core, &mut (), dst, src, len).await?;
+            if !null_arg("memcpy", &[("destination", dst), ("source", src)]) {
+                stdlib::memcpy(core, &mut (), dst, src, len).await?;
+            }
             Ok(JumpTo(lr))
         }
         HookKind::Memset => {
@@ -272,7 +297,9 @@ async fn handle_binary_patch_svc(core: &mut ArmCore, registry: &mut Registry) ->
                 )
             };
             tracing::trace!("hook memset(ptr_dst={dst:#x}, val={:#x}, len={len:#x})", val as u8);
-            stdlib::memset(core, &mut (), dst, val, len).await?;
+            if !null_arg("memset", &[("destination", dst)]) {
+                stdlib::memset(core, &mut (), dst, val, len).await?;
+            }
             Ok(JumpTo(lr))
         }
         HookKind::Strcpy => {
@@ -281,12 +308,24 @@ async fn handle_binary_patch_svc(core: &mut ArmCore, registry: &mut Registry) ->
                 (inner.engine.reg_read(ArmRegister::R0), inner.engine.reg_read(ArmRegister::R1))
             };
             tracing::trace!("hook strcpy(ptr_dst={dst:#x}, ptr_src={src:#x})");
-            stdlib::strcpy(core, &mut (), dst, src).await?;
+            if null_arg("strcpy", &[("destination", dst), ("source", src)]) {
+                // The caller reads the destination back as a string, so leave
+                // it an empty one rather than whatever it held before.
+                if dst != 0 {
+                    core.write_bytes(dst, &[0])?;
+                }
+            } else {
+                stdlib::strcpy(core, &mut (), dst, src).await?;
+            }
             Ok(JumpTo(lr))
         }
         HookKind::Strlen => {
             let s = core.inner.lock().engine.reg_read(ArmRegister::R0);
-            let len = stdlib::strlen(core, &mut (), s).await?;
+            let len = if null_arg("strlen", &[("string", s)]) {
+                0
+            } else {
+                stdlib::strlen(core, &mut (), s).await?
+            };
             tracing::trace!("hook strlen(ptr_str={s:#x}) -> {len:#x}");
             core.inner.lock().engine.reg_write(ArmRegister::R0, len);
             Ok(JumpTo(lr))
@@ -303,7 +342,9 @@ async fn handle_binary_patch_svc(core: &mut ArmCore, registry: &mut Registry) ->
                 "hook inline_copy(ptr_dst={dst:#x}, ptr_src={src:#x}, len={len:#x}, exit={:#x})",
                 spec.exit_pc
             );
-            stdlib::memcpy(core, &mut (), dst, src, len).await?;
+            if !null_arg("inline_copy", &[("destination", dst), ("source", src)]) {
+                stdlib::memcpy(core, &mut (), dst, src, len).await?;
+            }
             if spec.spill_back {
                 core.write_bytes(dst_slot, &dst.wrapping_add(len).to_le_bytes())?;
                 core.write_bytes(src_slot, &src.wrapping_add(len).to_le_bytes())?;
@@ -325,7 +366,9 @@ async fn handle_binary_patch_svc(core: &mut ArmCore, registry: &mut Registry) ->
                 "hook reg_inline_copy(src={src:#x}, dst={dst:#x}, count={count:#x}, exit={:#x})",
                 spec.exit_pc
             );
-            stdlib::memcpy(core, &mut (), dst, src, count).await?;
+            if !null_arg("reg_inline_copy", &[("destination", dst), ("source", src)]) {
+                stdlib::memcpy(core, &mut (), dst, src, count).await?;
+            }
             let mut inner = core.inner.lock();
             inner.engine.reg_write(spec.src, src.wrapping_add(count));
             inner.engine.reg_write(spec.dst, dst.wrapping_add(count));

@@ -1,0 +1,226 @@
+apply plugin: 'com.android.application'
+
+// The emulator core is Rust. `cargo ndk` cross-compiles the workspace's
+// `wie_android` crate and drops one .so per ABI into `jniLibsDir`, which is
+// then the only jniLibs source AGP packages.
+def jniLibsDir = layout.buildDirectory.dir('jniLibs').get().asFile
+// 64-bit is the primary target; 32-bit (armeabi-v7a) is built too so the app
+// installs on older 32-bit-only devices. The interpreter is the portable CPU
+// fallback there - the dynasm JIT only has x86_64/aarch64 backends, so a v7a
+// build silently runs the reference interpreter (slower, but correct).
+def abis = ['arm64-v8a', 'armeabi-v7a']
+
+// The signing key is deliberately not in the repository. Point the build at it
+// with `-PkeystoreFile=... -PkeystorePassword=... -PkeyAlias=...`, or with the
+// matching `MINIMOBILE_KEYSTORE*` environment variables, or by putting the same
+// four keys in `android/keystore.properties`.
+//
+// Without it a build falls back to the SDK's own debug key, which is generated
+// per machine - and, on a CI runner, per run. That is why an apk from one build
+// would not install over an apk from the last: Android refuses an update whose
+// signature differs from the installed app's, so every patch meant uninstalling
+// first. One stable key is the whole of the fix.
+def signingProperties = { ->
+    def properties = new Properties()
+    def file = rootProject.file('keystore.properties')
+    if (file.isFile()) {
+        file.withInputStream { properties.load(it) }
+    }
+
+    def value = { name, environment ->
+        providers.gradleProperty(name).getOrNull() ?: System.getenv(environment) ?: properties.getProperty(name)
+    }
+
+    def store = value('keystoreFile', 'MINIMOBILE_KEYSTORE_FILE')
+    if (store == null || store.trim().isEmpty()) {
+        return null
+    }
+
+    def resolved = rootProject.file(store)
+    if (!resolved.isFile()) {
+        throw new GradleException("Signing keystore not found: ${resolved}")
+    }
+
+    [
+        file    : resolved,
+        password: value('keystorePassword', 'MINIMOBILE_KEYSTORE_PASSWORD'),
+        alias   : value('keyAlias', 'MINIMOBILE_KEY_ALIAS') ?: 'minimobile',
+        keyPassword: value('keyPassword', 'MINIMOBILE_KEY_PASSWORD')
+                ?: value('keystorePassword', 'MINIMOBILE_KEYSTORE_PASSWORD'),
+    ]
+}()
+
+android {
+    namespace 'com.jjongjjongs.minimobile'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId providers.gradleProperty('applicationId')
+                .getOrElse('com.jjongjjongs.minimobile')
+        minSdk 24
+        targetSdk 35
+        // An update has to be at least the version it replaces, so a build that
+        // is meant to be installed over an older one cannot leave this at 1
+        // forever. CI passes its run number; a local build gets 1, which still
+        // reinstalls over itself.
+        versionCode providers.gradleProperty('versionCode').map { it as Integer }.getOrElse(1)
+        versionName '0.0.1'
+
+        ndk {
+            //noinspection ChromeOsAbiSupport
+            abiFilters.addAll(abis)
+        }
+
+        if (!project.hasProperty('skipCmake')) {
+            externalNativeBuild {
+                cmake {
+                    arguments '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON'
+                }
+            }
+        }
+    }
+
+    if (signingProperties != null) {
+        signingConfigs {
+            minimobile {
+                storeFile signingProperties.file
+                storePassword signingProperties.password
+                keyAlias signingProperties.alias
+                keyPassword signingProperties.keyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        // Both types take the same key when there is one. The apk people
+        // install is the debug build, so signing only the release build would
+        // fix nothing.
+        debug {
+            if (signingProperties != null) {
+                signingConfig signingConfigs.minimobile
+            }
+        }
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (signingProperties != null) {
+                signingConfig signingConfigs.minimobile
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    sourceSets {
+        main {
+            jniLibs.srcDirs = [jniLibsDir]
+            if (project.hasProperty('precompiledJava')) {
+                java.srcDirs = []
+            }
+        }
+    }
+
+    if (!project.hasProperty('skipCmake')) {
+        externalNativeBuild {
+            cmake {
+                path file('src/main/cpp/CMakeLists.txt')
+                version '3.22.1'
+            }
+        }
+    }
+
+    packaging {
+        jniLibs {
+            // The library is loaded straight from the apk; nothing unpacks it.
+            useLegacyPackaging false
+        }
+    }
+
+    androidResources {
+        noCompress += ['wav', 'mp3']
+    }
+}
+
+/**
+ * Build the native library. Requires the Rust aarch64-linux-android target and
+ * cargo-ndk:
+ *
+ *   rustup target add aarch64-linux-android
+ *   cargo install cargo-ndk
+ *
+ * Set `-PskipCargo` to package a .so you built yourself.
+ */
+tasks.register('cargoBuild', Exec) {
+    description = 'Cross-compiles wie_android for the configured Android ABIs'
+    group = 'build'
+
+    workingDir rootProject.projectDir.parentFile
+
+    def profile = 'release'
+    def args = ['cargo', 'ndk', '-o', jniLibsDir.absolutePath]
+    abis.each { args += ['-t', it] }
+    args += ['build', "--${profile}", '-p', 'wie_android', '-p', 'wie_midi']
+    // The machine-code JIT engine, which is what the shipped .so runs on.
+    //
+    // Without it the emulator falls back to the reference interpreter, and the
+    // titles that need the CPU do not get enough of it: 제노니아 1 and 2 ask for
+    // a 15ms tick and were getting a frame every 62ms and 80ms. The blit
+    // benchmark in `wie_core_arm::engine::bench` runs the same 190M
+    // instructions in 0.115s on the JIT against 0.787s on the interpreter.
+    //
+    // `-PdisableJit` builds the interpreter instead, which is how the two are
+    // compared on a device and what to reach for if the JIT is ever suspected.
+    if (!project.hasProperty('disableJit')) {
+        args += ['--features', 'wie_android/jit']
+    }
+
+    commandLine args
+
+    doFirst {
+        def soundFont = rootProject.projectDir.parentFile.toPath().resolve('wie_midi/soundfont.sf2').toFile()
+        if (!soundFont.isFile()) {
+            throw new GradleException('Missing local wie_midi/soundfont.sf2')
+        }
+        jniLibsDir.mkdirs()
+    }
+}
+
+dependencies {
+    if (project.hasProperty('precompiledJava')) {
+        implementation files('precompiled-validation.jar')
+    }
+}
+
+tasks.register('verifyLocalAudio') {
+    description = 'Checks private audio inputs required for the tested Zenonia build'
+    group = 'verification'
+
+    doLast {
+        def root = rootProject.projectDir.parentFile
+        def required = [zenonia1: 51, zenonia2: 16, zenonia3: 17]
+        required.each { name, count ->
+            def directory = new File(project.projectDir, "src/main/assets/${name}")
+            def files = directory.isDirectory() ? directory.listFiles()?.findAll { it.isFile() } : []
+            if (files == null || files.size() != count) {
+                throw new GradleException("Missing local ${name} audio: expected ${count} files in ${directory}")
+            }
+        }
+        def soundFont = new File(root, 'wie_midi/soundfont.sf2')
+        if (!soundFont.isFile()) {
+            throw new GradleException("Missing local MIDI soundfont: ${soundFont}")
+        }
+    }
+}
+
+tasks.configureEach { task ->
+    // `preBuild` is the last point before AGP starts collecting jniLibs.
+    if (task.name == 'preBuild' && !project.hasProperty('skipCargo')) {
+        task.dependsOn tasks.named('cargoBuild')
+    }
+    if (task.name == 'preBuild') {
+        task.dependsOn tasks.named('verifyLocalAudio')
+    }
+}

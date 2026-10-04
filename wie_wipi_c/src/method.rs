@@ -103,6 +103,8 @@ macro_rules! methods {
         __generate!($context, $raw_type, P0, P1, P2, P3, P4, P5, P6);
         __generate!($context, $raw_type, P0, P1, P2, P3, P4, P5, P6, P7);
         __generate!($context, $raw_type, P0, P1, P2, P3, P4, P5, P6, P7, P8);
+        __generate!($context, $raw_type, P0, P1, P2, P3, P4, P5, P6, P7, P8, P9);
+        __generate!($context, $raw_type, P0, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10);
     };
 }
 

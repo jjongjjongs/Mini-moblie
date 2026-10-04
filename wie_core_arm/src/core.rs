@@ -1,10 +1,14 @@
 use alloc::{borrow::ToOwned, boxed::Box, collections::BTreeMap, format, string::String, sync::Arc, vec, vec::Vec};
-use core::mem::size_of;
+use core::{
+    any::{Any, TypeId},
+    fmt::Write as _,
+    mem::size_of,
+};
 
 use spin::Mutex;
 
 use wie_backend::{ProfileCallback, ProfileSample};
-use wie_util::{ByteRead, ByteWrite, Result, WieError, read_generic};
+use wie_util::{ByteRead, ByteWrite, Result, WieError, read_generic, write_generic};
 
 use crate::{
     EmulatedFunction, ResultWriter, ThreadId,
@@ -22,9 +26,22 @@ use crate::{
 
 const GLOBAL_DATA_BASE: u32 = 0x7fff0000;
 const FUNCTIONS_BASE: u32 = 0x71000000;
-const FUNCTIONS_SIZE: usize = 0x10000;
+// Each resolved import and every application class method gets a 16-byte SVC
+// stub here. A title with many classes (LGT CLDC games register hundreds) needs
+// well over the 4096 stubs a 64 KiB arena held, so give it room for ~64K.
+const FUNCTIONS_SIZE: usize = 0x100000;
 const SVC_STUB_SIZE: u32 = 16;
 pub const RUN_FUNCTION_LR: u32 = 0x7f000000;
+
+/// Instruction budget for one `engine.run` batch. The engine returns the moment
+/// it reaches `end` or hits an SVC, so this only bounds an uninterrupted compute
+/// stretch — a `CountExhausted` just re-enters the loop and runs again with no
+/// scheduling in between (the executor only yields at an SVC that awaits). A low
+/// budget therefore bought nothing but round-trip overhead: a CPU-heavy title
+/// (Zenonia runs ~92k `run` calls a second, a third of them budget-exhaustion
+/// re-entries) paid a register save/restore and lock cycle for each. Larger
+/// batches collapse those without changing when a run actually stops.
+const RUN_INSTRUCTION_BUDGET: u32 = 8000;
 pub const HEAP_BASE: u32 = 0x40000000;
 pub const HEAP_SIZE: u32 = 0x10000000;
 
@@ -40,14 +57,56 @@ struct ProfileState {
     callback: ProfileCallback,
 }
 
+/// A synchronous SVC fast path, tried before the generic async handler dispatch.
+/// Called with the core, the SVC category and the caller's return address; it
+/// returns `Ok(true)` if it fully handled the SVC (set the result and return
+/// PC), or `Ok(false)` to fall through to the normal handler. It lets a few
+/// extremely hot, trivial syscalls skip the context clone, method boxing and
+/// async-trait future allocation the generic path pays on every call.
+pub type FastSvcHandler = Arc<dyn Fn(&mut ArmCore, u32, u32) -> Result<bool> + Send + Sync>;
+
 pub(crate) struct ArmCoreInner {
     pub(crate) engine: Box<dyn ArmEngine>,
     last_thread_id: ThreadId,
+    current_thread_id: Option<ThreadId>,
     threads: BTreeMap<ThreadId, ThreadState>,
     svc_handlers: BTreeMap<u32, Arc<Box<dyn RegisteredFunction>>>,
+    fast_svc: Option<FastSvcHandler>,
+    svc_stubs: BTreeMap<(u32, u32), u32>,
+    /// The same stubs by address, so a caller handed a bare function pointer
+    /// can ask which registration it stands for. See [`ArmCore::svc_stub_id`].
+    svc_stub_ids: BTreeMap<u32, (u32, u32)>,
     next_stub_address: u32,
     profile: Option<ProfileState>,
+    /// Guest allocations of freed thread stacks, kept for reuse. Every spawned
+    /// task creates a thread with a 1 MB stack, so a busy title alloc/frees
+    /// these fast; recycling the allocation keeps that churn from fragmenting
+    /// the heap into sub-stack-sized holes.
+    stack_pool: Vec<u32>,
+    /// Where the next allocation out of each bucket starts looking. See
+    /// [`crate::allocator::bucket::BucketAllocator::alloc`]; it lives on the
+    /// core because the allocator is stateless otherwise and the bitmap it
+    /// scans is guest memory this core owns.
+    pub(crate) bucket_cursors: [u32; 8],
+    /// Whether an SVC handler chose the address to resume at, rather than
+    /// returning to the instruction after the `svc`. Set by
+    /// [`ArmCore::set_next_pc`] and cleared before each handler runs.
+    next_pc_chosen: bool,
+    /// Guest words that are private to each thread, and what each reads before
+    /// its thread has written it. See [`ArmCore::register_thread_local_word`].
+    thread_local_defaults: BTreeMap<u32, u32>,
+    /// What [`ArmCore::write_once_metadata`] has already read, by address and
+    /// by what it was read as - one address can describe more than one thing.
+    write_once_metadata: BTreeMap<(u32, TypeId), Arc<dyn Any + Send + Sync>>,
+    /// What `fp` holds whenever the guest runs, when something asked for it.
+    /// See [`ArmCore::reserve_fp`].
+    reserved_fp: Option<u32>,
 }
+
+/// Upper bound on pooled thread stacks. Peak concurrency is small (a handful),
+/// so this is never reached in practice; it only caps memory if something spawns
+/// pathologically many concurrent threads.
+const THREAD_STACK_POOL_CAP: usize = 16;
 
 impl Drop for ArmCoreInner {
     fn drop(&mut self) {
@@ -72,6 +131,25 @@ pub struct ArmCore {
     pub(crate) inner: Arc<Mutex<ArmCoreInner>>, // TODO can we change it to another lock like async-lock?
 }
 
+/// The non-debug execution engine, chosen at compile time: the machine-code JIT
+/// (`jit` feature, x86-64) if available, else the block-caching interpreter
+/// (`fast_cpu`), else the reference interpreter.
+// The trailing interpreter/fast-engine arms stay compiled (via `cfg!`, not
+// `#[cfg]`) even when the JIT is selected, so `FastCpuEngine`/`Arm32CpuEngine`
+// remain referenced and warning-free across every feature combination; they are
+// then unreachable in the JIT build, which the allow acknowledges.
+#[allow(unreachable_code)]
+fn default_engine() -> Box<dyn ArmEngine> {
+    #[cfg(all(feature = "jit", any(target_arch = "x86_64", target_arch = "aarch64")))]
+    return Box::new(crate::engine::JitEngine::new());
+
+    if cfg!(feature = "fast_cpu") {
+        Box::new(crate::engine::FastCpuEngine::new())
+    } else {
+        Box::new(Arm32CpuEngine::new())
+    }
+}
+
 impl ArmCore {
     pub fn new(enable_gdbserver: bool, profile: Option<ProfileCallback>) -> Result<Self> {
         let mut engine = if enable_gdbserver {
@@ -82,7 +160,7 @@ impl ArmCore {
 
             engine
         } else {
-            Box::new(Arm32CpuEngine::new())
+            default_engine()
         };
 
         engine.mem_map(FUNCTIONS_BASE, FUNCTIONS_SIZE, MemoryPermission::ReadExecute);
@@ -97,10 +175,20 @@ impl ArmCore {
         let inner = ArmCoreInner {
             engine,
             last_thread_id: 0,
+            current_thread_id: None,
             threads: BTreeMap::new(),
             svc_handlers: BTreeMap::new(),
+            fast_svc: None,
+            svc_stubs: BTreeMap::new(),
+            svc_stub_ids: BTreeMap::new(),
+            next_pc_chosen: false,
+            thread_local_defaults: BTreeMap::new(),
+            stack_pool: Vec::new(),
+            bucket_cursors: [0; 8],
             next_stub_address: FUNCTIONS_BASE,
             profile,
+            write_once_metadata: BTreeMap::new(),
+            reserved_fp: None,
         };
 
         let result = Self {
@@ -156,6 +244,12 @@ impl ArmCore {
             thread_id
         };
 
+        {
+            use ::core::sync::atomic::Ordering::Relaxed;
+            let live = crate::LIVE_THREADS.fetch_add(1, Relaxed) + 1;
+            crate::PEAK_THREADS.fetch_max(live, Relaxed);
+        }
+
         tracing::info!("Create thread: {thread_id}");
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -177,10 +271,153 @@ impl ArmCore {
             inner.threads.remove(&thread_id)
         };
 
+        if _thread_state.is_some() {
+            crate::LIVE_THREADS.fetch_sub(1, ::core::sync::atomic::Ordering::Relaxed);
+        }
+
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(debug) = self.debug_inner() {
             debug.on_thread_deleted(thread_id);
         }
+    }
+
+    /// Reuses a previously released thread stack, or allocates a fresh one.
+    ///
+    /// Thread stacks are large and every spawned task creates a thread, so a
+    /// busy title churns them fast; recycling the guest allocation keeps that
+    /// churn from fragmenting the heap into sub-stack-sized holes until a new
+    /// stack no longer fits (the Legend of Master mid-play allocation failure).
+    pub(crate) fn acquire_thread_stack(&mut self, size: u32) -> Result<u32> {
+        let pooled = self.inner.lock().stack_pool.pop();
+        if let Some(base) = pooled {
+            return Ok(base);
+        }
+
+        crate::Allocator::alloc(self, size)
+    }
+
+    /// Returns a thread stack to the pool for reuse, freeing it only if the pool
+    /// is already at capacity.
+    pub(crate) fn release_thread_stack(&mut self, base: u32, size: u32) {
+        let pooled = {
+            let mut inner = self.inner.lock();
+            if inner.stack_pool.len() < THREAD_STACK_POOL_CAP {
+                inner.stack_pool.push(base);
+                true
+            } else {
+                false
+            }
+        };
+
+        if !pooled && let Err(err) = crate::Allocator::free(self, base, size) {
+            tracing::error!("Failed to free thread stack: {err}");
+        }
+    }
+
+    /// Collects conservative GC roots from every live thread.
+    ///
+    /// Returns each thread's register values (candidate root words) and the
+    /// in-use portion of its stack as a `[low, high)` range for the caller to
+    /// scan word by word. The currently executing thread's registers come from
+    /// the engine (its saved context is stale); other threads use their saved
+    /// context. `pc`/`cpsr` are omitted as they never hold heap references.
+    pub fn gc_thread_roots(&self) -> (Vec<u32>, Vec<(u32, u32)>) {
+        let current = self.save_context();
+        let current_thread = self.current_thread_id();
+
+        let inner = self.inner.lock();
+
+        let mut registers = Vec::new();
+        let mut ranges = Vec::new();
+
+        for (&thread_id, state) in inner.threads.iter() {
+            let context = if Some(thread_id) == current_thread { &current } else { &state.context };
+
+            registers.extend_from_slice(&[
+                context.r0, context.r1, context.r2, context.r3, context.r4, context.r5, context.r6, context.r7, context.r8, context.sb, context.sl,
+                context.fp, context.ip, context.lr,
+            ]);
+
+            let low = state.stack_base as u32;
+            let high = low + state.stack_size as u32;
+            if context.sp >= low && context.sp <= high {
+                ranges.push((context.sp, high));
+            }
+        }
+
+        (registers, ranges)
+    }
+
+    /// Makes one guest word private to each thread.
+    ///
+    /// Some of what a guest runtime keeps in a global is really per-thread
+    /// state. KTF's current Java exception-handler head is the one this exists
+    /// for: the AOT runtime pushes a handler record per `try` and links it
+    /// through a single word whose address the module is handed at `fn_init`,
+    /// so every thread's records went onto one chain. A throw on one thread
+    /// then found a catch belonging to a frame on another thread's stack -
+    /// 지크 dies that way, with the unwind refusing a handler it did find
+    /// because the frame was not on the stack the throw was on.
+    ///
+    /// Threads here are green: each one's future is polled inside its own
+    /// [`ThreadContextGuard`], which is already where the ARM registers are
+    /// swapped. A registered word swaps with them, so the guest reads and
+    /// writes it exactly as before and sees only its own thread's value.
+    ///
+    /// The word's current contents become what a thread reads before it has
+    /// written the word itself, so a thread that never pushes a record sees
+    /// the empty chain the runtime set up rather than another thread's.
+    pub fn register_thread_local_word(&mut self, address: u32) -> Result<()> {
+        let default: u32 = read_generic(self, address)?;
+
+        let mut inner = self.inner.lock();
+        inner.thread_local_defaults.insert(address, default);
+
+        Ok(())
+    }
+
+    /// Read a record the runtime writes once and never rewrites, answering from
+    /// a per-core cache after the first read.
+    ///
+    /// A guest read is not free: every byte costs this core's lock, a dynamic
+    /// call and a page lookup, and the platforms describe their Java classes in
+    /// guest memory by NUL-terminated strings. A field is found by comparing
+    /// names, so one `getfield` spells out every field name of a class and the
+    /// class's own name - tens of reads each - and a title whose paint loop
+    /// reaches for a field per pixel spends its frame on those characters. The
+    /// records themselves are written when a class is registered and never
+    /// touched again, so reading one twice always answers the same.
+    ///
+    /// **The caller promises exactly that**: pass only an address whose content
+    /// is fixed for as long as this core lives. Nothing invalidates an entry, so
+    /// caching anything a title can rewrite - a field's value, a buffer, an
+    /// allocation that may be freed and handed out again - hands back the old
+    /// bytes forever.
+    pub fn write_once_metadata<T, F>(&self, address: u32, read: F) -> Result<Arc<T>>
+    where
+        T: Any + Send + Sync,
+        F: FnOnce() -> Result<T>,
+    {
+        let key = (address, TypeId::of::<T>());
+
+        if let Some(cached) = self.inner.lock().write_once_metadata.get(&key)
+            && let Ok(value) = cached.clone().downcast::<T>()
+        {
+            return Ok(value);
+        }
+
+        // Read outside the lock: `read` goes back through this core's memory.
+        let value = Arc::new(read()?);
+
+        self.inner.lock().write_once_metadata.insert(key, value.clone());
+
+        Ok(value)
+    }
+
+    /// The registered addresses and the value each reads before a thread has
+    /// written it.
+    fn thread_local_defaults(&self) -> Vec<(u32, u32)> {
+        self.inner.lock().thread_local_defaults.iter().map(|(&a, &v)| (a, v)).collect()
     }
 
     pub fn enter_thread_context(&self, thread_id: ThreadId) -> ThreadContextGuard {
@@ -205,6 +442,14 @@ impl ArmCore {
         let inner = self.inner.lock();
 
         inner.threads.keys().cloned().collect()
+    }
+
+    /// Thread whose register context is currently loaded into the ARM engine.
+    ///
+    /// `None` is the bootstrap/native-loader context, before execution enters
+    /// an `ArmCoreThreadWrapper`.
+    pub fn current_thread_id(&self) -> Option<ThreadId> {
+        self.inner.lock().current_thread_id
     }
 
     fn sample_profile(&self) {
@@ -251,7 +496,26 @@ impl ArmCore {
     {
         // we don't need to save r0-r3, but to make it simple, we save all registers
         let previous_context = self.save_context();
-        {
+
+        // A guest that calls through a function pointer it never populated - a
+        // timer whose callback field is still zero, an import slot the resolver
+        // left empty - would branch to a null or near-null address and fault
+        // the whole title. That pointer is always a bug in whatever was meant
+        // to fill it, never code to run, so record where the call came from and
+        // hand back a benign zero, the way an unimplemented import already does.
+        if (address & !1) < 0x1000 {
+            let (pc, lr) = self.read_pc_lr().unwrap_or((0, 0));
+            tracing::warn!("run_function: refusing branch to invalid target {address:#x} (caller pc={pc:#x}, lr={lr:#x})");
+            {
+                let mut inner = self.inner.lock();
+                inner.engine.reg_write(ArmRegister::R0, 0);
+            }
+            let result = R::get(self);
+            self.restore_context(&previous_context);
+            return Ok(result);
+        }
+
+        let setup = {
             let mut inner = self.inner.lock();
 
             if !params.is_empty() {
@@ -266,13 +530,22 @@ impl ArmCore {
             if params.len() > 3 {
                 inner.engine.reg_write(ArmRegister::R3, params[3]);
             }
+
+            let mut stacked = Ok(());
             if params.len() > 4 {
                 for param in params[4..].iter().rev() {
                     let sp: u32 = inner.engine.reg_read(ArmRegister::SP) - 4;
 
-                    inner.engine.mem_write(sp, &param.to_le_bytes())?;
+                    if let Err(err) = inner.engine.mem_write(sp, &param.to_le_bytes()) {
+                        stacked = Err(err);
+                        break;
+                    }
                     inner.engine.reg_write(ArmRegister::SP, sp);
                 }
+            }
+
+            if let Some(fp) = inner.reserved_fp {
+                inner.engine.reg_write(ArmRegister::FP, fp);
             }
 
             inner.engine.reg_write(ArmRegister::PC, address);
@@ -281,13 +554,114 @@ impl ArmCore {
             let cpsr = inner.engine.reg_read(ArmRegister::Cpsr);
             let new_cpsr = (cpsr & !0x3f) | 0x1f | ((address & 1) << 5);
             inner.engine.reg_write(ArmRegister::Cpsr, new_cpsr);
+
+            stacked
+        };
+        if let Err(err) = setup {
+            self.restore_context(&previous_context);
+            return Err(err);
         }
 
         loop {
             let result = {
                 let mut inner = self.inner.lock();
-                inner.engine.run(RUN_FUNCTION_LR, 1000)?
+                match inner.engine.run(RUN_FUNCTION_LR, RUN_INSTRUCTION_BUDGET) {
+                    Ok(result) => Ok(result),
+                    Err(error) => {
+                        let regs = [
+                            ArmRegister::R0,
+                            ArmRegister::R1,
+                            ArmRegister::R2,
+                            ArmRegister::R3,
+                            ArmRegister::R4,
+                            ArmRegister::R5,
+                            ArmRegister::R6,
+                            ArmRegister::R7,
+                            ArmRegister::R8,
+                            ArmRegister::SB,
+                            ArmRegister::SL,
+                            ArmRegister::FP,
+                            ArmRegister::IP,
+                            ArmRegister::SP,
+                            ArmRegister::LR,
+                            ArmRegister::PC,
+                            ArmRegister::Cpsr,
+                        ]
+                        .map(|r| inner.engine.reg_read(r));
+                        tracing::warn!(
+                            "engine fault {error:?}: R0={:#x} R1={:#x} R2={:#x} R3={:#x} R4={:#x} R5={:#x} R6={:#x} R7={:#x} R8={:#x} SB={:#x} SL={:#x} FP={:#x} IP={:#x} SP={:#x} LR={:#x} PC={:#x} CPSR={:#x}",
+                            regs[0],
+                            regs[1],
+                            regs[2],
+                            regs[3],
+                            regs[4],
+                            regs[5],
+                            regs[6],
+                            regs[7],
+                            regs[8],
+                            regs[9],
+                            regs[10],
+                            regs[11],
+                            regs[12],
+                            regs[13],
+                            regs[14],
+                            regs[15],
+                            regs[16]
+                        );
+
+                        // The fatal path dumps the core again once the error
+                        // reaches it, but by then the engine may be running
+                        // another thread, so that dump can describe the wrong
+                        // one. Take the faulting thread's call stack here.
+                        let mut chain = String::new();
+                        let mut fp = regs[11];
+                        for _ in 0..64 {
+                            if fp < 12 || !inner.engine.is_mapped(fp - 12, 12) {
+                                break;
+                            }
+
+                            let mut word = [0; size_of::<u32>()];
+                            if inner.engine.mem_read(fp - 4, size_of::<u32>(), &mut word).is_err() {
+                                break;
+                            }
+                            let return_address = u32::from_le_bytes(word);
+
+                            if inner.engine.mem_read(fp - 12, size_of::<u32>(), &mut word).is_err() {
+                                break;
+                            }
+                            let caller_fp = u32::from_le_bytes(word);
+
+                            if return_address <= 4 {
+                                break;
+                            }
+                            let _ = write!(chain, " {:#x}", return_address - 4);
+
+                            if caller_fp <= fp {
+                                break;
+                            }
+                            fp = caller_fp;
+                        }
+                        tracing::warn!("engine fault frame chain: {:#x}{chain}", regs[15]);
+
+                        Err(error)
+                    }
+                }
             };
+
+            // The caller's registers back, the same as every other way out of
+            // here. A fault used to be the one path that left the faulted file
+            // behind, so a caller that handles the error - a graphics context
+            // whose pixel operation turns out to be the handset's own firmware,
+            // which is not here to run - carried on with the dead call's.
+            let result = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    self.restore_context(&previous_context);
+
+                    return Err(error);
+                }
+            };
+            crate::RUN_CALLS.fetch_add(1, ::core::sync::atomic::Ordering::Relaxed);
 
             self.sample_profile();
 
@@ -295,11 +669,28 @@ impl ArmCore {
                 EngineRunResult::End => break,
                 EngineRunResult::CountExhausted => {}
                 EngineRunResult::Svc { category, lr, spsr } => {
-                    {
+                    crate::SVC_COUNT.fetch_add(1, ::core::sync::atomic::Ordering::Relaxed);
+                    crate::SVC_CATEGORY_COUNT[(category & 0xff) as usize].fetch_add(1, ::core::sync::atomic::Ordering::Relaxed);
+                    let fast_svc = {
                         let mut inner = self.inner.lock();
                         // Restore the pre-exception execution state before running the Rust SVC handler.
                         inner.engine.reg_write(ArmRegister::Cpsr, spsr);
                         inner.engine.reg_write(ArmRegister::PC, lr);
+                        inner.fast_svc.clone()
+                    };
+
+                    // Synchronous fast path for a few extremely hot syscalls,
+                    // skipping the async handler dispatch and its allocations.
+                    if let Some(fast_svc) = fast_svc {
+                        let mut core = self.clone();
+                        match fast_svc(&mut core, category, lr) {
+                            Ok(true) => continue,
+                            Ok(false) => {}
+                            Err(err) => {
+                                self.restore_context(&previous_context);
+                                return Err(err);
+                            }
+                        }
                     }
 
                     let function = {
@@ -312,7 +703,25 @@ impl ArmCore {
                     };
 
                     let mut self1 = self.clone();
-                    function.call(&mut self1).await?;
+                    if let Err(err) = function.call(&mut self1).await {
+                        // The registers this call found are this call's to put
+                        // back, and an error is not an exception to that. A
+                        // Java throw leaves through here as
+                        // `JavaExceptionUnwind`, and whoever catches it resumes
+                        // the guest by calling in again at the handler's own
+                        // restore routine, with the frame to restore named in
+                        // the error - so the resumed call does not need, and
+                        // must not inherit, the throwing frame's register file.
+                        // Left behind, it became that call's `previous_context`
+                        // and was written back over the caller's on the way
+                        // out: 원더즈 영웅의 길 threw an IOException out of a
+                        // `<clinit>` run by `RegisterClass`, and the resumed
+                        // continuation handed the class-registration helper the
+                        // thrower's r4 - a static-field offset, not a pointer -
+                        // which it then dereferenced.
+                        self.restore_context(&previous_context);
+                        return Err(err);
+                    }
                 }
             }
         }
@@ -351,6 +760,13 @@ impl ArmCore {
             return Err(WieError::FatalError(format!("Unknown SVC handler category: {category}")));
         }
 
+        // A game that re-resolves the same import - which LGT titles do on
+        // every scene change - would otherwise burn a fresh stub each time and
+        // eventually exhaust the arena. Hand back the one already written.
+        if let Some(&address) = inner.svc_stubs.get(&(category, id)) {
+            return Ok(address);
+        }
+
         let address = inner.next_stub_address;
         if address + SVC_STUB_SIZE > FUNCTIONS_BASE + FUNCTIONS_SIZE as u32 {
             return Err(WieError::FatalError("SVC stub space exhausted".into()));
@@ -376,9 +792,27 @@ impl ArmCore {
         .collect::<Vec<_>>();
         inner.engine.mem_write(address, &stub)?;
 
+        // The Thumb entry has its low bit set; cache that so a repeat lookup
+        // returns an identical, callable pointer.
+        let thumb_address = address + 1;
+        inner.svc_stubs.insert((category, id), thumb_address);
+        inner.svc_stub_ids.insert(thumb_address, (category, id));
+
         tracing::trace!("Register SVC stub at {address:#x}, category={category}, id={id}");
 
-        Ok(address + 1)
+        Ok(thumb_address)
+    }
+
+    /// The category and id behind the stub at `address`, when `address` is one
+    /// this core wrote.
+    ///
+    /// A function pointer that arrives from guest code is either a stub of ours
+    /// or code compiled into the title's own module, and the two answer to
+    /// different conventions. Only the first stands for a method this platform
+    /// implements, whose descriptor is therefore knowable; the second returns
+    /// however its module was compiled, and nothing here can say what that is.
+    pub fn svc_stub_id(&self, address: u32) -> Option<(u32, u32)> {
+        self.inner.lock().svc_stub_ids.get(&(address | 1)).copied()
     }
 
     pub fn map(&mut self, address: u32, size: u32) -> Result<()> {
@@ -393,11 +827,30 @@ impl ArmCore {
 
     pub fn dump_reg_stack(&self, image_base: u32) -> String {
         format!(
-            "\n{}\nPossible call stack:\n{}\nStack:\n{}",
+            "\n{}\nFrame chain:\n{}\nPossible call stack:\n{}\nStack:\n{}",
             self.dump_regs(),
+            self.dump_frame_chain(image_base).unwrap(),
             self.dump_call_stack(image_base).unwrap(),
             self.dump_stack().unwrap()
         )
+    }
+
+    /// Keeps `fp` at `address` for every call into the guest.
+    ///
+    /// The ARM ABI leaves `fp` to the compiler, and the module every other KTF
+    /// archive carries does not use it. The one 텐가이 carries reserves it: its
+    /// compiled code reaches its VM context through `fp` and nothing hands it
+    /// over, so the runtime that gives it that context puts it here.
+    pub fn reserve_fp(&mut self, address: u32) {
+        self.inner.lock().reserved_fp = Some(address);
+    }
+
+    /// The `fp` [`Self::reserve_fp`] reserved, if one was.
+    ///
+    /// Only a module that reaches the runtime through `fp` has one, so its
+    /// presence is what says which kind of module is running.
+    pub fn reserved_fp(&self) -> Option<u32> {
+        self.inner.lock().reserved_fp
     }
 
     pub fn restore_context(&mut self, context: &ArmCoreContext) {
@@ -455,6 +908,19 @@ impl ArmCore {
         Ok((pc, lr))
     }
 
+    /// Install the synchronous SVC fast path (see [`FastSvcHandler`]). Only one
+    /// handler is kept; a later call replaces the previous one.
+    pub fn set_fast_svc_handler(&self, handler: FastSvcHandler) {
+        self.inner.lock().fast_svc = Some(handler);
+    }
+
+    /// Read the SVC id the stub left in `IP`/`r12` (see `make_svc_stub`, which
+    /// writes the id into `r12` right before the `svc`). Used by the fast SVC
+    /// path to identify the call without going through the async handler.
+    pub fn read_svc_id(&self) -> u32 {
+        self.inner.lock().engine.reg_read(ArmRegister::IP)
+    }
+
     pub fn write_return_value(&mut self, result: &[u32]) -> Result<()> {
         let mut inner = self.inner.lock();
 
@@ -474,6 +940,7 @@ impl ArmCore {
     pub fn set_next_pc(&mut self, pc: u32) -> Result<()> {
         let mut inner = self.inner.lock();
 
+        inner.next_pc_chosen = true;
         inner.engine.reg_write(ArmRegister::PC, pc);
 
         let cpsr = inner.engine.reg_read(ArmRegister::Cpsr);
@@ -481,6 +948,19 @@ impl ArmCore {
         inner.engine.reg_write(ArmRegister::Cpsr, new_cpsr);
 
         Ok(())
+    }
+
+    /// Clears the record of an SVC handler having chosen its own resume
+    /// address, and reports what it was. Called around a handler so the generic
+    /// result write does not send execution back to the instruction after the
+    /// `svc` when the handler has already redirected it - which is what an LGT
+    /// longjmp does when it restores a save point's captured context.
+    pub fn take_next_pc_chosen(&self) -> bool {
+        let mut inner = self.inner.lock();
+        let chosen = inner.next_pc_chosen;
+        inner.next_pc_chosen = false;
+
+        chosen
     }
 
     pub fn read_param(&self, pos: usize) -> Result<u32> {
@@ -559,6 +1039,54 @@ impl ArmCore {
         format!("{address:#x}: {description}\n")
     }
 
+    /// Walks the APCS frame chain, which is the call stack rather than a guess
+    /// at one.
+    ///
+    /// Compiled code opens a frame with `mov ip, sp` / `push {..., fp, ip, lr,
+    /// pc}` / `sub fp, ip, #4`, so `fp` points at the saved `pc` and the two
+    /// words a frame needs sit below it: the return address at `fp - 4` and the
+    /// caller's frame pointer at `fp - 12`. `dump_call_stack` scans the stack
+    /// for anything that reads as a return address, which finds the real frames
+    /// but buries them among words that only look like one; this names the
+    /// callers in order and stops when the chain does.
+    fn dump_frame_chain(&self, image_base: u32) -> Result<String> {
+        const MAX_FRAMES: usize = 64;
+
+        let mut inner = self.inner.lock();
+
+        let mut chain = Self::format_callstack_address(inner.engine.reg_read(ArmRegister::PC), image_base);
+        let mut fp = inner.engine.reg_read(ArmRegister::FP);
+
+        for _ in 0..MAX_FRAMES {
+            // A frame keeps its return address and its caller's frame pointer
+            // in the three words below `fp`, so anything less cannot be one.
+            if fp < 12 || !inner.engine.is_mapped(fp - 12, 12) {
+                break;
+            }
+
+            let mut word = [0; size_of::<u32>()];
+            inner.engine.mem_read(fp - 4, size_of::<u32>(), &mut word)?;
+            let return_address = u32::from_le_bytes(word);
+
+            inner.engine.mem_read(fp - 12, size_of::<u32>(), &mut word)?;
+            let caller_fp = u32::from_le_bytes(word);
+
+            if return_address <= 4 {
+                break;
+            }
+            chain += &Self::format_callstack_address(return_address - 4, image_base);
+
+            // The chain runs up the stack, so a frame pointer that does not
+            // move upwards is not one and would loop here.
+            if caller_fp <= fp {
+                break;
+            }
+            fp = caller_fp;
+        }
+
+        Ok(chain)
+    }
+
     fn dump_call_stack(&self, image_base: u32) -> Result<String> {
         let mut inner = self.inner.lock();
 
@@ -594,8 +1122,11 @@ impl ArmCore {
 
         let sp = inner.engine.reg_read(ArmRegister::SP);
 
+        // Enough words to cover a few frames: a compiled frame is a dozen or so
+        // words, and the interesting ones (the arguments a caller pushed) sit
+        // above the innermost.
         let mut result = String::new();
-        for i in 0..16 {
+        for i in 0..64 {
             let address = sp + (i * 4);
 
             if !inner.engine.is_mapped(address, size_of::<u32>()) {
@@ -650,19 +1181,46 @@ impl RunFunctionResult<()> for () {
 pub struct ThreadContextGuard {
     core: ArmCore,
     thread_id: ThreadId,
+    previous_thread_id: Option<ThreadId>,
 }
 
 impl ThreadContextGuard {
     pub fn new(mut core: ArmCore, thread_id: ThreadId) -> Self {
-        let context = core.inner.lock().threads.get(&thread_id).unwrap().context.clone(); // TODO we might not need clone
+        let (context, previous_thread_id) = {
+            let mut inner = core.inner.lock();
+            let context = inner.threads.get(&thread_id).unwrap().context.clone(); // TODO we might not need clone
+            let previous_thread_id = inner.current_thread_id.replace(thread_id);
+            (context, previous_thread_id)
+        };
         core.restore_context(&context);
+
+        // The thread's own value for every private word, so the guest reads
+        // what it last wrote there and not what another thread wrote.
+        for (address, default) in core.thread_local_defaults() {
+            let value = {
+                let inner = core.inner.lock();
+                inner
+                    .threads
+                    .get(&thread_id)
+                    .and_then(|state| state.thread_local.get(&address).copied())
+                    .unwrap_or(default)
+            };
+
+            // A word that cannot be written is one the guest cannot read
+            // either; there is nothing useful to do here but carry on.
+            let _ = write_generic(&mut core, address, value);
+        }
 
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(debug) = core.debug_inner() {
             debug.on_thread_entered(thread_id);
         }
 
-        Self { core, thread_id }
+        Self {
+            core,
+            thread_id,
+            previous_thread_id,
+        }
     }
 }
 
@@ -670,8 +1228,21 @@ impl Drop for ThreadContextGuard {
     fn drop(&mut self) {
         let context = self.core.save_context();
 
+        // And back out again, so what this thread left in a private word
+        // travels with it to its next run rather than with the core.
+        let saved: Vec<(u32, u32)> = self
+            .core
+            .thread_local_defaults()
+            .into_iter()
+            .filter_map(|(address, _)| read_generic(&self.core, address).ok().map(|value: u32| (address, value)))
+            .collect();
+
         let mut inner = self.core.inner.lock();
+        if let Some(state) = inner.threads.get_mut(&self.thread_id) {
+            state.thread_local.extend(saved);
+        }
         inner.threads.get_mut(&self.thread_id).unwrap().context = context;
+        inner.current_thread_id = self.previous_thread_id;
         drop(inner);
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -691,6 +1262,305 @@ mod tests {
         Ok(())
     }
 
+    async fn throwing_svc_handler(core: &mut ArmCore, _: &mut Option<u32>, _id: crate::SvcId) -> Result<()> {
+        // Stands in for the guest frames a throw runs through: by the time the
+        // unwind leaves the handler, the engine holds the thrower's register
+        // file rather than the caller's.
+        let mut thrower = core.save_context();
+        thrower.r4 = 0x184160;
+        thrower.r7 = 0x1;
+        thrower.sp = 0x1f00;
+        core.restore_context(&thrower);
+
+        Err(WieError::JavaExceptionUnwind {
+            context_base: 0x1100,
+            target: 0x40,
+            next_pc: 0x1200,
+            frame_sp: 0x1ff0,
+        })
+    }
+
+    /// A call that ends in an error still owes its caller the register file it
+    /// borrowed. A Java throw leaves a guest call as `JavaExceptionUnwind`, and
+    /// the catch resumes by calling in again at the handler's restore routine,
+    /// which takes the frame to restore as an argument - so the thrower's
+    /// registers are no part of what the resumed call needs. Left in the engine
+    /// they became the resumed call's own saved context and were written back
+    /// over the caller's when it returned, which is how 원더즈 영웅의 길 came out
+    /// of `RegisterClass` holding a static-field offset where a class pointer
+    /// belonged.
+    #[test]
+    fn a_call_that_unwinds_puts_the_callers_registers_back() {
+        use core::{
+            future::Future,
+            task::{Context, Poll},
+        };
+        use futures_test::task::new_count_waker;
+
+        let mut core = ArmCore::new(false, None).unwrap();
+        core.map(0x1000, 0x1000).unwrap();
+        core.register_svc_handler(1, throwing_svc_handler, &None).unwrap();
+        let stub = core.make_svc_stub(1, 0u32).unwrap();
+
+        let mut caller = core.save_context();
+        caller.sp = 0x2000;
+        caller.r4 = 0x910;
+        caller.r7 = 0x184160;
+        core.restore_context(&caller);
+
+        let mut runner = core.clone();
+        let mut call = Box::pin(async move { runner.run_function::<u32>(stub, &[]).await });
+
+        let (waker, _) = new_count_waker();
+        let mut cx = Context::from_waker(&waker);
+        let result = match call.as_mut().poll(&mut cx) {
+            Poll::Ready(x) => x,
+            Poll::Pending => panic!("the handler answers without waiting"),
+        };
+
+        assert!(
+            matches!(result, Err(WieError::JavaExceptionUnwind { .. })),
+            "the unwind reaches the caller"
+        );
+
+        let after = core.save_context();
+        assert_eq!(after.r4, caller.r4);
+        assert_eq!(after.r7, caller.r7);
+        assert_eq!(after.sp, caller.sp);
+    }
+
+    #[test]
+    fn released_thread_stacks_are_pooled_and_reused() {
+        let mut core = ArmCore::new(false, None).unwrap();
+        crate::Allocator::init(&mut core).unwrap();
+
+        let first = core.acquire_thread_stack(0x1000).unwrap();
+        core.release_thread_stack(first, 0x1000);
+        assert_eq!(core.inner.lock().stack_pool.len(), 1);
+
+        // A recycled stack comes back instead of a fresh allocation, so a busy
+        // title's thread churn does not fragment the heap with stack-sized holes.
+        let second = core.acquire_thread_stack(0x1000).unwrap();
+        assert_eq!(first, second);
+        assert!(core.inner.lock().stack_pool.is_empty());
+
+        // A distinct concurrent stack is a new allocation, not the pooled one.
+        let third = core.acquire_thread_stack(0x1000).unwrap();
+        assert_ne!(second, third);
+    }
+
+    #[test]
+    fn thread_stack_pool_is_capped() {
+        let mut core = ArmCore::new(false, None).unwrap();
+        crate::Allocator::init(&mut core).unwrap();
+
+        let stacks: Vec<u32> = (0..THREAD_STACK_POOL_CAP + 4)
+            .map(|_| core.acquire_thread_stack(0x1000).unwrap())
+            .collect();
+        for stack in stacks {
+            core.release_thread_stack(stack, 0x1000);
+        }
+
+        assert_eq!(core.inner.lock().stack_pool.len(), THREAD_STACK_POOL_CAP);
+    }
+
+    /// KTF's Java exception-handler head is a guest global that is really
+    /// thread state: left shared, a throw on one thread walks a chain of
+    /// records belonging to frames on another thread's stack. Registering the
+    /// word makes each thread see only what it wrote there.
+    #[test]
+    fn a_registered_word_is_private_to_each_thread() {
+        let mut core = ArmCore::new(false, None).unwrap();
+        crate::Allocator::init(&mut core).unwrap();
+
+        let word = crate::Allocator::alloc(&mut core, 4).unwrap();
+        write_generic(&mut core, word, 0u32).unwrap();
+        core.register_thread_local_word(word).unwrap();
+
+        let first = ThreadState::new(core.clone()).unwrap();
+        let second = ThreadState::new(core.clone()).unwrap();
+        {
+            let mut inner = core.inner.lock();
+            inner.threads.insert(1, first);
+            inner.threads.insert(2, second);
+        }
+
+        // Each thread pushes its own record onto what it reads as the head.
+        {
+            let _guard = core.enter_thread_context(1);
+            assert_eq!(
+                read_generic::<u32, _>(&core, word).unwrap(),
+                0,
+                "a thread starts from the registered value"
+            );
+            write_generic(&mut core.clone(), word, 0x1111_1111u32).unwrap();
+        }
+        {
+            let _guard = core.enter_thread_context(2);
+            assert_eq!(
+                read_generic::<u32, _>(&core, word).unwrap(),
+                0,
+                "the other thread's head leaked into this one"
+            );
+            write_generic(&mut core.clone(), word, 0x2222_2222u32).unwrap();
+        }
+
+        // And finds it again on its next run, whatever ran in between.
+        {
+            let _guard = core.enter_thread_context(1);
+            assert_eq!(read_generic::<u32, _>(&core, word).unwrap(), 0x1111_1111);
+        }
+        {
+            let _guard = core.enter_thread_context(2);
+            assert_eq!(read_generic::<u32, _>(&core, word).unwrap(), 0x2222_2222);
+        }
+    }
+
+    /// A word nobody registered is ordinary memory, shared like the rest of it.
+    #[test]
+    fn an_unregistered_word_is_still_shared() {
+        let mut core = ArmCore::new(false, None).unwrap();
+        crate::Allocator::init(&mut core).unwrap();
+
+        let word = crate::Allocator::alloc(&mut core, 4).unwrap();
+        write_generic(&mut core, word, 0u32).unwrap();
+
+        let first = ThreadState::new(core.clone()).unwrap();
+        let second = ThreadState::new(core.clone()).unwrap();
+        {
+            let mut inner = core.inner.lock();
+            inner.threads.insert(1, first);
+            inner.threads.insert(2, second);
+        }
+
+        {
+            let _guard = core.enter_thread_context(1);
+            write_generic(&mut core.clone(), word, 0x3333_3333u32).unwrap();
+        }
+        {
+            let _guard = core.enter_thread_context(2);
+            assert_eq!(read_generic::<u32, _>(&core, word).unwrap(), 0x3333_3333);
+        }
+    }
+
+    #[test]
+    fn thread_wrapper_exposes_current_thread_only_while_polled() {
+        use alloc::sync::Arc;
+        use core::{
+            future::Future,
+            pin::Pin,
+            task::{Context, Poll},
+        };
+        use futures_test::task::new_count_waker;
+        use spin::Mutex;
+
+        struct TwoPollFuture {
+            core: ArmCore,
+            seen: Arc<Mutex<Vec<Option<ThreadId>>>>,
+            first: bool,
+        }
+
+        impl Future for TwoPollFuture {
+            type Output = Result<()>;
+
+            fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+                self.seen.lock().push(self.core.current_thread_id());
+
+                if self.first {
+                    self.first = false;
+                    Poll::Pending
+                } else {
+                    Poll::Ready(Ok(()))
+                }
+            }
+        }
+
+        let mut core = ArmCore::new(false, None).unwrap();
+        crate::Allocator::init(&mut core).unwrap();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+
+        let future_core = core.clone();
+        let future_observed = observed.clone();
+        let mut wrapper = Box::pin(
+            core.run_in_thread(move || TwoPollFuture {
+                core: future_core,
+                seen: future_observed,
+                first: true,
+            })
+            .unwrap(),
+        );
+
+        assert_eq!(core.current_thread_id(), None);
+
+        let (waker, _) = new_count_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(wrapper.as_mut().poll(&mut cx), Poll::Pending));
+        assert_eq!(core.current_thread_id(), None);
+
+        assert!(matches!(wrapper.as_mut().poll(&mut cx), Poll::Ready(Ok(()))));
+        assert_eq!(core.current_thread_id(), None);
+
+        let seen = observed.lock();
+        assert_eq!(seen.len(), 2);
+        assert!(seen[0].is_some());
+        assert_eq!(seen[1], seen[0]);
+    }
+
+    async fn redirecting_svc_handler(core: &mut ArmCore, _: &mut Option<u32>, _id: crate::SvcId) -> Result<()> {
+        core.set_next_pc(0x1234)
+    }
+
+    /// An SVC handler that picks its own resume address keeps it: the generic
+    /// result write must not send the guest back to the instruction after the
+    /// `svc`. The LGT longjmp depends on this - it restores the register file a
+    /// `setjmp` captured and resumes there, and being returned to the call site
+    /// instead runs the rest of the `try` body on the restored registers.
+    #[test]
+    fn a_handler_that_chooses_its_resume_address_keeps_it() {
+        use core::{
+            future::Future,
+            task::{Context, Poll},
+        };
+        use futures_test::task::new_count_waker;
+
+        let mut core = ArmCore::new(false, None).unwrap();
+        core.register_svc_handler(1, redirecting_svc_handler, &None).unwrap();
+
+        // What the dispatcher leaves behind before a handler runs: PC at the
+        // SVC's own return address.
+        {
+            let mut inner = core.inner.lock();
+            inner.engine.reg_write(ArmRegister::PC, 0x2000);
+            inner.engine.reg_write(ArmRegister::LR, 0x2000);
+        }
+
+        let function = core.inner.lock().svc_handlers.get(&1).cloned().unwrap();
+        let mut handler_core = core.clone();
+        let mut call = Box::pin(async move { function.call(&mut handler_core).await });
+
+        let (waker, _) = new_count_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(call.as_mut().poll(&mut cx), Poll::Ready(Ok(()))));
+
+        assert_eq!(core.save_context().pc, 0x1234, "the handler's resume address survives");
+    }
+
+    #[test]
+    fn a_stub_says_which_registration_it_stands_for() {
+        let mut core = ArmCore::new(false, None).unwrap();
+        core.register_svc_handler(1, test_svc_handler, &None).unwrap();
+
+        let stub = core.make_svc_stub(1, 7u32).unwrap();
+
+        assert_eq!(core.svc_stub_id(stub), Some((1, 7)));
+        // The caller has a Thumb pointer or a plain address depending on where
+        // it read it from, and both name the same stub.
+        assert_eq!(core.svc_stub_id(stub & !1), Some((1, 7)));
+        // Guest code is not ours to answer for.
+        assert_eq!(core.svc_stub_id(0x1058bd), None);
+    }
+
     #[test]
     fn test_thumb_svc_stub_dispatch() {
         let mut core = ArmCore::new(false, None).unwrap();
@@ -702,7 +1572,9 @@ mod tests {
 
         core.register_svc_handler(1, test_svc_handler, &None).unwrap();
         let first = core.make_svc_stub(1, 0u32).unwrap();
+        let first_again = core.make_svc_stub(1, 0u32).unwrap();
         let second = core.make_svc_stub(1, 1u32).unwrap();
+        assert_eq!(first, first_again);
         assert_eq!(first, FUNCTIONS_BASE + 1);
         assert_eq!(second, FUNCTIONS_BASE + SVC_STUB_SIZE + 1);
 

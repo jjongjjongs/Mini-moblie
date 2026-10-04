@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      The whole UI is built in code, so the theme only has to supply a dark
+      background and drop the action bar.
+    -->
+    <style name="AppTheme" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#FF000000</item>
+        <item name="android:colorBackground">#FF000000</item>
+        <item name="android:colorAccent">#FF1769AA</item>
+        <item name="android:windowActionBar">false</item>
+    </style>
+
+    <!--
+      Dialog themes for the control settings. ControlStyle looks one up by name
+      at runtime (dark by default, light for the gamepad mapping opened from the
+      game library) and throws if it is missing, so both must exist.
+
+      Dark: the in-game menus float over the game, so they match the player's
+      dark control palette with the cyan accent.
+    -->
+    <style name="MiniControlsDialogThemeDark" parent="@android:style/Theme.Material.Dialog.Alert">
+        <item name="android:colorAccent">#FF54C7D6</item>
+        <item name="android:colorPrimary">#FF54C7D6</item>
+    </style>
+
+    <!-- Light: the library's gamepad mapping, matching the green list screens. -->
+    <style name="MiniControlsDialogTheme" parent="@android:style/Theme.Material.Light.Dialog.Alert">
+        <item name="android:colorAccent">#FF2E8B57</item>
+        <item name="android:colorPrimary">#FF2E8B57</item>
+    </style>
+</resources>

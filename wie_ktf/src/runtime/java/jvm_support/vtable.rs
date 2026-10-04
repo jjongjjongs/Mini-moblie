@@ -67,8 +67,8 @@ impl JavaVtable {
 
                     Ok(JavaVtableMethod {
                         method: x,
-                        name: name.name,
-                        descriptor: name.descriptor,
+                        name: name.name.clone(),
+                        descriptor: name.descriptor.clone(),
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;

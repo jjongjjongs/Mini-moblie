@@ -1,3 +1,27 @@
 /target
 .vscode
-.cargo
+/.cargo/*
+!/.cargo/config.toml
+
+# Android
+/android/.gradle
+/android/build
+/android/app/build
+/android/app/.cxx
+/android/app/precompiled-validation-classes/
+/android/app/precompiled-validation.jar
+/android/local.properties
+
+# Local Cargo checkout marker; the vendored source itself is tracked.
+/third_party/arm32_cpu/.cargo-ok
+third_party/**/target/
+
+# The app signing key. One stable key is what lets an apk install over the last
+# one, and it is kept outside the repository: CI restores it from a secret, a
+# local build points at its own copy. See android/app/build.gradle.
+*.jks
+*.keystore
+android/keystore.properties
+
+# Icon generator previews
+tools/icon/preview/

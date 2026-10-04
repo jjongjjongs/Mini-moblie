@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
+use alloc::{boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 use core::{
     fmt::{self, Debug, Formatter},
     mem::size_of,
@@ -18,7 +18,53 @@ use wie_util::{
 
 use crate::runtime::java::JavaSvcFunctions;
 
-use super::{KtfJvmWord, Result, class_instance::JavaClassInstance, field::JavaField, method::JavaMethod, value::JavaValueExt, vtable::JavaVtable};
+use super::{
+    KtfJvmWord, Result,
+    class_instance::JavaClassInstance,
+    field::{JavaField, ResolvedField},
+    method::JavaMethod,
+    name::JavaFullName,
+    value::JavaValueExt,
+    vtable::JavaVtable,
+};
+
+/// What a member lookup matches on: the name, the descriptor, and whether the
+/// member is static. The three together are what `field`/`method` compared for
+/// every member of a class on every lookup.
+#[derive(PartialEq, Eq)]
+struct MemberKey {
+    name: String,
+    descriptor: String,
+    is_static: bool,
+}
+
+impl MemberKey {
+    fn of(full_name: &JavaFullName, is_static: bool) -> Self {
+        Self {
+            name: full_name.name.clone(),
+            descriptor: full_name.descriptor.clone(),
+            is_static,
+        }
+    }
+}
+
+/// A class's declared fields, in the order the guest's own table lists them,
+/// each with everything its record says - see [`ResolvedField`].
+struct FieldIndex(Vec<(MemberKey, Arc<ResolvedField>)>);
+
+/// A class's declared methods, likewise, though a method is still named by its
+/// pointer. It is a type of its own so that the two indexes of one class do not
+/// answer for each other in the core's cache.
+struct MethodIndex(Vec<(MemberKey, u32)>);
+
+/// The first member matching a lookup, which is the one the walk this replaced
+/// would have stopped at.
+fn find_member<'a, T>(members: &'a [(MemberKey, T)], name: &str, descriptor: &str, is_static: bool) -> Option<&'a T> {
+    members
+        .iter()
+        .find(|(key, _)| key.is_static == is_static && key.name == name && key.descriptor == descriptor)
+        .map(|(_, member)| member)
+}
 
 #[derive(Clone)]
 pub struct JavaClassDefinition {
@@ -174,10 +220,10 @@ impl JavaClassDefinition {
             return Ok(Vec::new());
         }
 
-        let ptr_methods = read_null_terminated_table(&self.core, descriptor.ptr_methods)?;
+        let ptr_methods = self.member_table(descriptor.ptr_methods)?;
 
         let mut result = Vec::with_capacity(ptr_methods.len());
-        for method in ptr_methods {
+        for &method in ptr_methods.iter() {
             let method = JavaMethod::from_raw(method, &self.core);
 
             if method.ptr_class() == self.ptr_raw {
@@ -200,18 +246,42 @@ impl JavaClassDefinition {
             return Ok(Vec::new());
         }
 
-        let ptr_fields = read_null_terminated_table(&self.core, descriptor.ptr_fields_or_element_type)?;
+        let ptr_fields = self.member_table(descriptor.ptr_fields_or_element_type)?;
 
-        Ok(ptr_fields.into_iter().map(|x| JavaField::from_raw(x, &self.core)).collect())
+        Ok(ptr_fields.iter().map(|&x| JavaField::from_raw(x, &self.core)).collect())
     }
 
+    /// A class's table of field or method records, read once.
+    ///
+    /// Like the names the records carry, the table is written when the class is
+    /// registered and never rewritten, so it is cached against its own address.
+    /// A lookup reads the whole table to find one member, and a word of it is a
+    /// guest read like any other.
+    fn member_table(&self, address: u32) -> Result<Arc<Vec<u32>>> {
+        let core = self.core.clone();
+
+        self.core.write_once_metadata(address, || read_null_terminated_table(&core, address))
+    }
+
+    /// This class's name, read once out of the guest's own record.
+    ///
+    /// The record is written when the class is registered and never rewritten,
+    /// so the name is cached against the string's address - see
+    /// [`ArmCore::write_once_metadata`]. Every field and method lookup asks for
+    /// it, and spelling it out of guest memory each time cost more than the
+    /// lookup itself.
     pub fn name(&self) -> Result<String> {
         let raw: RawJavaClass = read_generic(&self.core, self.ptr_raw)?;
         let descriptor: RawJavaClassDescriptor = read_generic(&self.core, raw.ptr_descriptor)?;
 
-        let bytes = read_null_terminated_string_bytes(&self.core, descriptor.ptr_name)?;
+        let core = self.core.clone();
+        let name = self.core.write_once_metadata(descriptor.ptr_name, || {
+            let bytes = read_null_terminated_string_bytes(&core, descriptor.ptr_name)?;
 
-        Ok(String::from_utf8(bytes).unwrap())
+            Ok(String::from_utf8(bytes).unwrap())
+        })?;
+
+        Ok((*name).clone())
     }
 
     pub fn parent_class(&self) -> Result<Option<JavaClassDefinition>> {
@@ -225,31 +295,67 @@ impl JavaClassDefinition {
         }
     }
 
-    pub fn method(&self, name: &str, descriptor: &str, is_static: bool) -> Result<Option<JavaMethod>> {
-        let methods = self.methods()?;
+    /// The methods this class declares, by the name a lookup asks for.
+    ///
+    /// Built once per class and cached against the class's own record - see
+    /// [`ArmCore::write_once_metadata`]. Walking the table and reading a name
+    /// per entry to answer one lookup is what a `getfield` or an `invoke` used
+    /// to cost, and our own native classes do several per call.
+    fn method_index(&self) -> Result<Arc<MethodIndex>> {
+        let this = self.clone();
 
-        for method in methods {
-            let full_name = method.name()?;
-            if full_name.name == name && full_name.descriptor == descriptor && method.access_flags().contains(MethodAccessFlags::STATIC) == is_static
-            {
-                return Ok(Some(method));
+        self.core.write_once_metadata(self.ptr_raw, || {
+            let mut members = Vec::new();
+            for method in this.methods()? {
+                let full_name = method.name()?;
+                let is_static = method.access_flags().contains(MethodAccessFlags::STATIC);
+
+                members.push((MemberKey::of(&full_name, is_static), method.ptr_raw));
             }
-        }
 
-        Ok(None)
+            Ok(MethodIndex(members))
+        })
+    }
+
+    /// The fields this class declares, the same way [`Self::method_index`] holds
+    /// its methods.
+    fn field_index(&self) -> Result<Arc<FieldIndex>> {
+        let this = self.clone();
+
+        self.core.write_once_metadata(self.ptr_raw, || {
+            let mut members = Vec::new();
+            for field in this.fields()? {
+                let name = field.name()?;
+                let access_flags = field.access_flags();
+                let is_static = access_flags.contains(FieldAccessFlags::STATIC);
+
+                let resolved = ResolvedField {
+                    ptr_raw: field.ptr_raw,
+                    // A static field's record keeps its value in the word an
+                    // instance field keeps its offset in, and that word changes.
+                    offset: if is_static { None } else { Some(field.offset()?) },
+                    access_flags,
+                    value_type: JavaType::parse(&name.descriptor),
+                    name,
+                };
+
+                members.push((MemberKey::of(&resolved.name, is_static), Arc::new(resolved)));
+            }
+
+            Ok(FieldIndex(members))
+        })
+    }
+
+    pub fn method(&self, name: &str, descriptor: &str, is_static: bool) -> Result<Option<JavaMethod>> {
+        let index = self.method_index()?;
+
+        Ok(find_member(&index.0, name, descriptor, is_static).map(|&ptr_raw| JavaMethod::from_raw(ptr_raw, &self.core)))
     }
 
     pub fn field(&self, name: &str, descriptor: &str, is_static: bool) -> Result<Option<JavaField>> {
-        let fields = self.fields()?;
+        let index = self.field_index()?;
 
-        for field in fields {
-            let full_name = field.name()?;
-            if full_name.name == name && full_name.descriptor == descriptor && field.access_flags().contains(FieldAccessFlags::STATIC) == is_static {
-                return Ok(Some(field));
-            }
-        }
-
-        Ok(None)
+        Ok(find_member(&index.0, name, descriptor, is_static).map(|resolved| JavaField::resolved(&self.core, resolved.clone())))
     }
 
     pub fn read_static_field(&self, field: &JavaField) -> Result<KtfJvmWord> {
