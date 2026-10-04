@@ -159,21 +159,6 @@ pub struct TitleQuirks {
     /// See `wie_backend::present`, read through
     /// [`crate::System::title_present_crop_bottom`].
     pub present_crop_bottom: u32,
-
-    /// Whether the handset the title was written for read a zero width or
-    /// height in `setClip(x, y, w, h)` as "clip to the drawing surface's own
-    /// edge" rather than the empty region MIDP specifies.
-    ///
-    /// 타워오브바벨3 (SKT 0054563061) sets its story-dialogue clip with
-    /// `setClip(10, 150, 183, 0)` - a height of zero - before it blits the box
-    /// and types the text into it a glyph at a time. MIDP reads that as a clip
-    /// that admits nothing, so every glyph fell outside it and the story text
-    /// never appeared, though the box, the menus and the help screen (which
-    /// clip with proper heights) all drew. The SK-VM handset instead took the
-    /// zero to mean the clip ran from `y` to the bottom of the surface, so the
-    /// text showed. Filling a zero extent with the surface's own puts the text
-    /// back without widening a clip the title set a real size for.
-    pub clip_zero_fills_surface: bool,
 }
 
 const fn panel(width: u32, height: u32) -> TitleQuirks {
@@ -189,7 +174,6 @@ const fn panel(width: u32, height: u32) -> TitleQuirks {
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
         present_crop_bottom: 0,
-        clip_zero_fills_surface: false,
     }
 }
 
@@ -208,7 +192,6 @@ const fn panel_transparent_mutable(width: u32, height: u32) -> TitleQuirks {
         repaints_whole_frame: false,
         blank_mutable_image_transparent: true,
         present_crop_bottom: 0,
-        clip_zero_fills_surface: false,
     }
 }
 
@@ -225,7 +208,6 @@ const fn annunciator() -> TitleQuirks {
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
         present_crop_bottom: 0,
-        clip_zero_fills_surface: false,
     }
 }
 
@@ -243,7 +225,6 @@ const fn annunciator_of(rows: u32) -> TitleQuirks {
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
         present_crop_bottom: 0,
-        clip_zero_fills_surface: false,
     }
 }
 
@@ -260,7 +241,6 @@ const fn sideways() -> TitleQuirks {
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
         present_crop_bottom: 0,
-        clip_zero_fills_surface: false,
     }
 }
 
@@ -279,7 +259,6 @@ const fn clears_frame() -> TitleQuirks {
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
         present_crop_bottom: 0,
-        clip_zero_fills_surface: false,
     }
 }
 
@@ -310,7 +289,6 @@ const fn clip_includes_far_edge() -> TitleQuirks {
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
         present_crop_bottom: 0,
-        clip_zero_fills_surface: false,
     }
 }
 
@@ -329,7 +307,6 @@ const fn skvm_scancode_keys() -> TitleQuirks {
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
         present_crop_bottom: 0,
-        clip_zero_fills_surface: false,
     }
 }
 
@@ -348,7 +325,6 @@ const fn owns_graphics_state() -> TitleQuirks {
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
         present_crop_bottom: 0,
-        clip_zero_fills_surface: false,
     }
 }
 
@@ -368,7 +344,6 @@ const fn repaints_whole_frame() -> TitleQuirks {
         repaints_whole_frame: true,
         blank_mutable_image_transparent: false,
         present_crop_bottom: 0,
-        clip_zero_fills_surface: false,
     }
 }
 
@@ -398,16 +373,6 @@ impl TitleQuirks {
     const fn with_bottom_cropped(self, rows: u32) -> Self {
         Self {
             present_crop_bottom: rows,
-            ..self
-        }
-    }
-
-    /// This entry, for a title that also read a zero `setClip` extent as the
-    /// drawing surface's edge the way
-    /// [`clip_zero_fills_surface`](Self::clip_zero_fills_surface) describes.
-    const fn with_clip_zero_filling_surface(self) -> Self {
-        Self {
-            clip_zero_fills_surface: true,
             ..self
         }
     }
@@ -583,17 +548,10 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // 240 wide (its titles and portraits fill that) and its layout closes up at
     // 240 tall, so size it to a 240x240 panel.
     (TitlePlatform::Skt, "0051017321", panel(240, 240)),
-    // 타워오브바벨3 (Manastone, SK-VM): types its story dialogue a glyph at a
-    // time into a box it clips with `setClip(10, 150, 183, 0)` - a zero height.
-    // MIDP reads that as a clip that admits nothing, so every story glyph fell
-    // outside it and the text never showed, though the box, the menus and the
-    // help screen (which clip with real heights) all drew. The SK-VM handset
-    // took the zero to mean "to the bottom of the surface", so filling a zero
-    // extent with the surface's own puts the story text back. It is drawn for a
-    // 176-wide handset - its widest art is exactly 176 and its cutscenes fill
+    // 타워오브바벨3 (Manastone, SK-VM): drawn for a 176-wide handset - its widest art is exactly 176 and its cutscenes fill
     // that panel edge to edge - so on the 240x320 default each scene sat centred
     // with a black border; the 176x220 panel it was made for fills the screen.
-    (TitlePlatform::Skt, "0054563061", panel(176, 220).with_clip_zero_filling_surface()),
+    (TitlePlatform::Skt, "0054563061", panel(176, 220)),
     // 썸머스케치: a 2003 ensony title laid out for a 120x160 handset. It takes
     // the screen size it is told and draws to it, but its art sits at a fixed
     // size, so on the 240x320 default its title, menu and scenes shrink into the
@@ -979,21 +937,10 @@ mod tests {
         assert_eq!(title_quirks(TitlePlatform::Ktf, "0102E32F").present_crop_bottom, 24);
     }
 
-    /// 타워오브바벨3 reads a zero `setClip` extent as the surface's edge, and
-    /// fills the 176x220 panel it was drawn for.
+    /// 타워오브바벨3 fills the 176x220 panel it was drawn for.
     #[test]
-    fn tower_of_babel_3_fills_a_zero_clip_to_the_surface() {
-        let quirks = title_quirks(TitlePlatform::Skt, "0054563061");
-
-        assert!(quirks.clip_zero_fills_surface);
-        assert_eq!(quirks.screen_size, Some((176, 220)));
-    }
-
-    /// The zero-clip rule is one title's, not every title's.
-    #[test]
-    fn a_title_without_the_zero_clip_rule_does_not_get_it() {
-        assert!(!title_quirks(TitlePlatform::Skt, "0051017321").clip_zero_fills_surface);
-        assert!(!TitleQuirks::default().clip_zero_fills_surface);
+    fn tower_of_babel_3_fills_its_176x220_panel() {
+        assert_eq!(title_quirks(TitlePlatform::Skt, "0054563061").screen_size, Some((176, 220)));
     }
 
     /// An id appearing twice for one platform would make the table's answer

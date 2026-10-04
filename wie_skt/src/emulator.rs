@@ -74,7 +74,6 @@ impl SktEmulator {
     ) -> Result<Self> {
         let system = System::new(platform, id, id, DefaultTaskRunner);
         system.set_title_clip_includes_far_edge(title_quirks(TitlePlatform::Skt, id).clip_includes_far_edge);
-        system.set_title_clip_zero_fills_surface(title_quirks(TitlePlatform::Skt, id).clip_zero_fills_surface);
         system.set_title_clears_screen_each_paint(title_quirks(TitlePlatform::Skt, id).clears_screen_each_paint);
         system.set_title_keys_as_skvm_scancodes(title_quirks(TitlePlatform::Skt, id).keys_as_skvm_scancodes);
         if title_quirks(TitlePlatform::Skt, id).owns_graphics_state {

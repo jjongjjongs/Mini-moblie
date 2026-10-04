@@ -82,7 +82,11 @@ impl ClassDefinitionImpl {
             .map(|x| MethodImpl::from_method_proto(x, context.clone()))
             .collect::<Vec<_>>();
 
-        let fields = proto.fields.into_iter().map(FieldImpl::from_field_proto).collect::<Vec<_>>();
+        let fields = proto
+            .fields
+            .into_iter()
+            .map(|x| FieldImpl::from_field_proto(proto.name, x))
+            .collect::<Vec<_>>();
 
         let interfaces = proto.interfaces.into_iter().map(|x| x.to_string()).collect();
 
@@ -110,7 +114,7 @@ impl ClassDefinitionImpl {
                     _ => None,
                 });
 
-                let field = FieldImpl::from_field_info(field_info);
+                let field = FieldImpl::from_field_info(&class.this_class, field_info);
                 if let Some(x) = constant
                     && field.access_flags().contains(FieldAccessFlags::STATIC)
                 {

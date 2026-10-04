@@ -241,6 +241,71 @@ impl Jvm {
         }
     }
 
+    /// `getfield` as the bytecode names it: the field `class_name.name`, looked up
+    /// from `class_name` upwards rather than from the instance's own class.
+    ///
+    /// The two differ when a subclass declares a field with the superclass
+    /// field's name and type. The instance then holds both, and code compiled
+    /// against the superclass means the superclass's (JVMS 5.4.3.2) - starting
+    /// from the instance's class would find the subclass's instead.
+    pub async fn get_field_of<T>(&self, instance: &Box<dyn ClassInstance>, class_name: &str, name: &str, descriptor: &str) -> Result<T>
+    where
+        T: From<JavaValue>,
+    {
+        tracing::trace!("Get field {class_name}.{name}:{descriptor} of {}", instance.class_definition().name());
+
+        let field = self.find_field_of(instance, class_name, name, descriptor).await?;
+
+        if let Some(field) = field {
+            Ok(instance.get_field(&*field)?.into())
+        } else {
+            Err(self
+                .exception("java/lang/NoSuchFieldError", &format!("{class_name}.{name}:{descriptor}"))
+                .await)
+        }
+    }
+
+    /// `putfield` as the bytecode names it. See [`Jvm::get_field_of`].
+    pub async fn put_field_of<T>(&self, instance: &mut Box<dyn ClassInstance>, class_name: &str, name: &str, descriptor: &str, value: T) -> Result<()>
+    where
+        T: Into<JavaValue> + Debug,
+    {
+        tracing::trace!(
+            "Put field {class_name}.{name}:{descriptor} of {} = {value:?}",
+            instance.class_definition().name()
+        );
+
+        let field = self.find_field_of(instance, class_name, name, descriptor).await?;
+
+        if let Some(field) = field {
+            instance.put_field(&*field, value.into())
+        } else {
+            Err(self
+                .exception("java/lang/NoSuchFieldError", &format!("{class_name}.{name}:{descriptor}"))
+                .await)
+        }
+    }
+
+    async fn find_field_of(
+        &self,
+        instance: &Box<dyn ClassInstance>,
+        class_name: &str,
+        name: &str,
+        descriptor: &str,
+    ) -> Result<Option<Box<dyn Field>>> {
+        let instance_class = instance.class_definition();
+        if instance_class.name() == class_name {
+            return self.find_field(&*instance_class, name, descriptor);
+        }
+
+        let class = match self.get_class(class_name) {
+            Some(class) => class,
+            None => self.resolve_class(class_name).await?,
+        };
+
+        self.find_field(&*class.definition, name, descriptor)
+    }
+
     pub async fn put_field<T>(&self, instance: &mut Box<dyn ClassInstance>, name: &str, descriptor: &str, value: T) -> Result<()>
     where
         T: Into<JavaValue> + Debug,

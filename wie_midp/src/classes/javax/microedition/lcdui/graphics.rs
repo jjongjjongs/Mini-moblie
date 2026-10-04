@@ -302,23 +302,6 @@ impl Graphics {
             (width, height)
         };
 
-        // A title written for a handset that read a zero clip extent as the
-        // drawing surface's own edge (타워오브바벨3 clips its story box with a
-        // zero height) would otherwise get MIDP's empty region and draw
-        // nothing; fill a zero extent with the surface's size so the clip
-        // reaches the edge. See `TitleQuirks::clip_zero_fills_surface`.
-        let (width, height) = if context.system().title_clip_zero_fills_surface() && (width == 0 || height == 0) {
-            let surface_width: i32 = jvm.get_field(&this, "width", "I").await?;
-            let surface_height: i32 = jvm.get_field(&this, "height", "I").await?;
-
-            (
-                if width == 0 { surface_width } else { width },
-                if height == 0 { surface_height } else { height },
-            )
-        } else {
-            (width, height)
-        };
-
         // clip fields hold absolute coordinates; negative w/h must clamp to 0 or `Self::clip()`'s
         // u32 cast produces a huge clip that copy_area's i64 extension treats as unbounded
         jvm.put_field(&mut this, "clipX", "I", x + translate_x).await?;
