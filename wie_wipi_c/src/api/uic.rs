@@ -53,17 +53,105 @@ fn uic_handle(context: &dyn WIPICContext, component: WIPICWord) -> WIPICWord {
 
 async fn uic_dispatch_draw(context: &mut dyn WIPICContext, component: WIPICWord, graphics_context: WIPICWord) -> Result<()> {
     let draw: WIPICWord = read_generic(context, component + 0x24)?;
+    if draw == uic_draw_marker(3) {
+        return uic_draw_text(context, component).await;
+    }
     if (UIC_DRAW_MARKER_BASE + 1..=UIC_DRAW_MARKER_BASE + 5).contains(&draw) {
         // MC_uicCreate stores provider-private WPUic_Draw* function pointers here.
         // Generic WIE cannot execute those LGT .so addresses, so native-created
         // components use an internal marker until those private draw routines are
-        // ported independently. Application-installed callbacks still execute.
+        // ported independently - the text box is, below. Application-installed
+        // callbacks still execute.
         return Ok(());
     }
 
     if draw != 0 {
         context.call_function(draw, &[uic_handle(context, component), graphics_context]).await?;
     }
+
+    Ok(())
+}
+
+/// Room for a graphics context in either platform's layout - KTF's runs to
+/// `+0x40` - plus the clip rectangle handed to `MC_grpSetContext`.
+const UIC_DRAW_CONTEXT_BYTES: WIPICWord = 0x40;
+const UIC_DRAW_SCRATCH_BYTES: WIPICWord = UIC_DRAW_CONTEXT_BYTES + 16;
+
+/// Draws a TextComponent: its background, a one-pixel frame, the text in the
+/// component's font and colour from the left edge, and - while the box is
+/// enabled and the blink is on - a caret at the cursor.
+///
+/// Stands in for the firmware's own `WPUic_DrawText`, which WIE cannot run.
+/// Without it a text box was never drawn at all: 미니게임천국's ranking-name
+/// field took the keys and composed the name, and the player saw an empty box.
+///
+/// It draws into the screen frame buffer through a context of its own, clipped
+/// to the box, so nothing the title has set on its context leaks in or out.
+async fn uic_draw_text(context: &mut dyn WIPICContext, component: WIPICWord) -> Result<()> {
+    let screen = graphics::get_screen_framebuffer(context, 0).await?;
+
+    uic_draw_text_into(context, component, screen).await
+}
+
+/// [`uic_draw_text`] into a given frame buffer.
+async fn uic_draw_text_into(context: &mut dyn WIPICContext, component: WIPICWord, screen: WIPICIndirectPtr) -> Result<()> {
+    let x: i32 = read_generic(context, component + 0x04)?;
+    let y: i32 = read_generic(context, component + 0x08)?;
+    let width: i32 = read_generic(context, component + 0x0c)?;
+    let height: i32 = read_generic(context, component + 0x10)?;
+    if width <= 0 || height <= 0 || width == 0x7fff || height == 0x7fff {
+        // An unconfigured component is the whole plane, which is not a box.
+        return Ok(());
+    }
+
+    let font: u32 = read_generic(context, component + 0x14)?;
+    let foreground: u32 = read_generic(context, component + 0x18)?;
+    let background: u32 = read_generic(context, component + 0x1c)?;
+    let enabled: u32 = read_generic(context, component + 0x20)?;
+    let text_ptr: WIPICWord = read_generic(context, component + 0x44)?;
+    let cursor: u32 = read_generic(context, component + 0x4c)?;
+    let blink: u32 = read_generic(context, component + 0x58)?;
+
+    let scratch = context.alloc_raw(UIC_DRAW_SCRATCH_BYTES)?;
+    let clip = scratch + UIC_DRAW_CONTEXT_BYTES;
+    graphics::init_context(context, scratch).await?;
+    for (index, corner) in [x, y, x + width, y + height].into_iter().enumerate() {
+        write_generic(context, clip + 4 * index as WIPICWord, corner)?;
+    }
+    graphics::set_context(context, scratch, graphics::WIPICGraphicsContextIdx::ClipIdx, clip).await?;
+    graphics::set_context(context, scratch, graphics::WIPICGraphicsContextIdx::FontIdx, font).await?;
+
+    graphics::set_context(context, scratch, graphics::WIPICGraphicsContextIdx::FgPixelIdx, background).await?;
+    graphics::fill_rect(context, screen, x, y, width, height, scratch).await?;
+
+    graphics::set_context(context, scratch, graphics::WIPICGraphicsContextIdx::FgPixelIdx, foreground).await?;
+    graphics::draw_rect(context, screen, x, y, width, height, scratch).await?;
+
+    let font_height = graphics::get_font_height(context, font as i32).await?;
+    let top = y + (height - font_height).max(0) / 2;
+    let left = x + 2;
+
+    let length = if text_ptr == 0 {
+        0
+    } else {
+        uic_read_c_string(context, text_ptr)?.len() as i32
+    };
+    if length > 0 {
+        graphics::draw_string_from_top(context, screen, left, top, text_ptr, length, scratch).await?;
+    }
+
+    if enabled != 0 && blink != 0 {
+        let before = (cursor as i32).clamp(0, length);
+        let advance = if before > 0 {
+            graphics::get_string_width(context, font as i32, text_ptr, before).await?
+        } else {
+            0
+        };
+        let caret = left + advance;
+        graphics::draw_line(context, screen, caret, top, caret, top + font_height - 1, scratch).await?;
+    }
+
+    context.free_raw(scratch, UIC_DRAW_SCRATCH_BYTES)?;
 
     Ok(())
 }
@@ -3300,7 +3388,7 @@ mod tests {
         get_list_item, get_max_text_size, get_menu_item, get_text, get_text_size, get_time, handle_event, insert_text, is_instance, remove_list_item,
         remove_menu_item, repaint, set_active_list_item, set_active_menu_item, set_bg_color, set_callback, set_cursor_pos, set_enable,
         set_event_handler, set_fg_color, set_font, set_label, set_label_alignment, set_max_text_size, set_time, set_time_long, set_time_mask,
-        uic_color_to_rgb565, uic_read_c_string, uic_repaint_rect, uic_skip_time_separator,
+        uic_color_to_rgb565, uic_draw_text_into, uic_read_c_string, uic_repaint_rect, uic_skip_time_separator,
     };
 
     const COMPONENT: u32 = 0x1000;
@@ -3737,6 +3825,57 @@ mod tests {
         destroy(&mut context, handle).await.unwrap();
         assert_eq!(context.frees_of(handle), 1);
         assert_eq!(context.frees_of(component), 0);
+    }
+
+    /// A text box is drawn: its background, and the text typed into it. Until
+    /// the firmware's draw routine was ported a native-created text box drew
+    /// nothing, so a name composed into it never reached the screen.
+    #[futures_test::test]
+    async fn text_box_paint_draws_what_was_typed() {
+        let mut context = TestContext::with_system(wie_backend::System::new(
+            alloc::boxed::Box::new(test_utils::TestPlatform::new()),
+            "test-pid",
+            "test-aid",
+            wie_backend::DefaultTaskRunner,
+        ));
+        context.set_ktf_handles(true);
+
+        let handle = create(&mut context, 0, 3).await.unwrap().0;
+        configure(&mut context, handle, 4, 4, 100, 18, 3).await.unwrap();
+        let component = context.data_ptr(wipi_types::wipic::WIPICIndirectPtr(handle)).unwrap();
+        // A 120x30 16bpp surface laid out by hand - `{width, height, bpl, bpp,
+        // buf}` - small enough for the test heap, which the guarded surfaces
+        // the API creates are not.
+        let pixels_handle = context.alloc(120 * 30 * 2).unwrap();
+        let target = context.alloc(20).unwrap();
+        let header = context.data_ptr(target).unwrap();
+        for (index, word) in [120u32, 30, 240, 16, pixels_handle.0].into_iter().enumerate() {
+            write_generic(&mut context, header + index as u32 * 4, word).unwrap();
+        }
+
+        async fn pixels(context: &mut TestContext, target: wipi_types::wipic::WIPICIndirectPtr) -> alloc::vec::Vec<u32> {
+            let out = 0x3000;
+            crate::api::graphics::get_rgb_pixels(context, target, 0, 0, 120, 30, out, 120 * 4)
+                .await
+                .unwrap();
+            (0..120 * 30).map(|index| read_generic(&*context, out + index * 4).unwrap()).collect()
+        }
+
+        uic_draw_text_into(&mut context, component, target).await.unwrap();
+        let empty = pixels(&mut context, target).await;
+        // Inside the frame the box is one colour: its background.
+        let inside = empty[12 * 120 + 50];
+        assert!(
+            (10..100).all(|column| empty[12 * 120 + column] == inside),
+            "an empty box is just its background"
+        );
+
+        context.write_bytes(0x2f00, b"AB").unwrap();
+        insert_text(&mut context, handle, 0, 0x2f00, 2).await.unwrap();
+
+        uic_draw_text_into(&mut context, component, target).await.unwrap();
+        let typed = pixels(&mut context, target).await;
+        assert_ne!(empty, typed, "the typed text is drawn into the box");
     }
 
     /// A title's own event handler is given the handle it holds, not the

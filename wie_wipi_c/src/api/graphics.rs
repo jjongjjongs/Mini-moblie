@@ -2499,6 +2499,49 @@ pub async fn draw_unicode_string(
 /// Shared by the byte-string and the UCS-2 call, which differ only in how the
 /// characters were spelled in guest memory.
 async fn draw_text(context: &mut dyn WIPICContext, dst: WIPICIndirectPtr, x: i32, y: i32, string: &str, pgc: WIPICWord) -> Result<()> {
+    // The two platforms put `y` in different places, and the reference spells
+    // both out: LGT's `MC_grpDrawString` takes the top of the glyph box and
+    // derives the baseline from it (`baseline := y + face.Ascent`), KTF's takes
+    // the baseline itself (`baseline := registers[2]`). Drawing a KTF title's
+    // text from the top puts every string an ascent too low - which is what sat
+    // 격투가's menu labels against the bottom of their own boxes and cut the
+    // second line off its dialogue.
+    //
+    // A handset platform is the one whose indirect pointers are handles rather
+    // than addresses, the same question `new_screen_surface` asks.
+    let baseline_origin = context.data_ptr(dst)? != dst.0;
+
+    draw_text_with_origin(context, dst, x, y, string, pgc, baseline_origin).await
+}
+
+/// `MC_grpDrawString` with `top` the top of the glyph box on every platform.
+///
+/// For WIE's own drawing - a UIC text box - which lays its text out inside a
+/// box, not from a baseline a title chose, and so wants the same placement on
+/// a handset whose titles pass baselines as on one whose titles pass tops.
+pub(crate) async fn draw_string_from_top(
+    context: &mut dyn WIPICContext,
+    dst: WIPICIndirectPtr,
+    x: i32,
+    top: i32,
+    ptr_string: WIPICWord,
+    length: i32,
+    pgc: WIPICWord,
+) -> Result<()> {
+    let string = read_wipi_string(context, ptr_string, length)?;
+
+    draw_text_with_origin(context, dst, x, top, &string, pgc, false).await
+}
+
+async fn draw_text_with_origin(
+    context: &mut dyn WIPICContext,
+    dst: WIPICIndirectPtr,
+    x: i32,
+    y: i32,
+    string: &str,
+    pgc: WIPICWord,
+    baseline_origin: bool,
+) -> Result<()> {
     if string.is_empty() {
         return Ok(());
     }
@@ -2517,18 +2560,6 @@ async fn draw_text(context: &mut dyn WIPICContext, dst: WIPICIndirectPtr, x: i32
     .intersect(&context_clip(&gctx));
 
     let color = context_color(&framebuffer, &gctx);
-
-    // The two platforms put `y` in different places, and the reference spells
-    // both out: LGT's `MC_grpDrawString` takes the top of the glyph box and
-    // derives the baseline from it (`baseline := y + face.Ascent`), KTF's takes
-    // the baseline itself (`baseline := registers[2]`). Drawing a KTF title's
-    // text from the top puts every string an ascent too low - which is what sat
-    // 격투가's menu labels against the bottom of their own boxes and cut the
-    // second line off its dialogue.
-    //
-    // A handset platform is the one whose indirect pointers are handles rather
-    // than addresses, the same question `new_screen_surface` asks.
-    let baseline_origin = context.data_ptr(dst)? != dst.0;
 
     // The handset's own face when the BIOS supplied one, drawn a pixel at a
     // time exactly as it is stored. The face is the one the title selected with
