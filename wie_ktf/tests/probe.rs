@@ -260,6 +260,7 @@ fn probe_run(
                 let mut ppm = format!("P6\n{} {}\n255\n", c.width, c.height).into_bytes();
                 ppm.extend_from_slice(&c.pixels);
                 let _ = std::fs::write(format!("{dir}/t{ticks:06}.ppm"), ppm);
+                eprintln!("[probe] dumped t{ticks:06}");
             }
         }
         for &(at, key) in &script {

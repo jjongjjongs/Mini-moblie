@@ -163,6 +163,48 @@ where
     })
 }
 
+/// A context as a draw takes it: [`read_context`], less what its mask says was
+/// never set.
+///
+/// KTF's `MC_GrpContext` opens with a mask, one bit per op, which
+/// `MC_grpSetContext` sets and `MC_grpInitContext` leaves clear. The words a
+/// title wrote behind the API's back do not count for the clip and the alpha
+/// unless their bit is set: a draw through a context whose clip bit is clear is
+/// unclipped, and one whose alpha bit is clear is opaque.
+///
+/// 컴투스포춘골프3D builds every context it draws through by hand, mask zero,
+/// and keeps its own numbers in those two words - `(0, 0, 240, 306)` in the
+/// clip, `0` or a packed `0xee00ffc0` in the alpha. Taken at their word, every
+/// fill that clears its frame was painted fully transparent, so the tutorial
+/// box it had just drawn stayed on the screen and went into the snapshot the
+/// title takes of it for its top view, and everything it draws below row 306 -
+/// the club bag, the help bar, the items sliding in - was cut off at the foot of
+/// the screen it flushes down to row 320.
+///
+/// The colour words and the pixel operation are not gated: 헬싱 fills its own
+/// context with neither call and draws in the colour and through the operation
+/// it wrote there.
+fn read_drawing_context<M>(memory: &M, layout: ContextLayout, p_grp_ctx: WIPICWord) -> Result<WIPICGraphicsContext>
+where
+    M: ByteRead + ?Sized,
+{
+    let mut grp_ctx = read_context(memory, layout, p_grp_ctx)?;
+
+    if let Some(at) = layout.offsets().mask {
+        let mask: WIPICWord = read_generic(memory, p_grp_ctx + at)?;
+        let set = |op: WIPICGraphicsContextIdx| op.mask_bit().is_some_and(|bit| mask & bit != 0);
+
+        if !set(WIPICGraphicsContextIdx::ClipIdx) {
+            grp_ctx.clip = WHOLE_PLANE_CLIP;
+        }
+        if !set(WIPICGraphicsContextIdx::AlphaIdx) {
+            grp_ctx.alpha = 0xff;
+        }
+    }
+
+    Ok(grp_ctx)
+}
+
 /// A context written back into the handset's own words - see [`read_context`].
 ///
 /// Only the words the layout names are written. A word the handset keeps for
@@ -317,6 +359,13 @@ where
         }
     }
     write_context(memory, layout, p_grp_ctx, grp_ctx)?;
+
+    // And the op is marked set, where the handset keeps a mask - see
+    // [`read_drawing_context`].
+    if let (Some(at), Some(bit)) = (layout.offsets().mask, op.mask_bit()) {
+        let mask: WIPICWord = read_generic(memory, p_grp_ctx + at)?;
+        write_generic(memory, p_grp_ctx + at, mask | bit)?;
+    }
 
     Ok(())
 }
@@ -492,7 +541,7 @@ pub async fn put_pixel(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
     tracing::debug!("MC_grpPutPixel({:#x}, {x}, {y}, {p_gctx:?})", dst_fb.0);
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst_fb)?)?);
-    let gctx = read_context(context, context.graphics_context_layout(), p_gctx)?;
+    let gctx = read_drawing_context(context, context.graphics_context_layout(), p_gctx)?;
     let (offset_x, offset_y) = context_offset(&gctx);
     let (x, y) = (x + offset_x, y + offset_y);
 
@@ -525,7 +574,7 @@ pub async fn fill_rect(context: &mut dyn WIPICContext, dst_fb: WIPICIndirectPtr,
     }
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst_fb)?)?);
-    let gctx = read_context(context, context.graphics_context_layout(), p_gctx)?;
+    let gctx = read_drawing_context(context, context.graphics_context_layout(), p_gctx)?;
     let (offset_x, offset_y) = context_offset(&gctx);
     let (x, y) = (x + offset_x, y + offset_y);
 
@@ -677,7 +726,7 @@ pub async fn draw_arc(
     }
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst)?)?);
-    let gctx = read_context(context, context.graphics_context_layout(), p_gctx)?;
+    let gctx = read_drawing_context(context, context.graphics_context_layout(), p_gctx)?;
     let (offset_x, offset_y) = context_offset(&gctx);
     let (x, y) = (x + offset_x, y + offset_y);
     let mut canvas = framebuffer.canvas(context)?;
@@ -725,7 +774,7 @@ pub async fn fill_arc(
     }
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst)?)?);
-    let gctx = read_context(context, context.graphics_context_layout(), p_gctx)?;
+    let gctx = read_drawing_context(context, context.graphics_context_layout(), p_gctx)?;
     let (offset_x, offset_y) = context_offset(&gctx);
     let (x, y) = (x + offset_x, y + offset_y);
     let mut canvas = framebuffer.canvas(context)?;
@@ -804,7 +853,7 @@ pub async fn draw_polygon(
     }
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst)?)?);
-    let gctx = read_context(context, context.graphics_context_layout(), p_gctx)?;
+    let gctx = read_drawing_context(context, context.graphics_context_layout(), p_gctx)?;
     let (offset_x, offset_y) = context_offset(&gctx);
     let points = read_polygon_points(context, x_points, y_points, n_points as usize)?
         .into_iter()
@@ -842,7 +891,7 @@ pub async fn fill_polygon(
     }
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst)?)?);
-    let gctx = read_context(context, context.graphics_context_layout(), p_gctx)?;
+    let gctx = read_drawing_context(context, context.graphics_context_layout(), p_gctx)?;
     let (offset_x, offset_y) = context_offset(&gctx);
     let points = read_polygon_points(context, x_points, y_points, n_points as usize)?
         .into_iter()
@@ -1196,7 +1245,7 @@ pub async fn draw_image(
     let source = if keyed { image.img } else { image.mask };
     // A title's own pixel operation decides what every pixel becomes, and it is
     // read before the canvas takes the context.
-    let grp_ctx = read_context(context, context.graphics_context_layout(), graphics_context)?;
+    let grp_ctx = read_drawing_context(context, context.graphics_context_layout(), graphics_context)?;
 
     // DIAGNOSTIC(anymom): 아무이유없어 draws all text - black and coloured - by
     // blitting per-glyph sprites, yet its coloured glyphs land as solid blocks.
@@ -1813,7 +1862,7 @@ pub async fn copy_area(
     }
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst)?)?);
-    let gctx = read_context(context, context.graphics_context_layout(), pgc)?;
+    let gctx = read_drawing_context(context, context.graphics_context_layout(), pgc)?;
     let (offset_x, offset_y) = context_offset(&gctx);
     let (dx, dy) = (dx + offset_x, dy + offset_y);
 
@@ -2223,7 +2272,7 @@ pub async fn copy_frame_buffer(
     let src_framebuffer = FrameBuffer(read_generic(context, context.data_ptr(src)?)?);
     let dst_framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst)?)?);
 
-    let gctx = read_context(context, context.graphics_context_layout(), pgc)?;
+    let gctx = read_drawing_context(context, context.graphics_context_layout(), pgc)?;
     let Some((dx, dy, w, h, sx, sy)) = clipped_blit(&context_clip(&gctx), dx, dy, w, h, sx, sy) else {
         return Ok(());
     };
@@ -2556,7 +2605,7 @@ async fn draw_text_with_origin(
     }
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst)?)?);
-    let gctx = read_context(context, context.graphics_context_layout(), pgc)?;
+    let gctx = read_drawing_context(context, context.graphics_context_layout(), pgc)?;
     let (offset_x, offset_y) = context_offset(&gctx);
     let (x, y) = (x + offset_x, y + offset_y);
 
@@ -2907,7 +2956,7 @@ pub async fn set_rgb_pixels(
         context.read_bytes(src_addr, &mut buf[off..off + row_bytes])?;
     }
 
-    let gctx = read_context(context, context.graphics_context_layout(), pgc)?;
+    let gctx = read_drawing_context(context, context.graphics_context_layout(), pgc)?;
     let clip = context_clip(&gctx);
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst)?)?);
@@ -2998,7 +3047,7 @@ pub async fn draw_rect(context: &mut dyn WIPICContext, dst: WIPICIndirectPtr, x:
     }
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst)?)?);
-    let gctx = read_context(context, context.graphics_context_layout(), pgc)?;
+    let gctx = read_drawing_context(context, context.graphics_context_layout(), pgc)?;
     let (offset_x, offset_y) = context_offset(&gctx);
     let (x, y) = (x + offset_x, y + offset_y);
     let mut canvas = framebuffer.canvas(context)?;
@@ -3022,7 +3071,7 @@ pub async fn draw_line(context: &mut dyn WIPICContext, dst: WIPICIndirectPtr, x1
     tracing::debug!("MC_grpDrawLine({:#x}, {x1}, {y1}, {x2}, {y2}, {pgc:#x})", dst.0);
 
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(dst)?)?);
-    let gctx = read_context(context, context.graphics_context_layout(), pgc)?;
+    let gctx = read_drawing_context(context, context.graphics_context_layout(), pgc)?;
     let (offset_x, offset_y) = context_offset(&gctx);
     let (x1, y1, x2, y2) = (x1 + offset_x, y1 + offset_y, x2 + offset_x, y2 + offset_y);
     let context_clip = context_clip(&gctx);
@@ -3816,6 +3865,71 @@ mod tests {
             let out = filled.get_pixel(0, 0);
             assert_eq!((out.r, out.g, out.b), (expected.r, expected.g, expected.b), "{layout:?}");
         }
+    }
+
+    /// A KTF context's clip and alpha count only once their mask bit is set.
+    ///
+    /// 컴투스포춘골프3D builds its contexts by hand with a zero mask and leaves
+    /// its own numbers in those words - a clip that ends above the rows it
+    /// draws its help bar into, and an alpha of zero on the fill that clears
+    /// each frame. Taken at their word, the clear painted nothing and the bar
+    /// was cut off. Set through `MC_grpSetContext`, the same words clip and
+    /// blend as before.
+    #[futures_test::test]
+    async fn a_ktf_context_clips_and_blends_only_through_its_mask() {
+        const MASK: u32 = 0x00;
+        const CLIP: u32 = 0x04;
+        const FOREGROUND: u32 = 0x14;
+        const ALPHA: u32 = 0x20;
+
+        let mut context = test_context();
+        context.set_graphics_context_layout(ContextLayout::Ktf);
+
+        let pgc_handle = context.alloc(core::mem::size_of::<super::WIPICGraphicsContext>() as u32 + 4).unwrap();
+        let pgc = context.data_ptr(pgc_handle).unwrap();
+        for (offset, value) in [
+            (MASK, 0),
+            (CLIP, 0),
+            (CLIP + 4, 0),
+            (CLIP + 8, 4),
+            (CLIP + 12, 1),
+            (FOREGROUND, 0xffff),
+            (ALPHA, 0),
+        ] {
+            write_generic(&mut context, pgc + offset, value as u32).unwrap();
+        }
+
+        let destination = framebuffer_of(&mut context, 4, 4, &[0xff00_0000; 16]).await;
+        super::fill_rect(&mut context, destination, 0, 0, 4, 4, pgc).await.unwrap();
+
+        let handle = read_generic(&context, context.data_ptr(destination).unwrap()).unwrap();
+        let framebuffer = super::FrameBuffer(handle);
+        let colour = framebuffer.pixel_to_color(0xffff);
+        let filled = framebuffer.image(&mut context).unwrap();
+        let out = filled.get_pixel(3, 3);
+        assert_eq!(
+            (out.r, out.g, out.b),
+            (colour.r, colour.g, colour.b),
+            "unmasked words clipped or blended the fill"
+        );
+
+        // The same rectangle through the API: one row, and only that row.
+        let rect = context.alloc(16).unwrap();
+        let rect = context.data_ptr(rect).unwrap();
+        for (index, value) in [0u32, 0, 4, 1].into_iter().enumerate() {
+            write_generic(&mut context, rect + 4 * index as u32, value).unwrap();
+        }
+        set_context(&mut context, pgc, Idx::ClipIdx, rect).await.unwrap();
+        assert_eq!(read_generic::<u32, _>(&context, pgc + MASK).unwrap(), 1 << Idx::ClipIdx as u32);
+
+        let destination = framebuffer_of(&mut context, 4, 4, &[0xff00_0000; 16]).await;
+        super::fill_rect(&mut context, destination, 0, 0, 4, 4, pgc).await.unwrap();
+
+        let handle = read_generic(&context, context.data_ptr(destination).unwrap()).unwrap();
+        let filled = super::FrameBuffer(handle).image(&mut context).unwrap();
+        let (inside, outside) = (filled.get_pixel(3, 0), filled.get_pixel(3, 3));
+        assert_eq!((inside.r, inside.g, inside.b), (colour.r, colour.g, colour.b));
+        assert_eq!((outside.r, outside.g, outside.b), (0, 0, 0));
     }
 
     /// XOR mode lives in the operation slot, and a title reading that slot back

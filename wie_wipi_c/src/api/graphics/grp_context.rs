@@ -118,6 +118,11 @@ pub enum ContextLayout {
 ///
 /// `clip` and `offset` name the first of their consecutive words.
 pub(crate) struct ContextOffsets {
+    /// The word that says which ops have been set, where the layout has one.
+    ///
+    /// KTF's `MC_GrpContext` opens with it, one bit per op (`1 << op`), and
+    /// LGT's struct has no such word. See [`WIPICGraphicsContextIdx::mask_bit`].
+    pub mask: Option<WIPICWord>,
     pub clip: WIPICWord,
     pub fgpxl: WIPICWord,
     pub bgpxl: WIPICWord,
@@ -147,6 +152,7 @@ impl ContextLayout {
             // whichever offset this names, so the two are not told apart here
             // yet and the operation keeps the offset KTF's titles use.
             Self::Lgt => ContextOffsets {
+                mask: None,
                 clip: 0x00,
                 fgpxl: 0x10,
                 bgpxl: 0x14,
@@ -160,6 +166,7 @@ impl ContextLayout {
                 keeps_transparent: false,
             },
             Self::Ktf => ContextOffsets {
+                mask: Some(0x00),
                 clip: 0x04,
                 fgpxl: 0x14,
                 bgpxl: 0x18,
@@ -199,6 +206,14 @@ pub enum WIPICGraphicsContextIdx {
 }
 
 impl WIPICGraphicsContextIdx {
+    /// The bit of a KTF context's mask word that says this op has been set.
+    pub fn mask_bit(self) -> Option<WIPICWord> {
+        match self {
+            Self::Invalid => None,
+            op => Some(1 << (op as WIPICWord)),
+        }
+    }
+
     /// The op a raw argument names, or `Invalid` for one that names none.
     ///
     /// Taken apart from the `ParamConverter` so the emulator's synchronous
