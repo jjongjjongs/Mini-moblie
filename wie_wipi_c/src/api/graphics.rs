@@ -2282,7 +2282,16 @@ pub(crate) fn blit_magenta_keyed(canvas: &mut dyn Canvas, dx: i32, dy: i32, w: i
 /// `y` is the top of the glyph box, the same origin the outline path draws
 /// from, and each glyph is stamped a pixel at a time so the result is the 1-bit
 /// shape the face stores rather than an anti-aliased rendering of it.
+///
+/// A glyph's pixels are set opaque, whatever alpha the context carries - the
+/// outline path takes its alpha from the glyph's coverage alone and never from
+/// the colour, and the two have to agree. 컴투스포춘골프3D fills its own context
+/// and never writes the alpha word, so the colour came out with an alpha of
+/// 0: every tutorial, mission and character-select line was put down fully
+/// transparent with the handset's faces installed, while the same lines drew
+/// on the outline font.
 fn draw_bitmap_string(canvas: &mut dyn Canvas, face: &BitmapFace, string: &str, x: i32, y: i32, color: Color, clip: Clip) {
+    let color = Color { a: 0xff, ..color };
     let mut pen = x;
     for c in string.chars() {
         let Some(glyph) = face.glyph(c) else {

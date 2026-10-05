@@ -3,6 +3,8 @@
 //! - `WIE_KTF_ZIP`  - path to the `.zip` archive (msd+jar+...). Unset -> no-op.
 //! - `WIE_TICKS`    - how many ticks to run (default 4000).
 //! - `WIE_LAST_PPM` - when set, the last painted frame is written here as a PPM.
+//! - `WIE_ANNUNCIATOR` - `1` or `0` forces the status strip on or off, as the app's setting does.
+//! - `WIE_BIOS`     - a firmware image whose bitmap faces text is drawn with, as the app does.
 //! - `WIE_RUNS`     - launches over the same storage when the title exits (default 1).
 
 use std::sync::{
@@ -133,6 +135,17 @@ fn ktf_probe() {
         .with_writer(std::io::stderr)
         .try_init();
 
+    // The handset's own bitmap faces, which the Android frontend installs from
+    // the firmware it bundles; without `WIE_BIOS` text is drawn from the
+    // outline font, which does not look the same.
+    if let Ok(bios) = std::env::var("WIE_BIOS") {
+        let image = std::fs::read(&bios).expect("bios image");
+        let installed = wie_wipi_c::api::graphics::install_bios_font(&image);
+        eprintln!("[probe] bios {bios}: bitmap face installed={installed}");
+    } else {
+        wie_wipi_c::api::graphics::clear_bios_font();
+    }
+
     let ticks_limit: u32 = std::env::var("WIE_TICKS").ok().and_then(|x| x.parse().ok()).unwrap_or(4000);
     let archive = std::fs::read(&path).expect("read archive");
     let files = extract_zip(&archive).expect("extract archive");
@@ -201,7 +214,7 @@ fn probe_run(
         wie_backend::Options {
             enable_gdbserver: false,
             profile: None,
-            annunciator: None,
+            annunciator: std::env::var("WIE_ANNUNCIATOR").ok().map(|x| x == "1"),
         },
     ) {
         Ok(emulator) => emulator,
