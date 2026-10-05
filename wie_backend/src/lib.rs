@@ -114,6 +114,76 @@ pub fn protected_container(data: &[u8]) -> Option<&'static str> {
     (data.get(..4)? == b"odcf" && data.get(12..16)? == b"odrm").then_some("OMA DRM (DCF)")
 }
 
+/// What a protected container is, told enough about to point the player at the
+/// edition that will run.
+pub struct DrmContainer {
+    /// A human name for the format - the one [`protected_container`] gives.
+    pub format: &'static str,
+    /// The content id written in the clear in the header, when there is one.
+    ///
+    /// A WIPI DCF carries one like `00WIPI000000000001036D08`, whose last eight
+    /// characters are the title's own id. The non-DRM edition of the same title
+    /// files under that id as its AID, so it is the edition a player should look
+    /// for - see [`DrmContainer::edition_aid`].
+    pub content_id: Option<String>,
+}
+
+impl DrmContainer {
+    /// The AID a non-DRM edition of this title carries, read off the tail of
+    /// the content id. `None` when the id is missing or does not end in an
+    /// eight-character hex id.
+    pub fn edition_aid(&self) -> Option<&str> {
+        let id = self.content_id.as_deref()?;
+        let tail = id.get(id.len().checked_sub(8)?..)?;
+
+        tail.bytes().all(|b| b.is_ascii_hexdigit()).then_some(tail)
+    }
+}
+
+/// Reads a protected container's header, without opening or decrypting it.
+///
+/// Only the clear-text header is looked at, and only the region before the
+/// encrypted payload box (`odda`) is scanned, bounded so a malformed file
+/// cannot make this walk far. The content id is lifted out as the ASCII token
+/// around its `WIPI` marker; nothing here interprets, unwraps or unlocks the
+/// content itself.
+pub fn drm_container(data: &[u8]) -> Option<DrmContainer> {
+    let format = protected_container(data)?;
+
+    Some(DrmContainer {
+        format,
+        content_id: dcf_content_id(data),
+    })
+}
+
+/// The clear-text content id of a DCF, or `None`.
+///
+/// The id sits in the header before the `odda` payload box and, for a WIPI
+/// title, holds `WIPI`. The header is scanned for that marker and the ASCII
+/// alphanumeric run around it is returned, both ends bounded so untrusted
+/// bytes cannot drive this past the header.
+fn dcf_content_id(data: &[u8]) -> Option<String> {
+    const SCAN_LIMIT: usize = 8192;
+
+    let payload = data.windows(4).position(|w| w == b"odda").unwrap_or(data.len());
+    let header = &data[..payload.min(SCAN_LIMIT).min(data.len())];
+
+    let marker = header.windows(4).position(|w| w == b"WIPI")?;
+
+    let is_token = |b: u8| b.is_ascii_alphanumeric();
+    let mut start = marker;
+    while start > 0 && is_token(header[start - 1]) {
+        start -= 1;
+    }
+    let mut end = marker + 4;
+    while end < header.len() && is_token(header[end]) {
+        end += 1;
+    }
+
+    // A lone "WIPI" with nothing around it is not an id worth reporting.
+    (end - start > 4).then(|| String::from_utf8_lossy(&header[start..end]).into_owned())
+}
+
 /// The names of an archive's entries, without unpacking any of them.
 ///
 /// Only the central directory is read, so this costs nothing next to
@@ -354,5 +424,52 @@ mod protected_container_tests {
         assert_eq!(protected_container(b"PK\x03\x04and then a jar"), None);
         assert_eq!(protected_container(b"odcf"), None);
         assert_eq!(protected_container(b""), None);
+    }
+
+    /// 절묘한타이밍 01.00.05's header: the clear-text content id is read out, and
+    /// its last eight characters are the AID the non-DRM edition files under.
+    #[test]
+    fn a_container_hands_back_its_content_id_and_the_edition_aid() {
+        // The header as a WIPI DCF lays it out: the content id field is
+        // NUL-terminated (its length counts the NUL), and the rights-issuer URL
+        // and textual headers follow, so the id ends at the first NUL.
+        let mut data = b"odcf\x00\x02\x00\x00\x00\x00\x00\x01odrmodheohdr".to_vec();
+        data.extend_from_slice(b"\x01\x02\x00\x00\x00\x00\x00\x00\x00\x00\x87\xda");
+        data.extend_from_slice(b"\x00\x19\x00\x01\x00\x0c");
+        data.extend_from_slice(b"00WIPI000000000001036D08\x00");
+        data.extend_from_slice(b"\x00");
+        data.extend_from_slice(b"ContentURL:\x00");
+        data.extend_from_slice(b"oddathen the encrypted bytes WIPI never mind these");
+
+        let container = super::drm_container(&data).unwrap();
+        assert_eq!(container.content_id.as_deref(), Some("00WIPI000000000001036D08"));
+        assert_eq!(container.edition_aid(), Some("01036D08"));
+    }
+
+    /// A container with no readable id still recognises as one, and names no
+    /// edition rather than guessing.
+    #[test]
+    fn a_container_without_a_content_id_names_no_edition() {
+        let data = b"odcf\x00\x02\x00\x00\x00\x00\x00\x01odrmodheohdr\x01\x02\x00".to_vec();
+
+        let container = super::drm_container(&data).unwrap();
+        assert_eq!(container.content_id, None);
+        assert_eq!(container.edition_aid(), None);
+    }
+
+    /// The payload is never scanned for the id: a `WIPI` that only turns up
+    /// inside the encrypted `odda` bytes is not read as a content id.
+    #[test]
+    fn the_encrypted_payload_is_not_scanned_for_an_id() {
+        let mut data = b"odcf\x00\x02\x00\x00\x00\x00\x00\x01odrmodheohdr\x01\x02\x00".to_vec();
+        data.extend_from_slice(b"odda");
+        data.extend_from_slice(b"00WIPI000000000009999999");
+
+        assert_eq!(super::drm_container(&data).unwrap().content_id, None);
+    }
+
+    #[test]
+    fn an_ordinary_archive_has_no_drm_header() {
+        assert!(super::drm_container(b"PK\x03\x04and then a jar").is_none());
     }
 }

@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use wie_backend::{Emulator, Event, KeyCode, Options, extract_zip};
+use wie_backend::{Emulator, Event, KeyCode, Options, drm_container, extract_zip};
 use wie_j2me::J2MEEmulator;
 use wie_ktf::KtfEmulator;
 use wie_lgt::LgtEmulator;
@@ -145,6 +145,28 @@ fn packaged_jar(files: &BTreeMap<String, Vec<u8>>) -> Option<Vec<u8>> {
     }
 
     extract_zip(jar).ok().map(|_| jar.clone())
+}
+
+/// The DRM container a download is, if it is one.
+///
+/// The `.jar` a package carries is the title's own file, and under OMA DRM it
+/// is a locked container rather than a zip - so it cannot go through
+/// [`packaged_jar`], which only hands back a jar that opens as a zip. The one
+/// named entry is read directly here, and the raw download too, so a container
+/// handed over bare is caught as well.
+fn drm_download(files: &BTreeMap<String, Vec<u8>>, data: &[u8]) -> Option<wie_backend::DrmContainer> {
+    let mut jars = files.iter().filter(|(name, _)| {
+        name.rsplit('/')
+            .next()
+            .is_some_and(|name| name.len() > 4 && name[name.len() - 4..].eq_ignore_ascii_case(".jar"))
+    });
+
+    let jar = match (jars.next(), jars.next()) {
+        (Some((_, jar)), None) => jar.as_slice(),
+        _ => data,
+    };
+
+    drm_container(jar)
 }
 
 struct Instance {
@@ -675,6 +697,24 @@ fn build_emulator(platform: Box<AndroidPlatform>, data: &[u8], options: Options)
         tracing::warn!("no bitmap face in the bundled firmware; text stays on the outline font");
     }
 
+    // A download delivered under OMA DRM is a locked container, not the title:
+    // the title's bytes are inside it and the key is in a rights object issued
+    // to the handset that bought it, not in the file. No loader here can open
+    // one, so say so plainly - naming the AID a non-DRM edition of the same
+    // title files under, which the container's own content id carries - rather
+    // than letting a carrier loader report it as a broken archive.
+    if let Some(drm) = drm_download(&files, data) {
+        let mut message = format!("이 파일은 DRM 보호 배포본({})이라 실행할 수 없습니다.", drm.format);
+        match drm.edition_aid() {
+            Some(aid) => {
+                let _ = write!(message, " 같은 게임의 DRM이 없는 일반 배포본(AID {aid})을 받아 주세요.");
+            }
+            None => message.push_str(" 같은 게임의 DRM이 없는 일반 배포본을 받아 주세요."),
+        }
+
+        return Err(message);
+    }
+
     // Handset archives are detected by their descriptor. A jar carries no
     // descriptor, so it is only considered once all three archive formats have
     // been ruled out - an apk or jar is itself a zip and would otherwise be
@@ -816,6 +856,13 @@ pub fn carrier(data: &[u8]) -> &'static str {
         return "";
     };
 
+    // A DRM-locked download is marked as such in the library, not filed under
+    // the carrier its outer archive looks like, so the badge says why it will
+    // not run before the player opens it.
+    if drm_download(&files, data).is_some() {
+        return "DRM";
+    }
+
     if KtfEmulator::loadable_archive(&files) {
         return "KTF";
     }
@@ -853,6 +900,20 @@ pub fn inspect(data: &[u8]) -> String {
             return report;
         }
     };
+
+    // A download under OMA DRM is a locked container, not the title. Say so
+    // before reading on, since the carrier guesses below would read its outer
+    // zip as an ordinary archive and name a format it cannot run.
+    if let Some(drm) = drm_download(&files, data) {
+        let _ = writeln!(report, "format: DRM ({})", drm.format);
+        if let Some(id) = &drm.content_id {
+            let _ = writeln!(report, "content id: {id}");
+        }
+        if let Some(aid) = drm.edition_aid() {
+            let _ = writeln!(report, "non-DRM edition AID: {aid}");
+        }
+        return report;
+    }
 
     let jar = packaged_jar(&files).unwrap_or_else(|| data.to_vec());
     let format = if KtfEmulator::loadable_archive(&files) {
@@ -1001,6 +1062,41 @@ mod tests {
         let report = inspect(b"not a zip at all");
 
         assert!(report.contains("not a zip"), "{report}");
+    }
+
+    /// A download whose jar is an OMA DRM container: a package of exactly one
+    /// jar and its icons, the jar an `odcf` container with a WIPI content id.
+    fn drm_package() -> Vec<u8> {
+        let mut dcf = b"odcf\x00\x02\x00\x00\x00\x00\x00\x01odrmodheohdr".to_vec();
+        dcf.extend_from_slice(b"\x01\x02\x00\x00\x00\x00\x00\x00\x00\x00\x87\xda");
+        dcf.extend_from_slice(b"\x00\x19\x00\x01\x00\x0c");
+        dcf.extend_from_slice(b"00WIPI000000000001036D08\x00\x00ContentURL:\x00odda....");
+
+        zip_of(&[
+            ("010261FB.jar", &dcf),
+            ("big.icon", b"big"),
+            ("middle.icon", b"mid"),
+            ("small.icon", b"small"),
+        ])
+    }
+
+    /// A DRM download reads as DRM, names its content id and the AID the
+    /// non-DRM edition files under, and nothing is read on as if it could run.
+    #[test]
+    fn inspect_reports_a_drm_container() {
+        let report = inspect(&drm_package());
+
+        assert!(report.contains("format: DRM (OMA DRM (DCF))"), "{report}");
+        assert!(report.contains("content id: 00WIPI000000000001036D08"), "{report}");
+        assert!(report.contains("non-DRM edition AID: 01036D08"), "{report}");
+        assert!(!report.contains("format: KTF"), "{report}");
+    }
+
+    /// A DRM download is badged DRM in the library rather than filed under the
+    /// carrier its outer zip resembles.
+    #[test]
+    fn a_drm_download_is_badged_drm() {
+        assert_eq!(super::carrier(&drm_package()), "DRM");
     }
 
     /// The two ids differ, and reading only one of them would miss half of

@@ -282,6 +282,9 @@ public final class MainActivity extends Activity {
     private static final int[] CARRIER_KTF = {Color.rgb(29, 95, 191), Color.rgb(226, 236, 251), Color.rgb(207, 224, 247)};
     private static final int[] CARRIER_LGT = {Color.rgb(163, 38, 143), Color.rgb(247, 226, 242), Color.rgb(239, 207, 230)};
     private static final int[] CARRIER_ETC = {Color.rgb(100, 117, 104), Color.rgb(238, 243, 239), Color.rgb(226, 233, 228)};
+    // A DRM-locked download: a muted red, so the badge reads as "cannot run"
+    // rather than as another carrier.
+    private static final int[] CARRIER_DRM = {Color.rgb(153, 57, 57), Color.rgb(248, 232, 232), Color.rgb(237, 213, 213)};
 
     private static final int LIB_DELETE = Color.rgb(192, 57, 43);       // #c0392b delete button
     private static final int LIB_RED_SOFT = Color.rgb(253, 236, 235);   // #fdeceb danger icon tile
@@ -1772,7 +1775,10 @@ public final class MainActivity extends Activity {
             if (libraryFavOnly && !isFavorite(game)) {
                 continue;
             }
-            if (!libraryCarrier.isEmpty() && !carrierBucket(game).equals(libraryCarrier)) {
+            // DRM downloads are counted and filtered under 기타 (the count
+            // switch above defaults them there), though their badge stays the
+            // distinct red "DRM".
+            if (!libraryCarrier.isEmpty() && !filterBucket(game).equals(libraryCarrier)) {
                 continue;
             }
             if (!query.isEmpty() && !displayName(game).toLowerCase(java.util.Locale.ROOT).contains(query)) {
@@ -2136,6 +2142,7 @@ public final class MainActivity extends Activity {
             case "SKT": return CARRIER_SKT;
             case "KTF": return CARRIER_KTF;
             case "LGT": return CARRIER_LGT;
+            case "DRM": return CARRIER_DRM;
             default: return CARRIER_ETC;
         }
     }
@@ -2165,6 +2172,16 @@ public final class MainActivity extends Activity {
 
         carrierCache.put(key, bucket);
         return bucket;
+    }
+
+    /**
+     * The bucket a game filters and counts under, which folds DRM into 기타 so a
+     * DRM download appears under the 기타 chip it was counted in. The badge uses
+     * the raw {@link #carrierBucket} so it still shows the distinct red "DRM".
+     */
+    private String filterBucket(File game) {
+        String bucket = carrierBucket(game);
+        return bucket.equals("DRM") ? "ETC" : bucket;
     }
 
     /** The archive's cover icon, cached by name+size+mtime (null = no icon). */
