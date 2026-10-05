@@ -8,7 +8,7 @@ use jvm::{ClassInstance, Result as JvmResult, runtime::JavaLangString};
 use wie_backend::{
     Emulator, Event, Options, Platform, System, TaskRunner, TitlePlatform,
     canvas::{Rgb565Pixel, VecImageBuffer},
-    extract_zip, gz, protected_container, title_quirks,
+    extract_zip, gz, protected_container, title_quirks, title_quirks_on_panel,
 };
 use wie_core_arm::{Allocator, ArmCore};
 use wie_jvm_support::JvmSupport;
@@ -190,13 +190,17 @@ impl KtfEmulator {
 
         let mut core = ArmCore::new(options.enable_gdbserver, options.profile.take())?;
 
+        // Read against the panel the title is given, since one AID can name a
+        // different game on a handset of another size.
+        let quirks = title_quirks_on_panel(TitlePlatform::Ktf, aid, platform.screen().width());
+
         let system = System::new(platform, pid, aid, KtfTaskRunner { core: core.clone() });
-        system.set_title_draws_sideways(title_quirks(TitlePlatform::Ktf, aid).drawn_sideways);
-        system.set_title_expects_annunciator(title_quirks(TitlePlatform::Ktf, aid).expects_annunciator);
-        system.set_title_annunciator_rows(title_quirks(TitlePlatform::Ktf, aid).annunciator_rows);
-        system.set_title_clears_screen_each_paint(title_quirks(TitlePlatform::Ktf, aid).clears_screen_each_paint);
-        system.set_title_blank_mutable_image_transparent(title_quirks(TitlePlatform::Ktf, aid).blank_mutable_image_transparent);
-        system.set_title_present_crop_bottom(title_quirks(TitlePlatform::Ktf, aid).present_crop_bottom);
+        system.set_title_draws_sideways(quirks.drawn_sideways);
+        system.set_title_expects_annunciator(quirks.expects_annunciator);
+        system.set_title_annunciator_rows(quirks.annunciator_rows);
+        system.set_title_clears_screen_each_paint(quirks.clears_screen_each_paint);
+        system.set_title_blank_mutable_image_transparent(quirks.blank_mutable_image_transparent);
+        system.set_title_present_crop_bottom(quirks.present_crop_bottom);
 
         for (path, data) in files {
             let path = packaged_name(path).unwrap_or(path);
@@ -254,9 +258,7 @@ impl KtfEmulator {
         // pixel at (239, 295)) onto a 320-row panel, so the bottom 24 rows are
         // never its and kept whatever had been there under every frame.
         const ANNUNCIATOR_ROWS: u32 = 24;
-        let annunciator = options
-            .annunciator
-            .unwrap_or_else(|| title_quirks(TitlePlatform::Ktf, aid).expects_annunciator);
+        let annunciator = options.annunciator.unwrap_or(quirks.expects_annunciator);
         write_generic(
             &mut core,
             wie_wipi_c::api::graphics::ANNUNCIATOR_ROWS_PTR,

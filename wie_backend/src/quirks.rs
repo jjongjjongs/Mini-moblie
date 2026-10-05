@@ -426,17 +426,6 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // are not drawn at all. Told the 296 a strip leaves, it asks for 240x296
     // and fills it from its first row.
     (TitlePlatform::Lgt, "00030DD8", annunciator()),
-    // 만귀토벌전: lays every screen out below the strip and inside the rows
-    // left under it, so the rows the strip takes off the top are also what
-    // lines that layout up. Taken away with the rest of KTF's strips, its last
-    // frame fell from 66 colours to 15 - the screen, not a band at the bottom.
-    //
-    // Sixteen rows rather than the twenty the size table gives a 176-wide
-    // panel: the title clears 204 rows of its 220-row panel and puts everything
-    // inside them, and 204 + 16 is the panel exactly. Under a twenty-row strip
-    // its last four rows - the bottom of the portrait and of the KARMA gauge -
-    // went off the end.
-    (TitlePlatform::Ktf, "0102A356", annunciator_of(16)),
     // 셔터2 데스트니: the same SDK and the same arithmetic - it clips every
     // screen to 176x204 on its 176x220 panel - and it answers the same way,
     // 57 colours down to 6 without the strip.
@@ -809,6 +798,42 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
 ///
 /// Returns [`TitleQuirks::default`] - which asks for nothing - for every title
 /// without an entry, which is nearly all of them.
+/// Entries that hold only on a panel of one width, because one AID names
+/// more than one title.
+///
+/// A publisher could ship different games under the same AID to handsets of
+/// different sizes, and the table above cannot tell them apart. 0102A356 is
+/// 만귀토벌전 on a 176x220 handset and 동방사신기 on a 240x320 one: the strip
+/// the first is laid out under pushed the second a strip down its own panel,
+/// cutting the top of its title screen and the `CLR:BACK` line off its
+/// bottom, and put a status bar over a game that never had one.
+const PANEL_QUIRKS: &[(TitlePlatform, &str, u32, TitleQuirks)] = &[
+    // 만귀토벌전: lays every screen out below the strip and inside the rows
+    // left under it, so the rows the strip takes off the top are also what
+    // lines that layout up. Taken away with the rest of KTF's strips, its last
+    // frame fell from 66 colours to 15 - the screen, not a band at the bottom.
+    //
+    // Sixteen rows rather than the twenty the size table gives a 176-wide
+    // panel: the title clears 204 rows of its 220-row panel and puts everything
+    // inside them, and 204 + 16 is the panel exactly. Under a twenty-row strip
+    // its last four rows - the bottom of the portrait and of the KARMA gauge -
+    // went off the end.
+    (TitlePlatform::Ktf, "0102A356", 176, annunciator_of(16)),
+];
+
+/// [`title_quirks`] for a title running on a panel `width` wide, which also
+/// answers the entries that hold only on a panel of that width - see
+/// [`PANEL_QUIRKS`].
+pub fn title_quirks_on_panel(platform: TitlePlatform, aid: &str, width: u32) -> TitleQuirks {
+    for (entry_platform, entry_aid, entry_width, quirks) in PANEL_QUIRKS {
+        if *entry_platform == platform && entry_aid.eq_ignore_ascii_case(aid) && *entry_width == width {
+            return *quirks;
+        }
+    }
+
+    title_quirks(platform, aid)
+}
+
 pub fn title_quirks(platform: TitlePlatform, aid: &str) -> TitleQuirks {
     for (entry_platform, entry_aid, quirks) in QUIRKS {
         if *entry_platform == platform && entry_aid.eq_ignore_ascii_case(aid) {
@@ -822,6 +847,17 @@ pub fn title_quirks(platform: TitlePlatform, aid: &str) -> TitleQuirks {
 #[cfg(test)]
 mod tests {
     use super::{TitlePlatform, TitleQuirks, title_quirks};
+
+    /// One AID, two games: the strip is 만귀토벌전's on its 176-wide panel and
+    /// nothing at all on 동방사신기's 240-wide one.
+    #[test]
+    fn an_aid_shared_by_two_titles_is_told_apart_by_its_panel() {
+        let narrow = super::title_quirks_on_panel(TitlePlatform::Ktf, "0102A356", 176);
+        assert!(narrow.expects_annunciator);
+        assert_eq!(narrow.annunciator_rows, Some(16));
+
+        assert_eq!(super::title_quirks_on_panel(TitlePlatform::Ktf, "0102A356", 240), TitleQuirks::default());
+    }
 
     #[test]
     fn a_title_without_an_entry_asks_for_nothing() {
