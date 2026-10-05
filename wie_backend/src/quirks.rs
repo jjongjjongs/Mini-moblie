@@ -452,6 +452,12 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // 맞고삼국대전: 176x220 by its descriptor, and every screen - title, map,
     // story - fills the top 204 rows and leaves 16 blank under them.
     (TitlePlatform::Ktf, "010247AB", panel(176, 220).with_bottom_cropped(16)),
+    // 두뇌게임Q: 176x220 by its descriptor, but every screen - its title, the
+    // profile form, the confirmation box - paints the top 210 rows and leaves a
+    // 10-row white strip under them. Keep the 220 the title lays itself out in
+    // and crop that strip off what is shown, so it is not a band beneath the
+    // picture.
+    (TitlePlatform::Ktf, "01038485", panel(176, 220).with_bottom_cropped(10)),
     // 겟앰프드: its descriptor says 240*320, but every full-screen picture it
     // carries - title, menu, each map - is 240x296, and it centres its popup
     // frame in whatever height the screen reports. Told 320 it put the frame at
@@ -1006,6 +1012,8 @@ mod tests {
         assert_eq!(title_quirks(TitlePlatform::Ktf, "01033511").present_crop_bottom, 20);
         assert_eq!(title_quirks(TitlePlatform::Ktf, "010247AB").screen_size, Some((176, 220)));
         assert_eq!(title_quirks(TitlePlatform::Ktf, "010247AB").present_crop_bottom, 16);
+        assert_eq!(title_quirks(TitlePlatform::Ktf, "01038485").screen_size, Some((176, 220)));
+        assert_eq!(title_quirks(TitlePlatform::Ktf, "01038485").present_crop_bottom, 10);
     }
 
     /// 프린스메이커 온달편 fills the 128x128 panel its art was drawn for.
