@@ -474,6 +474,55 @@ fn module_vm_context(core: &mut ArmCore, ptr_jvm_context: u32) -> Result<u32> {
     Ok(context)
 }
 
+/// Gives the running thread its own module VM context, where a relocated module
+/// is loaded and the thread has none yet.
+///
+/// A relocated module reaches its stack and its `try` chain through the single
+/// `fp` the title reserves at load. One `fp` is enough while one thread at a
+/// time runs module code, but a title that starts a `java.lang.Thread` has two
+/// that do - the new thread's `run` and the event loop or `startApp` it was
+/// started from - and composing both onto one stack, with one handler chain,
+/// trampled each other: 테일즈판타지 opened a `try` on its game thread, the
+/// main thread's stack grew through the record it had just written, and the
+/// throw that followed long-jumped into a method record read as code.
+///
+/// So each thread that runs module code is handed its own context: a fresh
+/// stack and an empty `try` chain, over the same read-only parts the reserved
+/// one carries - the constant pool, the interface table, the class records.
+/// [`ArmCore::run_function`] uses it for this thread in place of the reserved
+/// one, and it is freed when the thread ends. The main thread, which reserves
+/// the title's `fp` only once it has loaded the module, has none here and keeps
+/// using the reserved one; a module that does not reach the runtime through
+/// `fp` reserves none, and nothing is done.
+pub fn enter_module_thread(core: &mut ArmCore) -> Result<()> {
+    let Some(main_context) = core.reserved_fp() else {
+        return Ok(());
+    };
+    let Some(thread_id) = core.current_thread_id() else {
+        return Ok(());
+    };
+    if core.thread_fp(thread_id).is_some() {
+        return Ok(());
+    }
+
+    let ptr_jvm_context: u32 = read_generic(core, main_context + VM_CONTEXT_JVM)?;
+    let pool: u32 = read_generic(core, main_context + VM_CONTEXT_POOL)?;
+    let interface: u32 = read_generic(core, main_context + VM_CONTEXT_INTERFACE)?;
+
+    let context = module_vm_context(core, ptr_jvm_context)?;
+    write_generic(core, context + VM_CONTEXT_POOL, pool)?;
+    write_generic(core, context + VM_CONTEXT_INTERFACE, interface)?;
+
+    let stack_top: u32 = read_generic(core, context + VM_CONTEXT_STACK)?;
+    core.free_with_thread(thread_id, stack_top - VM_CONTEXT_STACK_SIZE, VM_CONTEXT_STACK_SIZE);
+    core.free_with_thread(thread_id, context, VM_CONTEXT_SIZE);
+    core.set_thread_fp(thread_id, context);
+
+    tracing::debug!("thread {thread_id} module VM context at {context:#x}");
+
+    Ok(())
+}
+
 /// What a module method's `try` blocks catch.
 ///
 /// The method record's exception-table word is an array of as many pointers as

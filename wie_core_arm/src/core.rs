@@ -101,6 +101,15 @@ pub(crate) struct ArmCoreInner {
     /// What `fp` holds whenever the guest runs, when something asked for it.
     /// See [`ArmCore::reserve_fp`].
     reserved_fp: Option<u32>,
+    /// A thread's own `fp`, overriding [`Self::reserved_fp`] while that thread
+    /// runs. A relocated KTF module reaches its stack and its `try` chain
+    /// through `fp`, and two threads sharing one would trample each other's -
+    /// see `wie_ktf`'s per-thread module context. See [`ArmCore::set_thread_fp`].
+    thread_fp: BTreeMap<ThreadId, u32>,
+    /// Guest allocations to free when a thread ends, so a per-thread context
+    /// handed out above does not outlive its thread. See
+    /// [`ArmCore::free_with_thread`].
+    thread_owned_allocations: BTreeMap<ThreadId, Vec<(u32, u32)>>,
 }
 
 /// Upper bound on pooled thread stacks. Peak concurrency is small (a handful),
@@ -189,6 +198,8 @@ impl ArmCore {
             profile,
             write_once_metadata: BTreeMap::new(),
             reserved_fp: None,
+            thread_fp: BTreeMap::new(),
+            thread_owned_allocations: BTreeMap::new(),
         };
 
         let result = Self {
@@ -266,10 +277,19 @@ impl ArmCore {
         tracing::info!("Terminate thread: {thread_id}");
 
         // we should exit inner lock first to run cleanup on thread state drop
-        let _thread_state = {
+        let (_thread_state, owned_allocations) = {
             let mut inner = self.inner.lock();
-            inner.threads.remove(&thread_id)
+            inner.thread_fp.remove(&thread_id);
+            let owned = inner.thread_owned_allocations.remove(&thread_id).unwrap_or_default();
+            (inner.threads.remove(&thread_id), owned)
         };
+
+        // The thread's own module context, now that it has ended - freed outside
+        // the lock, since the allocator takes it itself.
+        for (address, size) in owned_allocations {
+            let mut core = self.clone();
+            let _ = crate::Allocator::free(&mut core, address, size);
+        }
 
         if _thread_state.is_some() {
             crate::LIVE_THREADS.fetch_sub(1, ::core::sync::atomic::Ordering::Relaxed);
@@ -544,7 +564,13 @@ impl ArmCore {
                 }
             }
 
-            if let Some(fp) = inner.reserved_fp {
+            // A thread with its own module context uses that; everything else
+            // uses the one reserved for the whole title.
+            let fp = inner
+                .current_thread_id
+                .and_then(|thread_id| inner.thread_fp.get(&thread_id).copied())
+                .or(inner.reserved_fp);
+            if let Some(fp) = fp {
                 inner.engine.reg_write(ArmRegister::FP, fp);
             }
 
@@ -851,6 +877,33 @@ impl ArmCore {
     /// presence is what says which kind of module is running.
     pub fn reserved_fp(&self) -> Option<u32> {
         self.inner.lock().reserved_fp
+    }
+
+    /// Gives `thread_id` its own `fp`, used instead of [`Self::reserve_fp`]'s
+    /// while that thread runs.
+    ///
+    /// A relocated KTF module reaches its stack and its `try` chain through
+    /// `fp`; two threads left sharing one trample each other's, so each thread
+    /// that runs module code is handed its own context here.
+    pub fn set_thread_fp(&mut self, thread_id: ThreadId, fp: u32) {
+        self.inner.lock().thread_fp.insert(thread_id, fp);
+    }
+
+    /// `thread_id`'s own `fp`, if it was given one.
+    pub fn thread_fp(&self, thread_id: ThreadId) -> Option<u32> {
+        self.inner.lock().thread_fp.get(&thread_id).copied()
+    }
+
+    /// Frees `address` (a `size`-byte allocation) when `thread_id` ends, so a
+    /// per-thread context does not outlive its thread. See
+    /// [`Self::delete_thread_context`].
+    pub fn free_with_thread(&mut self, thread_id: ThreadId, address: u32, size: u32) {
+        self.inner
+            .lock()
+            .thread_owned_allocations
+            .entry(thread_id)
+            .or_default()
+            .push((address, size));
     }
 
     pub fn restore_context(&mut self, context: &ArmCoreContext) {

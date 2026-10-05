@@ -11,4 +11,5 @@ const SVC_CATEGORY_MODULE: u32 = 5;
 const SVC_CATEGORY_MODULE_CLASS: u32 = 6;
 const SVC_CATEGORY_MODULE_JUMP: u32 = 7;
 
+pub(crate) use self::init::enter_module_thread;
 pub use self::java::jvm_support::KtfJvmSupport;

@@ -92,7 +92,16 @@ struct KtfTaskRunner {
 #[async_trait::async_trait]
 impl TaskRunner for KtfTaskRunner {
     async fn run(&self, future: Pin<Box<dyn Future<Output = Result<()>> + Send>>) -> Result<()> {
-        self.core.run_in_thread(async move || future.await)?.await
+        let mut core = self.core.clone();
+        self.core
+            .run_in_thread(async move || {
+                // Hand this thread its own module context before it runs any
+                // module code, so a relocated module's threads do not share one
+                // stack and one try chain - see `enter_module_thread`.
+                crate::runtime::enter_module_thread(&mut core)?;
+                future.await
+            })?
+            .await
     }
 }
 
