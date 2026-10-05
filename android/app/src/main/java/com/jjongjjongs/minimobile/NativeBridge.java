@@ -54,6 +54,12 @@ final class NativeBridge {
     static native int nativeSleepHintMs();
 
     /**
+     * How fast the title runs, 1.0 being real time. Only the game clock moves,
+     * so this is safe to call from the UI thread while a tick is in flight.
+     */
+    static native void nativeSetSpeed(float speed);
+
+    /**
      * Guest instructions retired so far. It climbs while the title is running
      * and stops dead when it is not, which is what tells a title doing a long
      * piece of work - a loading screen is one tick that can last seconds -

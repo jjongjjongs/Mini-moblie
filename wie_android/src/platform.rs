@@ -5,7 +5,6 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU8, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use wie_backend::{
@@ -173,10 +172,10 @@ impl Platform for AndroidPlatform {
         &self.screen
     }
 
+    /// The game clock, which runs at the speed the player set - see
+    /// [`crate::speed`].
     fn now(&self) -> Instant {
-        let since_epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-
-        Instant::from_epoch_millis(since_epoch.as_millis() as _)
+        Instant::from_epoch_millis(crate::speed::now_ms() as _)
     }
 
     fn database_repository(&self) -> &dyn DatabaseRepository {

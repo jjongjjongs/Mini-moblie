@@ -49,6 +49,7 @@ import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 import android.view.WindowManager;
@@ -4001,8 +4002,12 @@ public final class MainActivity extends Activity {
                 "로그 진단 설정",
                 "조작 설정 (키패드·게임패드)",
                 rotateMenuLabel(),
+                "게임 속도",
         };
-        String[] icons = {"📋", "🔧", "⚙", "🔄"};
+        String[] icons = {"📋", "🔧", "⚙", "🔄", "⏩"};
+        // The speed row says what the speed is, so the menu answers the
+        // question without opening anything.
+        String speedValue = currentGame != null ? formatSpeed(gameSpeed(currentGame)) : formatSpeed(1f);
         android.widget.ArrayAdapter<String> adapter =
                 new android.widget.ArrayAdapter<String>(this, 0, items) {
                     @Override
@@ -4028,6 +4033,14 @@ public final class MainActivity extends Activity {
                         label.setTextColor(COLOR_TEXT);
                         label.setTextSize(15f);
                         row.addView(label, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                        if (position == 4) {
+                            TextView value = new TextView(MainActivity.this);
+                            value.setText(speedValue);
+                            value.setTextColor(COLOR_ACCENT);
+                            value.setTextSize(15f);
+                            value.setTypeface(Typeface.DEFAULT_BOLD);
+                            row.addView(value);
+                        }
                         return row;
                     }
                 };
@@ -4051,10 +4064,203 @@ public final class MainActivity extends Activity {
                         case 3:
                             toggleOrientation();
                             break;
+                        case 4:
+                            showSpeedDialog();
+                            break;
                     }
                 })
                 .setNegativeButton("닫기", null)
                 .show();
+    }
+
+    /** The speeds the dialog offers as one-tap chips. */
+    private static final float[] SPEED_CHIPS = {0.5f, 1f, 1.5f, 2f, 3f, 4f};
+
+    /** The slider's range and step: 0.5x to 4x in quarters. */
+    private static final float SPEED_MIN = 0.5f;
+    private static final float SPEED_STEP = 0.25f;
+    private static final int SPEED_STEPS = 14;
+
+    /**
+     * The speed a title was last played at, 1.0 if it never left real time.
+     * Kept per title, by its file name, so a slow title can stay sped up
+     * without every other title following it.
+     */
+    private float gameSpeed(File game) {
+        float value = getSharedPreferences("mini_speed", MODE_PRIVATE).getFloat(game.getName(), 1f);
+
+        return Float.isNaN(value) || value <= 0f ? 1f : value;
+    }
+
+    private void saveGameSpeed(File game, float value) {
+        getSharedPreferences("mini_speed", MODE_PRIVATE).edit().putFloat(game.getName(), value).apply();
+    }
+
+    /** 2x, 1.5x, 1.25x - as few digits as the value needs. */
+    private static String formatSpeed(float value) {
+        if (value == Math.round(value)) {
+            return Math.round(value) + "x";
+        }
+        String text = String.format(java.util.Locale.US, "%.2f", value);
+        if (text.endsWith("0")) {
+            text = text.substring(0, text.length() - 1);
+        }
+
+        return text + "x";
+    }
+
+    private static int speedToStep(float value) {
+        return Math.max(0, Math.min(SPEED_STEPS, Math.round((value - SPEED_MIN) / SPEED_STEP)));
+    }
+
+    private static float stepToSpeed(int step) {
+        return SPEED_MIN + step * SPEED_STEP;
+    }
+
+    /**
+     * The game-speed window from the gear menu: the speed in large type, a row
+     * of chips for the common speeds and a slider for the quarters between
+     * them. Nothing changes until 적용; 1x로 goes straight back to real time.
+     */
+    private void showSpeedDialog() {
+        final File game = currentGame;
+        if (game == null) {
+            return;
+        }
+        final float[] chosen = {gameSpeed(game)};
+
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(20), dp(4), dp(20), dp(4));
+
+        final TextView big = new TextView(this);
+        big.setTextSize(40f);
+        big.setTypeface(Typeface.DEFAULT_BOLD);
+        big.setTextColor(COLOR_ACCENT);
+        big.setGravity(android.view.Gravity.CENTER);
+        body.addView(big);
+
+        TextView scope = new TextView(this);
+        scope.setText("이 게임에만 적용 · 다음에 열어도 유지");
+        scope.setTextSize(12.5f);
+        scope.setTextColor(COLOR_SUBTEXT);
+        scope.setGravity(android.view.Gravity.CENTER);
+        LinearLayout.LayoutParams scopeParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        scopeParams.bottomMargin = dp(14);
+        body.addView(scope, scopeParams);
+
+        LinearLayout chips = new LinearLayout(this);
+        chips.setOrientation(LinearLayout.HORIZONTAL);
+        final TextView[] chipViews = new TextView[SPEED_CHIPS.length];
+        final SeekBar slider = new SeekBar(this);
+
+        final Runnable refresh = () -> {
+            big.setText(formatSpeed(chosen[0]));
+            for (int i = 0; i < chipViews.length; i++) {
+                boolean on = Math.abs(SPEED_CHIPS[i] - chosen[0]) < 0.001f;
+                GradientDrawable face = new GradientDrawable();
+                face.setCornerRadius(dp(18));
+                face.setColor(on ? COLOR_ACCENT : Color.TRANSPARENT);
+                face.setStroke(Math.max(1, dp(1)), on ? COLOR_ACCENT : Color.rgb(85, 90, 102));
+                chipViews[i].setBackground(face);
+                chipViews[i].setTextColor(on ? Color.rgb(11, 42, 47) : COLOR_TEXT);
+            }
+        };
+
+        for (int i = 0; i < SPEED_CHIPS.length; i++) {
+            final float value = SPEED_CHIPS[i];
+            TextView chip = new TextView(this);
+            chip.setText(formatSpeed(value));
+            chip.setTextSize(13.5f);
+            chip.setTypeface(Typeface.DEFAULT_BOLD);
+            chip.setGravity(android.view.Gravity.CENTER);
+            chip.setPadding(0, dp(8), 0, dp(8));
+            chip.setOnClickListener(v -> {
+                chosen[0] = value;
+                slider.setProgress(speedToStep(value));
+                refresh.run();
+            });
+            LinearLayout.LayoutParams chipParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            if (i > 0) {
+                chipParams.leftMargin = dp(5);
+            }
+            chips.addView(chip, chipParams);
+            chipViews[i] = chip;
+        }
+        body.addView(chips);
+
+        slider.setMax(SPEED_STEPS);
+        slider.setProgress(speedToStep(chosen[0]));
+        slider.setProgressTintList(android.content.res.ColorStateList.valueOf(COLOR_ACCENT));
+        slider.setThumbTintList(android.content.res.ColorStateList.valueOf(COLOR_ACCENT));
+        slider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
+                if (fromUser) {
+                    chosen[0] = stepToSpeed(progress);
+                    refresh.run();
+                }
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar bar) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar bar) {
+            }
+        });
+        LinearLayout.LayoutParams sliderParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        sliderParams.topMargin = dp(16);
+        body.addView(slider, sliderParams);
+
+        LinearLayout ticks = new LinearLayout(this);
+        ticks.setOrientation(LinearLayout.HORIZONTAL);
+        ticks.setPadding(dp(14), 0, dp(14), 0);
+        String[] tickLabels = {"0.5x", "1x", "2x", "3x", "4x"};
+        // Where each label sits on the 0.5x-4x track, as weights between them.
+        float[] gaps = {0.5f, 1f, 1f, 1f};
+        for (int i = 0; i < tickLabels.length; i++) {
+            if (i > 0) {
+                ticks.addView(new View(this), new LinearLayout.LayoutParams(0, 1, gaps[i - 1]));
+            }
+            TextView tick = new TextView(this);
+            tick.setText(tickLabels[i]);
+            tick.setTextSize(11f);
+            tick.setTextColor(COLOR_SUBTEXT);
+            ticks.addView(tick);
+        }
+        body.addView(ticks);
+
+        TextView note = new TextView(this);
+        note.setText("빠르게 하면 게임 시간이 그만큼 빨리 흐릅니다. 무거운 장면에선 폰 성능만큼만 빨라질 수 있어요. 소리는 원래 속도로 재생됩니다.");
+        note.setTextSize(12f);
+        note.setTextColor(COLOR_SUBTEXT);
+        note.setLineSpacing(0f, 1.2f);
+        LinearLayout.LayoutParams noteParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        noteParams.topMargin = dp(14);
+        body.addView(note, noteParams);
+
+        refresh.run();
+
+        new AlertDialog.Builder(new android.view.ContextThemeWrapper(this, android.R.style.Theme_Material_Dialog_Alert))
+                .setTitle("게임 속도")
+                .setView(body)
+                .setPositiveButton("적용", (dialog, which) -> applyGameSpeed(game, chosen[0]))
+                .setNegativeButton("취소", null)
+                .setNeutralButton("1x로", (dialog, which) -> applyGameSpeed(game, 1f))
+                .show();
+    }
+
+    /** Remembers the speed for this title and puts the running one on it. */
+    private void applyGameSpeed(File game, float value) {
+        saveGameSpeed(game, value);
+        if (game.equals(currentGame)) {
+            NativeBridge.nativeSetSpeed(value);
+        }
     }
 
     /** Sets the (now optional) status label if one is present. */
@@ -4266,6 +4472,10 @@ public final class MainActivity extends Activity {
             // Snapshot the actual host handset model once for this emulator
             // instance so legacy PHONEMODEL queries retain their host value.
             String phoneModel = Build.MODEL != null ? Build.MODEL : "";
+
+            // The speed this title was last played at; nativeStart then puts
+            // the clock back on the time of day and runs it from there.
+            NativeBridge.nativeSetSpeed(gameSpeed(game));
 
             String message = NativeBridge.nativeStart(
                     buffer.toByteArray(),

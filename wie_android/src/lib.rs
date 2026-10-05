@@ -18,13 +18,14 @@ mod network;
 mod oma3;
 mod platform;
 mod runner;
+mod speed;
 
 use std::{panic::AssertUnwindSafe, path::PathBuf, time::Duration};
 
 use jni::{
     JNIEnv,
     objects::{JByteArray, JClass, JShortArray, JString},
-    sys::{jbyteArray, jint, jlong, jshortArray, jstring},
+    sys::{jbyteArray, jfloat, jint, jlong, jshortArray, jstring},
 };
 
 use crate::{platform::AndroidHandsetInformation, runner::with_runner};
@@ -112,6 +113,10 @@ pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativ
 
     tracing::info!("nativeStart: {} bytes, runtime dir {runtime_dir}", data.len());
 
+    // Each run starts at the real time of day, at whatever speed the player
+    // set for this title before starting it.
+    speed::realign();
+
     guard_string(&env, || {
         with_runner(|runner| runner.start(data, PathBuf::from(runtime_dir), handset_information))
     })
@@ -166,6 +171,19 @@ pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativ
     let hint = std::panic::catch_unwind(AssertUnwindSafe(|| with_runner(|runner| runner.sleep_hint()))).unwrap_or(None);
 
     hint.map_or(-1, |ms| ms.min(jint::MAX as u64) as jint)
+}
+
+/// `nativeSetSpeed(float speed)`
+///
+/// How fast the title runs, 1.0 being real time. Takes effect at once and
+/// touches only the game clock, so the UI thread can call it while a tick is
+/// in flight. See [`speed`].
+///
+/// # Safety
+/// Called by the JVM with a valid `env` reference.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativeSetSpeed(_env: JNIEnv, _class: JClass, value: jfloat) {
+    guard(|| speed::set_speed(value));
 }
 
 /// `nativeGuestProgress() -> long`

@@ -623,7 +623,9 @@ impl Runner {
         // drain ends and the wait begins. See [`LoopMeter`].
         self.meter.armed_at = Some(Instant::now());
 
-        self.instance.as_ref()?.emulator.sleep_hint()
+        // The title's timers are on the game clock; the loop sleeps on the
+        // wall clock, which at 2x reaches them in half the time.
+        self.instance.as_ref()?.emulator.sleep_hint().map(crate::speed::real_ms)
     }
 
     pub fn take_frame(&mut self) -> Option<Frame> {
