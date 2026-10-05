@@ -106,6 +106,27 @@ async fn test_calendar_cldc11_time_and_comparison_api() -> Result<()> {
 }
 
 #[tokio::test]
+async fn test_calendar_get_instance_with_null_zone() -> Result<()> {
+    let jvm = test_jvm().await?;
+
+    // A KTF title (두뇌게임Q) reaches getInstance(TimeZone) with a null zone when
+    // it works out an age from a birth year. The handset used the default zone
+    // rather than throwing, so this must hand back a usable calendar.
+    let null_zone: ClassInstanceRef<Object> = ClassInstanceRef::new(None);
+    let calendar: ClassInstanceRef<Object> = jvm
+        .invoke_static("java/util/Calendar", "getInstance", "(Ljava/util/TimeZone;)Ljava/util/Calendar;", (null_zone,))
+        .await?;
+
+    let _: () = jvm.invoke_virtual(&calendar, "setTimeInMillis", "(J)V", (0i64,)).await?;
+    assert_eq!(jvm.invoke_virtual::<_, i32>(&calendar, "get", "(I)I", (1,)).await?, 1970);
+
+    let zone: ClassInstanceRef<Object> = jvm.invoke_virtual(&calendar, "getTimeZone", "()Ljava/util/TimeZone;", ()).await?;
+    assert!(!zone.is_null());
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_calendar_set_time_zone() -> Result<()> {
     let jvm = test_jvm().await?;
 

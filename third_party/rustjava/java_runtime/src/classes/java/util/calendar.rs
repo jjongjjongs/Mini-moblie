@@ -64,13 +64,19 @@ impl Calendar {
 
     async fn get_instance_with_time_zone(
         jvm: &Jvm,
-        _: &mut RuntimeContext,
+        context: &mut RuntimeContext,
         time_zone: ClassInstanceRef<TimeZone>,
     ) -> Result<ClassInstanceRef<Calendar>> {
         tracing::debug!("java.util.Calendar::getInstance({time_zone:?})");
 
+        // A KTF title can reach here with a null zone - 두뇌게임Q does, computing
+        // an age from the birth year it was given. The handset's Calendar did not
+        // fault on that: it used the default zone, the same one `getInstance()`
+        // would, rather than throwing. Match that so the title runs on past its
+        // confirmation screen instead of dying in `paint`.
         if time_zone.is_null() {
-            return Err(jvm.exception("java/lang/NullPointerException", "timeZone").await);
+            tracing::debug!("java.util.Calendar::getInstance(null) - falling back to the default zone");
+            return Self::get_instance(jvm, context).await;
         }
 
         let instance = jvm
