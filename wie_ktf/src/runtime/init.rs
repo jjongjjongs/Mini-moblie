@@ -21,8 +21,8 @@ use crate::{
         SVC_CATEGORY_INIT, SVC_CATEGORY_MODULE, SVC_CATEGORY_MODULE_CLASS, SVC_CATEGORY_MODULE_JUMP,
         java::{
             interface::{
-                get_java_method, get_wipi_jb_interface, java_array_new, java_check_type, java_class_load, java_new, java_throw, java_throw_class,
-                java_throw_instance, jb_monitor_enter, jb_monitor_exit, map_jump_result,
+                get_field, get_java_method, get_wipi_jb_interface, java_array_new, java_check_type, java_class_load, java_new, java_throw,
+                java_throw_class, java_throw_instance, jb_monitor_enter, jb_monitor_exit, map_jump_result,
             },
             jvm_support::{JavaMethodResult, JavaVtable, KtfJvmSupport},
         },
@@ -268,6 +268,13 @@ async fn module_ensure_initialized(core: &mut ArmCore, jvm: &mut Jvm, ptr_class:
 /// name - descriptor and name in one string - and answers the method.
 const MODULE_GET_METHOD: u32 = 0x64 / size_of::<u32>() as u32;
 
+/// `MNInterface`'s field lookup, at `+0x54`, which takes a class and a full
+/// name - descriptor and name in one string - and answers the field, the same
+/// record [`get_field`] hands the ordinary module. 테일즈판타지 and its sequel
+/// reach for `System.out` this way in their first constructor, and a zero back
+/// was read as the field not being there and thrown as `java.lang.Error`.
+const MODULE_GET_FIELD: u32 = 0x54 / size_of::<u32>() as u32;
+
 /// `MNInterface`'s class load, at `+0x40`.
 ///
 /// The module's own resolver reads a class reference cell, and where the cell
@@ -295,6 +302,7 @@ async fn handle_module_svc(core: &mut ArmCore, jvm: &mut Jvm, id: SvcId) -> Resu
         MODULE_JAVA_NEW => EmulatedFunction::call(&java_new, core, jvm).await?.write(core, lr),
         MODULE_CLASS_LOAD => EmulatedFunction::call(&java_class_load, core, jvm).await?.write(core, lr),
         MODULE_GET_METHOD => EmulatedFunction::call(&get_java_method, core, &mut ()).await?.write(core, lr),
+        MODULE_GET_FIELD => EmulatedFunction::call(&get_field, core, &mut ()).await?.write(core, lr),
         MODULE_ENSURE_INITIALIZED => module_ensure_initialized(core, jvm, core.read_param(0)?).await?.write(core, lr),
         MODULE_ARRAY_NEW => EmulatedFunction::call(&java_array_new, core, jvm).await?.write(core, lr),
         MODULE_ARRAY_CLASS => module_array_class(core, jvm, core.read_param(0)?).await?.write(core, lr),
