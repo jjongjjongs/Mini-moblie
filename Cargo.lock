@@ -3696,6 +3696,7 @@ dependencies = [
  "bitflags 2.13.1",
  "bytemuck",
  "dyn-clone",
+ "encoding_rs",
  "futures",
  "java_class_proto",
  "java_constants",
