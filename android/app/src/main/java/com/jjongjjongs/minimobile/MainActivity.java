@@ -3778,7 +3778,16 @@ public final class MainActivity extends Activity {
         // auto-rotate is on and holds the orientation the user locked while it
         // is off. The title-bar toggle then only has to say what the phone is
         // not already saying - see `toggleOrientation`.
-        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_USER);
+        //
+        // Except a player that opens on its side with auto-rotate off: that is
+        // held in landscape the way the toggle holds it, so it still turns
+        // over with the phone - see `heldOrientation`.
+        if (landscapeMode && !autoRotateOn()) {
+            orientationPinned = true;
+            setRequestedOrientation(heldOrientation());
+        } else {
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_USER);
+        }
         buildPlayerContent();
 
         wedgeReported = false;
@@ -4172,16 +4181,24 @@ public final class MainActivity extends Activity {
             orientationPinned = true;
             setRequestedOrientation(landscapeMode
                     ? ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-                    : ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
+                    : ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
         }
 
         showRotateState();
     }
 
-    /** The orientation the player is in, asked for as an orientation to keep. */
+    /**
+     * The orientation the player is in, asked for as an orientation to keep.
+     *
+     * <p>Landscape is held as either side up. SENSOR_LANDSCAPE reads the
+     * sensor even with the phone's auto-rotate off, so a player held on its
+     * side turns over when the phone does - it never leaves landscape, it
+     * only stops being upside down. Portrait stays the one way up: most phones
+     * do not turn their own screen upside down either.
+     */
     private int heldOrientation() {
         return landscapeMode
-                ? ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                ? ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
                 : ActivityInfo.SCREEN_ORIENTATION_PORTRAIT;
     }
 
