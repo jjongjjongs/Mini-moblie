@@ -85,6 +85,8 @@ impl Display {
             fields: vec![
                 JavaFieldProto::new("isInFullScreenMode", "Z", Default::default()),
                 JavaFieldProto::new("currentDisplayable", "Ljavax/microedition/lcdui/Displayable;", Default::default()),
+                // The displayable last told it is showing - see `deliver_visibility`.
+                JavaFieldProto::new("__wieNotifiedDisplayable", "Ljavax/microedition/lcdui/Displayable;", Default::default()),
                 JavaFieldProto::new("screenImage", "Ljavax/microedition/lcdui/Image;", Default::default()),
                 JavaFieldProto::new("screenGraphics", "Ljavax/microedition/lcdui/Graphics;", Default::default()),
                 JavaFieldProto::new("width", "I", Default::default()),
@@ -188,21 +190,7 @@ impl Display {
             .get_field(&this, "currentDisplayable", "Ljavax/microedition/lcdui/Displayable;")
             .await?;
 
-        // Whether this call changes which displayable is showing. `showNotify`
-        // and `hideNotify` fire only on a real change: a title that hangs the
-        // start of its game loop off `showNotify` (센티멘탈러브 does) must not
-        // have it started twice by a `setCurrent` to the displayable already up.
-        let same: bool = if old_displayable.is_null() || displayable.is_null() {
-            false
-        } else {
-            jvm.invoke_virtual(&old_displayable, "equals", "(Ljava/lang/Object;)Z", (displayable.clone(),))
-                .await?
-        };
-
         if !old_displayable.is_null() {
-            if !same {
-                let _: () = jvm.invoke_virtual(&old_displayable, "hideNotify", "()V", ()).await?;
-            }
             let _: () = jvm
                 .invoke_virtual(&old_displayable, "setDisplay", "(Ljavax/microedition/lcdui/Display;)V", (None,))
                 .await?;
@@ -220,13 +208,9 @@ impl Display {
             .invoke_virtual(&displayable, "setDisplay", "(Ljavax/microedition/lcdui/Display;)V", (this.clone(),))
             .await?;
 
-        // The visible displayable is told it is showing before its first paint,
-        // as MIDP's lifecycle promises. A title relies on it: 센티멘탈러브's
-        // `Canvas.showNotify` starts the thread that drives its logo screen on,
-        // so without the call the screen sits frozen.
-        if !same && !displayable.is_null() {
-            let _: () = jvm.invoke_virtual(&displayable, "showNotify", "()V", ()).await?;
-        }
+        // `hideNotify` and `showNotify` are not called from here: MIDP's
+        // `setCurrent` returns at once and the change takes effect later, on
+        // the event thread - see `deliver_visibility`.
 
         let fullscreen_mode: bool = jvm.get_field(&displayable, "isInFullScreenMode", "Z").await?;
         jvm.put_field(&mut this, "isInFullScreenMode", "Z", fullscreen_mode).await?;
@@ -300,8 +284,77 @@ impl Display {
         Ok(())
     }
 
+    /// Tells the displayables what `setCurrent` changed: the one that stopped
+    /// showing gets `hideNotify` and the one now current gets `showNotify`.
+    ///
+    /// MIDP's `setCurrent` returns at once, and the switch - with these two
+    /// calls - happens later, on the event thread. Run from inside
+    /// `setCurrent`, on the caller's thread, they ran before the caller had
+    /// carried on, and a title that does both in the same breath was undone
+    /// by it: 다운타운 미니게임천국2 shows its name editor as a Canvas of its
+    /// own, and when the name is confirmed it calls `setCurrent` back to its
+    /// game Canvas and then hands its state machine "name entered". That
+    /// Canvas's `showNotify` is the title's resume, which hands the same state
+    /// machine "resumed" - so run inside `setCurrent`, it replaced "name
+    /// entered" before the title read it, and the new name was dropped.
+    ///
+    /// So they are delivered here, before the next event the display serves:
+    /// still before the new displayable's first paint, as MIDP promises and as
+    /// a title that starts its loop in `showNotify` (센티멘탈러브) needs, but
+    /// after the caller of `setCurrent` has gone on. Only the net change is
+    /// told, once: a displayable already told it is showing is not told again
+    /// (센티멘탈러브 must not have its loop started twice).
+    async fn deliver_visibility(jvm: &Jvm, this: &ClassInstanceRef<Self>) -> JvmResult<()> {
+        let current: ClassInstanceRef<Displayable> = jvm
+            .get_field(this, "currentDisplayable", "Ljavax/microedition/lcdui/Displayable;")
+            .await?;
+        let notified: ClassInstanceRef<Displayable> = jvm
+            .get_field(this, "__wieNotifiedDisplayable", "Ljavax/microedition/lcdui/Displayable;")
+            .await?;
+
+        let same = match (current.is_null(), notified.is_null()) {
+            (true, true) => true,
+            (false, false) => {
+                jvm.invoke_virtual(&current, "equals", "(Ljava/lang/Object;)Z", (notified.clone(),))
+                    .await?
+            }
+            _ => false,
+        };
+        if same {
+            return Ok(());
+        }
+
+        // Recorded first, so a displayable that calls `setCurrent` or paints
+        // from inside its own notification is not told twice.
+        let mut this = this.clone();
+        jvm.put_field(
+            &mut this,
+            "__wieNotifiedDisplayable",
+            "Ljavax/microedition/lcdui/Displayable;",
+            current.clone(),
+        )
+        .await?;
+
+        if !notified.is_null() {
+            let result: JvmResult<()> = jvm.invoke_virtual(&notified, "hideNotify", "()V", ()).await;
+            if let Err(x) = result {
+                Self::handle_exception(jvm, x).await?;
+            }
+        }
+        if !current.is_null() {
+            let result: JvmResult<()> = jvm.invoke_virtual(&current, "showNotify", "()V", ()).await;
+            if let Err(x) = result {
+                Self::handle_exception(jvm, x).await?;
+            }
+        }
+
+        Ok(())
+    }
+
     async fn handle_key_event(jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>, event_type: i32, code: i32) -> JvmResult<()> {
         tracing::debug!("javax.microedition.lcdui.Display::handleKeyEvent({this:?}, {event_type:?}, {code})");
+
+        Self::deliver_visibility(jvm, &this).await?;
 
         let current_displayable: ClassInstanceRef<Displayable> = jvm
             .get_field(&this, "currentDisplayable", "Ljavax/microedition/lcdui/Displayable;")
@@ -322,6 +375,8 @@ impl Display {
 
     async fn handle_paint_event(jvm: &Jvm, context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<()> {
         tracing::debug!("javax.microedition.lcdui.Display::handlePaintEvent({this:?})");
+
+        Self::deliver_visibility(jvm, &this).await?;
 
         let current_displayable: ClassInstanceRef<Displayable> = jvm
             .get_field(&this, "currentDisplayable", "Ljavax/microedition/lcdui/Displayable;")
@@ -421,6 +476,8 @@ impl Display {
             "javax.microedition.lcdui.Display::handleNotifyEvent({this:?}, {}, {param1}, {param2})",
             r#type,
         );
+
+        Self::deliver_visibility(jvm, &this).await?;
 
         let current_displayable: ClassInstanceRef<Displayable> = jvm
             .get_field(&this, "currentDisplayable", "Ljavax/microedition/lcdui/Displayable;")
