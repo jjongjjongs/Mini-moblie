@@ -152,12 +152,6 @@ static WAVE_CALLBACK: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 /// lock, so a render never waits on a game tick.
 static AUDIO_MIXER: Mutex<Option<Arc<Mutex<crate::ma3::SynthMixer>>>> = Mutex::new(None);
 
-/// What the audio pump's last pull left for the next, at a speed other than 1x.
-static TAPE: Mutex<crate::tape::Tape> = Mutex::new(crate::tape::Tape {
-    pending: std::collections::VecDeque::new(),
-    phase: 0.0,
-});
-
 /// Publishes the mixer for the audio pump to pull from.
 pub fn install_audio_mixer(mixer: Arc<Mutex<crate::ma3::SynthMixer>>) {
     *AUDIO_MIXER.lock().unwrap_or_else(|x| x.into_inner()) = Some(mixer);
@@ -178,12 +172,7 @@ pub fn render_audio_bytes(frames: usize) -> Vec<u8> {
             None => return Vec::new(),
         }
     };
-    // At the game's speed, the way a tape plays faster - see `crate::tape`.
-    let rendered = {
-        let mut tape = TAPE.lock().unwrap_or_else(|x| x.into_inner());
-        let mut mixer = mixer.lock().unwrap_or_else(|x| x.into_inner());
-        tape.pull(frames, crate::speed::speed(), |n| mixer.render(n))
-    };
+    let rendered = mixer.lock().unwrap_or_else(|x| x.into_inner()).render(frames);
     let Some(samples) = rendered else {
         return Vec::new();
     };

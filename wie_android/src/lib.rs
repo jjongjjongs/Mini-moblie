@@ -19,7 +19,6 @@ mod oma3;
 mod platform;
 mod runner;
 mod speed;
-mod tape;
 
 use std::{panic::AssertUnwindSafe, path::PathBuf, time::Duration};
 

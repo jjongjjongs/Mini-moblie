@@ -49,36 +49,8 @@ final class ZenoniaAudioOverride {
     private static SoundPool soundPool;
     private static MediaPlayer musicPlayer;
     private static long midiMutedUntil;
-    /** The game speed, which this audio plays at the way a tape would. */
-    private static volatile float speed = 1f;
 
     private ZenoniaAudioOverride() {}
-
-    /**
-     * Plays this title's replacement audio at the game's speed, pitch and all,
-     * as the emulator's own mix does. What is already playing follows at once
-     * where the platform lets it; effects pick it up on their next play.
-     */
-    static synchronized void setSpeed(float value) {
-        speed = value > 0f ? value : 1f;
-        if (musicPlayer != null && Build.VERSION.SDK_INT >= 23) {
-            try {
-                boolean playing = musicPlayer.isPlaying();
-                musicPlayer.setPlaybackParams(musicPlayer.getPlaybackParams().setSpeed(speed).setPitch(speed));
-                if (!playing) {
-                    // Setting a speed starts a paused player; leave it paused.
-                    musicPlayer.pause();
-                }
-            } catch (IllegalStateException | IllegalArgumentException ignored) {
-                // A player between states; the next track gets the speed.
-            }
-        }
-    }
-
-    /** How long a clip lasts on the wall clock at the current speed. */
-    private static long realDuration(int clip) {
-        return (long) Math.ceil(duration(clip) / speed);
-    }
 
     static synchronized void initialize(Context appContext) {
         PerformanceTuner.initialize(appContext);
@@ -222,7 +194,7 @@ final class ZenoniaAudioOverride {
             if (clip != null) {
                 play(clip);
                 if (clip == 0) {
-                    midiMutedUntil = SystemClock.uptimeMillis() + realDuration(clip);
+                    midiMutedUntil = SystemClock.uptimeMillis() + duration(clip);
                     return 2;
                 }
                 return 1;
@@ -237,7 +209,7 @@ final class ZenoniaAudioOverride {
             Integer clip = opcode == 7 ? findMidiClip(command) : null;
             if (clip != null) {
                 play(clip);
-                midiMutedUntil = SystemClock.uptimeMillis() + realDuration(clip);
+                midiMutedUntil = SystemClock.uptimeMillis() + duration(clip);
                 return 2;
             }
             if (SystemClock.uptimeMillis() < midiMutedUntil) {
@@ -334,13 +306,6 @@ final class ZenoniaAudioOverride {
                 return false;
             }
             track.setVolume(1.0f);
-            if (speed != 1f) {
-                // A track plays faster by being told its rate is higher; the
-                // platform takes up to twice the device's own output rate.
-                int rate = Math.round(sampleRate * speed);
-                int ceiling = 2 * AudioTrack.getNativeOutputSampleRate(AudioManager.STREAM_MUSIC);
-                track.setPlaybackRate(Math.max(1, Math.min(rate, ceiling)));
-            }
             track.play();
             NATIVE_WAVE_TRACKS.add(track);
             Log.d(TAG, "native PCM direct " + sampleRate + ":" + pcm.length);
@@ -391,8 +356,7 @@ final class ZenoniaAudioOverride {
     private static void play(int clip) {
         Integer soundId = SOUND_IDS.get(clip);
         if (soundId != null) {
-            // SoundPool takes rates between half and twice.
-            soundPool.play(soundId, 1.0f, 1.0f, 1, 0, Math.max(0.5f, Math.min(2f, speed)));
+            soundPool.play(soundId, 1.0f, 1.0f, 1, 0, 1.0f);
             Log.d(TAG, "WAV effect " + clip);
             return;
         }
@@ -410,13 +374,6 @@ final class ZenoniaAudioOverride {
             DURATIONS_MS.put(clip, wavDuration(descriptor.getLength()));
             descriptor.close();
             player.prepare();
-            if (speed != 1f && Build.VERSION.SDK_INT >= 23) {
-                try {
-                    player.setPlaybackParams(player.getPlaybackParams().setSpeed(speed).setPitch(speed));
-                } catch (IllegalArgumentException | IllegalStateException ignored) {
-                    // A speed the device will not play; real time it is.
-                }
-            }
             player.start();
             musicPlayer = player;
             Log.d(TAG, "WAV music " + clip);
