@@ -93,7 +93,7 @@ pub async fn get_screen_framebuffer(context: &mut dyn WIPICContext, a0: WIPICWor
     // under this one's first frame. Whether the title flushes is the last
     // title's answer too.
     forget_panel();
-    TITLE_FLUSHES_LCD.store(false, Ordering::Relaxed);
+    EXPLICIT_PRESENTS.store(0, Ordering::Relaxed);
 
     let (width, height) = {
         let platform = context.system().platform();
@@ -1631,7 +1631,7 @@ pub async fn flush_lcd(
         }
     }
 
-    TITLE_FLUSHES_LCD.store(true, Ordering::Relaxed);
+    EXPLICIT_PRESENTS.fetch_add(1, Ordering::Relaxed);
 
     // A title that flushes is driving the LCD, which is what keeps the MIDP
     // layer from flushing its own screen image over the top - see
@@ -1650,19 +1650,30 @@ pub async fn flush_lcd(
     Ok(())
 }
 
-/// Whether the title has flushed the LCD itself.
+/// How many frames the title has presented itself, through `MC_grpFlushLcd` or
+/// `MC_grpRepaint`.
 ///
 /// A platform has two ways of learning that a frame is ready. A title that
-/// composes through the `MC_grp*` calls says so with `MC_grpFlushLcd`; one
-/// whose C engine writes the frame buffer directly says nothing at all, and
-/// `KtfEmulator::present_lcd` watches the buffer for it instead. Once a title
-/// has flushed, it is the first kind, and the watcher must stand down: it shows
-/// the whole buffer, which is exactly what a partial flush is asking it not to.
-static TITLE_FLUSHES_LCD: AtomicBool = AtomicBool::new(false);
+/// composes through the `MC_grp*` calls says so with `MC_grpFlushLcd` or
+/// `MC_grpRepaint`; one whose C engine writes the frame buffer directly says
+/// nothing at all, and `KtfEmulator::present_lcd` watches the buffer for it
+/// instead. While a title keeps presenting, the watcher stands down: it shows
+/// the whole buffer, which is exactly what a partial present is asking it not
+/// to.
+///
+/// It is a count, not a flag, because a title that presents once and then goes
+/// quiet is the direct-buffer kind too. 던전앤파이터 격투가 repaints its first
+/// frame and from there composes straight into the screen buffer; a flag set by
+/// that one repaint stood the watcher down for good and froze the game on its
+/// first frame. The watcher compares this count across ticks instead - a frame
+/// presented since its last look means the title is driving, and a count that
+/// has stopped moving means it has handed the buffer back.
+static EXPLICIT_PRESENTS: AtomicU32 = AtomicU32::new(0);
 
-/// Whether `MC_grpFlushLcd` has been called since the title started.
-pub fn title_flushes_lcd() -> bool {
-    TITLE_FLUSHES_LCD.load(Ordering::Relaxed)
+/// How many frames the title has presented itself since it started. See
+/// [`EXPLICIT_PRESENTS`].
+pub fn explicit_present_count() -> u32 {
+    EXPLICIT_PRESENTS.load(Ordering::Relaxed)
 }
 
 /// The panel, as the last flush left it.
@@ -2808,10 +2819,13 @@ pub async fn repaint(context: &mut dyn WIPICContext, lcd: i32, x: i32, y: i32, w
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(WIPICIndirectPtr(handle))?)?);
     let src_canvas = framebuffer.image(context)?;
 
-    // Repaint drives the LCD, the same as a flush: the watcher must stand down
-    // so it does not paint the whole buffer over a partial repaint, and the
-    // MIDP layer must not flush its own screen image over the top.
-    TITLE_FLUSHES_LCD.store(true, Ordering::Relaxed);
+    // Repaint drives the LCD, the same as a flush: the watcher stands down while
+    // the title keeps presenting so it does not paint the whole buffer over a
+    // partial repaint, and the MIDP layer must not flush its own screen image
+    // over the top. A title that repaints once and then composes straight into
+    // the buffer stops moving this count, and the watcher resumes - see
+    // [`EXPLICIT_PRESENTS`].
+    EXPLICIT_PRESENTS.fetch_add(1, Ordering::Relaxed);
     context.system().set_title_drives_lcd();
 
     present_region(context.system(), &*src_canvas, x, y, width, height);

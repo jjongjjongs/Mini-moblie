@@ -106,6 +106,11 @@ pub struct KtfEmulator {
     /// What the last look saw, so a frame is only shown once it has stopped
     /// changing. See [`KtfEmulator::present_lcd`].
     lcd_seen: Option<u64>,
+    /// How many frames the title had presented itself as of the last look, so a
+    /// title that is actively flushing or repainting stands the watcher down and
+    /// one that has gone quiet does not. See [`KtfEmulator::present_lcd`] and
+    /// `wie_wipi_c::api::graphics::explicit_present_count`.
+    lcd_explicit_presents: u32,
 }
 
 impl KtfEmulator {
@@ -284,6 +289,7 @@ impl KtfEmulator {
             system,
             lcd_digest: None,
             lcd_seen: None,
+            lcd_explicit_presents: 0,
         })
     }
 
@@ -370,13 +376,22 @@ impl KtfEmulator {
     /// that has been taken but not drawn into is all one value and is left alone
     /// too, so taking the pointer alone does not blank a title.
     fn present_lcd(&mut self) {
-        // A title that flushes has said when its frame is ready and which part
-        // of it to show, and this shows the whole buffer - see
-        // `wie_wipi_c::api::graphics::title_flushes_lcd`. LOA-혼돈의 서곡 flushes
-        // `240x295` on the frames it leaves its status bar alone, and this
-        // painting the whole `240x320` over the top is what put the bar back to
-        // whatever the frame buffer held, which is nothing.
-        if wie_wipi_c::api::graphics::title_flushes_lcd() {
+        // A title presenting its own frames - through `MC_grpFlushLcd` or
+        // `MC_grpRepaint` - has said when a frame is ready and which part of it
+        // to show, and the watcher stands down so it does not paint the whole
+        // buffer over a partial present. LOA-혼돈의 서곡 flushes `240x295` on the
+        // frames it leaves its status bar alone, and the watcher painting the
+        // whole `240x320` over the top put the bar back to whatever the frame
+        // buffer held, which is nothing.
+        //
+        // A title that presented since the last look is driving now; one whose
+        // count has stopped moving has handed the buffer back, and the watcher
+        // takes over - 던전앤파이터 격투가 repaints its first frame and from there
+        // composes straight into the buffer, which is the whole game. See
+        // `wie_wipi_c::api::graphics::explicit_present_count`.
+        let presents = wie_wipi_c::api::graphics::explicit_present_count();
+        if presents != self.lcd_explicit_presents {
+            self.lcd_explicit_presents = presents;
             return;
         }
 
