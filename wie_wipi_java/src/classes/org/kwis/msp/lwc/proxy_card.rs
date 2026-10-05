@@ -169,6 +169,21 @@ impl ProxyCard {
             return Err(jvm.exception("java/lang/NullPointerException", "component is null").await);
         }
 
+        // An opaque card owns its area: it clears to white before its components
+        // draw, so what the screen held before the card was shown does not show
+        // through them. Without this 두뇌게임Q's name form - whose label and
+        // field backgrounds are transparent - let the previous screen's alien and
+        // its one-shot "STEP 1." header sit under the form's text. A transparent
+        // card is an overlay and is left to show what is behind it.
+        let transparent: bool = jvm.get_field(&this, "transparent", "Z").await?;
+        if !transparent {
+            let width: i32 = jvm.get_field(&this, "w", "I").await?;
+            let height: i32 = jvm.get_field(&this, "h", "I").await?;
+
+            let _: () = jvm.invoke_virtual(&graphics, "setColor", "(I)V", (0x00ff_ffffi32,)).await?;
+            let _: () = jvm.invoke_virtual(&graphics, "fillRect", "(IIII)V", (0, 0, width, height)).await?;
+        }
+
         jvm.invoke_virtual(&component, "paint", "(Lorg/kwis/msp/lcdui/Graphics;)V", (graphics,))
             .await
     }
