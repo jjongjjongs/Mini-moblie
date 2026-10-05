@@ -4235,7 +4235,7 @@ public final class MainActivity extends Activity {
         body.addView(ticks);
 
         TextView note = new TextView(this);
-        note.setText("빠르게 하면 게임 시간이 그만큼 빨리 흐릅니다. 무거운 장면에선 폰 성능만큼만 빨라질 수 있어요. 소리는 원래 속도로 재생됩니다.");
+        note.setText("빠르게 하면 게임 시간이 그만큼 빨리 흐릅니다. 소리도 테이프처럼 같은 배속으로 빨라지고 음이 높아져요. 무거운 장면에선 폰 성능만큼만 빨라질 수 있어요.");
         note.setTextSize(12f);
         note.setTextColor(COLOR_SUBTEXT);
         note.setLineSpacing(0f, 1.2f);
@@ -4260,6 +4260,7 @@ public final class MainActivity extends Activity {
         saveGameSpeed(game, value);
         if (game.equals(currentGame)) {
             NativeBridge.nativeSetSpeed(value);
+            ZenoniaAudioOverride.setSpeed(value);
         }
     }
 
@@ -4476,6 +4477,7 @@ public final class MainActivity extends Activity {
             // The speed this title was last played at; nativeStart then puts
             // the clock back on the time of day and runs it from there.
             NativeBridge.nativeSetSpeed(gameSpeed(game));
+            ZenoniaAudioOverride.setSpeed(gameSpeed(game));
 
             String message = NativeBridge.nativeStart(
                     buffer.toByteArray(),

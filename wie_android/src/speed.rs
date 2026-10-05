@@ -10,6 +10,9 @@
 //!
 //! At 1x it reads the wall clock exactly, which is what it did before there
 //! was a speed to set.
+//!
+//! The sound follows the same speed on its own side: the audio pump plays the
+//! mix faster or slower the way a tape would - see [`crate::tape`].
 
 use std::{
     sync::{
