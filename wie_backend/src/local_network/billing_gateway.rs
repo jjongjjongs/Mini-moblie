@@ -29,19 +29,51 @@ const FRAME_HEAD: usize = 4;
 /// A frame longer than this is refused rather than buffered without bound.
 const MAX_FRAME: usize = 4096;
 
+/// How a title lays out the frames it writes over the socket.
+#[derive(Clone, Copy)]
+enum Framing {
+    /// `[0xffff][u16le length counting the whole frame][body]` - the carrier
+    /// billing frame 질주쾌감 스케쳐2 and its family write by hand.
+    WpBillMarker,
+    /// `[u16be length counting the whole frame][body]` - the GP4 login family
+    /// (컴투스), where the length is the first field and there is no marker. See
+    /// [`crate::billing::lgt_local_apf2_response`].
+    BigEndianLength,
+}
+
 /// Answers the carrier billing frames a title writes over a plain socket to one
 /// of these servers.
 pub struct BillingGatewayEndpoint {
     name: &'static str,
     host: &'static str,
     port: u16,
+    framing: Framing,
 }
 
 impl BillingGatewayEndpoint {
-    /// Answers `host:port`. Both are the server a title dials, spelled the way
-    /// it spells them (a dotted quad for a title that resolved its own host).
+    /// Answers `host:port` for the `0xffff`-marked carrier billing frame. Both
+    /// are the server a title dials, spelled the way it spells them (a dotted
+    /// quad for a title that resolved its own host).
     pub const fn new(name: &'static str, host: &'static str, port: u16) -> Self {
-        Self { name, host, port }
+        Self {
+            name,
+            host,
+            port,
+            framing: Framing::WpBillMarker,
+        }
+    }
+
+    /// Answers `host:port` for the big-endian length-prefixed GP4 login family -
+    /// 액션퍼즐패밀리2, 미니게임천국4 and the other 컴투스 titles that open a plain
+    /// socket to `211.115.66.250:15133` and write `[u16be length][u16 type]
+    /// [0x30 ...]` frames with no marker in front.
+    pub const fn new_length_prefixed(name: &'static str, host: &'static str, port: u16) -> Self {
+        Self {
+            name,
+            host,
+            port,
+            framing: Framing::BigEndianLength,
+        }
     }
 }
 
@@ -57,6 +89,7 @@ impl LocalEndpoint for BillingGatewayEndpoint {
     fn open(&self, _scheme: &str, _host: &str, _port: u16) -> Box<dyn LocalConnection> {
         Box::new(BillingGatewayConnection {
             peer: alloc::format!("{}:{}", self.host, self.port),
+            framing: self.framing,
             pending: Vec::new(),
             outgoing: Vec::new(),
         })
@@ -65,6 +98,7 @@ impl LocalEndpoint for BillingGatewayEndpoint {
 
 struct BillingGatewayConnection {
     peer: alloc::string::String,
+    framing: Framing,
     /// What the title has written that is not yet a whole frame.
     pending: Vec<u8>,
     /// What is waiting to be read back.
@@ -73,10 +107,18 @@ struct BillingGatewayConnection {
 
 impl BillingGatewayConnection {
     /// Takes one whole billing frame off the front of `pending`, or `None` when
-    /// a whole one has not arrived yet. A frame that is not one of these - no
+    /// a whole one has not arrived yet.
+    fn take_frame(&mut self) -> Option<Vec<u8>> {
+        match self.framing {
+            Framing::WpBillMarker => self.take_wpbill_frame(),
+            Framing::BigEndianLength => self.take_length_prefixed_frame(),
+        }
+    }
+
+    /// `[0xffff][u16le length][body]`. A frame that is not one of these - no
     /// `0xffff` marker, or a length that describes nothing this could be - is
     /// dropped a byte at a time rather than buffered forever.
-    fn take_frame(&mut self) -> Option<Vec<u8>> {
+    fn take_wpbill_frame(&mut self) -> Option<Vec<u8>> {
         while self.pending.len() >= 2 && (self.pending[0] != 0xff || self.pending[1] != 0xff) {
             self.pending.remove(0);
         }
@@ -93,6 +135,28 @@ impl BillingGatewayConnection {
             // Not a length this frame could carry; step over the marker and try
             // again rather than wait for bytes that will never make it whole.
             self.pending.drain(..2);
+            return None;
+        }
+
+        if self.pending.len() < length {
+            return None;
+        }
+
+        Some(self.pending.drain(..length).collect())
+    }
+
+    /// `[u16be length][body]`, the length the first field and counting the whole
+    /// frame - the GP4 login family's shape. There is no marker to resync on, so
+    /// a length too small to be a frame steps over one byte and tries again.
+    fn take_length_prefixed_frame(&mut self) -> Option<Vec<u8>> {
+        if self.pending.len() < 2 {
+            return None;
+        }
+
+        // A GP4 frame is at least its own two-byte length and a two-byte type.
+        let length = u16::from_be_bytes([self.pending[0], self.pending[1]]) as usize;
+        if !(4..=MAX_FRAME).contains(&length) {
+            self.pending.remove(0);
             return None;
         }
 
@@ -151,12 +215,22 @@ impl LocalConnection for BillingGatewayConnection {
 
 #[cfg(test)]
 mod tests {
-    use super::{BillingGatewayConnection, LocalConnection, LocalRead};
+    use super::{BillingGatewayConnection, Framing, LocalConnection, LocalRead};
     use alloc::{vec, vec::Vec};
 
     fn connection() -> BillingGatewayConnection {
         BillingGatewayConnection {
             peer: "test:1".into(),
+            framing: Framing::WpBillMarker,
+            pending: Vec::new(),
+            outgoing: Vec::new(),
+        }
+    }
+
+    fn gp4_connection() -> BillingGatewayConnection {
+        BillingGatewayConnection {
+            peer: "211.115.66.250:15133".into(),
+            framing: Framing::BigEndianLength,
             pending: Vec::new(),
             outgoing: Vec::new(),
         }
@@ -199,5 +273,36 @@ mod tests {
 
         connection.write(&purchase[5..]);
         assert!(connection.readable(), "the whole frame is answered");
+    }
+
+    /// A GP4 login frame - a big-endian length that counts the whole frame, a
+    /// two-byte type, a `0x30` at the head of the payload - is read off the
+    /// length-prefixed framing and answered with the family's granted reply:
+    /// the echoed type under a length-eight frame with an all-zero status.
+    #[test]
+    fn a_gp4_login_is_granted() {
+        // The 73-byte type-0 login the capture caught, trimmed to its header -
+        // what `lgt_local_apf2_response` keys on - padded back to its length.
+        let mut login = vec![0x00, 0x49, 0x00, 0x00, 0x30, 0x03, 0xf9];
+        login.resize(0x49, 0x00);
+
+        let mut connection = gp4_connection();
+        connection.write(&login);
+
+        assert_eq!(read_all(&mut connection), vec![0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    /// The length-prefixed framing waits for the whole frame before it answers,
+    /// the same as the marked one.
+    #[test]
+    fn a_split_gp4_frame_is_answered_when_whole() {
+        let frame: &[u8] = &[0x00, 0x05, 0x00, 0x01, 0x30];
+
+        let mut connection = gp4_connection();
+        connection.write(&frame[..3]);
+        assert!(!connection.readable(), "nothing before the frame is whole");
+
+        connection.write(&frame[3..]);
+        assert_eq!(read_all(&mut connection), vec![0x00, 0x08, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]);
     }
 }

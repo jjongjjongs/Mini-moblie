@@ -127,6 +127,20 @@ impl System {
             28013,
         )));
 
+        // The 컴투스 GP4 login server (211.115.66.250:15133), gone for years.
+        // 미니게임천국4 and the other GP4 titles open a plain socket to it on
+        // startup and speak the big-endian length-prefixed login handshake
+        // (`[u16be length][u16 type][0x30 ...]`); dialed at the dead host the
+        // connect never completes and the title sits on its loading screen.
+        // Answered in process with the family's `granted` reply
+        // (`crate::billing::lgt_local_apf2_response`), the login goes through.
+        // Host-gated, so no other title is touched.
+        local_network.register(Box::new(crate::local_network::BillingGatewayEndpoint::new_length_prefixed(
+            "billing(211.115.66.250:15133)",
+            "211.115.66.250",
+            15133,
+        )));
+
         let platform = Arc::new(platform);
 
         Self {
