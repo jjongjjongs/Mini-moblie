@@ -440,6 +440,18 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // instead keep the full 320 it draws for and crop the 24-row strip away as the
     // frame reaches the screen.
     (TitlePlatform::Ktf, "0102E32F", panel(240, 320).with_bottom_cropped(24)),
+    // 탁재훈 신맞고2007 and 광수의 똥! 생각: the same handset strip. Every
+    // screen stops 24 rows short of the 240x320 panel, and the rows under it
+    // keep whatever stood there before - black under one, a loading screen's
+    // watermark under the other.
+    (TitlePlatform::Ktf, "010366DB", panel(240, 320).with_bottom_cropped(24)),
+    (TitlePlatform::Ktf, "01031E04", panel(240, 320).with_bottom_cropped(24)),
+    // 2006현영맞고: its pictures are 300 rows tall, and the 20 under them kept
+    // the title's logo under the menu.
+    (TitlePlatform::Ktf, "01033511", panel(240, 320).with_bottom_cropped(20)),
+    // 맞고삼국대전: 176x220 by its descriptor, and every screen - title, map,
+    // story - fills the top 204 rows and leaves 16 blank under them.
+    (TitlePlatform::Ktf, "010247AB", panel(176, 220).with_bottom_cropped(16)),
     // 겟앰프드: its descriptor says 240*320, but every full-screen picture it
     // carries - title, menu, each map - is 240x296, and it centres its popup
     // frame in whatever height the screen reports. Told 320 it put the frame at
@@ -989,6 +1001,11 @@ mod tests {
     fn pick_the_doll_ktf_crops_its_softkey_strip() {
         assert_eq!(title_quirks(TitlePlatform::Ktf, "0102E32F").screen_size, Some((240, 320)));
         assert_eq!(title_quirks(TitlePlatform::Ktf, "0102E32F").present_crop_bottom, 24);
+        assert_eq!(title_quirks(TitlePlatform::Ktf, "010366DB").present_crop_bottom, 24);
+        assert_eq!(title_quirks(TitlePlatform::Ktf, "01031E04").present_crop_bottom, 24);
+        assert_eq!(title_quirks(TitlePlatform::Ktf, "01033511").present_crop_bottom, 20);
+        assert_eq!(title_quirks(TitlePlatform::Ktf, "010247AB").screen_size, Some((176, 220)));
+        assert_eq!(title_quirks(TitlePlatform::Ktf, "010247AB").present_crop_bottom, 16);
     }
 
     /// 프린스메이커 온달편 fills the 128x128 panel its art was drawn for.
