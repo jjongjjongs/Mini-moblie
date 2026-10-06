@@ -114,6 +114,12 @@ impl System {
         // Host-gated, so no other title is touched.
         local_network.register(Box::new(crate::local_network::RelayEndpoint));
 
+        // 렙업만이살길1's shop server (211.113.45.131:9002), gone for years. A
+        // purchase of 돼지 dials it and sits on `구매중 입니다.` waiting for a
+        // connect that never completes. Answered in process, the purchase and
+        // the gift go through. Host-gated, so no other title is touched.
+        local_network.register(Box::new(crate::local_network::LevelUpEndpoint));
+
         // 질주쾌감 스케쳐2's shop/billing server (222.231.31.45:28013), gone for
         // years. The title opens a plain socket to it and writes the carrier
         // billing frame `ff ff 12 00 68 00 <subscriber> 03` - the `0x68`

@@ -27,6 +27,7 @@ mod capture;
 mod dragoneyes;
 mod funter;
 mod gpang;
+mod levelup;
 mod relay;
 mod snowboard;
 
@@ -37,6 +38,7 @@ pub use self::{
     dragoneyes::DragonEyesEndpoint,
     funter::FunterEndpoint,
     gpang::GpangEndpoint,
+    levelup::LevelUpEndpoint,
     relay::RelayEndpoint,
     snowboard::SnowBoardEndpoint,
 };
