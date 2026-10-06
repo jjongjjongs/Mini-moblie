@@ -374,6 +374,7 @@ impl DialogComponent {
         };
 
         let mut result = DLG_TIMEOUT;
+        let mut popup_was_open = false;
         for _ in 0..budget {
             let state: i32 = jvm.get_field(&this, "actionState", "I").await?;
             if state != PENDING {
@@ -385,6 +386,17 @@ impl DialogComponent {
                 // Pump one event and deliver it, the title's own loop in little.
                 let _: () = jvm.invoke_virtual(&event_queue, "getNextEvent", "([I)V", (event.clone(),)).await?;
                 let _: () = jvm.invoke_virtual(&event_queue, "dispatchEvent", "([I)V", (event.clone(),)).await?;
+
+                // A name field edits in a popup it opens on FIRE; the dialog is
+                // confirmed the moment that popup has opened and closed again,
+                // which is when the entered text has been committed to the field.
+                let popup_open = Self::editing_in_text_popup(jvm, &this).await?;
+                if popup_open {
+                    popup_was_open = true;
+                } else if popup_was_open {
+                    result = DLG_OK;
+                    break;
+                }
             } else {
                 context.system().sleep(POLL_MS).await;
             }
@@ -395,6 +407,41 @@ impl DialogComponent {
         tracing::debug!("org.kwis.msp.lwc.DialogComponent::doModal({this:?}) -> {result}");
 
         Ok(result)
+    }
+
+    /// Whether the focused work component is a `TextFieldComponent` whose
+    /// full-screen `TextPopup` editor is open right now.
+    ///
+    /// A `TextFieldComponent` name field does not confirm on FIRE - it opens a
+    /// popup editor (`controlPopup`), and a second FIRE inside that popup
+    /// commits the text back to the field. So FIRE while this is a field is the
+    /// start of editing, not a dialog close, and the dialog is done only once
+    /// the popup has closed again. The chain from the dialog to the focused
+    /// leaf is walked (dialog → form → field); a bound guards against a cycle.
+    async fn editing_in_text_popup(jvm: &Jvm, this: &ClassInstanceRef<Self>) -> JvmResult<bool> {
+        let mut current: ClassInstanceRef<()> = ClassInstanceRef::new(this.instance.clone());
+
+        for _ in 0..16 {
+            if current.is_null() {
+                return Ok(false);
+            }
+
+            if jvm.is_instance(&**current, "org/kwis/msp/lwc/TextFieldComponent") {
+                let popup: ClassInstanceRef<()> = jvm
+                    .get_field(&current, "__wieTextFieldPopup", "Lorg/kwis/msp/lwc/ShellComponent;")
+                    .await?;
+
+                return Ok(!popup.is_null());
+            }
+
+            if !jvm.is_instance(&**current, "org/kwis/msp/lwc/ContainerComponent") {
+                return Ok(false);
+            }
+
+            current = jvm.get_field(&current, "focusComponent", "Lorg/kwis/msp/lwc/Component;").await?;
+        }
+
+        Ok(false)
     }
 
     /// The dialog result a key closes it with, or `None` if the key is not one
@@ -451,6 +498,10 @@ impl DialogComponent {
         if event == 3
             && p1 == KEY_PRESSED
             && let Some(state) = Self::dialog_result_for_key(jvm, &this, p2).await?
+            // A FIRE that just opened the field's popup editor starts editing;
+            // it must not also close the dialog. The editor's commit, seen in
+            // doModal, closes it instead.
+            && !Self::editing_in_text_popup(jvm, &this).await?
         {
             let mut this = this;
             jvm.put_field(&mut this, "actionState", "I", state).await?;
