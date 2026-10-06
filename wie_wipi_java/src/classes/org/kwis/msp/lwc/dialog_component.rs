@@ -24,12 +24,16 @@ use crate::classes::org::kwis::msp::{lcdui::Display, lwc::Component};
 //
 // The real class draws its own framed, centred box over the screen and builds
 // private OK/Cancel `ButtonComponent`s wired through an inner
-// `DialogActionListener`. This runtime instead consumes the soft keys in
-// `keyNotify` - the left soft key (and FIRE) confirm, the right soft key
-// cancels - which is the convention these popups follow, and leaves the box
-// full-screen like any other shell. The field slots are the JVM's own, not the
-// native 44-word layout, because nothing reads the dialog's state back through
-// native field access (`getActionState`/`actionState` are never imported).
+// `DialogActionListener`. This runtime instead closes on the soft keys and the
+// FIRE key in `processEvent`, but only after the focused work component has
+// had the key and left it unhandled: a name field claims the left soft key to
+// cycle its input mode (Korean/English/symbol) and the digits to compose, and
+// none of those are dialog keys. FIRE confirms, the right soft key cancels,
+// and the left soft key confirms only when no field grabbed it. The box is
+// left full-screen like any other shell. The field slots are the JVM's own,
+// not the native 44-word layout, because nothing reads the dialog's state back
+// through native field access (`getActionState`/`actionState` are never
+// imported).
 pub struct DialogComponent;
 
 /// `actionState` while the modal loop is still running: no button chosen yet.
@@ -100,7 +104,6 @@ impl DialogComponent {
                 JavaMethodProto::new("getActionState", "()I", Self::get_action_state, Default::default()),
                 JavaMethodProto::new("doModal", "()I", Self::do_modal, Default::default()),
                 JavaMethodProto::new("processEvent", "(IIII)Z", Self::process_event, Default::default()),
-                JavaMethodProto::new("keyNotify", "(II)Z", Self::key_notify, Default::default()),
             ],
             fields: vec![
                 JavaFieldProto::new("TYPE_NONE", "I", FieldAccessFlags::STATIC),
@@ -383,58 +386,55 @@ impl DialogComponent {
         Ok(result)
     }
 
-    /// Closes the dialog if `key` is one of its soft keys, returning whether it
-    /// was. The left soft key confirms (`DLG_OK`), the right soft key cancels
-    /// (`DLG_CANCEL`, or `DLG_OK` for a dialog with no cancel button); every
-    /// other key - the digits, CLEAR and the FIRE key a name field composes
-    /// with - is not a dialog key and is left to the focused work component.
-    async fn resolve_soft_key(jvm: &Jvm, this: &ClassInstanceRef<Self>, key: i32) -> JvmResult<bool> {
-        // 90 = LEFT_SOFT_KEY, 91 = RIGHT_SOFT_KEY (see Display::getGameAction).
+    /// The dialog result a key closes it with, or `None` if the key is not one
+    /// of the dialog's own.
+    ///
+    /// FIRE (the centre/select key) confirms with `DLG_OK`, and the right soft
+    /// key cancels with `DLG_CANCEL` - or confirms, for a dialog built with no
+    /// cancel button. The left soft key confirms too, but the caller only asks
+    /// about it once the focused work component has left it unhandled: a name
+    /// field claims the left soft key to cycle its input mode, so it is a close
+    /// only on a dialog whose work component did not want it.
+    async fn dialog_result_for_key(jvm: &Jvm, this: &ClassInstanceRef<Self>, key: i32) -> JvmResult<Option<i32>> {
+        // 8 = FIRE, 90 = LEFT_SOFT_KEY, 91 = RIGHT_SOFT_KEY (Display::getGameAction).
         let action: i32 = jvm.invoke_static("org/kwis/msp/lcdui/Display", "getGameAction", "(I)I", (key,)).await?;
 
-        let state = if action == 90 {
-            DLG_OK
-        } else if action == 91 {
-            let dialog_type: i32 = jvm.get_field(this, "__wieDialogType", "I").await?;
-            if dialog_type == TYPE_OK_CANCEL { DLG_CANCEL } else { DLG_OK }
-        } else {
-            return Ok(false);
-        };
-
-        let mut this = this.clone();
-        jvm.put_field(&mut this, "actionState", "I", state).await?;
-
-        Ok(true)
+        Ok(match action {
+            8 | 90 => Some(DLG_OK),
+            91 => {
+                let dialog_type: i32 = jvm.get_field(this, "__wieDialogType", "I").await?;
+                Some(if dialog_type == TYPE_OK_CANCEL { DLG_CANCEL } else { DLG_OK })
+            }
+            _ => None,
+        })
     }
 
-    /// The dialog consumes its own soft keys (confirm/cancel) before the shell
-    /// forwards a key to the focused work component.
+    /// Closes the dialog on its own keys, but only on keys the focused work
+    /// component did not already use.
     ///
-    /// Native `ShellComponent.processEvent` routes a key to the command bar
-    /// (the OK/Cancel buttons the native dialog builds) before the focused
-    /// child; this runtime has no command bar, so the dialog recognises the
-    /// soft keys here instead. Doing it in `processEvent` rather than only in
-    /// `keyNotify` matters because the shell's key path reaches the focused
-    /// child through `processEvent`, not through the dialog's `keyNotify`.
+    /// The shell's key path reaches the focused child through `processEvent`,
+    /// so the key is forwarded to the superclass first and the dialog acts only
+    /// on what comes back unhandled. That is what keeps the name field's left
+    /// soft key (input-mode switch) and its digit/CLEAR composition working:
+    /// the field consumes those and the dialog never sees them. FIRE and the
+    /// right soft key, which no field wants, fall through here and close it.
     async fn process_event(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, event: i32, p1: i32, p2: i32, p3: i32) -> JvmResult<bool> {
+        let handled: bool = jvm
+            .invoke_special(&this, "org/kwis/msp/lwc/ShellComponent", "processEvent", "(IIII)Z", (event, p1, p2, p3))
+            .await?;
+
+        if handled {
+            return Ok(true);
+        }
+
         // 3 = KEY; p2 is the key code.
-        if event == 3 && Self::resolve_soft_key(jvm, &this, p2).await? {
+        if event == 3 && let Some(state) = Self::dialog_result_for_key(jvm, &this, p2).await? {
+            let mut this = this;
+            jvm.put_field(&mut this, "actionState", "I", state).await?;
+
             return Ok(true);
         }
 
-        jvm.invoke_special(&this, "org/kwis/msp/lwc/ShellComponent", "processEvent", "(IIII)Z", (event, p1, p2, p3))
-            .await
-    }
-
-    async fn key_notify(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, event_type: i32, key: i32) -> JvmResult<bool> {
-        tracing::debug!("org.kwis.msp.lwc.DialogComponent::keyNotify({this:?}, {event_type}, {key})");
-
-        if Self::resolve_soft_key(jvm, &this, key).await? {
-            return Ok(true);
-        }
-
-        // Everything else is left to the shell's focused work component.
-        jvm.invoke_special(&this, "org/kwis/msp/lwc/ShellComponent", "keyNotify", "(II)Z", (event_type, key))
-            .await
+        Ok(false)
     }
 }
