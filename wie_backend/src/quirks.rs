@@ -499,6 +499,13 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // to row 311 and stayed there under the gameplay that followed, which is
     // the leftover menu text showing below the shop.
     (TitlePlatform::Ktf, "01025922", panel(176, 220)),
+    // 월드오브드래곤: its descriptor names no panel, and it centres a 176x204
+    // screen in whatever it is given - on a 240x320 panel its title and play
+    // field sat at (32, 58) inside a white border, and on 176x220 eight rows
+    // down with white above. A strip does not take the difference: the title
+    // still centres in the 220 it is told and loses its bottom rows under it.
+    // The 204 rows it draws are the panel.
+    (TitlePlatform::Ktf, "0102FC8C", panel(176, 204)),
     // 초밥의달인3 (KTF PD004152): a Java title whose screens draw inside a
     // 240x296 clip - the bottom 24 rows are the handset's soft-key strip, which
     // it never touches - while some earlier screen fills the whole 240x320 with
