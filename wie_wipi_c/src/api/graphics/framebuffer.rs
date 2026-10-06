@@ -101,6 +101,29 @@ impl FrameBuffer {
         }))
     }
 
+    /// A frame buffer holding `image`, with `trailer` written `trailer_at` bytes
+    /// from the start of its pixels - for an image that keeps more than its
+    /// pixels in the same buffer. The size the drawing code reads back is still
+    /// the pixels alone; the trailer sits in the slack after them, which is
+    /// grown to fit it. See `create_wipi_image`.
+    pub fn from_image_with_trailer(context: &mut dyn WIPICContext, image: &dyn Image, trailer_at: u32, trailer: &[u8]) -> Result<Self> {
+        let (size, bpl) = buffer_size(image.width(), image.height(), image.bytes_per_pixel())?;
+        let end = trailer_at.checked_add(trailer.len() as u32).ok_or(WieError::AllocationFailure)?.max(size);
+        let buf = alloc_with_guard(context, end, bpl)?;
+
+        let base = context.data_ptr(buf)?;
+        context.write_bytes(base, &image.raw())?;
+        context.write_bytes(base + trailer_at, trailer)?;
+
+        Ok(Self(WIPICFramebuffer {
+            width: image.width(),
+            height: image.height(),
+            bpl,
+            bpp: image.bytes_per_pixel() * 8,
+            buf,
+        }))
+    }
+
     pub fn data(&self, context: &dyn WIPICContext) -> Result<Vec<u8>> {
         let (size, _) = buffer_size(self.0.width, self.0.height, self.0.bpp / 8)?;
         let mut buf = vec![0; size as _];
