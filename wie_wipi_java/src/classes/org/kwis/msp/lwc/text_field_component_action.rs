@@ -87,6 +87,10 @@ impl TextFieldComponentAction {
 
         // Native vslot +0xf0:
         // outer.setString((String)data, source.m_cPos)
+        {
+            let committed = jvm::runtime::JavaLangString::to_rust_string(jvm, &text).await?;
+            tracing::debug!("org.kwis.msp.lwc.TextFieldComponent$Action::action committing text={committed:?} caret={caret}");
+        }
         let _: () = jvm.invoke_virtual(&outer, "setString", "(Ljava/lang/String;I)V", (text, caret)).await?;
 
         let popup_caret: i32 = jvm.get_field(&source, "m_cPos", "I").await?;

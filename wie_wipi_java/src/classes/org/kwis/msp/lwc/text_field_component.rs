@@ -716,6 +716,8 @@ impl TextFieldComponent {
     async fn control_popup(jvm: &Jvm, _: &mut WieJvmContext, mut this: ClassInstanceRef<TextFieldComponent>) -> JvmResult<()> {
         // Native controlPopup_v0 @ 0x244358.
 
+        tracing::debug!("org.kwis.msp.lwc.TextFieldComponent::controlPopup({this:?}) opening popup editor");
+
         // new ShellComponent()
         let shell = jvm.new_class("org/kwis/msp/lwc/ShellComponent", "()V", ()).await?;
 
