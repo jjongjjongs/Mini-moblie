@@ -417,6 +417,14 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     (TitlePlatform::Lgt, "0002A52B", annunciator()),
     // 알바타이쿤2: every screen it draws lands exactly one strip down.
     (TitlePlatform::Lgt, "0002D4D0", annunciator()),
+    // 아무이유없어: its coloured words are stamped straight into the screen's
+    // memory by its own renderer (`0xbfd4`), which adds the 24-row strip to every
+    // row it writes (`adds r1, #0x18` at `0xbfee`) - the pointer
+    // `MC_grpGetFrameBufferPointer` hands it starts at the top of the panel, the
+    // strip included, on the handset. Without the strip every highlighted word
+    // sat 24 rows below the line it belongs to while the black text around it,
+    // drawn through `MC_grpDrawImage`, stood where it should.
+    (TitlePlatform::Lgt, "00029288", annunciator()),
     // 마구마구2011: the same, and it composes through its own off-screen
     // surface rather than the `MC_grp*` calls, so nothing but the strip's
     // height moves it. Told the whole 320-row panel it asks for a 240x320
