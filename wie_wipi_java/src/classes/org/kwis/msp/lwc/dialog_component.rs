@@ -420,23 +420,33 @@ impl DialogComponent {
         })
     }
 
-    /// Closes the dialog on FIRE and the right soft key, and forwards every
-    /// other key to the focused work component.
+    /// Forwards every key to the focused work component first, then closes the
+    /// dialog on FIRE (confirm) and the right soft key (cancel).
     ///
-    /// FIRE (confirm) and the right soft key (cancel) are recognised before the
-    /// key is forwarded, because no work component wants them and the forward
-    /// cannot tell whether one did: `ShellComponent.keyNotify` reports every
-    /// key it is handed as handled, so a key the focused field left unhandled
-    /// comes back from the superclass looking consumed. The left soft key, the
-    /// digits and CLEAR are forwarded untouched, which is what lets the name
-    /// field cycle its input mode and compose text; those never close the
-    /// dialog.
+    /// The forward comes first because the work component is the title's own
+    /// `TextComponent` subclass, and its `keyNotify` is where the title reads
+    /// the field: it takes the name out of the box when it sees the confirm
+    /// key. Swallowing FIRE before the forward - as an earlier version did -
+    /// meant that `keyNotify` never ran for the OK press, so the title kept the
+    /// old name and the box closed on a value it had never committed. So the
+    /// key is delivered, letting the field cycle its input mode, compose, and
+    /// commit, and only then is a FIRE or right-soft press turned into a close.
+    ///
+    /// The superclass's handled flag is not consulted: `ShellComponent.keyNotify`
+    /// reports every key it is handed as handled, so it cannot say whether the
+    /// field wanted the key. FIRE and the right soft key are the dialog's
+    /// regardless; the left soft key, the digits and CLEAR map to no dialog
+    /// result and so never close it.
     ///
     /// Only the press edge closes it ([`KEY_PRESSED`]): the key that opened the
     /// dialog was pressed on the screen underneath, so its release is the first
     /// event this dialog sees and closing on it would make the dialog flash
     /// open and shut.
     async fn process_event(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, event: i32, p1: i32, p2: i32, p3: i32) -> JvmResult<bool> {
+        let handled: bool = jvm
+            .invoke_special(&this, "org/kwis/msp/lwc/ShellComponent", "processEvent", "(IIII)Z", (event, p1, p2, p3))
+            .await?;
+
         // 3 = KEY; p1 is the press/release type, p2 the key code.
         if event == 3
             && p1 == KEY_PRESSED
@@ -448,7 +458,6 @@ impl DialogComponent {
             return Ok(true);
         }
 
-        jvm.invoke_special(&this, "org/kwis/msp/lwc/ShellComponent", "processEvent", "(IIII)Z", (event, p1, p2, p3))
-            .await
+        Ok(handled)
     }
 }
