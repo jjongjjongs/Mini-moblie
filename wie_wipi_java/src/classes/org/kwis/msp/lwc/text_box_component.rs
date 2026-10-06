@@ -325,7 +325,7 @@ impl TextBoxComponent {
     }
 
     async fn check_position(jvm: &Jvm, this: ClassInstanceRef<TextBoxComponent>, line: i32, direction: i32) -> JvmResult<bool> {
-        let font: ClassInstanceRef<()> = jvm.get_field(&this, "__wieFont", "Lorg/kwis/msp/lcdui/Font;").await?;
+        let font: ClassInstanceRef<()> = jvm.get_field(&this, "f", "Lorg/kwis/msp/lcdui/Font;").await?;
 
         if font.is_null() {
             return Err(jvm.exception("java/lang/NullPointerException", "").await);
@@ -360,7 +360,7 @@ impl TextBoxComponent {
     }
 
     async fn check_scroll(jvm: &Jvm, this: ClassInstanceRef<TextBoxComponent>, current_line: i32) -> JvmResult<()> {
-        let font: ClassInstanceRef<()> = jvm.get_field(&this, "__wieFont", "Lorg/kwis/msp/lcdui/Font;").await?;
+        let font: ClassInstanceRef<()> = jvm.get_field(&this, "f", "Lorg/kwis/msp/lcdui/Font;").await?;
 
         if font.is_null() {
             return Err(jvm.exception("java/lang/NullPointerException", "").await);

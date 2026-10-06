@@ -127,7 +127,7 @@ impl TextFieldComponentAction {
                 return Err(jvm.exception("java/lang/NullPointerException", "").await);
             }
 
-            let font: ClassInstanceRef<()> = jvm.get_field(&outer, "__wieFont", "Lorg/kwis/msp/lcdui/Font;").await?;
+            let font: ClassInstanceRef<()> = jvm.get_field(&outer, "f", "Lorg/kwis/msp/lcdui/Font;").await?;
 
             if font.is_null() {
                 return Err(jvm.exception("java/lang/NullPointerException", "").await);

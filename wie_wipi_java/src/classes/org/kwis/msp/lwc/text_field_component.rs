@@ -143,7 +143,7 @@ impl TextFieldComponent {
         let _: () = jvm.invoke_virtual(&this, "setString", "(Ljava/lang/String;)V", (data,)).await?;
 
         // font(+0x68).getHeight() + 4 -> +0x94.
-        let font: ClassInstanceRef<()> = jvm.get_field(&this, "__wieFont", "Lorg/kwis/msp/lcdui/Font;").await?;
+        let font: ClassInstanceRef<()> = jvm.get_field(&this, "f", "Lorg/kwis/msp/lcdui/Font;").await?;
 
         if font.is_null() {
             return Err(jvm.exception("java/lang/NullPointerException", "").await);
@@ -263,7 +263,7 @@ impl TextFieldComponent {
             jvm.invoke_virtual(&text, "length", "()I", ()).await?
         };
 
-        let font: ClassInstanceRef<()> = jvm.get_field(&this, "__wieFont", "Lorg/kwis/msp/lcdui/Font;").await?;
+        let font: ClassInstanceRef<()> = jvm.get_field(&this, "f", "Lorg/kwis/msp/lcdui/Font;").await?;
 
         // Native skips the width call when charCount == 0.
         let full_width: i32 = if char_count == 0 {
@@ -498,7 +498,7 @@ impl TextFieldComponent {
             jvm.invoke_virtual(&text, "length", "()I", ()).await?
         };
 
-        let font: ClassInstanceRef<()> = jvm.get_field(&this, "__wieFont", "Lorg/kwis/msp/lcdui/Font;").await?;
+        let font: ClassInstanceRef<()> = jvm.get_field(&this, "f", "Lorg/kwis/msp/lcdui/Font;").await?;
 
         let full_width: i32 = if char_count == 0 {
             0
@@ -1117,7 +1117,7 @@ impl TextFieldComponent {
 
         let char_count: i32 = jvm.invoke_virtual(&text, "length", "()I", ()).await?;
 
-        let font: ClassInstanceRef<()> = jvm.get_field(&this, "__wieFont", "Lorg/kwis/msp/lcdui/Font;").await?;
+        let font: ClassInstanceRef<()> = jvm.get_field(&this, "f", "Lorg/kwis/msp/lcdui/Font;").await?;
 
         if font.is_null() {
             return Err(jvm.exception("java/lang/NullPointerException", "").await);

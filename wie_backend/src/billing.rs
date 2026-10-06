@@ -9065,7 +9065,7 @@ const NEXON_PHONENUMBER_TAG: &[u8] = b"phonenum:";
 /// is three independent fields agreeing, which no other title's record on this
 /// socket does.
 fn lgt_local_nexon_mobile_response(request: &[u8]) -> Option<Vec<u8>> {
-    if request.len() < NEXON_HEAD + 2 {
+    if request.len() < NEXON_HEAD {
         return None;
     }
 
@@ -9078,14 +9078,23 @@ fn lgt_local_nexon_mobile_response(request: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
+    let command = u16::from_be_bytes([request[NEXON_COMMAND_AT], request[NEXON_COMMAND_AT + 1]]);
+
+    // The download service's records carry integers, or nothing, rather than
+    // strings - see `nexon_download_body`.
+    if let Some(body) = nexon_download_body(command) {
+        return Some(nexon_frame(command, &body));
+    }
+
     // The body opens with a `writeUTF`: a `u16` length and that many bytes. A
     // record that does not is not one of these.
+    if request.len() < NEXON_HEAD + 2 {
+        return None;
+    }
     let first = u16::from_be_bytes([request[NEXON_HEAD], request[NEXON_HEAD + 1]]) as usize;
     if first == 0 || NEXON_HEAD + 2 + first > request.len() {
         return None;
     }
-
-    let command = u16::from_be_bytes([request[NEXON_COMMAND_AT], request[NEXON_COMMAND_AT + 1]]);
 
     let body = match command {
         NEXON_HANDSET_RECORD => nexon_subscriber_body(&request[NEXON_HEAD + 2..NEXON_HEAD + 2 + first]),
@@ -9099,13 +9108,85 @@ fn lgt_local_nexon_mobile_response(request: &[u8]) -> Option<Vec<u8>> {
         _ => alloc::vec![NEXON_GRANTED],
     };
 
+    Some(nexon_frame(command, &body))
+}
+
+/// A reply frame: the eight byte head, answering `command` with the one after
+/// it, and `body`.
+fn nexon_frame(command: u16, body: &[u8]) -> Vec<u8> {
     let mut reply = Vec::with_capacity(NEXON_HEAD + body.len());
     reply.extend_from_slice(&((NEXON_HEAD + body.len()) as u32).to_be_bytes());
     reply.extend_from_slice(&NEXON_MARKER.to_be_bytes());
     reply.extend_from_slice(&command.wrapping_add(1).to_be_bytes());
-    reply.extend_from_slice(&body);
+    reply.extend_from_slice(body);
 
-    Some(reply)
+    reply
+}
+
+/// The commands 렛츠골프2007 (KTF `01038027`) sends its download service,
+/// `211.115.203.4:20102`, on a first run.
+///
+/// The title ships its data under `P/`, but on start it reads a file named for
+/// the subscriber - `user` and the phone number - and until that file says the
+/// additional download finished, it opens this connection and walks it:
+///
+/// | sent | body | reply read as |
+/// |---|---|---|
+/// | 0, 2 | `writeInt(1)` | result |
+/// | 4 | none | result, a byte, a `u16` length and a notice that long |
+/// | 6 | the phone number and three integers | result |
+/// | 300 | a few integers | result, eight bytes, a count, then the file list |
+/// | 302 | which file, from where | result, a length, and that many bytes of it |
+///
+/// All big endian; the reader at `ac.a([B)V` sees each reply from its command
+/// on, so the result is the third byte, and anything but zero there is a
+/// refusal. Every file the list names that the handset lacks is fetched with
+/// 302s; when the last one is in, the title marks the subscriber's file done,
+/// shows 추가 다운로드가 완료 되었습니다 and asks to be restarted - after which
+/// it never connects again.
+///
+/// The data is already here, so the list names one file only, a placeholder
+/// that nothing reads, and hands it over in one piece. It has to name
+/// something: with an empty list the title still asks for the first file, and
+/// indexes an empty array doing it.
+const NEXON_DOWNLOAD_NOTICE: u16 = 4;
+const NEXON_DOWNLOAD_LIST: u16 = 300;
+const NEXON_DOWNLOAD_FETCH: u16 = 302;
+
+/// The placeholder the list names, and its contents.
+const NEXON_DOWNLOAD_PLACEHOLDER: &[u8] = b"nxdownload.dat";
+const NEXON_DOWNLOAD_PLACEHOLDER_DATA: &[u8] = &[0];
+
+/// A file list record: an id, two flag bytes, two the title skips, the size,
+/// and a sixteen byte name. The second flag byte is how much the title has to
+/// have before it writes the file, so zero writes it after the first piece.
+const NEXON_DOWNLOAD_NAME_LEN: usize = 16;
+
+fn nexon_download_body(command: u16) -> Option<Vec<u8>> {
+    let mut body = alloc::vec![NEXON_GRANTED];
+
+    match command {
+        0 | 2 | 6 => {}
+        NEXON_DOWNLOAD_NOTICE => body.extend_from_slice(&[0, 0, 0]),
+        NEXON_DOWNLOAD_LIST => {
+            body.extend_from_slice(&[0; 8]);
+            body.extend_from_slice(&1u32.to_be_bytes());
+
+            body.extend_from_slice(&1u32.to_be_bytes());
+            body.extend_from_slice(&[0, 0, 0, 0]);
+            body.extend_from_slice(&(NEXON_DOWNLOAD_PLACEHOLDER_DATA.len() as u32).to_be_bytes());
+            let mut name = [0u8; NEXON_DOWNLOAD_NAME_LEN];
+            name[..NEXON_DOWNLOAD_PLACEHOLDER.len()].copy_from_slice(NEXON_DOWNLOAD_PLACEHOLDER);
+            body.extend_from_slice(&name);
+        }
+        NEXON_DOWNLOAD_FETCH => {
+            body.extend_from_slice(&(NEXON_DOWNLOAD_PLACEHOLDER_DATA.len() as u32).to_be_bytes());
+            body.extend_from_slice(NEXON_DOWNLOAD_PLACEHOLDER_DATA);
+        }
+        _ => return None,
+    }
+
+    Some(body)
 }
 
 /// `10400`'s body: the result, the subscriber number, and an empty record
@@ -13873,6 +13954,66 @@ mod nexon_mobile_tests {
 
         // And nothing at all.
         assert_eq!(lgt_local_nexon_mobile_response(&[]), None);
+    }
+
+    /// The download service's records as 렛츠골프2007 writes them on a first
+    /// run, caught on the wire.
+    const GOLF_CONNECT: [u8; 12] = [0x00, 0x00, 0x00, 0x0c, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01];
+    const GOLF_NOTICE: [u8; 8] = [0x00, 0x00, 0x00, 0x08, 0xff, 0xff, 0x00, 0x04];
+    const GOLF_LIST: [u8; 20] = [
+        0x00, 0x00, 0x00, 0x14, 0xff, 0xff, 0x01, 0x2c, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64,
+    ];
+    const GOLF_FETCH: [u8; 40] = [
+        0x00, 0x00, 0x00, 0x28, 0xff, 0xff, 0x01, 0x2e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01, b'n', b'x', b'd', b'o', b'w', b'n', b'l', b'o', b'a', b'd', b'.', b'd', b'a', b't', 0x00, 0x00,
+    ];
+
+    /// What the title's reader sees of a reply: everything from the command on.
+    fn seen(reply: &[u8]) -> &[u8] {
+        &reply[NEXON_MARKER_AT + 2..]
+    }
+
+    fn int_at(bytes: &[u8], at: usize) -> u32 {
+        u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+    }
+
+    #[test]
+    fn the_download_service_steps_are_granted() {
+        for request in [&GOLF_CONNECT[..], &GOLF_NOTICE[..], &GOLF_LIST[..], &GOLF_FETCH[..]] {
+            let reply = response(request).expect("answered");
+
+            assert_eq!(int_at(&reply, 0) as usize, reply.len());
+            assert_eq!(u16::from_be_bytes([reply[6], reply[7]]), u16::from_be_bytes([request[6], request[7]]) + 1);
+            assert_eq!(seen(&reply)[2], NEXON_GRANTED);
+        }
+    }
+
+    /// The notice is a `u16` length at the fourth byte and that many bytes, and
+    /// it is empty.
+    #[test]
+    fn the_notice_is_empty() {
+        let reply = response(&GOLF_NOTICE).expect("answered");
+
+        assert_eq!(seen(&reply), &[0x00, 0x05, NEXON_GRANTED, 0, 0, 0]);
+    }
+
+    /// The title reads the count at the eleventh byte and each record from the
+    /// fifteenth: the size at +8 and the name at +12.
+    #[test]
+    fn the_list_names_the_placeholder_and_the_fetch_hands_it_over() {
+        let list = response(&GOLF_LIST).expect("answered");
+        let list = seen(&list);
+
+        assert_eq!(int_at(list, 11), 1);
+        assert_eq!(int_at(list, 15 + 8) as usize, NEXON_DOWNLOAD_PLACEHOLDER_DATA.len());
+        assert_eq!(&list[15 + 12..15 + 12 + NEXON_DOWNLOAD_PLACEHOLDER.len()], NEXON_DOWNLOAD_PLACEHOLDER);
+        assert_eq!(list.len(), 15 + 28);
+
+        let fetch = response(&GOLF_FETCH).expect("answered");
+        let fetch = seen(&fetch);
+
+        assert_eq!(int_at(fetch, 3) as usize, NEXON_DOWNLOAD_PLACEHOLDER_DATA.len());
+        assert_eq!(&fetch[7..], NEXON_DOWNLOAD_PLACEHOLDER_DATA);
     }
 }
 

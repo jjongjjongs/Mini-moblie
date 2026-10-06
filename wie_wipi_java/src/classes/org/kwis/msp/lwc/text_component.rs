@@ -66,7 +66,9 @@ impl TextComponent {
                 JavaFieldProto::new("m_td", "[C", Default::default()),
                 JavaFieldProto::new("maxLength", "I", Default::default()),
                 JavaFieldProto::new("__wieConstraint", "I", Default::default()),
-                JavaFieldProto::new("__wieFont", "Lorg/kwis/msp/lcdui/Font;", Default::default()),
+                // The native class's own name for it: 렛츠골프2007's name
+                // entry reads it straight off the component.
+                JavaFieldProto::new("f", "Lorg/kwis/msp/lcdui/Font;", Default::default()),
                 JavaFieldProto::new("__wieConstraintChecker", "Lorg/kwis/msp/lwc/ConstraintChecker;", Default::default()),
                 // Native TextComponent has its own display/modeViewer state.
                 // Synthetic names avoid colliding with Component.display while
@@ -190,7 +192,7 @@ impl TextComponent {
             .invoke_static("org/kwis/msp/lcdui/Font", "getDefaultFont", "()Lorg/kwis/msp/lcdui/Font;", ())
             .await?;
 
-        jvm.put_field(&mut this, "__wieFont", "Lorg/kwis/msp/lcdui/Font;", font).await?;
+        jvm.put_field(&mut this, "f", "Lorg/kwis/msp/lcdui/Font;", font).await?;
 
         // Native +0x70 = -1, +0x6c = 1.
         jvm.put_field(&mut this, "__wieTextState70", "I", -1).await?;
@@ -869,7 +871,7 @@ impl TextComponent {
     }
 
     async fn set_font(jvm: &Jvm, _: &mut WieJvmContext, mut this: ClassInstanceRef<TextComponent>, font: ClassInstanceRef<()>) -> JvmResult<()> {
-        jvm.put_field(&mut this, "__wieFont", "Lorg/kwis/msp/lcdui/Font;", font).await?;
+        jvm.put_field(&mut this, "f", "Lorg/kwis/msp/lcdui/Font;", font).await?;
 
         let _: () = jvm.invoke_virtual(&this, "invalidate", "()V", ()).await?;
 
@@ -880,7 +882,7 @@ impl TextComponent {
     }
 
     async fn get_font(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<TextComponent>) -> JvmResult<ClassInstanceRef<()>> {
-        jvm.get_field(&this, "__wieFont", "Lorg/kwis/msp/lcdui/Font;").await
+        jvm.get_field(&this, "f", "Lorg/kwis/msp/lcdui/Font;").await
     }
 
     async fn control_input_method_handler(
