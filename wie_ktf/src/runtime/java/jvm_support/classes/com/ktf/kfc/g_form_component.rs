@@ -48,6 +48,7 @@ impl GFormComponent {
     /// Adds `component` and places it at the bounds given, answering its
     /// index as the one-argument add does. The bounds go through
     /// `Component.configure` with both its position and size bits.
+    #[allow(clippy::too_many_arguments)]
     async fn add_component_at(
         jvm: &Jvm,
         _: &mut WieJvmContext,
