@@ -26,7 +26,7 @@ use spin::Mutex;
 
 use wie_core_arm::ArmCore;
 use wie_jvm_support::JvmSupport;
-use wie_util::{Result, WieError, read_generic};
+use wie_util::{ByteRead, Result, WieError, read_generic};
 
 use super::{
     class_table::{ClassTable, is_wide, split_descriptor},
@@ -50,6 +50,41 @@ fn note_java_call(class_name: &str, name: &str) {
         *count += 1;
     } else {
         counts.insert(format!("{class_name}.{name}"), 1);
+    }
+}
+
+/// Diagnostic: 액션퍼즐패밀리 draws the "맞나요?" nickname from a static byte[]
+/// whose pointer lives at .bss 0x1500274 (base 0x1500124 + 0x150). This watches
+/// that slot and the bytes it points at, logging whenever either changes, after
+/// which platform call, so we can see if the edited name is ever written there.
+static NAME_BUFFER_SNAPSHOT: Mutex<Option<String>> = Mutex::new(None);
+
+fn watch_name_buffer(core: &ArmCore, after: &str) {
+    const NAME_PTR_ADDR: u32 = 0x1500274;
+
+    let Ok(ptr) = read_generic::<u32, _>(core, NAME_PTR_ADDR) else {
+        return;
+    };
+
+    let snapshot = if ptr == 0 {
+        "ptr=null".to_string()
+    } else if let Ok(len) = read_generic::<u32, _>(core, ptr)
+        && len <= 64
+    {
+        let mut bytes = alloc::vec![0u8; len as usize];
+        if core.read_bytes(ptr + 4, &mut bytes).is_ok() {
+            format!("ptr={ptr:#x} len={len} bytes={bytes:02x?}")
+        } else {
+            format!("ptr={ptr:#x} len={len} <unreadable>")
+        }
+    } else {
+        format!("ptr={ptr:#x} <bad len>")
+    };
+
+    let mut last = NAME_BUFFER_SNAPSHOT.lock();
+    if last.as_deref() != Some(snapshot.as_str()) {
+        tracing::debug!("NAME_BUFFER changed (after {after}): {snapshot}");
+        *last = Some(snapshot);
     }
 }
 
@@ -912,6 +947,8 @@ pub async fn invoke(core: &mut ArmCore, jvm: &Jvm, handles: &JavaHandles, member
     let Some((parameters, _)) = split_descriptor(descriptor) else {
         return Err(WieError::FatalError(format!("Malformed descriptor on {class_name}.{name}{descriptor}")));
     };
+
+    watch_name_buffer(core, &format!("{class_name}.{name}"));
 
     // A constructor row is not a factory. The compiled code allocates the
     // object, prepares it through the class's first reserved row, then calls
