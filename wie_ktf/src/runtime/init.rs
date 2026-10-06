@@ -22,7 +22,7 @@ use crate::{
         java::{
             interface::{
                 get_field, get_java_method, get_wipi_jb_interface, java_array_new, java_check_type, java_class_load, java_new, java_throw,
-                java_throw_class, java_throw_instance, jb_monitor_enter, jb_monitor_exit, map_jump_result,
+                java_throw_instance, jb_monitor_enter, jb_monitor_exit, map_jump_result,
             },
             jvm_support::{JavaMethodResult, JavaVtable, KtfJvmSupport},
         },
@@ -150,10 +150,19 @@ fn module_primitive_element(offset: u32) -> Result<u32> {
 
 /// The class of an array of `ptr_class`.
 async fn module_array_class(core: &mut ArmCore, jvm: &Jvm, ptr_class: u32) -> Result<u32> {
-    let element = KtfJvmSupport::class_from_raw(core, ptr_class).name()?;
+    let class = KtfJvmSupport::class_from_raw(core, ptr_class);
+    let element = class.name()?;
 
     // `[I` is an array of `I`; `[Ljava/lang/String;` is an array of that class.
-    let name = if element.starts_with('[') || element.len() == 1 {
+    //
+    // A one-letter name is not always a primitive. 2007프로야구's classes are
+    // named `g`, `h`, `l` and so on, and its own image spells an array of `g`
+    // as `[Lg;`. Taken as a primitive, `g` became `[g`, which the array class
+    // definition folds to `[G` - a descriptor with no such letter - and the
+    // first `new g[6]` panicked on it. A real class has a parent, as every class
+    // but `java/lang/Object` does, so a one-letter name with one is a class.
+    let primitive = element.len() == 1 && class.parent_class()?.is_none();
+    let name = if element.starts_with('[') || primitive {
         format!("[{element}")
     } else {
         format!("[L{element};")
@@ -746,12 +755,21 @@ const MODULE_MONITOR_EXIT: u32 = 3;
 /// runtime needs to do there.
 const MODULE_POLL: u32 = 4;
 
-/// The jump table's sixth entry, which a compiled method tail-jumps to when it
-/// finds an array index out of the array's bounds. The handset throws
-/// `ArrayIndexOutOfBoundsException` from here; a title that reads past an array
-/// (테일즈 판타지 does, in its startApp) leans on that being what happens rather
-/// than a runtime that stops.
-const MODULE_ARRAY_INDEX_OUT_OF_BOUNDS: u32 = 5;
+/// The jump table's sixth entry: the start of a `synchronized` block, the
+/// other way in. The object to lock is in `r0`, as it is for slot 2.
+///
+/// This was taken for an array bounds failure once, and answered with an
+/// `ArrayIndexOutOfBoundsException`. The modules say otherwise. In
+/// 2007프로야구 (KTF `010100A2`) both calls to it, `0x106fb4` and `0x1108d8`,
+/// load an object, keep it in a stack slot, jump here with it, and later
+/// jump slot 3 with the same object from that slot. 테일즈 판타지
+/// (`010281D2`) has the same shape at `0x1039fa` and `0x103afe`, each closed
+/// by a slot 3 call at `0x103a2e` and `0x103b24`. That is a lock taken and
+/// released, and an exception thrown from the middle of it is what stopped
+/// 2007프로야구's game thread at its first step. The bounds check in
+/// 2007프로야구's module, `0x105e3c`, unwinds through its own handler chain and
+/// never comes here.
+const MODULE_MONITOR_ENTER_AGAIN: u32 = 5;
 
 /// How many words the module leaves on the stack when it jumps.
 ///
@@ -939,11 +957,7 @@ async fn handle_module_jump_svc(core: &mut ArmCore, jvm: &mut Jvm, id: SvcId) ->
         MODULE_MONITOR_ENTER => return jb_monitor_enter(core, jvm, core.read_param(0)?).await?.write(core, lr),
         MODULE_MONITOR_EXIT => return jb_monitor_exit(core, jvm, core.read_param(0)?).await?.write(core, lr),
         MODULE_POLL => return 0u32.write(core, lr),
-        MODULE_ARRAY_INDEX_OUT_OF_BOUNDS => {
-            return java_throw_class(core, jvm, "java/lang/ArrayIndexOutOfBoundsException")
-                .await?
-                .write(core, lr);
-        }
+        MODULE_MONITOR_ENTER_AGAIN => return jb_monitor_enter(core, jvm, core.read_param(0)?).await?.write(core, lr),
         _ => (),
     }
 
