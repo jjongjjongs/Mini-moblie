@@ -25,7 +25,7 @@ use crate::{
         java::{
             interface::{
                 get_field, get_java_method, get_wipi_jb_interface, java_array_new, java_check_type, java_class_load, java_new, java_throw,
-                java_throw_instance, jb_monitor_enter, jb_monitor_exit, map_jump_result,
+                java_throw_instance, jb_monitor_enter, jb_monitor_exit, map_wide_jump_result,
             },
             jvm_support::{JavaMethodResult, JavaVtable, KtfJvmSupport},
         },
@@ -814,11 +814,16 @@ async fn module_invoke(core: &mut ArmCore, jvm: &Jvm, native: bool) -> Result<Ja
     let mut registers = core.save_context();
     let entry_sp = registers.sp;
 
-    if tracing::enabled!(tracing::Level::TRACE) {
-        let name = KtfJvmSupport::read_name(core, raw.ptr_name)?;
+    let name = KtfJvmSupport::read_name(core, raw.ptr_name)?;
+    tracing::trace!("module invoke {name} on {:#x}", core.read_param(1)?);
 
-        tracing::trace!("module invoke {name} on {:#x}", core.read_param(1)?);
-    }
+    // A `long` or a `double` comes back in `r0` and `r1` together, and the
+    // module reads both. Handing back `r0` alone left `r1` as whatever the
+    // call was entered with: 2007프로야구 takes `currentTimeMillis()` off its
+    // frame deadline, got a high word that was the receiver it called on, and
+    // put its game thread to sleep for `0x710027adfffffe3f` milliseconds on
+    // the Gamevil logo.
+    let wide = returns_wide(&name.descriptor);
 
     // The two the stub pushed, and then whatever the call site left above them.
     let argument = |core: &mut ArmCore, index: usize| -> Result<u32> {
@@ -839,7 +844,6 @@ async fn module_invoke(core: &mut ArmCore, jvm: &Jvm, native: bool) -> Result<Ja
     let caller = core.save_context();
 
     let result = if native {
-        let name = KtfJvmSupport::read_name(core, raw.ptr_name)?;
         let words = method_argument_words(&name.descriptor, MethodAccessFlags::from_bits_truncate(raw.access_flags));
 
         let arguments = Allocator::alloc(core, words * size_of::<u32>() as u32)?;
@@ -863,9 +867,9 @@ async fn module_invoke(core: &mut ArmCore, jvm: &Jvm, native: bool) -> Result<Ja
         // the arguments - which is the layout the entry reads, its first
         // argument at `[r0 + 4]`.
         let result = if raw.fn_body_native_or_exception_table == 0 {
-            core.run_function::<u32>(raw.fn_body, &[arguments]).await
+            core.run_function::<u64>(raw.fn_body, &[arguments]).await
         } else {
-            core.run_function::<u32>(raw.fn_body_native_or_exception_table, &[0, arguments]).await
+            core.run_function::<u64>(raw.fn_body_native_or_exception_table, &[0, arguments]).await
         };
 
         Allocator::free(core, arguments, words * size_of::<u32>() as u32)?;
@@ -877,7 +881,7 @@ async fn module_invoke(core: &mut ArmCore, jvm: &Jvm, native: bool) -> Result<Ja
         // put a second copy above them.
         let arguments = [0, argument(core, 0)?, argument(core, 1)?, argument(core, 2)?];
 
-        core.run_function::<u32>(raw.fn_body, &arguments).await
+        core.run_function::<u64>(raw.fn_body, &arguments).await
     };
 
     // A method this runtime implements throws by answering its caller, because
@@ -918,7 +922,7 @@ async fn module_invoke(core: &mut ArmCore, jvm: &Jvm, native: bool) -> Result<Ja
         }
 
         let arguments = module_unwound_arguments(core, context_base, target)?;
-        let resumed = core.run_function::<u32>(next_pc, &arguments).await;
+        let resumed = core.run_function::<u64>(next_pc, &arguments).await;
 
         // Not after a fault: the registers it faulted with are what the dump
         // is read from.
@@ -935,7 +939,12 @@ async fn module_invoke(core: &mut ArmCore, jvm: &Jvm, native: bool) -> Result<Ja
         };
     }
 
-    map_jump_result(entry_sp, result)
+    map_wide_jump_result(entry_sp, result, wide)
+}
+
+/// Whether a method of this descriptor answers in two words.
+fn returns_wide(descriptor: &str) -> bool {
+    descriptor.ends_with(")J") || descriptor.ends_with(")D")
 }
 
 /// How many words a call of this descriptor puts in registers and on the

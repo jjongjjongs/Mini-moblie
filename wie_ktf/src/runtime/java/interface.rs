@@ -151,8 +151,21 @@ pub async fn java_throw_class(core: &mut ArmCore, jvm: &mut Jvm, name: &str) -> 
 /// same question of its own entry, and the outermost guest call owns the whole
 /// stack.
 pub(crate) fn map_jump_result(entry_sp: u32, result: core::result::Result<u32, WieError>) -> Result<JavaMethodResult> {
+    map_jump_result_words(entry_sp, result.map(|x| vec![x]))
+}
+
+/// [`map_jump_result`] for a call whose answer is `r0` and `r1` together, a
+/// `long` or a `double`, when `wide` says it is.
+pub(crate) fn map_wide_jump_result(entry_sp: u32, result: core::result::Result<u64, WieError>, wide: bool) -> Result<JavaMethodResult> {
+    map_jump_result_words(
+        entry_sp,
+        result.map(|x| if wide { vec![x as u32, (x >> 32) as u32] } else { vec![x as u32] }),
+    )
+}
+
+fn map_jump_result_words(entry_sp: u32, result: core::result::Result<Vec<u32>, WieError>) -> Result<JavaMethodResult> {
     match result {
-        Ok(result) => Ok(JavaMethodResult::new(vec![result], None)),
+        Ok(result) => Ok(JavaMethodResult::new(result, None)),
         Err(WieError::JavaExceptionUnwind {
             context_base,
             target,

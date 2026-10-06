@@ -1227,6 +1227,16 @@ impl RunFunctionResult<u32> for u32 {
     }
 }
 
+/// The pair a function returns a 64-bit value in: `r0` low, `r1` high.
+impl RunFunctionResult<u64> for u64 {
+    fn get(core: &ArmCore) -> u64 {
+        let low = core.read_param(0).unwrap() as u64;
+        let high = core.read_param(1).unwrap() as u64;
+
+        (high << 32) | low
+    }
+}
+
 impl RunFunctionResult<()> for () {
     fn get(_: &ArmCore) {}
 }
