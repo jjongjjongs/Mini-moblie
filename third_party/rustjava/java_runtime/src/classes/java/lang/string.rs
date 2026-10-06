@@ -184,6 +184,8 @@ impl String {
         let charset = System::get_charset(jvm).await?;
         let string = Self::decode_str(&charset, cast_slice(&bytes)).unwrap_or_else(|| RustString::from_utf8_lossy(cast_slice(&bytes)).into_owned());
 
+        tracing::debug!("java.lang.String::<init>([BII) decoded ({count} bytes, {charset}) -> {string:?}");
+
         let utf16 = string.encode_utf16().collect::<Vec<_>>();
 
         let mut array = jvm.instantiate_array("C", utf16.len()).await?;
