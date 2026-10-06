@@ -2215,6 +2215,115 @@ pub fn lgt_local_tagged_record_response(request: &[u8]) -> Option<Vec<u8>> {
 
     Some(response)
 }
+
+/// The same five-byte-header messages, as 미니게임천국3 scrambles them.
+///
+/// 미니게임천국3 (KTF `0103ABB0`) opens the session 미니게임천국4 does, to
+/// `211.115.66.250:15133` and with the same body: service 1006, the build, the
+/// subscriber's number and `MINIGAMEHEAVEN3_KR`. Two things differ, and both are
+/// in its sender at `0x11c18e`:
+///
+/// - `[2]` is `0x01`, and every byte past the header is XORed with `0x9a`.
+/// - One more byte goes behind the body: the sum of every plain byte before it,
+///   header included, XORed the same way. The length at `[0..2]` counts it.
+///
+/// ```text
+/// 00 68 01 00 00 | 99 74 99 72 ... (03 ee 03 e8 ... ^ 0x9a) | 8d (0x17 ^ 0x9a)
+/// ```
+///
+/// Its reader at `0x11b4b6` XORs every byte past the header back before it
+/// looks at them. So the message is unscrambled, answered the way
+/// [`lgt_local_opcode_header_response`] answers it, and the answer is scrambled
+/// the same way, with its own sum behind it.
+///
+/// `None` for anything that is not one of these: `[2]` has to be `0x01`, the
+/// length has to be the frame's own, and the trailing sum has to agree.
+pub fn lgt_local_scrambled_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
+    const HEADER: usize = 5;
+    const SCRAMBLED: u8 = 0x01;
+    const KEY: u8 = 0x9a;
+
+    fn sum(bytes: &[u8]) -> u8 {
+        bytes.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte))
+    }
+
+    if request.len() < HEADER + 1 || u16::from_be_bytes([request[0], request[1]]) as usize != request.len() || request[2] != SCRAMBLED {
+        return None;
+    }
+
+    let (frame, check) = request.split_at(request.len() - 1);
+    let mut plain: Vec<u8> = frame[..HEADER]
+        .iter()
+        .copied()
+        .chain(frame[HEADER..].iter().map(|byte| byte ^ KEY))
+        .collect();
+    if sum(&plain) != check[0] ^ KEY {
+        return None;
+    }
+
+    // The message as 미니게임천국4 would have written it: `[2]` clear and no sum.
+    plain[2] = 0;
+    let plain_length = (plain.len() as u16).to_be_bytes();
+    plain[..2].copy_from_slice(&plain_length);
+
+    let mut scrambled = lgt_local_opcode_header_response(&plain)?;
+    if scrambled.len() < HEADER {
+        return None;
+    }
+
+    scrambled[2] = SCRAMBLED;
+    let length = (scrambled.len() as u16 + 1).to_be_bytes();
+    scrambled[..2].copy_from_slice(&length);
+    let check = sum(&scrambled) ^ KEY;
+    for byte in &mut scrambled[HEADER..] {
+        *byte ^= KEY;
+    }
+    scrambled.push(check);
+
+    Some(scrambled)
+}
+
+#[cfg(test)]
+mod scrambled_opcode_header_tests {
+    use super::*;
+
+    /// 미니게임천국3's session, off the device log.
+    const MINIGAME_HEAVEN_3_SESSION: &str = "00 68 01 00 00 99 74 99 72 9b 99 ec ff e8 b4 ab b4 aa b4 a8 9a 9a 9a 9a 9a 9a 9a 9a 9a 9a 9a aa ab \
+         aa ae ac ab ab a3 a8 ac a3 9a 9a 9a 9a 9a 9a 9a 9a 9a 9a 9a 9a 9a 9a 9a 9a 9a 9a 9a 9a 9a 9a 9a 9a 9a 9a 9a 9a 9a 9a 9a d7 d3 \
+         d4 d3 dd db d7 df d2 df db cc df d4 a9 c5 d1 c8 9a 9a 9a 9a 9a 9a 9a 9a 9a 9a 9a 9a 8d";
+
+    fn session() -> Vec<u8> {
+        MINIGAME_HEAVEN_3_SESSION
+            .split_whitespace()
+            .map(|byte| u8::from_str_radix(byte, 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn the_scrambled_session_is_answered_in_kind() {
+        let request = session();
+        assert_eq!(request.len(), 104);
+
+        let reply = response(&request).expect("the session is answered");
+
+        // 미니게임천국4's answer, `00 05 00 00 00`, with `[2]` set and the sum
+        // behind it: 0 + 6 + 1 + 0 + 0 = 7, XORed with 0x9a.
+        assert_eq!(reply, [0x00, 0x06, 0x01, 0x00, 0x00, 0x07 ^ 0x9a]);
+    }
+
+    #[test]
+    fn a_frame_whose_sum_disagrees_is_not_answered() {
+        let mut request = session();
+        *request.last_mut().unwrap() ^= 1;
+        assert_eq!(lgt_local_scrambled_opcode_header_response(&request), None);
+
+        // Nor is one that is not scrambled at all.
+        let mut plain = session();
+        plain[2] = 0;
+        assert_eq!(lgt_local_scrambled_opcode_header_response(&plain), None);
+    }
+}
+
 /// 엘피스's online menu and its item purchase, whose every message is one byte
 /// of opcode behind a five byte header.
 ///
@@ -9433,6 +9542,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_text_record_response(request))
         .or_else(|| lgt_local_tagged_record_response(request))
         .or_else(|| lgt_local_opcode_header_response(request))
+        .or_else(|| lgt_local_scrambled_opcode_header_response(request))
         .or_else(|| lgt_local_marked_command_response(request))
         .or_else(|| lgt_local_biochronicle_response(request))
         .or_else(|| lgt_local_destinia_response(request))
