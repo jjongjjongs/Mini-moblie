@@ -24,16 +24,15 @@ use crate::classes::org::kwis::msp::{lcdui::Display, lwc::Component};
 //
 // The real class draws its own framed, centred box over the screen and builds
 // private OK/Cancel `ButtonComponent`s wired through an inner
-// `DialogActionListener`. This runtime instead closes on the soft keys and the
-// FIRE key in `processEvent`, but only after the focused work component has
-// had the key and left it unhandled: a name field claims the left soft key to
-// cycle its input mode (Korean/English/symbol) and the digits to compose, and
-// none of those are dialog keys. FIRE confirms, the right soft key cancels,
-// and the left soft key confirms only when no field grabbed it. The box is
-// left full-screen like any other shell. The field slots are the JVM's own,
-// not the native 44-word layout, because nothing reads the dialog's state back
-// through native field access (`getActionState`/`actionState` are never
-// imported).
+// `DialogActionListener`. This runtime instead closes on FIRE (confirm) and
+// the right soft key (cancel) in `processEvent`, recognising them before the
+// key is forwarded to the focused work component. Every other key - the left
+// soft key a name field uses to cycle its input mode, and the digits and CLEAR
+// it composes with - is forwarded untouched, so the field keeps working and
+// none of them close the dialog. The box is left full-screen like any other
+// shell. The field slots are the JVM's own, not the native 44-word layout,
+// because nothing reads the dialog's state back through native field access
+// (`getActionState`/`actionState` are never imported).
 pub struct DialogComponent;
 
 /// `actionState` while the modal loop is still running: no button chosen yet.
@@ -389,18 +388,18 @@ impl DialogComponent {
     /// The dialog result a key closes it with, or `None` if the key is not one
     /// of the dialog's own.
     ///
-    /// FIRE (the centre/select key) confirms with `DLG_OK`, and the right soft
-    /// key cancels with `DLG_CANCEL` - or confirms, for a dialog built with no
-    /// cancel button. The left soft key confirms too, but the caller only asks
-    /// about it once the focused work component has left it unhandled: a name
-    /// field claims the left soft key to cycle its input mode, so it is a close
-    /// only on a dialog whose work component did not want it.
+    /// Only FIRE (the centre/select key, confirming with `DLG_OK`) and the
+    /// right soft key (cancelling with `DLG_CANCEL`, or confirming for a dialog
+    /// built with no cancel button) are the dialog's. The left soft key is
+    /// deliberately absent: a focused name field claims it to cycle its input
+    /// mode (Korean/English/symbol), so the dialog must never take it and it is
+    /// forwarded to the field like any other editing key.
     async fn dialog_result_for_key(jvm: &Jvm, this: &ClassInstanceRef<Self>, key: i32) -> JvmResult<Option<i32>> {
-        // 8 = FIRE, 90 = LEFT_SOFT_KEY, 91 = RIGHT_SOFT_KEY (Display::getGameAction).
+        // 8 = FIRE, 91 = RIGHT_SOFT_KEY (see Display::getGameAction).
         let action: i32 = jvm.invoke_static("org/kwis/msp/lcdui/Display", "getGameAction", "(I)I", (key,)).await?;
 
         Ok(match action {
-            8 | 90 => Some(DLG_OK),
+            8 => Some(DLG_OK),
             91 => {
                 let dialog_type: i32 = jvm.get_field(this, "__wieDialogType", "I").await?;
                 Some(if dialog_type == TYPE_OK_CANCEL { DLG_CANCEL } else { DLG_OK })
@@ -409,32 +408,29 @@ impl DialogComponent {
         })
     }
 
-    /// Closes the dialog on its own keys, but only on keys the focused work
-    /// component did not already use.
+    /// Closes the dialog on FIRE and the right soft key, and forwards every
+    /// other key to the focused work component.
     ///
-    /// The shell's key path reaches the focused child through `processEvent`,
-    /// so the key is forwarded to the superclass first and the dialog acts only
-    /// on what comes back unhandled. That is what keeps the name field's left
-    /// soft key (input-mode switch) and its digit/CLEAR composition working:
-    /// the field consumes those and the dialog never sees them. FIRE and the
-    /// right soft key, which no field wants, fall through here and close it.
+    /// FIRE (confirm) and the right soft key (cancel) are recognised before the
+    /// key is forwarded, because no work component wants them and the forward
+    /// cannot tell whether one did: `ShellComponent.keyNotify` reports every
+    /// key it is handed as handled, so a key the focused field left unhandled
+    /// comes back from the superclass looking consumed. The left soft key, the
+    /// digits and CLEAR are forwarded untouched, which is what lets the name
+    /// field cycle its input mode and compose text; those never close the
+    /// dialog.
     async fn process_event(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, event: i32, p1: i32, p2: i32, p3: i32) -> JvmResult<bool> {
-        let handled: bool = jvm
-            .invoke_special(&this, "org/kwis/msp/lwc/ShellComponent", "processEvent", "(IIII)Z", (event, p1, p2, p3))
-            .await?;
-
-        if handled {
-            return Ok(true);
-        }
-
         // 3 = KEY; p2 is the key code.
-        if event == 3 && let Some(state) = Self::dialog_result_for_key(jvm, &this, p2).await? {
+        if event == 3
+            && let Some(state) = Self::dialog_result_for_key(jvm, &this, p2).await?
+        {
             let mut this = this;
             jvm.put_field(&mut this, "actionState", "I", state).await?;
 
             return Ok(true);
         }
 
-        Ok(false)
+        jvm.invoke_special(&this, "org/kwis/msp/lwc/ShellComponent", "processEvent", "(IIII)Z", (event, p1, p2, p3))
+            .await
     }
 }
