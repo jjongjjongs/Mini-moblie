@@ -27,7 +27,7 @@ use self::{
     bitmap_font::BitmapFace,
     framebuffer::FrameBuffer,
     grp_context::{BUILT_IN_XOR, WIPICGraphicsContext},
-    image::create_wipi_image,
+    image::{create_wipi_image, forget_trailer, has_trailer, register_trailer, transparency_bits},
 };
 
 pub use self::grp_context::{ContextLayout, WIPICGraphicsContextIdx};
@@ -1043,6 +1043,7 @@ pub async fn destroy_image(context: &mut dyn WIPICContext, image: WIPICIndirectP
     // heap.
     let wipi_image: WIPICImage = read_generic(context, context.data_ptr(image)?)?;
     if wipi_image.img.buf.0 != 0 {
+        forget_trailer(wipi_image.img.buf.0);
         context.free(wipi_image.img.buf)?;
     }
     if wipi_image.mask.buf.0 != 0 {
@@ -1118,6 +1119,22 @@ pub async fn create_sub_image(context: &mut dyn WIPICContext, parent: WIPICIndir
         FrameBuffer::empty()
     };
 
+    // The cut-out keeps the handset's one-bit mask after its pixels the way a
+    // decoded image does - see `transparency_bits` - read from the mask plane
+    // just cut, or all opaque where the parent had none.
+    let colours = if sub_mask.0.buf.0 != 0 {
+        sub_mask.image(context)?.colors()
+    } else {
+        vec![Color { a: 0xff, r: 0, g: 0, b: 0 }; (w * h) as usize]
+    };
+    let (trailer_at, trailer) = transparency_bits(&colours);
+    // The cut-out's slack holds it for any image under a thousand rows tall;
+    // past that it goes unwritten and unbelieved.
+    if trailer_at as usize + trailer.len() <= (sub_img.0.bpl * (h as u32 + 64) + 16) as usize {
+        context.write_bytes(context.data_ptr(sub_img.0.buf)? + trailer_at, &trailer)?;
+        register_trailer(sub_img.0.buf.0);
+    }
+
     let image = WIPICImage {
         img: sub_img.0,
         mask: sub_mask.0,
@@ -1186,6 +1203,13 @@ fn carry_img_colour_into_mask(context: &mut dyn WIPICContext, image: &WIPICImage
     let (img_bpl, mask_bpl) = (image.img.bpl, image.mask.bpl);
     let cols = (x1 - x0) as usize;
 
+    // The one-bit mask after the pixels, where this runtime put one: a title that
+    // turns an image round rewrites it along with the colour. See below.
+    let trailer = has_trailer(image.img.buf.0).then(|| {
+        let pixels = (iw * ih) as u32;
+        img_ptr + (pixels + (pixels & 1)) * 2
+    });
+
     let mut img_row = alloc::vec![0u8; cols * 2];
     let mut mask_row = alloc::vec![0u8; cols * 4];
     for y in y0..y1 {
@@ -1194,12 +1218,39 @@ fn carry_img_colour_into_mask(context: &mut dyn WIPICContext, image: &WIPICImage
         context.read_bytes(img_off, &mut img_row)?;
         context.read_bytes(mask_off, &mut mask_row)?;
 
+        // The row's bits of that mask, from the byte holding its first pixel.
+        let first = (y * iw + x0) as usize;
+        let mut bits = alloc::vec![0u8; (first % 8 + cols).div_ceil(8)];
+        if let Some(trailer) = trailer {
+            context.read_bytes(trailer + (first / 8) as WIPICWord, &mut bits)?;
+        }
+
         for i in 0..cols {
             let colour = Rgb565Pixel::to_color(u16::from_le_bytes([img_row[i * 2], img_row[i * 2 + 1]]));
             // ArgbPixel bytes are [b, g, r, a]; keep the alpha, replace colour.
             mask_row[i * 4] = colour.b;
             mask_row[i * 4 + 1] = colour.g;
             mask_row[i * 4 + 2] = colour.r;
+
+            // And the shape, where the one-bit mask says otherwise. 아무이유없어
+            // turns half its characters round when it loads them (`0xb718`): it
+            // mirrors each row of the colour plane and then each row of that
+            // mask, in place. The mask plane kept the unturned shape, so the
+            // turned colours came down through it - and where the turned image
+            // is clear its colour is the white a transparent pixel decodes to,
+            // which stood beside every character facing left like a shadow. A
+            // pixel the bits and the alpha agree on keeps its alpha, so partial
+            // transparency in an untouched image is left alone.
+            if trailer.is_some() {
+                let bit = first % 8 + i;
+                let clear = bits[bit / 8] >> (bit % 8) & 1 == 1;
+                let alpha = &mut mask_row[i * 4 + 3];
+                if clear {
+                    *alpha = 0;
+                } else if *alpha < 0x80 {
+                    *alpha = 0xff;
+                }
+            }
         }
 
         context.write_bytes(mask_off, &mask_row)?;
@@ -4416,16 +4467,6 @@ mod tests {
     /// leave its transparent pixels showing the background, not fill a block.
     #[futures_test::test]
     async fn anymom_masked_glyph_keeps_its_transparent_pixels() {
-        const MAINMENU_SUB0: &[u8] = &[
-            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x1c, 0x00, 0x00, 0x00,
-            0x17, 0x08, 0x03, 0x00, 0x00, 0x00, 0x2f, 0x14, 0xdf, 0x65, 0x00, 0x00, 0x00, 0x12, 0x50, 0x4c, 0x54, 0x45, 0xff, 0xff, 0xff, 0x5b, 0x5b,
-            0x5b, 0xff, 0xff, 0xff, 0xe7, 0xe7, 0xe7, 0xd9, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5b, 0x90, 0xda, 0x0b, 0x00, 0x00, 0x00, 0x01, 0x74, 0x52,
-            0x4e, 0x53, 0x00, 0x40, 0xe6, 0xd8, 0x66, 0x00, 0x00, 0x00, 0x49, 0x49, 0x44, 0x41, 0x54, 0x78, 0x5e, 0xb5, 0xc9, 0xcb, 0x0a, 0x80, 0x30,
-            0x10, 0x43, 0xd1, 0xa4, 0xea, 0xff, 0xff, 0xb2, 0xc1, 0x2c, 0x06, 0x86, 0x4e, 0x1f, 0x60, 0xcf, 0x26, 0x90, 0x8b, 0x56, 0x80, 0x94, 0x91,
-            0x8e, 0x77, 0xc7, 0x3f, 0xb1, 0x89, 0xf6, 0xb2, 0x93, 0x51, 0x86, 0x91, 0x45, 0x94, 0x95, 0x98, 0xed, 0xc4, 0xe7, 0x13, 0x7b, 0x3c, 0x8a,
-            0xcf, 0x58, 0x9b, 0x44, 0x90, 0xda, 0x84, 0x06, 0xe9, 0x44, 0x04, 0x66, 0x8e, 0x78, 0x01, 0x68, 0xbc, 0x07, 0x30, 0xd8, 0x7b, 0x42, 0xec,
-            0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
-        ];
         let mut context = test_context();
 
         let pgc_handle = context.alloc(core::mem::size_of::<super::WIPICGraphicsContext>() as u32).unwrap();
@@ -4567,6 +4608,81 @@ mod tests {
         assert!(
             c.g > 150 && c.r < 90 && c.b < 90,
             "img-plane write was lost: opaque pixel drew #{:02x}{:02x}{:02x}, expected green",
+            c.r,
+            c.g,
+            c.b
+        );
+    }
+
+    /// 아무이유없어's `mainmenu_sub0`, a 28x23 palette PNG with a transparent
+    /// index: a masked image as the title's own images are.
+    const MAINMENU_SUB0: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x1c, 0x00, 0x00, 0x00,
+        0x17, 0x08, 0x03, 0x00, 0x00, 0x00, 0x2f, 0x14, 0xdf, 0x65, 0x00, 0x00, 0x00, 0x12, 0x50, 0x4c, 0x54, 0x45, 0xff, 0xff, 0xff, 0x5b, 0x5b,
+        0x5b, 0xff, 0xff, 0xff, 0xe7, 0xe7, 0xe7, 0xd9, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5b, 0x90, 0xda, 0x0b, 0x00, 0x00, 0x00, 0x01, 0x74, 0x52,
+        0x4e, 0x53, 0x00, 0x40, 0xe6, 0xd8, 0x66, 0x00, 0x00, 0x00, 0x49, 0x49, 0x44, 0x41, 0x54, 0x78, 0x5e, 0xb5, 0xc9, 0xcb, 0x0a, 0x80, 0x30,
+        0x10, 0x43, 0xd1, 0xa4, 0xea, 0xff, 0xff, 0xb2, 0xc1, 0x2c, 0x06, 0x86, 0x4e, 0x1f, 0x60, 0xcf, 0x26, 0x90, 0x8b, 0x56, 0x80, 0x94, 0x91,
+        0x8e, 0x77, 0xc7, 0x3f, 0xb1, 0x89, 0xf6, 0xb2, 0x93, 0x51, 0x86, 0x91, 0x45, 0x94, 0x95, 0x98, 0xed, 0xc4, 0xe7, 0x13, 0x7b, 0x3c, 0x8a,
+        0xcf, 0x58, 0x9b, 0x44, 0x90, 0xda, 0x84, 0x06, 0xe9, 0x44, 0x04, 0x66, 0x8e, 0x78, 0x01, 0x68, 0xbc, 0x07, 0x30, 0xd8, 0x7b, 0x42, 0xec,
+        0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
+    /// A title that rewrites the one-bit mask after an image's pixels is
+    /// believed when the image is drawn.
+    ///
+    /// 아무이유없어 turns its characters round in place as it loads them
+    /// (`0xb718`), mirroring the colour plane and that mask together. Drawn
+    /// through the mask plane's own alpha - the unturned shape - every turned
+    /// character stood beside a white shadow. Model the rewrite as the mask set
+    /// clear throughout: the glyph's opaque pixel at (2,2) must leave the blue
+    /// under it alone.
+    #[futures_test::test]
+    async fn a_rewritten_one_bit_mask_is_what_is_drawn() {
+        let mut context = test_context();
+
+        let pgc_handle = context.alloc(core::mem::size_of::<super::WIPICGraphicsContext>() as u32).unwrap();
+        let pgc = context.data_ptr(pgc_handle).unwrap();
+        init_context(&mut context, pgc).await.unwrap();
+
+        let source = context.alloc(MAINMENU_SUB0.len() as u32).unwrap();
+        let source_addr = context.data_ptr(source).unwrap();
+        context.write_bytes(source_addr, MAINMENU_SUB0).unwrap();
+        let ptr_image = context.alloc_raw(4).unwrap();
+        create_image(&mut context, ptr_image, source, 0, MAINMENU_SUB0.len() as u32)
+            .await
+            .unwrap();
+        let image_handle = super::WIPICIndirectPtr(read_generic(&context, ptr_image).unwrap());
+
+        // The mask sits past the 28x23 pixels - an even count - at 644 * 2.
+        let fetched = super::get_image_framebuffer(&mut context, image_handle).await.unwrap();
+        let img_fb: wipi_types::wipic::WIPICFramebuffer = read_generic(&context, context.data_ptr(fetched).unwrap()).unwrap();
+        let mask_at = context.data_ptr(img_fb.buf).unwrap() + 644 * 2;
+        context.write_bytes(mask_at, &[0xff; (644usize).div_ceil(16) * 2]).unwrap();
+
+        let blue = Rgb565Pixel::from_color(Color {
+            a: 0xff,
+            r: 0,
+            g: 0,
+            b: 0xff,
+        });
+        let dest_fb = super::FrameBuffer::new(&mut context, 28, 23, 16).unwrap();
+        let bytes: alloc::vec::Vec<u8> = (0..28 * 23).flat_map(|_| blue.to_le_bytes()).collect();
+        let dest_ptr = context.data_ptr(dest_fb.0.buf).unwrap();
+        context.write_bytes(dest_ptr, &bytes).unwrap();
+        let destination = context.alloc(core::mem::size_of::<wipi_types::wipic::WIPICFramebuffer>() as u32).unwrap();
+        let dest_addr = context.data_ptr(destination).unwrap();
+        write_generic(&mut context, dest_addr, dest_fb.0).unwrap();
+
+        draw_image(&mut context, destination, 0, 0, 28, 23, image_handle, 0, 0, pgc)
+            .await
+            .unwrap();
+
+        let handle = read_generic(&context, context.data_ptr(destination).unwrap()).unwrap();
+        let drawn = super::FrameBuffer(handle).image(&mut context).unwrap();
+        let c = drawn.get_pixel(2, 2);
+        assert!(
+            c.b > 200 && c.r < 40 && c.g < 40,
+            "a pixel the mask clears was drawn: #{:02x}{:02x}{:02x}, expected the blue under it",
             c.r,
             c.g,
             c.b

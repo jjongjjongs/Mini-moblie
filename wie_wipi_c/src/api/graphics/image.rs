@@ -1,3 +1,4 @@
+use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -31,6 +32,7 @@ pub fn create_wipi_image(context: &mut dyn WIPICContext, buf: WIPICIndirectPtr, 
 
     let (mask_at, mask_bits) = transparency_bits(&colors);
     let img_framebuffer = FrameBuffer::from_image_with_trailer(context, &rgb565, mask_at, &mask_bits)?;
+    register_trailer(img_framebuffer.0.buf.0);
     // Only an image that carries alpha needs the full ARGB kept in the mask
     // plane for MC_grpDrawImage to composite; a fully opaque image composites
     // straight from the 16bpp colour plane and is spared the second copy.
@@ -69,7 +71,7 @@ pub fn create_wipi_image(context: &mut dyn WIPICContext, buf: WIPICIndirectPtr, 
 /// colour it wants wherever a bit is clear. With the mask kept only in a
 /// separate ARGB plane, that memory held nothing, every bit read clear, and
 /// every highlighted word came down as a solid block of its colour.
-fn transparency_bits(colors: &[Color]) -> (u32, Vec<u8>) {
+pub(crate) fn transparency_bits(colors: &[Color]) -> (u32, Vec<u8>) {
     let pixels = colors.len();
     let at = (pixels + (pixels & 1)) as u32 * 2;
 
@@ -82,6 +84,26 @@ fn transparency_bits(colors: &[Color]) -> (u32, Vec<u8>) {
     }
 
     (at, bits)
+}
+
+/// The colour planes that carry the one-bit mask after their pixels - see
+/// [`transparency_bits`] - by buffer address.
+///
+/// Only the images this runtime built itself are known to have one; an image a
+/// test or another path put together does not, and the bytes past its pixels are
+/// whatever the allocator left there. So the mask is only believed for these.
+static TRAILERED: spin::Mutex<BTreeSet<WIPICWord>> = spin::Mutex::new(BTreeSet::new());
+
+pub(crate) fn register_trailer(buf: WIPICWord) {
+    TRAILERED.lock().insert(buf);
+}
+
+pub(crate) fn forget_trailer(buf: WIPICWord) {
+    TRAILERED.lock().remove(&buf);
+}
+
+pub(crate) fn has_trailer(buf: WIPICWord) -> bool {
+    TRAILERED.lock().contains(&buf)
 }
 
 #[cfg(test)]
