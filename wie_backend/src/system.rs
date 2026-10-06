@@ -81,6 +81,9 @@ pub struct System {
     /// How many rows are cropped from the bottom of the frame before it reaches
     /// the screen. See [`System::title_present_crop_bottom`].
     title_present_crop_bottom: Arc<AtomicU32>,
+    /// Whether opening a file that is not there to read fails.
+    /// See [`System::missing_file_fails_read_open`].
+    missing_file_fails_read_open: Arc<AtomicBool>,
 }
 
 impl System {
@@ -173,6 +176,7 @@ impl System {
             title_repaints_whole_frame: Arc::new(AtomicBool::new(false)),
             title_blank_mutable_image_transparent: Arc::new(AtomicBool::new(false)),
             title_present_crop_bottom: Arc::new(AtomicU32::new(0)),
+            missing_file_fails_read_open: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -403,6 +407,24 @@ impl System {
 
     pub fn set_title_present_crop_bottom(&self, rows: u32) {
         self.title_present_crop_bottom.store(rows, Ordering::SeqCst);
+    }
+
+    /// Whether `org.kwis.msp.io.File` opening a file that is not there to read
+    /// throws, rather than opening it empty.
+    ///
+    /// The handsets disagree, and titles were written against theirs. A KTF
+    /// one throws: 나이트테일즈 opens `save0.Dat` read-only and closes it again
+    /// as its test for a save, so an empty one opened in its place reads as a
+    /// save with nothing in it and the load runs off the end of its array. An
+    /// LGT one does not: 일지매 reads its store before it has ever written it
+    /// and has no catch around the open. Set by the emulator that loaded the
+    /// archive.
+    pub fn missing_file_fails_read_open(&self) -> bool {
+        self.missing_file_fails_read_open.load(Ordering::SeqCst)
+    }
+
+    pub fn set_missing_file_fails_read_open(&self, fails: bool) {
+        self.missing_file_fails_read_open.store(fails, Ordering::SeqCst);
     }
 
     /// Whether the title lays its screens out below the handset's status strip,

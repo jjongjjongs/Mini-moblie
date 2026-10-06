@@ -98,7 +98,7 @@ impl File {
 
     async fn init_with_flag(
         jvm: &Jvm,
-        _context: &mut WieJvmContext,
+        context: &mut WieJvmContext,
         mut this: ClassInstanceRef<Self>,
         filename: ClassInstanceRef<String>,
         mode: i32,
@@ -125,11 +125,13 @@ impl File {
 
         let file = jvm.new_class("java/io/File", "(Ljava/lang/String;)V", (filename,)).await?;
 
-        // WIPI opens a missing data file as an empty one rather than failing: a
-        // title reads its non-volatile store (e.g. "/NVdata.txt") before it has
-        // ever written it. A read-mode RandomAccessFile requires the file to
-        // exist, so create it empty first when it does not.
-        if mode == Mode::READ_ONLY {
+        // Where the handset opens a missing data file as an empty one rather
+        // than failing, create it empty first: a read-mode RandomAccessFile
+        // requires the file to exist. A title reads its non-volatile store
+        // (e.g. "/NVdata.txt") before it has ever written it. Where the handset
+        // throws, the open below fails and so does this constructor - see
+        // `System::missing_file_fails_read_open`.
+        if mode == Mode::READ_ONLY && !context.system().missing_file_fails_read_open() {
             let exists: bool = jvm.invoke_virtual(&file, "exists", "()Z", ()).await?;
             if !exists {
                 let stream = jvm.new_class("java/io/FileOutputStream", "(Ljava/io/File;)V", (file.clone(),)).await?;

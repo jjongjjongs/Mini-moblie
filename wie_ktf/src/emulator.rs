@@ -215,6 +215,7 @@ impl KtfEmulator {
         system.set_title_clears_screen_each_paint(quirks.clears_screen_each_paint);
         system.set_title_blank_mutable_image_transparent(quirks.blank_mutable_image_transparent);
         system.set_title_present_crop_bottom(quirks.present_crop_bottom);
+        system.set_missing_file_fails_read_open(true);
 
         for (path, data) in files {
             let path = packaged_name(path).unwrap_or(path);
