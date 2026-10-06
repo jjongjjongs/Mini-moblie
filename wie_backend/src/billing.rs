@@ -2447,6 +2447,22 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
     /// The three services `0x471f8` writes into the body's first two bytes.
     const SERVICES: [u16; 3] = [1006, 1017, 1036];
 
+    /// 미니게임천국4 (KTF `01040357`) opens this session too, with
+    /// `MINIGAMEHEAVEN4` where 엘피스 writes the handset model. Its reader is
+    /// numbered differently. The header parser (`0x13168c`) maps `[3]` through
+    /// `0x1322f4`, which adds `0x10` for the billing server, and the dispatcher at
+    /// `0x130332` jumps on the result. An answer under opcode 0 lands on `0x10`,
+    /// which has no handler of its own. The title clears its busy flags and then
+    /// waits forever, which is the `NETWORK_DATA_RECEIVED처리 완료` its log ends
+    /// on. The server answers from `0xc8` up, the same block 엘피스's approval
+    /// (`0xca`) and confirmation (`0xcc`) answers come from. `0xc8` becomes `0xd8`,
+    /// which is the `CONNECT 응답패킷` handler at `0x13035c`. It reads no body,
+    /// names the title's next message, and moves its network state on to `0xb`.
+    const KTF_SESSION_ANSWER_OPCODE: u8 = 0xc8;
+    /// Where the body carries the handset model, or 미니게임천국4's name.
+    const KTF_TITLE_AT: usize = 68;
+    const MINIGAME_HEAVEN_4: &[u8] = b"MINIGAMEHEAVEN4\0";
+
     /// The library's type `5`, which carries nothing and is answered in kind.
     const SIGNAL_OPCODE: u8 = 0x01;
 
@@ -2545,7 +2561,11 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
     let body = &request[HEADER..];
     let (opcode, answer): (u8, Vec<u8>) = match request[3] {
         SESSION_OPCODE if body.len() >= SESSION_BODY_MIN && SERVICES.contains(&u16::from_be_bytes([body[0], body[1]])) => {
-            (SESSION_OPCODE, Vec::new())
+            if body.get(KTF_TITLE_AT..KTF_TITLE_AT + MINIGAME_HEAVEN_4.len()) == Some(MINIGAME_HEAVEN_4) {
+                (KTF_SESSION_ANSWER_OPCODE, Vec::new())
+            } else {
+                (SESSION_OPCODE, Vec::new())
+            }
         }
         SIGNAL_OPCODE if body.is_empty() => (SIGNAL_OPCODE, Vec::new()),
         // The service each of these names is not weighed against anything: the
@@ -10295,6 +10315,27 @@ mod tests {
         let reply = response(&request).expect("the agreement is answered");
 
         assert_eq!(&reply, &[0x00, 0x06, 0x00, 0x17, 0x00, 0x01]);
+    }
+
+    /// 미니게임천국4's session, off the device log, is answered under the opcode
+    /// its own reader takes as the connection's answer.
+    #[test]
+    fn 미니게임천국4s_session_is_answered_under_its_connect_answer() {
+        let mut session = alloc::vec![0x00, 0x67, 0x00, 0x00, 0x00, 0x03, 0xee, 0xab, 0xcd, 0x01, 0x03];
+        session.extend_from_slice(b"ver.1.0.4");
+        session.resize(5 + 26, 0);
+        session.extend_from_slice(b"01046119269");
+        session.resize(5 + 68, 0);
+        session.extend_from_slice(b"MINIGAMEHEAVEN4");
+        session.resize(0x67, 0);
+
+        let reply = response(&session).expect("the session is answered");
+        assert_eq!(&reply, &[0x00, 0x05, 0x00, 0xc8, 0x00]);
+
+        // 미니게임천국3 is not this title, and keeps the answer it had.
+        let mut other = session.clone();
+        other[5 + 68 + 14] = b'3';
+        assert_eq!(&response(&other).unwrap(), &[0x00, 0x05, 0x00, 0x00, 0x00]);
     }
 
     /// Its session opens on 1017, which this already served, and the agreement
