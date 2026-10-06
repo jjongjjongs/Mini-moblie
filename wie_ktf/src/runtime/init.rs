@@ -1,5 +1,8 @@
-use alloc::{collections::BTreeSet, format, string::String, vec, vec::Vec};
-use core::mem::{offset_of, size_of};
+use alloc::{boxed::Box, collections::BTreeSet, format, string::String, vec, vec::Vec};
+use core::{
+    mem::{offset_of, size_of},
+    pin::Pin,
+};
 use jvm::{ClassInstance, Jvm};
 
 use wie_backend::System;
@@ -89,39 +92,52 @@ async fn module_multi_array_new(core: &mut ArmCore, jvm: &Jvm, ptr_class: u32, d
     let element = name
         .strip_prefix('[')
         .ok_or_else(|| WieError::FatalError(format!("a module asked for an array of {name}, which is not an array class")))?;
-    let element = String::from(element);
-
-    let array = match jvm.instantiate_array(&element, lengths[0] as _).await {
-        Ok(x) => x,
-        Err(e) => return Err(JvmSupport::to_wie_err(jvm, e).await),
-    };
 
     tracing::trace!("module array {name} {lengths:?}");
 
-    if dimensions > 1 {
+    let array = module_array_of(jvm, element, &lengths).await?;
+
+    Ok(KtfJvmSupport::class_instance_raw(&array))
+}
+
+/// What [`module_array_of`] answers, boxed because it calls itself.
+type ModuleArray<'a> = Pin<Box<dyn Future<Output = Result<Box<dyn ClassInstance>>> + Send + 'a>>;
+
+/// An array of `element`, `lengths[0]` long, each of its elements an array of
+/// the next length, down to the last length given.
+///
+/// Every dimension the module pushed is filled - the stub pushes as many as
+/// the source names. 월드오브드래곤 makes `monsterImage` as
+/// `new int[14][8][4]` in its static initializer and writes
+/// `monsterImage[0][0][0]` first thing in `inIt`, so stopping at the second
+/// left a null where the `int[4]` goes and the title died on a
+/// `NullPointerException` before its first frame.
+fn module_array_of<'a>(jvm: &'a Jvm, element: &'a str, lengths: &'a [u32]) -> ModuleArray<'a> {
+    Box::pin(async move {
+        let mut array = match jvm.instantiate_array(element, lengths[0] as _).await {
+            Ok(x) => x,
+            Err(e) => return Err(JvmSupport::to_wie_err(jvm, e).await),
+        };
+
+        let rest = &lengths[1..];
+        if rest.is_empty() {
+            return Ok(array);
+        }
+
         let inner = element
             .strip_prefix('[')
-            .ok_or_else(|| WieError::FatalError(format!("a module asked for {dimensions} dimensions of {name}")))?;
+            .ok_or_else(|| WieError::FatalError(format!("a module asked for {} dimensions of [{element}", lengths.len())))?;
 
-        let mut array = array;
         for index in 0..lengths[0] as usize {
-            // Only the second dimension is filled, which is as many as the
-            // stub that gets here can push. A module wanting a third would
-            // have to hand it over some other way, and none has.
-            let sub = match jvm.instantiate_array(inner, lengths[1] as _).await {
-                Ok(x) => x,
-                Err(e) => return Err(JvmSupport::to_wie_err(jvm, e).await),
-            };
+            let sub = module_array_of(jvm, inner, rest).await?;
 
             if let Err(e) = jvm.store_array(&mut array, index, [JavaValue::Object(Some(sub))]).await {
                 return Err(JvmSupport::to_wie_err(jvm, e).await);
             }
         }
 
-        return Ok(KtfJvmSupport::class_instance_raw(&array));
-    }
-
-    Ok(KtfJvmSupport::class_instance_raw(&array))
+        Ok(array)
+    })
 }
 
 /// `MNInterface`'s primitive array make, at `+0x70`, which takes a type and a
