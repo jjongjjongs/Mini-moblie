@@ -2312,11 +2312,63 @@ pub async fn copy_frame_buffer(
         return Ok(());
     };
 
-    let src_image = src_framebuffer.image(context)?;
-    let mut dst_canvas = dst_framebuffer.canvas(context)?;
+    // A copy goes through the title's own pixel operation too, exactly as a
+    // blit does - the reference's `WPGrp_CopyFrameBuffer` reads the context's
+    // operation the same way `WPGrp_DrawImage` does. 렙업만이살길 draws every
+    // coloured word this way: a glyph is kept black-on-green in an offscreen and
+    // copied to the screen through an operation at `0x115af1` that recolours the
+    // black to the current text colour and keeps the destination where the
+    // source is its green `0x2484` key - so a notice comes out green, a title
+    // red, and the key never shows. Taken as a plain copy the glyph came down
+    // black on a green block instead.
+    let operation = pixel_op::of_context(context, gctx.pixel_op_func_ptr, gctx.param1).await?;
+    let source_first = context.pixel_op_takes_source_first();
 
-    blit_magenta_keyed(&mut **dst_canvas, dx, dy, w, h, &*src_image, sx, sy);
-    dst_canvas.flush()?;
+    // A frame buffer has no mask plane and no transparent colour of its own, so
+    // nothing is keyed before the operation - it decides every pixel. Without
+    // one, the magenta convention is honoured, the same as before.
+    let Some((kind, function)) = operation else {
+        let src_image = src_framebuffer.image(context)?;
+        let mut dst_canvas = dst_framebuffer.canvas(context)?;
+
+        blit_magenta_keyed(&mut **dst_canvas, dx, dy, w, h, &*src_image, sx, sy);
+        dst_canvas.flush()?;
+
+        return Ok(());
+    };
+
+    // A colour-keyed copy the title planted as its operation - see
+    // `PixelOp::SourceKey` and the matching path in `draw_image`.
+    if kind == pixel_op::PixelOp::SourceKey && source_first {
+        let src_image = src_framebuffer.image(context)?;
+        let distinct = distinct_colours(&*src_image, sx, sy, w, h);
+        let keys = source_key_colours(context, function, gctx.param1, distinct).await?;
+
+        let mut dst_canvas = dst_framebuffer.canvas(context)?;
+        blit_keyed(&mut **dst_canvas, dx, dy, w, h, &*src_image, sx, sy, &|color| {
+            keys.contains(&Rgb565Pixel::from_color(color))
+        });
+        dst_canvas.flush()?;
+
+        return Ok(());
+    }
+
+    let pairs = pixel_op_pairs(context, &dst_framebuffer, dx, dy, w, h, &src_framebuffer, sx, sy, false)?;
+
+    let mut blended = Vec::with_capacity(pairs.len());
+    for &(x, y, destination, source_pixel) in &pairs {
+        let result = match pixel_op::apply(kind, destination, source_pixel, source_first) {
+            Some(result) => result,
+            None => {
+                let (a, b) = pixel_op::arguments(source_first, destination, source_pixel);
+                context.call_function(function, &[a as WIPICWord, b as WIPICWord, gctx.param1]).await? as u16
+            }
+        };
+
+        blended.push((x, y, result));
+    }
+
+    write_blended(context, &dst_framebuffer, &blended)?;
 
     Ok(())
 }
@@ -3347,8 +3399,8 @@ mod tests {
     use super::ContextLayout;
     use super::WIPICGraphicsContextIdx as Idx;
     use super::{
-        create_image, destination_stride, destroy_image, draw_image, draw_string, get_context, get_image_property, get_string_width,
-        get_unicode_string_width, init_context, set_context, surface_content, surface_thumbnail,
+        copy_frame_buffer, create_image, destination_stride, destroy_image, draw_image, draw_string, get_context, get_image_property,
+        get_string_width, get_unicode_string_width, init_context, set_context, surface_content, surface_thumbnail,
     };
     use crate::context::{WIPICContext, test::TestContext};
 
@@ -3738,6 +3790,63 @@ mod tests {
 
         let copied = drawn.get_pixel(1, 0);
         assert_eq!((copied.r, copied.g, copied.b), (0xff, 0x00, 0x00), "a kept colour should be copied");
+    }
+
+    /// A frame-buffer copy goes through the context's operation, so a title that
+    /// recolours its text on the way to the screen gets it.
+    ///
+    /// 렙업만이살길 keeps every word black-on-green in an offscreen and copies it
+    /// through an operation at `0x115af1`: a green `0x2484` source keeps the
+    /// destination (its key), anything else becomes the text colour it holds in
+    /// a global - so a notice copies out green, a title red. Taken as a plain
+    /// copy the word came down black on a green block instead.
+    #[futures_test::test]
+    async fn a_frame_buffer_copy_runs_through_the_contexts_operation() {
+        let mut context = test_context();
+
+        context.set_pixel_op_takes_source_first(true);
+
+        // The shape 렙업만이살길 plants: the destination where the source is the
+        // green key, and a fixed text colour - red - everywhere else.
+        const KEY: u32 = 0x2484;
+        const TEXT: u32 = 0xf800; // red in RGB565
+        context.set_guest_function(|_, args| if args[0] == KEY { args[1] } else { TEXT });
+
+        let pgc_handle = context.alloc(core::mem::size_of::<super::WIPICGraphicsContext>() as u32).unwrap();
+        let pgc = context.data_ptr(pgc_handle).unwrap();
+        init_context(&mut context, pgc).await.unwrap();
+
+        // A two-pixel glyph kept black-on-green, copied over a grey background.
+        let destination = framebuffer_of(&mut context, 2, 1, &[0xff20_2020, 0xff20_2020]).await;
+        let source = framebuffer_of(&mut context, 2, 1, &[0xff21_9221, 0xff00_0000]).await;
+
+        // A function address of its own, so the shared classification cache does
+        // not hand this test an operation another one taught it.
+        set_context(&mut context, pgc, Idx::PixelopIdx, 0x115a).await.unwrap();
+
+        copy_frame_buffer(&mut context, destination, 0, 0, 2, 1, source, 0, 0, pgc).await.unwrap();
+
+        let handle = read_generic(&context, context.data_ptr(destination).unwrap()).unwrap();
+        let copied = super::FrameBuffer(handle).image(&mut context).unwrap();
+
+        // The green key kept the grey background - read and written back through
+        // the 16bpp the operation works in, so it is the grey rounded to RGB565,
+        // not the green - and the black glyph pixel took the text colour, red.
+        let grey = Rgb565Pixel::to_color(Rgb565Pixel::from_color(Color {
+            a: 0xff,
+            r: 0x20,
+            g: 0x20,
+            b: 0x20,
+        }));
+        let kept = copied.get_pixel(0, 0);
+        assert_eq!((kept.r, kept.g, kept.b), (grey.r, grey.g, grey.b), "the key should leave the background");
+
+        let recoloured = copied.get_pixel(1, 0);
+        assert_eq!(
+            (recoloured.r, recoloured.g, recoloured.b),
+            (0xff, 0x00, 0x00),
+            "the glyph should take the text colour"
+        );
     }
 
     /// A fade of the title's own is recognised and done here, not asked about
