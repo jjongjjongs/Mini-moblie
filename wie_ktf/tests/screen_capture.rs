@@ -41,6 +41,8 @@
 //!   to be reachable at all: 드래곤하트 paints
 //!   `게임이 설치 되었습니다. 다시 실행해 주세요.` and goes no further, whatever
 //!   it is sent. Only the second launch is captured.
+//! - `WIE_PRELOAD_DIR` - a directory whose files are put into the title's
+//!   storage before it starts, to begin from a save.
 //! - `WIE_TICKS2` - the second launch's tick budget, when it needs a different
 //!   one from the first (default: the same).
 //! - `WIE_REDRAW_ON_REQUEST` - feed a host paint only when the title asks for
@@ -573,6 +575,9 @@ fn ktf_archive_probe() {
     // One handset's storage, so a title that installs itself on its first run
     // finds what it wrote when it is started again.
     let state = TestPlatformState::default();
+    if let Ok(dir) = std::env::var("WIE_PRELOAD_DIR") {
+        preload_dir(&state, &files, &dir);
+    }
     let second = std::env::var("WIE_SCRIPT2").ok();
 
     if let Some(second) = second {
@@ -606,6 +611,31 @@ fn ktf_archive_probe() {
         std::env::var("WIE_SHOT").ok().as_deref(),
         native_size,
     );
+}
+
+/// Puts every file directly in `dir` into the title's storage, under the
+/// application id its descriptor names, before it starts - a save carried over
+/// from a handset or another emulator.
+fn preload_dir(state: &TestPlatformState, files: &BTreeMap<String, Vec<u8>>, dir: &str) {
+    let aid = files
+        .get("__adf__")
+        .and_then(|adf| {
+            adf.split(|x| *x == b'\n')
+                .find_map(|line| line.strip_prefix(b"AID:").map(|x| String::from_utf8_lossy(x).trim().to_owned()))
+        })
+        .expect("WIE_PRELOAD_DIR needs an archive whose descriptor names its AID");
+
+    for entry in std::fs::read_dir(dir).expect("preload dir") {
+        let path = entry.expect("preload entry").path();
+        if !path.is_file() {
+            continue;
+        }
+
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let data = std::fs::read(&path).expect("preload file");
+        eprintln!("[probe] preload {aid}/{name}: {} bytes", data.len());
+        state.preload_file(&aid, &name, data);
+    }
 }
 
 /// Runs the archive once over `state`, which is the handset's storage and
