@@ -345,6 +345,61 @@ pub fn lgt_local_apf2_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(frame)
 }
 
+/// What answers 액션퍼즐패밀리1's star purchase.
+///
+/// 액션퍼즐패밀리1 (컴투스) uses the same billing socket and framing as
+/// 액션퍼즐패밀리2, `211.115.66.250:15133`. Its purchase is that title's type-0
+/// login frame with five more bytes behind it: the `0x02` command, a `u16be`
+/// star count, and two zero bytes. Buying 5000 stars on `01046119269`:
+///
+/// ```text
+/// 00 4e 00 00 30 03 ec 00 00 02 05 "1.0.0" ... "01046119269" ... "0000..." 02 13 88 00 00
+/// ```
+///
+/// The granted frame [`lgt_local_apf2_response`] gives does not work here.
+/// The title's message handler (`0x54c00`) reads the reply's type from byte 3
+/// and dispatches on it. It handles 3 to 8, 10, 12, 100 and 101. Type 0 is not
+/// one of them, so it goes to the default branch. That branch sets the error
+/// state 10 and closes the socket, which is the 1.재접속 2.취소 the device
+/// showed.
+///
+/// Type 8 (`0x55f2e`) is the purchase result. It reads a status from byte 5.
+/// When the status is zero, it adds the stars the title asked for to the count
+/// it keeps at index `0x1d` of the player record, saves, and goes to screen 7.
+/// Any other status goes to the error screen, 14. So the answer is a type-8
+/// frame with a zero status, in the same eight-byte shape as the granted frame.
+///
+/// `None` for anything that is not that purchase: the login frame has to carry
+/// the purchase tail, with the command and the trailing zeros where the title
+/// writes them.
+pub fn lgt_local_apf1_star_purchase_response(request: &[u8]) -> Option<Vec<u8>> {
+    /// The type-0 login both titles open with: `00 49 00 00 30 ...`.
+    const LOGIN: usize = 73;
+    /// The `0x02` command, the `u16be` star count, and two zero bytes.
+    const PURCHASE_TAIL: usize = 5;
+    const PURCHASE_COMMAND: u8 = 0x02;
+    /// The type `0x55f2e` handles, and the status it accepts.
+    const PURCHASE_RESULT: u8 = 0x08;
+    const GRANTED: u8 = 0x00;
+
+    if request.len() != LOGIN + PURCHASE_TAIL
+        || u16::from_be_bytes([request[0], request[1]]) as usize != request.len()
+        || request[2..4] != [0x00, 0x00]
+        || request[4] != 0x30
+    {
+        return None;
+    }
+
+    let tail = &request[LOGIN..];
+    if tail[0] != PURCHASE_COMMAND || tail[3..] != [0x00, 0x00] {
+        return None;
+    }
+
+    // [00 08][00 08][00][status][00 00]: the length that counts itself, the
+    // type in byte 3, and the status in byte 5.
+    Some(vec![0x00, 0x08, 0x00, PURCHASE_RESULT, 0x00, GRANTED, 0x00, 0x00])
+}
+
 /// What answers EA프로야구2010's login.
 ///
 /// EA프로야구2010 (`0002E1D2`) opens a billing socket to `210.222.18.28:20102`
@@ -9362,6 +9417,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_cash_response(request))
         .or_else(|| lgt_local_seotda_response(request))
         .or_else(|| lgt_local_miniheroes2_response(request))
+        .or_else(|| lgt_local_apf1_star_purchase_response(request))
         .or_else(|| lgt_local_apf2_response(request))
         .or_else(|| lgt_local_ea_baseball_response(request))
         // Before the 제노니아 packet matcher, which claims these by their length
@@ -9985,6 +10041,37 @@ mod tests {
 
     /// Only the two 액션퍼즐패밀리2 frames are: not a wrong length, not a wrong
     /// header.
+    /// 액션퍼즐패밀리1's purchase of 5000 stars, off the device log.
+    fn apf1_star_purchase() -> Vec<u8> {
+        let mut frame = APF2_LOGIN.to_vec();
+        frame[1] = 0x4e;
+        frame[5..7].copy_from_slice(&[0x03, 0xec]);
+        frame[11..16].copy_from_slice(b"1.0.0");
+        frame.extend_from_slice(&[0x02, 0x13, 0x88, 0x00, 0x00]);
+        frame
+    }
+
+    #[test]
+    fn the_apf1_star_purchase_is_answered_with_a_granted_purchase_result() {
+        let request = apf1_star_purchase();
+        assert_eq!(request.len(), 78, "the 78-byte purchase the capture caught");
+
+        let reply = response(&request).expect("the purchase is answered");
+        assert_eq!(reply, [0x00, 0x08, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00]);
+        // The handler reads the type from byte 3 and the status from byte 5.
+        assert_eq!(reply[3], 8);
+        assert_eq!(reply[5], 0);
+    }
+
+    #[test]
+    fn the_apf2_login_is_not_taken_for_a_purchase() {
+        assert_eq!(lgt_local_apf1_star_purchase_response(APF2_LOGIN), None);
+
+        let mut other_command = apf1_star_purchase();
+        other_command[73] = 0x03;
+        assert_eq!(lgt_local_apf1_star_purchase_response(&other_command), None);
+    }
+
     #[test]
     fn only_the_apf2_frames_are_answered() {
         let mut wrong_length = APF2_LOGIN.to_vec();
