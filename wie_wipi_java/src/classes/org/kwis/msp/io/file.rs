@@ -139,6 +139,19 @@ impl File {
             }
         }
 
+        // Where it throws, an empty file is taken for a missing one too. Builds
+        // before that choice existed opened every missing read-only file by
+        // creating it empty, and those files are still in players' storage:
+        // 나이트테일즈 found the `save0.Dat` an earlier launch left behind,
+        // took it for a save and ran off the end of its zero bytes. A handset
+        // never had such a file, since a title only makes one by writing it.
+        if mode == Mode::READ_ONLY && context.system().missing_file_fails_read_open() {
+            let length: i64 = jvm.invoke_virtual(&file, "length", "()J", ()).await?;
+            if length == 0 {
+                return Err(jvm.exception("java/io/IOException", "File not found").await);
+            }
+        }
+
         let raf = jvm
             .new_class(
                 "java/io/RandomAccessFile",
