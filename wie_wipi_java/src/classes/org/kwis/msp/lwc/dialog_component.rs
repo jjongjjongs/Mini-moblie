@@ -38,15 +38,23 @@ pub struct DialogComponent;
 /// `actionState` while the modal loop is still running: no button chosen yet.
 const PENDING: i32 = 0;
 
-// The dialog-type and result constants, assigned here (the native values are
-// not recorded in the platform table). They only have to be self-consistent:
-// the caller sets a type with one and compares `doModal`'s result against the
-// others, and both ends are this class.
+// The dialog-type and result constants. The result constants are not the
+// platform's own field values (those are not recorded in the table) but the
+// values a title's compiled code hard-codes when it compares `doModal`'s
+// return - it inlines them rather than reading the static fields, so the
+// return value is all that matters, and it has to be the native one.
+//
+// `DLG_OK` is 0xb: 액션퍼즐패밀리's rank-name dialog does
+// `if (dlg.doModal() == 11) { copy the field's text into the nickname }` at
+// 0x71fe, and anything else skips the copy, so returning 1 silently dropped
+// every entered name. The type and `DLG_CANCEL` values only have to not
+// collide with 0xb; a title that reads them back would still see a consistent
+// set.
 const TYPE_NONE: i32 = 0;
 const TYPE_OK: i32 = 1;
 const TYPE_OK_CANCEL: i32 = 2;
 const DLG_TIMEOUT: i32 = 3;
-const DLG_OK: i32 = 1;
+const DLG_OK: i32 = 0xb;
 const DLG_CANCEL: i32 = 2;
 const OK_BUTTON: i32 = 0;
 const CANCEL_BUTTON: i32 = 1;
