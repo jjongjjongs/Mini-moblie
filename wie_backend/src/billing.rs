@@ -9217,6 +9217,141 @@ mod chessmaster_tests {
     }
 }
 
+/// 아무이유없어's marble shop, answered the way its own reader reads it.
+///
+/// The title (`00029288`) opens a socket to `211.234.100.70:9002` and writes a
+/// frame of its own behind the billing header. A purchase is 168 bytes:
+///
+/// ```text
+///   +0x00 u16  0x3c, the request kind
+///   +0x02      "NOREASON", the title's name on the gateway
+///   +0x1c u32  0x6c
+///   +0x20      the subscriber's number, from PHONENUMBER
+///   +0x3c u16  which pack - the index into the table at 0x1409678
+///   +0x40 u32  its price in won, the same table four rows on
+/// ```
+///
+/// `0x24bb4` picks the pack and sets the connection's state at `0x1505604` to
+/// `0x16`. Spending marbles on the server, `0x24c00`, writes a 112-byte frame
+/// of kind `0x32` and sets the state to `0x15`.
+///
+/// Whatever was asked, the reply is read the same way. `0x2575c` sends the
+/// request and then asks for sixty bytes. Once those are in, `0x25518` takes a
+/// `u16` code from `+0x00`, only to print it, and a `u32` length from `+0x1a`,
+/// little end first, read through a `memcpy`. It then reads that many bytes
+/// over the front of the same buffer and hands them to the state's handler.
+///
+/// Both handlers, `0x24c84` for a purchase and `0x24d00` for a spend, copy two
+/// bytes from the front of what they were given and go on only when that `s16`
+/// is zero. A purchase then adds the pack's marbles - 500, 1100, 2400 or 4000
+/// from the table - to the count at `[0x1501464 + 0xc]`. A spend takes the cost
+/// it sent away from that count. Anything else leaves the count alone and
+/// returns to the shop.
+///
+/// So the answer is the sixty-byte header announcing a two-byte body, and that
+/// body is a zero. Other kinds, such as the 100-byte ranking frame (`0x0a`),
+/// have a reader with a body of their own, and are left alone.
+///
+/// `None` for anything that is not one of those two frames: it has to carry
+/// the title's name and the size word the title writes into each kind.
+pub fn lgt_local_noreason_response(request: &[u8]) -> Option<Vec<u8>> {
+    const NAME: &[u8] = b"NOREASON\0";
+    const NAME_AT: usize = 2;
+    const SIZE_WORD_AT: usize = 0x1c;
+
+    /// The kind, the frame's length, and the word the title writes at `+0x1c`.
+    const PURCHASE: (u16, usize, u32) = (0x3c, 168, 0x6c);
+    const SPEND: (u16, usize, u32) = (0x32, 112, 0x34);
+
+    /// What `0x2575c` asks for before it knows the length of the rest.
+    const HEADER: usize = 60;
+    /// Where `0x25518` reads the length of the rest from.
+    const BODY_LENGTH_AT: usize = 0x1a;
+    /// The `s16` both handlers go on only when it is zero.
+    const GRANTED: [u8; 2] = [0, 0];
+
+    if request.len() < SIZE_WORD_AT + 4 || request.get(NAME_AT..NAME_AT + NAME.len()) != Some(NAME) {
+        return None;
+    }
+
+    let kind = u16::from_le_bytes([request[0], request[1]]);
+    let size_word = u32::from_le_bytes(request[SIZE_WORD_AT..SIZE_WORD_AT + 4].try_into().ok()?);
+
+    if ![PURCHASE, SPEND].contains(&(kind, request.len(), size_word)) {
+        return None;
+    }
+
+    let mut response = vec![0u8; HEADER];
+    response[BODY_LENGTH_AT..BODY_LENGTH_AT + 4].copy_from_slice(&(GRANTED.len() as u32).to_le_bytes());
+    response.extend_from_slice(&GRANTED);
+
+    Some(response)
+}
+
+#[cfg(test)]
+mod noreason_tests {
+    use super::*;
+
+    /// The purchase the device log caught: pack 3, 3000 won, on `01024901107`.
+    fn purchase() -> Vec<u8> {
+        let mut frame = vec![0u8; 168];
+        frame[0] = 0x3c;
+        frame[2..10].copy_from_slice(b"NOREASON");
+        frame[0x1c] = 0x6c;
+        frame[0x20..0x2b].copy_from_slice(b"01024901107");
+        frame[0x3c] = 3;
+        frame[0x40..0x44].copy_from_slice(&3000u32.to_le_bytes());
+        frame
+    }
+
+    fn spend() -> Vec<u8> {
+        let mut frame = vec![0u8; 112];
+        frame[0] = 0x32;
+        frame[2..10].copy_from_slice(b"NOREASON");
+        frame[0x1c] = 0x34;
+        frame
+    }
+
+    #[test]
+    fn the_gateway_answers_the_purchase_and_the_spend() {
+        let granted = lgt_local_noreason_response(&purchase()).expect("the purchase is answered");
+        assert_eq!(response(&purchase()), Some(granted.clone()));
+        assert_eq!(response(&spend()), Some(granted));
+    }
+
+    #[test]
+    fn the_answer_is_a_header_announcing_a_zero_code() {
+        let reply = lgt_local_noreason_response(&purchase()).expect("the purchase is answered");
+
+        // Sixty bytes are what the title reads first, and the length it reads
+        // from them is the length of what is left.
+        assert_eq!(reply.len(), 62);
+        let body = u32::from_le_bytes(reply[0x1a..0x1e].try_into().unwrap()) as usize;
+        assert_eq!(body, reply.len() - 60);
+
+        // The handlers read the body's first two bytes as a signed code, and
+        // only zero adds the marbles.
+        assert_eq!(i16::from_le_bytes([reply[60], reply[61]]), 0);
+    }
+
+    #[test]
+    fn the_ranking_frame_and_strangers_are_left_alone() {
+        let mut ranking = vec![0u8; 100];
+        ranking[0] = 0x0a;
+        ranking[2..10].copy_from_slice(b"NOREASON");
+        ranking[0x1c] = 0x28;
+        assert_eq!(lgt_local_noreason_response(&ranking), None);
+
+        let mut stranger = purchase();
+        stranger[2] = b'X';
+        assert_eq!(lgt_local_noreason_response(&stranger), None);
+
+        let mut truncated = purchase();
+        truncated.truncate(100);
+        assert_eq!(lgt_local_noreason_response(&truncated), None);
+    }
+}
+
 pub fn response(request: &[u8]) -> Option<Vec<u8>> {
     // First: its signature is four things at once - see
     // `lgt_local_maguer2011_response` - so nothing else can be taken for it,
@@ -9264,6 +9399,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_soul_hunter_raki_response(request))
         .or_else(|| lgt_local_soul_hunter_raki_catalogue_response(request))
         .or_else(|| lgt_local_nexon_mobile_response(request))
+        .or_else(|| lgt_local_noreason_response(request))
         .or_else(|| ktf_local_download_response(request))
 }
 
