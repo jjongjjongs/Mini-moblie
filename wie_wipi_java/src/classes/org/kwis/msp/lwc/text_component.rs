@@ -31,6 +31,7 @@ impl TextComponent {
                 JavaMethodProto::new("getMaxLength", "()I", Self::get_max_length, Default::default()),
                 JavaMethodProto::new("getString", "()Ljava/lang/String;", Self::get_string, Default::default()),
                 JavaMethodProto::new("setString", "(Ljava/lang/String;)V", Self::set_string, Default::default()),
+                JavaMethodProto::new("setString", "(Ljava/lang/String;I)V", Self::set_string_with_position, Default::default()),
                 JavaMethodProto::new("insert", "(Ljava/lang/String;III)V", Self::insert, Default::default()),
                 JavaMethodProto::new("insert", "([CIII)V", Self::insert_chars, Default::default()),
                 JavaMethodProto::new("delete", "(II)V", Self::delete, Default::default()),
@@ -613,6 +614,36 @@ impl TextComponent {
         let _: () = jvm.invoke_virtual(&this, "invalidate", "()V", ()).await?;
 
         let _: () = jvm.invoke_virtual(&this, "repaint", "()V", ()).await?;
+
+        Ok(())
+    }
+
+    /// `setString(String, int)`: set the text, then leave the caret at
+    /// `position` instead of the start.
+    ///
+    /// Native keeps this at dispatch slot 59. 미니게임천국4's name field calls it
+    /// when it finalises the entered name, and the one-argument `setString` -
+    /// which resets the caret to 0 - does everything else, so this defers to it
+    /// (virtually, so a subclass field's own `setString` still runs) and then
+    /// places the caret, clamped to the text that is actually there.
+    async fn set_string_with_position(
+        jvm: &Jvm,
+        _: &mut WieJvmContext,
+        this: ClassInstanceRef<TextComponent>,
+        data: ClassInstanceRef<String>,
+        position: i32,
+    ) -> JvmResult<()> {
+        let _: () = jvm.invoke_virtual(&this, "setString", "(Ljava/lang/String;)V", (data,)).await?;
+
+        let text: ClassInstanceRef<String> = jvm.get_field(&this, "text", "Ljava/lang/String;").await?;
+        let length: i32 = if text.is_null() {
+            0
+        } else {
+            jvm.invoke_virtual(&text, "length", "()I", ()).await?
+        };
+
+        let mut this = this;
+        jvm.put_field(&mut this, "m_cPos", "I", position.clamp(0, length)).await?;
 
         Ok(())
     }
