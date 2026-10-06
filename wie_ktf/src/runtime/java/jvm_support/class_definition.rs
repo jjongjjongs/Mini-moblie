@@ -284,6 +284,48 @@ impl JavaClassDefinition {
         Ok((*name).clone())
     }
 
+    /// Whether an object of this class is one of `ptr_target`: this class, a
+    /// parent, or an interface either of them names, followed by address.
+    ///
+    /// A module's class record lists the interfaces it implements at
+    /// `ptr_interfaces`, as many as `unk6` says - 삼국쟁패's `y` names its one
+    /// interface `c` there, and stores a `y` into a `c[]` - while a class this
+    /// runtime makes leaves both zero. An entry that is not a class record (a
+    /// relocated module's unresolved import index) is passed over.
+    pub fn is_assignable_to(&self, ptr_target: u32) -> Result<bool> {
+        /// What a KTF class holds in its first word: its own address plus four.
+        fn names_itself(core: &ArmCore, ptr_class: u32) -> bool {
+            matches!(read_generic::<u32, _>(core, ptr_class), Ok(first) if first == ptr_class + 4)
+        }
+
+        /// More than any class declares; a count past it is not a count.
+        const MAX_INTERFACES: u16 = 32;
+
+        let mut pending = vec![self.ptr_raw];
+        let mut seen = Vec::new();
+        while let Some(current) = pending.pop() {
+            if current == ptr_target {
+                return Ok(true);
+            }
+            if current == 0 || seen.contains(&current) || !names_itself(&self.core, current) {
+                continue;
+            }
+            seen.push(current);
+
+            let raw: RawJavaClass = read_generic(&self.core, current)?;
+            let descriptor: RawJavaClassDescriptor = read_generic(&self.core, raw.ptr_descriptor)?;
+
+            pending.push(descriptor.ptr_parent_class);
+            if descriptor.ptr_interfaces != 0 && descriptor.unk6 <= MAX_INTERFACES {
+                for index in 0..descriptor.unk6 as u32 {
+                    pending.push(read_generic(&self.core, descriptor.ptr_interfaces + index * size_of::<u32>() as u32)?);
+                }
+            }
+        }
+
+        Ok(false)
+    }
+
     pub fn parent_class(&self) -> Result<Option<JavaClassDefinition>> {
         let raw: RawJavaClass = read_generic(&self.core, self.ptr_raw)?;
         let descriptor: RawJavaClassDescriptor = read_generic(&self.core, raw.ptr_descriptor)?;

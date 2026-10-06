@@ -669,6 +669,12 @@ pub async fn java_check_type(core: &mut ArmCore, jvm: &mut Jvm, ptr_class: u32, 
         return Ok(1);
     }
 
+    // The record walk sees the interfaces a module's own class implements,
+    // which the JVM's view of that class does not carry.
+    if instance.class()?.is_assignable_to(ptr_class)? {
+        return Ok(1);
+    }
+
     let class = JavaClassDefinition::from_raw(ptr_class, core);
     let class_name = class.name()?;
     let result = jvm.is_instance(&instance, &class_name);

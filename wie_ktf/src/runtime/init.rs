@@ -213,9 +213,8 @@ fn module_object_class(core: &mut ArmCore, ptr_instance: u32) -> Result<u32> {
 ///
 /// The module asks this before it stores into an array of objects, and throws
 /// `ArrayStoreException` on a no. Walking the object's own class up its
-/// parents answers it: a KTF class record carries its parent and nothing
-/// about its interfaces - `JavaClassDefinition::interface_names` has none
-/// either - so an interface is the one thing this cannot see.
+/// parents and the interfaces each names answers it - see
+/// `JavaClassDefinition::is_assignable_to`.
 const MODULE_IS_INSTANCE: u32 = 0x48 / size_of::<u32>() as u32;
 
 /// Whether `ptr_instance` is one of `ptr_class`.
@@ -231,18 +230,11 @@ fn module_is_instance(core: &mut ArmCore, ptr_class: u32, ptr_instance: u32) -> 
         return Ok(1);
     }
 
-    let mut current = module_object_class(core, ptr_instance)?;
-    while current != 0 {
-        if current == ptr_class {
-            return Ok(1);
-        }
-
-        let class: JavaClass = read_generic(core, current)?;
-        let descriptor: JavaClassDescriptor = read_generic(core, class.ptr_descriptor)?;
-        current = descriptor.ptr_parent_class;
+    let instance_class = module_object_class(core, ptr_instance)?;
+    if KtfJvmSupport::class_from_raw(core, instance_class).is_assignable_to(ptr_class)? {
+        return Ok(1);
     }
 
-    let instance_class = module_object_class(core, ptr_instance)?;
     let instance_name = KtfJvmSupport::class_from_raw(core, instance_class).name()?;
     let class_name = KtfJvmSupport::class_from_raw(core, ptr_class).name()?;
     tracing::debug!("{instance_name} ({instance_class:#x}) is not a {class_name} ({ptr_class:#x})");
