@@ -2306,9 +2306,9 @@ mod scrambled_opcode_header_tests {
 
         let reply = response(&request).expect("the session is answered");
 
-        // 미니게임천국4's answer, `00 05 00 00 00`, with `[2]` set and the sum
-        // behind it: 0 + 6 + 1 + 0 + 0 = 7, XORed with 0x9a.
-        assert_eq!(reply, [0x00, 0x06, 0x01, 0x00, 0x00, 0x07 ^ 0x9a]);
+        // 미니게임천국4's answer, `00 05 00 c8 00`, with `[2]` set and the sum
+        // behind it: 0 + 6 + 1 + 0xc8 + 0 = 0xcf, XORed with 0x9a.
+        assert_eq!(reply, [0x00, 0x06, 0x01, 0xc8, 0x00, 0xcf ^ 0x9a]);
     }
 
     #[test]
@@ -2461,7 +2461,11 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
     const KTF_SESSION_ANSWER_OPCODE: u8 = 0xc8;
     /// Where the body carries the handset model, or 미니게임천국4's name.
     const KTF_TITLE_AT: usize = 68;
-    const MINIGAME_HEAVEN_4: &[u8] = b"MINIGAMEHEAVEN4\0";
+    /// 미니게임천국3 writes `MINIGAMEHEAVEN3_KR` in the same place and reads
+    /// answers the same way: its own dispatcher (`0x11acbc`) switches on `0xc8`,
+    /// `0xca` and `0xcc`, and its `0xc8` case (`0x11b174`) reads nothing and
+    /// sends `0xc9` next.
+    const MINIGAME_HEAVEN: &[u8] = b"MINIGAMEHEAVEN";
 
     /// The library's type `5`, which carries nothing and is answered in kind.
     const SIGNAL_OPCODE: u8 = 0x01;
@@ -2537,6 +2541,9 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
     const APPROVAL_ANSWER_OPCODE: u8 = 0xca;
     /// `0x47b04` sends the approval back, and `0x47dd0` reads the answer.
     const CONFIRM_OPCODE: u8 = 0xcb;
+    /// 미니게임천국3 and 4's shorter approval body, and the kind it opens with.
+    const SHORT_APPROVAL_BODY: usize = 6;
+    const SHORT_APPROVAL_KIND: u16 = 0x0a;
     const CONFIRM_ANSWER_OPCODE: u8 = 0xcc;
     /// `0x47b5c` closes the walk, and `0x481d6` reads the answer for its opcode
     /// alone.
@@ -2561,7 +2568,7 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
     let body = &request[HEADER..];
     let (opcode, answer): (u8, Vec<u8>) = match request[3] {
         SESSION_OPCODE if body.len() >= SESSION_BODY_MIN && SERVICES.contains(&u16::from_be_bytes([body[0], body[1]])) => {
-            if body.get(KTF_TITLE_AT..KTF_TITLE_AT + MINIGAME_HEAVEN_4.len()) == Some(MINIGAME_HEAVEN_4) {
+            if body.get(KTF_TITLE_AT..KTF_TITLE_AT + MINIGAME_HEAVEN.len()) == Some(MINIGAME_HEAVEN) {
                 (KTF_SESSION_ANSWER_OPCODE, Vec::new())
             } else {
                 (SESSION_OPCODE, Vec::new())
@@ -2596,8 +2603,21 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
             answer.extend_from_slice(ORDER_CODE);
             (APPROVAL_ANSWER_OPCODE, answer)
         }
+        // 미니게임천국3 and 4 ask with six bytes: the `u16` `0x0a` and a `u32`
+        // amount (`00 0a 00 00 0b b8` for 3000). Both read the answer the way
+        // `0x47fea` does - 4's `0x130904`, 3's `0x11ae3e`: a `u32` and eight
+        // bytes, sent back out under `0xcb`. The amount goes out as the order,
+        // so it comes back with `0xcb` and the confirmation can hand it on.
+        APPROVAL_OPCODE if body.len() == SHORT_APPROVAL_BODY && u16::from_be_bytes([body[0], body[1]]) == SHORT_APPROVAL_KIND => {
+            let mut answer = Vec::from(&body[2..6]);
+            answer.extend_from_slice(ORDER_CODE);
+            (APPROVAL_ANSWER_OPCODE, answer)
+        }
         // The order and its code, sent back the way `0x47fea` handed them over.
-        CONFIRM_OPCODE if body.len() == 4 + ORDER_CODE.len() => (CONFIRM_ANSWER_OPCODE, Vec::from(ORDER.to_be_bytes())),
+        // The answer is the order again. 엘피스 keeps it without comparing it.
+        // 미니게임천국3's reader (`0x11b10a`) adds it to the stars it keeps at
+        // `+0x3e4`, and for that title the order is the amount it asked for.
+        CONFIRM_OPCODE if body.len() == 4 + ORDER_CODE.len() => (CONFIRM_ANSWER_OPCODE, Vec::from(&body[..4])),
         // The order, the product code and the quantity, and the order's code
         // behind them. Nothing reads the answer's body, so it has none.
         SETTLE_OPCODE if body.len() == 4 + 4 + ORDER_CODE.len() => (SETTLE_OPCODE, Vec::new()),
@@ -10317,6 +10337,22 @@ mod tests {
         assert_eq!(&reply, &[0x00, 0x06, 0x00, 0x17, 0x00, 0x01]);
     }
 
+    /// 미니게임천국4's approval, off the device log, and the confirmation that
+    /// follows it: the amount goes out as the order and comes back with it.
+    #[test]
+    fn 미니게임천국s_purchase_carries_its_amount_through_the_walk() {
+        let approval = [0x00, 0x0b, 0x00, 0xc9, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x0b, 0xb8];
+        let reply = response(&approval).expect("the approval is answered");
+        assert_eq!(&reply[..5], &[0x00, 0x11, 0x00, 0xca, 0x00]);
+        assert_eq!(&reply[5..9], &3000u32.to_be_bytes());
+        assert_eq!(&reply[9..], b"00000001");
+
+        let mut confirm = alloc::vec![0x00, 0x11, 0x00, 0xcb, 0x00];
+        confirm.extend_from_slice(&reply[5..]);
+        let reply = response(&confirm).expect("the confirmation is answered");
+        assert_eq!(&reply, &[0x00, 0x09, 0x00, 0xcc, 0x00, 0x00, 0x00, 0x0b, 0xb8]);
+    }
+
     /// 미니게임천국4's session, off the device log, is answered under the opcode
     /// its own reader takes as the connection's answer.
     #[test]
@@ -10332,9 +10368,9 @@ mod tests {
         let reply = response(&session).expect("the session is answered");
         assert_eq!(&reply, &[0x00, 0x05, 0x00, 0xc8, 0x00]);
 
-        // 미니게임천국3 is not this title, and keeps the answer it had.
+        // A title that writes a handset model there keeps the answer it had.
         let mut other = session.clone();
-        other[5 + 68 + 14] = b'3';
+        other[5 + 68..5 + 68 + 15].copy_from_slice(b"Emulator\0\0\0\0\0\0\0");
         assert_eq!(&response(&other).unwrap(), &[0x00, 0x05, 0x00, 0x00, 0x00]);
     }
 
