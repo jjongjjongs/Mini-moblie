@@ -7,6 +7,7 @@ use std::{
 };
 
 use wie_backend::{Emulator, Event, KeyCode, Options, drm_container, extract_zip};
+use wie_brew::BrewEmulator;
 use wie_j2me::J2MEEmulator;
 use wie_ktf::KtfEmulator;
 use wie_lgt::LgtEmulator;
@@ -152,18 +153,6 @@ fn has_extension(name: &str, extension: &str) -> bool {
     let name = name.rsplit('/').next().unwrap_or(name);
 
     name.len() > extension.len() && name[name.len() - extension.len()..].eq_ignore_ascii_case(extension)
-}
-
-/// Whether the archive is a Qualcomm BREW application rather than a WIPI or
-/// J2ME one: its compiled module (`.mod`) beside the module information file
-/// (`.mif`) that describes it, and no jar.
-///
-/// KTF sold BREW titles before WIPI, and they turn up repacked the same way -
-/// 카샨 is `kashan.mod`, `18933.mif`, `kashan.sig` and its data files. None of
-/// the loaders here runs BREW, and without this the zip fell through to the
-/// bare-jar path and the J2ME class loader panicked looking for a manifest.
-fn brew_application(files: &BTreeMap<String, Vec<u8>>) -> bool {
-    files.keys().any(|name| has_extension(name, ".mod")) && files.keys().any(|name| has_extension(name, ".mif"))
 }
 
 /// Whether a zip handed to the J2ME loader could be a jar at all: one carries a
@@ -504,6 +493,7 @@ impl Runner {
         // the chance to name its own panel first; almost none do, and those fall
         // back to the default.
         let (width, height) = LgtEmulator::screen_size(&data)
+            .or_else(|| BrewEmulator::screen_size(&data))
             .or_else(|| SktEmulator::screen_size(&data))
             .or_else(|| KtfEmulator::screen_size(&data))
             .or_else(|| j2me_panel(&data))
@@ -744,8 +734,13 @@ fn build_emulator(platform: Box<AndroidPlatform>, data: &[u8], options: Options)
         return Err(message);
     }
 
-    if brew_application(&files) {
-        return Err("BREW 애플리케이션(.mod/.mif)은 지원하지 않는 형식입니다. WIPI 또는 J2ME 배포본을 받아 주세요.".to_owned());
+    // A BREW application - KTF's earlier platform - is a module and its
+    // information file, with no descriptor, so it is told apart from the WIPI
+    // archives by that pair before they are tried.
+    if BrewEmulator::loadable_archive(&files) {
+        return BrewEmulator::from_archive(platform, files)
+            .map(|x| Box::new(x) as Box<dyn Emulator + Send>)
+            .map_err(|x| format!("BREW 애플리케이션을 실행할 수 없습니다: {x}"));
     }
 
     // Handset archives are detected by their descriptor. A jar carries no
@@ -849,6 +844,14 @@ pub fn save_ids(data: &[u8]) -> Option<SaveIds> {
         }
     }
 
+    // A BREW application keeps its writes under its ClassID.
+    if let Some(id) = BrewEmulator::save_id(&files) {
+        return Some(SaveIds {
+            records: id.clone(),
+            files: id,
+        });
+    }
+
     // An SKT archive names itself in its descriptor, or failing that in the
     // descriptor's own filename, and uses the one name for both.
     if let Some((name, contents)) = files.iter().find(|(name, _)| name.ends_with(".msd")) {
@@ -898,7 +901,7 @@ pub fn carrier(data: &[u8]) -> &'static str {
         return "DRM";
     }
 
-    if KtfEmulator::loadable_archive(&files) {
+    if KtfEmulator::loadable_archive(&files) || BrewEmulator::loadable_archive(&files) {
         return "KTF";
     }
     if LgtEmulator::loadable_archive(&files) {
@@ -951,8 +954,8 @@ pub fn inspect(data: &[u8]) -> String {
     }
 
     let jar = packaged_jar(&files).unwrap_or_else(|| data.to_vec());
-    let format = if brew_application(&files) {
-        "BREW application (unsupported)"
+    let format = if BrewEmulator::loadable_archive(&files) {
+        "BREW application"
     } else if KtfEmulator::loadable_archive(&files) {
         "KTF archive"
     } else if LgtEmulator::loadable_archive(&files) {
@@ -1097,7 +1100,7 @@ mod tests {
     }
 
     #[test]
-    fn a_brew_application_is_named_and_not_taken_for_a_jar() {
+    fn a_brew_application_is_named_as_one() {
         let package = zip_of(&[
             ("kashan/kashan.mod", b"module"),
             ("kashan/18933.mif", b"info"),

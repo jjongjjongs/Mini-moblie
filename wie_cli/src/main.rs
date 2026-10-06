@@ -27,6 +27,7 @@ use rodio::{DeviceSinkBuilder, Player, buffer::SamplesBuffer, conversions::Sampl
 use winit::keyboard::{KeyCode as WinitKeyCode, PhysicalKey};
 
 use wie_backend::{Emulator, Event, Filesystem, Instant, KeyCode, Options, Platform, ProfileSample, Screen, extract_zip};
+use wie_brew::BrewEmulator;
 use wie_j2me::J2MEEmulator;
 use wie_ktf::KtfEmulator;
 use wie_lgt::LgtEmulator;
@@ -206,6 +207,7 @@ pub fn start(filename: &str, options: Options) -> anyhow::Result<()> {
     // one, so let the archive name its own before the window exists, the same
     // way the Android runner does. Almost none do; those fall back to 240x320.
     let (width, height) = LgtEmulator::screen_size(&buf)
+        .or_else(|| BrewEmulator::screen_size(&buf))
         .or_else(|| SktEmulator::screen_size(&buf))
         .or_else(|| KtfEmulator::screen_size(&buf))
         .unwrap_or((240, 320));
@@ -216,7 +218,9 @@ pub fn start(filename: &str, options: Options) -> anyhow::Result<()> {
     let mut emulator: Box<dyn Emulator> = if extension.ends_with("zip") {
         let files = extract_zip(&buf).unwrap();
 
-        if KtfEmulator::loadable_archive(&files) {
+        if BrewEmulator::loadable_archive(&files) {
+            Box::new(BrewEmulator::from_archive(platform, files)?)
+        } else if KtfEmulator::loadable_archive(&files) {
             Box::new(KtfEmulator::from_archive(platform, files, options)?)
         } else if LgtEmulator::loadable_archive(&files) {
             Box::new(LgtEmulator::from_archive(platform, files, options)?)

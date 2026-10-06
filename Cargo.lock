@@ -3495,6 +3495,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wie_backend",
+ "wie_brew",
  "wie_core_arm",
  "wie_j2me",
  "wie_ktf",
@@ -3529,6 +3530,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "wie_brew"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "encoding_rs",
+ "spin",
+ "test_utils",
+ "tracing",
+ "tracing-subscriber",
+ "wie_backend",
+ "wie_core_arm",
+ "wie_util",
+ "wie_wipi_c",
+]
+
+[[package]]
 name = "wie_cli"
 version = "0.0.1"
 dependencies = [
@@ -3546,6 +3563,7 @@ dependencies = [
  "tracing-subscriber",
  "web-sys",
  "wie_backend",
+ "wie_brew",
  "wie_j2me",
  "wie_ktf",
  "wie_lgt",
