@@ -1010,6 +1010,7 @@ impl TextComponent {
         let text: ClassInstanceRef<String> = jvm.get_field(&this, "text", "Ljava/lang/String;").await?;
 
         let text = JavaLangString::to_rust_string(jvm, &text).await?;
+        tracing::debug!("org.kwis.msp.lwc.TextComponent::getString({this:?}) -> {text:?}");
         let text = JavaLangString::from_rust_string(jvm, &text).await?;
 
         Ok(text.into())

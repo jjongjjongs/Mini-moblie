@@ -323,7 +323,10 @@ impl DialogComponent {
     }
 
     async fn get_action_state(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<i32> {
-        jvm.get_field(&this, "actionState", "I").await
+        let state: i32 = jvm.get_field(&this, "actionState", "I").await?;
+        tracing::debug!("org.kwis.msp.lwc.DialogComponent::getActionState({this:?}) -> {state}");
+
+        Ok(state)
     }
 
     /// Shows the dialog and runs a modal loop until a button closes it,
@@ -388,6 +391,8 @@ impl DialogComponent {
         }
 
         let _: () = jvm.invoke_virtual(&this, "hide", "()V", ()).await?;
+
+        tracing::debug!("org.kwis.msp.lwc.DialogComponent::doModal({this:?}) -> {result}");
 
         Ok(result)
     }
