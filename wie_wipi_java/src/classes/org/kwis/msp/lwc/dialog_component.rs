@@ -52,6 +52,13 @@ const OK_BUTTON: i32 = 0;
 const CANCEL_BUTTON: i32 = 1;
 const TIMEOUT_INFINITE: i32 = -1;
 
+/// The KEY event type for a key going down, as `net.wie.CardCanvas` feeds it
+/// in (press = 1, release = 2). The dialog closes only on the press: the key
+/// that opened it was pressed on the screen underneath, so the dialog is shown
+/// between that press and its release and the release is the first event it
+/// sees. Acting on the release would close the dialog the instant it opened.
+const KEY_PRESSED: i32 = 1;
+
 /// How long one poll of the modal loop sleeps, in emulated milliseconds. Short
 /// enough that a soft-key press is answered promptly, long enough not to spin.
 const POLL_MS: u64 = 16;
@@ -419,9 +426,15 @@ impl DialogComponent {
     /// digits and CLEAR are forwarded untouched, which is what lets the name
     /// field cycle its input mode and compose text; those never close the
     /// dialog.
+    ///
+    /// Only the press edge closes it ([`KEY_PRESSED`]): the key that opened the
+    /// dialog was pressed on the screen underneath, so its release is the first
+    /// event this dialog sees and closing on it would make the dialog flash
+    /// open and shut.
     async fn process_event(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, event: i32, p1: i32, p2: i32, p3: i32) -> JvmResult<bool> {
-        // 3 = KEY; p2 is the key code.
+        // 3 = KEY; p1 is the press/release type, p2 the key code.
         if event == 3
+            && p1 == KEY_PRESSED
             && let Some(state) = Self::dialog_result_for_key(jvm, &this, p2).await?
         {
             let mut this = this;
