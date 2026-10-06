@@ -171,23 +171,6 @@ impl TextFieldComponentAction {
 
         let _: () = jvm.invoke_virtual(&outer, "repaint", "()V", ()).await?;
 
-        // Tell the field its text just changed, now the commit is settled.
-        //
-        // -99 is the framework's text-change notification (Display.getGameAction
-        // maps it to no action, so it opens nothing; the field's own keyNotify
-        // raises it on every inline edit before it touches the caret). A title
-        // that subclasses the field reads the new text out of it when its
-        // keyNotify sees -99 - 액션퍼즐패밀리's name field is one: a compiled
-        // TextFieldComponent subclass whose keyNotify copies getString() into the
-        // byte[] it shows back on its "서버에 등록될 닉네임 ... 맞나요?" confirm
-        // screen. The wide editor's commit above wrote straight to the field's
-        // text and raised no notification, so that title kept the name it had
-        // read before the editor opened and confirmed the pre-edit value. Raise
-        // it virtually so the subclass's keyNotify runs and re-reads; a field
-        // with no override just runs the base caret bookkeeping for -99, exactly
-        // as a native inline edit would.
-        let _: bool = jvm.invoke_virtual(&outer, "keyNotify", "(II)Z", (1i32, -99i32)).await?;
-
         Ok(())
     }
 }
