@@ -9137,6 +9137,7 @@ fn nexon_frame(command: u16, body: &[u8]) -> Vec<u8> {
 /// | 6 | the phone number and three integers | result |
 /// | 300 | a few integers | result, eight bytes, a count, then the file list |
 /// | 302 | which file, from where | result, a length, and that many bytes of it |
+/// | 28 | the price | result |
 ///
 /// All big endian; the reader at `ac.a([B)V` sees each reply from its command
 /// on, so the result is the third byte, and anything but zero there is a
@@ -9149,7 +9150,13 @@ fn nexon_frame(command: u16, body: &[u8]) -> Vec<u8> {
 /// that nothing reads, and hands it over in one piece. It has to name
 /// something: with an empty list the title still asks for the first file, and
 /// indexes an empty array doing it.
+///
+/// The same service sells 캔디, the title's cash. A purchase walks 0 to 6 as
+/// above and then sends 28 with the price as a `writeInt`; the reply's result
+/// alone is read, and zero credits the 캔디 the title was holding for the sale
+/// and shows its own confirmation.
 const NEXON_DOWNLOAD_NOTICE: u16 = 4;
+const NEXON_CANDY_PURCHASE: u16 = 28;
 const NEXON_DOWNLOAD_LIST: u16 = 300;
 const NEXON_DOWNLOAD_FETCH: u16 = 302;
 
@@ -9166,7 +9173,7 @@ fn nexon_download_body(command: u16) -> Option<Vec<u8>> {
     let mut body = alloc::vec![NEXON_GRANTED];
 
     match command {
-        0 | 2 | 6 => {}
+        0 | 2 | 6 | NEXON_CANDY_PURCHASE => {}
         NEXON_DOWNLOAD_NOTICE => body.extend_from_slice(&[0, 0, 0]),
         NEXON_DOWNLOAD_LIST => {
             body.extend_from_slice(&[0; 8]);
@@ -13960,6 +13967,7 @@ mod nexon_mobile_tests {
     /// run, caught on the wire.
     const GOLF_CONNECT: [u8; 12] = [0x00, 0x00, 0x00, 0x0c, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01];
     const GOLF_NOTICE: [u8; 8] = [0x00, 0x00, 0x00, 0x08, 0xff, 0xff, 0x00, 0x04];
+    const GOLF_CANDY: [u8; 12] = [0x00, 0x00, 0x00, 0x0c, 0xff, 0xff, 0x00, 0x1c, 0x00, 0x00, 0x01, 0xf4];
     const GOLF_LIST: [u8; 20] = [
         0x00, 0x00, 0x00, 0x14, 0xff, 0xff, 0x01, 0x2c, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64,
     ];
@@ -13979,13 +13987,21 @@ mod nexon_mobile_tests {
 
     #[test]
     fn the_download_service_steps_are_granted() {
-        for request in [&GOLF_CONNECT[..], &GOLF_NOTICE[..], &GOLF_LIST[..], &GOLF_FETCH[..]] {
+        for request in [&GOLF_CONNECT[..], &GOLF_NOTICE[..], &GOLF_LIST[..], &GOLF_FETCH[..], &GOLF_CANDY[..]] {
             let reply = response(request).expect("answered");
 
             assert_eq!(int_at(&reply, 0) as usize, reply.len());
             assert_eq!(u16::from_be_bytes([reply[6], reply[7]]), u16::from_be_bytes([request[6], request[7]]) + 1);
             assert_eq!(seen(&reply)[2], NEXON_GRANTED);
         }
+    }
+
+    /// A 캔디 purchase is granted with the result alone.
+    #[test]
+    fn a_candy_purchase_is_granted() {
+        let reply = response(&GOLF_CANDY).expect("answered");
+
+        assert_eq!(seen(&reply), &[0x00, 0x1d, NEXON_GRANTED]);
     }
 
     /// The notice is a `u16` length at the fourth byte and that many bytes, and
