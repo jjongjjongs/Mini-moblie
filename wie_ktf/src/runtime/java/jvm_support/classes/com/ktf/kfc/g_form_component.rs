@@ -31,6 +31,7 @@ impl GFormComponent {
                     Default::default(),
                 ),
                 JavaMethodProto::new("layout", "()V", Self::layout, Default::default()),
+                JavaMethodProto::new("showNotify", "(Z)V", Self::show_notify, Default::default()),
             ],
             fields: vec![],
             access_flags: Default::default(),
@@ -78,6 +79,43 @@ impl GFormComponent {
     /// the box it draws for it to the top of the screen.
     async fn layout(_: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<()> {
         tracing::debug!("com.ktf.kfc.GFormComponent::layout({this:?})");
+
+        Ok(())
+    }
+}
+
+impl GFormComponent {
+    /// Lets the screen under the form show through the shell it is shown in.
+    ///
+    /// A KFC form is laid over the title's own screen: 삼국쟁패 draws its name
+    /// entry - the frame, the prompt, the box - itself, and hands the form
+    /// only the field, at the rectangle inside that box. Shown in a shell made
+    /// with the plain constructor, it came up on the shell's white page with
+    /// the field alone on it. The shell's card is made an overlay instead.
+    async fn show_notify(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, show: bool) -> JvmResult<()> {
+        tracing::debug!("com.ktf.kfc.GFormComponent::showNotify({this:?}, {show})");
+
+        let _: () = jvm
+            .invoke_special(&this, "org/kwis/msp/lwc/Component", "showNotify", "(Z)V", (show,))
+            .await?;
+
+        if !show {
+            return Ok(());
+        }
+
+        let mut parent: ClassInstanceRef<Component> = jvm.get_field(&this, "parent", "Lorg/kwis/msp/lwc/ContainerComponent;").await?;
+        while !parent.is_null() {
+            if jvm.is_instance(&**parent, "org/kwis/msp/lwc/ShellComponent") {
+                let mut card: ClassInstanceRef<()> = jvm.get_field(&parent, "proxyCard", "Lorg/kwis/msp/lwc/ProxyCard;").await?;
+                if !card.is_null() {
+                    jvm.put_field(&mut card, "transparent", "Z", true).await?;
+                }
+
+                break;
+            }
+
+            parent = jvm.get_field(&parent, "parent", "Lorg/kwis/msp/lwc/ContainerComponent;").await?;
+        }
 
         Ok(())
     }
