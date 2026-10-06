@@ -366,10 +366,12 @@ impl Brew {
     /// Delivers a key: the press and then the key typed, or the release.
     pub async fn key(&self, core: &mut ArmCore, code: u32, pressed: bool) -> Result<()> {
         if pressed {
-            self.send_event(core, EVENT_KEY_DOWN, code, 0).await?;
-            self.send_event(core, EVENT_KEY_TYPED, code, 0).await?;
+            let down = self.send_event(core, EVENT_KEY_DOWN, code, 0).await?;
+            let typed = self.send_event(core, EVENT_KEY_TYPED, code, 0).await?;
+            tracing::debug!("BREW key {code:#x} down: handled {down}, typed: handled {typed}");
         } else {
-            self.send_event(core, EVENT_KEY_UP, code, 0).await?;
+            let up = self.send_event(core, EVENT_KEY_UP, code, 0).await?;
+            tracing::debug!("BREW key {code:#x} up: handled {up}");
         }
 
         Ok(())
@@ -1367,25 +1369,38 @@ fn padded_text(core: &ArmCore, address: u32, first: Vec<u8>) -> Result<Vec<u8>> 
     Ok(run)
 }
 
-/// The code the title acts on for each key.
+/// The code the title acts on for each key: the handset's virtual key codes,
+/// `AVK_*`.
 ///
-/// The five-way pad is the ring around the 5 - `0xe000` with the digit's own
-/// character - and the digit keys are a block of their own from `0xe021`,
-/// which the title's numbered menu items answer to in order. Clear is
-/// `0xe030`.
+/// The digits are a block from `0xe021`, then star, pound, power, end, send
+/// and clear, then the pad - up, down, left, right, select - and the soft
+/// keys. The right soft key is the handset's back key, so it is clear.
 pub fn key_code(key: wie_backend::KeyCode) -> Option<u32> {
     use wie_backend::KeyCode;
 
-    const BASE: u32 = 0xe000;
     const DIGIT_BASE: u32 = 0xe021;
+    const STAR: u32 = 0xe02b;
+    const POUND: u32 = 0xe02c;
+    const END: u32 = 0xe02e;
+    const SEND: u32 = 0xe02f;
+    const CLEAR: u32 = 0xe030;
+    const UP: u32 = 0xe031;
+    const DOWN: u32 = 0xe032;
+    const LEFT: u32 = 0xe033;
+    const RIGHT: u32 = 0xe034;
+    const SELECT: u32 = 0xe035;
+    const SOFT1: u32 = 0xe036;
 
     Some(match key {
-        KeyCode::UP => BASE | b'2' as u32,
-        KeyCode::DOWN => BASE | b'8' as u32,
-        KeyCode::LEFT => BASE | b'4' as u32,
-        KeyCode::RIGHT => BASE | b'6' as u32,
-        KeyCode::OK => BASE | b'5' as u32,
-        KeyCode::CLEAR | KeyCode::RIGHT_SOFT_KEY => BASE | b'0' as u32,
+        KeyCode::UP => UP,
+        KeyCode::DOWN => DOWN,
+        KeyCode::LEFT => LEFT,
+        KeyCode::RIGHT => RIGHT,
+        KeyCode::OK => SELECT,
+        KeyCode::LEFT_SOFT_KEY => SOFT1,
+        KeyCode::CLEAR | KeyCode::RIGHT_SOFT_KEY => CLEAR,
+        KeyCode::CALL => SEND,
+        KeyCode::HANGUP => END,
         KeyCode::NUM0 => DIGIT_BASE,
         KeyCode::NUM1 => DIGIT_BASE + 1,
         KeyCode::NUM2 => DIGIT_BASE + 2,
@@ -1396,6 +1411,8 @@ pub fn key_code(key: wie_backend::KeyCode) -> Option<u32> {
         KeyCode::NUM7 => DIGIT_BASE + 7,
         KeyCode::NUM8 => DIGIT_BASE + 8,
         KeyCode::NUM9 => DIGIT_BASE + 9,
+        KeyCode::STAR => STAR,
+        KeyCode::HASH => POUND,
         _ => return None,
     })
 }

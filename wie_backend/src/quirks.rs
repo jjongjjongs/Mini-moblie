@@ -506,6 +506,11 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // still centres in the 220 it is told and loses its bottom rows under it.
     // The 204 rows it draws are the panel.
     (TitlePlatform::Ktf, "0102FC8C", panel(176, 204)),
+    // 2007프로야구 (GAMEVIL): the same 176x204 build. Its menus lay themselves
+    // out to any panel, but its title is a 176x204 picture centred at (32, 58)
+    // of a 240x320 one, and its play field draws for 176x204 too, leaving a
+    // dark band above it.
+    (TitlePlatform::Ktf, "010100A2", panel(176, 204)),
     // 초밥의달인3 (KTF PD004152): a Java title whose screens draw inside a
     // 240x296 clip - the bottom 24 rows are the handset's soft-key strip, which
     // it never touches - while some earlier screen fills the whole 240x320 with
