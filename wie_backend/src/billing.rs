@@ -2224,8 +2224,12 @@ pub fn lgt_local_tagged_record_response(request: &[u8]) -> Option<Vec<u8>> {
 /// in its sender at `0x11c18e`:
 ///
 /// - `[2]` is `0x01`, and every byte past the header is XORed with `0x9a`.
-/// - One more byte goes behind the body: the sum of every plain byte before it,
-///   header included, XORed the same way. The length at `[0..2]` counts it.
+/// - One more byte goes behind the body, counted in the length at `[0..2]`.
+///   The sender bumps the length first and then sums every byte up to it, so
+///   the sum takes in whatever the buffer still held where that byte goes, and
+///   is XORed with `0x9a` over the top. For its session that slot is clean and
+///   the byte is the sum of the plain frame. For its confirmation it held a
+///   stale `0x21`, so the byte is not something anything can check.
 ///
 /// ```text
 /// 00 68 01 00 00 | 99 74 99 72 ... (03 ee 03 e8 ... ^ 0x9a) | 8d (0x17 ^ 0x9a)
@@ -2237,7 +2241,8 @@ pub fn lgt_local_tagged_record_response(request: &[u8]) -> Option<Vec<u8>> {
 /// the same way, with its own sum behind it.
 ///
 /// `None` for anything that is not one of these: `[2]` has to be `0x01`, the
-/// length has to be the frame's own, and the trailing sum has to agree.
+/// length has to be the frame's own, and what is inside has to be a message
+/// [`lgt_local_opcode_header_response`] answers.
 pub fn lgt_local_scrambled_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
     const HEADER: usize = 5;
     const SCRAMBLED: u8 = 0x01;
@@ -2251,15 +2256,12 @@ pub fn lgt_local_scrambled_opcode_header_response(request: &[u8]) -> Option<Vec<
         return None;
     }
 
-    let (frame, check) = request.split_at(request.len() - 1);
+    let frame = &request[..request.len() - 1];
     let mut plain: Vec<u8> = frame[..HEADER]
         .iter()
         .copied()
         .chain(frame[HEADER..].iter().map(|byte| byte ^ KEY))
         .collect();
-    if sum(&plain) != check[0] ^ KEY {
-        return None;
-    }
 
     // The message as 미니게임천국4 would have written it: `[2]` clear and no sum.
     plain[2] = 0;
@@ -2311,13 +2313,26 @@ mod scrambled_opcode_header_tests {
         assert_eq!(reply, [0x00, 0x06, 0x01, 0xc8, 0x00, 0xcf ^ 0x9a]);
     }
 
+    /// The confirmation, off the device log. Its trailing byte is `0xd9`, where
+    /// the plain frame sums to `0x22`: the sender summed a stale `0x21` sitting
+    /// in the slot the byte went into. It is answered all the same, with the
+    /// amount the approval carried.
     #[test]
-    fn a_frame_whose_sum_disagrees_is_not_answered() {
-        let mut request = session();
-        *request.last_mut().unwrap() ^= 1;
-        assert_eq!(lgt_local_scrambled_opcode_header_response(&request), None);
+    fn the_confirmation_is_answered_whatever_its_trailing_byte() {
+        let request = [
+            0x00, 0x12, 0x01, 0xcb, 0x00, 0x9a, 0x9a, 0x91, 0x22, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xab, 0xd9,
+        ];
 
-        // Nor is one that is not scrambled at all.
+        let reply = response(&request).expect("the confirmation is answered");
+
+        // 0xcc with the order, 3000, scrambled behind a plain header.
+        assert_eq!(&reply[..5], &[0x00, 0x0a, 0x01, 0xcc, 0x00]);
+        let order: Vec<u8> = reply[5..9].iter().map(|byte| byte ^ 0x9a).collect();
+        assert_eq!(order, 3000u32.to_be_bytes());
+    }
+
+    #[test]
+    fn a_frame_that_is_not_scrambled_is_left_alone() {
         let mut plain = session();
         plain[2] = 0;
         assert_eq!(lgt_local_scrambled_opcode_header_response(&plain), None);
