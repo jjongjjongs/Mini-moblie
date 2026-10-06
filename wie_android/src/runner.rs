@@ -147,6 +147,35 @@ fn packaged_jar(files: &BTreeMap<String, Vec<u8>>) -> Option<Vec<u8>> {
     extract_zip(jar).ok().map(|_| jar.clone())
 }
 
+/// Whether `name` ends in `extension`, which starts with its dot, in any case.
+fn has_extension(name: &str, extension: &str) -> bool {
+    let name = name.rsplit('/').next().unwrap_or(name);
+
+    name.len() > extension.len() && name[name.len() - extension.len()..].eq_ignore_ascii_case(extension)
+}
+
+/// Whether the archive is a Qualcomm BREW application rather than a WIPI or
+/// J2ME one: its compiled module (`.mod`) beside the module information file
+/// (`.mif`) that describes it, and no jar.
+///
+/// KTF sold BREW titles before WIPI, and they turn up repacked the same way -
+/// 카샨 is `kashan.mod`, `18933.mif`, `kashan.sig` and its data files. None of
+/// the loaders here runs BREW, and without this the zip fell through to the
+/// bare-jar path and the J2ME class loader panicked looking for a manifest.
+fn brew_application(files: &BTreeMap<String, Vec<u8>>) -> bool {
+    files.keys().any(|name| has_extension(name, ".mod")) && files.keys().any(|name| has_extension(name, ".mif"))
+}
+
+/// Whether a zip handed to the J2ME loader could be a jar at all: one carries a
+/// manifest or classes. Anything else has nothing for the loader to start.
+fn could_be_jar(jar: &[u8]) -> bool {
+    extract_zip(jar).is_ok_and(|files| {
+        files
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("META-INF/MANIFEST.MF") || has_extension(name, ".class"))
+    })
+}
+
 /// The DRM container a download is, if it is one.
 ///
 /// The `.jar` a package carries is the title's own file, and under OMA DRM it
@@ -715,6 +744,10 @@ fn build_emulator(platform: Box<AndroidPlatform>, data: &[u8], options: Options)
         return Err(message);
     }
 
+    if brew_application(&files) {
+        return Err("BREW 애플리케이션(.mod/.mif)은 지원하지 않는 형식입니다. WIPI 또는 J2ME 배포본을 받아 주세요.".to_owned());
+    }
+
     // Handset archives are detected by their descriptor. A jar carries no
     // descriptor, so it is only considered once all three archive formats have
     // been ruled out - an apk or jar is itself a zip and would otherwise be
@@ -761,6 +794,8 @@ fn build_emulator(platform: Box<AndroidPlatform>, data: &[u8], options: Options)
         SktEmulator::from_jar(platform, &jar_filename, jar, &id, None)
             .map(|x| Box::new(x) as Box<dyn Emulator + Send>)
             .map_err(|x| format!("SKT jar를 실행할 수 없습니다: {x}"))
+    } else if !could_be_jar(&jar) {
+        Err("지원하지 않는 형식입니다: WIPI 아카이브도 jar도 아닙니다.".to_owned())
     } else {
         J2MEEmulator::from_jar(platform, &jar_filename, jar)
             .map(|x| Box::new(x) as Box<dyn Emulator + Send>)
@@ -916,7 +951,9 @@ pub fn inspect(data: &[u8]) -> String {
     }
 
     let jar = packaged_jar(&files).unwrap_or_else(|| data.to_vec());
-    let format = if KtfEmulator::loadable_archive(&files) {
+    let format = if brew_application(&files) {
+        "BREW application (unsupported)"
+    } else if KtfEmulator::loadable_archive(&files) {
         "KTF archive"
     } else if LgtEmulator::loadable_archive(&files) {
         "LGT archive"
@@ -928,8 +965,10 @@ pub fn inspect(data: &[u8]) -> String {
         "LGT jar"
     } else if SktEmulator::loadable_jar(&jar) {
         "SKT jar"
-    } else {
+    } else if could_be_jar(&jar) {
         "J2ME jar (assumed)"
+    } else {
+        "unknown (not a jar)"
     };
     let _ = writeln!(report, "format: {format}");
 
@@ -962,7 +1001,7 @@ pub fn inspect(data: &[u8]) -> String {
 mod tests {
     use wie_backend::KeyCode;
 
-    use super::{content_id, extract_zip, inspect, key_code, packaged_jar, save_ids};
+    use super::{content_id, could_be_jar, extract_zip, inspect, key_code, packaged_jar, save_ids};
 
     /// A stored zip of the given entries, which is all these tests need.
     fn zip_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
@@ -1055,6 +1094,28 @@ mod tests {
 
         assert!(report.contains("format: LGT archive"), "{report}");
         assert!(report.contains("--- app_info ---"), "{report}");
+    }
+
+    #[test]
+    fn a_brew_application_is_named_and_not_taken_for_a_jar() {
+        let package = zip_of(&[
+            ("kashan/kashan.mod", b"module"),
+            ("kashan/18933.mif", b"info"),
+            ("kashan/kashan.sig", b"sig"),
+        ]);
+
+        let report = inspect(&package);
+        assert!(report.contains("format: BREW application"), "{report}");
+    }
+
+    #[test]
+    fn a_zip_without_manifest_or_classes_is_not_a_jar() {
+        assert!(!could_be_jar(&zip_of(&[("kgraphic.ils", b"data")])));
+        assert!(could_be_jar(&zip_of(&[
+            ("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0"),
+            ("res/0.png", b"png")
+        ])));
+        assert!(could_be_jar(&zip_of(&[("Main.class", b"\xca\xfe")])));
     }
 
     #[test]
