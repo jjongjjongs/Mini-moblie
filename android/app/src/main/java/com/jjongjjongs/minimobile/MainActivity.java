@@ -3490,7 +3490,7 @@ public final class MainActivity extends Activity {
         if (name.startsWith("small.")) {
             return 2;
         }
-        if (name.endsWith(".icon") || name.contains("icon") || name.endsWith(".wmr")) {
+        if (name.endsWith(".icon") || name.contains("icon") || name.endsWith(".wmr") || name.endsWith(".mif")) {
             return 3;
         }
         if (name.endsWith("_l.png") || name.endsWith("_ad.png") || name.endsWith("_m.png") || name.endsWith("_s.png")) {
@@ -3518,7 +3518,8 @@ public final class MainActivity extends Activity {
             }
 
             boolean skvmIcon = isSkvmIconResource(header, headerRead);
-            if (!skvmIcon && !looksLikeImage(header, headerRead)) {
+            boolean brewInfo = entry.getName().toLowerCase(Locale.US).endsWith(".mif");
+            if (!skvmIcon && !brewInfo && !looksLikeImage(header, headerRead)) {
                 return null;
             }
 
@@ -3531,7 +3532,14 @@ public final class MainActivity extends Activity {
             }
 
             byte[] bytes = buffer.toByteArray();
-            Bitmap bitmap = skvmIcon ? decodeSkvmIcon(bytes) : BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+            Bitmap bitmap;
+            if (skvmIcon) {
+                bitmap = decodeSkvmIcon(bytes);
+            } else if (brewInfo) {
+                bitmap = decodeBrewIcon(bytes);
+            } else {
+                bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+            }
             if (bitmap != null
                     && bitmap.getWidth() >= minSide && bitmap.getHeight() >= minSide
                     && bitmap.getWidth() <= maxSide && bitmap.getHeight() <= maxSide) {
@@ -3604,6 +3612,57 @@ public final class MainActivity extends Activity {
                 | (bytes[offset + 1] & 0xff) << 8
                 | (bytes[offset + 2] & 0xff) << 16
                 | (bytes[offset + 3] & 0xff) << 24;
+    }
+
+    /**
+     * The largest picture a BREW module information file ({@code .mif})
+     * carries.
+     *
+     * <p>A BREW package is a {@code .mod} beside its {@code .mif} and the
+     * title's own data files, and no picture of its own - the handset menu's
+     * icons are inside the {@code .mif}. Its span table is at the offset the
+     * word at {@code 0x10} names, with the count at {@code 0x14}, one offset per
+     * span and then the end of the last. An image span opens with a 16-bit
+     * length covering itself and a NUL-terminated MIME type, {@code image/bmp}
+     * in 카샨's, and the picture follows: there a 120x80 icon and a 20x20 one.
+     */
+    private static Bitmap decodeBrewIcon(byte[] bytes) {
+        final int maxSpans = 64;
+
+        if (bytes.length < 0x20) {
+            return null;
+        }
+
+        int table = readLittleEndianInt(bytes, 0x10);
+        int count = readLittleEndianInt(bytes, 0x14);
+        if (count <= 0 || count > maxSpans || table < 0 || (long) table + 4L * (count + 1) > bytes.length) {
+            return null;
+        }
+
+        Bitmap best = null;
+        for (int index = 0; index < count; index++) {
+            int start = readLittleEndianInt(bytes, table + 4 * index);
+            int end = readLittleEndianInt(bytes, table + 4 * (index + 1));
+            if (start < 0 || end > bytes.length || end - start < 4) {
+                continue;
+            }
+
+            int headerLength = (bytes[start] & 0xff) | (bytes[start + 1] & 0xff) << 8;
+            if (headerLength < 8 || headerLength >= end - start || bytes[start + headerLength - 1] != 0) {
+                continue;
+            }
+            String type = new String(bytes, start + 2, headerLength - 3, StandardCharsets.ISO_8859_1);
+            if (!type.startsWith("image/")) {
+                continue;
+            }
+
+            Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, start + headerLength, end - start - headerLength);
+            if (bitmap != null && (best == null || bitmap.getWidth() * bitmap.getHeight() > best.getWidth() * best.getHeight())) {
+                best = bitmap;
+            }
+        }
+
+        return best;
     }
 
     /** Whether these bytes open the way an image these archives carry does. */
