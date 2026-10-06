@@ -6,6 +6,7 @@ mod button_component;
 mod component;
 mod constraint_checker;
 mod container_component;
+mod dialog_component;
 mod event_listener;
 mod form_component;
 mod grab_key_listener;
@@ -27,9 +28,9 @@ mod text_popup;
 pub use self::{
     action_listener::ActionListener, annunciator_component::AnnunciatorComponent, annunciator_component_1::AnnunciatorComponent1,
     annunciator_component_event_listener::AnnunciatorComponentEventListener, button_component::ButtonComponent, component::Component,
-    constraint_checker::ConstraintChecker, container_component::ContainerComponent, event_listener::EventListener, form_component::FormComponent,
-    grab_key_listener::GrabKeyListener, input_listener::InputListener, label_component::LabelComponent, proxy_card::ProxyCard,
-    scrollbar_component::ScrollbarComponent, shell_component::ShellComponent, text_box_component::TextBoxComponent,
+    constraint_checker::ConstraintChecker, container_component::ContainerComponent, dialog_component::DialogComponent, event_listener::EventListener,
+    form_component::FormComponent, grab_key_listener::GrabKeyListener, input_listener::InputListener, label_component::LabelComponent,
+    proxy_card::ProxyCard, scrollbar_component::ScrollbarComponent, shell_component::ShellComponent, text_box_component::TextBoxComponent,
     text_box_component_action::TextBoxComponentAction, text_component::TextComponent, text_component_mode_viewer::TextComponentModeViewer,
     text_field_component::TextFieldComponent, text_field_component_action::TextFieldComponentAction,
     text_field_component_text_popup::TextFieldComponentTextPopup, text_format_processor::TextFormatProcessor, text_popup::TextPopup,

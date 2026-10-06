@@ -6,7 +6,7 @@ pub mod classes;
 
 use wie_jvm_support::WieJavaClassProto;
 
-pub fn get_protos() -> [WieJavaClassProto; 72] {
+pub fn get_protos() -> [WieJavaClassProto; 73] {
     [
         crate::classes::org::kwis::msf::io::Message::as_proto(),
         crate::classes::org::kwis::msf::io::Network::as_proto(),
@@ -48,6 +48,7 @@ pub fn get_protos() -> [WieJavaClassProto; 72] {
         crate::classes::org::kwis::msp::lwc::GrabKeyListener::as_proto(),
         crate::classes::org::kwis::msp::lwc::InputListener::as_proto(),
         crate::classes::org::kwis::msp::lwc::ButtonComponent::as_proto(),
+        crate::classes::org::kwis::msp::lwc::DialogComponent::as_proto(),
         crate::classes::org::kwis::msp::lwc::LabelComponent::as_proto(),
         crate::classes::org::kwis::msp::lwc::ProxyCard::as_proto(),
         crate::classes::org::kwis::msp::lwc::ShellComponent::as_proto(),
