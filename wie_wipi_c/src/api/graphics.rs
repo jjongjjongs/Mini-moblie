@@ -1357,6 +1357,30 @@ pub async fn draw_image(
         return Ok(());
     };
 
+    // A colour-keyed copy the title planted as its operation: the source for
+    // every pixel but the key, which it leaves as the background. The key is a
+    // constant the probing never carries, so it is found here from the colours
+    // the sprite holds and the blit skips them - the same shape as the
+    // operation-less keyed path, without staging either surface whole or
+    // calling the guest a pixel at a time. See `PixelOp::SourceKey`.
+    if kind == pixel_op::PixelOp::SourceKey && source_first {
+        let src_fb = FrameBuffer(source);
+        let src_image = src_fb.image(context)?;
+        // The colours gathered with the borrow let go of before any guest call,
+        // so the blit's image - owned, and `Send` - is all that is held across
+        // the awaits that follow.
+        let distinct = distinct_colours(&*src_image, sx, sy, w, h);
+        let keys = source_key_colours(context, function, grp_ctx.param1, distinct).await?;
+
+        let mut canvas = framebuffer.canvas(context)?;
+        blit_keyed(&mut **canvas, dx, dy, w, h, &*src_image, sx, sy, &|color| {
+            keys.contains(&Rgb565Pixel::from_color(color))
+        });
+        canvas.flush()?;
+
+        return Ok(());
+    }
+
     let source = FrameBuffer(source);
     let pairs = pixel_op_pairs(context, &framebuffer, dx, dy, w, h, &source, sx, sy, keyed)?;
 
@@ -2310,6 +2334,25 @@ fn is_transparent_key(color: Color) -> bool {
 /// convention is honoured here rather than read from it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn blit_magenta_keyed(canvas: &mut dyn Canvas, dx: i32, dy: i32, w: i32, h: i32, src: &dyn Image, sx: i32, sy: i32) {
+    blit_keyed(canvas, dx, dy, w, h, src, sx, sy, &is_transparent_key);
+}
+
+/// Copies `src` onto `canvas`, skipping the source pixels `is_key` names. The
+/// magenta path is this with the fixed key; a title that keyed a colour of its
+/// own through a pixel operation gets that colour instead - see
+/// [`pixel_op::PixelOp::SourceKey`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn blit_keyed(
+    canvas: &mut dyn Canvas,
+    dx: i32,
+    dy: i32,
+    w: i32,
+    h: i32,
+    src: &dyn Image,
+    sx: i32,
+    sy: i32,
+    is_key: &dyn Fn(Color) -> bool,
+) {
     let src_w = src.width() as i64;
     let src_h = src.height() as i64;
     let dst_w = canvas.image().width() as i64;
@@ -2329,12 +2372,62 @@ pub(crate) fn blit_magenta_keyed(canvas: &mut dyn Canvas, dx: i32, dy: i32, w: i
             }
 
             let color = src.get_pixel(sx_px as i32, sy_px as i32);
-            if is_transparent_key(color) {
+            if is_key(color) {
                 continue;
             }
             canvas.put_pixel(dx_px as i32, dy_px as i32, color);
         }
     }
+}
+
+/// The distinct RGB565 colours a blit would read out of `src`.
+///
+/// A sprite carries only a handful, which is what makes asking the title's
+/// keyed-copy operation about each of them cheap - see [`source_key_colours`].
+fn distinct_colours(src: &dyn Image, sx: i32, sy: i32, w: i32, h: i32) -> alloc::collections::BTreeSet<u16> {
+    let (src_w, src_h) = (src.width() as i32, src.height() as i32);
+
+    let mut distinct = alloc::collections::BTreeSet::new();
+    for row in 0..h {
+        let y = sy + row;
+        if y < 0 || y >= src_h {
+            continue;
+        }
+        for col in 0..w {
+            let x = sx + col;
+            if x < 0 || x >= src_w {
+                continue;
+            }
+            distinct.insert(Rgb565Pixel::from_color(src.get_pixel(x, y)));
+        }
+    }
+
+    distinct
+}
+
+/// Which of a sprite's `distinct` colours the title's keyed-copy operation keys
+/// out, asked of the operation once per colour and kept.
+///
+/// A keyed-copy operation leaves the background where its source is the key, so
+/// those pixels must be skipped - but the key is a constant the classifier
+/// never sees. Each colour is put to the operation ([`pixel_op::keys_out`]) and
+/// the answers are cached: a few guest calls when a sprite is first drawn and
+/// none after, against a guest call for every pixel that the key being unknown
+/// would otherwise cost.
+async fn source_key_colours(
+    context: &mut dyn WIPICContext,
+    function: WIPICWord,
+    param: WIPICWord,
+    distinct: alloc::collections::BTreeSet<u16>,
+) -> Result<alloc::collections::BTreeSet<u16>> {
+    let mut keys = alloc::collections::BTreeSet::new();
+    for colour in distinct {
+        if pixel_op::keys_out(context, function, param, colour).await? {
+            keys.insert(colour);
+        }
+    }
+
+    Ok(keys)
 }
 
 /// Draw a string from the handset's own bitmap face.
@@ -3583,6 +3676,68 @@ mod tests {
         let expected = Rgb565Pixel::to_color(RECOLOURED as u16);
         let out = drawn.get_pixel(0, 0);
         assert_eq!((out.r, out.g, out.b), (expected.r, expected.g, expected.b));
+    }
+
+    /// A colour-keyed copy planted as an operation keys its one colour out and
+    /// copies the rest, leaving the background where the key falls.
+    ///
+    /// 렙업만이살길 draws its sprites this way: its operation at `0x11514c` is
+    /// `if (source == 0x2484) return dest; else return source`, a green keyed
+    /// out so the character is not boxed in it. The key is a constant the
+    /// classifier's probes never carry, so the operation reads as a plain
+    /// source-copy and the key is found from the sprite's own colours - here the
+    /// green pixel is dropped and the red one drawn, over an untouched grey.
+    #[futures_test::test]
+    async fn a_keyed_copy_operation_drops_its_key_and_copies_the_rest() {
+        let mut context = test_context();
+
+        context.set_pixel_op_takes_source_first(true);
+
+        // The shape 렙업만이살길 plants: the source for every pixel but the key,
+        // where it hands back the destination instead. 0x2484 is the green
+        // #219221 in RGB565.
+        const KEY: u32 = 0x2484;
+        context.set_guest_function(|_, args| if args[0] == KEY { args[1] } else { args[0] });
+
+        let pgc_handle = context.alloc(core::mem::size_of::<super::WIPICGraphicsContext>() as u32).unwrap();
+        let pgc = context.data_ptr(pgc_handle).unwrap();
+        init_context(&mut context, pgc).await.unwrap();
+
+        // Two pixels of background grey, drawn over by a two-pixel sprite whose
+        // first pixel is the keyed green and whose second is red.
+        let destination = framebuffer_of(&mut context, 2, 1, &[0xff20_2020, 0xff20_2020]).await;
+        let source = framebuffer_of(&mut context, 2, 1, &[0xff21_9221, 0xffff_0000]).await;
+
+        let image_handle = context.alloc(core::mem::size_of::<wipi_types::wipic::WIPICImage>() as u32).unwrap();
+        let image_address = context.data_ptr(image_handle).unwrap();
+        let image = wipi_types::wipic::WIPICImage {
+            img: read_generic(&context, context.data_ptr(source).unwrap()).unwrap(),
+            mask: super::FrameBuffer::empty().0,
+            loop_count: 0,
+            delay: 0,
+            animated: 0,
+            buf: super::WIPICIndirectPtr(0),
+            offset: 0,
+            current: 0,
+            len: 0,
+        };
+        write_generic(&mut context, image_address, image).unwrap();
+
+        // A function address of its own, so the shared classification cache does
+        // not hand this test an operation another one taught it.
+        set_context(&mut context, pgc, Idx::PixelopIdx, 0x7a84).await.unwrap();
+
+        draw_image(&mut context, destination, 0, 0, 2, 1, image_handle, 0, 0, pgc).await.unwrap();
+
+        let handle = read_generic(&context, context.data_ptr(destination).unwrap()).unwrap();
+        let drawn = super::FrameBuffer(handle).image(&mut context).unwrap();
+
+        // The key pixel kept the background grey, and the red pixel was copied.
+        let kept = drawn.get_pixel(0, 0);
+        assert_eq!((kept.r, kept.g, kept.b), (0x20, 0x20, 0x20), "the key should leave the background");
+
+        let copied = drawn.get_pixel(1, 0);
+        assert_eq!((copied.r, copied.g, copied.b), (0xff, 0x00, 0x00), "a kept colour should be copied");
     }
 
     /// A fade of the title's own is recognised and done here, not asked about

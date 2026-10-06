@@ -47,6 +47,24 @@ pub enum PixelOp {
     /// The second argument, unchanged. A title whose operation covers a range
     /// of strengths needs one that means "as it was", and this is it.
     Second,
+    /// The source pixel for every pixel but one colour it keys out - a
+    /// colour-keyed copy the title planted as an operation.
+    ///
+    /// The reference's own blit has no key, so a title that wants one writes it
+    /// as the operation the context draws through: `f(source, dest)` hands back
+    /// the source for every pixel it keeps and the destination - the
+    /// background, left as it was - for the one it keys. 렙업만이살길's sprites
+    /// are drawn this way, keying `0x2484` (a green) out at `0x11514c`:
+    /// `cmp r0, #0x2484; bne return r0; return r1`.
+    ///
+    /// Taken for `Second`'s neighbour it is not: it answers with its *first*
+    /// argument, not its second, and the key branch never shows in the probing
+    /// because the key is a constant in the title's code and never one of the
+    /// pixels asked about. So the operation reads as a plain source-copy, and
+    /// the key is discovered per draw from the colours the sprite actually
+    /// holds - a few guest calls on first sight, none after - rather than
+    /// guessed here. See `draw_image`'s keyed path and [`keys_out`].
+    SourceKey,
     /// The first argument mixed `weight`/255 of the way towards a grey, on the
     /// eight-bit components `MC_grpGetRGBFromPixel` hands out - a fade to white
     /// or to black. See [`fade`].
@@ -92,6 +110,12 @@ pub fn invert(first: u16, _second: u16) -> u16 {
 /// The second pixel, whatever the first was.
 pub fn second(_first: u16, second: u16) -> u16 {
     second
+}
+
+/// The first pixel, whatever the second was - what a colour-keyed copy answers
+/// for every pixel it is asked about, the key aside. See [`PixelOp::SourceKey`].
+pub fn first(first: u16, _second: u16) -> u16 {
+    first
 }
 
 /// The eight-bit components `MC_grpGetRGBFromPixel` answers with, which spread
@@ -251,6 +275,46 @@ static KNOWN: Mutex<Vec<((WIPICWord, WIPICWord), PixelOp)>> = Mutex::new(Vec::ne
 /// every draw costs more than the draw.
 static UNCALLABLE: Mutex<Vec<WIPICWord>> = Mutex::new(Vec::new());
 
+/// Which colours a keyed-copy operation keys out, remembered per operation so a
+/// colour is asked about once rather than once per pixel. Keyed by the function
+/// and its parameter, the same as `KNOWN`, with the colour and the answer.
+static KEYED_COLOURS: Mutex<Vec<(WIPICWord, WIPICWord, u16, bool)>> = Mutex::new(Vec::new());
+
+/// A sprite holds a handful of colours and a title a handful of sprites, so
+/// this stays small; a cap keeps a title that draws from an endless palette
+/// from growing it without end, at the cost of asking an evicted colour again.
+const KEYED_COLOURS_LIMIT: usize = 4096;
+
+/// Whether a [`PixelOp::SourceKey`] operation keys `colour` out.
+///
+/// Planted as a colour-keyed copy, the operation hands back its source for a
+/// colour it keeps and its destination for the one it keys. Asked with the
+/// colour as the source and a sentinel as the destination, it answers with the
+/// sentinel only for the key - so two sentinels are asked, because a kept
+/// colour could happen to equal one of them but not both.
+pub async fn keys_out(context: &mut dyn WIPICContext, function: WIPICWord, param: WIPICWord, colour: u16) -> Result<bool> {
+    if let Some(&(.., answer)) = KEYED_COLOURS.lock().iter().find(|&&(f, p, c, _)| (f, p, c) == (function, param, colour)) {
+        return Ok(answer);
+    }
+
+    let source_first = context.pixel_op_takes_source_first();
+    let mut keyed = true;
+    for sentinel in [colour ^ 0xffff, colour ^ 0x0f0f] {
+        // The colour goes in the source slot and the sentinel in the
+        // destination, in the handset's own argument order.
+        let (a, b) = arguments(source_first, sentinel, colour);
+        let answer = context.call_function(function, &[a as WIPICWord, b as WIPICWord, param]).await? as u16;
+        keyed &= answer == sentinel;
+    }
+
+    let mut cache = KEYED_COLOURS.lock();
+    if cache.len() < KEYED_COLOURS_LIMIT {
+        cache.push((function, param, colour, keyed));
+    }
+
+    Ok(keyed)
+}
+
 /// A title that keeps planting new functions must not grow this without end.
 ///
 /// Keyed by the parameter as well as the function, because an operation is
@@ -340,8 +404,24 @@ pub async fn classify(context: &mut dyn WIPICContext, function: WIPICWord, param
         // answer to the wider set as well as this one.
         ask(context, &mut asked, &WIDE_PROBES).await?;
 
+        // An operation that hands back the source for every probe is a
+        // colour-keyed copy: the source for every pixel but the key, where it
+        // keeps the destination instead. The key is a constant the probes never
+        // carry - 렙업만이살길's is a green, `0x2484` - so the key branch never
+        // shows here and the operation reads as a plain source-copy; the key is
+        // found per draw from the sprite's own colours. Checked before the
+        // fades, because a copy reads as a fade of no strength (`weight` 0) and
+        // would be taken for one.
+        //
+        // Held to answering with the source for *every* probe, not just most, so
+        // 마스터오브소드4's operation - which recolours a white source to a blue
+        // of its own - fails it and is asked per pixel, where its recolour is
+        // done. A title whose key happens to be one of the probe colours fails
+        // it too and is asked per pixel as well, which still draws right.
         if matches(&asked, &second) {
             PixelOp::Second
+        } else if matches(&asked, &first) {
+            PixelOp::SourceKey
         } else if let Some((target, weight)) = fit_fade(&|model| matches(&asked, model)) {
             PixelOp::Fade { target, weight }
         } else if let Some((level, weight)) = (-4..=4)
@@ -448,6 +528,12 @@ pub fn apply(operation: PixelOp, destination: u16, source: u16, source_first: bo
         PixelOp::Second => Some(second(a, b)),
         PixelOp::Fade { target, weight } => Some(fade(a, b, target, weight)),
         PixelOp::Blend { level, weight } => Some(blend(a, b, level, weight)),
+        // The key is not known here, so the colour-keyed copy has no closed
+        // form to apply - its draw path is a keyed blit, not this loop. Asked
+        // per pixel it would still be right (the guest answers with the source
+        // or the background), which is the fallback when its draw path is not
+        // taken.
+        PixelOp::SourceKey => None,
         PixelOp::Guest => None,
     }
 }
