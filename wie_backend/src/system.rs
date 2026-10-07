@@ -81,6 +81,10 @@ pub struct System {
     /// How many rows are cropped from the bottom of the frame before it reaches
     /// the screen. See [`System::title_present_crop_bottom`].
     title_present_crop_bottom: Arc<AtomicU32>,
+    /// The picture size enlarged to the panel as it is decoded, as
+    /// `width << 16 | height`, `0` for none.
+    /// See [`System::title_stretched_picture`].
+    title_stretched_picture: Arc<AtomicU32>,
     /// Whether opening a file that is not there to read fails.
     /// See [`System::missing_file_fails_read_open`].
     missing_file_fails_read_open: Arc<AtomicBool>,
@@ -150,6 +154,18 @@ impl System {
             15133,
         )));
 
+        // 크로이센's shop server for its KTF build (222.231.57.145:56000), gone
+        // for years. A purchase dials it and waits on a connect that never
+        // completes. Answered in process with the record its LGT build is
+        // granted through the billing gateway
+        // (`crate::billing::lgt_local_chroisen_response`), the item is given.
+        // Host-gated, so no other title is touched.
+        local_network.register(Box::new(crate::local_network::BillingGatewayEndpoint::new_kp_tagged(
+            "billing(222.231.57.145:56000)",
+            "222.231.57.145",
+            56000,
+        )));
+
         let platform = Arc::new(platform);
 
         Self {
@@ -176,6 +192,7 @@ impl System {
             title_repaints_whole_frame: Arc::new(AtomicBool::new(false)),
             title_blank_mutable_image_transparent: Arc::new(AtomicBool::new(false)),
             title_present_crop_bottom: Arc::new(AtomicU32::new(0)),
+            title_stretched_picture: Arc::new(AtomicU32::new(0)),
             missing_file_fails_read_open: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -407,6 +424,22 @@ impl System {
 
     pub fn set_title_present_crop_bottom(&self, rows: u32) {
         self.title_present_crop_bottom.store(rows, Ordering::SeqCst);
+    }
+
+    /// The size of a picture that is enlarged to the panel as it is decoded,
+    /// `None` for none. Looked up in `crate::quirks` and set here by the
+    /// emulator that loaded the archive; the image decoder reads it.
+    /// See [`crate::quirks::TitleQuirks::stretched_picture`].
+    pub fn title_stretched_picture(&self) -> Option<(u32, u32)> {
+        match self.title_stretched_picture.load(Ordering::SeqCst) {
+            0 => None,
+            packed => Some((packed >> 16, packed & 0xffff)),
+        }
+    }
+
+    pub fn set_title_stretched_picture(&self, size: Option<(u32, u32)>) {
+        let packed = size.map_or(0, |(width, height)| (width & 0xffff) << 16 | (height & 0xffff));
+        self.title_stretched_picture.store(packed, Ordering::SeqCst);
     }
 
     /// Whether `org.kwis.msp.io.File` opening a file that is not there to read

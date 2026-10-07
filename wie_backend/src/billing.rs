@@ -2216,6 +2216,66 @@ pub fn lgt_local_tagged_record_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(response)
 }
 
+/// What answers the tagged record 크로이센 buys an item with.
+///
+/// Both builds - LGT `0002CCCB` to `222.231.57.145:57000`, KTF `010100D3` to
+/// `:56000` - run the same engine, and its builder (`0x40f84` on LGT,
+/// `0x14723c` on KTF) writes every request past its network state `0x19` under
+/// the `KP` header [`lgt_local_tagged_record_response`] describes, in shape `8`.
+/// State `0x1e` is a purchase, record `2`, thirty-six bytes - the subscriber,
+/// the title's aid with a three digit item code, then the price:
+///
+/// ```text
+/// 4b 50 24 00 08 00 02 00  "01023867669" 00  "0002CCCB007" 00  dc 05 00 00
+/// ```
+///
+/// The reader (`0x40d04` / `0x146ee8`) asks twelve bytes for these states and
+/// is done at twelve, or at eight; an answer opening with `'0'` is the server's
+/// refusal. The parser at `0x3f71c` then reads the purchase's verdict out of
+/// `[8]`, the first byte of the body: `3`, `2` and `0` are its three refusals
+/// (its codes `0x54`, `0x57`, `0x56`), anything else goes on, and `[7]` has to
+/// be zero as well. Past that the grant at `0x3f9fa` is built from the title's
+/// own tables and reads nothing more of the answer.
+///
+/// So the answer is the header with its record and a zero status, and a body of
+/// `1` padded out to the twelve the reader asks for.
+///
+/// `None` for anything that is not this purchase: the tag, the record's own
+/// length, shape `8` and record `2`. The title's other records in this shape
+/// read bodies of their own, which are not something to fill in from here.
+fn lgt_local_chroisen_response(request: &[u8]) -> Option<Vec<u8>> {
+    const TAG: &[u8] = b"KP";
+    const HEADER: usize = 8;
+    const SHAPE: u16 = 8;
+    const PURCHASE_RECORD: u8 = 2;
+    /// The subscriber, the item and the price.
+    const PURCHASE_LENGTH: usize = HEADER + 12 + 12 + 4;
+    /// `[8]`, which is not one of the three refusals.
+    const GRANTED: [u8; 4] = [1, 0, 0, 0];
+
+    if request.len() != PURCHASE_LENGTH || !request.starts_with(TAG) {
+        return None;
+    }
+
+    if u16::from_le_bytes([request[2], request[3]]) as usize != request.len()
+        || u16::from_le_bytes([request[4], request[5]]) != SHAPE
+        || request[6] != PURCHASE_RECORD
+    {
+        return None;
+    }
+
+    let length = HEADER + GRANTED.len();
+    let mut response = Vec::with_capacity(length);
+    response.extend_from_slice(TAG);
+    response.extend_from_slice(&(length as u16).to_le_bytes());
+    response.extend_from_slice(&SHAPE.to_le_bytes());
+    response.push(PURCHASE_RECORD);
+    response.push(0);
+    response.extend_from_slice(&GRANTED);
+
+    Some(response)
+}
+
 /// The same five-byte-header messages, as 미니게임천국3 scrambles them.
 ///
 /// 미니게임천국3 (KTF `0103ABB0`) opens the session 미니게임천국4 does, to
@@ -9683,6 +9743,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_big_endian_record_response(request))
         .or_else(|| lgt_local_major_minor_response(request))
         .or_else(|| lgt_local_text_record_response(request))
+        .or_else(|| lgt_local_chroisen_response(request))
         .or_else(|| lgt_local_tagged_record_response(request))
         .or_else(|| lgt_local_opcode_header_response(request))
         .or_else(|| lgt_local_scrambled_opcode_header_response(request))
@@ -9710,6 +9771,38 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_nexon_mobile_response(request))
         .or_else(|| lgt_local_noreason_response(request))
         .or_else(|| ktf_local_download_response(request))
+}
+
+#[cfg(test)]
+mod chroisen_tests {
+    use super::*;
+
+    /// The purchase the LGT build wrote, byte for byte off the device log: item
+    /// `007` for 1500원 on `01023867669`.
+    const PURCHASE: [u8; 36] = [
+        0x4b, 0x50, 0x24, 0x00, 0x08, 0x00, 0x02, 0x00, 0x30, 0x31, 0x30, 0x32, 0x33, 0x38, 0x36, 0x37, 0x36, 0x36, 0x39, 0x00, 0x30, 0x30, 0x30,
+        0x32, 0x43, 0x43, 0x43, 0x42, 0x30, 0x30, 0x37, 0x00, 0xdc, 0x05, 0x00, 0x00,
+    ];
+
+    #[test]
+    fn a_purchase_is_granted_in_the_twelve_bytes_read() {
+        let reply = response(&PURCHASE).expect("answered");
+
+        assert_eq!(reply, [0x4b, 0x50, 0x0c, 0x00, 0x08, 0x00, 0x02, 0x00, 0x01, 0x00, 0x00, 0x00]);
+        // Not the refusal the reader looks for first.
+        assert_ne!(reply[0], b'0');
+    }
+
+    #[test]
+    fn other_records_in_the_shape_are_left_alone() {
+        let mut other = PURCHASE;
+        other[6] = 1;
+        assert_eq!(lgt_local_chroisen_response(&other), None);
+
+        let mut short = PURCHASE.to_vec();
+        short.pop();
+        assert_eq!(lgt_local_chroisen_response(&short), None);
+    }
 }
 
 #[cfg(test)]

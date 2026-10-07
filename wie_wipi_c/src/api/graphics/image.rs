@@ -1,8 +1,9 @@
+use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use wie_backend::canvas::{Color, PixelType, Rgb565Pixel, VecImageBuffer, decode_image};
+use wie_backend::canvas::{ArgbPixel, Color, Image, PixelType, Rgb565Pixel, VecImageBuffer, decode_image};
 use wie_util::Result;
 
 use wipi_types::wipic::{WIPICImage, WIPICIndirectPtr, WIPICWord};
@@ -15,6 +16,7 @@ pub fn create_wipi_image(context: &mut dyn WIPICContext, buf: WIPICIndirectPtr, 
     let mut data = vec![0; len as _];
     context.read_bytes(ptr_image_data + offset, &mut data)?;
     let image = decode_image(&data)?;
+    let image = stretched_to_panel(context, image);
 
     // A title that blits straight out of image memory reads it at the display's
     // own depth - 16bpp RGB565, the depth MC_grpGetFrameBpp reports - so the
@@ -53,6 +55,53 @@ pub fn create_wipi_image(context: &mut dyn WIPICContext, buf: WIPICIndirectPtr, 
         current: 0,
         len,
     })
+}
+
+/// `image` enlarged to the panel, when it is the full-screen picture this title
+/// draws at a smaller handset's size - see
+/// [`wie_backend::TitleQuirks::stretched_picture`]. Every other picture is
+/// returned as it was decoded.
+fn stretched_to_panel(context: &mut dyn WIPICContext, image: Box<dyn Image>) -> Box<dyn Image> {
+    let Some(size) = context.system().title_stretched_picture() else {
+        return image;
+    };
+    if size != (image.width(), image.height()) {
+        return image;
+    }
+
+    let screen = context.system().platform().screen();
+    let (width, height) = (screen.width(), screen.height());
+    if (width, height) == size || width == 0 || height == 0 {
+        return image;
+    }
+
+    tracing::info!("enlarging a {}x{} picture to the {width}x{height} panel", size.0, size.1);
+
+    Box::new(resample(&*image, width, height))
+}
+
+/// `image` resampled to `width` x `height`, each pixel taken from the source
+/// pixel under its centre.
+///
+/// Nearest rather than blended: 크로이센 carries the picture over into a store
+/// of its own, which takes a picture's colours as the ones it was drawn with -
+/// handed a blended enlargement, with thousands of in-between colours, it drew
+/// the backdrop as a dark speckle. Every colour this hands back is one the
+/// picture already had.
+fn resample(image: &dyn Image, width: u32, height: u32) -> VecImageBuffer<ArgbPixel> {
+    let (source_width, source_height) = (image.width() as u64, image.height() as u64);
+    let colors = image.colors();
+
+    let mut raw = Vec::with_capacity((width * height) as usize);
+    for y in 0..height as u64 {
+        let source_y = ((2 * y + 1) * source_height / (2 * height as u64)).min(source_height - 1);
+        for x in 0..width as u64 {
+            let source_x = ((2 * x + 1) * source_width / (2 * width as u64)).min(source_width - 1);
+            raw.push(ArgbPixel::from_color(colors[(source_y * source_width + source_x) as usize]));
+        }
+    }
+
+    VecImageBuffer::<ArgbPixel>::from_raw(width, height, raw)
 }
 
 /// The handset's one-bit transparency mask for a decoded image, and where in
@@ -108,9 +157,27 @@ pub(crate) fn has_trailer(buf: WIPICWord) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use wie_backend::canvas::Color;
+    use alloc::vec;
 
-    use super::transparency_bits;
+    use wie_backend::canvas::{ArgbPixel, Color, Image, VecImageBuffer};
+
+    use super::{resample, transparency_bits};
+
+    /// Enlarging covers the panel with the picture's own colours and no others,
+    /// each in its own share of the width.
+    #[test]
+    fn resampling_keeps_the_pictures_colours() {
+        let picture = VecImageBuffer::<ArgbPixel>::from_raw(2, 1, vec![0xff000000, 0xffffffff]);
+        let enlarged = resample(&picture, 8, 3);
+
+        assert_eq!((enlarged.width(), enlarged.height()), (8, 3));
+        for y in 0..3 {
+            for x in 0..8 {
+                assert_eq!(enlarged.get_pixel(x, y).r, if x < 4 { 0 } else { 0xff }, "({x}, {y})");
+                assert_eq!(enlarged.get_pixel(x, y).a, 0xff);
+            }
+        }
+    }
 
     const INK: Color = Color { a: 0xff, r: 0, g: 0, b: 0 };
     const CLEAR: Color = Color {

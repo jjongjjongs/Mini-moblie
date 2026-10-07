@@ -3455,6 +3455,18 @@ mod tests {
     };
     use crate::context::{WIPICContext, test::TestContext};
 
+    /// A context with a system behind it, which making an image asks for the
+    /// title's quirks.
+    fn image_test_context() -> TestContext {
+        let system = wie_backend::System::new(
+            alloc::boxed::Box::new(test_utils::TestPlatform::new()),
+            "test-pid",
+            "test-aid",
+            wie_backend::DefaultTaskRunner,
+        );
+        TestContext::with_system(system)
+    }
+
     /// A flush that names part of the frame leaves the rest of the panel
     /// standing.
     ///
@@ -3570,7 +3582,7 @@ mod tests {
     /// leak one buffer per image for as long as the title runs.
     #[futures_test::test]
     async fn destroying_an_image_gives_back_the_bytes_it_was_made_from() {
-        let mut context = TestContext::new();
+        let mut context = image_test_context();
 
         let source = context.alloc(TINY_PNG.len() as u32).unwrap();
         let ptr_source = context.data_ptr(source).unwrap();
@@ -3602,7 +3614,7 @@ mod tests {
     /// double free of a framebuffer plane, behind 240 warnings about this one.
     #[futures_test::test]
     async fn a_source_the_title_took_back_is_not_freed_twice() {
-        let mut context = TestContext::new();
+        let mut context = image_test_context();
 
         let source = context.alloc(TINY_PNG.len() as u32).unwrap();
         let ptr_source = context.data_ptr(source).unwrap();

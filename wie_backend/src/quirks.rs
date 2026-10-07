@@ -159,6 +159,22 @@ pub struct TitleQuirks {
     /// See `wie_backend::present`, read through
     /// [`crate::System::title_present_crop_bottom`].
     pub present_crop_bottom: u32,
+
+    /// The size of a full-screen picture the title draws at its own size on a
+    /// larger panel, which is enlarged to the panel as it is decoded. `None`
+    /// leaves every picture at the size it was drawn.
+    ///
+    /// 크로이센 (KTF 010100D3) lays its field, HUD and menus out to the panel
+    /// it is given, but its title and menu backdrop is one 176x220 picture made
+    /// for the smaller handset. On the 240x320 panel it sits in the top-left
+    /// corner with the menu drawn across the black beside it. The title does
+    /// not draw it through `MC_grpDrawImage`: it reads the picture's size with
+    /// `MC_grpGetImageProperty`, copies the pixels into its own store and draws
+    /// from there at that size. Decoding the picture at the panel's size is
+    /// therefore the one place it can be enlarged, and the title then fills the
+    /// screen with it. It is the only picture of that size the title loads.
+    /// Read through [`crate::System::title_stretched_picture`].
+    pub stretched_picture: Option<(u32, u32)>,
 }
 
 const fn panel(width: u32, height: u32) -> TitleQuirks {
@@ -174,6 +190,7 @@ const fn panel(width: u32, height: u32) -> TitleQuirks {
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
         present_crop_bottom: 0,
+        stretched_picture: None,
     }
 }
 
@@ -192,6 +209,7 @@ const fn panel_transparent_mutable(width: u32, height: u32) -> TitleQuirks {
         repaints_whole_frame: false,
         blank_mutable_image_transparent: true,
         present_crop_bottom: 0,
+        stretched_picture: None,
     }
 }
 
@@ -208,6 +226,7 @@ const fn annunciator() -> TitleQuirks {
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
         present_crop_bottom: 0,
+        stretched_picture: None,
     }
 }
 
@@ -225,6 +244,7 @@ const fn annunciator_of(rows: u32) -> TitleQuirks {
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
         present_crop_bottom: 0,
+        stretched_picture: None,
     }
 }
 
@@ -241,6 +261,7 @@ const fn sideways() -> TitleQuirks {
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
         present_crop_bottom: 0,
+        stretched_picture: None,
     }
 }
 
@@ -259,6 +280,7 @@ const fn clears_frame() -> TitleQuirks {
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
         present_crop_bottom: 0,
+        stretched_picture: None,
     }
 }
 
@@ -289,6 +311,7 @@ const fn clip_includes_far_edge() -> TitleQuirks {
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
         present_crop_bottom: 0,
+        stretched_picture: None,
     }
 }
 
@@ -307,6 +330,7 @@ const fn skvm_scancode_keys() -> TitleQuirks {
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
         present_crop_bottom: 0,
+        stretched_picture: None,
     }
 }
 
@@ -325,6 +349,7 @@ const fn owns_graphics_state() -> TitleQuirks {
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
         present_crop_bottom: 0,
+        stretched_picture: None,
     }
 }
 
@@ -344,6 +369,7 @@ const fn repaints_whole_frame() -> TitleQuirks {
         repaints_whole_frame: true,
         blank_mutable_image_transparent: false,
         present_crop_bottom: 0,
+        stretched_picture: None,
     }
 }
 
@@ -373,6 +399,15 @@ impl TitleQuirks {
     const fn with_bottom_cropped(self, rows: u32) -> Self {
         Self {
             present_crop_bottom: rows,
+            ..self
+        }
+    }
+
+    /// This entry, with a `width` x `height` picture enlarged to the panel the
+    /// way [`stretched_picture`](Self::stretched_picture) describes.
+    const fn with_picture_stretched(self, width: u32, height: u32) -> Self {
+        Self {
+            stretched_picture: Some((width, height)),
             ..self
         }
     }
@@ -522,9 +557,9 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // tall strip with the title picture in its top corner. The title lays its
     // field, HUD and menus out to whatever it is given, and on 240x320 - the
     // panel the LGT build ships for - the field fills the screen the way the
-    // LGT one does. Its title and menu backdrops are 176x220 pictures and stay
-    // in the top-left corner at any larger size.
-    (TitlePlatform::Ktf, "010100D3", panel(240, 320)),
+    // LGT one does. Its title and menu backdrop is a 176x220 picture that
+    // would stay in the top-left corner, so it is enlarged to the panel.
+    (TitlePlatform::Ktf, "010100D3", panel(240, 320).with_picture_stretched(176, 220)),
     // 초밥의달인3 (KTF PD004152): a Java title whose screens draw inside a
     // 240x296 clip - the bottom 24 rows are the handset's soft-key strip, which
     // it never touches - while some earlier screen fills the whole 240x320 with
@@ -1048,6 +1083,16 @@ mod tests {
         assert_eq!(title_quirks(TitlePlatform::Ktf, "010247AB").present_crop_bottom, 16);
         assert_eq!(title_quirks(TitlePlatform::Ktf, "01038485").screen_size, Some((176, 220)));
         assert_eq!(title_quirks(TitlePlatform::Ktf, "01038485").present_crop_bottom, 10);
+    }
+
+    /// 크로이센 (KTF) lays out to 240x320 and has its 176x220 backdrop enlarged
+    /// to match.
+    #[test]
+    fn chroisen_ktf_stretches_its_backdrop() {
+        let quirks = title_quirks(TitlePlatform::Ktf, "010100D3");
+        assert_eq!(quirks.screen_size, Some((240, 320)));
+        assert_eq!(quirks.stretched_picture, Some((176, 220)));
+        assert_eq!(title_quirks(TitlePlatform::Ktf, "01031795").stretched_picture, None);
     }
 
     /// 프린스메이커 온달편 fills the 128x128 panel its art was drawn for.

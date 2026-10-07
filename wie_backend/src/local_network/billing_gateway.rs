@@ -39,6 +39,9 @@ enum Framing {
     /// (컴투스), where the length is the first field and there is no marker. See
     /// [`crate::billing::lgt_local_apf2_response`].
     BigEndianLength,
+    /// `[KP][u16le length counting the whole frame][...]` - the tagged record
+    /// 크로이센 buys with. See [`crate::billing::lgt_local_tagged_record_response`].
+    KpTagged,
 }
 
 /// Answers the carrier billing frames a title writes over a plain socket to one
@@ -73,6 +76,18 @@ impl BillingGatewayEndpoint {
             host,
             port,
             framing: Framing::BigEndianLength,
+        }
+    }
+
+    /// Answers `host:port` for the `KP` tagged record - 크로이센's KTF build,
+    /// which opens a plain socket to its shop server and writes the same record
+    /// its LGT build hands the billing gateway.
+    pub const fn new_kp_tagged(name: &'static str, host: &'static str, port: u16) -> Self {
+        Self {
+            name,
+            host,
+            port,
+            framing: Framing::KpTagged,
         }
     }
 }
@@ -112,7 +127,37 @@ impl BillingGatewayConnection {
         match self.framing {
             Framing::WpBillMarker => self.take_wpbill_frame(),
             Framing::BigEndianLength => self.take_length_prefixed_frame(),
+            Framing::KpTagged => self.take_kp_tagged_frame(),
         }
+    }
+
+    /// `[KP][u16le length][...]`, the length counting the whole frame. Bytes in
+    /// front of a tag are dropped, and so is a tag whose length could not be a
+    /// frame, rather than buffered forever.
+    fn take_kp_tagged_frame(&mut self) -> Option<Vec<u8>> {
+        const TAG: &[u8] = b"KP";
+        /// The tag, the length, the shape, the record byte and one more.
+        const HEADER: usize = 8;
+
+        while self.pending.len() >= 2 && !self.pending.starts_with(TAG) {
+            self.pending.remove(0);
+        }
+
+        if self.pending.len() < FRAME_HEAD {
+            return None;
+        }
+
+        let length = u16::from_le_bytes([self.pending[2], self.pending[3]]) as usize;
+        if !(HEADER..=MAX_FRAME).contains(&length) {
+            self.pending.drain(..2);
+            return None;
+        }
+
+        if self.pending.len() < length {
+            return None;
+        }
+
+        Some(self.pending.drain(..length).collect())
     }
 
     /// `[0xffff][u16le length][body]`. A frame that is not one of these - no
@@ -234,6 +279,35 @@ mod tests {
             pending: Vec::new(),
             outgoing: Vec::new(),
         }
+    }
+
+    fn kp_connection() -> BillingGatewayConnection {
+        BillingGatewayConnection {
+            peer: "222.231.57.145:56000".into(),
+            framing: Framing::KpTagged,
+            pending: Vec::new(),
+            outgoing: Vec::new(),
+        }
+    }
+
+    /// 크로이센's purchase, split across two writes, is taken whole and granted
+    /// in the twelve bytes its reader asks for.
+    #[test]
+    fn a_kp_tagged_purchase_is_granted() {
+        let purchase: &[u8] = &[
+            0x4b, 0x50, 0x24, 0x00, 0x08, 0x00, 0x02, 0x00, 0x30, 0x31, 0x30, 0x32, 0x33, 0x38, 0x36, 0x37, 0x36, 0x36, 0x39, 0x00, 0x30, 0x30, 0x30,
+            0x32, 0x43, 0x43, 0x43, 0x42, 0x30, 0x30, 0x37, 0x00, 0xdc, 0x05, 0x00, 0x00,
+        ];
+
+        let mut connection = kp_connection();
+        connection.write(&purchase[..10]);
+        assert!(!connection.readable());
+        connection.write(&purchase[10..]);
+
+        assert_eq!(
+            read_all(&mut connection),
+            [0x4b, 0x50, 0x0c, 0x00, 0x08, 0x00, 0x02, 0x00, 0x01, 0x00, 0x00, 0x00]
+        );
     }
 
     fn read_all(connection: &mut BillingGatewayConnection) -> Vec<u8> {
