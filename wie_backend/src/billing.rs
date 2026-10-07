@@ -345,6 +345,53 @@ pub fn lgt_local_apf2_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(frame)
 }
 
+/// What answers the text commands 하얀섬 sends EA Mobile's server.
+///
+/// 하얀섬 (LGT `0002C059`, EA모바일/비주얼샤워) opens `210.222.18.28:11532` and
+/// writes one NUL-ended line per request, `printf`-built from the four formats
+/// it carries: `CHARGE %s %s %s`, `SMSAGREE %s %s %c`, `KOIN_REQ_P2 %s %s` and
+/// `KOIN_USE_P2 %s %s`. The first thing it asks is the advertising consent
+/// on its `고객정보 활용동의` screen: `SMSAGREE <subscriber> G1000135 Y` or `N`.
+///
+/// Its network class says how an answer is read: the head is two bytes (its
+/// `headerSize` is `2`), and the parser (`0x1fe9c`) takes the first as the
+/// result and the second as how much text follows; zero means none, and the
+/// exchange is done. Each command then judges the result itself (`0x1f87c`):
+///
+/// | command | accepted result |
+/// |---------|-----------------|
+/// | `SMSAGREE` | 2 or 3 |
+/// | `CHARGE` | 0 or 1 |
+/// | `KOIN_REQ_P2` | 7, with a balance record behind it |
+/// | `KOIN_USE_P2` | 8 |
+///
+/// Anything else is `네트워크 오류`. The consent and a charge are answered
+/// here, a two-byte head with no text: the consent recorded, the purchase
+/// approved. The KOIN pair carries records this does not shape, and is left
+/// unanswered.
+pub fn lgt_local_ea_text_response(request: &[u8]) -> Option<Vec<u8>> {
+    const SMS_CONSENT: &[u8] = b"SMSAGREE ";
+    const CHARGE: &[u8] = b"CHARGE ";
+    const CONSENT_RECORDED: u8 = 2;
+    const CHARGE_APPROVED: u8 = 0;
+
+    // One printable line and its NUL, nothing after.
+    let (&last, line) = request.split_last()?;
+    if last != 0 || !line.iter().all(|&byte| (0x20..0x7f).contains(&byte)) {
+        return None;
+    }
+
+    let result = if line.starts_with(SMS_CONSENT) {
+        CONSENT_RECORDED
+    } else if line.starts_with(CHARGE) {
+        CHARGE_APPROVED
+    } else {
+        return None;
+    };
+
+    Some(vec![result, 0x00])
+}
+
 /// What answers 위기일발 막장가족's 막장캡슐 purchase.
 ///
 /// 위기일발 막장가족 (KTF `01039F5A`, 파란) opens
@@ -9922,6 +9969,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_noreason_response(request))
         .or_else(|| ktf_local_download_response(request))
         .or_else(|| ktf_local_entaz_response(request))
+        .or_else(|| lgt_local_ea_text_response(request))
 }
 
 #[cfg(test)]
@@ -10578,6 +10626,18 @@ mod tests {
         wrong_header[4] = 0x31;
         assert_eq!(lgt_local_apf2_response(&wrong_header), None, "not the login header");
         assert_eq!(lgt_local_apf2_response(&[0x00, 0x05, 0x00, 0x01, 0x31]), None, "not the follow-up");
+    }
+
+    /// 하얀섬's advertising consent, off the device log, is recorded with the
+    /// result its parser accepts for it; a charge is approved; the KOIN pair
+    /// and anything not a NUL-ended line are left alone.
+    #[test]
+    fn hayanseom_consent_and_charge_are_answered() {
+        assert_eq!(lgt_local_ea_text_response(b"SMSAGREE 01057375505 G1000135 N\0"), Some(vec![2, 0]));
+        assert_eq!(lgt_local_ea_text_response(b"SMSAGREE 01057375505 G1000135 Y\0"), Some(vec![2, 0]));
+        assert_eq!(lgt_local_ea_text_response(b"CHARGE 01057375505 G1000135 C2000468\0"), Some(vec![0, 0]));
+        assert_eq!(lgt_local_ea_text_response(b"KOIN_REQ_P2 01057375505 G1000135\0"), None);
+        assert_eq!(lgt_local_ea_text_response(b"SMSAGREE 01057375505 G1000135 N"), None);
     }
 
     /// 위기일발 막장가족's 막장캡슐 purchase, off the device log, is answered

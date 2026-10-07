@@ -2532,6 +2532,16 @@ fn ensure_event_dispatcher(context: &mut dyn WIPICContext) -> Result<()> {
                     state.lock().stop_dispatcher(self.generation);
                     return Err(error);
                 }
+
+                // A connection answered in process stays readable until the
+                // title reads it, and a title need not read from inside its
+                // callback. 하얀섬's read callback (0x132c8) only moves its EA
+                // net state from 13 to 12 and returns; the read is its main
+                // loop's, a frame later. Delivered again without a yield, the
+                // callback is all that ever runs - it has nothing left to do,
+                // the main loop never gets its turn, and the title hangs on
+                // 네트워크 진행중입니다 with the answer sitting there unread.
+                context.system().sleep(1).await;
             }
         }
     }
