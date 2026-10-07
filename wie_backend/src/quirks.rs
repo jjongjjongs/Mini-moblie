@@ -560,6 +560,14 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // LGT one does. Its title and menu backdrop is a 176x220 picture that
     // would stay in the top-left corner, so it is enlarged to the panel.
     (TitlePlatform::Ktf, "010100D3", panel(240, 320).with_picture_stretched(176, 220)),
+    // 약국타이쿤 (지팩): drawn for a 176x220 handset. On 240x320 it centres its
+    // 176-wide pictures and anchors its talk boxes to the bottom, so the town
+    // and the shop sat in a band with the speaker a hundred rows below them.
+    (TitlePlatform::Ktf, "0102884A", panel(176, 220)),
+    // 머리좀써봐앨리스 (나스카): drawn for a 128x160 handset. On 240x320 its
+    // title logo stayed in the corner while the pictures it centres and
+    // bottom-anchors drifted apart from it.
+    (TitlePlatform::Ktf, "01036C16", panel(128, 160)),
     // 초밥의달인3 (KTF PD004152): a Java title whose screens draw inside a
     // 240x296 clip - the bottom 24 rows are the handset's soft-key strip, which
     // it never touches - while some earlier screen fills the whole 240x320 with
@@ -1093,6 +1101,13 @@ mod tests {
         assert_eq!(quirks.screen_size, Some((240, 320)));
         assert_eq!(quirks.stretched_picture, Some((176, 220)));
         assert_eq!(title_quirks(TitlePlatform::Ktf, "01031795").stretched_picture, None);
+    }
+
+    /// 약국타이쿤 and 머리좀써봐앨리스 get the small panels their art was drawn for.
+    #[test]
+    fn pharmacy_tycoon_and_alice_get_their_panels() {
+        assert_eq!(title_quirks(TitlePlatform::Ktf, "0102884A").screen_size, Some((176, 220)));
+        assert_eq!(title_quirks(TitlePlatform::Ktf, "01036C16").screen_size, Some((128, 160)));
     }
 
     /// 프린스메이커 온달편 fills the 128x128 panel its art was drawn for.
