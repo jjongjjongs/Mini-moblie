@@ -16,6 +16,7 @@ wipi_types = { workspace = true }
 wie_util = { workspace = true }
 wie_backend = { workspace = true }
 spin = { workspace = true }
+libm = "^0.2"
 
 [dev-dependencies]
 futures-test = { workspace = true }

@@ -1746,13 +1746,16 @@ pub async fn select_record_ktf(context: &mut dyn WIPICContext, db_id: i32, rec_i
     //     slot at a known byte offset within record 1; this seeks both
     //     cursors so the next read/write hits the right slot while
     //     preserving the bytes belonging to the other slots.
-    //   - `(handle, 0, 0)` and `(handle, 0, 2)` — rewinds both cursors.
-    //     mode=0 vs 2 isn't a length and isn't truncate (truncating on
-    //     mode=2 on the read path destroys a prefetched buffer during a
-    //     subsequent re-open and wipes the saved record). Both are treated
-    //     as plain seek-and-rewind.
+    //   - `(handle, 0, 0)` — rewinds both cursors. It is not a truncate
+    //     (truncating on the read path destroys a prefetched buffer during a
+    //     subsequent re-open and wipes the saved record).
     //   - `(handle, delta, 1)` — seeks from where the cursor already is,
     //     the way `SEEK_CUR` does, rather than from the start.
+    //   - `(handle, delta, 2)` — seeks from the end, the way `SEEK_END` does,
+    //     and so answers the length. 싸이 디럭스 sizes the `flag.dat` it has
+    //     just written that way, `(0, 2)` then `(0, 0)` and a read: answered
+    //     zero, as when this was taken for a rewind, it called its own data
+    //     damaged and quit at the first screen.
     //
     // Mode 1 only tells itself apart from mode 0 once a handle has been read
     // from: on a freshly opened one both land in the same place, which is why
@@ -1784,6 +1787,8 @@ pub async fn select_record_ktf(context: &mut dyn WIPICContext, db_id: i32, rec_i
     // not have it.
     let offset = if mode == 1 {
         (handle.read_cursor as i64 + rec_id as i64).clamp(0, handle.buffer_len as i64) as u32
+    } else if mode == 2 {
+        (handle.buffer_len as i64 + rec_id as i64).clamp(0, handle.buffer_len as i64) as u32
     } else {
         rec_id as u32
     };
@@ -3277,6 +3282,22 @@ mod tests {
         let mut landed = [0u8; 3];
         context.read_bytes(0x2000, &mut landed).unwrap();
         assert_eq!(&landed, b"HIT", "a mode 1 seek is relative to the cursor");
+    }
+
+    /// Mode 2 seeks from the end, the way `SEEK_END` does: `(0, 2)` answers
+    /// the length, and a rewind afterwards reads from the front again.
+    /// 싸이 디럭스 checks the `flag.dat` it has just written that way.
+    #[futures_test::test]
+    async fn a_ktf_seek_of_mode_two_is_from_the_end() {
+        let shipped = vec![7u8; 4288];
+
+        let mut context = database_test_context().with_resource("flag.dat", &shipped);
+        context.write_bytes(0x1000, b"flag.dat\0").unwrap();
+        let db_id = open_database(&mut context, 0x1000, 1, 1).await.unwrap();
+
+        assert_eq!(select_record_ktf(&mut context, db_id, 0, 2, 0).await.unwrap(), 4288, "the length");
+        assert_eq!(select_record_ktf(&mut context, db_id, 0, 0, 0).await.unwrap(), 0);
+        assert_eq!(stream_read(&mut context, db_id, 0x2000, 4).await.unwrap(), 4);
     }
 
     /// A seek answers where it left the cursor, whichever mode it was.

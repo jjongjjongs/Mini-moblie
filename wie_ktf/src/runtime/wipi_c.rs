@@ -58,12 +58,16 @@ impl EmulatedFunction<(), WIPICMethodResult, ()> for CMethodProxy {
         // eight, so read through the eleventh, all off the caller's frame.
         let a9 = u32::get(core, 9);
         let a10 = u32::get(core, 10);
+        // And two more for `m3dInterf`'s `AffineTrans::set`, which takes its
+        // twelve words after `this`.
+        let a11 = u32::get(core, 11);
+        let a12 = u32::get(core, 12);
 
         let result = self
             .body
             .call(
                 &mut self.context.clone(),
-                vec![a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10].into_boxed_slice(),
+                vec![a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12].into_boxed_slice(),
             )
             .await?;
 

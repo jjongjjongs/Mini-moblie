@@ -21,7 +21,12 @@ use wie_util::{
     Result, WieError, descriptor_value, read_generic, read_null_terminated_string_bytes, write_generic, write_null_terminated_string_bytes,
 };
 
-use crate::{WIPICResult, api::fastrelay, context::WIPICContext, method::MethodBody};
+use crate::{
+    WIPICResult,
+    api::{fastrelay, m3d},
+    context::WIPICContext,
+    method::MethodBody,
+};
 
 pub use self::sprintf::format as format_varargs;
 use self::sprintf::sprintf;
@@ -387,6 +392,8 @@ pub struct KernelState {
     /// The socket the `FastRelay` library last connected, while it is open.
     /// See [`crate::api::fastrelay`].
     pub(crate) relay_socket: Option<i32>,
+    /// The `m3dInterf` objects this title has made. See [`crate::api::m3d`].
+    pub(crate) m3d: crate::api::m3d::State,
     /// The encoded bytes each live image was made from, by the image's own
     /// address - see `graphics::hold_image_source`.
     ///
@@ -410,7 +417,7 @@ pub fn register_dll_interface(state: &SharedKernelState, name: &str, address: WI
     state.lock().dll_interfaces.insert(name.to_string(), address);
 }
 
-fn has_dll_interface(context: &mut dyn WIPICContext, name: &str) -> bool {
+fn has_dll_interface(context: &dyn WIPICContext, name: &str) -> bool {
     context.kernel_state().lock().dll_interfaces.contains_key(name)
 }
 
@@ -777,18 +784,31 @@ pub async fn mexecute(context: &mut dyn WIPICContext, ptr_name: WIPICWord) -> Re
     Ok(-12) // M_E_NOENT
 }
 
+/// The libraries this runtime serves itself, as their program id and the
+/// interface name `MC_knlGetDLLInterface` hands them out under: the
+/// `FastRelay` carrier library (see [`fastrelay`]) and the `m3dInterf` 3D
+/// library (see [`m3d`]).
+const SERVED_LIBRARIES: [(&str, &str); 2] = [(fastrelay::LIBRARY_ID, fastrelay::INTERFACE_NAME), (m3d::LIBRARY_ID, m3d::INTERFACE_NAME)];
+
+/// The served library `matches` picks out by its id, if this run has one.
+fn served_library(context: &dyn WIPICContext, matches: impl Fn(&str) -> bool) -> Option<(&'static str, &'static str)> {
+    SERVED_LIBRARIES
+        .into_iter()
+        .find(|(id, interface)| matches(id) && has_dll_interface(context, interface))
+}
+
 /// `MC_knlLoad` - bring another program's code in without running it.
 ///
 /// Loading is how a title reaches a shared library sitting beside it on the
-/// handset. Nothing sits beside this one, except the `FastRelay` library this
-/// runtime serves itself (see [`fastrelay`]).
+/// handset. Nothing sits beside this one, except the libraries this runtime
+/// serves itself (see [`SERVED_LIBRARIES`]).
 pub async fn load(context: &mut dyn WIPICContext, ptr_name: WIPICWord) -> Result<i32> {
     let name = program_name_for_log(context, ptr_name);
 
-    // The one library that is here: what `MC_knlGetExecNames` listed for it is
-    // what the title hands back, so the id anywhere in the name is that.
-    if name.contains(fastrelay::LIBRARY_ID) && has_dll_interface(context, fastrelay::INTERFACE_NAME) {
-        tracing::info!("MC_knlLoad({name:?}) -> 0, the {} library", fastrelay::INTERFACE_NAME);
+    // A library that is here: what `MC_knlGetExecNames` listed for it is what
+    // the title hands back, so the id anywhere in the name is that.
+    if let Some((_, interface)) = served_library(context, |id| name.contains(id)) {
+        tracing::info!("MC_knlLoad({name:?}) -> 0, the {interface} library");
 
         return Ok(0);
     }
@@ -887,12 +907,11 @@ pub async fn get_exec_names(
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         .unwrap_or_default();
 
-    // A carrier library this runtime serves itself is installed too, listed as
-    // a program is: its id and the name of its executable, which are the same.
-    let installed = if wanted.eq_ignore_ascii_case(fastrelay::LIBRARY_ID) && has_dll_interface(context, fastrelay::INTERFACE_NAME) {
-        fastrelay::LIBRARY_ID.to_string()
-    } else {
-        installed
+    // A library this runtime serves itself is installed too, listed as a
+    // program is: its id and the name of its executable, which are the same.
+    let installed = match served_library(context, |id| wanted.eq_ignore_ascii_case(id)) {
+        Some((id, _)) => id.to_string(),
+        None => installed,
     };
 
     if !wanted.is_empty() && !wanted.eq_ignore_ascii_case(&installed) {

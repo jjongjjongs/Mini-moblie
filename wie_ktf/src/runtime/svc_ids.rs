@@ -486,6 +486,9 @@ pub enum WIPICTableId {
     /// `MNInterface` that no table above stands for, numbered by the slot. See
     /// `crate::runtime::init::native_module_target`.
     NativeModule = 20,
+    /// The `m3dInterf` 3D library, reached through `MC_knlGetDLLInterface`
+    /// like [`Self::MxUserMem`].
+    M3d = 21,
 }
 
 impl WIPICTableId {
@@ -520,6 +523,7 @@ impl TryFrom<u32> for WIPICTableId {
             18 => Self::MxUserMem,
             19 => Self::FastRelay,
             20 => Self::NativeModule,
+            21 => Self::M3d,
             _ => return Err(wie_util::WieError::FatalError(alloc::format!("Unknown KTF WIPIC table id {value}"))),
         })
     }

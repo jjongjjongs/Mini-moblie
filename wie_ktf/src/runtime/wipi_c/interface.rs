@@ -105,11 +105,24 @@ fn register_fastrelay_interface(core: &mut ArmCore, context: &mut dyn WIPICConte
     Ok(())
 }
 
+/// Writes the `m3dInterf` 3D library, all [`wie_wipi_c::api::m3d::SLOTS`] of
+/// it, and records it the same way.
+fn register_m3d_interface(core: &mut ArmCore, context: &mut dyn WIPICContext) -> Result<()> {
+    let slots = wie_wipi_c::api::m3d::SLOTS;
+    let address = context.alloc_raw(slots as u32 * 4)?;
+    write_stubs(core, context, WIPICTableId::M3d, address, 0, slots)?;
+
+    wie_wipi_c::api::kernel::register_dll_interface(&context.kernel_state(), wie_wipi_c::api::m3d::INTERFACE_NAME, address);
+
+    Ok(())
+}
+
 pub async fn get_wipic_interfaces(core: &mut ArmCore, context: &mut dyn WIPICContext) -> Result<u32> {
     tracing::trace!("get_wipic_interfaces");
 
     register_mxusermem_interface(core, context)?;
     register_fastrelay_interface(core, context)?;
+    register_m3d_interface(core, context)?;
 
     let graphics_interface = get_graphics_interface(core)?;
     let database_interface = get_database_interface(core)?;

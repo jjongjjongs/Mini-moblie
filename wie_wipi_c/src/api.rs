@@ -4,6 +4,7 @@ pub mod filesystem;
 pub mod graphics;
 pub mod im;
 pub mod kernel;
+pub mod m3d;
 pub mod media;
 pub mod misc;
 pub mod mxusermem;

@@ -9,7 +9,7 @@ use wie_core_arm::ArmCore;
 use wie_util::{Result, WieError};
 use wie_wipi_c::{
     MethodImpl, WIPICContext, WIPICMethodBody,
-    api::{database, fastrelay, filesystem, graphics, im, kernel, media, misc, mxusermem, net, record_database, shared_buf, uic, util},
+    api::{database, fastrelay, filesystem, graphics, im, kernel, m3d, media, misc, mxusermem, net, record_database, shared_buf, uic, util},
 };
 
 use crate::runtime::{
@@ -570,6 +570,236 @@ pub fn get_unk12_method_table() -> Vec<WIPICMethodBody> {
     vec![unk12_slot_0.into_body(), unk12_slot_1.into_body(), unk12_slot_2.into_body()]
 }
 
+/// One function per `m3dInterf` slot, each handing its number on to
+/// [`m3d::call`]: a body cannot be a closure that keeps the context (see
+/// [`unk12_slot`]), so the number has to be in the function.
+macro_rules! m3d_slot {
+    ($name:ident, $slot:expr) => {
+        #[allow(clippy::too_many_arguments)]
+        async fn $name(
+            context: &mut dyn WIPICContext,
+            a0: WIPICWord,
+            a1: WIPICWord,
+            a2: WIPICWord,
+            a3: WIPICWord,
+            a4: WIPICWord,
+            a5: WIPICWord,
+            a6: WIPICWord,
+            a7: WIPICWord,
+            a8: WIPICWord,
+            a9: WIPICWord,
+            a10: WIPICWord,
+            a11: WIPICWord,
+            a12: WIPICWord,
+        ) -> Result<u32> {
+            m3d::call(context, $slot, [a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12]).await
+        }
+    };
+}
+
+m3d_slot!(m3d_slot_0, 0);
+m3d_slot!(m3d_slot_1, 1);
+m3d_slot!(m3d_slot_2, 2);
+m3d_slot!(m3d_slot_3, 3);
+m3d_slot!(m3d_slot_4, 4);
+m3d_slot!(m3d_slot_5, 5);
+m3d_slot!(m3d_slot_6, 6);
+m3d_slot!(m3d_slot_7, 7);
+m3d_slot!(m3d_slot_8, 8);
+m3d_slot!(m3d_slot_9, 9);
+m3d_slot!(m3d_slot_10, 10);
+m3d_slot!(m3d_slot_11, 11);
+m3d_slot!(m3d_slot_12, 12);
+m3d_slot!(m3d_slot_13, 13);
+m3d_slot!(m3d_slot_14, 14);
+m3d_slot!(m3d_slot_15, 15);
+m3d_slot!(m3d_slot_16, 16);
+m3d_slot!(m3d_slot_17, 17);
+m3d_slot!(m3d_slot_18, 18);
+m3d_slot!(m3d_slot_19, 19);
+m3d_slot!(m3d_slot_20, 20);
+m3d_slot!(m3d_slot_21, 21);
+m3d_slot!(m3d_slot_22, 22);
+m3d_slot!(m3d_slot_23, 23);
+m3d_slot!(m3d_slot_24, 24);
+m3d_slot!(m3d_slot_25, 25);
+m3d_slot!(m3d_slot_26, 26);
+m3d_slot!(m3d_slot_27, 27);
+m3d_slot!(m3d_slot_28, 28);
+m3d_slot!(m3d_slot_29, 29);
+m3d_slot!(m3d_slot_30, 30);
+m3d_slot!(m3d_slot_31, 31);
+m3d_slot!(m3d_slot_32, 32);
+m3d_slot!(m3d_slot_33, 33);
+m3d_slot!(m3d_slot_34, 34);
+m3d_slot!(m3d_slot_35, 35);
+m3d_slot!(m3d_slot_36, 36);
+m3d_slot!(m3d_slot_37, 37);
+m3d_slot!(m3d_slot_38, 38);
+m3d_slot!(m3d_slot_39, 39);
+m3d_slot!(m3d_slot_40, 40);
+m3d_slot!(m3d_slot_41, 41);
+m3d_slot!(m3d_slot_42, 42);
+m3d_slot!(m3d_slot_43, 43);
+m3d_slot!(m3d_slot_44, 44);
+m3d_slot!(m3d_slot_45, 45);
+m3d_slot!(m3d_slot_46, 46);
+m3d_slot!(m3d_slot_47, 47);
+m3d_slot!(m3d_slot_48, 48);
+m3d_slot!(m3d_slot_49, 49);
+m3d_slot!(m3d_slot_50, 50);
+m3d_slot!(m3d_slot_51, 51);
+m3d_slot!(m3d_slot_52, 52);
+m3d_slot!(m3d_slot_53, 53);
+m3d_slot!(m3d_slot_54, 54);
+m3d_slot!(m3d_slot_55, 55);
+m3d_slot!(m3d_slot_56, 56);
+m3d_slot!(m3d_slot_57, 57);
+m3d_slot!(m3d_slot_58, 58);
+m3d_slot!(m3d_slot_59, 59);
+m3d_slot!(m3d_slot_60, 60);
+m3d_slot!(m3d_slot_61, 61);
+m3d_slot!(m3d_slot_62, 62);
+m3d_slot!(m3d_slot_63, 63);
+m3d_slot!(m3d_slot_64, 64);
+m3d_slot!(m3d_slot_65, 65);
+m3d_slot!(m3d_slot_66, 66);
+m3d_slot!(m3d_slot_67, 67);
+m3d_slot!(m3d_slot_68, 68);
+m3d_slot!(m3d_slot_69, 69);
+m3d_slot!(m3d_slot_70, 70);
+m3d_slot!(m3d_slot_71, 71);
+m3d_slot!(m3d_slot_72, 72);
+m3d_slot!(m3d_slot_73, 73);
+m3d_slot!(m3d_slot_74, 74);
+m3d_slot!(m3d_slot_75, 75);
+m3d_slot!(m3d_slot_76, 76);
+m3d_slot!(m3d_slot_77, 77);
+m3d_slot!(m3d_slot_78, 78);
+m3d_slot!(m3d_slot_79, 79);
+m3d_slot!(m3d_slot_80, 80);
+m3d_slot!(m3d_slot_81, 81);
+m3d_slot!(m3d_slot_82, 82);
+m3d_slot!(m3d_slot_83, 83);
+m3d_slot!(m3d_slot_84, 84);
+m3d_slot!(m3d_slot_85, 85);
+m3d_slot!(m3d_slot_86, 86);
+m3d_slot!(m3d_slot_87, 87);
+m3d_slot!(m3d_slot_88, 88);
+m3d_slot!(m3d_slot_89, 89);
+m3d_slot!(m3d_slot_90, 90);
+m3d_slot!(m3d_slot_91, 91);
+m3d_slot!(m3d_slot_92, 92);
+m3d_slot!(m3d_slot_93, 93);
+m3d_slot!(m3d_slot_94, 94);
+m3d_slot!(m3d_slot_95, 95);
+m3d_slot!(m3d_slot_96, 96);
+m3d_slot!(m3d_slot_97, 97);
+
+fn get_m3d_method_body(function_id: u16) -> Option<WIPICMethodBody> {
+    Some(match function_id {
+        0 => m3d_slot_0.into_body(),
+        1 => m3d_slot_1.into_body(),
+        2 => m3d_slot_2.into_body(),
+        3 => m3d_slot_3.into_body(),
+        4 => m3d_slot_4.into_body(),
+        5 => m3d_slot_5.into_body(),
+        6 => m3d_slot_6.into_body(),
+        7 => m3d_slot_7.into_body(),
+        8 => m3d_slot_8.into_body(),
+        9 => m3d_slot_9.into_body(),
+        10 => m3d_slot_10.into_body(),
+        11 => m3d_slot_11.into_body(),
+        12 => m3d_slot_12.into_body(),
+        13 => m3d_slot_13.into_body(),
+        14 => m3d_slot_14.into_body(),
+        15 => m3d_slot_15.into_body(),
+        16 => m3d_slot_16.into_body(),
+        17 => m3d_slot_17.into_body(),
+        18 => m3d_slot_18.into_body(),
+        19 => m3d_slot_19.into_body(),
+        20 => m3d_slot_20.into_body(),
+        21 => m3d_slot_21.into_body(),
+        22 => m3d_slot_22.into_body(),
+        23 => m3d_slot_23.into_body(),
+        24 => m3d_slot_24.into_body(),
+        25 => m3d_slot_25.into_body(),
+        26 => m3d_slot_26.into_body(),
+        27 => m3d_slot_27.into_body(),
+        28 => m3d_slot_28.into_body(),
+        29 => m3d_slot_29.into_body(),
+        30 => m3d_slot_30.into_body(),
+        31 => m3d_slot_31.into_body(),
+        32 => m3d_slot_32.into_body(),
+        33 => m3d_slot_33.into_body(),
+        34 => m3d_slot_34.into_body(),
+        35 => m3d_slot_35.into_body(),
+        36 => m3d_slot_36.into_body(),
+        37 => m3d_slot_37.into_body(),
+        38 => m3d_slot_38.into_body(),
+        39 => m3d_slot_39.into_body(),
+        40 => m3d_slot_40.into_body(),
+        41 => m3d_slot_41.into_body(),
+        42 => m3d_slot_42.into_body(),
+        43 => m3d_slot_43.into_body(),
+        44 => m3d_slot_44.into_body(),
+        45 => m3d_slot_45.into_body(),
+        46 => m3d_slot_46.into_body(),
+        47 => m3d_slot_47.into_body(),
+        48 => m3d_slot_48.into_body(),
+        49 => m3d_slot_49.into_body(),
+        50 => m3d_slot_50.into_body(),
+        51 => m3d_slot_51.into_body(),
+        52 => m3d_slot_52.into_body(),
+        53 => m3d_slot_53.into_body(),
+        54 => m3d_slot_54.into_body(),
+        55 => m3d_slot_55.into_body(),
+        56 => m3d_slot_56.into_body(),
+        57 => m3d_slot_57.into_body(),
+        58 => m3d_slot_58.into_body(),
+        59 => m3d_slot_59.into_body(),
+        60 => m3d_slot_60.into_body(),
+        61 => m3d_slot_61.into_body(),
+        62 => m3d_slot_62.into_body(),
+        63 => m3d_slot_63.into_body(),
+        64 => m3d_slot_64.into_body(),
+        65 => m3d_slot_65.into_body(),
+        66 => m3d_slot_66.into_body(),
+        67 => m3d_slot_67.into_body(),
+        68 => m3d_slot_68.into_body(),
+        69 => m3d_slot_69.into_body(),
+        70 => m3d_slot_70.into_body(),
+        71 => m3d_slot_71.into_body(),
+        72 => m3d_slot_72.into_body(),
+        73 => m3d_slot_73.into_body(),
+        74 => m3d_slot_74.into_body(),
+        75 => m3d_slot_75.into_body(),
+        76 => m3d_slot_76.into_body(),
+        77 => m3d_slot_77.into_body(),
+        78 => m3d_slot_78.into_body(),
+        79 => m3d_slot_79.into_body(),
+        80 => m3d_slot_80.into_body(),
+        81 => m3d_slot_81.into_body(),
+        82 => m3d_slot_82.into_body(),
+        83 => m3d_slot_83.into_body(),
+        84 => m3d_slot_84.into_body(),
+        85 => m3d_slot_85.into_body(),
+        86 => m3d_slot_86.into_body(),
+        87 => m3d_slot_87.into_body(),
+        88 => m3d_slot_88.into_body(),
+        89 => m3d_slot_89.into_body(),
+        90 => m3d_slot_90.into_body(),
+        91 => m3d_slot_91.into_body(),
+        92 => m3d_slot_92.into_body(),
+        93 => m3d_slot_93.into_body(),
+        94 => m3d_slot_94.into_body(),
+        95 => m3d_slot_95.into_body(),
+        96 => m3d_slot_96.into_body(),
+        97 => m3d_slot_97.into_body(),
+        _ => return None,
+    })
+}
+
 pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPICMethodBody> {
     get_served_method_body(table_id, function_id).or_else(|| (function_id < WIPIC_TABLE_FUNCTIONS).then(|| gen_missing(table_id, function_id)))
 }
@@ -769,6 +999,7 @@ pub fn get_served_method_body(table_id: WIPICTableId, function_id: u16) -> Optio
             170 => Some(filesystem::list.into_body()),
             _ => None,
         },
+        WIPICTableId::M3d => get_m3d_method_body(function_id),
         WIPICTableId::Database => match WIPICDatabaseMethodId::try_from(function_id).ok()? {
             WIPICDatabaseMethodId::OpenDatabase => Some(database::open_database.into_body()),
             WIPICDatabaseMethodId::StreamRead => Some(database::stream_read.into_body()),
