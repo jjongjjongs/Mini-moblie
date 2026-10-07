@@ -345,6 +345,57 @@ pub fn lgt_local_apf2_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(frame)
 }
 
+/// Where an entaz record keeps its command, and the length of its body.
+const ENTAZ_COMMAND_AT: usize = 0;
+const ENTAZ_BODY_LENGTH_AT: usize = 4;
+/// An entaz record's head: the command, the body length and three more `u32`s.
+const ENTAZ_HEAD: usize = 20;
+/// The SMS consent: `[u32 0][the subscriber number, NUL padded to twelve]`.
+const ENTAZ_CONSENT: u32 = 9;
+const ENTAZ_CONSENT_BODY: usize = 16;
+/// The notice board, sent with no body.
+const ENTAZ_NOTICES: u32 = 2;
+
+/// What answers the entaz SDK's `BillSocket://brew7.entaz.com:15106`.
+///
+/// 해적왕2007 (KTF `01037B1E`, 엔타즈) writes records of a twenty-byte head -
+/// five little-endian `u32`s: the command, the length of the body that follows,
+/// a zero, the service (`0x64`, with the SMS answer in its top byte) and a
+/// zero - then the body. Its reader takes the same twenty bytes back and then
+/// as many more as the reply's own length field says.
+///
+/// | command | sent | answered with | what the title does |
+/// |---------|------|---------------|---------------------|
+/// | 9 | the SMS consent the player chose (`수신동의 등록 중` / `수신거부 등록 중`) and the subscriber number | the record itself | `수신동의되었습니다` / `수신거부되셨습니다` |
+/// | 2 | nothing: asks for the notice board (`자료수신(1회)`) | the head alone, a body of none | `표시할 내용이 없습니다`, then the game |
+///
+/// With the ez-i SDK's twenty-byte answer instead, the consent waits for
+/// sixteen more bytes that never come and the title stays on `등록 중`; the
+/// notice board reads its `999` as a length and waits for that.
+///
+/// `None` for anything else.
+pub fn ktf_local_entaz_response(request: &[u8]) -> Option<Vec<u8>> {
+    if request.len() < ENTAZ_HEAD {
+        return None;
+    }
+
+    let read_u32 = |at: usize| u32::from_le_bytes([request[at], request[at + 1], request[at + 2], request[at + 3]]);
+    let command = read_u32(ENTAZ_COMMAND_AT);
+    let body_length = read_u32(ENTAZ_BODY_LENGTH_AT) as usize;
+    if ENTAZ_HEAD + body_length != request.len() {
+        return None;
+    }
+
+    match (command, body_length) {
+        // Handed back as it came: the head says how much body follows, and
+        // the title reads the consent it registered off it.
+        (ENTAZ_CONSENT, ENTAZ_CONSENT_BODY) => Some(request.to_vec()),
+        // The head again, a body length of zero: no notices to show.
+        (ENTAZ_NOTICES, 0) => Some(request.to_vec()),
+        _ => None,
+    }
+}
+
 /// What answers 템페스트's 정품인증, reached through the `FastRelay` library.
 ///
 /// 템페스트 (KTF `010100D4`, 컴투스) speaks the GP4 family's frames both ways:
@@ -9827,6 +9878,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_nexon_mobile_response(request))
         .or_else(|| lgt_local_noreason_response(request))
         .or_else(|| ktf_local_download_response(request))
+        .or_else(|| ktf_local_entaz_response(request))
 }
 
 #[cfg(test)]
@@ -10483,6 +10535,37 @@ mod tests {
         wrong_header[4] = 0x31;
         assert_eq!(lgt_local_apf2_response(&wrong_header), None, "not the login header");
         assert_eq!(lgt_local_apf2_response(&[0x00, 0x05, 0x00, 0x01, 0x31]), None, "not the follow-up");
+    }
+
+    /// 해적왕2007's SMS refusal, off the device log, and its consent (the same
+    /// record with the answer in the top byte of the service word) are handed
+    /// back whole; its notice-board request is answered with an empty board.
+    #[test]
+    fn entaz_consent_and_notices_are_answered() {
+        let mut refusal = vec![0x09, 0, 0, 0, 0x10, 0, 0, 0, 0, 0, 0, 0, 0x64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        refusal.extend_from_slice(b"01046119269\0");
+        let mut consent = refusal.clone();
+        consent[15] = 0x01;
+
+        assert_eq!(response(&refusal), Some(refusal.clone()));
+        assert_eq!(response(&consent), Some(consent.clone()));
+
+        let notices = [0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x64, 0, 0, 0, 0, 0, 0, 0];
+        let reply = response(&notices).expect("the notice board is answered");
+        assert_eq!(reply.len(), 20, "a head alone");
+        assert_eq!(&reply[4..8], &[0, 0, 0, 0], "with no body behind it");
+    }
+
+    /// A record whose length field does not match what was written, or a
+    /// command these two are not, is not taken.
+    #[test]
+    fn entaz_answers_only_its_two_records() {
+        let mut short = vec![0x09, 0, 0, 0, 0x10, 0, 0, 0];
+        short.resize(30, 0);
+        assert_eq!(ktf_local_entaz_response(&short), None);
+
+        let other = [0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x64, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(ktf_local_entaz_response(&other), None);
     }
 
     /// 템페스트's 정품인증 and saved-game check, request by request as the title
