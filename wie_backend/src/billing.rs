@@ -2761,8 +2761,11 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
     /// subscriber's number. The handset model behind it brings 엘피스's to 98,
     /// and 슈퍼액션히어로3 leaves it off.
     const SESSION_BODY_MIN: usize = 68;
-    /// The three services `0x471f8` writes into the body's first two bytes.
-    const SERVICES: [u16; 3] = [1006, 1017, 1036];
+    /// The services `0x471f8` writes into the body's first two bytes, and
+    /// 액션퍼즐패밀리3's (`0002CB6A`), 1042, which opens its 명품샵 with this
+    /// session: `00 6c 00 00 00 04 12 00 00 02 05 "1.0.2" ...`, the handset
+    /// model behind the subscriber's number.
+    const SERVICES: [u16; 4] = [1006, 1017, 1036, 1042];
 
     /// 미니게임천국4 (KTF `01040357`) opens this session too, with
     /// `MINIGAMEHEAVEN4` where 엘피스 writes the handset model. Its reader is
@@ -2783,6 +2786,19 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
     /// `0xca` and `0xcc`, and its `0xc8` case (`0x11b174`) reads nothing and
     /// sends `0xc9` next.
     const MINIGAME_HEAVEN: &[u8] = b"MINIGAMEHEAVEN";
+    /// 액션퍼즐패밀리3 (LGT `0002CB6A`) writes `APF3` there for its start-up
+    /// save check, and that check reads its answers the newer way:
+    /// `0x64d30` takes the opcode straight out of `[3]` and hands it to the
+    /// handler for the state its network is in, and the check's (`0x6689c`)
+    /// knows `0xc8` - which reads no body and sends the next request the
+    /// screen asked for - and passes an answer under opcode 0 by. The check sat
+    /// on `확인 중입니다` with that one in hand.
+    ///
+    /// Its 명품샵 is the other kind. It opens under service 1042 with the
+    /// handset model in this place, and its state's handler (`0x65a98`) takes
+    /// opcodes up to `0x4a` through a table and calls anything past that a
+    /// failed connection - so that session is answered under opcode 0.
+    const APF3: &[u8] = b"APF3";
 
     /// The library's type `5`, which carries nothing and is answered in kind.
     const SIGNAL_OPCODE: u8 = 0x01;
@@ -2837,6 +2853,40 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
     /// something nobody said.
     const NOTICE_OPCODE: u8 = 0x15;
 
+    /// 액션퍼즐패밀리3's start-up question, after its session: is there a save
+    /// of its on the server (`00 06 00 d5 00 01`). Its reader (in `0x6689c`)
+    /// takes a byte from `[5]` and a `u32` from `[6..10]`; a zero byte goes
+    /// on to its next request, `0xd`, and anything else to `9`, which would
+    /// fetch the save. There is no server and no save on it, so the byte is 0.
+    const SAVE_CHECK_OPCODE: u8 = 0xd5;
+    const NO_SAVE: u8 = 0;
+
+    /// What 액션퍼즐패밀리3's 명품샵 asks first once its session is open
+    /// (`00 06 00 40 00 02`). The case at `0x65aec` takes a `u16` length from
+    /// `[6..8]` and that many bytes from `[8..]`, which it keeps at
+    /// `0x1500314`, and then sends its next request, `0x48`.
+    ///
+    /// The text is the server's, and only goes into a line the shop formats
+    /// around it, so none of it is invented here; but the answer to `0x48`
+    /// opens the shop only if the text is not empty (the `strlen` at
+    /// `0x65bda`, and again at `0x6f652`), so it is a single space.
+    const SHOP_OPEN_OPCODE: u8 = 0x40;
+    const SHOP_TEXT: &[u8] = b" ";
+
+    /// 명품샵's next question (`00 05 00 48 00`). The case at `0x65b44` reads
+    /// six bytes from `[5..11]` into `0x1500890` and six `u32`s from
+    /// `[11..35]` into `0x15070b0`, one of each per item on the shelf.
+    ///
+    /// The byte is the badge drawn over the item (`0x3afc4`: one to three
+    /// picks a mark, anything else none), so none of them carries one. The
+    /// `u32` is whether the item is on sale: `0x3a388` sends a choice of one
+    /// at zero or below to the 'not for sale' screen, `0x29`, and anything
+    /// above it on to the purchase, so every item is.
+    const SHOP_SHELF_OPCODE: u8 = 0x48;
+    const SHELF_ITEMS: usize = 6;
+    const NO_BADGE: u8 = 0;
+    const ON_SALE: u32 = 1;
+
     /// What 슈퍼액션히어로3 sends once its session is open, and `0x48c5c` reads
     /// the answer of.
     const REPORT_OPCODE: u8 = 0x32;
@@ -2885,7 +2935,9 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
     let body = &request[HEADER..];
     let (opcode, answer): (u8, Vec<u8>) = match request[3] {
         SESSION_OPCODE if body.len() >= SESSION_BODY_MIN && SERVICES.contains(&u16::from_be_bytes([body[0], body[1]])) => {
-            if body.get(KTF_TITLE_AT..KTF_TITLE_AT + MINIGAME_HEAVEN.len()) == Some(MINIGAME_HEAVEN) {
+            if body.get(KTF_TITLE_AT..KTF_TITLE_AT + MINIGAME_HEAVEN.len()) == Some(MINIGAME_HEAVEN)
+                || body.get(KTF_TITLE_AT..KTF_TITLE_AT + APF3.len()) == Some(APF3)
+            {
                 (KTF_SESSION_ANSWER_OPCODE, Vec::new())
             } else {
                 (SESSION_OPCODE, Vec::new())
@@ -2902,6 +2954,24 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
             let mut answer = alloc::vec![0u8];
             answer.extend_from_slice(&0u16.to_be_bytes());
             (NOTICE_OPCODE, answer)
+        }
+        SAVE_CHECK_OPCODE if body.len() == 1 => {
+            let mut answer = alloc::vec![NO_SAVE];
+            answer.extend_from_slice(&0u32.to_be_bytes());
+            (SAVE_CHECK_OPCODE, answer)
+        }
+        SHOP_OPEN_OPCODE if body.len() == 1 => {
+            let mut answer = alloc::vec![0u8];
+            answer.extend_from_slice(&(SHOP_TEXT.len() as u16).to_be_bytes());
+            answer.extend_from_slice(SHOP_TEXT);
+            (SHOP_OPEN_OPCODE, answer)
+        }
+        SHOP_SHELF_OPCODE if body.is_empty() => {
+            let mut answer = alloc::vec![NO_BADGE; SHELF_ITEMS];
+            for _ in 0..SHELF_ITEMS {
+                answer.extend_from_slice(&ON_SALE.to_be_bytes());
+            }
+            (SHOP_SHELF_OPCODE, answer)
         }
         // Whatever it carries, its answer is the one `u32` `0x48c5c` takes.
         REPORT_OPCODE if !body.is_empty() => (REPORT_OPCODE, Vec::from(0u32.to_be_bytes())),
@@ -14167,6 +14237,33 @@ mod tests {
 
         // And a frame of another size.
         assert!(lgt_local_blademaster3_response(&request[..27]).is_none());
+    }
+
+    /// 액션퍼즐패밀리3's questions after its session: whether the server holds
+    /// a save of its, and then its 명품샵's text and shelf.
+    #[test]
+    fn action_puzzle_family_3_finds_no_save_and_a_shelf_all_on_sale() {
+        let save_check = lgt_local_opcode_header_response(&[0x00, 0x06, 0x00, 0xd5, 0x00, 0x01]).unwrap();
+        assert_eq!(save_check, vec![0x00, 0x0a, 0x00, 0xd5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+
+        // The text must not be empty for the shelf's answer to open the shop.
+        let shop_open = lgt_local_opcode_header_response(&[0x00, 0x06, 0x00, 0x40, 0x00, 0x02]).unwrap();
+        assert_eq!(shop_open, vec![0x00, 0x09, 0x00, 0x40, 0x00, 0x00, 0x00, 0x01, b' ']);
+
+        // Six badge bytes, then six u32s, each above zero.
+        let shelf = lgt_local_opcode_header_response(&[0x00, 0x05, 0x00, 0x48, 0x00]).unwrap();
+        assert_eq!(shelf.len(), 5 + 6 + 6 * 4);
+        assert_eq!(u16::from_be_bytes([shelf[0], shelf[1]]) as usize, shelf.len());
+        assert_eq!(&shelf[2..5], &[0x00, 0x48, 0x00]);
+        assert_eq!(&shelf[5..11], &[0; 6]);
+        assert!(
+            shelf[11..]
+                .chunks(4)
+                .all(|item| u32::from_be_bytes([item[0], item[1], item[2], item[3]]) == 1)
+        );
+
+        // The shelf question carries nothing; with something behind it, it is not that one.
+        assert!(lgt_local_opcode_header_response(&[0x00, 0x06, 0x00, 0x48, 0x00, 0x00]).is_none());
     }
 
     /// A message this does not know the shape of is left alone rather than
