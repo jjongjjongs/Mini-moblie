@@ -3026,6 +3026,15 @@ pub async fn repaint(context: &mut dyn WIPICContext, lcd: i32, x: i32, y: i32, w
 
     present_region(context.system(), &*src_canvas, x, y, width, height);
 
+    // And still ask for the paint, which is what the call is on the handset: it
+    // posts a paint event, and the title's paint handler runs from it. Taking
+    // the screen frame buffer does not change that. 럭키당구 runs its whole
+    // game from paint - a 30ms timer does nothing but `MC_grpRepaint` - so
+    // with only the present here a frontend that paints on request never ran
+    // it again, and the title sat on its first frame for good. The probe's
+    // periodic host paint hid it, at a tenth of the speed.
+    context.system().platform().screen().request_redraw()?;
+
     Ok(())
 }
 
