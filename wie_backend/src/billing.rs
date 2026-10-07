@@ -1762,7 +1762,17 @@ pub fn lgt_local_big_endian_record_response(request: &[u8]) -> Option<Vec<u8>> {
 /// | `1/0x01`        | `0x612d0`   | reads nothing of the reply; answers with its `PHONENUMBER` as `1/0x3d` |
 /// | `1/0x3d`        | `0x6137a`   | reads nothing of the reply; answers `1/0x3e` |
 /// | `1/0x3e`        | `0x613b8`   | reads nothing of the reply while the 상점 flag is set; closes the 서버 응답을 기다리는중 notice and asks for the catalogue as `5/0x3f` |
+/// | `1/0x50`        | `0x61430`   | the 수신동의 a first connection asks for, sent in place of `1/0x3e` when the menu is in that mode, carrying the handset's choice as a byte. See below |
 /// | `5/0x3f`        | `0x5eb1e`   | takes a `u16 LE` count at `[8]` and that many 37-byte rows behind it, then opens the shop screen |
+///
+/// `1/0x50`'s reader takes a status byte at `[6]`. Anything but zero is the
+/// answer having been taken: it copies the NUL-terminated message at `[8]` into
+/// `0x15668d9`, has `0x65bf8` write the choice to `./Hero4SmsAgree` - which is
+/// what keeps the question from being asked again - puts that message up as
+/// screen `0xb`, and hangs up. Zero sets the choice back to unasked and hangs up
+/// with nothing written and nothing on screen, so the next connection asks
+/// again. It is answered as taken, with no message, since there is no server
+/// here to have written one.
 ///
 /// Buying from that screen is two more, and both read a status byte at `[6]`
 /// and a NUL-terminated message at `[8]` - the pattern every `major 5` handler
@@ -1819,6 +1829,9 @@ pub fn lgt_local_major_minor_response(request: &[u8]) -> Option<Vec<u8>> {
     let (major, minor) = (request[4], request[5]);
     let body: Vec<u8> = match (major, minor) {
         (1, 0x01) | (1, 0x3d) | (1, 0x3e) => Vec::new(),
+        // The 수신동의, taken: the status, a byte the reader skips, and an empty
+        // message.
+        (1, 0x50) if request.len() == HEADER + 1 => vec![GRANTED, 0, 0],
         // The 창고 upload. `0x5e4f0` reads nothing of the reply - it closes the
         // notice, counts the save and asks for the listing as `5/0x3d`.
         (0x14, 0x46) => Vec::new(),
@@ -12397,6 +12410,22 @@ mod tests {
                 u32::from_le_bytes([row[21], row[22], row[23], row[24]])
             })
             .collect()
+    }
+
+    /// The 수신동의 a first connection sends, as the device log has it, is
+    /// taken: a status the reader treats as answered and an empty message.
+    #[test]
+    fn hero4_sms_consent_is_taken_with_no_message() {
+        use super::lgt_local_major_minor_response;
+
+        let request = hero_lore_frame(1, 0x50, &[1]);
+        assert_eq!(request, [0x07, 0x00, 0x00, 0x00, 0x01, 0x50, 0x01]);
+
+        let response = lgt_local_major_minor_response(&request).unwrap();
+        assert_eq!(response, [0x09, 0x00, 0x00, 0x00, 0x01, 0x50, 0x01, 0x00, 0x00]);
+
+        // Without the choice behind it, it is not that request.
+        assert!(lgt_local_major_minor_response(&hero_lore_frame(1, 0x50, &[])).is_none());
     }
 
     #[test]
