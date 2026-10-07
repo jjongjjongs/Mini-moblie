@@ -1204,6 +1204,57 @@ fn map_network_error(error: wie_backend::NetworkError) -> i32 {
     }
 }
 
+/// Opens a stream connection to `address`:`port` the way a carrier relay
+/// library does, and answers the socket descriptor it is reached through.
+///
+/// A relay library (see [`crate::api::fastrelay`]) brings the network up and
+/// connects in one call, so the title never runs `MC_netConnect` or the
+/// connect callback first: what it gets back is a socket it reads with the
+/// ordinary `MC_netSocketRead`. The process network is therefore marked up
+/// here as a finished `MC_netConnect` would leave it.
+///
+/// Only a server this run answers for itself can be reached - the relay's own
+/// servers are gone - so anything else is refused with `M_E_NOTCONN`, which is
+/// a failure the title has a path for rather than a socket that never speaks.
+/// `port` is as the title passed it, in network order.
+pub fn open_relay_connection(context: &mut dyn WIPICContext, address: WIPICWord, port: WIPICWord) -> Result<i32> {
+    let host = dotted_quad(address);
+    let port = dialled_port(port);
+
+    let descriptor = {
+        let system = context.system();
+        system.local_network().connect("socket", &host, port)
+    };
+    let Some(descriptor) = descriptor else {
+        tracing::info!("relay connection to {host}:{port}: nothing answers it here");
+
+        return Ok(M_E_NOTCONN);
+    };
+
+    let socket = match context.system().platform().network().map(|network| network.socket(2, 1)) {
+        Some(Ok(socket)) => socket,
+        _ => {
+            context.system().local_network().close(descriptor);
+
+            return Ok(M_E_NOTCONN);
+        }
+    };
+
+    {
+        let state = context.network_state();
+        let mut state = state.lock();
+        if state.process_state == ProcessNetworkState::Closed {
+            state.process_state = ProcessNetworkState::Available;
+        }
+        state.register_socket(socket, 1, 0);
+        state.bind_local(socket, descriptor);
+    }
+
+    tracing::info!("relay connection to {host}:{port} answered in process on socket {socket}");
+
+    Ok(socket)
+}
+
 /// Opens a socket, and says so - for the reason [`socket_connect`] gives. A
 /// title that was refused one here never reaches the connect at all, and the two
 /// look the same from a capture that records neither.

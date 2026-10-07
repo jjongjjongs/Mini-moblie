@@ -1,4 +1,5 @@
 pub mod database;
+pub mod fastrelay;
 pub mod filesystem;
 pub mod graphics;
 pub mod im;

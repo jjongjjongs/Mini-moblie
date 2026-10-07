@@ -479,6 +479,9 @@ pub enum WIPICTableId {
     /// `MC_knlGetDLLInterface` rather than by index, so it needs an id of its
     /// own only to route its four stubs back here.
     MxUserMem = 18,
+    /// The `FastRelay` carrier library, reached the same way - see
+    /// `wie_wipi_c::api::fastrelay`.
+    FastRelay = 19,
 }
 
 impl WIPICTableId {
@@ -511,6 +514,7 @@ impl TryFrom<u32> for WIPICTableId {
             16 => Self::Interface15,
             17 => Self::Interface16,
             18 => Self::MxUserMem,
+            19 => Self::FastRelay,
             _ => return Err(wie_util::WieError::FatalError(alloc::format!("Unknown KTF WIPIC table id {value}"))),
         })
     }

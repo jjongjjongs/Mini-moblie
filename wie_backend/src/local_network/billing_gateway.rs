@@ -42,6 +42,9 @@ enum Framing {
     /// `[KP][u16le length counting the whole frame][...]` - the tagged record
     /// 크로이센 buys with. See [`crate::billing::lgt_local_tagged_record_response`].
     KpTagged,
+    /// The GP4 frames 템페스트 writes through the `FastRelay` library. See
+    /// [`crate::billing::ktf_local_tempest_response`].
+    Relay,
 }
 
 /// Answers the carrier billing frames a title writes over a plain socket to one
@@ -90,6 +93,17 @@ impl BillingGatewayEndpoint {
             framing: Framing::KpTagged,
         }
     }
+
+    /// Answers `host:port` for a title that reaches its server through the
+    /// `FastRelay` carrier library - 템페스트's 정품인증.
+    pub const fn new_relay(name: &'static str, host: &'static str, port: u16) -> Self {
+        Self {
+            name,
+            host,
+            port,
+            framing: Framing::Relay,
+        }
+    }
 }
 
 impl LocalEndpoint for BillingGatewayEndpoint {
@@ -126,7 +140,7 @@ impl BillingGatewayConnection {
     fn take_frame(&mut self) -> Option<Vec<u8>> {
         match self.framing {
             Framing::WpBillMarker => self.take_wpbill_frame(),
-            Framing::BigEndianLength => self.take_length_prefixed_frame(),
+            Framing::BigEndianLength | Framing::Relay => self.take_length_prefixed_frame(),
             Framing::KpTagged => self.take_kp_tagged_frame(),
         }
     }
@@ -220,7 +234,11 @@ impl LocalConnection for BillingGatewayConnection {
         // One write is not always one frame, so take whole frames only and
         // leave any tail for the write that completes it.
         while let Some(frame) = self.take_frame() {
-            match crate::billing::response(&frame) {
+            let reply = match self.framing {
+                Framing::Relay => crate::billing::ktf_local_tempest_response(&frame),
+                _ => crate::billing::response(&frame),
+            };
+            match reply {
                 Some(reply) => {
                     tracing::info!(
                         "billing gateway {}: {} -> {}",

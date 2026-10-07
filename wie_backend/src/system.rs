@@ -166,6 +166,22 @@ impl System {
             56000,
         )));
 
+        // 템페스트's 정품인증 servers, gone for years, which it reaches through the
+        // `FastRelay` carrier library rather than a socket of its own: the
+        // relay's address and the two ports its other modes dial. Answered in
+        // process (`crate::billing::ktf_local_tempest_response`), the 인증서 is
+        // granted. Host-gated, so no other title is touched.
+        for (name, host, port) in [
+            ("billing(211.115.66.252:15136)", "211.115.66.252", 15136),
+            ("billing(211.115.66.252:15155)", "211.115.66.252", 15155),
+            ("billing(211.115.66.252:18005)", "211.115.66.252", 18005),
+            ("billing(211.233.42.196:15136)", "211.233.42.196", 15136),
+            ("billing(211.233.42.196:15155)", "211.233.42.196", 15155),
+            ("billing(211.233.42.196:18005)", "211.233.42.196", 18005),
+        ] {
+            local_network.register(Box::new(crate::local_network::BillingGatewayEndpoint::new_relay(name, host, port)));
+        }
+
         let platform = Arc::new(platform);
 
         Self {

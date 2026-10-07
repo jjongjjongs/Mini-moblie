@@ -47,6 +47,9 @@
 //!   storage before it starts, to begin from a save.
 //! - `WIE_TICKS2` - the second launch's tick budget, when it needs a different
 //!   one from the first (default: the same).
+//! - `WIE_WATCH` - branch traces and write watches, spelled as the handset's
+//!   probe setting is (`pc:3a376/500,w:1518700`) - see
+//!   `wie_backend::probe::set_watches`.
 //! - `WIE_REDRAW_ON_REQUEST` - feed a host paint only when the title asks for
 //!   one, which is what the Android frontend does. Off, a paint arrives every
 //!   forty ticks regardless, and a repaint the runtime loses is covered up.
@@ -581,6 +584,10 @@ fn ktf_archive_probe() {
         script.push(Step { at: At::Tick(tick), key });
     }
     script.sort_by_key(|step| step.at.order_key());
+
+    if let Ok(spec) = std::env::var("WIE_WATCH") {
+        wie_backend::probe::set_watches(&spec).expect("WIE_WATCH");
+    }
 
     // One handset's storage, so a title that installs itself on its first run
     // finds what it wrote when it is started again.

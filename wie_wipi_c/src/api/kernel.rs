@@ -21,7 +21,7 @@ use wie_util::{
     Result, WieError, descriptor_value, read_generic, read_null_terminated_string_bytes, write_generic, write_null_terminated_string_bytes,
 };
 
-use crate::{WIPICResult, context::WIPICContext, method::MethodBody};
+use crate::{WIPICResult, api::fastrelay, context::WIPICContext, method::MethodBody};
 
 pub use self::sprintf::format as format_varargs;
 use self::sprintf::sprintf;
@@ -384,6 +384,9 @@ pub struct KernelState {
     /// interface tables, because building one needs to make guest-side stubs
     /// and only the platform can do that.
     dll_interfaces: BTreeMap<String, WIPICWord>,
+    /// The socket the `FastRelay` library last connected, while it is open.
+    /// See [`crate::api::fastrelay`].
+    pub(crate) relay_socket: Option<i32>,
     /// The encoded bytes each live image was made from, by the image's own
     /// address - see `graphics::hold_image_source`.
     ///
@@ -405,6 +408,10 @@ pub fn new_state() -> SharedKernelState {
 /// can answer with it.
 pub fn register_dll_interface(state: &SharedKernelState, name: &str, address: WIPICWord) {
     state.lock().dll_interfaces.insert(name.to_string(), address);
+}
+
+fn has_dll_interface(context: &mut dyn WIPICContext, name: &str) -> bool {
+    context.kernel_state().lock().dll_interfaces.contains_key(name)
 }
 
 /// `MC_knlGetDLLInterface(name, major, minor, outMajor, outMinor)` — the
@@ -773,9 +780,19 @@ pub async fn mexecute(context: &mut dyn WIPICContext, ptr_name: WIPICWord) -> Re
 /// `MC_knlLoad` - bring another program's code in without running it.
 ///
 /// Loading is how a title reaches a shared library sitting beside it on the
-/// handset. Nothing sits beside this one.
+/// handset. Nothing sits beside this one, except the `FastRelay` library this
+/// runtime serves itself (see [`fastrelay`]).
 pub async fn load(context: &mut dyn WIPICContext, ptr_name: WIPICWord) -> Result<i32> {
     let name = program_name_for_log(context, ptr_name);
+
+    // The one library that is here: what `MC_knlGetExecNames` listed for it is
+    // what the title hands back, so the id anywhere in the name is that.
+    if name.contains(fastrelay::LIBRARY_ID) && has_dll_interface(context, fastrelay::INTERFACE_NAME) {
+        tracing::info!("MC_knlLoad({name:?}) -> 0, the {} library", fastrelay::INTERFACE_NAME);
+
+        return Ok(0);
+    }
+
     tracing::info!("MC_knlLoad({name:?}) -> -12, nothing else is installed");
 
     Ok(-12) // M_E_NOENT
@@ -825,7 +842,9 @@ const EXEC_NAME_TRAILER: &str = "\t000";
 ///
 /// One program is installed here - the archive that is running - so the listing
 /// names it, and asking about any other name answers that there is nothing
-/// installed under it.
+/// installed under it. The exception is a carrier library this runtime serves
+/// itself, `FastRelay`, which is listed the same way once its interface is
+/// registered.
 ///
 /// **The listing's layout is reconstructed from its one caller**, because
 /// nothing describes it: not the specification, not any handset we have. 록맨X
@@ -867,6 +886,14 @@ pub async fn get_exec_names(
     let wanted = read_null_terminated_string_bytes(context, ptr_program)
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         .unwrap_or_default();
+
+    // A carrier library this runtime serves itself is installed too, listed as
+    // a program is: its id and the name of its executable, which are the same.
+    let installed = if wanted.eq_ignore_ascii_case(fastrelay::LIBRARY_ID) && has_dll_interface(context, fastrelay::INTERFACE_NAME) {
+        fastrelay::LIBRARY_ID.to_string()
+    } else {
+        installed
+    };
 
     if !wanted.is_empty() && !wanted.eq_ignore_ascii_case(&installed) {
         // Not an error: the caller asked whether a program is there, and the
@@ -1003,8 +1030,8 @@ mod test {
     use crate::{WIPICContext, context::test::TestContext, method::MethodImpl};
 
     use super::{
-        alloc, calloc, execute, exit, free, get_access_level, get_app_manager_id, get_exec_names, get_parent_program_id, get_program_info,
-        get_program_name, get_resource, get_resource_id, get_system_property, load, mexecute, mload, program_stop, sprintk,
+        alloc, calloc, execute, exit, fastrelay, free, get_access_level, get_app_manager_id, get_exec_names, get_parent_program_id, get_program_info,
+        get_program_name, get_resource, get_resource_id, get_system_property, load, mexecute, mload, program_stop, register_dll_interface, sprintk,
     };
 
     /// `MC_knlGetProgramName` answers the name the title's own binary was built
@@ -1364,6 +1391,25 @@ mod test {
 
         // Asked about nothing in particular, the listing is the same one.
         assert_eq!(get_exec_names(&mut context, 0, 0, 0, out, 64).await.unwrap(), 1);
+    }
+
+    /// The `FastRelay` library is installed once its interface is: 템페스트 asks
+    /// for its listing and loads what that names before it takes the interface,
+    /// and stops at `LIBRARY LOAD FAIL` when either refuses.
+    #[futures_test::test]
+    async fn the_relay_library_is_listed_and_loads_once_it_is_there() {
+        let mut context = program_control_context(None);
+        let name = context.alloc_raw(16).unwrap();
+        let out = context.alloc_raw(64).unwrap();
+        write_null_terminated_string_bytes(&mut context, name, fastrelay::LIBRARY_ID.as_bytes()).unwrap();
+
+        assert_eq!(get_exec_names(&mut context, name, 0, 0, out, 64).await.unwrap(), 0);
+        assert_eq!(load(&mut context, name).await.unwrap(), -12);
+
+        register_dll_interface(&context.kernel_state(), fastrelay::INTERFACE_NAME, 0x1000);
+
+        assert_eq!(get_exec_names(&mut context, name, 0, 0, out, 64).await.unwrap(), 1);
+        assert_eq!(load(&mut context, out).await.unwrap(), 0);
     }
 
     /// A buffer the listing does not fit in is refused rather than filled part

@@ -96,10 +96,20 @@ fn register_mxusermem_interface(core: &mut ArmCore, context: &mut dyn WIPICConte
     Ok(())
 }
 
+/// Writes the `FastRelay` carrier library and records it the same way.
+fn register_fastrelay_interface(core: &mut ArmCore, context: &mut dyn WIPICContext) -> Result<()> {
+    let address = write_methods(core, context, WIPICTableId::FastRelay)?;
+
+    wie_wipi_c::api::kernel::register_dll_interface(&context.kernel_state(), wie_wipi_c::api::fastrelay::INTERFACE_NAME, address);
+
+    Ok(())
+}
+
 pub async fn get_wipic_interfaces(core: &mut ArmCore, context: &mut dyn WIPICContext) -> Result<u32> {
     tracing::trace!("get_wipic_interfaces");
 
     register_mxusermem_interface(core, context)?;
+    register_fastrelay_interface(core, context)?;
 
     let graphics_interface = get_graphics_interface(core)?;
     let database_interface = get_database_interface(core)?;

@@ -9,7 +9,7 @@ use wie_core_arm::ArmCore;
 use wie_util::{Result, WieError};
 use wie_wipi_c::{
     MethodImpl, WIPICContext, WIPICMethodBody,
-    api::{database, filesystem, graphics, im, kernel, media, misc, mxusermem, net, record_database, shared_buf, uic, util},
+    api::{database, fastrelay, filesystem, graphics, im, kernel, media, misc, mxusermem, net, record_database, shared_buf, uic, util},
 };
 
 use crate::runtime::{
@@ -738,6 +738,16 @@ pub fn get_served_method_body(table_id: WIPICTableId, function_id: u16) -> Optio
             2 => Some(mxusermem::realloc.into_body()),
             3 => Some(mxusermem::free.into_body()),
             _ => (function_id < WIPIC_TABLE_FUNCTIONS).then(|| gen_missing(WIPICTableId::MxUserMem, function_id)),
+        },
+        // The slots 템페스트 calls; the rest of the table is unknown.
+        WIPICTableId::FastRelay => match function_id {
+            2 => Some(fastrelay::init.into_body()),
+            3 => Some(fastrelay::connect.into_body()),
+            4 => Some(fastrelay::send.into_body()),
+            5 => Some(fastrelay::recv.into_body()),
+            6 => Some(fastrelay::close.into_body()),
+            7 => Some(fastrelay::connected.into_body()),
+            _ => (function_id < WIPIC_TABLE_FUNCTIONS).then(|| gen_missing(WIPICTableId::FastRelay, function_id)),
         },
         WIPICTableId::Database => match WIPICDatabaseMethodId::try_from(function_id).ok()? {
             WIPICDatabaseMethodId::OpenDatabase => Some(database::open_database.into_body()),

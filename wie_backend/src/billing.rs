@@ -345,6 +345,62 @@ pub fn lgt_local_apf2_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(frame)
 }
 
+/// What answers 템페스트's 정품인증, reached through the `FastRelay` library.
+///
+/// 템페스트 (KTF `010100D4`, 컴투스) speaks the GP4 family's frames both ways:
+/// `[u16be length counting the frame][00][type][00][body]`, the byte that
+/// 액션퍼즐패밀리2 sets to `0x30` a zero here. Its reader (`0x110914`) takes the
+/// five-byte head, the type from byte 3, and then `length - 5` bytes of body.
+///
+/// The 정품인증 is three exchanges, each request named by the answer to the one
+/// before (the dispatch at `0x10bc22` sets the next request from the reply's
+/// type):
+///
+/// | request | answer | what the title does with it |
+/// |---------|--------|------------------------------|
+/// | `0x00`, the 73-byte login with the build's version and the subscriber number | type `0x00` | asks for the 인증서, `0x1e` |
+/// | `0x1e` | type `0x1e`, body `[01]` | a first byte of one records the licence (`0x10ae44(1)`); either way it asks for `0x14` |
+/// | `0x14` | type `0x14`, body `[00][u16be 0]` | a message of that length is shown if there is one; then the licence is kept (`0x10ade0(1)`) and `정상적으로 처리되었습니다` is shown |
+///
+/// After the licence the title logs in again and asks, with `0x32`, whether
+/// the server keeps a saved game for it (`기존에 저장되어 있는 환경 설정 데이터,
+/// 게임 데이터가 있는지 확인 중입니다`). Its handler (`0x10bd8a`) reads one byte:
+/// one says there is, and moves on to fetch it; anything else ends the check
+/// with nothing to restore (`0x101100(5)`), which is the truth here - there is
+/// no server - so `0x32` is answered `[00]`.
+///
+/// `None` for anything else, which is left unanswered.
+pub fn ktf_local_tempest_response(request: &[u8]) -> Option<Vec<u8>> {
+    const HEAD: usize = 5;
+    const LOGIN: u8 = 0x00;
+    const CERTIFICATE: u8 = 0x1e;
+    const COMPLETE: u8 = 0x14;
+    const SAVED_GAME: u8 = 0x32;
+
+    if request.len() < HEAD || u16::from_be_bytes([request[0], request[1]]) as usize != request.len() || request[2] != 0x00 || request[4] != 0x00 {
+        return None;
+    }
+
+    let message_type = request[3];
+    let body: &[u8] = match message_type {
+        // What a login is answered with in this family, though the title only
+        // looks at the type.
+        LOGIN => &[0, 0, 0, 0, 0],
+        CERTIFICATE => &[0x01],
+        // No message: a zero u16be length after the first byte.
+        COMPLETE => &[0x00, 0x00, 0x00],
+        SAVED_GAME => &[0x00],
+        _ => return None,
+    };
+
+    let length = HEAD + body.len();
+    let mut frame = Vec::with_capacity(length);
+    frame.extend_from_slice(&(length as u16).to_be_bytes());
+    frame.extend_from_slice(&[0x00, message_type, 0x00]);
+    frame.extend_from_slice(body);
+    Some(frame)
+}
+
 /// What answers 액션퍼즐패밀리1's star purchase.
 ///
 /// 액션퍼즐패밀리1 (컴투스) uses the same billing socket and framing as
@@ -10427,6 +10483,52 @@ mod tests {
         wrong_header[4] = 0x31;
         assert_eq!(lgt_local_apf2_response(&wrong_header), None, "not the login header");
         assert_eq!(lgt_local_apf2_response(&[0x00, 0x05, 0x00, 0x01, 0x31]), None, "not the follow-up");
+    }
+
+    /// 템페스트's 정품인증 and saved-game check, request by request as the title
+    /// wrote them through `FastRelay`, each answered under the same five-byte
+    /// head with the request's type at byte 3.
+    #[test]
+    fn tempest_is_licensed_and_told_there_is_no_saved_game() {
+        let mut login = vec![0x00, 0x49, 0x00, 0x00, 0x00, 0x03, 0xf9, 0x00, 0x01, 0x01, 0x03];
+        login.extend_from_slice(b"1.0.0");
+        login.resize(31, 0x00);
+        login.extend_from_slice(b"01046119269");
+        login.resize(0x49, 0x00);
+
+        let mut complete = vec![0x00, 0x4f, 0x00, 0x14, 0x00, 0x0c, 0x04, 0x10];
+        complete.extend_from_slice(b"Emulator");
+        complete.resize(0x4f, 0x00);
+
+        assert_eq!(
+            ktf_local_tempest_response(&login),
+            Some(vec![0x00, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+        );
+        assert_eq!(
+            ktf_local_tempest_response(&[0x00, 0x07, 0x00, 0x1e, 0x00, 0x04, 0x10]),
+            Some(vec![0x00, 0x06, 0x00, 0x1e, 0x00, 0x01])
+        );
+        assert_eq!(
+            ktf_local_tempest_response(&complete),
+            Some(vec![0x00, 0x08, 0x00, 0x14, 0x00, 0x00, 0x00, 0x00])
+        );
+        assert_eq!(
+            ktf_local_tempest_response(&[0x00, 0x05, 0x00, 0x32, 0x00]),
+            Some(vec![0x00, 0x06, 0x00, 0x32, 0x00, 0x00])
+        );
+    }
+
+    /// The GP4 frames 액션퍼즐패밀리2 writes carry `0x30` where 템페스트's carry a
+    /// zero, and are not taken; nor is a type the 정품인증 does not send.
+    #[test]
+    fn tempest_answers_only_its_own_frames() {
+        assert_eq!(ktf_local_tempest_response(APF2_LOGIN), None);
+        assert_eq!(ktf_local_tempest_response(&[0x00, 0x05, 0x00, 0x33, 0x00]), None);
+        assert_eq!(
+            ktf_local_tempest_response(&[0x00, 0x06, 0x00, 0x1e, 0x00]),
+            None,
+            "length is not the frame's"
+        );
     }
 
     /// EA프로야구2010's 34-byte command-0x10 login, off the wire: a u32be
