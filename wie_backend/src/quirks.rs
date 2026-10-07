@@ -553,13 +553,10 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // out as the height less those 16: told 204, the restaurant came out 188
     // high, its counters shifted up under the clip and the bottom bar cut.
     (TitlePlatform::Ktf, "01031795", panel(176, 220).with_bottom_cropped(16)),
-    // 크로이센 (KTH): the descriptor says 240x400, which leaves the field a
-    // tall strip with the title picture in its top corner. The title lays its
-    // field, HUD and menus out to whatever it is given, and on 240x320 - the
-    // panel the LGT build ships for - the field fills the screen the way the
-    // LGT one does. Its title and menu backdrop is a 176x220 picture that
-    // would stay in the top-left corner, so it is enlarged to the panel.
-    (TitlePlatform::Ktf, "010100D3", panel(240, 320).with_picture_stretched(176, 220)),
+    // 광개토태왕정벌기 (모비클, KTF): the descriptor says 240x320, but every
+    // screen is drawn for 176x220 - on 240x320 the menu and the field sat in
+    // the middle of a black frame.
+    (TitlePlatform::Ktf, "01028C45", panel(176, 220)),
     // 약국타이쿤 (지팩): drawn for a 176x220 handset. On 240x320 it centres its
     // 176-wide pictures and anchors its talk boxes to the bottom, so the town
     // and the shop sat in a band with the speaker a hundred rows below them.
@@ -902,6 +899,47 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
 /// the first is laid out under pushed the second a strip down its own panel,
 /// cutting the top of its title screen and the `CLR:BACK` line off its
 /// bottom, and put a status bar over a game that never had one.
+/// Entries that hold only for the build whose descriptor names a given panel.
+///
+/// An application id is the carrier's, and one has been reused for a second
+/// title: KTF `010100D3` is both 크로이센 (KTH, `DisplaySize:240*400`) and
+/// 아포칼립스 (겜닥스, `DisplaySize:176*220`). Nothing else in the descriptor
+/// is as plain a tell, and it is read before there is a panel to ask about, so
+/// the panel the descriptor names is what tells the two apart. Read through
+/// [`title_quirks_for_descriptor`].
+const DESCRIPTOR_QUIRKS: &[(TitlePlatform, &str, (u32, u32), TitleQuirks)] = &[
+    // 크로이센 (KTH): the descriptor says 240x400, which leaves the field a
+    // tall strip with the title picture in its top corner. The title lays its
+    // field, HUD and menus out to whatever it is given, and on 240x320 - the
+    // panel the LGT build ships for - the field fills the screen the way the
+    // LGT one does. Its title and menu backdrop is a 176x220 picture that
+    // would stay in the top-left corner, so it is enlarged to the panel.
+    (
+        TitlePlatform::Ktf,
+        "010100D3",
+        (240, 400),
+        panel(240, 320).with_picture_stretched(176, 220),
+    ),
+    // 아포칼립스 (겜닥스): every screen is 204 rows - the 176x220 handset less
+    // its status strip - and centred in whatever height it is given, so on
+    // the descriptor's 176x220 it sat between two black bands. On 176x204 it
+    // fills the panel.
+    (TitlePlatform::Ktf, "010100D3", (176, 220), panel(176, 204)),
+];
+
+/// [`title_quirks`] for the build whose descriptor names `display_size`, which
+/// also answers the entries that hold only for that build - see
+/// [`DESCRIPTOR_QUIRKS`].
+pub fn title_quirks_for_descriptor(platform: TitlePlatform, aid: &str, display_size: Option<(u32, u32)>) -> TitleQuirks {
+    for (entry_platform, entry_aid, entry_size, quirks) in DESCRIPTOR_QUIRKS {
+        if *entry_platform == platform && entry_aid.eq_ignore_ascii_case(aid) && Some(*entry_size) == display_size {
+            return *quirks;
+        }
+    }
+
+    title_quirks(platform, aid)
+}
+
 const PANEL_QUIRKS: &[(TitlePlatform, &str, u32, TitleQuirks)] = &[
     // 만귀토벌전: lays every screen out below the strip and inside the rows
     // left under it, so the rows the strip takes off the top are also what
@@ -914,6 +952,10 @@ const PANEL_QUIRKS: &[(TitlePlatform, &str, u32, TitleQuirks)] = &[
     // its last four rows - the bottom of the portrait and of the KARMA gauge -
     // went off the end.
     (TitlePlatform::Ktf, "0102A356", 176, annunciator_of(16)),
+    // 크로이센's backdrop, enlarged on the 240-wide panel its descriptor entry
+    // gives it - see `DESCRIPTOR_QUIRKS`. 아포칼립스 shares the id and runs
+    // 176 wide, where nothing is enlarged.
+    (TitlePlatform::Ktf, "010100D3", 240, panel(240, 320).with_picture_stretched(176, 220)),
 ];
 
 /// [`title_quirks`] for a title running on a panel `width` wide, which also
@@ -1097,10 +1139,29 @@ mod tests {
     /// to match.
     #[test]
     fn chroisen_ktf_stretches_its_backdrop() {
-        let quirks = title_quirks(TitlePlatform::Ktf, "010100D3");
+        let quirks = super::title_quirks_for_descriptor(TitlePlatform::Ktf, "010100D3", Some((240, 400)));
         assert_eq!(quirks.screen_size, Some((240, 320)));
-        assert_eq!(quirks.stretched_picture, Some((176, 220)));
+        assert_eq!(
+            super::title_quirks_on_panel(TitlePlatform::Ktf, "010100D3", 240).stretched_picture,
+            Some((176, 220))
+        );
         assert_eq!(title_quirks(TitlePlatform::Ktf, "01031795").stretched_picture, None);
+    }
+
+    /// 아포칼립스 has 크로이센's application id; its own descriptor is what
+    /// keeps it off 크로이센's panel and picture.
+    #[test]
+    fn apocalypse_is_not_taken_for_chroisen() {
+        let quirks = super::title_quirks_for_descriptor(TitlePlatform::Ktf, "010100D3", Some((176, 220)));
+        assert_eq!(quirks.screen_size, Some((176, 204)));
+        assert_eq!(quirks.stretched_picture, None);
+        assert_eq!(super::title_quirks_on_panel(TitlePlatform::Ktf, "010100D3", 176).stretched_picture, None);
+    }
+
+    /// 광개토태왕정벌기 (KTF) is drawn for 176x220 whatever its descriptor says.
+    #[test]
+    fn gwanggaeto_ktf_gets_its_panel() {
+        assert_eq!(title_quirks(TitlePlatform::Ktf, "01028C45").screen_size, Some((176, 220)));
     }
 
     /// 약국타이쿤 and 머리좀써봐앨리스 get the small panels their art was drawn for.
