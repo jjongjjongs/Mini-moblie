@@ -493,6 +493,11 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // character select, the table - stops there, leaving the 24 rows under it
     // white.
     (TitlePlatform::Ktf, "0102BB09", panel(240, 320).with_bottom_cropped(24)),
+    // 위기일발 막장가족: drawn for a 296-row drawing area - its scene fills
+    // are `(0, -1, 241, 297)` - and told 320 it left the comic strips and the
+    // 하이킥 screens 24 rows short over a white band, and its title's PRESS ANY
+    // KEY under the panel. Told 296 it lays every screen out to the edge.
+    (TitlePlatform::Ktf, "01039F5A", panel(240, 296)),
     // 2006현영맞고: its pictures are 300 rows tall, and the 20 under them kept
     // the title's logo under the menu.
     (TitlePlatform::Ktf, "01033511", panel(240, 320).with_bottom_cropped(20)),
@@ -1133,6 +1138,7 @@ mod tests {
         assert_eq!(title_quirks(TitlePlatform::Ktf, "010366DB").present_crop_bottom, 24);
         assert_eq!(title_quirks(TitlePlatform::Ktf, "01031E04").present_crop_bottom, 24);
         assert_eq!(title_quirks(TitlePlatform::Ktf, "0102BB09").present_crop_bottom, 24);
+        assert_eq!(title_quirks(TitlePlatform::Ktf, "01039F5A").screen_size, Some((240, 296)));
         assert_eq!(title_quirks(TitlePlatform::Ktf, "01033511").present_crop_bottom, 20);
         assert_eq!(title_quirks(TitlePlatform::Ktf, "010247AB").screen_size, Some((176, 220)));
         assert_eq!(title_quirks(TitlePlatform::Ktf, "010247AB").present_crop_bottom, 16);

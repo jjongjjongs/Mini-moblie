@@ -345,6 +345,46 @@ pub fn lgt_local_apf2_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(frame)
 }
 
+/// What answers 위기일발 막장가족's 막장캡슐 purchase.
+///
+/// 위기일발 막장가족 (KTF `01039F5A`, 파란) opens
+/// `BillSocket://222.231.31.45:33009` and writes the carrier's `0xffff` frame:
+/// `ff ff 12 00 14 04` and the subscriber number, NUL ended. Its reader
+/// (`0x106644`) does not take the frame's two bytes after the length as one
+/// type: it reads byte 4 as the reply's command and byte 5 as the result, and
+/// for the purchase (`0x107876`) a result of zero is `[구매 성공]` - the
+/// capsules bought are credited and saved - while anything else is `[네트워크
+/// 오류] 네트워크에 연결 할 수 없습니다`.
+///
+/// The family's granted frame ([`lgt_local_granted_response`]) echoes the
+/// request's type as a `u16`, `15 04`, which puts the `0x04` in the result
+/// byte and refuses every purchase. So this one answers `ff ff 07 00 15 00 00`:
+/// the command answered, a zero result.
+///
+/// The same frame carries a 막장캡슐 gift, the friend's number in place of the
+/// subscriber's, and is answered the same way. `None` for anything that is not
+/// this frame: command `0x14` with a `0x04` after it and an eleven-digit
+/// number.
+pub fn ktf_local_makjang_capsule_response(request: &[u8]) -> Option<Vec<u8>> {
+    const COMMAND: u8 = 0x14;
+    const KIND: u8 = 0x04;
+    const NUMBER: usize = 11;
+    const FRAME: usize = 6 + NUMBER + 1;
+
+    if request.len() != FRAME
+        || request[0..2] != [0xff, 0xff]
+        || u16::from_le_bytes([request[2], request[3]]) as usize != FRAME
+        || request[4] != COMMAND
+        || request[5] != KIND
+        || !request[6..6 + NUMBER].iter().all(u8::is_ascii_digit)
+        || request[FRAME - 1] != 0
+    {
+        return None;
+    }
+
+    Some(vec![0xff, 0xff, 0x07, 0x00, COMMAND + 1, 0x00, 0x00])
+}
+
 /// Where an entaz record keeps its command, and the length of its body.
 const ENTAZ_COMMAND_AT: usize = 0;
 const ENTAZ_BODY_LENGTH_AT: usize = 4;
@@ -9831,6 +9871,9 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
     // `lgt_local_maguer2011_response` - so nothing else can be taken for it,
     // and it cannot take anything else.
     lgt_local_maguer2011_response(request)
+        // Before the granted frame, which answers this request in a shape the
+        // title reads as a refusal.
+        .or_else(|| ktf_local_makjang_capsule_response(request))
         .or_else(|| lgt_local_chessmaster_response(request))
         .or_else(|| lgt_local_granted_response(request))
         .or_else(|| lgt_local_cash_response(request))
@@ -10535,6 +10578,22 @@ mod tests {
         wrong_header[4] = 0x31;
         assert_eq!(lgt_local_apf2_response(&wrong_header), None, "not the login header");
         assert_eq!(lgt_local_apf2_response(&[0x00, 0x05, 0x00, 0x01, 0x31]), None, "not the follow-up");
+    }
+
+    /// 위기일발 막장가족's 막장캡슐 purchase, off the device log, is answered
+    /// with a zero result where the title reads it, byte 5.
+    #[test]
+    fn makjang_capsule_purchase_is_granted() {
+        let mut purchase = vec![0xff, 0xff, 0x12, 0x00, 0x14, 0x04];
+        purchase.extend_from_slice(b"01199999999\0");
+
+        let reply = response(&purchase).expect("the purchase is answered");
+        assert_eq!(reply, [0xff, 0xff, 0x07, 0x00, 0x15, 0x00, 0x00]);
+        assert_eq!(reply[5], 0, "the result byte the title reads");
+
+        let mut other = purchase.clone();
+        other[5] = 0x05;
+        assert_eq!(ktf_local_makjang_capsule_response(&other), None);
     }
 
     /// 해적왕2007's SMS refusal, off the device log, and its consent (the same
