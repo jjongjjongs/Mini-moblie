@@ -1404,6 +1404,87 @@ pub fn lgt_local_fixed_block_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(response)
 }
 
+/// What answers the session 09대박맞고-왕후의길 opens for its 초기 인증.
+///
+/// 09대박맞고-왕후의길 (`0002AABE`) connects to 218.50.3.88:2508 as soon as its
+/// 'press any key' notice is passed, says 초기 인증 중.. and waits there for the
+/// answer. Its request is built by `0x5bfa8` for state 8 of the session machine
+/// at `[0x1502ec0+0x7038]`:
+///
+/// ```text
+/// 14 00  01 00  00 x16  72 00 00 00  <adler32 of the 24 bytes before it, LE>
+/// ```
+///
+/// - a `u16` `0x14` and a `u16` 1, all little-endian,
+/// - sixteen bytes `0x5bfa8` clears and copies in cleared every time,
+/// - the version, `0x72`,
+/// - and Adler-32 over those 24 bytes (`0xcfb8`).
+///
+/// The read callback `0x5cb20` reads twelve bytes. In state 8 it does not take
+/// them for the header its other states read a length from, because
+/// `[0x760]` is 8 (`0x5cbba`); the twelve are the whole answer. `0x5c74a` reads
+/// them as a `u16`, a `u16`, a `u32` and a `u32` into `0x7a40..0x7a4c`, and the
+/// session is over: `[0x7034]` goes to 8.
+///
+/// The `u32` at `[4..8]` (`0x7a44`) is what the server had to say to this
+/// handset, and the 초기 인증 screen (`0x3cd64`) acts on nothing else:
+///
+/// - 1: it had played an 엔소니 title before, and is given 500원 of game cash;
+/// - 2 and 12: the same, for 300원, if it agrees;
+/// - 3: an offer of 200원 for agreeing to SMS;
+/// - 999: nothing to say, so the screen closes the socket and goes on to the
+///   title (`0x3cdce`).
+///
+/// Any other value sends it to screen 7, which waits for a key that leads back
+/// into the same session. So the answer is 999: the server has nothing for
+/// this handset, which is the one thing a server that is gone can truthfully
+/// say. The two `u16`s and the last `u32` are kept and never read again.
+///
+/// `None` unless the request is exactly that frame, checksum included.
+pub fn lgt_local_ensoni_session_response(request: &[u8]) -> Option<Vec<u8>> {
+    /// What the checksum covers, and the frame with it.
+    const BODY: usize = 24;
+    const FRAME: usize = BODY + 4;
+    const KIND: u16 = 0x14;
+    const STEP: u16 = 1;
+    const VERSION: u32 = 0x72;
+    /// The 초기 인증 screen's 'nothing to show'.
+    const NO_EVENT: u32 = 999;
+
+    if request.len() != FRAME {
+        return None;
+    }
+
+    let (body, trailer) = request.split_at(BODY);
+    if u16::from_le_bytes([body[0], body[1]]) != KIND
+        || u16::from_le_bytes([body[2], body[3]]) != STEP
+        || u32::from_le_bytes([body[20], body[21], body[22], body[23]]) != VERSION
+        || adler32(body).to_le_bytes() != trailer
+    {
+        return None;
+    }
+
+    let mut answer = Vec::with_capacity(12);
+    answer.extend_from_slice(&0u16.to_le_bytes());
+    answer.extend_from_slice(&0u16.to_le_bytes());
+    answer.extend_from_slice(&NO_EVENT.to_le_bytes());
+    answer.extend_from_slice(&0u32.to_le_bytes());
+
+    Some(answer)
+}
+
+/// Adler-32, which 09대박맞고-왕후의길 puts behind each request it writes
+/// (`0xcfb8`).
+fn adler32(bytes: &[u8]) -> u32 {
+    const MODULUS: u32 = 65521;
+    let (mut a, mut b) = (1u32, 0u32);
+    for &byte in bytes {
+        a = (a + byte as u32) % MODULUS;
+        b = (b + a) % MODULUS;
+    }
+    (b << 16) | a
+}
+
 /// What answers the `ENSLGT` record 블레이드마스터4 buys 하트 with.
 ///
 /// 블레이드마스터4 (`0002BA50`) opens a billing socket to port 5018 when a
@@ -10121,6 +10202,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_command_tag_response(request))
         .or_else(|| lgt_local_fixed_block_response(request))
         .or_else(|| lgt_local_ens_record_response(request))
+        .or_else(|| lgt_local_ensoni_session_response(request))
         .or_else(|| lgt_local_big_endian_record_response(request))
         .or_else(|| lgt_local_major_minor_response(request))
         .or_else(|| lgt_local_text_record_response(request))
@@ -13423,6 +13505,33 @@ mod tests {
         assert_eq!(response(b"hello"), None);
         assert_eq!(response(&[0u8; 64]), None);
     }
+    /// 09대박맞고-왕후의길's 초기 인증 session, as the device log has it, is told
+    /// there is nothing for this handset, and only that frame is.
+    #[test]
+    fn the_ensoni_session_is_answered_with_nothing_to_show() {
+        let request = [
+            0x14, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x72, 0x00, 0x00,
+            0x00, 0x88, 0x00, 0xd6, 0x03,
+        ];
+
+        let answer = response(&request).unwrap();
+        assert_eq!(answer, lgt_local_ensoni_session_response(&request).unwrap());
+        assert_eq!(answer.len(), 12);
+        assert_eq!(u32::from_le_bytes([answer[4], answer[5], answer[6], answer[7]]), 999);
+
+        // A checksum that does not cover the bytes before it is not that frame.
+        let mut broken = request;
+        broken[27] ^= 1;
+        assert!(lgt_local_ensoni_session_response(&broken).is_none());
+
+        // Nor is another version under its own checksum.
+        let mut other = request;
+        other[20] = 0x73;
+        let checksum = adler32(&other[..24]);
+        other[24..].copy_from_slice(&checksum.to_le_bytes());
+        assert!(lgt_local_ensoni_session_response(&other).is_none());
+    }
+
     /// The opening message of 엘피스's online menu is answered with its own
     /// opcode and nothing behind it, which is what `0x488f0` needs to run the
     /// screen's next request.
