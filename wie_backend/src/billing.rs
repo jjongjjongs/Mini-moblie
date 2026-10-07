@@ -8227,10 +8227,11 @@ const NOMZERO_ACK_BODY: usize = 4;
 ///   dialog that ends the purchase, which is what `구매가 완료되었습니다` is
 ///   doing here.
 ///
-/// What the service granted went with the service: the balance the shop shows
-/// is `[[0x1400054] + 0x1134]`, and nothing in either reply reaches it - the
-/// title credits it on a `0x0301` it is not sent here. So this takes the
-/// purchase off the error and says so, and leaves the balance where it was.
+/// Neither reply reaches the balance the shop shows (`[[0x1400054] + 0x1134]`).
+/// That is paid by the `0x0300`/`0x0301` exchange after the login - see
+/// [`supersoccer_charge_response`], which also explains why `0x0104` was only
+/// ever sent from the error path. These two stay answered for a title that
+/// still reaches them.
 ///
 /// `None` for anything that is not one of those two: the length has to be the
 /// frame in hand, the command one of the two, and the frame has to carry this
@@ -8259,6 +8260,10 @@ pub fn lgt_local_supersoccer_response(request: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
+    if let Some(answer) = supersoccer_charge_response(request) {
+        return Some(answer);
+    }
+
     let id = u32::from_le_bytes([request[4], request[5], request[6], request[7]]);
     if id != TITLE_ID {
         return None;
@@ -8281,6 +8286,55 @@ pub fn lgt_local_supersoccer_response(request: &[u8]) -> Option<Vec<u8>> {
     }
 
     Some(response)
+}
+
+/// The login and the credit that pay a 슈퍼사커 purchase into the balance.
+///
+/// When a purchase is granted, the title writes the G포인트 it bought to
+/// `[[0x1400064] + 0x3e3c]` (`0x79fa0`; 300 for the first row). Nothing adds it
+/// to the balance `[[0x1400054] + 0x1134]` until a `0x0301` comes in. That
+/// handler (`0x7ce38`) adds it, saves (`0x7048d`), and moves on.
+///
+/// The purchase runs as a queue of steps (`0x7c4e4`, state 0): the login
+/// `0x0500`, then `0x0300` asking for the credit, then done. Every reply goes
+/// through `0x7c9a0`, which wants its status byte **above zero**. The GAMEVIL
+/// packet answer gives the login a zero there, so the login went to `OnError`
+/// instead. The error path fetches a message with `0x0104` and shows whatever
+/// `0x0105` carries, which is why the purchase said `구매가 완료되었습니다`
+/// and nothing was credited.
+///
+/// Both are answered here with a status of one. The login body is otherwise
+/// zero; the title keeps its fields only when they are not.
+fn supersoccer_charge_response(request: &[u8]) -> Option<Vec<u8>> {
+    const LOGIN: u16 = 0x0500;
+    const LOGIN_SIZE: usize = 116;
+    /// 슈퍼사커, EUC-KR, where the login carries the title's name.
+    const NAME: &[u8] = b"\xbd\xb4\xc6\xdb\xbb\xe7\xc4\xbf\x00";
+    const NAME_OFFSET: usize = 0x4c;
+    /// Header, status, and the login reply's fields (`0x7ce6a` reads 20 bytes).
+    const LOGIN_ANSWER_SIZE: usize = 0x20;
+
+    const CREDIT: u16 = 0x0300;
+    const CREDIT_SIZE: usize = 16;
+    const TITLE_ID: [u8; 4] = [0x0b, 0x43, 0x00, 0x00];
+    /// Header and status; `0x0301` reads nothing behind them.
+    const CREDIT_ANSWER_SIZE: usize = 5;
+
+    /// Above zero, which is what `0x7c9da` wants.
+    const GRANTED: u8 = 1;
+
+    let command = u16::from_le_bytes([request[2], request[3]]);
+    let size = match (command, request.len()) {
+        (LOGIN, LOGIN_SIZE) if request.get(NAME_OFFSET..NAME_OFFSET + NAME.len())? == NAME => LOGIN_ANSWER_SIZE,
+        (CREDIT, CREDIT_SIZE) if request[4..8] == TITLE_ID => CREDIT_ANSWER_SIZE,
+        _ => return None,
+    };
+
+    let mut answer = vec![0u8; size];
+    answer[0..2].copy_from_slice(&(size as u16).to_le_bytes());
+    answer[2..4].copy_from_slice(&(command + 1).to_le_bytes());
+    answer[4] = GRANTED;
+    Some(answer)
 }
 
 /// 디스트로이어's 정식사용자 인증.
@@ -11161,6 +11215,28 @@ mod tests {
             line,
             b"\xb1\xb8\xb8\xc5\xb0\xa1 \xbf\xcf\xb7\xe1\xb5\xc7\xbe\xfa\xbd\xc0\xb4\xcf\xb4\xd9."
         );
+    }
+
+    /// The login and the credit after a purchase, both with a status above
+    /// zero, which is what moves the title on to paying the G포인트 in.
+    #[test]
+    fn 슈퍼사커s_login_and_credit_are_answered_above_zero() {
+        let mut login = vec![0u8; 116];
+        login[0] = 116;
+        login[2..4].copy_from_slice(&0x0500u16.to_le_bytes());
+        login[0x4c..0x55].copy_from_slice(b"\xbd\xb4\xc6\xdb\xbb\xe7\xc4\xbf\x00");
+        let answer = response(&login).expect("the login is answered");
+        assert_eq!(answer.len(), 0x20);
+        assert_eq!(&answer[..5], &[0x20, 0x00, 0x01, 0x05, 0x01]);
+
+        let credit = [
+            0x10, 0x00, 0x00, 0x03, 0x0b, 0x43, 0x00, 0x00, 0x2d, 0x33, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(response(&credit), Some(vec![0x05, 0x00, 0x01, 0x03, 0x01]));
+
+        // Another title's login keeps the GAMEVIL answer.
+        login[0x4c] = 0;
+        assert_eq!(response(&login).expect("still answered")[4], 0);
     }
 
     /// Keyed on the title's own id where both frames carry it, so the matcher
