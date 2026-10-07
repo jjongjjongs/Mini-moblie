@@ -392,6 +392,54 @@ pub fn lgt_local_ea_text_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(vec![result, 0x00])
 }
 
+/// The word 하얀섬2's own server protocol XORs every body with.
+const RANN_PR_KEY: [u8; 4] = [0x6e, 0x63, 0x2b, 0xc4];
+
+/// What answers the requests 하얀섬2 sends its developer's server.
+///
+/// 하얀섬2 (LGT `0002FEB8`, RANN engine) talks to `115.94.11.101:21702` for
+/// its consent, charge log, rankings and save backups. Every frame has an
+/// 8-byte head, `00 65 <command> 00` followed by the whole frame's length as
+/// a big-endian word, and a body XORed with [`RANN_PR_KEY`] (`0x24c4`, one
+/// routine for both directions). A request body starts with 20 zero bytes
+/// ahead of the command's own fields; the consent (`0x14`) is
+/// `Y|N`, a length-prefixed version and a length-prefixed trial string.
+///
+/// The reply head is checked at `0x433dc`: bytes 0, 1 and 3 must be `00 65 00`,
+/// the length must cover the head, and byte 2 must be the command that was
+/// sent. The body parser (`0x43410`) reads a result byte and a length-prefixed
+/// message. For the consent and the other commands listed below, that is the
+/// whole answer, and the parse succeeds only when the body ends right there.
+/// Each of those is answered with result 0 and no message. Commands that
+/// return data (rankings, save downloads, gift lists) are left unanswered.
+pub fn lgt_local_rann_pr_response(request: &[u8]) -> Option<Vec<u8>> {
+    const HEAD_SIZE: usize = 8;
+    const PROTOCOL: u8 = 0x65;
+    // Consent, charge, and the other result-only exchanges at `0x43492`.
+    const RESULT_ONLY: [u8; 7] = [0x14, 0x1e, 0x3c, 0x50, 0x33, 0x28, 0x2b];
+    const SUCCEEDED: u8 = 0;
+
+    let head = request.get(..HEAD_SIZE)?;
+    if head[0] != 0 || head[1] != PROTOCOL || head[3] != 0 {
+        return None;
+    }
+    let declared = u32::from_be_bytes([head[4], head[5], head[6], head[7]]) as usize;
+    if declared != request.len() || declared <= HEAD_SIZE {
+        return None;
+    }
+    let command = head[2];
+    if !RESULT_ONLY.contains(&command) {
+        return None;
+    }
+
+    let body = [SUCCEEDED, 0x00];
+    let mut response = Vec::with_capacity(HEAD_SIZE + body.len());
+    response.extend_from_slice(&[0x00, PROTOCOL, command, 0x00]);
+    response.extend_from_slice(&((HEAD_SIZE + body.len()) as u32).to_be_bytes());
+    response.extend(body.iter().zip(RANN_PR_KEY.iter().cycle()).map(|(byte, key)| byte ^ key));
+    Some(response)
+}
+
 /// What answers 위기일발 막장가족's 막장캡슐 purchase.
 ///
 /// 위기일발 막장가족 (KTF `01039F5A`, 파란) opens
@@ -9969,6 +10017,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_noreason_response(request))
         .or_else(|| ktf_local_download_response(request))
         .or_else(|| ktf_local_entaz_response(request))
+        .or_else(|| lgt_local_rann_pr_response(request))
         .or_else(|| lgt_local_ea_text_response(request))
 }
 
@@ -10638,6 +10687,33 @@ mod tests {
         assert_eq!(lgt_local_ea_text_response(b"CHARGE 01057375505 G1000135 C2000468\0"), Some(vec![0, 0]));
         assert_eq!(lgt_local_ea_text_response(b"KOIN_REQ_P2 01057375505 G1000135\0"), None);
         assert_eq!(lgt_local_ea_text_response(b"SMSAGREE 01057375505 G1000135 N"), None);
+    }
+
+    /// 하얀섬2's consent request, off the device log, is answered with its own
+    /// head and a zero result, XORed the way the title reads it. Its EA-side
+    /// consent, the next thing it sends, goes to the EA text answer.
+    #[test]
+    fn hayanseom2_consent_is_answered() {
+        let consent = [
+            0x00, 0x65, 0x14, 0x00, 0x00, 0x00, 0x00, 0x30, 0x6e, 0x63, 0x2b, 0xc4, 0x6e, 0x63, 0x2b, 0xc4, 0x6e, 0x63, 0x2b, 0xc4, 0x6e, 0x63, 0x2b,
+            0xc4, 0x6e, 0x63, 0x2b, 0xc4, 0x37, 0x6b, 0x7d, 0xe4, 0x5f, 0x4d, 0x1b, 0xea, 0x5e, 0x63, 0x22, 0x81, 0x03, 0x16, 0x47, 0xa5, 0x1a, 0x0c,
+            0x59, 0xc4,
+        ];
+        let answer = vec![0x00, 0x65, 0x14, 0x00, 0x00, 0x00, 0x00, 0x0a, 0x6e, 0x63];
+
+        assert_eq!(lgt_local_rann_pr_response(&consent), Some(answer.clone()));
+        assert_eq!(response(&consent), Some(answer));
+
+        // A length that is not the frame's own, or a command that returns
+        // data (0x2a, a rank list), is not answered.
+        let mut short = consent;
+        short[7] = 0x2f;
+        assert_eq!(lgt_local_rann_pr_response(&short), None);
+        let mut ranks = consent;
+        ranks[2] = 0x2a;
+        assert_eq!(lgt_local_rann_pr_response(&ranks), None);
+
+        assert_eq!(response(b"SMSAGREE 01085300848 G1000153 Y Emulator\0"), Some(vec![2, 0]));
     }
 
     /// 위기일발 막장가족's 막장캡슐 purchase, off the device log, is answered
