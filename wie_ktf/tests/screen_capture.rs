@@ -41,6 +41,8 @@
 //!   to be reachable at all: 드래곤하트 paints
 //!   `게임이 설치 되었습니다. 다시 실행해 주세요.` and goes no further, whatever
 //!   it is sent. Only the second launch is captured.
+//! - `WIE_SCR_W`/`WIE_SCR_H` - run on this panel instead of the one the
+//!   archive names, to see which one a title was drawn for.
 //! - `WIE_PRELOAD_DIR` - a directory whose files are put into the title's
 //!   storage before it starts, to begin from a save.
 //! - `WIE_TICKS2` - the second launch's tick budget, when it needs a different
@@ -558,6 +560,14 @@ fn ktf_archive_probe() {
     // frontend gives it too. Without this a capture runs a 176x220 title on a
     // 240x320 screen and shows a layout no handset ever did.
     let native_size = KtfEmulator::screen_size(&archive);
+    // `WIE_SCR_W`/`WIE_SCR_H` try the title on another panel instead.
+    let native_size = match (
+        std::env::var("WIE_SCR_W").ok().and_then(|x| x.parse().ok()),
+        std::env::var("WIE_SCR_H").ok().and_then(|x| x.parse().ok()),
+    ) {
+        (Some(width), Some(height)) => Some((width, height)),
+        _ => native_size,
+    };
     eprintln!(
         "[probe] {path}: {} entries, loadable={}, panel={native_size:?}",
         files.len(),

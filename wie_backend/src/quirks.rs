@@ -515,6 +515,12 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // title, menu, play - is clipped to 176x204, and the 16 rows under it kept
     // whatever an earlier screen left there, a strip of the title's street.
     (TitlePlatform::Ktf, "01031795", panel(176, 204)),
+    // 크로이센 (KTH): the descriptor says 240x400, and the title lays its menus
+    // out to whatever it is given, but its art is 176x220 - on 240x400 the
+    // title picture sat in the top-left corner over a black field, the rating
+    // mark and version off at the far edges. On 176x220 the title, menus and
+    // field all fill the screen.
+    (TitlePlatform::Ktf, "010100D3", panel(176, 220)),
     // 초밥의달인3 (KTF PD004152): a Java title whose screens draw inside a
     // 240x296 clip - the bottom 24 rows are the handset's soft-key strip, which
     // it never touches - while some earlier screen fills the whole 240x320 with
