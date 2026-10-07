@@ -2891,6 +2891,17 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
     /// the answer of.
     const REPORT_OPCODE: u8 = 0x32;
 
+    /// The same opcode is 명품샵's request for a page of one counter's goods
+    /// (`0x6f4b6`, and `0x39fec` and `0x3a15c` for the page before and after),
+    /// six bytes ending in the page as a `u32`, five goods to a page. The case at `0x6642a`
+    /// takes the number of goods in all as a `u32` from `[11..15]` and the
+    /// number on this page from `[15]`; each of those would then come as an
+    /// `0x49` frame of its own, with the picture of the item in it, which only
+    /// the server ever had. So the counter is answered as an empty one, and a
+    /// page of none sends the shop back to its counters (`0x66462`).
+    const SHOP_PAGE_BODY: usize = 6;
+    const SHOP_PAGE_ANSWER: usize = 6 + 4 + 1;
+
     /// 아이뮤지션2's licence check, which it sends the moment its session is
     /// open and will not start without.
     const LICENCE_OPCODE: u8 = 0x14;
@@ -2973,6 +2984,7 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
             }
             (SHOP_SHELF_OPCODE, answer)
         }
+        REPORT_OPCODE if body.len() == SHOP_PAGE_BODY => (REPORT_OPCODE, alloc::vec![0; SHOP_PAGE_ANSWER]),
         // Whatever it carries, its answer is the one `u32` `0x48c5c` takes.
         REPORT_OPCODE if !body.is_empty() => (REPORT_OPCODE, Vec::from(0u32.to_be_bytes())),
         // The verdict, and a string behind its length - which the title keeps
@@ -14261,6 +14273,12 @@ mod tests {
                 .chunks(4)
                 .all(|item| u32::from_be_bytes([item[0], item[1], item[2], item[3]]) == 1)
         );
+
+        // A page of a counter's goods comes back with none on it.
+        let page = lgt_local_opcode_header_response(&[0x00, 0x0b, 0x00, 0x32, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x01]).unwrap();
+        assert_eq!(page.len(), 5 + 11);
+        assert_eq!(&page[2..5], &[0x00, 0x32, 0x00]);
+        assert!(page[5..].iter().all(|&byte| byte == 0));
 
         // The shelf question carries nothing; with something behind it, it is not that one.
         assert!(lgt_local_opcode_header_response(&[0x00, 0x06, 0x00, 0x48, 0x00, 0x00]).is_none());
