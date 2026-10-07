@@ -4186,6 +4186,9 @@ mod tests {
     #[futures_test::test]
     async fn a_context_a_title_filled_itself_is_read_at_the_right_words() {
         let mut context = test_context();
+        // 헬싱 is a KTF title. LGT keeps its operation at `+0x1c` instead -
+        // see `lgt_keeps_the_operation_where_its_firmware_does`.
+        context.set_graphics_context_layout(ContextLayout::Ktf);
 
         let pgc_handle = context.alloc(core::mem::size_of::<super::WIPICGraphicsContext>() as u32).unwrap();
         let pgc = context.data_ptr(pgc_handle).unwrap();
@@ -4197,7 +4200,7 @@ mod tests {
         write_generic(&mut context, pgc + TRANSPARENT, 0xf81fu32).unwrap();
         write_generic(&mut context, pgc + OPERATION, 0x1234u32).unwrap();
 
-        let gctx: super::WIPICGraphicsContext = read_generic(&context, pgc).unwrap();
+        let gctx = super::read_context(&context, ContextLayout::Ktf, pgc).unwrap();
         assert_eq!(gctx.transparent, 0xf81f);
         assert_eq!(gctx.pixel_op_func_ptr, 0x1234);
 

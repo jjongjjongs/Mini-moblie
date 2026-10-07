@@ -42,8 +42,8 @@ pub struct WIPICGraphicsContext {
     pub style: WIPICWord,
     /// `MC_GrpPixelOpProc`, which the reference also plants for XOR mode.
     ///
-    /// At `+0x2c` on both handsets - see [`ContextLayout`]. XOR mode has no
-    /// word of its own: it is this slot holding [`BUILT_IN_XOR`].
+    /// At `+0x2c` on KTF and `+0x1c` on LGT - see [`ContextLayout`]. XOR mode
+    /// has no word of its own here: it is this slot holding [`BUILT_IN_XOR`].
     pub pixel_op_func_ptr: WIPICWord,
     /// x, y
     pub offset: [WIPICWord; 2],
@@ -146,22 +146,27 @@ pub(crate) struct ContextOffsets {
 impl ContextLayout {
     pub(crate) fn offsets(self) -> ContextOffsets {
         match self {
-            // Straight off `MC_grpSetContext` (@0x1aaba8). The operation is at
-            // `+0x1c` there and a flag at `+0x2c`; no LGT title reaches either
-            // word except through the API, which stores and reads back
-            // whichever offset this names, so the two are not told apart here
-            // yet and the operation keeps the offset KTF's titles use.
+            // Straight off `MC_grpSetContext` (@0x1aaba8): the operation at
+            // `+0x1c`, its parameter at `+0x20`, and XOR mode's flag at
+            // `+0x2c`. 몬스터마스터's own blitter (@0x36438) reads the first
+            // two directly - an operation there hands the blit back to
+            // `MC_grpDrawImage`, and otherwise it keys against the parameter.
+            // With the operation kept at KTF's `+0x2c`, its logo fades found
+            // no operation, keyed against the fade level instead of magenta,
+            // and drew every sprite's magenta box raw. The transparent pixel
+            // has no word on LGT (the reference drops op 3); the one named
+            // here is only read and written back, never drawn with.
             Self::Lgt => ContextOffsets {
                 mask: None,
                 clip: 0x00,
                 fgpxl: 0x10,
                 bgpxl: 0x14,
                 alpha: 0x18,
-                transparent: 0x1c,
+                pixel_op_func_ptr: 0x1c,
                 param1: 0x20,
                 font: 0x24,
                 style: 0x28,
-                pixel_op_func_ptr: 0x2c,
+                transparent: 0x2c,
                 offset: 0x30,
                 keeps_transparent: false,
             },
@@ -339,5 +344,19 @@ mod test {
         assert_eq!(ContextLayout::Ktf.offsets().clip, 0x04);
         assert_eq!(ContextLayout::Lgt.offsets().clip, 0x00);
         assert!(!ContextLayout::Lgt.offsets().keeps_transparent, "the reference drops op 3");
+    }
+
+    /// The two words 몬스터마스터's own blitter (@0x36438) reads.
+    ///
+    /// An operation at `+0x1c` sends the blit back to the API; otherwise it
+    /// keys against `+0x20`. Those are op 5 and op 6 where LGT's
+    /// `MC_grpSetContext` stores them.
+    #[test]
+    fn lgt_keeps_the_operation_where_its_firmware_does() {
+        let at = ContextLayout::Lgt.offsets();
+
+        assert_eq!(at.pixel_op_func_ptr, 0x1c);
+        assert_eq!(at.param1, 0x20);
+        assert_eq!(at.offset, 0x30);
     }
 }

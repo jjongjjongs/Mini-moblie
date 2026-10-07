@@ -622,6 +622,12 @@ fn run_scripted_over(
     }
     .expect("load");
 
+    // Branch traces and write watches, spelled as the handset's probe setting
+    // is (`pc:3a376/500,w:1518700`) - see `wie_backend::probe::set_watches`.
+    if let Ok(spec) = std::env::var("WIE_WATCH") {
+        wie_backend::probe::set_watches(&spec).expect("WIE_WATCH");
+    }
+
     let shot_dir = std::env::var("WIE_SHOT_DIR").ok();
     let write_ppm = |path: &str, screen: &CaptureScreen| {
         let c = screen.captured.lock().unwrap();
