@@ -522,7 +522,10 @@ impl SmafPlayer {
         let repeat = repeat && length > 0;
 
         let voice = sink.open_midi_voice(clip);
-        tracing::info!("[audio] SMAF clip on isolated voice {voice}");
+        tracing::info!(
+            "[audio] SMAF clip on isolated voice {voice}: {} events, {length}ms, repeat={repeat}",
+            self.events.len()
+        );
 
         loop {
             let mut active_notes: Vec<(u8, u8)> = Vec::new();

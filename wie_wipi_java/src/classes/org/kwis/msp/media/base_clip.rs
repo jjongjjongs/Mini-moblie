@@ -35,6 +35,10 @@ impl BaseClip {
                 JavaFieldProto::new("player", "Ljavax/microedition/media/Player;", Default::default()),
                 JavaFieldProto::new("playListener", "Lorg/kwis/msp/media/PlayListener;", Default::default()),
                 JavaFieldProto::new("__wieBufferSize", "I", Default::default()),
+                // The buffer `setBuffer` named, and a hash of what it held when
+                // the player was last built from it. See `refresh_from_buffer`.
+                JavaFieldProto::new("__wieBuffer", "[B", Default::default()),
+                JavaFieldProto::new("__wieBufferHash", "I", Default::default()),
                 // Whether this clip is sounding, so `Player.stop` can say
                 // whether it stopped anything. See `media_stop`.
                 JavaFieldProto::new("__wiePlaying", "Z", Default::default()),
@@ -97,7 +101,7 @@ impl BaseClip {
         let array_length = jvm.array_length(&buffer).await? as i32;
         let data_size = core::cmp::min(array_length, size);
 
-        let result: i32 = jvm.invoke_virtual(&this, "putData", "([BII)I", (buffer, 0, data_size)).await?;
+        let result: i32 = jvm.invoke_virtual(&this, "putData", "([BII)I", (buffer.clone(), 0, data_size)).await?;
         if result < 0 {
             return Ok(false);
         }
@@ -106,7 +110,62 @@ impl BaseClip {
         // clamps only the byte count passed to the backend.
         jvm.put_field(&mut this, "__wieBufferSize", "I", size).await?;
 
+        let hash = Self::buffer_hash(jvm, &buffer, data_size).await?;
+        jvm.put_field(&mut this, "__wieBuffer", "[B", buffer).await?;
+        jvm.put_field(&mut this, "__wieBufferHash", "I", hash).await?;
+
         Ok(true)
+    }
+
+    /// A hash of the first `size` bytes of `buffer`.
+    async fn buffer_hash(jvm: &Jvm, buffer: &ClassInstanceRef<Array<i8>>, size: i32) -> JvmResult<i32> {
+        let bytes: alloc::vec::Vec<i8> = jvm.load_array(buffer, 0, size.max(0) as usize).await?;
+
+        // FNV-1a.
+        let hash = bytes
+            .iter()
+            .fold(0x811c_9dc5u32, |hash, &byte| (hash ^ u32::from(byte as u8)).wrapping_mul(0x0100_0193));
+
+        Ok(hash as i32)
+    }
+
+    /// Builds the player again from the clip's buffer when what the buffer
+    /// holds has changed since it was last built.
+    ///
+    /// The handset keeps the buffer `setBuffer` was given, not a copy of it,
+    /// and plays whatever it holds when it is asked to. A title can therefore
+    /// set one buffer once and reuse the clip for every sound it has: 스도쿠
+    /// 넘버홀릭 reads each `.mmf` into the same 14636-byte array and plays the
+    /// clip again. The copy taken at `setBuffer` was of an empty buffer, so
+    /// every one of its sounds played that, and the title was silent.
+    async fn refresh_from_buffer(jvm: &Jvm, this: &mut ClassInstanceRef<Self>) -> JvmResult<()> {
+        let buffer: ClassInstanceRef<Array<i8>> = jvm.get_field(this, "__wieBuffer", "[B").await?;
+        if buffer.is_null() {
+            return Ok(());
+        }
+
+        let size: i32 = jvm.get_field(this, "__wieBufferSize", "I").await?;
+        let data_size = core::cmp::min(jvm.array_length(&buffer).await? as i32, size);
+
+        let hash = Self::buffer_hash(jvm, &buffer, data_size).await?;
+        let built_from: i32 = jvm.get_field(this, "__wieBufferHash", "I").await?;
+        if hash == built_from {
+            return Ok(());
+        }
+
+        tracing::debug!("org.kwis.msp.media.BaseClip: buffer changed since the player was built; building it again");
+
+        // The old player's sound goes with it, so a clip does not leave one
+        // loaded sound behind for every file it has played.
+        let old: ClassInstanceRef<Player> = jvm.get_field(this, "player", "Ljavax/microedition/media/Player;").await?;
+        if !old.is_null() {
+            let _: () = jvm.invoke_virtual(&old, "close", "()V", ()).await?;
+        }
+
+        let _: i32 = jvm.invoke_virtual(this, "putData", "([BII)I", (buffer, 0, data_size)).await?;
+        jvm.put_field(this, "__wieBufferHash", "I", hash).await?;
+
+        Ok(())
     }
 
     async fn available_data_size(_jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<i32> {
@@ -153,6 +212,8 @@ impl BaseClip {
 
     async fn media_play(jvm: &Jvm, context: &mut WieJvmContext, mut this: ClassInstanceRef<Self>, repeat: bool) -> JvmResult<i32> {
         tracing::debug!("org.kwis.msp.media.BaseClip::mediaPlay({this:?}, {repeat})");
+
+        Self::refresh_from_buffer(jvm, &mut this).await?;
 
         let player: ClassInstanceRef<Player> = jvm.get_field(&this, "player", "Ljavax/microedition/media/Player;").await?;
 
