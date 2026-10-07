@@ -47,14 +47,23 @@ impl Volume {
         Ok(())
     }
 
-    async fn get(_: &Jvm, _: &mut WieJvmContext) -> JvmResult<i32> {
-        tracing::warn!("stub org.kwis.msp.media.Volume::get()");
+    /// The handset's media level, the same one `MC_mdaGetVolume` answers.
+    ///
+    /// A title reads this to decide whether there is any point playing at all,
+    /// so the zero this used to answer read as a handset turned all the way
+    /// down: 미녀환생전 asks once at start and then never plays a sound.
+    async fn get(_: &Jvm, context: &mut WieJvmContext) -> JvmResult<i32> {
+        let level = context.system().audio().master_volume();
+        tracing::debug!("org.kwis.msp.media.Volume::get() -> {level}");
 
-        Ok(0)
+        Ok(level as i32)
     }
 
-    async fn set(_: &Jvm, _: &mut WieJvmContext, level: i32) -> JvmResult<()> {
-        tracing::warn!("stub org.kwis.msp.media.Volume::set({level})");
+    /// Sets the handset's media level, the same one `MC_mdaSetVolume` sets.
+    async fn set(_: &Jvm, context: &mut WieJvmContext, level: i32) -> JvmResult<()> {
+        tracing::debug!("org.kwis.msp.media.Volume::set({level})");
+
+        context.system().audio().set_master_volume(level.clamp(0, 100) as u8);
 
         Ok(())
     }
