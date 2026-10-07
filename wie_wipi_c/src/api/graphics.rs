@@ -2011,6 +2011,19 @@ fn annunciator_rows(context: &dyn WIPICContext, width: u32) -> u32 {
     read_generic(context, ANNUNCIATOR_ROWS_PTR).unwrap_or(0)
 }
 
+/// Rows of slack above the screen surface's first row.
+///
+/// The bottom edge has `SURFACE_GUARD_ROWS`; the top had nothing, and on KTF
+/// the word just before a buffer's pixels is the handle the whole surface is
+/// reached through. 위기일발 막장가족 draws its scene with its own blitter
+/// straight into the screen buffer and lets a sprite reach the row above the
+/// first - it fills from `y = -1` everywhere too - so a few of those stores
+/// rewrote the handle, and the next `MC_grpPutPixel` on the screen went through
+/// a handle naming address 8 and stopped the title on its publisher logo. On
+/// the handset the LCD buffer has memory of its own above it; here the lead
+/// rows are that memory.
+const SCREEN_LEAD_ROWS: u32 = 16;
+
 /// Build the screen surface with the status strip above the drawing area.
 ///
 /// The strip is part of the panel, not of the title's drawing area, and the
@@ -2031,7 +2044,9 @@ fn new_screen_surface(context: &mut dyn WIPICContext, width: u32, height: u32) -
 
     // The surface spans the whole panel; the framebuffer reports - and every
     // path but the pointer getter uses - the drawing area below the strip.
-    let mut framebuffer = FrameBuffer::new(context, width, height.saturating_add(SURFACE_GUARD_ROWS), FRAMEBUFFER_DEPTH)?;
+    // `SCREEN_LEAD_ROWS` more sit above it, owned by nobody - see there.
+    let rows = height.saturating_add(SURFACE_GUARD_ROWS).saturating_add(SCREEN_LEAD_ROWS);
+    let mut framebuffer = FrameBuffer::new(context, width, rows, FRAMEBUFFER_DEPTH)?;
 
     // A handset's LCD buffer starts dark; ours starts as whatever the heap was
     // last used for, because `Allocator::alloc` does not clear what it hands
@@ -2040,9 +2055,25 @@ fn new_screen_surface(context: &mut dyn WIPICContext, width: u32, height: u32) -
     // composes its scene into the top rows leaves the rest untouched, and 던전
     // 앤파이터 격투가 showed a band of old heap under every frame for exactly
     // that reason. Clear it once, here, rather than trusting the title to.
-    let (size, _) = buffer_size(width, height.saturating_add(SURFACE_GUARD_ROWS), FRAMEBUFFER_DEPTH / 8)?;
+    let (size, _) = buffer_size(width, rows, FRAMEBUFFER_DEPTH / 8)?;
     let base = context.data_ptr(framebuffer.0.buf)?;
     context.write_bytes(base, &vec![0u8; size as usize])?;
+
+    // The panel's first row starts past the lead rows. Where the indirect
+    // pointer is a handle, the handle has to be one whose target says so,
+    // and it cannot be the allocation's own: that sits just before the pixels,
+    // which is the very place the lead rows are for. So the surface gets a
+    // handle of its own, elsewhere, aimed past them.
+    let first_row = base + SCREEN_LEAD_ROWS * framebuffer.0.bpl;
+    framebuffer.0.buf = if context.data_ptr(framebuffer.0.buf)? == framebuffer.0.buf.0 {
+        WIPICIndirectPtr(first_row)
+    } else {
+        let handle = context.alloc(0)?;
+        let target: WIPICWord = read_generic(context, handle.0)?;
+        let skew = context.data_ptr(handle)?.wrapping_sub(target);
+        write_generic(context, handle.0, first_row.wrapping_sub(skew))?;
+        handle
+    };
     // Where an indirect pointer is an address, the strip is taken out of the
     // framebuffer: the title is told the drawing area and handed a pointer that
     // starts below the strip.
