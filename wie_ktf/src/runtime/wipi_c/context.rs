@@ -12,8 +12,14 @@ use wie_util::{ByteRead, ByteWrite, Result, WieError, read_generic, write_generi
 use wie_wipi_c::{
     WIPICContext, WIPICMethodBody,
     api::{
-        filesystem::SharedFilesystemState, graphics::ContextLayout, im::SharedImState, kernel::SharedKernelState, media::SharedMediaState,
-        net::SharedNetworkState, serial::SharedSerialState, shared_buf::SharedSharedBufState,
+        filesystem::SharedFilesystemState,
+        graphics::{ContextLayout, ImageLayout},
+        im::SharedImState,
+        kernel::SharedKernelState,
+        media::SharedMediaState,
+        net::SharedNetworkState,
+        serial::SharedSerialState,
+        shared_buf::SharedSharedBufState,
     },
 };
 
@@ -73,6 +79,12 @@ impl WIPICContext for KtfWIPICContext {
     /// every word of it.
     fn graphics_context_layout(&self) -> ContextLayout {
         ContextLayout::Ktf
+    }
+
+    /// KTF keeps an image's two planes behind frame buffer handles of their
+    /// own - see `ImageLayout`, which has what 폴라폴리2007's blitter reads.
+    fn image_layout(&self) -> ImageLayout {
+        ImageLayout::Handles
     }
 
     /// KTF answers a clip of no size with null - see the note on the trait

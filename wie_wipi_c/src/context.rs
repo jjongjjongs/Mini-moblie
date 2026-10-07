@@ -8,8 +8,14 @@ use wie_util::{ByteRead, ByteWrite, Result};
 use crate::{
     WIPICMethodBody,
     api::{
-        filesystem::SharedFilesystemState, graphics::ContextLayout, im::SharedImState, kernel::SharedKernelState, media::SharedMediaState,
-        net::SharedNetworkState, serial::SharedSerialState, shared_buf::SharedSharedBufState,
+        filesystem::SharedFilesystemState,
+        graphics::{ContextLayout, ImageLayout},
+        im::SharedImState,
+        kernel::SharedKernelState,
+        media::SharedMediaState,
+        net::SharedNetworkState,
+        serial::SharedSerialState,
+        shared_buf::SharedSharedBufState,
     },
     method::{ParamConverter, ResultConverter},
 };
@@ -70,6 +76,13 @@ pub trait WIPICContext: ByteRead + ByteWrite + Send + Sync {
     /// with, so it is the default and KTF is what overrides it.
     fn graphics_context_layout(&self) -> ContextLayout {
         ContextLayout::Lgt
+    }
+
+    /// How this handset keeps `MC_GrpImage` - see `ImageLayout`. Inline is
+    /// what this runtime has always written, so it is the default and KTF is
+    /// what overrides it.
+    fn image_layout(&self) -> ImageLayout {
+        ImageLayout::Inline
     }
 
     /// Whether `MC_mdaClipCreate` answers null for a clip of no size.
@@ -151,7 +164,7 @@ pub mod test {
     use super::{WIPICContext, WIPICMethodBody};
     use crate::api::{
         filesystem::{SharedFilesystemState, new_state as new_filesystem_state},
-        graphics::ContextLayout,
+        graphics::{ContextLayout, ImageLayout},
         im::{SharedImState, new_state as new_im_state},
         kernel::{SharedKernelState, new_state as new_kernel_state},
         media::{SharedMediaState, new_state as new_media_state},
@@ -193,6 +206,8 @@ pub mod test {
         pixel_op_takes_source_first: bool,
         /// The order this handset keeps a context's two colour words in.
         graphics_context_layout: ContextLayout,
+        /// How this handset keeps an image.
+        image_layout: ImageLayout,
         /// Whether this handset refuses a clip of no size.
         refuses_empty_clip: bool,
         /// Whether `alloc` hands out KTF's indirect handles - a cell pointing
@@ -221,6 +236,12 @@ pub mod test {
         /// given order - see `ContextLayout`.
         pub fn set_graphics_context_layout(&mut self, layout: ContextLayout) {
             self.graphics_context_layout = layout;
+        }
+
+        /// Stands in for a handset that keeps an image the given way - see
+        /// `ImageLayout`.
+        pub fn set_image_layout(&mut self, layout: ImageLayout) {
+            self.image_layout = layout;
         }
 
         /// Stands in for a KTF handset, which refuses a clip of no size.
@@ -254,6 +275,7 @@ pub mod test {
                 guest_function: None,
                 pixel_op_takes_source_first: false,
                 graphics_context_layout: ContextLayout::Lgt,
+                image_layout: ImageLayout::Inline,
                 refuses_empty_clip: false,
                 ktf_handles: false,
                 freed: Vec::new(),
@@ -279,6 +301,7 @@ pub mod test {
                 guest_function: None,
                 pixel_op_takes_source_first: false,
                 graphics_context_layout: ContextLayout::Lgt,
+                image_layout: ImageLayout::Inline,
                 refuses_empty_clip: false,
                 ktf_handles: false,
                 freed: Vec::new(),
@@ -399,6 +422,10 @@ pub mod test {
 
         fn graphics_context_layout(&self) -> ContextLayout {
             self.graphics_context_layout
+        }
+
+        fn image_layout(&self) -> ImageLayout {
+            self.image_layout
         }
 
         fn refuses_empty_clip(&self) -> bool {

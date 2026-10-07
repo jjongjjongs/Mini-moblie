@@ -3,7 +3,7 @@ use alloc::{boxed::Box, sync::Arc, vec};
 use jvm::Jvm;
 use wie_backend::System;
 use wie_core_arm::{ArmCore, EmulatedFunction, EmulatedFunctionParam, ResultWriter, SvcId};
-use wie_util::{Result, WieError, write_generic};
+use wie_util::{Result, WieError, read_generic, write_generic};
 use wie_wipi_c::api::graphics::{ContextLayout, WIPICGraphicsContextIdx};
 
 /// KTF keeps the background pixel in the first of the two colour words - see
@@ -280,9 +280,18 @@ fn try_fast_wipic_call(core: &mut ArmCore) -> Result<bool> {
 
             pixel
         }
-        // `MC_grpGetImageFrameBuffer`: a WIPICImage begins with its own
-        // framebuffer, so the image handle is already the answer.
-        GET_IMAGE_FRAMEBUFFER => core.read_param(0)?,
+        // `MC_grpGetImageFrameBuffer`: the colour plane's frame buffer handle,
+        // which is the image's first word (`ImageLayout::Handles`). A KTF
+        // handle's data sits eight bytes past the address it holds.
+        GET_IMAGE_FRAMEBUFFER => {
+            let image = core.read_param(0)?;
+            if image == 0 {
+                0
+            } else {
+                let base: u32 = read_generic(core, image)?;
+                read_generic(core, base + 8)?
+            }
+        }
         _ => return Ok(false),
     };
 

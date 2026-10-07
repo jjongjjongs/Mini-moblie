@@ -4,9 +4,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use wie_backend::canvas::{ArgbPixel, Color, Image, PixelType, Rgb565Pixel, VecImageBuffer, decode_image};
-use wie_util::Result;
+use wie_util::{Result, read_generic, write_generic};
 
-use wipi_types::wipic::{WIPICImage, WIPICIndirectPtr, WIPICWord};
+use wipi_types::wipic::{WIPICFramebuffer, WIPICImage, WIPICIndirectPtr, WIPICWord};
 
 use crate::{api::graphics::framebuffer::FrameBuffer, context::WIPICContext};
 
@@ -208,5 +208,143 @@ mod tests {
 
         assert_eq!(at, 4 * 2);
         assert_eq!(bits, [0, 0], "every pixel is ink");
+    }
+}
+
+/// How a handset keeps `MC_GrpImage` in a title's memory.
+///
+/// A title that only hands its images back to the API never sees the struct,
+/// but one with its own blitter reads it directly, so where each word sits is
+/// part of the ABI - as it is for a graphics context (see `ContextLayout`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageLayout {
+    /// The colour plane's and the mask plane's frame buffers inline, one after
+    /// the other, then the animation words. The image handle doubles as the
+    /// colour plane's frame buffer handle.
+    Inline,
+    /// `MC_GrpImage` as the WIPI header declares it: the two planes are
+    /// `MC_GrpFrameBuffer` *handles*, each to a frame buffer of its own, and a
+    /// zero mask handle is an image with no mask. The animation words follow.
+    ///
+    /// KTF keeps it this way. 폴라폴리2007 (`01037216`) draws everything
+    /// through its own blitter (`0x1197e0`), which reads the colour plane's
+    /// handle from the image's first word and the mask's from the second, then
+    /// the frame buffer behind each (width at `+0`, depth at `+0xc`, pixels
+    /// through the handle at `+0x10`). Given the inline layout, it took the
+    /// colour plane's width for a handle and stopped on its first logo.
+    Handles,
+}
+
+/// The words of a `Handles` image: two handles and the seven animation words.
+const HANDLES_IMAGE_SIZE: WIPICWord = 9 * 4;
+
+fn read_framebuffer_at(context: &dyn WIPICContext, handle: WIPICWord) -> Result<WIPICFramebuffer> {
+    if handle == 0 {
+        return Ok(FrameBuffer::empty().0);
+    }
+
+    read_generic(context, context.data_ptr(WIPICIndirectPtr(handle))?)
+}
+
+fn alloc_framebuffer_struct(context: &mut dyn WIPICContext, framebuffer: WIPICFramebuffer) -> Result<WIPICWord> {
+    let memory = context.alloc(size_of::<WIPICFramebuffer>() as WIPICWord)?;
+    write_generic(context, context.data_ptr(memory)?, framebuffer)?;
+
+    Ok(memory.0)
+}
+
+/// The image behind `image`, in this runtime's own shape whatever the
+/// handset keeps.
+pub fn read_image(context: &dyn WIPICContext, image: WIPICIndirectPtr) -> Result<WIPICImage> {
+    let base = context.data_ptr(image)?;
+
+    match context.image_layout() {
+        ImageLayout::Inline => read_generic(context, base),
+        ImageLayout::Handles => {
+            let img: WIPICWord = read_generic(context, base)?;
+            let mask: WIPICWord = read_generic(context, base + 4)?;
+            let word = |index: WIPICWord| read_generic::<WIPICWord, _>(context, base + 8 + index * 4);
+
+            Ok(WIPICImage {
+                img: read_framebuffer_at(context, img)?,
+                mask: read_framebuffer_at(context, mask)?,
+                loop_count: word(0)?,
+                delay: word(1)?,
+                animated: word(2)?,
+                buf: WIPICIndirectPtr(word(3)?),
+                offset: word(4)?,
+                current: word(5)?,
+                len: word(6)?,
+            })
+        }
+    }
+}
+
+/// A new image handle holding `image`, laid out the way the handset keeps one.
+pub fn alloc_image(context: &mut dyn WIPICContext, image: WIPICImage) -> Result<WIPICIndirectPtr> {
+    match context.image_layout() {
+        ImageLayout::Inline => {
+            let memory = context.alloc(size_of::<WIPICImage>() as WIPICWord)?;
+            write_generic(context, context.data_ptr(memory)?, image)?;
+
+            Ok(memory)
+        }
+        ImageLayout::Handles => {
+            let img = alloc_framebuffer_struct(context, image.img)?;
+            let mask = if image.mask.buf.0 != 0 {
+                alloc_framebuffer_struct(context, image.mask)?
+            } else {
+                0
+            };
+
+            let memory = context.alloc(HANDLES_IMAGE_SIZE)?;
+            let base = context.data_ptr(memory)?;
+            let words = [
+                img,
+                mask,
+                image.loop_count,
+                image.delay,
+                image.animated,
+                image.buf.0,
+                image.offset,
+                image.current,
+                image.len,
+            ];
+            for (index, word) in words.iter().enumerate() {
+                write_generic(context, base + index as WIPICWord * 4, *word)?;
+            }
+
+            Ok(memory)
+        }
+    }
+}
+
+/// Gives back the image struct itself - and, where the handset keeps the
+/// planes' frame buffers behind handles of their own, those too. The planes'
+/// pixels are the caller's to free.
+pub fn free_image_struct(context: &mut dyn WIPICContext, image: WIPICIndirectPtr) -> Result<()> {
+    if context.image_layout() == ImageLayout::Handles {
+        let base = context.data_ptr(image)?;
+        for at in [base, base + 4] {
+            let handle: WIPICWord = read_generic(context, at)?;
+            if handle != 0 {
+                context.free(WIPICIndirectPtr(handle))?;
+            }
+        }
+    }
+
+    context.free(image)
+}
+
+/// The colour plane's frame buffer handle, which is what
+/// `MC_grpGetImageFrameBuffer` answers.
+pub fn image_framebuffer_handle(context: &dyn WIPICContext, image: WIPICIndirectPtr) -> Result<WIPICIndirectPtr> {
+    if image.0 == 0 {
+        return Ok(image);
+    }
+
+    match context.image_layout() {
+        ImageLayout::Inline => Ok(image),
+        ImageLayout::Handles => Ok(WIPICIndirectPtr(read_generic(context, context.data_ptr(image)?)?)),
     }
 }

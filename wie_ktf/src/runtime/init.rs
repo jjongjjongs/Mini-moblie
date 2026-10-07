@@ -21,7 +21,7 @@ use crate::{
     adf::parse_bss_size,
     emulator::IMAGE_BASE,
     runtime::{
-        SVC_CATEGORY_INIT, SVC_CATEGORY_MODULE, SVC_CATEGORY_MODULE_CLASS, SVC_CATEGORY_MODULE_JUMP,
+        SVC_CATEGORY_INIT, SVC_CATEGORY_MODULE, SVC_CATEGORY_MODULE_CLASS, SVC_CATEGORY_MODULE_JUMP, SVC_CATEGORY_WIPIC,
         java::{
             interface::{
                 get_field, get_java_method, get_wipi_jb_interface, java_array_new, java_check_type, java_class_load, java_new, java_throw,
@@ -29,7 +29,7 @@ use crate::{
             },
             jvm_support::{JavaMethodResult, JavaVtable, KtfJvmSupport},
         },
-        svc_ids::InitSvcId,
+        svc_ids::{InitSvcId, WIPICKernelMethodId, WIPICTableId},
         wipi_c::{interface::get_wipic_knl_interface, register_wipic_svc_handler},
     },
 };
@@ -46,7 +46,7 @@ pub fn register_init_svc_handler(core: &mut ArmCore, jvm: &Jvm) -> Result<()> {
 /// A guess, and deliberately a loud one: the slots below are the ones a title
 /// has asked for, and every other slot answers with a warning naming itself
 /// and its arguments, so the next one says what it is in a single run.
-const MODULE_INTERFACE_SLOTS: u32 = 64;
+const MODULE_INTERFACE_SLOTS: u32 = 256;
 
 /// `MNInterface`'s throw, at `+0x20`, which takes the name of the class to
 /// throw and a word the module leaves zero.
@@ -302,8 +302,126 @@ const MODULE_GET_FIELD: u32 = 0x54 / size_of::<u32>() as u32;
 /// ordinary module makes for the same thing.
 const MODULE_CLASS_LOAD: u32 = 0x40 / size_of::<u32>() as u32;
 
+/// Where a native module's `MNInterface` slot goes in the WIPI C tables.
+///
+/// O2JAM (`0103034A`) is a relocated module of C, not of compiled Java: it
+/// asks for the same `MNInterface` by name, but reads it as one long table of
+/// WIPI C, each API in a run of its own. Its veneers reach as far as slot 235.
+///
+/// From 32 on is the graphics table in its own order - its flush routine
+/// (`0x10b154`) is `MC_grpInitContext` (37), `MC_grpGetPixelFromRGB` (54),
+/// `MC_grpSetContext` (38), `MC_grpGetScreenFrameBuffer(0)` (34),
+/// `MC_grpCopyFrameBuffer` (44) and `MC_grpFlushLcd` (53) in turn, which is
+/// graphics 5, 22, 6, 2, 12 and 21. Below 32 are the kernel calls it uses: its
+/// frame timer is defined (9), armed for ten milliseconds from its own
+/// callback (10) and dropped on exit (11); 27 takes no argument and answers 64
+/// bits, the current time; 28 is handed a name, a buffer and its size; and 0 is
+/// handed a string, the log. 160 to 170 are the file calls, served from a
+/// table of their own (see `WIPICTableId::NativeModule`).
+///
+/// Its socket calls (116 to 152), its sound (173 to 186: a clip it creates and
+/// skips when the answer is zero) and the rest are not known well enough to
+/// be served, and answer zero.
+fn native_module_target(slot: u32) -> Option<u32> {
+    const GRAPHICS: core::ops::Range<u32> = 32..96;
+    const FILES: core::ops::RangeInclusive<u32> = 160..=170;
+
+    if GRAPHICS.contains(&slot) {
+        return Some(WIPICTableId::Graphics.function_id((slot - GRAPHICS.start) as u16));
+    }
+    if FILES.contains(&slot) {
+        return Some(WIPICTableId::NativeModule.function_id(slot as u16));
+    }
+
+    let kernel = match slot {
+        0 => WIPICKernelMethodId::Printk,
+        9 => WIPICKernelMethodId::DefTimer,
+        10 => WIPICKernelMethodId::SetTimer,
+        11 => WIPICKernelMethodId::UnsetTimer,
+        27 => WIPICKernelMethodId::CurrentTime,
+        28 => WIPICKernelMethodId::GetSystemProperty,
+        _ => return None,
+    };
+
+    Some(WIPICTableId::Kernel.function_id(kernel as u16))
+}
+
+/// How many words the veneer a native module reached a slot through pushed.
+///
+/// Its calls go through a veneer that pushes the arguments the slot's address
+/// is about to be loaded over and jumps to it. Up to slot 152 that is `r0`
+/// alone (`push {r0}; ...; ldr r0, [r0, #off]; mov pc, r0`); from 159 on the
+/// offset is too far for an immediate, so `r1` holds it and is pushed as well
+/// (`push {r0, r1}; ...; ldr r1, =off; ldr r0, [r0, r1]`).
+///
+/// Which one it was is read off the veneer itself, found through the `bl` that
+/// returns to `lr`. `r1` holding the slot's offset is not proof - O2JAM's
+/// `printk` of a zero (`0x109af6`) has `r1` equal to slot 0's offset, and
+/// taking that for the second form shifted its stack a word and returned it to
+/// `0x8`. That test stays only for a call that did not come through a `bl`.
+fn native_veneer_pushes(core: &ArmCore, slot: u32, lr: u32) -> Result<u32> {
+    const PUSH_R0: u16 = 0xb401;
+    const PUSH_R0_R1: u16 = 0xb403;
+
+    let ret = lr & !1;
+    let high: u16 = read_generic(core, ret - 4)?;
+    let low: u16 = read_generic(core, ret - 2)?;
+    if high & 0xf800 == 0xf000 && low & 0xf800 == 0xf800 {
+        let offset = ((((high as u32 & 0x7ff) << 12) | ((low as u32 & 0x7ff) << 1)) << 9) as i32 >> 9;
+        let veneer: u16 = read_generic(core, ret.wrapping_add(offset as u32))?;
+        match veneer {
+            PUSH_R0 => return Ok(1),
+            PUSH_R0_R1 => return Ok(2),
+            _ => {}
+        }
+    }
+
+    let offset = slot * size_of::<u32>() as u32;
+    Ok(if offset != 0 && core.read_param(1)? == offset { 2 } else { 1 })
+}
+
+/// A slot of `MNInterface` called the way a native module calls it.
+///
+/// `r0` is the slot itself and what the veneer pushed (see
+/// [`native_veneer_pushes`]) is on the stack. That is put right, and the call
+/// goes on to the WIPI C function the slot stands for - as a tail call, so its
+/// own body answers and returns to the module's caller.
+fn handle_native_module_svc(core: &mut ArmCore, id: SvcId) -> Result<()> {
+    let (_, lr) = core.read_pc_lr()?;
+    let first = core.pop_word()?;
+    if native_veneer_pushes(core, id.0, lr)? == 2 {
+        let second = core.pop_word()?;
+        core.write_return_value(&[first, second])?;
+    } else {
+        core.write_return_value(&[first])?;
+    }
+
+    let Some(target) = native_module_target(id.0) else {
+        tracing::warn!(
+            "stub native MNInterface-{} ({first:#x}, {:#x}, {:#x}, {:#x}) from lr={lr:#x}",
+            id.0,
+            core.read_param(1)?,
+            core.read_param(2)?,
+            core.read_param(3)?
+        );
+        core.write_return_value(&[0])?;
+        return core.set_next_pc(lr);
+    };
+
+    tracing::trace!("native MNInterface-{} as {target:#x} from lr={lr:#x}", id.0);
+
+    let stub = core.make_svc_stub(SVC_CATEGORY_WIPIC, target)?;
+    core.set_next_pc(stub)
+}
+
 /// A slot of `MNInterface`.
 async fn handle_module_svc(core: &mut ArmCore, jvm: &mut Jvm, id: SvcId) -> Result<()> {
+    // A native module reaches the slot with the slot's own address in `r0`;
+    // nothing a compiled Java module hands over is that.
+    if core.svc_stub_id(core.read_param(0)?) == Some((SVC_CATEGORY_MODULE, id.0)) {
+        return handle_native_module_svc(core, id);
+    }
+
     let (_, lr) = core.read_pc_lr()?;
     tracing::trace!(
         "MNInterface-{} ({:#x}, {:#x}, {:#x}, {:#x}) from lr={lr:#x}",
@@ -1481,4 +1599,67 @@ async fn alloc(core: &mut ArmCore, _: &mut (), a0: u32) -> Result<u32> {
     tracing::trace!("alloc({a0})");
 
     Allocator::alloc(core, a0)
+}
+
+#[cfg(test)]
+mod tests {
+    use wie_core_arm::ArmCore;
+    use wie_util::write_generic;
+
+    use crate::runtime::svc_ids::{WIPICGraphicsMethodId, WIPICKernelMethodId, WIPICTableId};
+
+    use super::{native_module_target, native_veneer_pushes};
+
+    const CODE: u32 = 0x100000;
+
+    /// A `bl` at `CODE` to a veneer at `CODE + 0x100` that begins `push`;
+    /// answers the `lr` the call leaves.
+    fn call_through(core: &mut ArmCore, push: u16) -> u32 {
+        core.map(CODE, 0x1000).unwrap();
+        // bl +0xfc from CODE + 4: the high half carries bits 22-12, the low half 11-1.
+        write_generic(core, CODE, 0xf000u16).unwrap();
+        write_generic(core, CODE + 2, 0xf800u16 | (0xfc >> 1)).unwrap();
+        write_generic(core, CODE + 0x100, push).unwrap();
+
+        (CODE + 4) | 1
+    }
+
+    #[test]
+    fn a_two_word_veneer_is_read_off_its_push() {
+        let mut core = ArmCore::new(false, None).unwrap();
+        let lr = call_through(&mut core, 0xb403);
+        core.write_return_value(&[0, 0x1234]).unwrap();
+
+        assert_eq!(native_veneer_pushes(&core, 232, lr).unwrap(), 2);
+    }
+
+    #[test]
+    fn a_zero_handed_to_slot_zero_is_not_taken_for_its_offset() {
+        // O2JAM's `printk` of a zero: `r1` is 0, which is slot 0's offset, and
+        // the veneer pushed `r0` alone.
+        let mut core = ArmCore::new(false, None).unwrap();
+        let lr = call_through(&mut core, 0xb401);
+        core.write_return_value(&[0, 0]).unwrap();
+
+        assert_eq!(native_veneer_pushes(&core, 0, lr).unwrap(), 1);
+    }
+
+    #[test]
+    fn native_slots_land_on_the_functions_o2jam_uses_them_as() {
+        assert_eq!(
+            native_module_target(34),
+            Some(WIPICTableId::Graphics.function_id(WIPICGraphicsMethodId::GetScreenFramebuffer))
+        );
+        assert_eq!(
+            native_module_target(53),
+            Some(WIPICTableId::Graphics.function_id(WIPICGraphicsMethodId::FlushLcd))
+        );
+        assert_eq!(
+            native_module_target(10),
+            Some(WIPICTableId::Kernel.function_id(WIPICKernelMethodId::SetTimer))
+        );
+        assert_eq!(native_module_target(160), Some(WIPICTableId::NativeModule.function_id(160u16)));
+        assert_eq!(native_module_target(6), None);
+        assert_eq!(native_module_target(173), None);
+    }
 }

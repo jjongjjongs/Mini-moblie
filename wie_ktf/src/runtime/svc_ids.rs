@@ -482,6 +482,10 @@ pub enum WIPICTableId {
     /// The `FastRelay` carrier library, reached the same way - see
     /// `wie_wipi_c::api::fastrelay`.
     FastRelay = 19,
+    /// Not one of the guest's tables either: the slots of a native module's
+    /// `MNInterface` that no table above stands for, numbered by the slot. See
+    /// `crate::runtime::init::native_module_target`.
+    NativeModule = 20,
 }
 
 impl WIPICTableId {
@@ -515,6 +519,7 @@ impl TryFrom<u32> for WIPICTableId {
             17 => Self::Interface16,
             18 => Self::MxUserMem,
             19 => Self::FastRelay,
+            20 => Self::NativeModule,
             _ => return Err(wie_util::WieError::FatalError(alloc::format!("Unknown KTF WIPIC table id {value}"))),
         })
     }

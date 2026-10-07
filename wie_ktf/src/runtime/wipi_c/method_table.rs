@@ -749,6 +749,26 @@ pub fn get_served_method_body(table_id: WIPICTableId, function_id: u16) -> Optio
             7 => Some(fastrelay::connected.into_body()),
             _ => (function_id < WIPIC_TABLE_FUNCTIONS).then(|| gen_missing(WIPICTableId::FastRelay, function_id)),
         },
+        // A native module's file calls, in the order LGT numbers them from
+        // `MC_fsOpen`. O2JAM's own wrappers settle it: 160 is handed a name, a
+        // mode and a one; 163 closes what 160 opened; 161 and 162 move bytes;
+        // 164 is handed its origin as 0, 1 or 2; 165 a name and a buffer it
+        // reads the attributes and the size back from; 166, 168 and 169 a name
+        // and a one, which is remove, make and remove a directory.
+        WIPICTableId::NativeModule => match function_id {
+            160 => Some(filesystem::open.into_body()),
+            161 => Some(filesystem::read.into_body()),
+            162 => Some(filesystem::write.into_body()),
+            163 => Some(filesystem::close.into_body()),
+            164 => Some(filesystem::seek.into_body()),
+            165 => Some(filesystem::file_attribute.into_body()),
+            166 => Some(filesystem::remove.into_body()),
+            167 => Some(filesystem::rename.into_body()),
+            168 => Some(filesystem::mkdir.into_body()),
+            169 => Some(filesystem::rmdir.into_body()),
+            170 => Some(filesystem::list.into_body()),
+            _ => None,
+        },
         WIPICTableId::Database => match WIPICDatabaseMethodId::try_from(function_id).ok()? {
             WIPICDatabaseMethodId::OpenDatabase => Some(database::open_database.into_body()),
             WIPICDatabaseMethodId::StreamRead => Some(database::stream_read.into_body()),

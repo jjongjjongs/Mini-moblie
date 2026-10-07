@@ -1016,6 +1016,18 @@ impl ArmCore {
         chosen
     }
 
+    /// Takes the word on top of the guest stack off it.
+    ///
+    /// For a call that reaches a handler with its first argument pushed rather
+    /// than in `r0` - see the native module interface in `wie_ktf`.
+    pub fn pop_word(&mut self) -> Result<u32> {
+        let sp = self.inner.lock().engine.reg_read(ArmRegister::SP);
+        let value: u32 = read_generic(self, sp)?;
+        self.inner.lock().engine.reg_write(ArmRegister::SP, sp + 4);
+
+        Ok(value)
+    }
+
     pub fn read_param(&self, pos: usize) -> Result<u32> {
         let inner = self.inner.lock();
 

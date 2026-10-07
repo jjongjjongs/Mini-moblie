@@ -27,10 +27,14 @@ use self::{
     bitmap_font::BitmapFace,
     framebuffer::FrameBuffer,
     grp_context::{BUILT_IN_XOR, WIPICGraphicsContext},
-    image::{create_wipi_image, forget_trailer, has_trailer, register_trailer, transparency_bits},
+    image::{
+        alloc_image, create_wipi_image, forget_trailer, free_image_struct, has_trailer, image_framebuffer_handle, read_image, register_trailer,
+        transparency_bits,
+    },
 };
 
 pub use self::grp_context::{ContextLayout, WIPICGraphicsContextIdx};
+pub use self::image::ImageLayout;
 
 pub use self::bitmap_font::{clear as clear_bios_font, install_from_bios as install_bios_font};
 
@@ -1008,9 +1012,8 @@ pub async fn create_image(
         Err(other) => return Err(other),
     };
 
-    let memory = context.alloc(size_of::<WIPICImage>() as WIPICWord)?;
+    let memory = alloc_image(context, image)?;
     write_generic(context, ptr_image, memory)?;
-    write_generic(context, context.data_ptr(memory)?, image)?;
 
     hold_image_source(context, memory.0, image_data.0);
 
@@ -1041,7 +1044,7 @@ pub async fn destroy_image(context: &mut dyn WIPICContext, image: WIPICIndirectP
     // leaks both planes, and a title that creates and destroys a scratch image
     // every frame (MapleStory 도적편 does this ~100x/frame) then exhausts the
     // heap.
-    let wipi_image: WIPICImage = read_generic(context, context.data_ptr(image)?)?;
+    let wipi_image = read_image(context, image)?;
     if wipi_image.img.buf.0 != 0 {
         forget_trailer(wipi_image.img.buf.0);
         context.free(wipi_image.img.buf)?;
@@ -1061,7 +1064,7 @@ pub async fn destroy_image(context: &mut dyn WIPICContext, image: WIPICIndirectP
         tracing::warn!("MC_grpDestroyImage: could not free the source buffer {source:#x}: {error}");
     }
 
-    context.free(image)?;
+    free_image_struct(context, image)?;
 
     Ok(())
 }
@@ -1110,7 +1113,7 @@ pub async fn create_sub_image(context: &mut dyn WIPICContext, parent: WIPICIndir
         return Ok(0);
     }
 
-    let parent_image: WIPICImage = read_generic(context, context.data_ptr(parent)?)?;
+    let parent_image = read_image(context, parent)?;
 
     let sub_img = crop_framebuffer(context, &FrameBuffer(parent_image.img), x, y, w, h)?;
     let sub_mask = if parent_image.mask.buf.0 != 0 {
@@ -1147,8 +1150,7 @@ pub async fn create_sub_image(context: &mut dyn WIPICContext, parent: WIPICIndir
         len: 0,
     };
 
-    let memory = context.alloc(size_of::<WIPICImage>() as WIPICWord)?;
-    write_generic(context, context.data_ptr(memory)?, image)?;
+    let memory = alloc_image(context, image)?;
 
     Ok(memory.0)
 }
@@ -1165,7 +1167,7 @@ pub async fn decode_next_image(context: &mut dyn WIPICContext, image: WIPICIndir
         return Ok(-1);
     }
 
-    let _wipi_image: WIPICImage = read_generic(context, context.data_ptr(image)?)?;
+    let _wipi_image = read_image(context, image)?;
     Ok(0)
 }
 
@@ -1286,7 +1288,7 @@ pub async fn draw_image(
 
     let image_handle = image.0;
     let framebuffer = FrameBuffer(read_generic(context, context.data_ptr(framebuffer)?)?);
-    let image: WIPICImage = read_generic(context, context.data_ptr(image)?)?;
+    let image = read_image(context, image)?;
 
     // An image that carries alpha keeps the full colour in the mask plane, and
     // its per-pixel alpha composites straight. One without a mask is a 16bpp
@@ -3239,8 +3241,7 @@ pub async fn get_image_framebuffer(context: &mut dyn WIPICContext, image: WIPICI
     // once: its size and whether it is masked. A masked one here is the smoking
     // gun for the coloured help text going missing.
     if image.0 != 0 && tracing::enabled!(tracing::Level::INFO) {
-        let ptr = context.data_ptr(image)?;
-        let img: WIPICImage = read_generic(context, ptr)?;
+        let img = read_image(context, image)?;
         let masked = img.mask.buf.0 != 0;
         // Masked fetches are the suspects, sampled continuously so a late log
         // window still holds them; anything else, once per handle for coverage.
@@ -3257,9 +3258,10 @@ pub async fn get_image_framebuffer(context: &mut dyn WIPICContext, image: WIPICI
         }
     }
 
-    // WIPICImage starts with `img: WIPICFramebuffer` at offset 0,
-    // so the image handle doubles as a framebuffer handle.
-    Ok(image)
+    // The colour plane's frame buffer: the image handle itself where the
+    // planes are inline, the handle in its first word where they are not - see
+    // `ImageLayout`.
+    image_framebuffer_handle(context, image)
 }
 
 /// A property of an image, or nothing at all when there is no image.
@@ -3277,7 +3279,7 @@ pub async fn get_image_property(context: &mut dyn WIPICContext, image: WIPICIndi
         return Ok(0);
     }
 
-    let image: WIPICImage = read_generic(context, context.data_ptr(image)?)?;
+    let image = read_image(context, image)?;
 
     Ok(match property {
         4 => image.img.width as _,
@@ -4174,6 +4176,63 @@ mod tests {
             out.g,
             out.b
         );
+    }
+
+    /// An image as KTF keeps it: the colour plane's frame buffer behind a
+    /// handle in the first word, a zero mask handle in the second.
+    ///
+    /// 폴라폴리2007's own blitter (`0x1197e0`) reads both words and then the
+    /// frame buffer behind the first - width at `+0`, depth at `+0xc`, pixels
+    /// through the handle at `+0x10`. The API reads the same struct back, and
+    /// `MC_grpGetImageFrameBuffer` answers the handle in the first word.
+    #[futures_test::test]
+    async fn a_ktf_image_keeps_its_planes_behind_handles() {
+        use super::{ImageLayout, alloc_image, free_image_struct, read_image};
+
+        let mut context = test_context();
+        context.set_ktf_handles(true);
+        context.set_image_layout(ImageLayout::Handles);
+
+        let img = super::FrameBuffer::new(&mut context, 3, 2, 16).unwrap();
+        let image = wipi_types::wipic::WIPICImage {
+            img: img.0,
+            mask: super::FrameBuffer::empty().0,
+            loop_count: 1,
+            delay: 2,
+            animated: 3,
+            buf: super::WIPICIndirectPtr(0),
+            offset: 4,
+            current: 5,
+            len: 6,
+        };
+        let handle = alloc_image(&mut context, image).unwrap();
+
+        // The words a title's own blitter reads.
+        let base = context.data_ptr(handle).unwrap();
+        let img_handle: u32 = read_generic(&context, base).unwrap();
+        let mask_handle: u32 = read_generic(&context, base + 4).unwrap();
+        assert_ne!(img_handle, 0);
+        assert_eq!(mask_handle, 0, "no mask is a zero handle");
+        let fb_base = context.data_ptr(super::WIPICIndirectPtr(img_handle)).unwrap();
+        assert_eq!(read_generic::<u32, _>(&context, fb_base).unwrap(), 3, "width");
+        assert_eq!(read_generic::<u32, _>(&context, fb_base + 0xc).unwrap(), 16, "depth");
+        assert_eq!(read_generic::<u32, _>(&context, fb_base + 0x10).unwrap(), img.0.buf.0, "pixels");
+
+        // And the API reads the same image back.
+        let read = read_image(&context, handle).unwrap();
+        assert_eq!((read.img.width, read.img.height, read.img.buf.0), (3, 2, img.0.buf.0));
+        assert_eq!(read.mask.buf.0, 0);
+        assert_eq!(
+            (read.loop_count, read.delay, read.animated, read.offset, read.current, read.len),
+            (1, 2, 3, 4, 5, 6)
+        );
+        assert_eq!(super::get_image_property(&mut context, handle, 4).await.unwrap(), 3);
+        assert_eq!(super::get_image_framebuffer(&mut context, handle).await.unwrap().0, img_handle);
+
+        // Giving the image back gives back the frame buffer struct behind it.
+        free_image_struct(&mut context, handle).unwrap();
+        assert_eq!(context.frees_of(img_handle), 1);
+        assert_eq!(context.frees_of(handle.0), 1);
     }
 
     /// Where the operation and the transparent pixel sit in the struct.
