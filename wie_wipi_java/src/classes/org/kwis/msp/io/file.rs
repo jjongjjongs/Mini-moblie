@@ -198,7 +198,11 @@ impl File {
         let raf = jvm.get_field(&this, "raf", "Ljava/io/RandomAccessFile;").await?;
         let _: () = jvm.invoke_virtual(&raf, "write", "([BII)V", (buf, offset, len)).await?;
 
-        Ok(0)
+        // The count written, which is all of it. A title can check: 판타지맞고
+        // reserves its save by writing 3228 bytes at start, and removes the
+        // file again - then refuses every new game for want of room - when
+        // the answer is not 3228.
+        Ok(len)
     }
 
     async fn seek(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, pos: i32) -> JvmResult<()> {

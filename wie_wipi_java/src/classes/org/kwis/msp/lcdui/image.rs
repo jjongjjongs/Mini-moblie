@@ -1507,7 +1507,7 @@ mod test {
                     .await?;
 
                 let written: i32 = jvm.invoke_virtual(&file, "write", "([B)I", (data,)).await?;
-                assert_eq!(written, 0);
+                assert_eq!(written, gif.len() as i32, "the count written");
 
                 let _: () = jvm.invoke_virtual(&file, "close", "()V", ()).await?;
 

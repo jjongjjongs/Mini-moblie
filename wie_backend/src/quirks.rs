@@ -489,6 +489,10 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // watermark under the other.
     (TitlePlatform::Ktf, "010366DB", panel(240, 320).with_bottom_cropped(24)),
     (TitlePlatform::Ktf, "01031E04", panel(240, 320).with_bottom_cropped(24)),
+    // 판타지맞고: the same strip. Its card is 240x296 and every screen - menu,
+    // character select, the table - stops there, leaving the 24 rows under it
+    // white.
+    (TitlePlatform::Ktf, "0102BB09", panel(240, 320).with_bottom_cropped(24)),
     // 2006현영맞고: its pictures are 300 rows tall, and the 20 under them kept
     // the title's logo under the menu.
     (TitlePlatform::Ktf, "01033511", panel(240, 320).with_bottom_cropped(20)),
@@ -1128,6 +1132,7 @@ mod tests {
         assert_eq!(title_quirks(TitlePlatform::Ktf, "0102E32F").present_crop_bottom, 24);
         assert_eq!(title_quirks(TitlePlatform::Ktf, "010366DB").present_crop_bottom, 24);
         assert_eq!(title_quirks(TitlePlatform::Ktf, "01031E04").present_crop_bottom, 24);
+        assert_eq!(title_quirks(TitlePlatform::Ktf, "0102BB09").present_crop_bottom, 24);
         assert_eq!(title_quirks(TitlePlatform::Ktf, "01033511").present_crop_bottom, 20);
         assert_eq!(title_quirks(TitlePlatform::Ktf, "010247AB").screen_size, Some((176, 220)));
         assert_eq!(title_quirks(TitlePlatform::Ktf, "010247AB").present_crop_bottom, 16);
