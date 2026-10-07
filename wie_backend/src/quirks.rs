@@ -511,10 +511,13 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // of a 240x320 one, and its play field draws for 176x204 too, leaving a
     // dark band above it.
     (TitlePlatform::Ktf, "010100A2", panel(176, 204)),
-    // 고기집타이쿤 (퍼니큐브): the descriptor says 176x220, but every screen -
-    // title, menu, play - is clipped to 176x204, and the 16 rows under it kept
-    // whatever an earlier screen left there, a strip of the title's street.
-    (TitlePlatform::Ktf, "01031795", panel(176, 204)),
+    // 고기집타이쿤 (퍼니큐브): the descriptor says 176x220 and the title needs
+    // to be told 220, but it draws in the top 204 - the handset's soft-key
+    // strip had the 16 rows under it - so those rows kept whatever an earlier
+    // screen left there, a strip of the title's street. It works its play area
+    // out as the height less those 16: told 204, the restaurant came out 188
+    // high, its counters shifted up under the clip and the bottom bar cut.
+    (TitlePlatform::Ktf, "01031795", panel(176, 220).with_bottom_cropped(16)),
     // 크로이센 (KTH): the descriptor says 240x400, and the title lays its menus
     // out to whatever it is given, but its art is 176x220 - on 240x400 the
     // title picture sat in the top-left corner over a black field, the rating
