@@ -316,20 +316,21 @@ const MODULE_CLASS_LOAD: u32 = 0x40 / size_of::<u32>() as u32;
 /// frame timer is defined (9), armed for ten milliseconds from its own
 /// callback (10) and dropped on exit (11); 27 takes no argument and answers 64
 /// bits, the current time; 28 is handed a name, a buffer and its size; and 0 is
-/// handed a string, the log. 160 to 170 are the file calls, served from a
-/// table of their own (see `WIPICTableId::NativeModule`).
+/// handed a string, the log. 160 to 170 are the file calls and 173 to 186
+/// with 228 and 229 its sound, served from a table of their own (see
+/// `WIPICTableId::NativeModule`).
 ///
-/// Its socket calls (116 to 152), its sound (173 to 186: a clip it creates and
-/// skips when the answer is zero) and the rest are not known well enough to
-/// be served, and answer zero.
+/// Its socket calls (116 to 152) and the rest are not known well enough to be
+/// served, and answer zero.
 fn native_module_target(slot: u32) -> Option<u32> {
     const GRAPHICS: core::ops::Range<u32> = 32..96;
     const FILES: core::ops::RangeInclusive<u32> = 160..=170;
+    const SOUND: [u32; 10] = [173, 174, 177, 182, 183, 184, 185, 186, 228, 229];
 
     if GRAPHICS.contains(&slot) {
         return Some(WIPICTableId::Graphics.function_id((slot - GRAPHICS.start) as u16));
     }
-    if FILES.contains(&slot) {
+    if FILES.contains(&slot) || SOUND.contains(&slot) {
         return Some(WIPICTableId::NativeModule.function_id(slot as u16));
     }
 
@@ -1660,6 +1661,7 @@ mod tests {
         );
         assert_eq!(native_module_target(160), Some(WIPICTableId::NativeModule.function_id(160u16)));
         assert_eq!(native_module_target(6), None);
-        assert_eq!(native_module_target(173), None);
+        assert_eq!(native_module_target(173), Some(WIPICTableId::NativeModule.function_id(173u16)));
+        assert_eq!(native_module_target(175), None);
     }
 }

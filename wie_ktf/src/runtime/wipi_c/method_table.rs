@@ -997,6 +997,27 @@ pub fn get_served_method_body(table_id: WIPICTableId, function_id: u16) -> Optio
             168 => Some(filesystem::mkdir.into_body()),
             169 => Some(filesystem::rmdir.into_body()),
             170 => Some(filesystem::list.into_body()),
+            // Its sound, in the order LGT numbers it from `MC_mdaClipCreate`
+            // as far as O2JAM's calls show. 173 is handed a type, a size and
+            // its own callback, and the clip it answers is what the rest are
+            // handed; 174 frees it; 177 is given the clip, the data and its
+            // length and checked for an answer above zero; 183 is given the
+            // clip and whether to repeat; 184 and 185 are what its
+            // `pauseClet` and `resumeClet` call with each clip; and 186 is
+            // called on each clip before it is freed. 182 comes on a fresh
+            // clip before its data does, and is taken for a clear. 228 and 229
+            // stand apart from the rest: the clip's volume, read back on a
+            // scale of a hundred and set on the same one.
+            173 => Some(media::clip_create.into_body()),
+            174 => Some(media::clip_free.into_body()),
+            177 => Some(media::clip_put_data.into_body()),
+            182 => Some(media::clip_clear_data.into_body()),
+            183 => Some(media::play.into_body()),
+            184 => Some(media::pause.into_body()),
+            185 => Some(media::resume.into_body()),
+            186 => Some(media::stop.into_body()),
+            228 => Some(media::clip_get_volume.into_body()),
+            229 => Some(media::clip_set_volume.into_body()),
             _ => None,
         },
         WIPICTableId::M3d => get_m3d_method_body(function_id),
