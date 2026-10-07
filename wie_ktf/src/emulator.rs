@@ -217,9 +217,24 @@ impl KtfEmulator {
         system.set_title_present_crop_bottom(quirks.present_crop_bottom);
         system.set_missing_file_fails_read_open(true);
 
+        // The number this handset reports, which some titles bind their files
+        // to - see `crate::handset_bound`. Read from the same certificate and
+        // descriptor files `HandsetProperty` reads it from.
+        let packaged_file = |name: &str| {
+            files
+                .iter()
+                .find(|(path, _)| packaged_name(path).unwrap_or(path) == name)
+                .map(|(_, data)| data.as_slice())
+        };
+        let subscriber =
+            wie_backend::subscriber::subscriber_number(packaged_file("cert.c2s"), packaged_file("certification"), packaged_file("app_info"));
+
         for (path, data) in files {
             let path = packaged_name(path).unwrap_or(path);
-            system.filesystem().add_virtual(path, data.clone());
+            match crate::handset_bound::rebind(path, data, &subscriber) {
+                Some(rebound) => system.filesystem().add_virtual(path, rebound),
+                None => system.filesystem().add_virtual(path, data.clone()),
+            }
 
             // A package ships some of its data gzipped and the handset's
             // installer is what unpacks it; the guest only ever asks for the
