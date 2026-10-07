@@ -511,6 +511,10 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // of a 240x320 one, and its play field draws for 176x204 too, leaving a
     // dark band above it.
     (TitlePlatform::Ktf, "010100A2", panel(176, 204)),
+    // 고기집타이쿤 (퍼니큐브): the descriptor says 176x220, but every screen -
+    // title, menu, play - is clipped to 176x204, and the 16 rows under it kept
+    // whatever an earlier screen left there, a strip of the title's street.
+    (TitlePlatform::Ktf, "01031795", panel(176, 204)),
     // 초밥의달인3 (KTF PD004152): a Java title whose screens draw inside a
     // 240x296 clip - the bottom 24 rows are the handset's soft-key strip, which
     // it never touches - while some earlier screen fills the whole 240x320 with
