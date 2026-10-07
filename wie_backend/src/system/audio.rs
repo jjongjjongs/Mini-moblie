@@ -144,7 +144,7 @@ impl Audio {
         let audio_handle = self.last_audio_handle;
 
         self.last_audio_handle += 1;
-        self.files.insert(audio_handle, AudioFile::Smaf(data.to_vec()));
+        self.files.insert(audio_handle, AudioFile::Smaf(smaf_file(data).to_vec()));
         self.volumes.insert(audio_handle, Arc::new(AtomicU8::new(FULL_VOLUME)));
 
         Ok(audio_handle)
@@ -460,6 +460,29 @@ impl Audio {
     }
 }
 
+/// The SMAF file at the front of `data`, without whatever follows it.
+///
+/// A SMAF file says its own length: `MMMD` and a big-endian `u32` counting
+/// what comes after those eight bytes. The handset reads that much and no
+/// more, so a title can hand over a buffer bigger than the file. 스도쿠
+/// 넘버홀릭 reads its 1877-byte intro music into a 14636-byte buffer and plays
+/// the whole buffer; the parser, given the file and twelve thousand zeros
+/// after it, found no file at all. `data` is returned whole when it does not
+/// open with a header, or names more than it holds.
+fn smaf_file(data: &[u8]) -> &[u8] {
+    const HEADER: usize = 8;
+
+    if data.len() < HEADER || &data[..4] != b"MMMD" {
+        return data;
+    }
+
+    let length = u32::from_be_bytes([data[4], data[5], data[6], data[7]]) as usize;
+    match HEADER.checked_add(length) {
+        Some(end) if end < data.len() => &data[..end],
+        _ => data,
+    }
+}
+
 pub struct SmafPlayer {
     events: Vec<(usize, SmafEvent)>,
 }
@@ -469,11 +492,35 @@ impl SmafPlayer {
         Self { events: parse_smaf(data) }
     }
 
+    /// How long one pass takes, in milliseconds: until the last event, or the
+    /// end of the last recorded wave if that sounds on past it.
+    fn length_ms(&self) -> usize {
+        self.events
+            .iter()
+            .map(|(time, event)| match event {
+                SmafEvent::Wave { sampling_rate, data, .. } if *sampling_rate > 0 => {
+                    time + (data.len() as u64 * 1000 / u64::from(*sampling_rate)) as usize
+                }
+                _ => *time,
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
     pub async fn play(&self, clip: AudioHandle, system: &mut System, sink: &dyn AudioSink, stop_flag: &AtomicBool, repeat: bool) {
         // An isolated voice for this clip, so its sequence does not collide with
         // other clips playing at the same time (a looping track under short
         // effects) on shared MIDI channels. It is opened in the clip's name so
         // the clip's volume reaches it.
+        // A clip with no length has nothing to wait out between one pass and
+        // the next, and repeating it would go round this loop without ever
+        // giving the thread back - the whole emulator stopped on 스도쿠
+        // 넘버홀릭's intro music when it arrived unparsed, and a title quit from
+        // there left every title after it on a black screen. Such a clip is
+        // played once.
+        let length = self.length_ms();
+        let repeat = repeat && length > 0;
+
         let voice = sink.open_midi_voice(clip);
         tracing::info!("[audio] SMAF clip on isolated voice {voice}");
 
@@ -530,6 +577,13 @@ impl SmafPlayer {
                     }
                     SmafEvent::End => {}
                 }
+            }
+
+            // A recorded wave sounds past the instant it starts, so a pass is
+            // over when its last wave has finished, not when it was fired.
+            let elapsed = system.platform().now() - start_time;
+            if repeat && (length as u64) > elapsed && !stop_flag.load(Ordering::Relaxed) {
+                system.sleep(length as u64 - elapsed).await;
             }
 
             for (channel, note) in &active_notes {
@@ -937,13 +991,17 @@ mod tests {
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 
+    /// A clip with no length is played once even when asked to repeat: there
+    /// is nothing to wait out between passes, so repeating it never gave the
+    /// thread back. Nothing here sets the stop flag, which is how a title
+    /// left it.
     #[futures_test::test]
-    async fn repeats_until_stop_flag_is_set() {
+    async fn a_clip_with_no_length_is_not_repeated() {
         let counter = Arc::new(AtomicUsize::new(0));
         let stop_flag = Arc::new(AtomicBool::new(false));
         let sink = CountingSink {
             program_change_count: counter.clone(),
-            stop_after: 2,
+            stop_after: usize::MAX,
             stop_flag: stop_flag.clone(),
         };
         let player = SmafPlayer {
@@ -952,8 +1010,46 @@ mod tests {
         let mut system = new_system();
 
         player.play(1, &mut system, &sink, &stop_flag, true).await;
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
 
-        assert_eq!(counter.load(Ordering::SeqCst), 2);
+        // And one that parsed to nothing at all.
+        SmafPlayer { events: vec![] }.play(1, &mut system, &sink, &stop_flag, true).await;
+    }
+
+    /// A pass lasts until its last recorded wave has finished.
+    #[test]
+    fn a_wave_counts_toward_the_length() {
+        let player = SmafPlayer {
+            events: vec![
+                (0, SmafEvent::MidiProgramChange { channel: 0, program: 1 }),
+                (
+                    100,
+                    SmafEvent::Wave {
+                        channel: 0,
+                        sampling_rate: 8000,
+                        data: vec![0; 4000],
+                    },
+                ),
+                (300, SmafEvent::End),
+            ],
+        };
+
+        assert_eq!(player.length_ms(), 600);
+    }
+
+    /// A buffer bigger than the SMAF file in it is read as the file alone, the
+    /// length its header names.
+    #[test]
+    fn a_smaf_file_is_cut_to_its_own_length() {
+        let mut buffer = b"MMMD\x00\x00\x00\x04abcd".to_vec();
+        assert_eq!(super::smaf_file(&buffer), &buffer[..]);
+
+        buffer.resize(64, 0);
+        assert_eq!(super::smaf_file(&buffer), b"MMMD\x00\x00\x00\x04abcd");
+
+        // A header naming more than there is, or none, leaves it alone.
+        assert_eq!(super::smaf_file(&buffer[..10]), &buffer[..10]);
+        assert_eq!(super::smaf_file(b"music"), b"music");
     }
 
     /// A volume is one clip's, and reaches the sink named as that clip's.
