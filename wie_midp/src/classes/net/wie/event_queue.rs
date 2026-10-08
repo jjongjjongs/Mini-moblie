@@ -16,6 +16,10 @@ use crate::classes::javax::microedition::midlet::MIDlet;
 enum EventQueueEvent {
     // TODO it's wipi event codes
     KeyEvent = 1,
+    /// `org.kwis.msp.lcdui.EventQueue.POINTER_EVENT`: `[2, POINT_*, x, y]`,
+    /// which the LGT firmware's `dispatchEvent` hands to
+    /// `Display.pointerNotify(type, x, y)`.
+    PointerEvent = 2,
     RepaintEvent = 41,
     NotifyEvent = 1000,
 }
@@ -24,6 +28,7 @@ impl EventQueueEvent {
     fn from_raw(raw: i32) -> Option<Self> {
         Some(match raw {
             x if x == Self::KeyEvent as i32 => Self::KeyEvent,
+            x if x == Self::PointerEvent as i32 => Self::PointerEvent,
             x if x == Self::RepaintEvent as i32 => Self::RepaintEvent,
             x if x == Self::NotifyEvent as i32 => Self::NotifyEvent,
             _ => return None,
@@ -277,6 +282,16 @@ impl EventQueue {
                         midp_key_code(x, standard_keys),
                         0,
                     ],
+                    Event::Pointer { kind, x, y } => {
+                        // Turned off after it was queued: the title was told
+                        // there is no touch screen, so it hears nothing.
+                        if !wie_backend::touch_enabled() {
+                            continue;
+                        }
+
+                        let (x, y) = Self::panel_point(context, x, y);
+                        vec![EventQueueEvent::PointerEvent as _, kind.wipi_type(), x, y]
+                    }
                     Event::Timer {
                         id,
                         generation,
@@ -494,6 +509,11 @@ impl EventQueue {
 
                 let _: () = jvm.invoke_virtual(&display, "handleKeyEvent", "(II)V", (event_type as i32, code)).await?;
             }
+            EventQueueEvent::PointerEvent => {
+                let _: () = jvm
+                    .invoke_virtual(&display, "handlePointerEvent", "(III)V", (event[1], event[2], event[3]))
+                    .await?;
+            }
             EventQueueEvent::NotifyEvent => {
                 let r#type = event[1];
                 let param1 = event[2];
@@ -506,6 +526,16 @@ impl EventQueue {
         }
 
         Ok(())
+    }
+
+    /// Where on the title's own panel a touch at `x`, `y` on the shown frame
+    /// landed. A handset held sideways reports touches on its upright panel,
+    /// so that is what a title drawn sideways expects to hear.
+    fn panel_point(context: &mut WieJvmContext, x: i32, y: i32) -> (i32, i32) {
+        let system = context.system();
+        let panel_width = system.platform().screen().width();
+
+        wie_backend::frame_point_on_panel(system.title_draws_sideways(), panel_width, x, y)
     }
 
     /// Runs the `callSerially` runnable that was waiting on the paint just

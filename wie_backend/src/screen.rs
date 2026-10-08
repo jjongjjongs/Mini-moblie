@@ -49,6 +49,17 @@ pub fn present(system: &System, image: &dyn Image) {
     screen.paint(image);
 }
 
+/// Where on the title's own panel a point on the frame [`present`] showed
+/// lies: the same point, unless the title draws sideways, when the frame is the
+/// panel a quarter turn left - the frame's column is the panel's row, and its
+/// row counts the panel's columns back from the right. `panel_width` is the
+/// panel's, which is the turned frame's height.
+///
+/// Cropped rows come off the bottom, so they move nothing above them.
+pub fn frame_point_on_panel(sideways: bool, panel_width: u32, x: i32, y: i32) -> (i32, i32) {
+    if sideways { (panel_width as i32 - 1 - y, x) } else { (x, y) }
+}
+
 /// A copy of `image` with its bottom `rows` dropped, or `None` when there is
 /// nothing to do or nothing sensible to do.
 ///
@@ -147,7 +158,7 @@ where
 mod tests {
     use alloc::vec;
 
-    use super::{crop_bottom, quarter_turn_left};
+    use super::{crop_bottom, frame_point_on_panel, quarter_turn_left};
     use crate::canvas::{Image, Rgb565Pixel, VecImageBuffer};
 
     /// Rows read bottom-up as columns, which is a quarter turn to the left.
@@ -177,6 +188,29 @@ mod tests {
 
         assert_eq!((turned.width(), turned.height()), (4, 2));
         assert_eq!(turned.raw().as_ref(), image.raw().as_ref());
+    }
+
+    /// A touch on the turned frame lands on the panel pixel that was turned
+    /// there: every frame point maps back to the panel point holding the same
+    /// value.
+    #[test]
+    fn a_point_on_a_turned_frame_is_found_on_the_panel() {
+        let (width, height) = (5u32, 3u32);
+        let panel = VecImageBuffer::<Rgb565Pixel>::from_raw(width, height, (0..(width * height) as u16).collect());
+        let turned = quarter_turn_left(&panel).unwrap();
+        let (turned_raw, panel_raw) = (turned.raw(), panel.raw());
+        let frame: &[u16] = bytemuck::cast_slice(turned_raw.as_ref());
+        let pixels: &[u16] = bytemuck::cast_slice(panel_raw.as_ref());
+
+        for fy in 0..turned.height() as i32 {
+            for fx in 0..turned.width() as i32 {
+                let (x, y) = frame_point_on_panel(true, width, fx, fy);
+                assert!((0..width as i32).contains(&x) && (0..height as i32).contains(&y));
+                assert_eq!(frame[(fy * turned.width() as i32 + fx) as usize], pixels[(y * width as i32 + x) as usize]);
+            }
+        }
+
+        assert_eq!(frame_point_on_panel(false, width, 2, 1), (2, 1));
     }
 
     /// An image whose bytes do not amount to its size is not turned at all,

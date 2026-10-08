@@ -43,6 +43,7 @@ impl Displayable {
                     Default::default(),
                 ),
                 JavaMethodProto::new("handleKeyEvent", "(II)V", Self::handle_key_event, Default::default()),
+                JavaMethodProto::new("handlePointerEvent", "(III)V", Self::handle_pointer_event, Default::default()),
                 JavaMethodProto::new(
                     "handlePaintEvent",
                     "(Ljavax/microedition/lcdui/Graphics;)V",
@@ -184,6 +185,19 @@ impl Displayable {
 
     async fn handle_key_event(_jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>, event_type: i32, code: i32) -> JvmResult<()> {
         tracing::debug!("javax.microedition.lcdui.Displayable::handleKeyEvent({this:?}, {event_type}, {code})");
+
+        Ok(())
+    }
+
+    async fn handle_pointer_event(
+        _jvm: &Jvm,
+        _context: &mut WieJvmContext,
+        this: ClassInstanceRef<Self>,
+        event_type: i32,
+        x: i32,
+        y: i32,
+    ) -> JvmResult<()> {
+        tracing::debug!("javax.microedition.lcdui.Displayable::handlePointerEvent({this:?}, {event_type}, {x}, {y})");
 
         Ok(())
     }

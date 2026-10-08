@@ -80,6 +80,10 @@ struct GameView: View {
     /// The layout being edited, nil when the pad is in play.
     @State private var draft: PadLayout?
     @State private var selectedKey: Int32?
+    /// Whether touches on the screen reach the title (see `GameTouch`).
+    @State private var touch = false
+    /// The frame pixel the finger on the screen is at, nil with none down.
+    @State private var touchedAt: FramePoint?
 
     private var layout: PadLayout {
         PadLayout.decode(padMode == .below ? layoutBelow : layoutOverlay, mode: padMode)
@@ -114,6 +118,7 @@ struct GameView: View {
         .statusBar(hidden: true)
         .onAppear {
             speed = GameSpeed.get(game)
+            touch = GameTouch.get(game)
             emulator.start(game: game)
         }
         .onDisappear { emulator.stop() }
@@ -158,6 +163,9 @@ struct GameView: View {
                 }
                 Button(action: beginEditing) {
                     Label("가상 패드 편집", systemImage: "square.grid.3x3")
+                }
+                Button(action: toggleTouch) {
+                    Label(touch ? "화면 터치: 켜짐" : "화면 터치: 꺼짐", systemImage: touch ? "hand.tap.fill" : "hand.tap")
                 }
                 Button { sheet = .log } label: {
                     Label("로그 보기", systemImage: "doc.text.magnifyingglass")
@@ -235,6 +243,10 @@ struct GameView: View {
                         .antialiased(smooth)
                         .resizable()
                         .frame(width: size.width, height: size.height)
+                        .gesture(
+                            screenTouch(frame: CGSize(width: frame.width, height: frame.height), shown: size),
+                            including: touch ? .all : .none
+                        )
                 }
                 if let message = emulator.message {
                     Text(message)
@@ -271,10 +283,64 @@ struct GameView: View {
         }
     }
 
+    /// Turns touches on the screen on or off for this title and keeps the
+    /// choice. A title that asks for a touch screen asks as it starts, so one
+    /// that lays itself out for touch only does so after a restart.
+    private func toggleTouch() {
+        if touch, let point = touchedAt {
+            wie_pointer(1, point.x, point.y)
+            touchedAt = nil
+        }
+        touch.toggle()
+        GameTouch.set(touch, for: game)
+        wie_set_touch(touch)
+    }
+
+    /// A finger on the screen, handed to the title in the frame's own pixels:
+    /// a press where it lands, a drag each time it reaches another pixel, a
+    /// release where it lifts.
+    private func screenTouch(frame: CGSize, shown: CGSize) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                let point = FramePoint(location: value.location, frame: frame, shown: shown)
+                if touchedAt == nil {
+                    wie_pointer(0, point.x, point.y)
+                } else if point != touchedAt {
+                    wie_pointer(2, point.x, point.y)
+                }
+                touchedAt = point
+            }
+            .onEnded { _ in
+                if let point = touchedAt {
+                    wie_pointer(1, point.x, point.y)
+                }
+                touchedAt = nil
+            }
+    }
+
     private func beginEditing() {
         sheet = nil
         selectedKey = nil
         draft = layout
+    }
+}
+
+/// A pixel of the title's frame.
+struct FramePoint: Equatable {
+    let x: Int32
+    let y: Int32
+
+    /// The pixel under `location` on a frame of `frame` pixels shown at
+    /// `shown` points, clamped to its edge so a finger that slides off it is
+    /// still on it.
+    init(location: CGPoint, frame: CGSize, shown: CGSize) {
+        guard frame.width > 0, frame.height > 0, shown.width > 0, shown.height > 0 else {
+            x = 0
+            y = 0
+            return
+        }
+        x = Int32(min(max(location.x / shown.width * frame.width, 0), frame.width - 1))
+        y = Int32(min(max(location.y / shown.height * frame.height, 0), frame.height - 1))
     }
 }
 

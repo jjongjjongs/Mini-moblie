@@ -243,6 +243,35 @@ pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativ
     guard(|| runner::key(index, pressed != 0));
 }
 
+/// `nativePointer(int action, int x, int y)`
+///
+/// A touch on the screen, in the frame's own pixels: `action` 0 down, 1 up, 2
+/// move. Queued like a key, and dropped unless touch is on.
+///
+/// # Safety
+/// Called by the JVM with a valid `env` reference.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativePointer(
+    _env: JNIEnv,
+    _class: JClass,
+    action: jint,
+    x: jint,
+    y: jint,
+) {
+    guard(|| runner::pointer(action, x, y));
+}
+
+/// `nativeSetTouch(int enabled)`
+///
+/// Turns touches on the screen on or off; safe to call while a title runs.
+///
+/// # Safety
+/// Called by the JVM with a valid `env` reference.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativeSetTouch(_env: JNIEnv, _class: JClass, enabled: jint) {
+    guard(|| runner::set_touch(enabled != 0));
+}
+
 /// `nativeFrame() -> short[]`
 ///
 /// Returns `null` when nothing new has been painted, otherwise

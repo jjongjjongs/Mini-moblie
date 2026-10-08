@@ -87,6 +87,20 @@ final class NativeBridge {
     static native void nativeKey(int index, int pressed);
 
     /**
+     * A touch on the game screen, in the frame's own pixels. Dropped unless
+     * touch is on (see {@link #nativeSetTouch}). Called from the UI thread.
+     *
+     * @param action 0 down, 1 up, 2 move
+     */
+    static native void nativePointer(int action, int x, int y);
+
+    /**
+     * Turns touches on the game screen on or off, and with them what the
+     * title is told when it asks for a touch screen. Safe while a title runs.
+     */
+    static native void nativeSetTouch(int enabled);
+
+    /**
      * @return {@code null} when nothing new was painted, otherwise
      *         {@code {width, height, RGB565 pixels...}}
      */

@@ -2,7 +2,10 @@ use alloc::{
     boxed::Box,
     collections::{BTreeMap, VecDeque},
 };
-use core::pin::Pin;
+use core::{
+    pin::Pin,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use wie_util::Result;
 
@@ -67,11 +70,70 @@ impl KeyCode {
 
 type TimerCallback = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
 
+/// What a finger did on the screen.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum PointerKind {
+    Pressed,
+    Released,
+    Dragged,
+}
+
+impl PointerKind {
+    /// The `org.kwis.msp.lcdui.EventQueue` `POINT_*` value for this, which is
+    /// what a WIPI card's `pointerNotify(type, x, y)` is handed.
+    ///
+    /// Read off the LGT firmware's own `EventQueue`, whose static finals share
+    /// one constant slot per distinct value: `POINT_PRESSED` shares `UP`'s and
+    /// `KEY_PRESSED`'s (1), `POINT_RELEASED` `LEFT`'s and `KEY_RELEASED`'s (2),
+    /// and `POINT_DRAGGED` `RIGHT`'s - the MIDP game action, 5. Its
+    /// `dispatchEvent` passes the type through to `Display.pointerNotify`
+    /// untouched.
+    pub fn wipi_type(self) -> i32 {
+        match self {
+            Self::Pressed => 1,
+            Self::Released => 2,
+            Self::Dragged => 5,
+        }
+    }
+
+    pub fn from_wipi_type(value: i32) -> Option<Self> {
+        Some(match value {
+            1 => Self::Pressed,
+            2 => Self::Released,
+            5 => Self::Dragged,
+            _ => return None,
+        })
+    }
+}
+
+/// Whether touches on the screen reach the title, which the player turns on
+/// for a title made for a touch handset. Off, a title is told the handset has
+/// no touch screen and hears none, as on the keypad handsets most were made
+/// for - a title that sees a touch screen may lay itself out for one.
+///
+/// Held here rather than per emulator so the host can flip it while a title
+/// runs, from its UI thread.
+static TOUCH_ENABLED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_touch_enabled(enabled: bool) {
+    TOUCH_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+pub fn touch_enabled() -> bool {
+    TOUCH_ENABLED.load(Ordering::Relaxed)
+}
+
 pub enum Event {
     Redraw,
     Keydown(KeyCode),
     Keyup(KeyCode),
     Keyrepeat(KeyCode),
+    /// A touch at `x`, `y` on the frame the host was shown.
+    Pointer {
+        kind: PointerKind,
+        x: i32,
+        y: i32,
+    },
     Timer {
         id: u32,
         generation: u64,
@@ -125,6 +187,19 @@ impl EventQueue {
     pub fn push(&mut self, event: Event) {
         if matches!(event, Event::Redraw) {
             self.events.retain(|x| !matches!(x, Event::Redraw));
+        }
+
+        // A finger moving reports far more often than a title reads; only
+        // where it is now matters, so a drag still waiting is moved rather
+        // than queued behind.
+        if let Event::Pointer {
+            kind: PointerKind::Dragged, ..
+        } = event
+            && let Some(Event::Pointer {
+                kind: PointerKind::Dragged, ..
+            }) = self.events.back()
+        {
+            self.events.pop_back();
         }
 
         self.events.push_back(event);
@@ -202,6 +277,53 @@ mod tests {
         assert!(matches!(queue.pop(), Some(Event::Keydown(KeyCode::OK))));
         assert!(matches!(queue.pop(), Some(Event::Redraw)));
         assert!(queue.pop().is_none());
+    }
+
+    /// A drag still waiting is moved to where the finger is now, and a press
+    /// or release is never folded into one - nor is a drag behind a press.
+    #[test]
+    fn a_waiting_drag_is_moved_rather_than_queued_behind() {
+        use super::PointerKind;
+
+        let point = |event: Option<Event>| match event {
+            Some(Event::Pointer { kind, x, y }) => (kind, x, y),
+            _ => panic!("expected a pointer event"),
+        };
+
+        let mut queue = EventQueue::new();
+        queue.push(Event::Pointer {
+            kind: PointerKind::Pressed,
+            x: 1,
+            y: 1,
+        });
+        for step in 2..6 {
+            queue.push(Event::Pointer {
+                kind: PointerKind::Dragged,
+                x: step,
+                y: step,
+            });
+        }
+        queue.push(Event::Pointer {
+            kind: PointerKind::Released,
+            x: 5,
+            y: 5,
+        });
+
+        assert_eq!(point(queue.pop()), (PointerKind::Pressed, 1, 1));
+        assert_eq!(point(queue.pop()), (PointerKind::Dragged, 5, 5));
+        assert_eq!(point(queue.pop()), (PointerKind::Released, 5, 5));
+        assert!(queue.pop().is_none());
+    }
+
+    /// The `POINT_*` values a card is handed read back as what they were.
+    #[test]
+    fn pointer_kinds_round_trip_through_their_wipi_types() {
+        use super::PointerKind;
+
+        for kind in [PointerKind::Pressed, PointerKind::Released, PointerKind::Dragged] {
+            assert_eq!(PointerKind::from_wipi_type(kind.wipi_type()), Some(kind));
+        }
+        assert_eq!(PointerKind::from_wipi_type(3), None);
     }
 
     #[test]

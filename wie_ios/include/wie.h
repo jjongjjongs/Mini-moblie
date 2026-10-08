@@ -81,6 +81,16 @@ char *wie_import_save(const uint8_t *zip, size_t length, const char *runtime_dir
 // Removes the game's saves; `*removed` is how many directories.
 char *wie_erase_save(const uint8_t *data, size_t length, const char *runtime_dir, size_t *removed);
 
+// A touch on the game screen, at x, y in the frame's own pixels (as
+// wie_take_frame hands it): action 0 down, 1 up, 2 move. Dropped unless touch
+// is on.
+void wie_pointer(int32_t action, int32_t x, int32_t y);
+
+// Turns touches on the game screen on or off, and with them what the title is
+// told when it asks for a touch screen. Safe while a title runs.
+void wie_set_touch(bool enabled);
+bool wie_touch(void);
+
 // The log collected for this run. Free with `wie_free_string`.
 char *wie_log(void);
 

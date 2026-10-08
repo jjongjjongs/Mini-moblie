@@ -283,8 +283,10 @@ impl Card {
         declared_field(jvm, CARD, &this, "y", "I").await
     }
 
+    /// A card that overrides nothing handles no touch, as it handles no key;
+    /// a title made for a touch handset overrides this.
     async fn pointer_notify(_: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Card>, r#type: i32, x: i32, y: i32) -> JvmResult<bool> {
-        tracing::warn!("stub org.kwis.msp.lcdui.Card::pointerNotify({this:?}, {type}, {x}, {y})");
+        tracing::debug!("org.kwis.msp.lcdui.Card::pointerNotify({this:?}, {type}, {x}, {y})");
 
         Ok(false)
     }

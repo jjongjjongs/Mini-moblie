@@ -549,23 +549,26 @@ impl Display {
         Ok(65536)
     }
 
-    /// No pointer reaches the guest, so this stays `false`.
+    /// Whether the handset has a touch screen: what the player set for this
+    /// title (see [`wie_backend::touch_enabled`]).
     ///
-    /// The Android frontend draws its own keypad and turns a touch into a key,
-    /// and nothing anywhere pushes a pointer event at a card. Answering `true`
-    /// would invite a title to wait for a touch that never arrives - which is
-    /// the mistake, in this exact pair of methods, that another player recorded
-    /// making and had to undo.
+    /// Off by default. Most titles were made for keypad handsets, and one that
+    /// is told of a touch screen may lay itself out for touch and wait for a
+    /// touch - so it is only `true` when the player turned touch on, and then
+    /// touches do reach the cards (see `net.wie.CardCanvas`).
     async fn has_pointer_events(_: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<bool> {
-        tracing::debug!("org.kwis.msp.lcdui.Display::hasPointerEvents({this:?}) -> false");
+        let enabled = wie_backend::touch_enabled();
+        tracing::debug!("org.kwis.msp.lcdui.Display::hasPointerEvents({this:?}) -> {enabled}");
 
-        Ok(false)
+        Ok(enabled)
     }
 
+    /// Drags are reported whenever touch is.
     async fn has_pointer_motion_events(_: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<bool> {
-        tracing::warn!("stub org.kwis.msp.lcdui.Display::hasPointerMotionEvents({this:?})");
+        let enabled = wie_backend::touch_enabled();
+        tracing::debug!("org.kwis.msp.lcdui.Display::hasPointerMotionEvents({this:?}) -> {enabled}");
 
-        Ok(false)
+        Ok(enabled)
     }
 
     /// Whether a held key repeats itself, which on the frontend that ships it

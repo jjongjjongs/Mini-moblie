@@ -3,6 +3,7 @@ use alloc::vec;
 use java_class_proto::{JavaFieldProto, JavaMethodProto};
 use jvm::{ClassInstanceRef, Jvm, Result as JvmResult};
 
+use wie_backend::PointerKind;
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 use wie_midp::classes::{
     javax::microedition::lcdui::{Canvas as MidpCanvas, Display as MidpDisplay, Graphics as MidpGraphics},
@@ -149,6 +150,9 @@ impl CardCanvas {
                 JavaMethodProto::new("keyPressed", "(I)V", Self::key_pressed, Default::default()),
                 JavaMethodProto::new("keyRepeated", "(I)V", Self::key_repeated, Default::default()),
                 JavaMethodProto::new("keyReleased", "(I)V", Self::key_released, Default::default()),
+                JavaMethodProto::new("pointerPressed", "(II)V", Self::pointer_pressed, Default::default()),
+                JavaMethodProto::new("pointerReleased", "(II)V", Self::pointer_released, Default::default()),
+                JavaMethodProto::new("pointerDragged", "(II)V", Self::pointer_dragged, Default::default()),
                 JavaMethodProto::new("pushCard", "(Lorg/kwis/msp/lcdui/Card;)V", Self::push_card, Default::default()),
                 JavaMethodProto::new("setDockedCard", "(Lorg/kwis/msp/lcdui/Card;)V", Self::set_docked_card, Default::default()),
                 JavaMethodProto::new("popCard", "()Lorg/kwis/msp/lcdui/Card;", Self::pop_card, Default::default()),
@@ -450,6 +454,52 @@ impl CardCanvas {
         Ok(())
     }
 
+    async fn pointer_pressed(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, x: i32, y: i32) -> JvmResult<()> {
+        tracing::debug!("net.wie.CardCanvas::pointerPressed({this:?}, {x}, {y})");
+
+        Self::notify_pointer(jvm, &this, PointerKind::Pressed, x, y).await
+    }
+
+    async fn pointer_released(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, x: i32, y: i32) -> JvmResult<()> {
+        tracing::debug!("net.wie.CardCanvas::pointerReleased({this:?}, {x}, {y})");
+
+        Self::notify_pointer(jvm, &this, PointerKind::Released, x, y).await
+    }
+
+    async fn pointer_dragged(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, x: i32, y: i32) -> JvmResult<()> {
+        tracing::debug!("net.wie.CardCanvas::pointerDragged({this:?}, {x}, {y})");
+
+        Self::notify_pointer(jvm, &this, PointerKind::Dragged, x, y).await
+    }
+
+    /// A touch, offered to the cards from the top down until one takes it -
+    /// what the LGT firmware's `Display.pointerNotify` does, a key's walk with
+    /// `pointerNotify(type, x, y)` in place of `keyNotify`. The coordinates are
+    /// the screen's, as the firmware passes them; a card that is not at the
+    /// origin works out its own.
+    ///
+    /// A docked card sits behind the stack, so it is offered the touch last.
+    async fn notify_pointer(jvm: &Jvm, this: &ClassInstanceRef<Self>, kind: PointerKind, x: i32, y: i32) -> JvmResult<()> {
+        let cards = jvm.get_field(this, "cards", "Ljava/util/Vector;").await?;
+        let length = jvm.invoke_virtual(&cards, "size", "()I", ()).await?;
+
+        for i in (0..length).rev() {
+            let card = jvm.invoke_virtual(&cards, "elementAt", "(I)Ljava/lang/Object;", (i,)).await?;
+            let handled: bool = jvm.invoke_virtual(&card, "pointerNotify", "(III)Z", (kind.wipi_type(), x, y)).await?;
+
+            if handled {
+                return Ok(());
+            }
+        }
+
+        let docked: ClassInstanceRef<Card> = jvm.get_field(this, "dockedCard", "Lorg/kwis/msp/lcdui/Card;").await?;
+        if !docked.is_null() {
+            let _: bool = jvm.invoke_virtual(&docked, "pointerNotify", "(III)Z", (kind.wipi_type(), x, y)).await?;
+        }
+
+        Ok(())
+    }
+
     async fn push_card(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, c: ClassInstanceRef<Card>) -> JvmResult<()> {
         tracing::debug!("net.wie.CardCanvas::pushCard({this:?}, {c:?})");
 
@@ -695,5 +745,119 @@ mod skvm_scancode_tests {
         ] {
             assert_eq!(WIPIKeyCode::to_skvm_scancode(key as i32), key as i32);
         }
+    }
+}
+
+#[cfg(test)]
+mod pointer_tests {
+    use alloc::{boxed::Box, vec};
+
+    use java_class_proto::{JavaFieldProto, JavaMethodProto};
+    use java_constants::FieldAccessFlags;
+    use jvm::{ClassInstanceRef, Jvm, Result as JvmResult};
+    use test_utils::run_jvm_test;
+    use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
+    use wie_util::Result;
+
+    use crate::get_protos;
+
+    /// A card that takes every touch, and one that lets every touch by. Each
+    /// counts the touches it was offered and keeps the last as
+    /// `type * 1_000_000 + x * 1000 + y`.
+    struct TakingCard;
+    struct PassingCard;
+
+    fn card_proto(name: &'static str, pointer_notify: JavaMethodProto<WieJvmContext>) -> WieJavaClassProto {
+        WieJavaClassProto {
+            name,
+            parent_class: Some("org/kwis/msp/lcdui/Card"),
+            interfaces: vec![],
+            methods: vec![JavaMethodProto::new("<init>", "()V", init, Default::default()), pointer_notify],
+            fields: vec![
+                JavaFieldProto::new("offered", "I", FieldAccessFlags::STATIC),
+                JavaFieldProto::new("last", "I", FieldAccessFlags::STATIC),
+            ],
+            access_flags: Default::default(),
+        }
+    }
+
+    // A card made without a display, which these tests never paint.
+    async fn init(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<TakingCard>) -> JvmResult<()> {
+        jvm.invoke_special(&this, "java/lang/Object", "<init>", "()V", ()).await
+    }
+
+    async fn record(jvm: &Jvm, class: &str, r#type: i32, x: i32, y: i32) -> JvmResult<()> {
+        let offered: i32 = jvm.get_static_field(class, "offered", "I").await?;
+        jvm.put_static_field(class, "offered", "I", offered + 1).await?;
+        jvm.put_static_field(class, "last", "I", r#type * 1_000_000 + x * 1000 + y).await
+    }
+
+    async fn taking(jvm: &Jvm, _: &mut WieJvmContext, _: ClassInstanceRef<TakingCard>, r#type: i32, x: i32, y: i32) -> JvmResult<bool> {
+        record(jvm, "test/TakingCard", r#type, x, y).await?;
+        Ok(true)
+    }
+
+    async fn passing(jvm: &Jvm, _: &mut WieJvmContext, _: ClassInstanceRef<PassingCard>, r#type: i32, x: i32, y: i32) -> JvmResult<bool> {
+        record(jvm, "test/PassingCard", r#type, x, y).await?;
+        Ok(false)
+    }
+
+    fn protos() -> Box<[Box<[WieJavaClassProto]>]> {
+        Box::new([
+            wie_midp::get_protos().into(),
+            get_protos().into(),
+            vec![
+                card_proto(
+                    "test/TakingCard",
+                    JavaMethodProto::new("pointerNotify", "(III)Z", taking, Default::default()),
+                ),
+                card_proto(
+                    "test/PassingCard",
+                    JavaMethodProto::new("pointerNotify", "(III)Z", passing, Default::default()),
+                ),
+            ]
+            .into(),
+        ])
+    }
+
+    /// A canvas with `cards` stacked bottom first.
+    async fn canvas_with(jvm: &Jvm, cards: &[&str]) -> JvmResult<ClassInstanceRef<super::CardCanvas>> {
+        let canvas: ClassInstanceRef<super::CardCanvas> = jvm.new_class("net/wie/CardCanvas", "()V", ()).await?.into();
+        let stack = jvm.get_field(&canvas, "cards", "Ljava/util/Vector;").await?;
+        for card in cards {
+            let card = jvm.new_class(card, "()V", ()).await?;
+            let _: () = jvm.invoke_virtual(&stack, "addElement", "(Ljava/lang/Object;)V", (card,)).await?;
+        }
+        Ok(canvas)
+    }
+
+    async fn touch(jvm: &Jvm, canvas: &ClassInstanceRef<super::CardCanvas>) -> JvmResult<()> {
+        let _: () = jvm.invoke_virtual(canvas, "pointerPressed", "(II)V", (10, 20)).await?;
+        let _: () = jvm.invoke_virtual(canvas, "pointerDragged", "(II)V", (12, 20)).await?;
+        jvm.invoke_virtual(canvas, "pointerReleased", "(II)V", (12, 21)).await
+    }
+
+    /// A touch is offered from the top card down until one takes it, as the
+    /// LGT firmware's `Display.pointerNotify` does, typed with the
+    /// `POINT_PRESSED`/`DRAGGED`/`RELEASED` values 1, 5 and 2.
+    #[test]
+    fn a_touch_goes_down_the_stack_until_a_card_takes_it() -> Result<()> {
+        run_jvm_test(protos(), |jvm| async move {
+            let canvas = canvas_with(&jvm, &["test/TakingCard", "test/PassingCard"]).await?;
+            touch(&jvm, &canvas).await?;
+
+            assert_eq!(jvm.get_static_field::<i32>("test/PassingCard", "offered", "I").await?, 3);
+            assert_eq!(jvm.get_static_field::<i32>("test/TakingCard", "offered", "I").await?, 3);
+            assert_eq!(jvm.get_static_field::<i32>("test/TakingCard", "last", "I").await?, 2_012_021);
+
+            // With the taking card on top, the one under it never hears.
+            let canvas = canvas_with(&jvm, &["test/PassingCard", "test/TakingCard"]).await?;
+            let _: () = jvm.invoke_virtual(&canvas, "pointerDragged", "(II)V", (7, 8)).await?;
+
+            assert_eq!(jvm.get_static_field::<i32>("test/PassingCard", "offered", "I").await?, 3);
+            assert_eq!(jvm.get_static_field::<i32>("test/TakingCard", "last", "I").await?, 5_007_008);
+
+            Ok(())
+        })
     }
 }

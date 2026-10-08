@@ -182,7 +182,10 @@ struct PadView: View {
             ZStack(alignment: .topLeading) {
                 ForEach(visible) { key in
                     let rect = key.rect(in: geometry.size).insetBy(dx: 3, dy: 3)
+                    // Only drawn: the touch area below reads the touches, and a
+                    // touch beside the keys goes through to the screen.
                     KeyFace(label: key.label, pressed: pressed.contains(key.index), size: rect.size, labelScale: labelScale)
+                        .allowsHitTesting(false)
                         .position(x: rect.midX, y: rect.midY)
                 }
                 .opacity(opacity)

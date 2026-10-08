@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use wie_backend::{Emulator, Event, KeyCode, Options, Platform, drm_container, extract_zip};
+use wie_backend::{Emulator, Event, KeyCode, Options, Platform, PointerKind, drm_container, extract_zip};
 use wie_brew::BrewEmulator;
 use wie_j2me::J2MEEmulator;
 use wie_ktf::KtfEmulator;
@@ -268,6 +268,45 @@ pub fn key(index: i32, pressed: bool) {
             .input
             .push_back(if pressed { Event::Keydown(key_code) } else { Event::Keyup(key_code) });
     });
+}
+
+/// What [`pointer`]'s `action` says a finger did: the order the hosts number
+/// them in, Android's `ACTION_DOWN`, `ACTION_UP` and `ACTION_MOVE`.
+const POINTER_ACTIONS: [PointerKind; 3] = [PointerKind::Pressed, PointerKind::Released, PointerKind::Dragged];
+
+/// Queues a touch on the screen for the next tick: `action` 0 for a press, 1
+/// for a release, 2 for a drag, at `x`, `y` on the frame the host was last
+/// given. Dropped unless the player turned touch on for this title (see
+/// [`set_touch`]).
+///
+/// Called from the UI thread, like [`key`].
+pub fn pointer(action: i32, x: i32, y: i32) {
+    if !wie_backend::touch_enabled() {
+        return;
+    }
+    let Some(&kind) = usize::try_from(action).ok().and_then(|action| POINTER_ACTIONS.get(action)) else {
+        tracing::warn!("Unknown pointer action {action}");
+        return;
+    };
+
+    // Presses and releases at info, for the reason keys are; a drag reports
+    // dozens of times a second and would flood the log.
+    if kind != PointerKind::Dragged {
+        tracing::info!("input: touch {kind:?} at {x},{y}");
+    }
+
+    with_inbox(|inbox| {
+        if inbox.running {
+            inbox.input.push_back(Event::Pointer { kind, x, y });
+        }
+    });
+}
+
+/// Turns touches on the screen on or off for the running title, and what the
+/// title is told when it asks whether the handset has a touch screen.
+pub fn set_touch(enabled: bool) {
+    tracing::info!("touch {}", if enabled { "on" } else { "off" });
+    wie_backend::set_touch_enabled(enabled);
 }
 
 /// Whether a game is loaded.

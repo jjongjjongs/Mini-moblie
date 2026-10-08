@@ -214,6 +214,19 @@ enum GameSpeed {
     }
 }
 
+/// Whether touches on the game screen reach a title, kept per title as the
+/// speed is. Off unless the player turned it on for a title made for a touch
+/// handset.
+enum GameTouch {
+    static func get(_ game: GameFile) -> Bool {
+        UserDefaults.standard.bool(forKey: "touch.\(game.name)")
+    }
+
+    static func set(_ enabled: Bool, for game: GameFile) {
+        UserDefaults.standard.set(enabled, forKey: "touch.\(game.name)")
+    }
+}
+
 /// Matching a search against a title: a plain substring, or - when the query is
 /// only initial consonants, as Korean players type it - against the initial
 /// consonant of each syllable ("ㅇㅇㅅㄱ" finds 영웅서기).

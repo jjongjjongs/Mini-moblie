@@ -254,6 +254,21 @@ pub unsafe extern "C" fn wie_erase_save(data: *const u8, length: usize, runtime_
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn wie_pointer(action: i32, x: i32, y: i32) {
+    host::pointer(action, x, y);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn wie_set_touch(enabled: bool) {
+    host::set_touch(enabled);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn wie_touch() -> bool {
+    host::touch()
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn wie_log() -> *mut c_char {
     CString::new(host::log().replace('\0', "?")).map_or(std::ptr::null_mut(), CString::into_raw)
 }

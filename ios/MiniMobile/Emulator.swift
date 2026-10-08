@@ -40,6 +40,7 @@ final class Emulator: ObservableObject {
         // The speed this title was last played at; the runner keeps it from
         // the first tick.
         wie_set_speed(GameSpeed.get(game))
+        wie_set_touch(GameTouch.get(game))
 
         let runtimeDirectory = Library.dataDirectory.path
         let failure = data.withUnsafeBytes { buffer -> String? in

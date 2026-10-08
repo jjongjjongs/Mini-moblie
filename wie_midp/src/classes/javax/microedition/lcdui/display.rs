@@ -77,6 +77,7 @@ impl Display {
                 // wie private methods...
                 JavaMethodProto::new("handlePaintEvent", "()V", Self::handle_paint_event, Default::default()),
                 JavaMethodProto::new("handleKeyEvent", "(II)V", Self::handle_key_event, Default::default()),
+                JavaMethodProto::new("handlePointerEvent", "(III)V", Self::handle_pointer_event, Default::default()),
                 JavaMethodProto::new("handleNotifyEvent", "(III)V", Self::handle_notify_event, Default::default()),
                 JavaMethodProto::new("setFullscreen", "(Z)V", Self::set_fullscreen, Default::default()),
                 JavaMethodProto::new("repaint", "(IIII)V", Self::repaint, Default::default()),
@@ -363,6 +364,37 @@ impl Display {
         if !current_displayable.is_null() {
             let result: JvmResult<()> = jvm
                 .invoke_virtual(&current_displayable, "handleKeyEvent", "(II)V", (event_type, code))
+                .await;
+
+            if let Err(x) = result {
+                Self::handle_exception(jvm, x).await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// A touch, handed to the current displayable as a key is. `event_type`
+    /// is the `POINT_*` value of [`wie_backend::PointerKind::wipi_type`].
+    async fn handle_pointer_event(
+        jvm: &Jvm,
+        _context: &mut WieJvmContext,
+        this: ClassInstanceRef<Self>,
+        event_type: i32,
+        x: i32,
+        y: i32,
+    ) -> JvmResult<()> {
+        tracing::debug!("javax.microedition.lcdui.Display::handlePointerEvent({this:?}, {event_type}, {x}, {y})");
+
+        Self::deliver_visibility(jvm, &this).await?;
+
+        let current_displayable: ClassInstanceRef<Displayable> = jvm
+            .get_field(&this, "currentDisplayable", "Ljavax/microedition/lcdui/Displayable;")
+            .await?;
+
+        if !current_displayable.is_null() {
+            let result: JvmResult<()> = jvm
+                .invoke_virtual(&current_displayable, "handlePointerEvent", "(III)V", (event_type, x, y))
                 .await;
 
             if let Err(x) = result {

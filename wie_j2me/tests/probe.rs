@@ -6,6 +6,8 @@
 //!   descriptor (its main class, its LCD size) is read rather than guessed.
 //! - `WIE_TICKS` - how many ticks to run (default 2000).
 //! - `WIE_SCRIPT` - `"tick:KEY,tick:KEY"` presses, each held 20 ticks.
+//! - `WIE_TOUCH` - `"tick:x:y,..."` touches at `x`, `y`, each dragged 3
+//!   pixels right after 5 ticks and lifted after 10. Setting it turns touch on.
 //! - `WIE_FDUMP_DIR` + `WIE_FDUMP_EVERY` - dump a PPM every N ticks into the dir.
 //! - `WIE_LAST_PPM` - write the last painted frame here as a PPM.
 
@@ -15,7 +17,7 @@ use std::sync::{
 };
 
 use test_utils::{TestPlatform, TestPlatformEvent};
-use wie_backend::{AudioSink, DatabaseRepository, Emulator, Event, Filesystem, Instant, Platform, Screen, canvas::Image};
+use wie_backend::{AudioSink, DatabaseRepository, Emulator, Event, Filesystem, Instant, Platform, PointerKind, Screen, canvas::Image};
 use wie_j2me::J2MEEmulator;
 use wie_util::Result;
 
@@ -190,6 +192,20 @@ fn j2me_jar_probe() {
         })
         .unwrap_or_default();
 
+    let touches: Vec<(u32, i32, i32)> = std::env::var("WIE_TOUCH")
+        .ok()
+        .map(|s| {
+            s.split(',')
+                .filter(|x| !x.trim().is_empty())
+                .map(|touch| {
+                    let parts: Vec<i32> = touch.split(':').map(|x| x.trim().parse().expect("tick:x:y")).collect();
+                    (parts[0] as u32, parts[1], parts[2])
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    wie_backend::set_touch_enabled(!touches.is_empty());
+
     let fdump_dir = std::env::var("WIE_FDUMP_DIR").ok();
     let fdump_every: u32 = std::env::var("WIE_FDUMP_EVERY").ok().and_then(|x| x.parse().ok()).unwrap_or(250);
     if let Some(dir) = &fdump_dir {
@@ -219,6 +235,16 @@ fn j2me_jar_probe() {
             if ticks == at + 20 {
                 emulator.handle_event(Event::Keyup(key));
             }
+        }
+        for &(at, x, y) in &touches {
+            let kind = match ticks.checked_sub(at) {
+                Some(0) => PointerKind::Pressed,
+                Some(5) => PointerKind::Dragged,
+                Some(10) => PointerKind::Released,
+                _ => continue,
+            };
+            let x = if kind == PointerKind::Pressed { x } else { x + 3 };
+            emulator.handle_event(Event::Pointer { kind, x, y });
         }
         if let Err(error) = emulator.tick() {
             stopped = Some(error);

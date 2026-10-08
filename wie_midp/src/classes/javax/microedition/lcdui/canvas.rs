@@ -4,6 +4,7 @@ use java_class_proto::{JavaFieldProto, JavaMethodProto};
 use java_constants::ClassAccessFlags;
 use jvm::{ClassInstanceRef, Jvm, Result as JvmResult};
 
+use wie_backend::PointerKind;
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 
 use crate::classes::{
@@ -33,12 +34,18 @@ impl Canvas {
                 JavaMethodProto::new("keyPressed", "(I)V", Self::key_pressed, Default::default()),
                 JavaMethodProto::new("keyRepeated", "(I)V", Self::key_repeated, Default::default()),
                 JavaMethodProto::new("keyReleased", "(I)V", Self::key_released, Default::default()),
+                JavaMethodProto::new("pointerPressed", "(II)V", Self::pointer_pressed, Default::default()),
+                JavaMethodProto::new("pointerReleased", "(II)V", Self::pointer_released, Default::default()),
+                JavaMethodProto::new("pointerDragged", "(II)V", Self::pointer_dragged, Default::default()),
+                JavaMethodProto::new("hasPointerEvents", "()Z", Self::has_pointer_events, Default::default()),
+                JavaMethodProto::new("hasPointerMotionEvents", "()Z", Self::has_pointer_events, Default::default()),
                 JavaMethodProto::new("setFullScreenMode", "(Z)V", Self::set_full_screen_mode, Default::default()),
                 JavaMethodProto::new("isDoubleBuffered", "()Z", Self::is_double_buffered, Default::default()),
                 JavaMethodProto::new("getWidth", "()I", Self::get_width, Default::default()),
                 JavaMethodProto::new("getHeight", "()I", Self::get_height, Default::default()),
                 // wie private methods
                 JavaMethodProto::new("handleKeyEvent", "(II)V", Self::handle_key_event, Default::default()),
+                JavaMethodProto::new("handlePointerEvent", "(III)V", Self::handle_pointer_event, Default::default()),
                 JavaMethodProto::new(
                     "handlePaintEvent",
                     "(Ljavax/microedition/lcdui/Graphics;)V",
@@ -330,6 +337,56 @@ impl Canvas {
         }?;
 
         Ok(())
+    }
+
+    async fn pointer_pressed(_: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, x: i32, y: i32) -> JvmResult<()> {
+        tracing::debug!("javax.microedition.lcdui.Canvas::pointerPressed({this:?}, {x}, {y})");
+
+        Ok(())
+    }
+
+    async fn pointer_released(_: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, x: i32, y: i32) -> JvmResult<()> {
+        tracing::debug!("javax.microedition.lcdui.Canvas::pointerReleased({this:?}, {x}, {y})");
+
+        Ok(())
+    }
+
+    async fn pointer_dragged(_: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, x: i32, y: i32) -> JvmResult<()> {
+        tracing::debug!("javax.microedition.lcdui.Canvas::pointerDragged({this:?}, {x}, {y})");
+
+        Ok(())
+    }
+
+    /// Whether the handset has a touch screen: whatever the player set for
+    /// this title (see [`wie_backend::touch_enabled`]). Motion is reported
+    /// whenever touch is, so this answers `hasPointerMotionEvents` as well.
+    async fn has_pointer_events(_: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<bool> {
+        let enabled = wie_backend::touch_enabled();
+        tracing::debug!("javax.microedition.lcdui.Canvas::hasPointerEvents({this:?}) -> {enabled}");
+
+        Ok(enabled)
+    }
+
+    /// A touch, to the `pointerPressed`/`Released`/`Dragged` the title
+    /// overrides.
+    async fn handle_pointer_event(
+        jvm: &Jvm,
+        _context: &mut WieJvmContext,
+        this: ClassInstanceRef<Self>,
+        event_type: i32,
+        x: i32,
+        y: i32,
+    ) -> JvmResult<()> {
+        tracing::debug!("javax.microedition.lcdui.Canvas::handlePointerEvent({this:?}, {event_type}, {x}, {y})");
+
+        let method = match PointerKind::from_wipi_type(event_type) {
+            Some(PointerKind::Pressed) => "pointerPressed",
+            Some(PointerKind::Released) => "pointerReleased",
+            Some(PointerKind::Dragged) => "pointerDragged",
+            None => return Ok(()),
+        };
+
+        jvm.invoke_virtual(&this, method, "(II)V", (x, y)).await
     }
 
     async fn handle_paint_event(

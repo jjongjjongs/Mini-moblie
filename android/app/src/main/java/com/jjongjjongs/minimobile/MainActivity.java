@@ -4085,8 +4085,9 @@ public final class MainActivity extends Activity {
                 "조작 설정 (키패드·게임패드)",
                 rotateMenuLabel(),
                 "게임 속도",
+                "화면 터치",
         };
-        String[] icons = {"📋", "🔧", "⚙", "🔄", "⏩"};
+        String[] icons = {"📋", "🔧", "⚙", "🔄", "⏩", "👆"};
         // The speed row says what the speed is, so the menu answers the
         // question without opening anything.
         String speedValue = currentGame != null ? formatSpeed(gameSpeed(currentGame)) : formatSpeed(1f);
@@ -4115,10 +4116,10 @@ public final class MainActivity extends Activity {
                         label.setTextColor(COLOR_TEXT);
                         label.setTextSize(15f);
                         row.addView(label, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-                        if (position == 4) {
+                        if (position == 4 || position == 5) {
                             TextView value = new TextView(MainActivity.this);
-                            value.setText(speedValue);
-                            value.setTextColor(COLOR_ACCENT);
+                            value.setText(position == 4 ? speedValue : (touchOn ? "켜짐" : "꺼짐"));
+                            value.setTextColor(position == 5 && !touchOn ? COLOR_SUBTEXT : COLOR_ACCENT);
                             value.setTextSize(15f);
                             value.setTypeface(Typeface.DEFAULT_BOLD);
                             row.addView(value);
@@ -4149,10 +4150,53 @@ public final class MainActivity extends Activity {
                         case 4:
                             showSpeedDialog();
                             break;
+                        case 5:
+                            toggleTouch();
+                            break;
                     }
                 })
                 .setNegativeButton("닫기", null)
                 .show();
+    }
+
+    /**
+     * Whether touches on the game screen reach the running title. Off unless
+     * the player turned it on for this title - see {@link #toggleTouch}.
+     */
+    private volatile boolean touchOn;
+
+    /** Whether touch was on when this title was last played. Kept per title, as the speed is. */
+    private boolean gameTouch(File game) {
+        return getSharedPreferences("mini_touch", MODE_PRIVATE).getBoolean(game.getName(), false);
+    }
+
+    /**
+     * Turns touch on the game screen on or off for the running title and keeps
+     * the choice for it.
+     *
+     * <p>Most titles were made for keypad handsets and hear nothing from a
+     * touch, so it is off unless asked for: a title made for a touch handset
+     * (풀터치폰용) takes taps on its own screen when it is on. A title that asks
+     * whether the handset has a touch screen asks once, as it starts, so one
+     * that lays itself out for touch only does so after a restart.
+     */
+    private void toggleTouch() {
+        File game = currentGame;
+        if (game == null) {
+            return;
+        }
+        boolean enabled = !touchOn;
+        if (!enabled && gameView != null) {
+            gameView.liftTouch();
+        }
+        touchOn = enabled;
+        getSharedPreferences("mini_touch", MODE_PRIVATE).edit().putBoolean(game.getName(), enabled).apply();
+        NativeBridge.nativeSetTouch(enabled ? 1 : 0);
+        Toast.makeText(this,
+                enabled
+                        ? "화면 터치를 켰습니다. 터치를 지원하는 게임은 화면을 눌러 조작할 수 있습니다. (게임에 따라 다시 시작해야 적용됩니다)"
+                        : "화면 터치를 껐습니다.",
+                Toast.LENGTH_LONG).show();
     }
 
     /** The speeds the dialog offers as one-tap chips. */
@@ -4558,6 +4602,10 @@ public final class MainActivity extends Activity {
             // The speed this title was last played at; nativeStart then puts
             // the clock back on the time of day and runs it from there.
             NativeBridge.nativeSetSpeed(gameSpeed(game));
+            // Touch is as the player left it for this title: off unless they
+            // turned it on for one made for a touch handset.
+            touchOn = gameTouch(game);
+            NativeBridge.nativeSetTouch(touchOn ? 1 : 0);
 
             String message = NativeBridge.nativeStart(
                     buffer.toByteArray(),
@@ -4965,6 +5013,86 @@ public final class MainActivity extends Activity {
             pixelBuffer.limit(needed);
             bitmap.copyPixelsFromBuffer(pixelBuffer);
             invalidate();
+        }
+
+        /** The finger on the screen while touch is on, or -1. Only the first is followed. */
+        private int touchPointer = -1;
+        /** Where that finger last was, in the frame's pixels. */
+        private int touchX;
+        private int touchY;
+
+        /**
+         * A touch on the screen, handed to the title in the frame's own pixels
+         * when touch is on (see {@link #toggleTouch}). Only the first finger is
+         * followed - the handsets these titles were made for took one.
+         */
+        @Override
+        public boolean onTouchEvent(MotionEvent event) {
+            if (!touchOn || bitmap == null) {
+                return super.onTouchEvent(event);
+            }
+
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN: {
+                    touchPointer = event.getPointerId(0);
+                    if (toFrame(event.getX(0), event.getY(0))) {
+                        NativeBridge.nativePointer(0, touchX, touchY);
+                    } else {
+                        touchPointer = -1;
+                    }
+                    return true;
+                }
+                case MotionEvent.ACTION_MOVE: {
+                    int index = touchPointer >= 0 ? event.findPointerIndex(touchPointer) : -1;
+                    if (index >= 0) {
+                        int lastX = touchX;
+                        int lastY = touchY;
+                        toFrame(event.getX(index), event.getY(index));
+                        if (touchX != lastX || touchY != lastY) {
+                            NativeBridge.nativePointer(2, touchX, touchY);
+                        }
+                    }
+                    return true;
+                }
+                case MotionEvent.ACTION_POINTER_UP: {
+                    if (event.getPointerId(event.getActionIndex()) == touchPointer) {
+                        liftTouch();
+                    }
+                    return true;
+                }
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    liftTouch();
+                    return true;
+                default:
+                    return true;
+            }
+        }
+
+        /** Releases the finger being followed, if there is one. */
+        void liftTouch() {
+            if (touchPointer >= 0) {
+                touchPointer = -1;
+                NativeBridge.nativePointer(1, touchX, touchY);
+            }
+        }
+
+        /**
+         * Puts a point on this view into the frame's pixels, through the same
+         * fit {@link #onDraw} draws with, clamped to the frame's edge so a
+         * finger that slides off it is still on it. Whether the point was on the
+         * frame at all.
+         */
+        private boolean toFrame(float viewX, float viewY) {
+            float scale = Math.min((float) getWidth() / bitmap.getWidth(), (float) getHeight() / bitmap.getHeight());
+            float left = (getWidth() - bitmap.getWidth() * scale) / 2f;
+            float top = (getHeight() - bitmap.getHeight() * scale) / 2f;
+            float x = (viewX - left) / scale;
+            float y = (viewY - top) / scale;
+            boolean inside = x >= 0 && y >= 0 && x < bitmap.getWidth() && y < bitmap.getHeight();
+            touchX = Math.max(0, Math.min(bitmap.getWidth() - 1, (int) x));
+            touchY = Math.max(0, Math.min(bitmap.getHeight() - 1, (int) y));
+            return inside;
         }
 
         @Override

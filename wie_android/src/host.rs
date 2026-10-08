@@ -118,6 +118,21 @@ pub fn carrier(data: &[u8]) -> String {
     std::panic::catch_unwind(AssertUnwindSafe(|| runner::carrier(data).to_owned())).unwrap_or_default()
 }
 
+/// A touch on the screen, at `x`, `y` in the frame's pixels: `action` 0 for a
+/// press, 1 for a release, 2 for a drag. Dropped unless touch is on.
+pub fn pointer(action: i32, x: i32, y: i32) {
+    let _ = std::panic::catch_unwind(AssertUnwindSafe(|| runner::pointer(action, x, y)));
+}
+
+/// Turns touches on the screen on or off for the running title.
+pub fn set_touch(enabled: bool) {
+    let _ = std::panic::catch_unwind(AssertUnwindSafe(|| runner::set_touch(enabled)));
+}
+
+pub fn touch() -> bool {
+    wie_backend::touch_enabled()
+}
+
 /// How fast the title runs, 1.0 being real time.
 pub fn set_speed(value: f32) {
     let _ = std::panic::catch_unwind(AssertUnwindSafe(|| speed::set_speed(value)));
