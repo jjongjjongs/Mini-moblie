@@ -25,6 +25,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
 import android.provider.Settings;
 import android.text.InputFilter;
@@ -3008,6 +3009,11 @@ public final class MainActivity extends Activity {
                 "application/zip",
                 "application/octet-stream",
         });
+        // Start where exported saves are kept, rather than wherever the
+        // picker was last left.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, Downloads.savesFolderUri());
+        }
         startActivityForResult(intent, PICK_SAVE);
     }
 

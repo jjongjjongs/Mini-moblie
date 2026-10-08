@@ -8,6 +8,7 @@ import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
+import android.provider.DocumentsContract;
 import android.provider.MediaStore;
 
 import java.io.File;
@@ -91,6 +92,21 @@ final class Downloads {
             this.name = name;
             this.uri = uri;
         }
+    }
+
+    /**
+     * {@code Download/Mini Mobile/세이브/} as the system file picker names it,
+     * for {@code EXTRA_INITIAL_URI}: the folder an exported save is in, and so
+     * where a save being imported most likely is.
+     *
+     * <p>The picker takes it only as a hint. A folder that is not there yet -
+     * nothing has been exported - or a picker that is not the system's own
+     * opens where it would have anyway.
+     */
+    static Uri savesFolderUri() {
+        return DocumentsContract.buildDocumentUri(
+                "com.android.externalstorage.documents",
+                "primary:" + Environment.DIRECTORY_DOWNLOADS + "/" + SAVES_DIR);
     }
 
     /** The save zips in {@code Download/Mini Mobile/세이브/}, by name. */
