@@ -1,10 +1,11 @@
-use alloc::{string::ToString, vec, vec::Vec};
+use alloc::{string::ToString, sync::Arc, vec, vec::Vec};
 use core::iter;
 
 // XXX for zip..
 extern crate std;
 use std::io::{Cursor, Read};
 
+use parking_lot::Mutex;
 use zip::ZipArchive;
 
 use java_class_proto::{JavaFieldProto, JavaMethodProto};
@@ -18,6 +19,24 @@ use crate::{
         util::{Enumeration, zip::ZipEntry},
     },
 };
+
+/// How many parsed archives [`ZipFile::get_zip_archive`] keeps. A title has
+/// its own jar open and, at most, a few others.
+const MAX_ARCHIVES: usize = 4;
+/// How much of each end of an archive's bytes a kept archive is checked
+/// against.
+const FINGERPRINT_BYTES: usize = 64;
+
+#[derive(PartialEq, Eq)]
+struct Fingerprint {
+    length: usize,
+    head: [u8; FINGERPRINT_BYTES],
+    tail: [u8; FINGERPRINT_BYTES],
+}
+
+/// The archives parsed so far, oldest first, by the identity of the array
+/// each was read from.
+static ARCHIVES: Mutex<Vec<(usize, Fingerprint, ZipArchive<Cursor<Arc<[u8]>>>)>> = Mutex::new(Vec::new());
 
 // class java.util.zip.ZipFile
 pub struct ZipFile;
@@ -49,16 +68,62 @@ impl ZipFile {
         }
     }
 
-    async fn get_zip_archive(jvm: &Jvm, this: &ClassInstanceRef<Self>) -> Result<ZipArchive<Cursor<Vec<u8>>>> {
+    /// This file's archive, parsed.
+    ///
+    /// Every entry looked up or opened used to copy the whole of `zipData` out
+    /// of its Java array - clearing a buffer that size first - and parse the
+    /// central directory again: twice per resource, once for `getEntry` and
+    /// once for `getInputStream`. For a title's 2.6MB jar that was megabytes of
+    /// copying for every few kilobytes of image it loaded, and what a scene
+    /// change that loads fifty of them waited on.
+    ///
+    /// So an archive is parsed once and kept, against the array it came from.
+    /// The array is this file's own and is never written after the constructor,
+    /// but an identity can be reused once its object is gone, so a kept archive
+    /// is only taken while the array still has its length and its first and
+    /// last bytes.
+    async fn get_zip_archive(jvm: &Jvm, this: &ClassInstanceRef<Self>) -> Result<ZipArchive<Cursor<Arc<[u8]>>>> {
         let zip_data: ClassInstanceRef<Array<i8>> = jvm.get_field(this, "zipData", "[B").await?;
         let length = jvm.array_length(&zip_data).await?;
+        let identity = zip_data.identity();
+
+        let mut fingerprint = Fingerprint {
+            length,
+            head: [0; FINGERPRINT_BYTES],
+            tail: [0; FINGERPRINT_BYTES],
+        };
+        let sampled = length.min(FINGERPRINT_BYTES);
+        {
+            let buffer = jvm.array_raw_buffer(&zip_data).await?;
+            buffer.read(0, &mut fingerprint.head[..sampled])?;
+            buffer.read(length - sampled, &mut fingerprint.tail[..sampled])?;
+        }
+
+        if let Some(archive) = ARCHIVES
+            .lock()
+            .iter()
+            .find(|(id, kept, _)| *id == identity && *kept == fingerprint)
+            .map(|(_, _, archive)| archive.clone())
+        {
+            return Ok(archive);
+        }
+
         let mut buf = vec![0u8; length];
         jvm.array_raw_buffer(&zip_data).await?.read(0, &mut buf)?;
 
-        match ZipArchive::new(Cursor::new(buf)) {
-            Ok(x) => Ok(x),
-            Err(err) => Err(jvm.exception("java/util/zip/ZipException", &err.to_string()).await),
+        let archive = match ZipArchive::new(Cursor::new(Arc::<[u8]>::from(buf))) {
+            Ok(x) => x,
+            Err(err) => return Err(jvm.exception("java/util/zip/ZipException", &err.to_string()).await),
+        };
+
+        let mut archives = ARCHIVES.lock();
+        archives.retain(|(id, _, _)| *id != identity);
+        if archives.len() >= MAX_ARCHIVES {
+            archives.remove(0);
         }
+        archives.push((identity, fingerprint, archive.clone()));
+
+        Ok(archive)
     }
 
     async fn init(jvm: &Jvm, _: &mut RuntimeContext, mut this: ClassInstanceRef<Self>, file: ClassInstanceRef<File>) -> Result<()> {
