@@ -6,15 +6,16 @@ use std::{
 
 use wie_backend::{Filesystem, FilesystemMkdirError, FilesystemRenameError, FilesystemRmDirError, FilesystemSetModeError};
 
-/// The two calls this file makes that only a Unix has: `statfs`, for how big
+/// The two calls this file makes that each host answers its own way: how big
 /// the storage is and how much of it is left, and the permission bits
 /// `MC_fsSetAttribute` sets.
 ///
-/// This crate is the Android front end and is only ever built for Android, but
-/// it is a member of the workspace, so `cargo clippy --all` on a Windows runner
-/// checks it for the host and stops at the first of them. The calls are here
-/// and the rest of the crate compiles everywhere; off a Unix the two report
-/// that they could not answer, the same way a failed `statfs` does.
+/// A Unix - Android, iOS, the Linux builds - has `statfs` and mode bits.
+/// Windows has `GetDiskFreeSpaceExW` and a read-only flag; the SDL port's
+/// Windows build runs here too, and a title that checks for room before it
+/// saves (제노니아 asks for 1KB) read "unknown" as none at all there and
+/// refused to start. Anything else reports that it could not answer, the
+/// same way a failed `statfs` does.
 #[cfg(unix)]
 mod host {
     use std::{ffi::CString, fs, os::unix::ffi::OsStrExt, os::unix::fs::PermissionsExt, path::Path};
@@ -41,7 +42,36 @@ mod host {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+mod host {
+    use std::{fs, os::windows::ffi::OsStrExt, path::Path};
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetDiskFreeSpaceExW(directory: *const u16, available: *mut u64, total: *mut u64, free: *mut u64) -> i32;
+    }
+
+    /// The volume's size and the space this program may still use, as one-byte
+    /// blocks, the shape `statfs`'s answer takes.
+    pub fn storage_blocks(path: &Path) -> Option<(u64, u64, u64)> {
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let (mut available, mut total, mut free) = (0u64, 0u64, 0u64);
+        // SAFETY: a nul-terminated UTF-16 path and three out-parameters.
+        if unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut available, &mut total, &mut free) } == 0 {
+            return None;
+        }
+        Some((1, total, available))
+    }
+
+    /// Windows keeps only "read-only": a mode with no owner-write bit sets it.
+    pub fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
+        let mut permissions = fs::metadata(path)?.permissions();
+        permissions.set_readonly(mode & 0o200 == 0);
+        fs::set_permissions(path, permissions)
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 mod host {
     use std::path::Path;
 
@@ -381,6 +411,20 @@ mod tests {
     use std::path::PathBuf;
 
     use super::AndroidFilesystem;
+
+    /// The host says how much room is left, on Windows as on a Unix.
+    ///
+    /// 제노니아 asks for 1KB free before it starts, and the Windows build
+    /// answered "unknown", which the title reads as no room at all.
+    #[futures_test::test]
+    async fn the_room_left_is_known() {
+        use wie_backend::Filesystem as _;
+
+        let filesystem = AndroidFilesystem::new(std::env::temp_dir().join("wie_android_space"));
+        let available = filesystem.available_space("010100D3").await.expect("available space");
+        let total = filesystem.total_space("010100D3").await.expect("total space");
+        assert!(available > 1024 && total >= available, "{available} of {total}");
+    }
 
     /// The app's own directory has to be made on demand here, the way `write`
     /// already makes it.
