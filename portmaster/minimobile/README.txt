@@ -19,9 +19,10 @@ Android 앱과 같은 에뮬레이터로 KTF / LGT / SKT / BREW / J2ME 게임을
     위/아래          게임 고르기
     좌/우, L1/R1     한 페이지씩
     A 또는 START     실행
+    Y                버튼 설정 (고른 게임 기준)
     SELECT+START     MiniMobile 종료
 
-게임 중 (기본값, controls.txt에서 바꿀 수 있음)
+게임 중 (기본값)
     D패드 / 왼쪽 스틱  방향키
     A                 확인(OK)
     B                 취소(CLEAR)
@@ -35,16 +36,30 @@ Android 앱과 같은 에뮬레이터로 KTF / LGT / SKT / BREW / J2ME 게임을
         A 5    B 0      X 1      Y 3
         L1 7   R1 9     L2 *     R2 #
 
-    SELECT+START 또는 MENU(핫키)   게임 끝내고 목록으로
+    MENU(핫키)        일시정지 메뉴 (버튼 설정, 프리셋, 게임 끝내기)
+    SELECT+START      게임 끝내고 바로 목록으로
 
-A와 B가 반대로 느껴지면 minimobile/controls.txt 에서 두 줄을 바꾸세요.
-처음 실행할 때 기본값으로 만들어집니다.
+버튼 설정
+---------
+게임 목록에서 Y, 게임 중에는 MENU 버튼으로 엽니다. 메뉴가 열린 동안
+게임은 멈춰 있습니다.
+
+    버튼 배치 바꾸기   패드 버튼마다 "그냥"과 "SELECT 누른 채" 키를
+                       고릅니다. ◀▶로 칸, A로 바꾸기.
+    프리셋             ◀▶로 바로 바꾸고, A로 목록을 엽니다.
+                       목록에서 A 불러오기, X 덮어쓰기, Y 지우기(두 번).
+                       맨 아래 "+ 지금 배치를 새 프리셋으로"는 고른
+                       게임 이름으로 저장합니다.
+    이 게임에 프리셋 고정
+                       켜 두면 그 게임을 실행할 때마다 그 프리셋으로
+                       바뀝니다.
 
 파일
 ----
     minimobile/games/              게임 파일
     minimobile/data/               세이브 (Android 앱과 같은 구조)
-    minimobile/controls.txt        버튼 설정
+    minimobile/controls.txt        지금 버튼 설정 (직접 고쳐도 됨)
+    minimobile/presets/            프리셋
     minimobile/log.txt             마지막 실행 기록
     minimobile/last_game_log.txt   마지막 게임의 에뮬레이터 로그
 

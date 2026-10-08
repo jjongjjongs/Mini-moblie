@@ -1,0 +1,657 @@
+//! The settings screens: the menu (Y on the game list, MENU in a game), the
+//! button table, the key picker and the presets.
+//!
+//! They are driven by the pad's raw buttons, never through the mapping they
+//! edit, so a mapping however wrong cannot lock the player out of fixing it.
+
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
+
+use wie_android::host;
+use wie_backend::canvas::{Color, TextAlignment, string_width_px};
+
+use crate::{
+    App, FRAME, Input,
+    controls::{Button, TABLE_BUTTONS, key_label},
+    library::{BAR, BAR_COLOR, HIGHLIGHT, LINE, MUTED, Screen, TEXT, fit, rgb},
+    presets::DEFAULT_NAME,
+};
+
+const ROW: Color = rgb(0x22, 0x2a, 0x33);
+const ACCENT: Color = rgb(0x7d, 0xe0, 0xa8);
+const PANEL: Color = rgb(0x1a, 0x20, 0x28);
+const EDGE: Color = rgb(0x3c, 0x48, 0x54);
+const DIM: Color = Color { a: 0xb0, r: 0, g: 0, b: 0 };
+
+/// Where the settings were opened from.
+pub struct Context<'a> {
+    /// The game picked on the list, or the one running.
+    pub game: Option<&'a Path>,
+    /// The running game's last frame, shown dimmed behind the menu. `None`
+    /// on the list.
+    pub frame: Option<(u32, u32, &'a [u8])>,
+}
+
+impl Context<'_> {
+    fn in_game(&self) -> bool {
+        self.frame.is_some()
+    }
+
+    /// The game's file name, which a fixed preset is filed under.
+    fn game_file(&self) -> Option<String> {
+        self.game.and_then(|x| x.file_name()).map(|x| x.to_string_lossy().into_owned())
+    }
+
+    /// The game's name, which a new preset is called.
+    fn game_name(&self) -> Option<String> {
+        self.game.and_then(|x| x.file_stem()).map(|x| x.to_string_lossy().into_owned())
+    }
+}
+
+/// How the menu was left.
+pub enum Outcome {
+    /// Back to the game, or to the list.
+    Close,
+    /// "게임 끝내기".
+    EndGame,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Item {
+    Resume,
+    Layout,
+    Preset,
+    Fix,
+    EndGame,
+    Close,
+}
+
+/// A pad button held down keeps repeating after a moment: the directions,
+/// for moving through a list.
+struct Repeat {
+    held: Option<(Button, Instant)>,
+}
+
+impl Repeat {
+    fn new() -> Repeat {
+        Repeat { held: None }
+    }
+}
+
+impl App {
+    /// The buttons pressed since the last call, a held direction repeating.
+    /// The keyboard's escape is B; closing the window ends the port.
+    fn presses(&mut self, repeat: &mut Repeat) -> Vec<Button> {
+        let mut pressed = Vec::new();
+        for input in self.poll() {
+            match input {
+                Input::Quit => {
+                    host::stop();
+                    std::process::exit(0);
+                }
+                Input::Back => pressed.push(Button::B),
+                Input::Button(button, true) => {
+                    pressed.push(button);
+                    repeat.held = matches!(button, Button::Up | Button::Down | Button::Left | Button::Right)
+                        .then(|| (button, Instant::now() + Duration::from_millis(400)));
+                }
+                Input::Button(button, false) => {
+                    if repeat.held.is_some_and(|(held, _)| held == button) {
+                        repeat.held = None;
+                    }
+                }
+                Input::Handset(..) => {}
+            }
+        }
+        if let Some((button, at)) = repeat.held
+            && Instant::now() >= at
+        {
+            pressed.push(button);
+            repeat.held = Some((button, Instant::now() + Duration::from_millis(70)));
+        }
+        pressed
+    }
+
+    /// A blank screen of the settings' size, with the running game dimmed
+    /// behind it when there is one.
+    fn canvas(&self, context: &Context) -> (Screen, u32, u32) {
+        let (width, height, _) = self.menu_size();
+        let mut screen = Screen::new(width, height);
+        if let Some((frame_width, frame_height, rgba)) = context.frame {
+            screen.backdrop(rgba, frame_width, frame_height);
+            screen.fill(0, 0, width, height, DIM);
+        }
+        (screen, width, height)
+    }
+
+    fn present(&mut self, screen: Screen, width: u32, height: u32) {
+        let rgba = screen.rgba();
+        self.show(&rgba, width, height);
+    }
+
+    /// The menu, until it is closed or the game is ended from it.
+    pub fn settings_menu(&mut self, context: &Context) -> Outcome {
+        let mut items = Vec::new();
+        if context.in_game() {
+            items.push(Item::Resume);
+        }
+        items.extend([Item::Layout, Item::Preset]);
+        if context.game.is_some() {
+            items.push(Item::Fix);
+        }
+        items.push(if context.in_game() { Item::EndGame } else { Item::Close });
+
+        let mut cursor: usize = 0;
+        let mut repeat = Repeat::new();
+        let mut dirty = true;
+        loop {
+            for button in self.presses(&mut repeat) {
+                dirty = true;
+                match button {
+                    Button::Up => cursor = cursor.checked_sub(1).unwrap_or(items.len() - 1),
+                    Button::Down => cursor = (cursor + 1) % items.len(),
+                    Button::B | Button::Guide => return Outcome::Close,
+                    Button::Left | Button::Right if items[cursor] == Item::Preset => {
+                        self.cycle_preset(button == Button::Right);
+                    }
+                    Button::A => match items[cursor] {
+                        Item::Resume | Item::Close => return Outcome::Close,
+                        Item::EndGame => return Outcome::EndGame,
+                        Item::Layout => self.layout(),
+                        Item::Preset => self.presets(context),
+                        Item::Fix => {
+                            if let Some(game) = context.game_file() {
+                                let fixed = self.store.fixed(&game).map(str::to_owned);
+                                let active = self.store.active().to_owned();
+                                self.store.set_fixed(&game, if fixed.is_some() { None } else { Some(&active) });
+                            }
+                        }
+                    },
+                    _ => {}
+                }
+            }
+
+            if dirty {
+                self.draw_menu(context, &items, cursor);
+                dirty = false;
+            }
+            std::thread::sleep(FRAME);
+        }
+    }
+
+    /// Loads the preset after (or before) the one in use.
+    fn cycle_preset(&mut self, forward: bool) {
+        let names = self.store.names();
+        let current = names.iter().position(|x| x == self.store.active()).unwrap_or(0);
+        let next = if forward {
+            (current + 1) % names.len()
+        } else {
+            current.checked_sub(1).unwrap_or(names.len() - 1)
+        };
+        self.store.apply(&names[next]);
+    }
+
+    /// The active preset's name, starred once the mapping has moved off it.
+    fn active_label(&self) -> String {
+        let star = if self.store.modified() { "*" } else { "" };
+        format!("{}{star}", self.store.active())
+    }
+
+    fn draw_menu(&mut self, context: &Context, items: &[Item], cursor: usize) {
+        let (mut screen, width, height) = self.canvas(context);
+        let panel_width = (width - 16).min(288);
+        let panel_height = (2 * BAR + 8 + items.len() as i32 * LINE) as u32;
+        let x = (width - panel_width) as i32 / 2;
+        let y = (height - panel_height) as i32 / 2;
+        screen.fill(x - 1, y - 1, panel_width + 2, panel_height + 2, EDGE);
+        screen.fill(x, y, panel_width, panel_height, PANEL);
+
+        let (title, note) = if context.in_game() {
+            ("메뉴".to_owned(), "일시정지".to_owned())
+        } else {
+            let game = context.game_name().unwrap_or_default();
+            ("설정".to_owned(), fit(&game, panel_width as f32 / 2.0))
+        };
+        panel_bar(&mut screen, x, y, panel_width, &title, &note);
+
+        for (index, item) in items.iter().enumerate() {
+            let label = match item {
+                Item::Resume => "게임으로 돌아가기",
+                Item::Layout => "버튼 배치 바꾸기",
+                Item::Preset => "프리셋",
+                Item::Fix => "이 게임에 프리셋 고정",
+                Item::EndGame => "게임 끝내기",
+                Item::Close => "닫기",
+            };
+            // What is left of the row beside its label.
+            let room = panel_width as f32 - 28.0 - string_width_px(label, 16.0);
+            let value = match item {
+                Item::Preset => format!("◀ {} ▶", fit(&self.active_label(), room - 40.0)),
+                Item::Fix => {
+                    let fixed = context.game_file().and_then(|game| self.store.fixed(&game).map(str::to_owned));
+                    fixed.map_or("끔".to_owned(), |name| fit(&name, room))
+                }
+                _ => String::new(),
+            };
+            let row_y = y + BAR + 4 + index as i32 * LINE;
+            let picked = index == cursor;
+            if picked {
+                screen.fill(x, row_y, panel_width, LINE as u32, HIGHLIGHT);
+            }
+            screen.text(label, x + 8, row_y + 1, TextAlignment::Left, if picked { TEXT } else { MUTED });
+            if !value.is_empty() {
+                screen.text(
+                    &value,
+                    x + panel_width as i32 - 8,
+                    row_y + 1,
+                    TextAlignment::Right,
+                    if picked { TEXT } else { ACCENT },
+                );
+            }
+        }
+
+        let hint = if items[cursor] == Item::Preset {
+            "A 목록  ◀▶ 바꾸기"
+        } else {
+            "A 선택"
+        };
+        panel_bar(&mut screen, x, y + panel_height as i32 - BAR, panel_width, hint, "B 닫기");
+        self.present(screen, width, height);
+    }
+
+    /// The table of every button, plain and with SELECT held.
+    fn layout(&mut self) {
+        let mut row: usize = 0;
+        let mut with_select = false;
+        let mut top = 0;
+        let mut repeat = Repeat::new();
+        let mut dirty = true;
+        loop {
+            for button in self.presses(&mut repeat) {
+                dirty = true;
+                match button {
+                    Button::Up => row = row.checked_sub(1).unwrap_or(TABLE_BUTTONS.len() - 1),
+                    Button::Down => row = (row + 1) % TABLE_BUTTONS.len(),
+                    Button::Left | Button::Right => with_select = !with_select,
+                    Button::B | Button::Guide => return,
+                    Button::A => {
+                        let (target, name) = TABLE_BUTTONS[row];
+                        let current = self.store.controls().get(target, with_select);
+                        let title = format!("{name} 버튼 ({})", if with_select { "SELECT+" } else { "그냥" });
+                        if let Some(key) = self.pick_key(&title, current, row, with_select, top) {
+                            self.store.set(target, with_select, key);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            if dirty {
+                let (screen, width, height) = self.draw_layout(row, with_select, &mut top);
+                self.present(screen, width, height);
+                dirty = false;
+            }
+            std::thread::sleep(FRAME);
+        }
+    }
+
+    fn draw_layout(&self, row: usize, with_select: bool, top: &mut usize) -> (Screen, u32, u32) {
+        let (width, height, _) = self.menu_size();
+        let mut screen = Screen::new(width, height);
+        let preset = format!("프리셋: {}{}", self.store.active(), if self.store.modified() { " (바뀜)" } else { "" });
+        screen.bar(0, "버튼 배치", &fit(&preset, width as f32 - 96.0));
+
+        let (c1, c2, c3) = (8, (width * 29 / 100) as i32, (width * 64 / 100) as i32);
+        screen.text("버튼", c1, BAR + 2, TextAlignment::Left, MUTED);
+        screen.text("그냥", c2, BAR + 2, TextAlignment::Left, MUTED);
+        screen.text("SELECT+", c3, BAR + 2, TextAlignment::Left, MUTED);
+        screen.fill(0, BAR + LINE + 1, width, 1, EDGE);
+
+        let list_top = BAR + LINE + 4;
+        let rows = ((height as i32 - list_top - BAR - 2) / LINE).max(1) as usize;
+        if row < *top {
+            *top = row;
+        } else if row >= *top + rows {
+            *top = row + 1 - rows;
+        }
+
+        let controls = self.store.controls();
+        for (index, (button, name)) in TABLE_BUTTONS.iter().enumerate().skip(*top).take(rows) {
+            let y = list_top + (index - *top) as i32 * LINE;
+            let picked = index == row;
+            if picked {
+                screen.fill(0, y, width, LINE as u32, ROW);
+                let (x, w) = if with_select {
+                    (c3 - 4, width as i32 - c3 + 4)
+                } else {
+                    (c2 - 4, c3 - c2 - 4)
+                };
+                screen.fill(x, y, w as u32, LINE as u32, HIGHLIGHT);
+            }
+            screen.text(name, c1, y + 1, TextAlignment::Left, TEXT);
+            let plain = controls.get(*button, false);
+            screen.text(
+                key_label(plain),
+                c2,
+                y + 1,
+                TextAlignment::Left,
+                if picked && !with_select { TEXT } else { ACCENT },
+            );
+            // A button with nothing under SELECT keeps its own key there, shown
+            // muted.
+            match controls.get(*button, true) {
+                Some(key) => screen.text(
+                    key_label(Some(key)),
+                    c3,
+                    y + 1,
+                    TextAlignment::Left,
+                    if picked && with_select { TEXT } else { ACCENT },
+                ),
+                None => screen.text(
+                    key_label(plain),
+                    c3,
+                    y + 1,
+                    TextAlignment::Left,
+                    if picked && with_select { TEXT } else { MUTED },
+                ),
+            }
+        }
+        if *top + rows < TABLE_BUTTONS.len() {
+            screen.text(
+                "▼",
+                width as i32 - 8,
+                list_top + (rows as i32 - 1) * LINE + 1,
+                TextAlignment::Right,
+                MUTED,
+            );
+        }
+        if *top > 0 {
+            screen.text("▲", width as i32 - 8, list_top + 1, TextAlignment::Right, MUTED);
+        }
+
+        screen.bar(height as i32 - BAR, "A 바꾸기  ◀▶ 칸", "B 뒤로");
+        (screen, width, height)
+    }
+
+    /// Picks a handset key for one cell of the table, over it. `None` when
+    /// the pick is cancelled, `Some(None)` for no key.
+    fn pick_key(&mut self, title: &str, current: Option<i32>, row: usize, with_select: bool, top: usize) -> Option<Option<i32>> {
+        let cells = picker_cells();
+        let mut cursor = cells.iter().position(|cell| cell.key == current).unwrap_or(0);
+        let mut repeat = Repeat::new();
+        let mut dirty = true;
+        loop {
+            for button in self.presses(&mut repeat) {
+                dirty = true;
+                match button {
+                    Button::Up | Button::Down | Button::Left | Button::Right => cursor = step(&cells, cursor, button),
+                    Button::A => return Some(cells[cursor].key),
+                    Button::B | Button::Guide => return None,
+                    _ => {}
+                }
+            }
+
+            if dirty {
+                let mut top = top;
+                let (mut screen, width, height) = self.draw_layout(row, with_select, &mut top);
+                screen.fill(0, 0, width, height, DIM);
+
+                let (panel_width, panel_height) = (272u32, 196u32);
+                let x = (width - panel_width) as i32 / 2;
+                let y = (height - panel_height) as i32 / 2;
+                screen.fill(x - 1, y - 1, panel_width + 2, panel_height + 2, EDGE);
+                screen.fill(x, y, panel_width, panel_height, PANEL);
+                panel_bar(&mut screen, x, y, panel_width, title, &format!("지금: {}", key_label(current)));
+                for (index, cell) in cells.iter().enumerate() {
+                    let fill = if index == cursor { HIGHLIGHT } else { ROW };
+                    screen.fill(x + cell.x, y + cell.y, cell.width as u32, cell.height as u32, fill);
+                    let color = if cell.key.is_none() && index != cursor { MUTED } else { TEXT };
+                    let label = if cell.key.is_none() { "없음" } else { key_label(cell.key) };
+                    screen.text(
+                        label,
+                        x + cell.x + cell.width / 2,
+                        y + cell.y + (cell.height - 16) / 2,
+                        TextAlignment::Center,
+                        color,
+                    );
+                }
+                panel_bar(&mut screen, x, y + panel_height as i32 - BAR, panel_width, "A 고르기", "B 취소");
+                self.present(screen, width, height);
+                dirty = false;
+            }
+            std::thread::sleep(FRAME);
+        }
+    }
+
+    /// The presets, loaded, saved, overwritten and deleted.
+    fn presets(&mut self, context: &Context) {
+        let mut cursor = self.store.names().iter().position(|x| x == self.store.active()).unwrap_or(0);
+        let mut top = 0;
+        let mut status = String::new();
+        // A delete waits for a second press of Y on the same preset.
+        let mut confirm: Option<String> = None;
+        let mut repeat = Repeat::new();
+        let mut dirty = true;
+        loop {
+            let names = self.store.names();
+            // The last row saves the mapping as a new preset.
+            let count = names.len() + 1;
+            cursor = cursor.min(count - 1);
+            let name = names.get(cursor).cloned();
+
+            for button in self.presses(&mut repeat) {
+                dirty = true;
+                if button != Button::Y {
+                    confirm = None;
+                }
+                match button {
+                    Button::Up => cursor = cursor.checked_sub(1).unwrap_or(count - 1),
+                    Button::Down => cursor = (cursor + 1) % count,
+                    Button::B | Button::Guide => return,
+                    Button::A => match &name {
+                        Some(name) => {
+                            self.store.apply(name);
+                            status = format!("불러왔습니다: {name}");
+                        }
+                        None => {
+                            let saved = self.store.save_new(&context.game_name().unwrap_or_else(|| "프리셋".to_owned()));
+                            cursor = self.store.names().iter().position(|x| *x == saved).unwrap_or(0);
+                            status = format!("저장했습니다: {saved}");
+                        }
+                    },
+                    Button::X => match &name {
+                        Some(name) if name != DEFAULT_NAME => {
+                            self.store.overwrite(name);
+                            status = format!("덮어썼습니다: {name}");
+                        }
+                        Some(_) => status = "기본 프리셋은 바꿀 수 없습니다.".to_owned(),
+                        None => {}
+                    },
+                    Button::Y => match &name {
+                        Some(name) if name != DEFAULT_NAME => {
+                            if confirm.as_ref() == Some(name) {
+                                self.store.delete(name);
+                                status = format!("지웠습니다: {name}");
+                                confirm = None;
+                            } else {
+                                status = format!("Y를 한 번 더 누르면 지웁니다: {name}");
+                                confirm = Some(name.clone());
+                            }
+                        }
+                        Some(_) => status = "기본 프리셋은 지울 수 없습니다.".to_owned(),
+                        None => {}
+                    },
+                    _ => {}
+                }
+            }
+
+            if dirty {
+                self.draw_presets(context, cursor, &mut top, &status);
+                dirty = false;
+            }
+            std::thread::sleep(FRAME);
+        }
+    }
+
+    fn draw_presets(&mut self, context: &Context, cursor: usize, top: &mut usize, status: &str) {
+        let (width, height, _) = self.menu_size();
+        let mut screen = Screen::new(width, height);
+        let names = self.store.names();
+        let count = names.len() + 1;
+        screen.bar(0, "프리셋", &format!("{}/{}", cursor.min(names.len() - 1) + 1, names.len()));
+
+        let list_top = BAR + 4;
+        let rows = ((height as i32 - list_top - 2 * BAR - 4) / LINE).max(1) as usize;
+        if cursor < *top {
+            *top = cursor;
+        } else if cursor >= *top + rows {
+            *top = cursor + 1 - rows;
+        }
+
+        let fixed = context.game_file().and_then(|game| self.store.fixed(&game).map(str::to_owned));
+        for index in (*top..count).take(rows) {
+            let y = list_top + (index - *top) as i32 * LINE;
+            let picked = index == cursor;
+            if picked {
+                screen.fill(0, y, width, LINE as u32, HIGHLIGHT);
+            }
+            let (label, notes) = match names.get(index) {
+                Some(name) => {
+                    let mut notes = Vec::new();
+                    if name == self.store.active() {
+                        notes.push(if self.store.modified() { "사용 중*" } else { "사용 중" });
+                    }
+                    if fixed.as_deref() == Some(name.as_str()) {
+                        notes.push("이 게임");
+                    }
+                    (name.clone(), notes.join(" · "))
+                }
+                None => ("+ 지금 배치를 새 프리셋으로".to_owned(), String::new()),
+            };
+            let room = width as f32 - 16.0 - if notes.is_empty() { 0.0 } else { 104.0 };
+            screen.text(&fit(&label, room), 8, y + 1, TextAlignment::Left, if picked { TEXT } else { MUTED });
+            if !notes.is_empty() {
+                screen.text(&notes, width as i32 - 8, y + 1, TextAlignment::Right, if picked { TEXT } else { ACCENT });
+            }
+        }
+
+        if !status.is_empty() {
+            screen.text(&fit(status, width as f32 - 16.0), 8, height as i32 - 2 * BAR, TextAlignment::Left, ACCENT);
+        }
+        let hint = if cursor >= names.len() {
+            "A 저장"
+        } else {
+            "A 불러오기 X 덮어쓰기 Y 지우기"
+        };
+        screen.bar(height as i32 - BAR, hint, "B 뒤로");
+        self.present(screen, width, height);
+    }
+}
+
+fn panel_bar(screen: &mut Screen, x: i32, y: i32, width: u32, left: &str, right: &str) {
+    screen.fill(x, y, width, BAR as u32, BAR_COLOR);
+    screen.text(left, x + 6, y + 2, TextAlignment::Left, TEXT);
+    if !right.is_empty() {
+        screen.text(right, x + width as i32 - 6, y + 2, TextAlignment::Right, TEXT);
+    }
+}
+
+/// One key in the picker, placed inside its panel.
+struct Cell {
+    key: Option<i32>,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+/// The picker's keys: a handset's number pad on the left, the other keys in
+/// two columns on the right, and "none" under them.
+fn picker_cells() -> Vec<Cell> {
+    let mut cells = Vec::new();
+    // 1 2 3 / 4 5 6 / 7 8 9 / * 0 #, by key index.
+    let pad = [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 8, 19];
+    for (index, key) in pad.into_iter().enumerate() {
+        cells.push(Cell {
+            key: Some(key),
+            x: 10 + (index % 3) as i32 * 38,
+            y: BAR + 8 + (index / 3) as i32 * 28,
+            width: 34,
+            height: 24,
+        });
+    }
+    // ▲ ▼ / ◀ ▶ / 확인 취소 / 좌소프트 우소프트 / 통화 종료.
+    let keys = [0, 1, 2, 3, 4, 7, 5, 6, 20, 21];
+    for (index, key) in keys.into_iter().enumerate() {
+        cells.push(Cell {
+            key: Some(key),
+            x: 130 + (index % 2) as i32 * 68,
+            y: BAR + 8 + (index / 2) as i32 * 23,
+            width: 64,
+            height: 20,
+        });
+    }
+    cells.push(Cell {
+        key: None,
+        x: 130,
+        y: BAR + 8 + 5 * 23,
+        width: 132,
+        height: 20,
+    });
+    cells
+}
+
+/// The cell a direction leads to from `from`: of the cells wholly past its
+/// edge that way, the nearest, distance across the direction counting double;
+/// `from` itself at an edge.
+fn step(cells: &[Cell], from: usize, direction: Button) -> usize {
+    let centre = |cell: &Cell| (cell.x + cell.width / 2, cell.y + cell.height / 2);
+    let origin = &cells[from];
+    let (fx, fy) = centre(origin);
+    cells
+        .iter()
+        .enumerate()
+        .filter(|(_, cell)| match direction {
+            Button::Up => cell.y + cell.height <= origin.y,
+            Button::Down => cell.y >= origin.y + origin.height,
+            Button::Left => cell.x + cell.width <= origin.x,
+            _ => cell.x >= origin.x + origin.width,
+        })
+        .map(|(index, cell)| {
+            let (cx, cy) = centre(cell);
+            let (along, across) = match direction {
+                Button::Up | Button::Down => ((cy - fy).abs(), cx - fx),
+                _ => ((cx - fx).abs(), cy - fy),
+            };
+            (index, along + 2 * across.abs())
+        })
+        .min_by_key(|(_, distance)| *distance)
+        .map_or(from, |(index, _)| index)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(cells: &[Cell], key: Option<i32>) -> usize {
+        cells.iter().position(|cell| cell.key == key).unwrap()
+    }
+
+    #[test]
+    fn the_picker_moves_like_a_keypad() {
+        let cells = picker_cells();
+        // 1 → 2 → 3 along the top row, 5 down to 8, and from 3 across to ▲.
+        assert_eq!(step(&cells, at(&cells, Some(9)), Button::Right), at(&cells, Some(10)));
+        assert_eq!(step(&cells, at(&cells, Some(13)), Button::Down), at(&cells, Some(16)));
+        assert_eq!(step(&cells, at(&cells, Some(11)), Button::Right), at(&cells, Some(0)));
+        // The bottom of the right column reaches "none", and nothing is below it.
+        let none = at(&cells, None);
+        assert_eq!(step(&cells, at(&cells, Some(20)), Button::Down), none);
+        assert_eq!(step(&cells, none, Button::Down), none);
+        // The top-left key stays put going up or left.
+        assert_eq!(step(&cells, at(&cells, Some(9)), Button::Up), at(&cells, Some(9)));
+        assert_eq!(step(&cells, at(&cells, Some(9)), Button::Left), at(&cells, Some(9)));
+    }
+}

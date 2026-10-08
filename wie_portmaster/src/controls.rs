@@ -113,19 +113,65 @@ const KEY_NAMES: [(&str, i32); 22] = [
     ("HANGUP", 21),
 ];
 
+fn key_name(key: i32) -> &'static str {
+    KEY_NAMES.iter().find(|(_, index)| *index == key).map_or("NONE", |(name, _)| name)
+}
+
+/// What the settings screens call a handset key.
+pub fn key_label(key: Option<i32>) -> &'static str {
+    match key {
+        None => "-",
+        Some(0) => "▲",
+        Some(1) => "▼",
+        Some(2) => "◀",
+        Some(3) => "▶",
+        Some(4) => "확인",
+        Some(5) => "좌소프트",
+        Some(6) => "우소프트",
+        Some(7) => "취소",
+        Some(18) => "*",
+        Some(19) => "#",
+        Some(20) => "통화",
+        Some(21) => "종료",
+        Some(key @ 8..=17) => ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"][(key - 8) as usize],
+        Some(_) => "?",
+    }
+}
+
+/// The buttons the settings table lists, and what it calls them. SELECT is
+/// the layer key and GUIDE opens the menu, so neither is mapped there.
+pub const TABLE_BUTTONS: [(Button, &str); 15] = [
+    (Button::Up, "D▲"),
+    (Button::Down, "D▼"),
+    (Button::Left, "D◀"),
+    (Button::Right, "D▶"),
+    (Button::A, "A"),
+    (Button::B, "B"),
+    (Button::X, "X"),
+    (Button::Y, "Y"),
+    (Button::L1, "L1"),
+    (Button::R1, "R1"),
+    (Button::L2, "L2"),
+    (Button::R2, "R2"),
+    (Button::L3, "L3"),
+    (Button::R3, "R3"),
+    (Button::Start, "START"),
+];
+
 pub const DEFAULT_FILE: &str = "\
 # MiniMobile 버튼 설정
+#
+# 게임 목록에서 Y, 게임 중에는 MENU 버튼으로 여는 설정 화면에서 바꿀 수
+# 있고, 이 파일을 직접 고쳐도 됩니다.
 #
 #   버튼 = 폰 키
 #   SELECT+버튼 = 폰 키      (SELECT를 누른 채로 누를 때)
 #
-# 버튼: UP DOWN LEFT RIGHT A B X Y L1 R1 L2 R2 L3 R3 START SELECT GUIDE
+# 버튼: UP DOWN LEFT RIGHT A B X Y L1 R1 L2 R2 L3 R3 START
 # 폰 키: UP DOWN LEFT RIGHT OK CLEAR SOFT_LEFT SOFT_RIGHT
 #        0 1 2 3 4 5 6 7 8 9 STAR HASH CALL HANGUP NONE
 #
-# SELECT+START, 또는 기기의 MENU(핫키) 버튼은 게임을 끝내고 목록으로
-# 돌아갑니다 (바꿀 수 없음).
-# A와 B가 반대로 느껴지면 두 줄의 키를 서로 바꾸세요.
+# SELECT+START는 게임을 끝내고 목록으로 돌아갑니다 (바꿀 수 없음).
 
 UP = UP
 DOWN = DOWN
@@ -156,6 +202,7 @@ SELECT+L2 = STAR
 SELECT+R2 = HASH
 ";
 
+#[derive(Clone, PartialEq, Eq)]
 pub struct Controls {
     plain: [Option<i32>; BUTTON_COUNT],
     with_select: [Option<i32>; BUTTON_COUNT],
@@ -221,6 +268,46 @@ impl Controls {
         }
     }
 
+    /// The key `button` is set to press itself in one layer - SELECT held or
+    /// not - without falling back to the plain layer.
+    pub fn get(&self, button: Button, with_select: bool) -> Option<i32> {
+        if with_select {
+            self.with_select[button.index()]
+        } else {
+            self.plain[button.index()]
+        }
+    }
+
+    pub fn set(&mut self, button: Button, with_select: bool, key: Option<i32>) {
+        if with_select {
+            self.with_select[button.index()] = key;
+        } else {
+            self.plain[button.index()] = key;
+        }
+    }
+
+    /// The mapping as a controls file: the default file's notes, then every
+    /// button in both layers, so the file says all of it whatever the
+    /// defaults become.
+    pub fn to_text(&self) -> String {
+        let mut text: String = DEFAULT_FILE
+            .lines()
+            .take_while(|line| line.is_empty() || line.starts_with('#'))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        for (prefix, layer) in [("", &self.plain), ("SELECT+", &self.with_select)] {
+            text.push('\n');
+            for (button, name) in BUTTON_NAMES {
+                if button == Button::Select || button == Button::Guide {
+                    continue;
+                }
+                let key = layer[button.index()].map_or("NONE", key_name);
+                text.push_str(&format!("{prefix}{name} = {key}\n"));
+            }
+        }
+        text
+    }
+
     /// The key `button` presses, with SELECT held or not. A button with
     /// nothing under SELECT keeps its own key there.
     pub fn key(&self, button: Button, select_held: bool) -> Option<i32> {
@@ -250,6 +337,16 @@ mod tests {
         assert_eq!(controls.key(Button::A, true), Some(13));
         assert_eq!(controls.key(Button::Up, true), Some(10));
         assert_eq!(controls.key(Button::Start, true), Some(4));
+    }
+
+    #[test]
+    fn the_file_written_reads_back_the_same() {
+        let mut controls = Controls::parse("");
+        controls.set(Button::A, false, Some(7));
+        controls.set(Button::X, true, None);
+        controls.set(Button::L3, false, Some(13));
+        assert!(Controls::parse(&controls.to_text()) == controls);
+        assert!(Controls::parse(&Controls::parse("").to_text()) == Controls::parse(""));
     }
 
     #[test]

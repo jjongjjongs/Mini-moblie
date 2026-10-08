@@ -39,6 +39,12 @@ struct Anchor {
 
 static ANCHOR: Mutex<Option<Anchor>> = Mutex::new(None);
 
+/// The game clock's reading while a host holds it still - a pause menu over
+/// the title - or `None` while it runs.
+///
+/// Taken before [`ANCHOR`] wherever both are.
+static HELD: Mutex<Option<u64>> = Mutex::new(None);
+
 fn wall_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
 }
@@ -58,9 +64,10 @@ pub fn speed() -> f32 {
 pub fn set_speed(speed: f32) {
     let speed = if speed.is_finite() { speed.clamp(MIN_SPEED, MAX_SPEED) } else { 1.0 };
 
+    let held = *HELD.lock().unwrap_or_else(|x| x.into_inner());
     let mut anchor = ANCHOR.lock().unwrap_or_else(|x| x.into_inner());
     let wall = wall_ms();
-    let game = anchor.as_ref().map_or(wall, |anchor| game_ms_at(anchor, wall, self::speed()));
+    let game = held.unwrap_or_else(|| anchor.as_ref().map_or(wall, |anchor| game_ms_at(anchor, wall, self::speed())));
     *anchor = Some(Anchor {
         wall_ms: wall,
         game_ms: game,
@@ -75,14 +82,43 @@ pub fn set_speed(speed: f32) {
 /// Called as a title starts, so each run begins at the real time of day
 /// whatever an earlier run at another speed left the clock at.
 pub fn realign() {
+    *HELD.lock().unwrap_or_else(|x| x.into_inner()) = None;
     *ANCHOR.lock().unwrap_or_else(|x| x.into_inner()) = Some(Anchor {
         wall_ms: wall_ms(),
         game_ms: wall_ms(),
     });
 }
 
+/// Stops the game clock where it is, or starts it again from there.
+///
+/// While it is held the title reads the same time throughout, so a pause of
+/// any length is no time at all to it: a timer due in a second is still due
+/// a second after the clock is let go.
+pub fn hold(held: bool) {
+    let mut slot = HELD.lock().unwrap_or_else(|x| x.into_inner());
+    match (held, *slot) {
+        (true, None) => *slot = Some(running_ms()),
+        (false, Some(game)) => {
+            *slot = None;
+            *ANCHOR.lock().unwrap_or_else(|x| x.into_inner()) = Some(Anchor {
+                wall_ms: wall_ms(),
+                game_ms: game,
+            });
+        }
+        _ => {}
+    }
+}
+
 /// The game clock, in milliseconds since the epoch.
 pub fn now_ms() -> u64 {
+    if let Some(game) = *HELD.lock().unwrap_or_else(|x| x.into_inner()) {
+        return game;
+    }
+    running_ms()
+}
+
+/// The game clock as its anchor has it, held or not.
+fn running_ms() -> u64 {
     let anchor = ANCHOR.lock().unwrap_or_else(|x| x.into_inner());
     let wall = wall_ms();
 
@@ -100,7 +136,20 @@ pub fn real_ms(game_ms: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Anchor, game_ms_at};
+    use super::{Anchor, game_ms_at, hold, now_ms};
+
+    /// A held clock reads the same throughout, and goes on from there.
+    #[test]
+    fn a_held_clock_stands_still_and_goes_on_from_where_it_stood() {
+        hold(true);
+        let held = now_ms();
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert_eq!(now_ms(), held);
+        hold(false);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let after = now_ms();
+        assert!(after >= held + 15 && after < held + 55, "{held} then {after}");
+    }
 
     /// The clock runs at its speed from the anchor, and only from the anchor.
     #[test]

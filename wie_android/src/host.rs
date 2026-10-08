@@ -142,6 +142,12 @@ pub fn speed() -> f32 {
     speed::speed()
 }
 
+/// Holds the title's clock still while `held` - for a pause menu over it -
+/// so no time has passed for it when it goes on.
+pub fn hold_clock(held: bool) {
+    let _ = std::panic::catch_unwind(AssertUnwindSafe(|| speed::hold(held)));
+}
+
 // --- saves ---------------------------------------------------------------------
 //
 // The layout and the zip are the Android app's (`SaveExporter`/`SaveImporter`):

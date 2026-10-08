@@ -101,7 +101,7 @@ impl Menu {
             format!("{}/{}", self.selected + 1, self.games.len())
         };
         canvas.bar(0, "MiniMobile", &count);
-        canvas.bar(height as i32 - BAR, "A 실행   ◀▶ 페이지", "SELECT+START 종료");
+        canvas.bar(height as i32 - BAR, "A 실행  Y 설정", "SELECT+START 종료");
 
         if self.games.is_empty() {
             let text = format!(
@@ -166,7 +166,7 @@ fn name(path: &Path) -> String {
 }
 
 /// `text`, cut short with an ellipsis if it is wider than `width`.
-fn fit(text: &str, width: f32) -> String {
+pub(crate) fn fit(text: &str, width: f32) -> String {
     if string_width_px(text, FONT) <= width {
         return text.to_owned();
     }
@@ -252,6 +252,31 @@ impl Screen {
         self.text(left, 6, text_y, TextAlignment::Left, TEXT);
         if !right.is_empty() {
             self.text(right, self.width as i32 - 6, text_y, TextAlignment::Right, TEXT);
+        }
+    }
+
+    /// `rgba`, `width` by `height`, fitted to the whole screen at its own
+    /// shape, by whole pixels - the game behind a menu.
+    pub(crate) fn backdrop(&mut self, rgba: &[u8], width: u32, height: u32) {
+        if width == 0 || height == 0 || rgba.len() < (width * height * 4) as usize {
+            return;
+        }
+        let scale = (self.width as f32 / width as f32).min(self.height as f32 / height as f32);
+        let (shown_width, shown_height) = ((width as f32 * scale) as u32, (height as f32 * scale) as u32);
+        let (left, top) = ((self.width - shown_width) / 2, (self.height - shown_height) / 2);
+        for y in 0..shown_height {
+            let source_y = ((y as f32 / scale) as u32).min(height - 1);
+            for x in 0..shown_width {
+                let source_x = ((x as f32 / scale) as u32).min(width - 1);
+                let at = ((source_y * width + source_x) * 4) as usize;
+                let color = Color {
+                    a: 0xff,
+                    r: rgba[at],
+                    g: rgba[at + 1],
+                    b: rgba[at + 2],
+                };
+                self.canvas.put_pixel((left + x) as i32, (top + y) as i32, color);
+            }
         }
     }
 

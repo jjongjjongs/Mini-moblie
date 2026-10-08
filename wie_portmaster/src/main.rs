@@ -6,13 +6,14 @@
 //! The screen, sound and pad are the handheld's own SDL2 (see `sdl`).
 //!
 //! It opens on a list of the games in the folder it is given and goes back to
-//! it when a game ends or SELECT+START is pressed.
+//! it when a game ends or SELECT+START is pressed. Y on the list and MENU in a
+//! game open the button settings (see `settings`).
 
 mod controls;
 mod library;
-#[cfg(test)]
-mod mockup;
+mod presets;
 mod sdl;
+mod settings;
 
 use std::{
     ffi::{CStr, c_int, c_void},
@@ -24,9 +25,11 @@ use std::{
 use wie_android::host;
 
 use self::{
-    controls::{BUTTON_COUNT, Button, Controls},
+    controls::{BUTTON_COUNT, Button},
     library::Menu,
+    presets::Store,
     sdl::{Event, Rect, Sdl},
+    settings::{Context, Outcome},
 };
 
 /// How often the game loop runs a tick when the title does not say otherwise.
@@ -101,7 +104,8 @@ struct App {
     renderer: *mut c_void,
     texture: *mut c_void,
     texture_size: (i32, i32),
-    controls: Controls,
+    /// The button mapping and its presets.
+    store: Store,
     /// Which of a button's sources - the button itself, a stick or trigger -
     /// hold it down, one bit each.
     held: [u8; BUTTON_COUNT],
@@ -169,7 +173,7 @@ impl App {
                 renderer,
                 texture: ptr::null_mut(),
                 texture_size: (0, 0),
-                controls: Controls::load(Path::new("controls.txt")),
+                store: Store::load(),
                 held: [0; BUTTON_COUNT],
                 controllers: 0,
                 audio,
@@ -328,12 +332,12 @@ impl App {
         }
     }
 
-    /// The pixel size the list and messages are drawn at: the screen divided
-    /// by the largest whole number that leaves at least 240 lines, so the
-    /// 16-pixel font lands on whole pixels.
+    /// The pixel size the list and settings are drawn at: the screen divided
+    /// by the largest whole number that leaves at least 320 by 240, so the
+    /// 16-pixel font lands on whole pixels and every screen has its room.
     fn menu_size(&self) -> (u32, u32, u32) {
         let (width, height) = self.output_size();
-        let scale = (height / 240).max(1);
+        let scale = (height / 240).min(width / 320).max(1);
         ((width / scale) as u32, (height / scale) as u32, scale as u32)
     }
 
@@ -354,6 +358,16 @@ impl App {
                                 if let Some(game) = menu.selected() {
                                     return Some(game);
                                 }
+                            }
+                            Button::Y => {
+                                let game = menu.selected();
+                                self.settings_menu(&Context {
+                                    game: game.as_deref(),
+                                    frame: None,
+                                });
+                                repeat = None;
+                                dirty = true;
+                                continue;
                             }
                             _ => {}
                         }
@@ -412,6 +426,13 @@ impl App {
         self.show(&rgba, width, height);
 
         let data = std::fs::read(game).map_err(|error| format!("게임 파일을 읽을 수 없습니다: {error}"))?;
+        // A game fixed to a preset plays with it.
+        let fixed = game
+            .file_name()
+            .and_then(|file| self.store.fixed(&file.to_string_lossy()).map(str::to_owned));
+        if let Some(preset) = fixed {
+            self.store.apply(&preset);
+        }
         let runtime_dir = std::env::current_dir().unwrap_or_default().join("data");
         let _ = std::fs::create_dir_all(&runtime_dir);
         let failure = host::start(data, runtime_dir, "Linux".to_owned());
@@ -421,7 +442,7 @@ impl App {
         // SAFETY: a device id SDL handed out, or 0, which SDL ignores.
         unsafe { (self.sdl.pause_audio_device)(self.audio, 0) };
 
-        let result = self.run_game();
+        let result = self.run_game(game);
 
         host::stop();
         // SAFETY: as above.
@@ -432,7 +453,9 @@ impl App {
         result
     }
 
-    fn run_game(&mut self) -> Result<(), String> {
+    fn run_game(&mut self, game: &Path) -> Result<(), String> {
+        // The newest frame, kept for the menu to show behind it.
+        let mut frame: Option<(u32, u32, Vec<u8>)> = None;
         // The handset key each button pressed, so letting it go releases that
         // key even if SELECT was let go in between.
         let mut pressed: [Option<i32>; BUTTON_COUNT] = [None; BUTTON_COUNT];
@@ -455,18 +478,35 @@ impl App {
                         release_all(&mut pressed);
                         return Ok(());
                     }
-                    // SELECT+START, or the handheld's menu / hotkey button on
-                    // its own: back to the list.
+                    // The handheld's menu / hotkey button: the menu, with the
+                    // game and its clock and sound held still behind it.
                     Input::Button(Button::Guide, true) => {
                         release_all(&mut pressed);
-                        return Ok(());
+                        host::hold_clock(true);
+                        // SAFETY: a device id SDL handed out, or 0, which SDL ignores.
+                        unsafe { (self.sdl.pause_audio_device)(self.audio, 1) };
+                        let outcome = self.settings_menu(&Context {
+                            game: Some(game),
+                            frame: frame.as_ref().map(|(width, height, rgba)| (*width, *height, rgba.as_slice())),
+                        });
+                        // SAFETY: as above.
+                        unsafe { (self.sdl.pause_audio_device)(self.audio, 0) };
+                        host::hold_clock(false);
+                        if let Outcome::EndGame = outcome {
+                            return Ok(());
+                        }
+                        if let Some((width, height, rgba)) = &frame {
+                            let (width, height, rgba) = (*width, *height, rgba.clone());
+                            self.show(&rgba, width, height);
+                        }
                     }
+                    // SELECT+START: straight back to the list.
                     Input::Button(Button::Start, true) if self.select_held() => {
                         release_all(&mut pressed);
                         return Ok(());
                     }
                     Input::Button(button, true) => {
-                        if let Some(key) = self.controls.key(button, self.select_held()) {
+                        if let Some(key) = self.store.controls().key(button, self.select_held()) {
                             host::key(key, true);
                             pressed[button.index()] = Some(key);
                         }
@@ -486,6 +526,7 @@ impl App {
             }
             if let Some((width, height, rgba)) = host::take_frame_rgba() {
                 self.show(&rgba, width, height);
+                frame = Some((width, height, rgba));
             }
             // Vibration: nothing on a handheld to give it to, but the queue
             // still has to be emptied.
@@ -510,7 +551,8 @@ impl App {
 }
 
 /// A keyboard, for trying the port on a desktop: the desktop build's keys for
-/// the handset, and the arrows, Enter and Escape for the list.
+/// the handset, the arrows, Enter and Escape for the list, and F3 to F7 for
+/// X, Y, SELECT, MENU and START.
 fn keyboard(scancode: i32, down: bool, inputs: &mut Vec<Input>) {
     let button = match scancode {
         82 => Some(Button::Up),
@@ -521,6 +563,11 @@ fn keyboard(scancode: i32, down: bool, inputs: &mut Vec<Input>) {
         42 => Some(Button::B),
         225 => Some(Button::L1),
         229 => Some(Button::R1),
+        60 => Some(Button::X),
+        61 => Some(Button::Y),
+        62 => Some(Button::Select),
+        63 => Some(Button::Guide),
+        64 => Some(Button::Start),
         _ => None,
     };
     if let Some(button) = button {
