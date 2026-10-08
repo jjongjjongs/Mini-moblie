@@ -70,14 +70,6 @@ android {
             //noinspection ChromeOsAbiSupport
             abiFilters.addAll(abis)
         }
-
-        if (!project.hasProperty('skipCmake')) {
-            externalNativeBuild {
-                cmake {
-                    arguments '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON'
-                }
-            }
-        }
     }
 
     if (signingProperties != null) {
@@ -132,24 +124,11 @@ android {
         }
     }
 
-    if (!project.hasProperty('skipCmake')) {
-        externalNativeBuild {
-            cmake {
-                path file('src/main/cpp/CMakeLists.txt')
-                version '3.22.1'
-            }
-        }
-    }
-
     packaging {
         jniLibs {
             // The library is loaded straight from the apk; nothing unpacks it.
             useLegacyPackaging false
         }
-    }
-
-    androidResources {
-        noCompress += ['wav', 'mp3']
     }
 }
 
@@ -203,33 +182,9 @@ dependencies {
     }
 }
 
-tasks.register('verifyLocalAudio') {
-    description = 'Checks private audio inputs required for the tested Zenonia build'
-    group = 'verification'
-
-    doLast {
-        def root = rootProject.projectDir.parentFile
-        def required = [zenonia1: 51, zenonia2: 16, zenonia3: 17]
-        required.each { name, count ->
-            def directory = new File(project.projectDir, "src/main/assets/${name}")
-            def files = directory.isDirectory() ? directory.listFiles()?.findAll { it.isFile() } : []
-            if (files == null || files.size() != count) {
-                throw new GradleException("Missing local ${name} audio: expected ${count} files in ${directory}")
-            }
-        }
-        def soundFont = new File(root, 'wie_midi/soundfont.sf2')
-        if (!soundFont.isFile()) {
-            throw new GradleException("Missing local MIDI soundfont: ${soundFont}")
-        }
-    }
-}
-
 tasks.configureEach { task ->
     // `preBuild` is the last point before AGP starts collecting jniLibs.
     if (task.name == 'preBuild' && !project.hasProperty('skipCargo')) {
         task.dependsOn tasks.named('cargoBuild')
-    }
-    if (task.name == 'preBuild') {
-        task.dependsOn tasks.named('verifyLocalAudio')
     }
 }

@@ -26,10 +26,9 @@ use crate::{
 };
 use std::{
     collections::HashMap,
-    ffi::c_void,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicPtr, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
 };
 
@@ -140,10 +139,6 @@ fn mmf_hash(data: &[u8]) -> u64 {
 /// level and only peaks round off.
 const MMF_GAIN: f32 = 2.0;
 
-type WaveCallback = unsafe extern "C" fn(u8, u32, *const i16, usize) -> u8;
-
-static WAVE_CALLBACK: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
-
 /// The mixer the audio thread pulls from. The Java audio pump renders chunks on
 /// demand through [`render_audio_bytes`], clocked by its own AudioTrack, so
 /// playback advances in real time on a thread of its own rather than in the
@@ -181,25 +176,6 @@ pub fn render_audio_bytes(frames: usize) -> Vec<u8> {
         out.extend_from_slice(&sample.to_le_bytes());
     }
     out
-}
-
-/// Installs an optional host-side low-latency wave handler.
-///
-/// The stable symbol lets the Android audio helper register without patching
-/// a build-specific instruction address inside this library.
-#[unsafe(no_mangle)]
-pub extern "C" fn wie_set_wave_callback(callback: *mut c_void) {
-    WAVE_CALLBACK.store(callback, Ordering::Release);
-}
-
-fn wave_callback_consumed(channel: u8, sampling_rate: u32, wave_data: &[i16]) -> bool {
-    let callback = WAVE_CALLBACK.load(Ordering::Acquire);
-    if callback.is_null() {
-        return false;
-    }
-
-    let callback: WaveCallback = unsafe { std::mem::transmute(callback) };
-    unsafe { callback(channel, sampling_rate, wave_data.as_ptr(), wave_data.len()) != 0 }
 }
 
 pub fn vibrate_command(duration_ms: u64, intensity: u8) -> Vec<u8> {
@@ -278,7 +254,7 @@ impl wie_backend::AudioSink for AndroidAudioSink {
         self.shared.mixer().close(voice);
     }
 
-    fn play_wave(&self, clip: u32, channel: u8, sampling_rate: u32, wave_data: &[i16]) {
+    fn play_wave(&self, clip: u32, _channel: u8, sampling_rate: u32, wave_data: &[i16]) {
         if wave_data.is_empty() {
             return;
         }
@@ -289,12 +265,6 @@ impl wie_backend::AudioSink for AndroidAudioSink {
         // one-shot it has already taken ownership of.
         let volume = self.shared.mixer().clip_volume(clip);
         if volume == 0 {
-            return;
-        }
-
-        // A disabled per-title override leaves this a no-op, but keep the hook so
-        // it can still substitute a wave when enabled.
-        if wave_callback_consumed(channel, sampling_rate, wave_data) {
             return;
         }
 

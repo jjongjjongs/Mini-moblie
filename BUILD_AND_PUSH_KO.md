@@ -1,5 +1,11 @@
 # WIE Android 변경사항 커밋, 푸시 및 APK 빌드
 
+> **2026-10-08 변경:** 제노니아 1/2/3 교체 음원(`android/app/src/main/assets/zenonia1~3`),
+> 이를 연결하던 `libwie_audio_hook.so`, `import-local-audio.ps1`, `verifyLocalAudio`
+> 작업은 모두 제거됐다. 교체 기능은 2026-08-24부터 꺼져 있었고, 제노니아는
+> 에뮬레이터가 게임 데이터로 직접 만든 소리로 재생된다. 아래의 음원 관련 절차는
+> 더 이상 필요 없고, 빌드에 필요한 로컬 파일은 `wie_midi/soundfont.sf2`뿐이다.
+
 이 문서는 현재 검증된 제노니아 1/2/3 오디오 보완 버전을 GitHub에 올리고,
 새 작업 폴더에서도 같은 Android APK를 빌드하는 절차를 정리한다.
 

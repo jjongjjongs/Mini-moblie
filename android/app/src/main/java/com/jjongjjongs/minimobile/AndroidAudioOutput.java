@@ -58,7 +58,7 @@ final class AndroidAudioOutput {
 
     AndroidAudioOutput(Context context) {
         this.vibrator = (Vibrator) context.getSystemService(Context.VIBRATOR_SERVICE);
-        ZenoniaAudioOverride.initialize(context);
+        PerformanceTuner.initialize(context);
         midiThread = Executors.newSingleThreadScheduledExecutor(runnable -> {
             Thread thread = new Thread(runnable, "WIE MIDI pump");
             thread.setDaemon(true);
@@ -79,14 +79,6 @@ final class AndroidAudioOutput {
         }
 
         cleanupFinished();
-
-        int override = ZenoniaAudioOverride.handle(command);
-        if (override != 0) {
-            if (override == 2) {
-                MidiSynthBridge.reset();
-            }
-            return;
-        }
 
         switch (command[0] & 0xFF) {
             case OPCODE_PLAY_WAVE:
@@ -127,7 +119,6 @@ final class AndroidAudioOutput {
     }
 
     synchronized void pause() {
-        ZenoniaAudioOverride.pause();
         PcmStreamWriter.pause();
         MmfAudioPump.pause();
         midiEnabled = false;
@@ -149,7 +140,6 @@ final class AndroidAudioOutput {
     }
 
     synchronized void resume() {
-        ZenoniaAudioOverride.resume();
         PcmStreamWriter.resume();
         MmfAudioPump.resume();
         midiEnabled = true;
@@ -173,7 +163,6 @@ final class AndroidAudioOutput {
     }
 
     synchronized void release() {
-        ZenoniaAudioOverride.release();
         PcmStreamWriter.release();
         MmfAudioPump.release();
         if (stream != null) {
