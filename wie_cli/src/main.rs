@@ -26,12 +26,8 @@ use midir::MidiOutput;
 use rodio::{DeviceSinkBuilder, Player, buffer::SamplesBuffer, conversions::SampleTypeConverter};
 use winit::keyboard::{KeyCode as WinitKeyCode, PhysicalKey};
 
-use wie_backend::{Emulator, Event, Filesystem, Instant, KeyCode, Options, Platform, ProfileSample, Screen, extract_zip};
-use wie_brew::BrewEmulator;
+use wie_backend::{Emulator, Event, Filesystem, Instant, KeyCode, Options, Platform, ProfileSample, Screen};
 use wie_j2me::J2MEEmulator;
-use wie_ktf::KtfEmulator;
-use wie_lgt::LgtEmulator;
-use wie_skt::SktEmulator;
 
 use self::{
     audio_sink::AudioSink,
@@ -63,10 +59,9 @@ impl WieCliPlatform {
     fn audio_thread(rx: Receiver<(u8, u32, Vec<i16>)>) {
         let default_output = DeviceSinkBuilder::open_default_sink();
         if default_output.is_err() {
-            // do nothing if we can't open output
-            loop {
-                rx.recv().unwrap();
-            }
+            // do nothing if we can't open output, until the emulator is gone
+            while rx.recv().is_ok() {}
+            return;
         }
 
         let output_sink = default_output.unwrap();
@@ -206,67 +201,27 @@ pub fn start(filename: &str, options: Options) -> anyhow::Result<()> {
     // A title drawn for a panel other than 240x320 lays itself out for that
     // one, so let the archive name its own before the window exists, the same
     // way the Android runner does. Almost none do; those fall back to 240x320.
-    let (width, height) = LgtEmulator::screen_size(&buf)
-        .or_else(|| BrewEmulator::screen_size(&buf))
-        .or_else(|| SktEmulator::screen_size(&buf))
-        .or_else(|| KtfEmulator::screen_size(&buf))
-        .unwrap_or((240, 320));
+    // A title drawn for a panel other than 240x320 lays itself out for that
+    // one, so let the archive name its own before the window exists.
+    let (width, height) = if filename.to_lowercase().ends_with("jad") {
+        (240, 320)
+    } else {
+        wie_android::title_panel(&buf)
+    };
     let window = WindowImpl::new(width, height).unwrap();
     let platform = Box::new(WieCliPlatform::new(window.handle()));
-    // Only used to pick the loader; all file access keeps the original casing.
-    let extension = filename.to_lowercase();
-    let mut emulator: Box<dyn Emulator> = if extension.ends_with("zip") {
-        let files = extract_zip(&buf).unwrap();
-
-        if BrewEmulator::loadable_archive(&files) {
-            Box::new(BrewEmulator::from_archive(platform, files)?)
-        } else if KtfEmulator::loadable_archive(&files) {
-            Box::new(KtfEmulator::from_archive(platform, files, options)?)
-        } else if LgtEmulator::loadable_archive(&files) {
-            Box::new(LgtEmulator::from_archive(platform, files, options)?)
-        } else if SktEmulator::loadable_archive(&files) {
-            Box::new(SktEmulator::from_archive(platform, files)?)
-        } else {
-            anyhow::bail!("Unknown archive format");
-        }
-    } else if extension.ends_with("jad") {
+    let mut emulator: Box<dyn Emulator> = if filename.to_lowercase().ends_with("jad") {
         let jar_filename = filename.replace(".jad", ".jar");
         let jar = fs::read(&jar_filename)?;
 
         let jar_filename = jar_filename[jar_filename.rfind('/').unwrap_or(0) + 1..].to_owned();
 
         Box::new(J2MEEmulator::from_jad_jar(platform, buf, jar_filename, jar)?)
-    } else if extension.ends_with("jar") {
-        let filename_without_path = filename[filename.rfind('/').unwrap_or(0) + 1..].to_owned();
-        let filename_without_ext = filename_without_path.trim_end_matches(".jar");
-
-        if KtfEmulator::loadable_jar(&buf) {
-            Box::new(KtfEmulator::from_jar(
-                platform,
-                &filename_without_path,
-                buf,
-                filename_without_ext,
-                filename_without_ext,
-                None,
-                options,
-            )?)
-        } else if LgtEmulator::loadable_jar(&buf) {
-            Box::new(LgtEmulator::from_jar(
-                platform,
-                &filename_without_path,
-                buf,
-                filename_without_ext,
-                filename_without_ext,
-                None,
-                options,
-            )?)
-        } else if SktEmulator::loadable_jar(&buf) {
-            Box::new(SktEmulator::from_jar(platform, &filename_without_path, buf, filename_without_ext, None)?)
-        } else {
-            Box::new(J2MEEmulator::from_jar(platform, &filename_without_path, buf)?)
-        }
     } else {
-        anyhow::bail!("Unknown file format");
+        // Everything else loads the way the Android app loads it - the
+        // bundled LGT firmware and handset font, packages around one jar, a
+        // jar filed under its own id - so a title runs here as it does there.
+        wie_android::build_emulator(platform, &buf, options).map_err(anyhow::Error::msg)?
     };
 
     let mut key_events = HashMap::new();

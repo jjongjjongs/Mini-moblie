@@ -130,12 +130,17 @@ jobs:
           | Signing | $signing |
 
           Android will ask for permission to install it from outside the
-          store."
+          store.
+
+          \`wie-linux-x86_64.tar.gz\` is the Linux build of the same commit,
+          uploaded by its own job - see the README inside it."
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --notes "$notes" --prerelease
           else
-            gh release create "$TAG" --title 'WIE Mobile (development build)' --notes "$notes" --prerelease
+            # The Linux job may have created it in the meantime.
+            gh release create "$TAG" --title 'WIE Mobile (development build)' --notes "$notes" --prerelease \
+              || gh release edit "$TAG" --notes "$notes" --prerelease
           fi
 
           # The asset takes the file's own name, so it is renamed rather than
@@ -146,3 +151,58 @@ jobs:
           # Drop a stale `app-debug.apk` asset left by an older workflow: it
           # shows up next to the real one and is easy to download by mistake.
           gh release delete-asset "$TAG" app-debug.apk --yes 2>/dev/null || true
+
+  # The same emulator as a Linux desktop program, published next to the apk.
+  # It loads titles through the Android app's own loader (bundled firmware and
+  # handset font included), so a title behaves the same on both.
+  linux:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install required packages
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - name: Build
+        run: cargo build --release -p wie_cli --features jit
+
+      - name: Package
+        run: |
+          set -eu
+          mkdir -p wie-linux-x86_64
+          cp target/release/wie_cli wie-linux-x86_64/
+          cp wie_cli/README_LINUX.txt wie-linux-x86_64/README.txt
+          # Built against this runner's C library, so it runs on that one or
+          # anything newer - which is worth saying where it is unpacked.
+          printf '\n이 빌드에 필요한 C 라이브러리: %s 이상\n커밋: %s\n' \
+            "$(ldd --version | head -1 | sed 's/.* //; s/^/glibc /')" "${{ github.sha }}" >> wie-linux-x86_64/README.txt
+          tar czf wie-linux-x86_64.tar.gz wie-linux-x86_64
+
+      - name: Upload the Linux build
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: wie-linux-x86_64
+          path: wie-linux-x86_64.tar.gz
+
+      # The apk job writes the release's notes; this one only adds its file,
+      # creating the release first if this job got there before it.
+      - name: Publish the Linux build to the development release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: mobile-dev
+        run: |
+          set -eu
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --title 'WIE Mobile (development build)' --notes 'Development build, replaced by every push.' --prerelease \
+            || gh release view "$TAG" >/dev/null
+          gh release upload "$TAG" wie-linux-x86_64.tar.gz --clobber

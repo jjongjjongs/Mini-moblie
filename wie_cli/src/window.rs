@@ -19,7 +19,8 @@ use wie_backend::{Screen, canvas::Image};
 #[derive(Debug)]
 pub enum WindowInternalEvent {
     RequestRedraw,
-    Paint(Vec<u32>),
+    /// A frame's pixels, and its width and height.
+    Paint(Vec<u32>, u32, u32),
     Quit,
 }
 
@@ -60,7 +61,7 @@ impl Screen for WindowHandle {
             .map(|x| ((x.a as u32) << 24) | ((x.r as u32) << 16) | ((x.g as u32) << 8) | (x.b as u32))
             .collect::<Vec<_>>();
 
-        self.send_event(WindowInternalEvent::Paint(data)).unwrap()
+        self.send_event(WindowInternalEvent::Paint(data, image.width(), image.height())).unwrap()
     }
 
     fn width(&self) -> u32 {
@@ -314,6 +315,9 @@ where
     /// Displays the last content frame to the window.
     fn paint_last_frame(&mut self) -> Option<()> {
         let data = &self.last_frame;
+        if data.len() != self.content_size.width as usize * self.content_size.height as usize || self.surface.is_none() {
+            return None;
+        }
         let data_to_blit = if self.scaled_image_buf.len() == data.len() {
             data
         } else {
@@ -373,8 +377,24 @@ where
             WindowInternalEvent::RequestRedraw => {
                 self.window.as_ref().unwrap().request_redraw();
             }
-            WindowInternalEvent::Paint(data) => {
-                self.last_frame = data;
+            WindowInternalEvent::Paint(data, width, height) => {
+                // A title can draw a frame of another size than the panel it
+                // reported - as the Android player, which scales each frame by
+                // its own size, allows - so the window follows the frame.
+                let size = LogicalSize::new(width, height);
+                if size != self.content_size && width != 0 && height != 0 {
+                    self.content_size = size;
+                    self.update_scale_factor(None, None);
+                    if let Some(new_size) = self.window.as_ref().and_then(|window| window.request_inner_size(self.scaled_size)) {
+                        self.window_size = new_size;
+                    }
+                    self.last_frame = data;
+                    if self.window.is_some() {
+                        self.on_resize();
+                    }
+                } else {
+                    self.last_frame = data;
+                }
                 self.paint_last_frame();
             }
             WindowInternalEvent::Quit => {

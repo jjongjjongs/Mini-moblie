@@ -3562,12 +3562,9 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "web-sys",
+ "wie_android",
  "wie_backend",
- "wie_brew",
  "wie_j2me",
- "wie_ktf",
- "wie_lgt",
- "wie_skt",
  "wie_util",
  "winit",
 ]

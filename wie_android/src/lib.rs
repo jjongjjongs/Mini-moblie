@@ -20,6 +20,8 @@ mod platform;
 mod runner;
 mod speed;
 
+pub use runner::{build_emulator, title_panel};
+
 use std::{panic::AssertUnwindSafe, path::PathBuf, time::Duration};
 
 use jni::{

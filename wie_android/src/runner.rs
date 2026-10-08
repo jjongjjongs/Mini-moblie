@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use wie_backend::{Emulator, Event, KeyCode, Options, drm_container, extract_zip};
+use wie_backend::{Emulator, Event, KeyCode, Options, Platform, drm_container, extract_zip};
 use wie_brew::BrewEmulator;
 use wie_j2me::J2MEEmulator;
 use wie_ktf::KtfEmulator;
@@ -492,12 +492,7 @@ impl Runner {
         // to exist before there is an emulator to ask about it. Give the archive
         // the chance to name its own panel first; almost none do, and those fall
         // back to the default.
-        let (width, height) = LgtEmulator::screen_size(&data)
-            .or_else(|| BrewEmulator::screen_size(&data))
-            .or_else(|| SktEmulator::screen_size(&data))
-            .or_else(|| KtfEmulator::screen_size(&data))
-            .or_else(|| j2me_panel(&data))
-            .unwrap_or((SCREEN_WIDTH, SCREEN_HEIGHT));
+        let (width, height) = title_panel(&data);
         // Always on: which panel a title is given decides how its fixed-layout
         // screens land, so a capture that does not say the size cannot answer
         // why a title drew where it did.
@@ -700,7 +695,23 @@ impl Runner {
 const FIRMWARE_BIOS: &[u8] = include_bytes!("../firmware/libarm32_lgt_system.so");
 const FIRMWARE_BIOS_NAME: &str = "libarm32_lgt_system.so";
 
-fn build_emulator(platform: Box<AndroidPlatform>, data: &[u8], options: Options) -> Result<Box<dyn Emulator + Send>, String> {
+/// The panel `data` is drawn for: the one its archive or jar names, or the
+/// default 240x320.
+pub fn title_panel(data: &[u8]) -> (u32, u32) {
+    LgtEmulator::screen_size(data)
+        .or_else(|| BrewEmulator::screen_size(data))
+        .or_else(|| SktEmulator::screen_size(data))
+        .or_else(|| KtfEmulator::screen_size(data))
+        .or_else(|| j2me_panel(data))
+        .unwrap_or((SCREEN_WIDTH, SCREEN_HEIGHT))
+}
+
+/// Loads `data` - a handset archive, a package around one jar, or a bare jar -
+/// onto `platform`. Returns the message to show when it cannot be run.
+///
+/// Shared with the desktop build, so a title loads there exactly as it does on
+/// a handset.
+pub fn build_emulator(platform: Box<dyn Platform>, data: &[u8], options: Options) -> Result<Box<dyn Emulator + Send>, String> {
     let mut files = extract_zip(data).map_err(|x| format!("압축을 열 수 없습니다: {x}"))?;
 
     // The handset's own bitmap faces live in the bundled firmware, and drawing
