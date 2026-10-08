@@ -11,6 +11,9 @@ pub struct FileEntry {
     pub path: String,
     pub mode: i32,
     pub cursor: usize,
+    /// Whether every write goes to EOF, wherever the cursor is. See [`open`]
+    /// for which mode 2 descriptors are.
+    pub append: bool,
 }
 
 pub struct FilesystemState {
@@ -36,14 +39,14 @@ pub fn new_state() -> SharedFilesystemState {
 }
 
 impl FilesystemState {
-    fn register(&mut self, path: String, mode: i32, cursor: usize) -> i32 {
+    fn register(&mut self, path: String, mode: i32, cursor: usize, append: bool) -> i32 {
         let fd = self.next_fd;
         self.next_fd = self.next_fd.wrapping_add(1);
         if self.next_fd <= 0 {
             self.next_fd = 1;
         }
 
-        self.entries.insert(fd, FileEntry { path, mode, cursor });
+        self.entries.insert(fd, FileEntry { path, mode, cursor, append });
         fd
     }
 
@@ -189,6 +192,9 @@ pub async fn open(context: &mut dyn WIPICContext, path: WIPICWord, mode: i32, ac
     // clearest signal for why a title bails during start-up.
     tracing::info!("MC_fsOpen({path:?}, mode={mode}) exists={exists}");
 
+    // Only a mode 2 open of a file that is already there appends; see below.
+    let append = mode == 2 && exists;
+
     let cursor = match mode {
         1 => {
             if !exists {
@@ -200,6 +206,16 @@ pub async fn open(context: &mut dyn WIPICContext, path: WIPICWord, mode: i32, ac
             // Native O_WRONLY|O_APPEND, falling back to O_WRONLY|O_CREAT.
             // O_APPEND does not move the initial file offset to EOF; it
             // redirects each write to EOF when that write occurs.
+            //
+            // The fallback has no O_APPEND, so a file this open creates is an
+            // ordinary write-only file, whose writes land where it seeks to.
+            // 영웅서기4 depends on it: it saves by copying its `kickass`
+            // container into a new `chicken`, seeking back to 0 to write the
+            // finished directory, and renaming `chicken` over `kickass`. With
+            // every write appended, that directory went to the end of the
+            // file, the one at the front stayed the stale placeholder - which
+            // lists the slot but not the game - and a saved character loaded
+            // as a new one, from the start of the story.
             if !exists {
                 filesystem.truncate(&path, 0).await;
                 if !filesystem.exists(&path).await {
@@ -230,7 +246,7 @@ pub async fn open(context: &mut dyn WIPICContext, path: WIPICWord, mode: i32, ac
         _ => unreachable!(),
     };
 
-    Ok(context.filesystem_state().lock().register(path, mode, cursor))
+    Ok(context.filesystem_state().lock().register(path, mode, cursor, append))
 }
 
 /// WIPI-C MC_fsRead (service 0x191).
@@ -357,10 +373,10 @@ pub async fn write(context: &mut dyn WIPICContext, fd: i32, buffer: WIPICWord, s
 
     let filesystem = context.system().filesystem().clone();
 
-    // Mode 2 was opened O_APPEND. Every write therefore starts at the
-    // current EOF regardless of a preceding seek. Other writable modes use
-    // the descriptor's current file offset.
-    let offset = if entry.mode == 2 {
+    // An appending descriptor (mode 2 over an existing file) writes at the
+    // current EOF regardless of a preceding seek. Every other writable one
+    // uses the descriptor's current file offset.
+    let offset = if entry.append {
         let Some(file_size) = filesystem.size(&entry.path).await else {
             return Ok(-1);
         };
@@ -379,7 +395,7 @@ pub async fn write(context: &mut dyn WIPICContext, fd: i32, buffer: WIPICWord, s
 
     let state = context.filesystem_state();
     let mut state = state.lock();
-    let updated = if entry.mode == 2 {
+    let updated = if entry.append {
         state.set_cursor(fd, offset.wrapping_add(written))
     } else {
         state.advance_cursor(fd, written)
@@ -1548,7 +1564,7 @@ mod tests {
         context.system().filesystem().truncate("save/tell.dat", 6).await;
         context.system().filesystem().write("save/tell.dat", 0, &[1, 2, 3, 4, 5, 6]).await;
 
-        let fd = context.filesystem_state().lock().register(String::from("save/tell.dat"), 8, 0);
+        let fd = context.filesystem_state().lock().register(String::from("save/tell.dat"), 8, 0, false);
 
         assert_eq!(tell(&mut context, fd).await.unwrap(), 0);
 
@@ -1571,11 +1587,31 @@ mod tests {
         assert_eq!(tell(&mut context, -1).await.unwrap(), -2);
         assert_eq!(tell(&mut context, 12345).await.unwrap(), -2);
 
-        let fd = context.filesystem_state().lock().register(String::from("save/tell.dat"), 1, 4);
+        let fd = context.filesystem_state().lock().register(String::from("save/tell.dat"), 1, 4, false);
 
         assert_eq!(tell(&mut context, fd).await.unwrap(), 4);
         assert_eq!(close(&mut context, fd).await.unwrap(), 0);
         assert_eq!(tell(&mut context, fd).await.unwrap(), -2);
+    }
+
+    /// A mode 2 open that creates its file falls back to plain O_WRONLY|O_CREAT,
+    /// with no O_APPEND, so a seek moves where the next write lands - the
+    /// directory 영웅서기4 writes back at offset 0 of its new save.
+    #[futures_test::test]
+    async fn lgt_fs_append_open_that_creates_writes_where_it_seeks() {
+        let mut context = filesystem_test_context();
+        context.write_bytes(0x1000, b"save/chicken\0").unwrap();
+        context.write_bytes(0x2000, b"....body").unwrap();
+        context.write_bytes(0x3000, b"HEAD").unwrap();
+
+        let fd = open(&mut context, 0x1000, 2, 1).await.unwrap();
+        assert_eq!(write(&mut context, fd, 0x2000, 8).await.unwrap(), 8);
+        assert_eq!(seek(&mut context, fd, 0, 0).await.unwrap(), 0);
+        assert_eq!(write(&mut context, fd, 0x3000, 4).await.unwrap(), 4);
+
+        let mut actual = [0u8; 9];
+        assert_eq!(context.system().filesystem().read("save/chicken", 0, 9, &mut actual).await, Some(8));
+        assert_eq!(&actual[..8], b"HEADbody");
     }
 
     #[futures_test::test]
