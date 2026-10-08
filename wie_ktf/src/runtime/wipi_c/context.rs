@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, format, vec, vec::Vec};
+use alloc::{boxed::Box, format, sync::Arc, vec, vec::Vec};
 
 use jvm::{
     Jvm,
@@ -15,7 +15,7 @@ use wie_wipi_c::{
         filesystem::SharedFilesystemState,
         graphics::{ContextLayout, ImageLayout},
         im::SharedImState,
-        kernel::SharedKernelState,
+        kernel::{self, SharedKernelState},
         media::SharedMediaState,
         net::SharedNetworkState,
         serial::SharedSerialState,
@@ -63,6 +63,24 @@ impl KtfWIPICContext {
             media_state,
             kernel_state,
         }
+    }
+}
+
+impl KtfWIPICContext {
+    /// One of the jar's own files, read once - see
+    /// [`wie_wipi_c::api::kernel::packaged_resource`].
+    async fn packaged_resource(&self, name: &str) -> Option<Arc<[u8]>> {
+        if let Some(data) = kernel::packaged_resource(&self.kernel_state, name) {
+            return Some(data);
+        }
+
+        let class_loader = self.jvm.current_class_loader().await.unwrap();
+        let stream = JavaLangClassLoader::get_resource_as_stream(&self.jvm, &class_loader, name)
+            .await
+            .unwrap()?;
+        let data = JavaIoInputStream::read_until_end(&self.jvm, &stream).await.unwrap();
+
+        Some(kernel::cache_packaged_resource(&self.kernel_state, name, data))
     }
 }
 
@@ -199,16 +217,7 @@ impl WIPICContext for KtfWIPICContext {
     }
 
     async fn get_resource_size(&self, name: &str) -> Result<Option<usize>> {
-        let class_loader = self.jvm.current_class_loader().await.unwrap();
-        let stream = JavaLangClassLoader::get_resource_as_stream(&self.jvm, &class_loader, name).await.unwrap();
-
-        if stream.is_none() {
-            return Ok(None);
-        }
-
-        let available: i32 = self.jvm.invoke_virtual(&stream.unwrap(), "available", "()I", ()).await.unwrap();
-
-        Ok(Some(available as _))
+        Ok(self.packaged_resource(name).await.map(|data| data.len()))
     }
 
     /// One of the archive's own files.
@@ -223,11 +232,8 @@ impl WIPICContext for KtfWIPICContext {
     /// file the jar did not hold took the emulator down rather than reporting
     /// that it is not there.
     async fn read_resource(&self, name: &str) -> Result<Vec<u8>> {
-        let class_loader = self.jvm.current_class_loader().await.unwrap();
-        let stream = JavaLangClassLoader::get_resource_as_stream(&self.jvm, &class_loader, name).await.unwrap();
-
-        if let Some(stream) = stream {
-            return Ok(JavaIoInputStream::read_until_end(&self.jvm, &stream).await.unwrap());
+        if let Some(data) = self.packaged_resource(name).await {
+            return Ok(data.to_vec());
         }
 
         let Some(size) = self.system.filesystem().size(name).await else {

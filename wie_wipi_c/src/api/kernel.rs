@@ -403,9 +403,51 @@ pub struct KernelState {
     /// block at the same address in another, which is a thing this runtime's
     /// own tests do to each other every time they run side by side.
     pub(crate) image_sources: BTreeMap<WIPICWord, WIPICWord>,
+    /// The archive's own files, by name, once they have been read. See
+    /// [`packaged_resource`].
+    packaged_resources: BTreeMap<String, Arc<[u8]>>,
+    /// What [`Self::packaged_resources`] holds, in bytes.
+    packaged_bytes: usize,
 }
 
 pub type SharedKernelState = Arc<Mutex<KernelState>>;
+
+/// How much of the archive [`cache_packaged_resource`] keeps.
+///
+/// Enough for every tile, object and sound a title of this era carries -
+/// 영웅서기4's whole jar is 2.6MB compressed - and a bound on what one that
+/// carries more can make a handset hold.
+const PACKAGED_RESOURCE_BUDGET: usize = 32 * 1024 * 1024;
+
+/// One of the archive's own files, if it has been read before.
+///
+/// A file inside the jar cannot change while the title runs, so it only has to
+/// be read once. Reading one goes through the class loader - a URL, a jar
+/// entry, an inflating stream and a read through the JVM - which on a handset
+/// is several milliseconds a file, twice over when its size is asked for first.
+/// 영웅서기4 loads its map's tiles and objects this way each time the map
+/// changes, forty or fifty of them at once, and that stalled the screen for
+/// over half a second on every change.
+///
+/// Only the jar's files are kept: what the class loader cannot find comes from
+/// the filesystem, which the title can write.
+pub fn packaged_resource(state: &SharedKernelState, name: &str) -> Option<Arc<[u8]>> {
+    state.lock().packaged_resources.get(name).cloned()
+}
+
+/// Keeps `data` as the archive's file `name`, unless that would take the cache
+/// past [`PACKAGED_RESOURCE_BUDGET`], and hands it back either way.
+pub fn cache_packaged_resource(state: &SharedKernelState, name: &str, data: Vec<u8>) -> Arc<[u8]> {
+    let data: Arc<[u8]> = data.into();
+
+    let mut state = state.lock();
+    if state.packaged_bytes + data.len() <= PACKAGED_RESOURCE_BUDGET && !state.packaged_resources.contains_key(name) {
+        state.packaged_bytes += data.len();
+        state.packaged_resources.insert(name.to_string(), data.clone());
+    }
+
+    data
+}
 
 pub fn new_state() -> SharedKernelState {
     Arc::new(Mutex::new(KernelState::default()))
