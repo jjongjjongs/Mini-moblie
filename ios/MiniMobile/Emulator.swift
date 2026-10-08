@@ -3,13 +3,6 @@ import CoreGraphics
 import QuartzCore
 import UIKit
 
-/// Takes ownership of a string the emulator returned.
-private func takeString(_ pointer: UnsafeMutablePointer<CChar>?) -> String? {
-    guard let pointer else { return nil }
-    defer { wie_free_string(pointer) }
-    return String(cString: pointer)
-}
-
 /// One running title: the emulator's loop on a thread of its own, its frames
 /// published for the screen, and its sound pulled by the audio engine.
 final class Emulator: ObservableObject {
@@ -43,6 +36,10 @@ final class Emulator: ObservableObject {
             message = "게임 파일을 읽을 수 없습니다: \(error.localizedDescription)"
             return
         }
+
+        // The speed this title was last played at; the runner keeps it from
+        // the first tick.
+        wie_set_speed(GameSpeed.get(game))
 
         let runtimeDirectory = Library.dataDirectory.path
         let failure = data.withUnsafeBytes { buffer -> String? in

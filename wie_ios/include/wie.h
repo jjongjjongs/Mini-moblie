@@ -61,6 +61,26 @@ size_t wie_render_audio(int16_t *samples, size_t frames);
 // Pops the next vibration request. Returns false when there is none.
 bool wie_take_vibration(uint32_t *duration_ms);
 
+// The carrier `data` runs under: "KTF", "LGT", "SKT", "DRM" (a locked
+// download) or "". Free with `wie_free_string`; never NULL.
+char *wie_carrier(const uint8_t *data, size_t length);
+
+// How fast the title runs, 1.0 being real time.
+void wie_set_speed(float speed);
+float wie_speed(void);
+
+// Saves, in the Android app's zip layout (db/<product id>/..., fs/<app id>/...),
+// so a save moves between the two. `data` is the game file whose saves are
+// meant; `runtime_dir` is the one given to `wie_start`. Each returns NULL on
+// success, otherwise a message (free with `wie_free_string`).
+//
+// Writes the zip to `destination`; `*exported` is false when nothing is saved.
+char *wie_export_save(const uint8_t *data, size_t length, const char *runtime_dir, const char *destination, bool *exported);
+// Restores a save zip, overwriting; `*restored` is how many files.
+char *wie_import_save(const uint8_t *zip, size_t length, const char *runtime_dir, size_t *restored);
+// Removes the game's saves; `*removed` is how many directories.
+char *wie_erase_save(const uint8_t *data, size_t length, const char *runtime_dir, size_t *removed);
+
 // The log collected for this run. Free with `wie_free_string`.
 char *wie_log(void);
 

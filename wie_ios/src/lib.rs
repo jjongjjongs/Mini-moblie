@@ -155,6 +155,104 @@ pub unsafe extern "C" fn wie_take_vibration(duration_ms: *mut u32) -> bool {
     false
 }
 
+/// # Safety
+/// `data` points at `length` readable bytes.
+unsafe fn bytes<'a>(data: *const u8, length: usize) -> &'a [u8] {
+    if data.is_null() {
+        return &[];
+    }
+    // SAFETY: as the caller promises.
+    unsafe { std::slice::from_raw_parts(data, length) }
+}
+
+/// # Safety
+/// `data` points at `length` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wie_carrier(data: *const u8, length: usize) -> *mut c_char {
+    // SAFETY: as the caller promises.
+    let carrier = host::carrier(unsafe { bytes(data, length) });
+    CString::new(carrier).map_or(std::ptr::null_mut(), CString::into_raw)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn wie_set_speed(speed: f32) {
+    host::set_speed(speed);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn wie_speed() -> f32 {
+    host::speed()
+}
+
+/// # Safety
+/// `data` points at `length` readable bytes; the strings are NUL-terminated;
+/// `exported` is valid for a write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wie_export_save(
+    data: *const u8,
+    length: usize,
+    runtime_dir: *const c_char,
+    destination: *const c_char,
+    exported: *mut bool,
+) -> *mut c_char {
+    // SAFETY: as the caller promises.
+    let (data, runtime_dir, destination) = unsafe { (bytes(data, length), string(runtime_dir), string(destination)) };
+    let result = host::export_save(data, std::path::Path::new(&runtime_dir)).and_then(|zip| match zip {
+        Some(zip) => std::fs::write(&destination, zip)
+            .map(|_| true)
+            .map_err(|error| format!("세이브를 저장할 수 없습니다: {error}")),
+        None => Ok(false),
+    });
+    match result {
+        Ok(written) => {
+            if !exported.is_null() {
+                // SAFETY: as the caller promises.
+                unsafe { *exported = written };
+            }
+            std::ptr::null_mut()
+        }
+        Err(error) => message(error),
+    }
+}
+
+/// # Safety
+/// `zip` points at `length` readable bytes; `runtime_dir` is NUL-terminated;
+/// `restored` is valid for a write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wie_import_save(zip: *const u8, length: usize, runtime_dir: *const c_char, restored: *mut usize) -> *mut c_char {
+    // SAFETY: as the caller promises.
+    let (zip, runtime_dir) = unsafe { (bytes(zip, length), string(runtime_dir)) };
+    match host::import_save(zip, std::path::Path::new(&runtime_dir)) {
+        Ok(count) => {
+            if !restored.is_null() {
+                // SAFETY: as the caller promises.
+                unsafe { *restored = count };
+            }
+            std::ptr::null_mut()
+        }
+        Err(error) => message(error),
+    }
+}
+
+/// # Safety
+/// `data` points at `length` readable bytes; `runtime_dir` is NUL-terminated;
+/// `removed` is valid for a write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wie_erase_save(data: *const u8, length: usize, runtime_dir: *const c_char, removed: *mut usize) -> *mut c_char {
+    // SAFETY: as the caller promises.
+    let (data, runtime_dir) = unsafe { (bytes(data, length), string(runtime_dir)) };
+    match host::erase_save(data, std::path::Path::new(&runtime_dir)) {
+        Ok(count) => {
+            if !removed.is_null() {
+                // SAFETY: as the caller promises.
+                unsafe { *removed = count };
+            }
+            std::ptr::null_mut()
+        }
+        Err(error) => message(error),
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn wie_log() -> *mut c_char {
     CString::new(host::log().replace('\0', "?")).map_or(std::ptr::null_mut(), CString::into_raw)

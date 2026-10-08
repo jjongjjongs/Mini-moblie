@@ -4,11 +4,27 @@ import Foundation
 struct GameFile: Identifiable, Hashable {
     let url: URL
     var id: String { url.path }
+    /// The file name, which is what favorites and per-title settings key on.
+    var name: String { url.lastPathComponent }
     var title: String { url.deletingPathExtension().lastPathComponent }
 }
 
-/// Where games and their saves live. Both are under Documents, so the Files
-/// app reaches them too (UIFileSharingEnabled).
+/// A failure the emulator or the file system reported, in the words the
+/// player sees.
+struct LibraryError: LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
+}
+
+/// Takes ownership of a string the emulator returned.
+func takeString(_ pointer: UnsafeMutablePointer<CChar>?) -> String? {
+    guard let pointer else { return nil }
+    defer { wie_free_string(pointer) }
+    return String(cString: pointer)
+}
+
+/// Where games and their saves live. Everything is under Documents, so the
+/// Files app reaches it too (UIFileSharingEnabled).
 enum Library {
     static let extensions: Set<String> = ["zip", "jar", "jad"]
 
@@ -16,18 +32,19 @@ enum Library {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     }
 
-    static var gamesDirectory: URL {
-        let url = documents.appendingPathComponent("Games", isDirectory: true)
+    private static func directory(_ name: String) -> URL {
+        let url = documents.appendingPathComponent(name, isDirectory: true)
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }
 
+    static var gamesDirectory: URL { directory("Games") }
+
     /// What the emulator keeps per title: its files and databases.
-    static var dataDirectory: URL {
-        let url = documents.appendingPathComponent("Data", isDirectory: true)
-        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
-    }
+    static var dataDirectory: URL { directory("Data") }
+
+    /// Exported saves, as zips the Android app imports as well.
+    static var savesDirectory: URL { directory("Saves") }
 
     static func games() -> [GameFile] {
         let urls = (try? FileManager.default.contentsOfDirectory(at: gamesDirectory, includingPropertiesForKeys: nil)) ?? []
@@ -50,7 +67,181 @@ enum Library {
         try FileManager.default.copyItem(at: source, to: destination)
     }
 
+    /// Removes the game file; its saves stay, as they do on Android, so a
+    /// title imported again picks up where it was.
     static func delete(_ game: GameFile) {
         try? FileManager.default.removeItem(at: game.url)
+        Favorites.remove(game.name)
+    }
+
+    // MARK: - Carrier
+
+    /// The carrier a game runs under - "KTF", "LGT", "SKT", "DRM" for a locked
+    /// download, or "" - cached by name, size and date so the list does not
+    /// read every file each time it is shown.
+    static func carrier(of game: GameFile) -> String {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: game.url.path)
+        let size = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
+        let date = (attributes?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let stamp = "\(size):\(Int64(date))"
+
+        let key = "carrier.\(game.name)"
+        if let cached = UserDefaults.standard.string(forKey: key), cached.hasPrefix(stamp + "|") {
+            return String(cached.dropFirst(stamp.count + 1))
+        }
+
+        guard let data = try? Data(contentsOf: game.url) else { return "" }
+        let carrier = data.withUnsafeBytes { buffer -> String in
+            let bytes = buffer.bindMemory(to: UInt8.self)
+            return takeString(wie_carrier(bytes.baseAddress, bytes.count)) ?? ""
+        }
+        UserDefaults.standard.set("\(stamp)|\(carrier)", forKey: key)
+        return carrier
+    }
+
+    // MARK: - Saves
+
+    /// Writes the title's saves to Documents/Saves as a zip, laid out as the
+    /// Android app's export is, and returns where; nil when the title has
+    /// not saved anything yet.
+    static func exportSave(_ game: GameFile) throws -> URL? {
+        let data = try Data(contentsOf: game.url)
+        let stamp = DateFormatter.saveStamp.string(from: Date())
+        let destination = savesDirectory.appendingPathComponent("\(game.title)_세이브_\(stamp).zip")
+
+        var exported = false
+        let failure = data.withUnsafeBytes { buffer -> String? in
+            let bytes = buffer.bindMemory(to: UInt8.self)
+            return takeString(wie_export_save(bytes.baseAddress, bytes.count, dataDirectory.path, destination.path, &exported))
+        }
+        if let failure {
+            throw LibraryError(message: failure)
+        }
+        return exported ? destination : nil
+    }
+
+    /// Restores a save zip - one this app or the Android app exported - and
+    /// returns how many files it put back.
+    static func importSave(from source: URL) throws -> Int {
+        let accessing = source.startAccessingSecurityScopedResource()
+        defer {
+            if accessing { source.stopAccessingSecurityScopedResource() }
+        }
+        let zip = try Data(contentsOf: source)
+
+        var restored = 0
+        let failure = zip.withUnsafeBytes { buffer -> String? in
+            let bytes = buffer.bindMemory(to: UInt8.self)
+            return takeString(wie_import_save(bytes.baseAddress, bytes.count, dataDirectory.path, &restored))
+        }
+        if let failure {
+            throw LibraryError(message: failure)
+        }
+        return restored
+    }
+
+    /// Erases the title's saves and returns how many files went.
+    static func eraseSave(_ game: GameFile) throws -> Int {
+        let data = try Data(contentsOf: game.url)
+
+        var removed = 0
+        let failure = data.withUnsafeBytes { buffer -> String? in
+            let bytes = buffer.bindMemory(to: UInt8.self)
+            return takeString(wie_erase_save(bytes.baseAddress, bytes.count, dataDirectory.path, &removed))
+        }
+        if let failure {
+            throw LibraryError(message: failure)
+        }
+        return removed
+    }
+}
+
+extension DateFormatter {
+    /// 20261008_1530, for export file names.
+    static let saveStamp: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd_HHmm"
+        return formatter
+    }()
+}
+
+/// The titles the player starred, by file name.
+enum Favorites {
+    static let key = "favorites"
+
+    static func decode(_ text: String) -> Set<String> {
+        Set(text.split(separator: "\n").map(String.init))
+    }
+
+    static func encode(_ names: Set<String>) -> String {
+        names.sorted().joined(separator: "\n")
+    }
+
+    static func remove(_ name: String) {
+        var names = decode(UserDefaults.standard.string(forKey: key) ?? "")
+        names.remove(name)
+        UserDefaults.standard.set(encode(names), forKey: key)
+    }
+}
+
+/// How fast each title runs, kept per title by file name as on Android: a slow
+/// title can stay sped up without every other title following it.
+enum GameSpeed {
+    static let chips: [Float] = [0.5, 1, 1.5, 2, 3, 4]
+    static let range: ClosedRange<Float> = 0.5...4
+    static let step: Float = 0.25
+
+    static func get(_ game: GameFile) -> Float {
+        let value = UserDefaults.standard.float(forKey: "speed.\(game.name)")
+        return value.isNaN || value <= 0 ? 1 : value
+    }
+
+    static func set(_ value: Float, for game: GameFile) {
+        UserDefaults.standard.set(value, forKey: "speed.\(game.name)")
+    }
+
+    /// 2x, 1.5x, 1.25x - as few digits as the value needs.
+    static func format(_ value: Float) -> String {
+        if value == value.rounded() {
+            return "\(Int(value))x"
+        }
+        var text = String(format: "%.2f", value)
+        if text.hasSuffix("0") {
+            text.removeLast()
+        }
+        return text + "x"
+    }
+}
+
+/// Matching a search against a title: a plain substring, or - when the query is
+/// only initial consonants, as Korean players type it - against the initial
+/// consonant of each syllable ("ㅇㅇㅅㄱ" finds 영웅서기).
+enum TitleSearch {
+    private static let initials: [Character] = Array("ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ")
+
+    static func matches(_ title: String, _ query: String) -> Bool {
+        let query = query.replacingOccurrences(of: " ", with: "")
+        if query.isEmpty {
+            return true
+        }
+        if title.replacingOccurrences(of: " ", with: "").localizedCaseInsensitiveContains(query) {
+            return true
+        }
+        guard query.allSatisfy({ initials.contains($0) }) else { return false }
+        return initialsOf(title).contains(query)
+    }
+
+    private static func initialsOf(_ title: String) -> String {
+        var result = ""
+        for scalar in title.unicodeScalars {
+            let value = scalar.value
+            if (0xAC00...0xD7A3).contains(value) {
+                result.append(initials[Int((value - 0xAC00) / 588)])
+            } else if scalar != " " {
+                result.unicodeScalars.append(scalar)
+            }
+        }
+        return result
     }
 }

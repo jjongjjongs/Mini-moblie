@@ -5,7 +5,12 @@
 //! the same one, so a title loads, runs, saves and sounds the way it does on
 //! Android.
 
-use std::{panic::AssertUnwindSafe, path::PathBuf, time::Duration};
+use std::{
+    io::{Read, Write},
+    panic::AssertUnwindSafe,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use crate::{
     logging,
@@ -105,4 +110,193 @@ pub fn take_output() -> Option<Vec<u8>> {
 /// The log collected for this run.
 pub fn log() -> String {
     guarded(logging::snapshot)
+}
+
+/// The carrier `data` runs under - `"KTF"`, `"LGT"`, `"SKT"`, `"DRM"` for a
+/// locked download, or `""` - for the library's badge and filter.
+pub fn carrier(data: &[u8]) -> String {
+    std::panic::catch_unwind(AssertUnwindSafe(|| runner::carrier(data).to_owned())).unwrap_or_default()
+}
+
+/// How fast the title runs, 1.0 being real time.
+pub fn set_speed(value: f32) {
+    let _ = std::panic::catch_unwind(AssertUnwindSafe(|| speed::set_speed(value)));
+}
+
+pub fn speed() -> f32 {
+    speed::speed()
+}
+
+// --- saves ---------------------------------------------------------------------
+//
+// The layout and the zip are the Android app's (`SaveExporter`/`SaveImporter`):
+// a title's record stores live under `<runtime>/db/<product id>` and the files
+// it wrote under `<runtime>/fs/<application id>`, and an export keeps that split
+// in its entry paths. So a save taken on one host goes back on the other.
+
+/// Every directory `data`'s saves live in, as its path inside the zip and on
+/// disk.
+fn save_roots(data: &[u8], runtime_dir: &Path) -> Result<Vec<(String, PathBuf)>, String> {
+    let ids = runner::save_ids(data).ok_or_else(|| "이 파일의 저장 위치를 알 수 없습니다.".to_owned())?;
+
+    let mut roots: Vec<(String, PathBuf)> = Vec::new();
+    for (kind, id) in [("db", &ids.records), ("fs", &ids.files), ("fs", &ids.records)] {
+        let name = format!("{kind}/{id}");
+        let path = runtime_dir.join(kind).join(id);
+        if path.is_dir() && !roots.iter().any(|(existing, _)| *existing == name) {
+            roots.push((name, path));
+        }
+    }
+
+    Ok(roots)
+}
+
+/// Every file under `dir`, with its path relative to `dir`, `/`-separated.
+fn files_under(dir: &Path, prefix: &str, out: &mut Vec<(String, PathBuf)>) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = format!("{prefix}/{}", entry.file_name().to_string_lossy());
+        let path = entry.path();
+        if path.is_dir() {
+            files_under(&path, &name, out)?;
+        } else {
+            out.push((name, path));
+        }
+    }
+    Ok(())
+}
+
+/// `data`'s saves as an Android-compatible save zip, or `None` when the title
+/// has saved nothing.
+pub fn export_save(data: &[u8], runtime_dir: &Path) -> Result<Option<Vec<u8>>, String> {
+    let mut files = Vec::new();
+    for (name, path) in save_roots(data, runtime_dir)? {
+        files_under(&path, &name, &mut files).map_err(|error| format!("세이브를 읽을 수 없습니다: {error}"))?;
+    }
+    if files.is_empty() {
+        return Ok(None);
+    }
+
+    let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (name, path) in files {
+        let contents = std::fs::read(&path).map_err(|error| format!("세이브를 읽을 수 없습니다: {error}"))?;
+        zip.start_file(name, options)
+            .map_err(|error| format!("세이브를 묶을 수 없습니다: {error}"))?;
+        zip.write_all(&contents).map_err(|error| format!("세이브를 묶을 수 없습니다: {error}"))?;
+    }
+    let cursor = zip.finish().map_err(|error| format!("세이브를 묶을 수 없습니다: {error}"))?;
+
+    Ok(Some(cursor.into_inner()))
+}
+
+/// Puts a save zip's `db/...` and `fs/...` entries back under `runtime_dir`,
+/// overwriting what is there, and returns how many files it restored. Each
+/// entry's path names the title it belongs to, so this needs no title.
+pub fn import_save(zip_data: &[u8], runtime_dir: &Path) -> Result<usize, String> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_data)).map_err(|error| format!("세이브 파일을 열 수 없습니다: {error}"))?;
+
+    let mut restored = 0;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| format!("세이브 파일을 읽을 수 없습니다: {error}"))?;
+        if entry.is_dir() {
+            continue;
+        }
+        // A zip is untrusted: only the save trees are restored, and nothing
+        // that would leave them.
+        let Some(relative) = entry.enclosed_name() else {
+            return Err("세이브 파일에 잘못된 경로가 들어 있습니다.".to_owned());
+        };
+        if !(relative.starts_with("db") || relative.starts_with("fs")) || relative.components().count() < 3 {
+            continue;
+        }
+
+        let target = runtime_dir.join(&relative);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| format!("폴더를 만들 수 없습니다: {error}"))?;
+        }
+        let mut contents = Vec::new();
+        entry
+            .read_to_end(&mut contents)
+            .map_err(|error| format!("세이브 파일을 읽을 수 없습니다: {error}"))?;
+        std::fs::write(&target, contents).map_err(|error| format!("세이브를 쓸 수 없습니다: {error}"))?;
+        restored += 1;
+    }
+
+    if restored == 0 {
+        return Err("세이브 데이터가 없는 파일입니다.".to_owned());
+    }
+    Ok(restored)
+}
+
+/// Removes `data`'s saves, and returns how many directories it removed.
+pub fn erase_save(data: &[u8], runtime_dir: &Path) -> Result<usize, String> {
+    let roots = save_roots(data, runtime_dir)?;
+    for (_, path) in &roots {
+        std::fs::remove_dir_all(path).map_err(|error| format!("세이브를 지울 수 없습니다: {error}"))?;
+    }
+    Ok(roots.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::{erase_save, export_save, import_save};
+
+    fn runtime_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("wie-host-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A save taken out comes back byte for byte, under the paths the Android
+    /// app uses, after the title's saves were erased.
+    #[test]
+    fn an_exported_save_imports_back_after_an_erase() {
+        let archive = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../test_data/helloworld_ktf.zip")).unwrap();
+        let ids = crate::runner::save_ids(&archive).expect("ids");
+        let runtime = runtime_dir("roundtrip");
+
+        let save = runtime.join("fs").join(&ids.files).join("save").join("slot.dat");
+        std::fs::create_dir_all(save.parent().unwrap()).unwrap();
+        std::fs::write(&save, b"progress").unwrap();
+        let record = runtime.join("db").join(&ids.records).join("scores").join("1");
+        std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+        std::fs::write(&record, b"1234").unwrap();
+
+        let zip = export_save(&archive, &runtime).unwrap().expect("something saved");
+        assert!(erase_save(&archive, &runtime).unwrap() >= 2);
+        assert!(!save.exists() && !record.exists());
+
+        assert_eq!(import_save(&zip, &runtime).unwrap(), 2);
+        assert_eq!(std::fs::read(&save).unwrap(), b"progress");
+        assert_eq!(std::fs::read(&record).unwrap(), b"1234");
+
+        // Nothing saved is nothing to export.
+        erase_save(&archive, &runtime).unwrap();
+        assert!(export_save(&archive, &runtime).unwrap().is_none());
+
+        let _ = std::fs::remove_dir_all(&runtime);
+    }
+
+    /// An entry outside the save trees, or one climbing out of them, is not
+    /// written.
+    #[test]
+    fn an_import_writes_nothing_outside_the_save_trees() {
+        let runtime = runtime_dir("traversal");
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("readme.txt", options).unwrap();
+        std::io::Write::write_all(&mut zip, b"x").unwrap();
+        let data = zip.finish().unwrap().into_inner();
+
+        assert!(import_save(&data, &runtime).is_err());
+        assert!(!runtime.join("readme.txt").exists());
+
+        let _ = std::fs::remove_dir_all(&runtime);
+    }
 }

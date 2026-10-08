@@ -33,7 +33,8 @@ wie_wipi_c = { workspace = true }
 # Already in the graph through wie_backend; named here because the MMF
 # dispatch reads a sequence's voices before deciding which player gets it.
 smaf_player = { path = "../third_party/smaf_player" }
+# Save export/import for the hosts that have no zip of their own (iOS).
+zip = { version = "^8.6", features = ["deflate"], default-features = false }
 
 [dev-dependencies]
 futures-test = { workspace = true }
-zip = { version = "^8.6", features = ["deflate"], default-features = false }
