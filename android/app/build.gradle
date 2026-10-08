@@ -92,20 +92,29 @@ android {
     }
 
     buildTypes {
-        // Both types take the same key when there is one. The apk people
-        // install is the debug build, so signing only the release build would
-        // fix nothing.
+        // Both types take the same key when there is one, so either installs
+        // over the other and keeps the player's data.
         debug {
             if (signingProperties != null) {
                 signingConfig signingConfigs.minimobile
             }
         }
+        // The apk people install is the release build. A debuggable app that
+        // arrives from outside a store is one of the things a handset's
+        // scanner holds against it - Galaxy S23/S24 refused to install the
+        // debug build as suspected malware - and nothing here needs a
+        // debugger attached on a player's phone. The emulator core is built
+        // with cargo's release profile for both types, so the games run the
+        // same either way.
         release {
+            // Off: the JNI bridge reaches Java classes and methods by name,
+            // which shrinking would rename or drop.
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-            if (signingProperties != null) {
-                signingConfig signingConfigs.minimobile
-            }
+            // Without the project key a release build would come out unsigned,
+            // which no handset installs, so it falls back to the debug key the
+            // way the debug build does.
+            signingConfig signingProperties != null ? signingConfigs.minimobile : signingConfigs.debug
         }
     }
 

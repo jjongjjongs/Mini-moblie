@@ -88,14 +88,14 @@ jobs:
         env:
           MINIMOBILE_KEYSTORE_PASSWORD: ${{ env.ANDROID_KEYSTORE_PASSWORD }}
           MINIMOBILE_KEY_ALIAS: minimobile
-        run: gradle --no-daemon assembleDebug -PenableJit -PversionCode=${{ github.run_number }}
+        run: gradle --no-daemon assembleRelease -PenableJit -PversionCode=${{ github.run_number }}
 
       - name: Upload APK
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: wie-mobile-debug
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          path: android/app/build/outputs/apk/release/app-release.apk
 
       # An artifact can only be downloaded by someone signed in to GitHub, from
       # a zip, which is awkward on the handset the apk is meant for. A release
@@ -144,8 +144,10 @@ jobs:
           fi
 
           # The asset takes the file's own name, so it is renamed rather than
-          # uploaded as gradle's `app-debug.apk`.
-          cp android/app/build/outputs/apk/debug/app-debug.apk wie-mobile-debug.apk
+          # uploaded as gradle's `app-release.apk`. It keeps the name it had
+          # when the debug build was shipped, so the download link people have
+          # does not change.
+          cp android/app/build/outputs/apk/release/app-release.apk wie-mobile-debug.apk
           gh release upload "$TAG" wie-mobile-debug.apk --clobber
 
           # Drop a stale `app-debug.apk` asset left by an older workflow: it
