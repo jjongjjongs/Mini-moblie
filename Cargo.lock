@@ -3733,6 +3733,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wie_portmaster"
+version = "0.0.1"
+dependencies = [
+ "libloading 0.8.9",
+ "wie_android",
+ "wie_backend",
+]
+
+[[package]]
 name = "wie_skt"
 version = "0.0.1"
 dependencies = [

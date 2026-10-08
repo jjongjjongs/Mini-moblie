@@ -4,6 +4,7 @@ resolver = "2"
 members = [
     "wie_android",
     "wie_ios",
+    "wie_portmaster",
     "wie_backend",
     "wie_brew",
     "wie_cli",

@@ -136,7 +136,10 @@ jobs:
           uploaded by its own job - see the README inside it.
 
           \`wie-mobile-ios.ipa\` is the iPhone app, unsigned: install it with
-          AltStore, SideStore or TrollStore, which sign it on the way in."
+          AltStore, SideStore or TrollStore, which sign it on the way in.
+
+          \`MiniMobile-portmaster.zip\` is the port for Linux handhelds
+          (PortMaster, aarch64) - see minimobile/README.txt inside it."
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --notes "$notes" --prerelease
@@ -211,6 +214,68 @@ jobs:
             || gh release create "$TAG" --title 'WIE Mobile (development build)' --notes 'Development build, replaced by every push.' --prerelease \
             || gh release view "$TAG" >/dev/null
           gh release upload "$TAG" wie-linux-x86_64.tar.gz --clobber
+
+  # The same emulator as a PortMaster port for Linux handhelds (aarch64),
+  # published next to the apk. Cross-compiled with zig against glibc 2.17 so
+  # it runs on the oldest firmware PortMaster serves; it opens the handheld's
+  # own SDL2 at run time, so nothing else is linked.
+  portmaster:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: portmaster-aarch64
+
+      - name: Install zig and cargo-zigbuild
+        run: |
+          set -eu
+          pip install ziglang==0.17.0
+          echo "$(python3 -c 'import os, ziglang; print(os.path.dirname(ziglang.__file__))')" >> "$GITHUB_PATH"
+          cargo install --locked cargo-zigbuild@0.23.4
+
+      - name: Build
+        run: cargo zigbuild --release -p wie_portmaster --features jit --target aarch64-unknown-linux-gnu.2.17
+
+      - name: Package
+        run: |
+          set -eu
+          mkdir -p out
+          cp portmaster/MiniMobile.sh out/
+          cp -r portmaster/minimobile out/
+          cp target/aarch64-unknown-linux-gnu/release/minimobile out/minimobile/minimobile.aarch64
+          chmod +x out/MiniMobile.sh out/minimobile/minimobile.aarch64
+          mkdir -p out/minimobile/games
+          printf '\n커밋: %s\n' "${{ github.sha }}" >> out/minimobile/README.txt
+          (cd out && zip -qry ../MiniMobile-portmaster.zip MiniMobile.sh minimobile)
+
+      - name: Upload the PortMaster build
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: MiniMobile-portmaster
+          path: MiniMobile-portmaster.zip
+
+      - name: Publish the PortMaster build to the development release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: mobile-dev
+        run: |
+          set -eu
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --title 'WIE Mobile (development build)' --notes 'Development build, replaced by every push.' --prerelease \
+            || gh release view "$TAG" >/dev/null
+          gh release upload "$TAG" MiniMobile-portmaster.zip --clobber
 
   # The iPhone app, as an unsigned ipa next to the apk. Whatever installs it -
   # AltStore, SideStore, TrollStore - signs it on the way in. iOS gives an
