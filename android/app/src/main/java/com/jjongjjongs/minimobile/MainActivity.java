@@ -577,6 +577,10 @@ public final class MainActivity extends Activity {
         if (view != null) {
             view.releaseAll();
         }
+        // A finger on the game screen is lost the same way.
+        if (gameView != null) {
+            gameView.liftTouch();
+        }
 
         // A pad's buttons go the same way a finger does: the release arrives
         // wherever focus went, not here.
@@ -5025,6 +5029,10 @@ public final class MainActivity extends Activity {
          * A touch on the screen, handed to the title in the frame's own pixels
          * when touch is on (see {@link #toggleTouch}). Only the first finger is
          * followed - the handsets these titles were made for took one.
+         *
+         * <p>In landscape the keypad lies over this view and takes every touch
+         * first, so a finger there reaches the screen through the keypad
+         * instead - see {@link KeypadView#onTouchEvent}.
          */
         @Override
         public boolean onTouchEvent(MotionEvent event) {
@@ -5033,24 +5041,15 @@ public final class MainActivity extends Activity {
             }
 
             switch (event.getActionMasked()) {
-                case MotionEvent.ACTION_DOWN: {
-                    touchPointer = event.getPointerId(0);
-                    if (toFrame(event.getX(0), event.getY(0))) {
-                        NativeBridge.nativePointer(0, touchX, touchY);
-                    } else {
-                        touchPointer = -1;
-                    }
+                case MotionEvent.ACTION_DOWN:
+                    // A first finger: any one still followed lost its release.
+                    liftTouch();
+                    press(event.getPointerId(0), event.getX(0), event.getY(0));
                     return true;
-                }
                 case MotionEvent.ACTION_MOVE: {
                     int index = touchPointer >= 0 ? event.findPointerIndex(touchPointer) : -1;
                     if (index >= 0) {
-                        int lastX = touchX;
-                        int lastY = touchY;
-                        toFrame(event.getX(index), event.getY(index));
-                        if (touchX != lastX || touchY != lastY) {
-                            NativeBridge.nativePointer(2, touchX, touchY);
-                        }
+                        drag(event.getX(index), event.getY(index));
                     }
                     return true;
                 }
@@ -5067,6 +5066,38 @@ public final class MainActivity extends Activity {
                 default:
                     return true;
             }
+        }
+
+        /**
+         * A finger coming down at a point on this view. It is followed, and the
+         * title hears it pressed, when touch is on, no other finger is already
+         * followed and the point is on the frame. Whether it was taken.
+         */
+        boolean press(int pointerId, float viewX, float viewY) {
+            if (!touchOn || bitmap == null || touchPointer >= 0 || !toFrame(viewX, viewY)) {
+                return false;
+            }
+            touchPointer = pointerId;
+            NativeBridge.nativePointer(0, touchX, touchY);
+            return true;
+        }
+
+        /** The followed finger moving to a point on this view; the title hears it only if it changes pixel. */
+        void drag(float viewX, float viewY) {
+            if (touchPointer < 0 || bitmap == null) {
+                return;
+            }
+            int lastX = touchX;
+            int lastY = touchY;
+            toFrame(viewX, viewY);
+            if (touchX != lastX || touchY != lastY) {
+                NativeBridge.nativePointer(2, touchX, touchY);
+            }
+        }
+
+        /** The id of the finger being followed, or -1. */
+        int followedPointer() {
+            return touchPointer;
         }
 
         /** Releases the finger being followed, if there is one. */
@@ -5448,25 +5479,54 @@ public final class MainActivity extends Activity {
             if (ControlPatch.beforeTouch(this, event)) {
                 return true;
             }
+            // In landscape this view lies over the game screen (see
+            // ControlPatch.onPlayerBuilt), so a finger on the screen and on no
+            // key is the screen's: it is handed over in the screen's own
+            // coordinates and kept away from the keys while it stays down.
+            GameView screen = landscape ? gameView : null;
+            if (screen != null && event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+                // A first finger: any one still on the screen lost its release.
+                screen.liftTouch();
+            }
+            int onScreen = screen != null ? screen.followedPointer() : -1;
             switch (event.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
                 case MotionEvent.ACTION_POINTER_DOWN: {
                     int pointer = event.getActionIndex();
-                    underFinger.put(event.getPointerId(pointer), keyAt(event.getX(pointer), event.getY(pointer)));
+                    float x = event.getX(pointer);
+                    float y = event.getY(pointer);
+                    Key key = keyAt(x, y);
+                    if (key == null && screen != null
+                            && screen.press(event.getPointerId(pointer), x - screen.getLeft(), y - screen.getTop())) {
+                        return true;
+                    }
+                    underFinger.put(event.getPointerId(pointer), key);
                     break;
                 }
                 case MotionEvent.ACTION_MOVE: {
                     for (int pointer = 0; pointer < event.getPointerCount(); pointer++) {
+                        if (event.getPointerId(pointer) == onScreen) {
+                            screen.drag(event.getX(pointer) - screen.getLeft(), event.getY(pointer) - screen.getTop());
+                            continue;
+                        }
                         underFinger.put(event.getPointerId(pointer), keyAt(event.getX(pointer), event.getY(pointer)));
                     }
                     break;
                 }
                 case MotionEvent.ACTION_UP:
                 case MotionEvent.ACTION_POINTER_UP: {
-                    underFinger.remove(event.getPointerId(event.getActionIndex()));
+                    int id = event.getPointerId(event.getActionIndex());
+                    if (id == onScreen) {
+                        screen.liftTouch();
+                        return true;
+                    }
+                    underFinger.remove(id);
                     break;
                 }
                 case MotionEvent.ACTION_CANCEL: {
+                    if (screen != null) {
+                        screen.liftTouch();
+                    }
                     underFinger.clear();
                     break;
                 }
