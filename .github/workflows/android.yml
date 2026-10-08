@@ -281,9 +281,9 @@ jobs:
           gh release upload "$TAG" MiniMobile-portmaster.zip --clobber
 
   # The same SDL port as a Windows program, published next to the apk. It
-  # opens SDL2.dll beside it, which the zip carries. No JIT yet: the block
-  # engine's machine code follows the System V calling convention, so Windows
-  # runs the decoded blocks as the iPhone build does.
+  # opens SDL2.dll beside it, which the zip carries. The JIT is on, as on
+  # Android: its blocks and helpers name the System V convention they are
+  # written in (see wie_core_arm's `jit_extern`), which Windows can call too.
   windows:
     runs-on: windows-latest
 
@@ -300,7 +300,7 @@ jobs:
           key: windows
 
       - name: Build
-        run: cargo build --release -p wie_portmaster
+        run: cargo build --release -p wie_portmaster --features jit
 
       - name: Fetch SDL2
         shell: bash

@@ -66,8 +66,5 @@ Android 앱과 같은 에뮬레이터로 KTF / LGT / SKT / BREW / J2ME 게임을
 
 참고
 ----
-이 빌드는 아직 JIT(빠른 실행 기능)가 꺼져 있어 Android판보다 느릴 수
-있습니다.
-
 SDL2.dll은 SDL 라이브러리(zlib 라이선스)입니다. README-SDL.txt를
 보세요.

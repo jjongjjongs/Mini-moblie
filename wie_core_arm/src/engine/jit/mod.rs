@@ -7,7 +7,7 @@
 //! that cost by **compiling each basic block to native code**: the block's
 //! [`FastOp`]s become a straight run of host instructions operating on a flat
 //! guest register array ([`JitCtx`]), with guest memory reached through small
-//! `extern "C"` helpers that share the interpreter's page table and fault
+//! `extern` helpers (see `jit_extern`) that share the interpreter's page table and fault
 //! semantics. A prototype of this shape ran the hot sprite-blit loop ~19x faster
 //! than the interpreter.
 //!
@@ -1217,17 +1217,43 @@ impl ArmEngine for JitEngine {
 /// Evaluate an ARM condition code against CPSR, reusing the interpreter's exact
 /// logic so compiled conditional branches match bit-for-bit.
 // The AArch64 backend tests conditions with the host's own flags.
-#[cfg_attr(not(all(feature = "jit", target_arch = "x86_64")), allow(dead_code))]
-pub(crate) extern "C" fn jit_cond_met(cond: u32, cpsr: u32) -> u32 {
-    arm32_cpu::util::arm::cond_met(cond, cpsr) as u32
+/// Defines a function compiled code calls, in the convention the code
+/// generators emit their calls in: System V on x86-64 - which on Windows is not
+/// the platform's own, so it has to be named - and the platform's on AArch64.
+#[cfg(target_arch = "x86_64")]
+macro_rules! jit_extern {
+    ($(#[$meta:meta])* $vis:vis unsafe fn $($rest:tt)*) => {
+        $(#[$meta])* $vis unsafe extern "sysv64" fn $($rest)*
+    };
+    ($(#[$meta:meta])* $vis:vis fn $($rest:tt)*) => {
+        $(#[$meta])* $vis extern "sysv64" fn $($rest)*
+    };
 }
 
+#[cfg(not(target_arch = "x86_64"))]
+macro_rules! jit_extern {
+    ($(#[$meta:meta])* $vis:vis unsafe fn $($rest:tt)*) => {
+        $(#[$meta])* $vis unsafe extern "C" fn $($rest)*
+    };
+    ($(#[$meta:meta])* $vis:vis fn $($rest:tt)*) => {
+        $(#[$meta])* $vis extern "C" fn $($rest)*
+    };
+}
+
+jit_extern! {
+#[cfg_attr(not(all(feature = "jit", target_arch = "x86_64")), allow(dead_code))]
+pub(crate) fn jit_cond_met(cond: u32, cpsr: u32) -> u32 {
+    arm32_cpu::util::arm::cond_met(cond, cpsr) as u32
+}
+}
+
+jit_extern! {
 /// Barrel-shifter for ARM operand2 / load-store register offset. `reg_shift` is
 /// the ARM `r` bit (1 = shift amount from a register, 0 = immediate); `amount` is
 /// the resolved shift amount (immediate, or `rs & 0xff`). Reuses the
 /// interpreter's `arg_shift`/`arg_shift0` so the shifted value and its carry-out
 /// match bit-for-bit. Returns the value in the low 32 bits, carry in bit 32.
-pub(crate) extern "C" fn jit_arm_shift(val: u32, shift_type: u32, amount: u32, reg_shift: u32, c_in: u32) -> u64 {
+pub(crate) fn jit_arm_shift(val: u32, shift_type: u32, amount: u32, reg_shift: u32, c_in: u32) -> u64 {
     use arm32_cpu::util::arm::{arg_shift, arg_shift0};
     let (v, carry) = if reg_shift == 0 && amount == 0 {
         arg_shift0(val, shift_type, c_in)
@@ -1238,14 +1264,16 @@ pub(crate) extern "C" fn jit_arm_shift(val: u32, shift_type: u32, amount: u32, r
     };
     (v as u64) | ((carry as u64) << 32)
 }
+}
 
+jit_extern! {
 /// Register-amount shift for the Thumb ALU LSL/LSR/ASR/ROR-by-register ops
 /// (`AluOp` 0x2/0x3/0x4/0x7). Mirrors `engine::fast`'s `exec_straight` exactly: a
 /// zero shift (low 8 bits of the amount register) leaves the value and carry
 /// untouched, otherwise the interpreter's own `arg_shift` applies. Returns the
 /// result in the low 32 bits and the new carry (0/1) in bit 32, so a single
 /// return register carries both.
-pub(crate) extern "C" fn jit_alu_shift(val: u32, amount: u32, shift_type: u32, c_in: u32) -> u64 {
+pub(crate) fn jit_alu_shift(val: u32, amount: u32, shift_type: u32, c_in: u32) -> u64 {
     let shift = amount & 0xff;
     let (res, new_c) = if shift == 0 {
         (val, c_in)
@@ -1254,7 +1282,9 @@ pub(crate) extern "C" fn jit_alu_shift(val: u32, amount: u32, shift_type: u32, c
     };
     (res as u64) | ((new_c as u64) << 32)
 }
+}
 
+jit_extern! {
 /// MUL / MLA, and the long forms UMULL / SMULL / UMLAL / SMLAL.
 ///
 /// The whole word is handed over and decoded here, because what this has to
@@ -1272,7 +1302,7 @@ pub(crate) extern "C" fn jit_alu_shift(val: u32, amount: u32, shift_type: u32, c
 /// nothing here reads or writes the PC.
 ///
 /// SAFETY: `ctx` points at a live `JitCtx` (guaranteed by `run`).
-pub(crate) unsafe extern "C" fn jit_arm_multiply(ctx: *mut JitCtx, inst: u32) {
+pub(crate) unsafe fn jit_arm_multiply(ctx: *mut JitCtx, inst: u32) {
     use arm32_cpu::util::arm::build_flags;
 
     let ctx = unsafe { &mut *ctx };
@@ -1325,10 +1355,12 @@ pub(crate) unsafe extern "C" fn jit_arm_multiply(ctx: *mut JitCtx, inst: u32) {
         ctx.cpsr = (ctx.cpsr & !(0xf << 28)) | (flags << 28);
     }
 }
+}
 
+jit_extern! {
 /// SAFETY: `ctx` points at a live `JitCtx` whose `mem`/`code_pages` are valid for
 /// the duration of the call (guaranteed by `run`).
-pub(crate) unsafe extern "C" fn jit_load8(ctx: *mut JitCtx, addr: u32) -> u32 {
+pub(crate) unsafe fn jit_load8(ctx: *mut JitCtx, addr: u32) -> u32 {
     let ctx = unsafe { &mut *ctx };
     let mem = unsafe { &*ctx.mem };
     match mem.load_u8(addr) {
@@ -1340,8 +1372,10 @@ pub(crate) unsafe extern "C" fn jit_load8(ctx: *mut JitCtx, addr: u32) -> u32 {
         }
     }
 }
+}
 
-pub(crate) unsafe extern "C" fn jit_load16(ctx: *mut JitCtx, addr: u32) -> u32 {
+jit_extern! {
+pub(crate) unsafe fn jit_load16(ctx: *mut JitCtx, addr: u32) -> u32 {
     let ctx = unsafe { &mut *ctx };
     let mem = unsafe { &*ctx.mem };
     match mem.load_u16(addr) {
@@ -1353,8 +1387,10 @@ pub(crate) unsafe extern "C" fn jit_load16(ctx: *mut JitCtx, addr: u32) -> u32 {
         }
     }
 }
+}
 
-pub(crate) unsafe extern "C" fn jit_load32(ctx: *mut JitCtx, addr: u32) -> u32 {
+jit_extern! {
+pub(crate) unsafe fn jit_load32(ctx: *mut JitCtx, addr: u32) -> u32 {
     let ctx = unsafe { &mut *ctx };
     let mem = unsafe { &*ctx.mem };
     let a = addr & !3;
@@ -1372,6 +1408,7 @@ pub(crate) unsafe extern "C" fn jit_load32(ctx: *mut JitCtx, addr: u32) -> u32 {
             0
         }
     }
+}
 }
 
 #[inline(always)]
@@ -1398,7 +1435,8 @@ unsafe fn note_store(ctx: &mut JitCtx, addr: u32) {
     }
 }
 
-pub(crate) unsafe extern "C" fn jit_store8(ctx: *mut JitCtx, addr: u32, val: u32) {
+jit_extern! {
+pub(crate) unsafe fn jit_store8(ctx: *mut JitCtx, addr: u32, val: u32) {
     let ctx = unsafe { &mut *ctx };
     let mem = unsafe { &mut *ctx.mem };
     if mem.store_u8(addr, val as u8).is_none() {
@@ -1408,8 +1446,10 @@ pub(crate) unsafe extern "C" fn jit_store8(ctx: *mut JitCtx, addr: u32, val: u32
         unsafe { note_store(ctx, addr) };
     }
 }
+}
 
-pub(crate) unsafe extern "C" fn jit_store16(ctx: *mut JitCtx, addr: u32, val: u32) {
+jit_extern! {
+pub(crate) unsafe fn jit_store16(ctx: *mut JitCtx, addr: u32, val: u32) {
     let ctx = unsafe { &mut *ctx };
     let mem = unsafe { &mut *ctx.mem };
     if mem.store_u16(addr, val as u16).is_none() {
@@ -1419,8 +1459,10 @@ pub(crate) unsafe extern "C" fn jit_store16(ctx: *mut JitCtx, addr: u32, val: u3
         unsafe { note_store(ctx, addr) };
     }
 }
+}
 
-pub(crate) unsafe extern "C" fn jit_store32(ctx: *mut JitCtx, addr: u32, val: u32) {
+jit_extern! {
+pub(crate) unsafe fn jit_store32(ctx: *mut JitCtx, addr: u32, val: u32) {
     let ctx = unsafe { &mut *ctx };
     let mem = unsafe { &mut *ctx.mem };
     let a = addr & !3;
@@ -1430,6 +1472,7 @@ pub(crate) unsafe extern "C" fn jit_store32(ctx: *mut JitCtx, addr: u32, val: u3
     } else {
         unsafe { note_store(ctx, a) };
     }
+}
 }
 
 #[cfg(test)]

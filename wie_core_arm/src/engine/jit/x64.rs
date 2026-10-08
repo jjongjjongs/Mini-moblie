@@ -1,7 +1,9 @@
 //! x86-64 code generator for the JIT.
 //!
-//! Each Thumb basic block is compiled to a `extern "C" fn(*mut JitCtx) -> u32`
-//! following the SysV AMD64 convention: `rdi` holds the context pointer on
+//! Each Thumb basic block is compiled to a `extern "sysv64" fn(*mut JitCtx) -> u32`
+//! following the SysV AMD64 convention - on Windows too, where it is not the
+//! platform's own, so the block and the helpers it calls name it (see
+//! `jit_extern`): `rdi` holds the context pointer on
 //! entry, moved into the callee-saved `rbx` for the block's lifetime; guest
 //! register `i` lives at `[rbx + i*4]`, CPSR at `[rbx + 64]`. The function
 //! returns an `exit::*` code and always leaves `regs[15]` (`[rbx + 60]`) at the
@@ -28,7 +30,7 @@ pub(crate) struct Code {
 }
 
 pub(crate) fn run_block(code: &Code, ctx: &mut JitCtx) -> u32 {
-    let f: extern "C" fn(*mut JitCtx) -> u32 = unsafe { core::mem::transmute(code.buf.ptr(code.entry)) };
+    let f: extern "sysv64" fn(*mut JitCtx) -> u32 = unsafe { core::mem::transmute(code.buf.ptr(code.entry)) };
     f(ctx as *mut JitCtx)
 }
 
