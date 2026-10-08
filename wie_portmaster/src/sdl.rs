@@ -19,7 +19,7 @@ pub const INIT_JOYSTICK: u32 = 0x0000_0200;
 pub const INIT_GAMECONTROLLER: u32 = 0x0000_2000;
 pub const INIT_EVENTS: u32 = 0x0000_4000;
 
-pub const WINDOWPOS_UNDEFINED: c_int = 0x1FFF_0000;
+pub const WINDOWPOS_CENTERED: c_int = 0x2FFF_0000;
 pub const WINDOW_FULLSCREEN_DESKTOP: u32 = 0x0000_1001;
 pub const WINDOW_SHOWN: u32 = 0x0000_0004;
 pub const WINDOW_RESIZABLE: u32 = 0x0000_0020;
@@ -34,13 +34,14 @@ pub const TEXTUREACCESS_STREAMING: c_int = 1;
 pub const AUDIO_S16LSB: u16 = 0x8010;
 
 pub const QUIT: u32 = 0x100;
+pub const WINDOWEVENT: u32 = 0x200;
+pub const DROPFILE: u32 = 0x1000;
 pub const KEYDOWN: u32 = 0x300;
 pub const KEYUP: u32 = 0x301;
 pub const CONTROLLERAXISMOTION: u32 = 0x650;
 pub const CONTROLLERBUTTONDOWN: u32 = 0x651;
 pub const CONTROLLERBUTTONUP: u32 = 0x652;
 pub const CONTROLLERDEVICEADDED: u32 = 0x653;
-pub const CONTROLLERDEVICEREMOVED: u32 = 0x654;
 
 #[repr(C)]
 pub struct Rect {
@@ -72,6 +73,11 @@ impl Event {
 
     fn i32_at(&self, offset: usize) -> i32 {
         i32::from_ne_bytes(self.raw[offset..offset + 4].try_into().unwrap())
+    }
+
+    /// `SDL_DropEvent.file`: a path SDL allocated, for the caller to free.
+    pub fn dropped_file(&self) -> *mut c_char {
+        usize::from_ne_bytes(self.raw[8..8 + size_of::<usize>()].try_into().unwrap()) as *mut c_char
     }
 
     /// `SDL_KeyboardEvent.repeat`.
@@ -152,6 +158,12 @@ functions! {
     show_cursor = "SDL_ShowCursor": fn(c_int) -> c_int;
     create_window = "SDL_CreateWindow": fn(*const c_char, c_int, c_int, c_int, c_int, u32) -> *mut c_void;
     create_renderer = "SDL_CreateRenderer": fn(*mut c_void, c_int, u32) -> *mut c_void;
+    set_window_title = "SDL_SetWindowTitle": fn(*mut c_void, *const c_char);
+    set_window_fullscreen = "SDL_SetWindowFullscreen": fn(*mut c_void, u32) -> c_int;
+    set_window_size = "SDL_SetWindowSize": fn(*mut c_void, c_int, c_int);
+    set_window_position = "SDL_SetWindowPosition": fn(*mut c_void, c_int, c_int);
+    get_display_usable_bounds = "SDL_GetDisplayUsableBounds": fn(c_int, *mut Rect) -> c_int;
+    free = "SDL_free": fn(*mut c_void);
     get_renderer_output_size = "SDL_GetRendererOutputSize": fn(*mut c_void, *mut c_int, *mut c_int) -> c_int;
     create_texture = "SDL_CreateTexture": fn(*mut c_void, u32, c_int, c_int, c_int) -> *mut c_void;
     destroy_texture = "SDL_DestroyTexture": fn(*mut c_void);
@@ -174,9 +186,15 @@ functions! {
 
 fn open() -> Result<Library, String> {
     let mut failures = Vec::new();
-    for name in ["libSDL2-2.0.so.0", "libSDL2-2.0.so", "libSDL2.so"] {
+    // The Windows build ships SDL2.dll beside the program.
+    let names: &[&str] = if cfg!(windows) {
+        &["SDL2.dll"]
+    } else {
+        &["libSDL2-2.0.so.0", "libSDL2-2.0.so", "libSDL2.so"]
+    };
+    for name in names {
         // SAFETY: SDL2's initialisers do nothing a process cannot take.
-        match unsafe { Library::new(name) } {
+        match unsafe { Library::new(*name) } {
             Ok(library) => return Ok(library),
             Err(error) => failures.push(format!("{name}: {error}")),
         }

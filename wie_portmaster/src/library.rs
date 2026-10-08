@@ -23,6 +23,11 @@ pub(crate) const fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color { a: 0xff, r, g, b }
 }
 
+const ROW: Color = rgb(0x22, 0x2a, 0x33);
+const ACCENT: Color = rgb(0x7d, 0xe0, 0xa8);
+const PANEL: Color = rgb(0x1a, 0x20, 0x28);
+const EDGE: Color = rgb(0x3c, 0x48, 0x54);
+
 /// The game files in one folder and which of them is picked.
 pub struct Menu {
     folder: PathBuf,
@@ -32,17 +37,31 @@ pub struct Menu {
     top: usize,
     /// How many entries the last drawing had room for.
     rows: usize,
+    /// A window on a desktop, where the keyboard's keys are the ones to show
+    /// and games can be dropped on it.
+    desktop: bool,
+    /// The games dropped on the window this time.
+    added: Vec<PathBuf>,
+    /// What the last drop came to.
+    status: String,
 }
 
 impl Menu {
-    pub fn new(folder: &Path) -> Menu {
+    pub fn new(folder: &Path, desktop: bool) -> Menu {
         Menu {
             folder: folder.to_owned(),
             games: Vec::new(),
             selected: 0,
             top: 0,
             rows: 1,
+            desktop,
+            added: Vec::new(),
+            status: String::new(),
         }
+    }
+
+    pub fn folder(&self) -> &Path {
+        &self.folder
     }
 
     /// Reads the folder again, keeping the pick on the same file if it is
@@ -60,6 +79,35 @@ impl Menu {
         games.sort_by_key(|path| name(path).to_lowercase());
         self.selected = current.and_then(|current| games.iter().position(|x| *x == current)).unwrap_or(0);
         self.games = games;
+    }
+
+    /// Copies a file dropped on the window into the games folder and picks
+    /// it, saying how that went.
+    pub fn add(&mut self, path: &Path) {
+        let file_name = path.file_name().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
+        if !path.is_file() || !is_game(path) {
+            self.status = format!("게임 파일(.zip, .jar)이 아닙니다: {file_name}");
+            return;
+        }
+        let target = self.folder.join(&file_name);
+        if target.exists() {
+            self.status = format!("이미 있습니다: {file_name}");
+        } else {
+            match std::fs::copy(path, &target) {
+                Ok(_) => {
+                    self.status = format!("추가했습니다: {file_name}");
+                    self.added.push(target.clone());
+                }
+                Err(error) => {
+                    self.status = format!("복사할 수 없습니다: {error}");
+                    return;
+                }
+            }
+        }
+        self.refresh();
+        if let Some(at) = self.games.iter().position(|x| *x == target) {
+            self.selected = at;
+        }
     }
 
     pub fn selected(&self) -> Option<PathBuf> {
@@ -101,19 +149,50 @@ impl Menu {
             format!("{}/{}", self.selected + 1, self.games.len())
         };
         canvas.bar(0, "MiniMobile", &count);
-        canvas.bar(height as i32 - BAR, "A 실행  Y 설정", "SELECT+START 종료");
+        if self.desktop {
+            canvas.bar(height as i32 - BAR, "Enter 실행  Esc 메뉴", "F11 전체화면");
+        } else {
+            canvas.bar(height as i32 - BAR, "A 실행  Y 설정", "SELECT+START 종료");
+        }
+        // What the last drop came to, over the bar.
+        let bottom = if self.status.is_empty() {
+            height as i32 - BAR
+        } else {
+            canvas.fill(0, height as i32 - 2 * BAR, width, BAR as u32, PANEL);
+            canvas.text(
+                &fit(&self.status, width as f32 - 16.0),
+                8,
+                height as i32 - 2 * BAR + 2,
+                TextAlignment::Left,
+                ACCENT,
+            );
+            height as i32 - 2 * BAR
+        };
 
         if self.games.is_empty() {
-            let text = format!(
-                "게임이 없습니다.\n\n아래 폴더에 게임 파일\n(.zip, .jar)을 넣어 주세요.\n\n{}",
-                self.folder.canonicalize().unwrap_or_else(|_| self.folder.clone()).display()
-            );
-            canvas.paragraph(&text, BAR + 12, MUTED);
+            if self.desktop {
+                canvas.paragraph("게임이 없습니다.", BAR + 22, TEXT);
+                canvas.paragraph(
+                    "게임 파일(.zip, .jar)을\n이 창에 끌어다 놓으면 추가됩니다.\n\n또는 games 폴더에 넣으세요.",
+                    BAR + 52,
+                    MUTED,
+                );
+                let (box_width, box_y) = (148, BAR + 52 + 5 * LINE + 6);
+                let box_x = (width as i32 - box_width) / 2;
+                canvas.fill(box_x, box_y, box_width as u32, 22, ROW);
+                canvas.text("F2 games 폴더 열기", width as i32 / 2, box_y + 3, TextAlignment::Center, ACCENT);
+            } else {
+                let text = format!(
+                    "게임이 없습니다.\n\n아래 폴더에 게임 파일\n(.zip, .jar)을 넣어 주세요.\n\n{}",
+                    self.folder.canonicalize().unwrap_or_else(|_| self.folder.clone()).display()
+                );
+                canvas.paragraph(&text, BAR + 12, MUTED);
+            }
             return canvas.rgba();
         }
 
         let list_top = BAR + 4;
-        self.rows = ((height as i32 - 2 * BAR - 8) / LINE).max(1) as usize;
+        self.rows = ((bottom - list_top - 4) / LINE).max(1) as usize;
         if self.selected < self.top {
             self.top = self.selected;
         } else if self.selected >= self.top + self.rows {
@@ -126,18 +205,50 @@ impl Menu {
             if picked {
                 canvas.fill(0, y, width, LINE as u32, HIGHLIGHT);
             }
-            let label = fit(&name(game), width as f32 - 16.0);
+            let new = self.added.contains(game);
+            let room = width as f32 - 16.0 - if new { 80.0 } else { 0.0 };
             canvas.text(
-                &label,
+                &fit(&name(game), room),
                 8,
                 y + (LINE - FONT as i32) / 2,
                 TextAlignment::Left,
                 if picked { TEXT } else { MUTED },
             );
+            if new {
+                canvas.text(
+                    "새로 추가",
+                    width as i32 - 8,
+                    y + 1,
+                    TextAlignment::Right,
+                    if picked { TEXT } else { ACCENT },
+                );
+            }
         }
 
         canvas.rgba()
     }
+}
+
+/// `rgba`, `width` by `height`, with `text` in a small box over its bottom.
+pub fn with_toast(rgba: &[u8], width: u32, height: u32, text: &str) -> Vec<u8> {
+    let mut out = rgba.to_vec();
+    let box_width = (string_width_px(text, FONT) as u32 + 16).min(width);
+    let box_height = 22u32;
+    if height < box_height + 8 || out.len() < (width * height * 4) as usize {
+        return out;
+    }
+    let mut toast = Screen::new(box_width, box_height);
+    toast.fill(0, 0, box_width, box_height, EDGE);
+    toast.fill(1, 1, box_width - 2, box_height - 2, PANEL);
+    toast.text(&fit(text, box_width as f32 - 8.0), box_width as i32 / 2, 3, TextAlignment::Center, TEXT);
+    let pixels = toast.rgba();
+    let (left, top) = ((width - box_width) / 2, height - box_height - 8);
+    for y in 0..box_height {
+        let from = (y * box_width * 4) as usize;
+        let to = (((top + y) * width + left) * 4) as usize;
+        out[to..to + (box_width * 4) as usize].copy_from_slice(&pixels[from..from + (box_width * 4) as usize]);
+    }
+    out
 }
 
 /// A screen of `text`, centred, with `hint` in the bar under it.

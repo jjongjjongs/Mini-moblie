@@ -6,6 +6,10 @@
 //! handheld player reaches for it on a title screen. A handheld has no number
 //! pad, so SELECT held turns the buttons into one: see [`DEFAULT_FILE`].
 //!
+//! A keyboard - the Windows build's, or one plugged into a handheld - has a
+//! mapping of its own: up to two keys for each handset key, the arrows,
+//! Enter, the digits and the number pad by default.
+//!
 //! `controls.txt` beside the port can move any of them; it is written out
 //! with the defaults the first time, so there is a file to edit.
 
@@ -158,14 +162,157 @@ pub const TABLE_BUTTONS: [(Button, &str); 15] = [
     (Button::Start, "START"),
 ];
 
+/// The handset keys the keyboard table lists, in its order.
+pub const TABLE_KEYS: [i32; 22] = [0, 1, 2, 3, 4, 7, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 8, 19, 20, 21];
+
+/// How many keyboard keys one handset key can have.
+pub const KEYS_PER_KEY: usize = 2;
+
+/// The keyboard keys a mapping can name: SDL's scancode, the name a controls
+/// file gives it, and what the settings screens call it.
+const SCANCODES: [(i32, &str, &str); 87] = [
+    (4, "A", "A"),
+    (5, "B", "B"),
+    (6, "C", "C"),
+    (7, "D", "D"),
+    (8, "E", "E"),
+    (9, "F", "F"),
+    (10, "G", "G"),
+    (11, "H", "H"),
+    (12, "I", "I"),
+    (13, "J", "J"),
+    (14, "K", "K"),
+    (15, "L", "L"),
+    (16, "M", "M"),
+    (17, "N", "N"),
+    (18, "O", "O"),
+    (19, "P", "P"),
+    (20, "Q", "Q"),
+    (21, "R", "R"),
+    (22, "S", "S"),
+    (23, "T", "T"),
+    (24, "U", "U"),
+    (25, "V", "V"),
+    (26, "W", "W"),
+    (27, "X", "X"),
+    (28, "Y", "Y"),
+    (29, "Z", "Z"),
+    (30, "1", "1"),
+    (31, "2", "2"),
+    (32, "3", "3"),
+    (33, "4", "4"),
+    (34, "5", "5"),
+    (35, "6", "6"),
+    (36, "7", "7"),
+    (37, "8", "8"),
+    (38, "9", "9"),
+    (39, "0", "0"),
+    (40, "RETURN", "Enter"),
+    (42, "BACKSPACE", "Backspace"),
+    (43, "TAB", "Tab"),
+    (44, "SPACE", "Space"),
+    (45, "MINUS", "-"),
+    (46, "EQUALS", "="),
+    (47, "LBRACKET", "["),
+    (48, "RBRACKET", "]"),
+    (49, "BACKSLASH", "\\"),
+    (51, "SEMICOLON", ";"),
+    (52, "APOSTROPHE", "'"),
+    (53, "GRAVE", "`"),
+    (54, "COMMA", ","),
+    (55, "PERIOD", "."),
+    (56, "SLASH", "/"),
+    (58, "F1", "F1"),
+    (59, "F2", "F2"),
+    (60, "F3", "F3"),
+    (61, "F4", "F4"),
+    (62, "F5", "F5"),
+    (63, "F6", "F6"),
+    (64, "F7", "F7"),
+    (65, "F8", "F8"),
+    (66, "F9", "F9"),
+    (67, "F10", "F10"),
+    (69, "F12", "F12"),
+    (73, "INSERT", "Insert"),
+    (74, "HOME", "Home"),
+    (75, "PAGEUP", "PageUp"),
+    (77, "END", "End"),
+    (78, "PAGEDOWN", "PageDown"),
+    (79, "RIGHT", "방향키 ▶"),
+    (80, "LEFT", "방향키 ◀"),
+    (81, "DOWN", "방향키 ▼"),
+    (82, "UP", "방향키 ▲"),
+    (84, "KP_DIVIDE", "키패드 /"),
+    (85, "KP_MULTIPLY", "키패드 *"),
+    (86, "KP_MINUS", "키패드 -"),
+    (87, "KP_PLUS", "키패드 +"),
+    (88, "KP_ENTER", "키패드 Enter"),
+    (89, "KP_1", "키패드 1"),
+    (90, "KP_2", "키패드 2"),
+    (91, "KP_3", "키패드 3"),
+    (92, "KP_4", "키패드 4"),
+    (93, "KP_5", "키패드 5"),
+    (94, "KP_6", "키패드 6"),
+    (95, "KP_7", "키패드 7"),
+    (96, "KP_8", "키패드 8"),
+    (97, "KP_9", "키패드 9"),
+    (98, "KP_0", "키패드 0"),
+    (99, "KP_PERIOD", "키패드 ."),
+];
+
+/// Keys the port keeps for itself: Esc opens the menu, F11 the full screen,
+/// Delete clears a cell while the table is open.
+pub const ESCAPE: i32 = 41;
+pub const F11: i32 = 68;
+pub const DELETE: i32 = 76;
+
+/// Modifier keys, which the table above leaves out only to keep it in
+/// scancode order.
+const MODIFIERS: [(i32, &str, &str); 6] = [
+    (224, "LCTRL", "왼쪽 Ctrl"),
+    (225, "LSHIFT", "왼쪽 Shift"),
+    (226, "LALT", "왼쪽 Alt"),
+    (228, "RCTRL", "오른쪽 Ctrl"),
+    (229, "RSHIFT", "오른쪽 Shift"),
+    (230, "RALT", "오른쪽 Alt"),
+];
+
+fn scancodes() -> impl Iterator<Item = &'static (i32, &'static str, &'static str)> {
+    SCANCODES.iter().chain(MODIFIERS.iter())
+}
+
+/// Whether a keyboard key can be put in the mapping at all.
+pub fn mappable(scancode: i32) -> bool {
+    scancodes().any(|(code, _, _)| *code == scancode)
+}
+
+/// What the settings screens call a keyboard key.
+pub fn scancode_label(scancode: Option<i32>) -> String {
+    match scancode {
+        None => "-".to_owned(),
+        Some(code) => scancodes()
+            .find(|(x, _, _)| *x == code)
+            .map_or_else(|| format!("키 {code}"), |(_, _, label)| (*label).to_owned()),
+    }
+}
+
+fn scancode_named(name: &str) -> Option<i32> {
+    scancodes().find(|(_, x, _)| x.eq_ignore_ascii_case(name)).map(|(code, _, _)| *code)
+}
+
+fn scancode_name(scancode: i32) -> Option<&'static str> {
+    scancodes().find(|(code, _, _)| *code == scancode).map(|(_, name, _)| *name)
+}
+
 pub const DEFAULT_FILE: &str = "\
 # MiniMobile 버튼 설정
 #
-# 게임 목록에서 Y, 게임 중에는 MENU 버튼으로 여는 설정 화면에서 바꿀 수
+# 설정 화면(게임 목록에서 Y나 Esc, 게임 중에는 MENU나 Esc)에서 바꿀 수
 # 있고, 이 파일을 직접 고쳐도 됩니다.
 #
 #   버튼 = 폰 키
 #   SELECT+버튼 = 폰 키      (SELECT를 누른 채로 누를 때)
+#   KEYBOARD:폰 키 = 키보드 키, 키보드 키   (두 개까지)
 #
 # 버튼: UP DOWN LEFT RIGHT A B X Y L1 R1 L2 R2 L3 R3 START
 # 폰 키: UP DOWN LEFT RIGHT OK CLEAR SOFT_LEFT SOFT_RIGHT
@@ -200,12 +347,38 @@ SELECT+L1 = 7
 SELECT+R1 = 9
 SELECT+L2 = STAR
 SELECT+R2 = HASH
+
+# 키보드
+KEYBOARD:UP = UP
+KEYBOARD:DOWN = DOWN
+KEYBOARD:LEFT = LEFT
+KEYBOARD:RIGHT = RIGHT
+KEYBOARD:OK = RETURN, SPACE
+KEYBOARD:CLEAR = BACKSPACE
+KEYBOARD:SOFT_LEFT = LSHIFT, LBRACKET
+KEYBOARD:SOFT_RIGHT = RSHIFT, RBRACKET
+KEYBOARD:1 = 1, KP_1
+KEYBOARD:2 = 2, KP_2
+KEYBOARD:3 = 3, KP_3
+KEYBOARD:4 = 4, KP_4
+KEYBOARD:5 = 5, KP_5
+KEYBOARD:6 = 6, KP_6
+KEYBOARD:7 = 7, KP_7
+KEYBOARD:8 = 8, KP_8
+KEYBOARD:9 = 9, KP_9
+KEYBOARD:STAR = MINUS, KP_MULTIPLY
+KEYBOARD:0 = 0, KP_0
+KEYBOARD:HASH = EQUALS, KP_DIVIDE
+KEYBOARD:CALL = F1
+KEYBOARD:HANGUP = F2
 ";
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct Controls {
     plain: [Option<i32>; BUTTON_COUNT],
     with_select: [Option<i32>; BUTTON_COUNT],
+    /// The keyboard keys for each handset key, by key index.
+    keyboard: [[Option<i32>; KEYS_PER_KEY]; KEY_NAMES.len()],
 }
 
 impl Controls {
@@ -229,6 +402,7 @@ impl Controls {
         let mut controls = Controls {
             plain: [None; BUTTON_COUNT],
             with_select: [None; BUTTON_COUNT],
+            keyboard: [[None; KEYS_PER_KEY]; KEY_NAMES.len()],
         };
         controls.apply(DEFAULT_FILE);
         controls.apply(text);
@@ -245,6 +419,35 @@ impl Controls {
                 eprintln!("버튼 설정을 읽을 수 없습니다: {line}");
                 continue;
             };
+            if let Some(handset) = button
+                .trim()
+                .strip_prefix("KEYBOARD:")
+                .or_else(|| button.trim().strip_prefix("keyboard:"))
+            {
+                let Some((_, index)) = KEY_NAMES.iter().find(|(name, _)| name.eq_ignore_ascii_case(handset.trim())) else {
+                    eprintln!("모르는 폰 키입니다: {line}");
+                    continue;
+                };
+                let mut keys = [None; KEYS_PER_KEY];
+                let names = key.split(',').map(str::trim).filter(|x| !x.is_empty() && !x.eq_ignore_ascii_case("NONE"));
+                for (slot, name) in names.enumerate() {
+                    match scancode_named(name) {
+                        Some(code) if slot < KEYS_PER_KEY => keys[slot] = Some(code),
+                        Some(_) => eprintln!("폰 키 하나에 키보드 키는 {KEYS_PER_KEY}개까지입니다: {line}"),
+                        None => eprintln!("모르는 키보드 키입니다: {name}"),
+                    }
+                }
+                // A key named here leaves whatever other handset key had it.
+                for code in keys.iter().flatten() {
+                    for slots in self.keyboard.iter_mut() {
+                        for slot in slots.iter_mut().filter(|x| **x == Some(*code)) {
+                            *slot = None;
+                        }
+                    }
+                }
+                self.keyboard[*index as usize] = keys;
+                continue;
+            }
             let (layer, button) = match button.trim().split_once('+') {
                 Some((modifier, button)) if modifier.trim().eq_ignore_ascii_case("SELECT") => (&mut self.with_select, button.trim()),
                 Some(_) => {
@@ -305,7 +508,50 @@ impl Controls {
                 text.push_str(&format!("{prefix}{name} = {key}\n"));
             }
         }
+        text.push('\n');
+        for key in TABLE_KEYS {
+            let names: Vec<&str> = self.keyboard[key as usize]
+                .iter()
+                .flatten()
+                .filter_map(|code| scancode_name(*code))
+                .collect();
+            let names = if names.is_empty() { "NONE".to_owned() } else { names.join(", ") };
+            text.push_str(&format!("KEYBOARD:{} = {names}\n", key_name(key)));
+        }
         text
+    }
+
+    /// The keyboard key in one slot of a handset key.
+    pub fn keyboard(&self, handset: i32, slot: usize) -> Option<i32> {
+        self.keyboard[handset as usize][slot]
+    }
+
+    /// Puts `scancode` in one slot of a handset key, taking it off any other
+    /// it was on. The handset key it was taken from, if one.
+    pub fn set_keyboard(&mut self, handset: i32, slot: usize, scancode: Option<i32>) -> Option<i32> {
+        let mut moved_from = None;
+        if let Some(code) = scancode {
+            for (index, slots) in self.keyboard.iter_mut().enumerate() {
+                for (other, value) in slots.iter_mut().enumerate() {
+                    if *value == Some(code) && (index as i32, other) != (handset, slot) {
+                        *value = None;
+                        if index as i32 != handset {
+                            moved_from = Some(index as i32);
+                        }
+                    }
+                }
+            }
+        }
+        self.keyboard[handset as usize][slot] = scancode;
+        moved_from
+    }
+
+    /// The handset key a keyboard key presses.
+    pub fn keyboard_key(&self, scancode: i32) -> Option<i32> {
+        self.keyboard
+            .iter()
+            .position(|slots| slots.contains(&Some(scancode)))
+            .map(|index| index as i32)
     }
 
     /// The key `button` presses, with SELECT held or not. A button with
@@ -347,6 +593,38 @@ mod tests {
         controls.set(Button::L3, false, Some(13));
         assert!(Controls::parse(&controls.to_text()) == controls);
         assert!(Controls::parse(&Controls::parse("").to_text()) == Controls::parse(""));
+    }
+
+    #[test]
+    fn the_keyboard_defaults_and_file() {
+        let controls = Controls::parse("");
+        assert_eq!(controls.keyboard_key(40), Some(4)); // Enter: OK
+        assert_eq!(controls.keyboard_key(44), Some(4)); // Space: OK
+        assert_eq!(controls.keyboard_key(89), Some(9)); // keypad 1: 1
+        assert_eq!(controls.keyboard_key(82), Some(0)); // up arrow: UP
+        assert_eq!(controls.keyboard_key(41), None); // Esc: the menu's
+
+        // A key named for one handset key leaves the one it was on.
+        let controls = Controls::parse("KEYBOARD:5 = space, kp_5\nKEYBOARD:CLEAR = none");
+        assert_eq!(controls.keyboard_key(44), Some(13));
+        assert_eq!(controls.keyboard(4, 0), Some(40));
+        assert_eq!(controls.keyboard(4, 1), None);
+        assert_eq!(controls.keyboard_key(42), None);
+        assert!(Controls::parse(&controls.to_text()) == controls);
+    }
+
+    #[test]
+    fn setting_a_keyboard_key_moves_it() {
+        let mut controls = Controls::parse("");
+        // Space onto 5's second slot comes off OK.
+        assert_eq!(controls.set_keyboard(13, 1, Some(44)), Some(4));
+        assert_eq!(controls.keyboard_key(44), Some(13));
+        assert_eq!(controls.keyboard(4, 1), None);
+        // Onto its own other slot, it only moves over.
+        assert_eq!(controls.set_keyboard(13, 0, Some(44)), None);
+        assert_eq!(controls.keyboard(13, 1), None);
+        assert_eq!(controls.keyboard(13, 0), Some(44));
+        assert!(mappable(225) && !mappable(41) && !mappable(68) && !mappable(76));
     }
 
     #[test]

@@ -1,8 +1,9 @@
-//! The settings screens: the menu (Y on the game list, MENU in a game), the
-//! button table, the key picker and the presets.
+//! The settings screens: the menu (Y or Esc on the game list, MENU or Esc in
+//! a game), the keyboard and pad tables, the key pickers and the presets.
 //!
-//! They are driven by the pad's raw buttons, never through the mapping they
-//! edit, so a mapping however wrong cannot lock the player out of fixing it.
+//! They are driven by the pad's raw buttons and a fixed set of keyboard keys
+//! (see `key_button`), never through the mapping they edit, so a mapping
+//! however wrong cannot lock the player out of fixing it.
 
 use std::{
     path::Path,
@@ -14,9 +15,10 @@ use wie_backend::canvas::{Color, TextAlignment, string_width_px};
 
 use crate::{
     App, FRAME, Input,
-    controls::{Button, TABLE_BUTTONS, key_label},
+    controls::{Button, DELETE, ESCAPE, KEYS_PER_KEY, TABLE_BUTTONS, TABLE_KEYS, key_label, mappable, scancode_label},
+    key_button,
     library::{BAR, BAR_COLOR, HIGHLIGHT, LINE, MUTED, Screen, TEXT, fit, rgb},
-    presets::DEFAULT_NAME,
+    presets::{DEFAULT_NAME, SCREEN_MAX},
 };
 
 const ROW: Color = rgb(0x22, 0x2a, 0x33);
@@ -56,20 +58,25 @@ pub enum Outcome {
     Close,
     /// "게임 끝내기".
     EndGame,
+    /// "MiniMobile 종료".
+    QuitApp,
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum Item {
     Resume,
+    Keyboard,
     Layout,
     Preset,
     Fix,
+    Screen,
     EndGame,
     Close,
+    QuitApp,
 }
 
 /// A pad button held down keeps repeating after a moment: the directions,
-/// for moving through a list.
+/// for moving through a list. (A held keyboard key repeats by itself.)
 struct Repeat {
     held: Option<(Button, Instant)>,
 }
@@ -80,9 +87,29 @@ impl Repeat {
     }
 }
 
+/// The window sizes the screen setting steps through: 2x to 4x of 320x240,
+/// then the full screen.
+fn screen_steps() -> Vec<u32> {
+    (2..=SCREEN_MAX).chain(Some(0)).collect()
+}
+
+fn screen_label(scale: u32) -> String {
+    if scale == 0 {
+        "전체화면".to_owned()
+    } else {
+        format!("창 {scale}배")
+    }
+}
+
 impl App {
-    /// The buttons pressed since the last call, a held direction repeating.
-    /// The keyboard's escape is B; closing the window ends the port.
+    /// The pad's words or the keyboard's for a hint, whichever this is.
+    fn hint(&self, pad: &'static str, keys: &'static str) -> &'static str {
+        if self.desktop { keys } else { pad }
+    }
+
+    /// The buttons pressed since the last call, a held direction repeating,
+    /// and the keyboard's keys as the buttons they stand for. Closing the
+    /// window ends the program.
     fn presses(&mut self, repeat: &mut Repeat) -> Vec<Button> {
         let mut pressed = Vec::new();
         for input in self.poll() {
@@ -91,7 +118,12 @@ impl App {
                     host::stop();
                     std::process::exit(0);
                 }
-                Input::Back => pressed.push(Button::B),
+                // A key the system repeats moves the cursor on, and does
+                // nothing else again.
+                Input::Key(code, true, repeated) => pressed.extend(
+                    key_button(code).filter(|button| !repeated || matches!(button, Button::Up | Button::Down | Button::Left | Button::Right)),
+                ),
+                Input::Key(..) | Input::Drop(_) => {}
                 Input::Button(button, true) => {
                     pressed.push(button);
                     repeat.held = matches!(button, Button::Up | Button::Down | Button::Left | Button::Right)
@@ -102,7 +134,6 @@ impl App {
                         repeat.held = None;
                     }
                 }
-                Input::Handset(..) => {}
             }
         }
         if let Some((button, at)) = repeat.held
@@ -112,6 +143,11 @@ impl App {
             repeat.held = Some((button, Instant::now() + Duration::from_millis(70)));
         }
         pressed
+    }
+
+    /// Whether the screen has to be drawn again for the window's sake.
+    fn take_redraw(&mut self) -> bool {
+        std::mem::take(&mut self.redraw)
     }
 
     /// A blank screen of the settings' size, with the running game dimmed
@@ -131,17 +167,28 @@ impl App {
         self.show(&rgba, width, height);
     }
 
-    /// The menu, until it is closed or the game is ended from it.
+    /// The menu, until it is closed or the game or the program is ended from
+    /// it.
     pub fn settings_menu(&mut self, context: &Context) -> Outcome {
         let mut items = Vec::new();
         if context.in_game() {
             items.push(Item::Resume);
         }
+        if self.desktop {
+            items.push(Item::Keyboard);
+        }
         items.extend([Item::Layout, Item::Preset]);
         if context.game.is_some() {
             items.push(Item::Fix);
         }
-        items.push(if context.in_game() { Item::EndGame } else { Item::Close });
+        if self.desktop {
+            items.push(Item::Screen);
+        }
+        if context.in_game() {
+            items.push(Item::EndGame);
+        } else {
+            items.extend([Item::Close, Item::QuitApp]);
+        }
 
         let mut cursor: usize = 0;
         let mut repeat = Repeat::new();
@@ -156,11 +203,17 @@ impl App {
                     Button::Left | Button::Right if items[cursor] == Item::Preset => {
                         self.cycle_preset(button == Button::Right);
                     }
+                    Button::Left | Button::Right if items[cursor] == Item::Screen => {
+                        self.cycle_screen(button == Button::Right);
+                    }
                     Button::A => match items[cursor] {
                         Item::Resume | Item::Close => return Outcome::Close,
                         Item::EndGame => return Outcome::EndGame,
+                        Item::QuitApp => return Outcome::QuitApp,
+                        Item::Keyboard => self.keyboard_layout(),
                         Item::Layout => self.layout(),
                         Item::Preset => self.presets(context),
+                        Item::Screen => self.cycle_screen(true),
                         Item::Fix => {
                             if let Some(game) = context.game_file() {
                                 let fixed = self.store.fixed(&game).map(str::to_owned);
@@ -173,7 +226,7 @@ impl App {
                 }
             }
 
-            if dirty {
+            if dirty || self.take_redraw() {
                 self.draw_menu(context, &items, cursor);
                 dirty = false;
             }
@@ -193,6 +246,18 @@ impl App {
         self.store.apply(&names[next]);
     }
 
+    /// Steps the window to the next (or previous) size.
+    fn cycle_screen(&mut self, forward: bool) {
+        let steps = screen_steps();
+        let current = steps.iter().position(|x| *x == self.store.screen()).unwrap_or(0);
+        let next = if forward {
+            (current + 1) % steps.len()
+        } else {
+            current.checked_sub(1).unwrap_or(steps.len() - 1)
+        };
+        self.set_screen(steps[next]);
+    }
+
     /// The active preset's name, starred once the mapping has moved off it.
     fn active_label(&self) -> String {
         let star = if self.store.modified() { "*" } else { "" };
@@ -204,7 +269,7 @@ impl App {
         let panel_width = (width - 16).min(288);
         let panel_height = (2 * BAR + 8 + items.len() as i32 * LINE) as u32;
         let x = (width - panel_width) as i32 / 2;
-        let y = (height - panel_height) as i32 / 2;
+        let y = ((height as i32 - panel_height as i32) / 2).max(0);
         screen.fill(x - 1, y - 1, panel_width + 2, panel_height + 2, EDGE);
         screen.fill(x, y, panel_width, panel_height, PANEL);
 
@@ -219,16 +284,21 @@ impl App {
         for (index, item) in items.iter().enumerate() {
             let label = match item {
                 Item::Resume => "게임으로 돌아가기",
+                Item::Keyboard => "키보드 배치 바꾸기",
+                Item::Layout if self.desktop => "패드 버튼 배치 바꾸기",
                 Item::Layout => "버튼 배치 바꾸기",
                 Item::Preset => "프리셋",
                 Item::Fix => "이 게임에 프리셋 고정",
+                Item::Screen => "화면",
                 Item::EndGame => "게임 끝내기",
                 Item::Close => "닫기",
+                Item::QuitApp => "MiniMobile 종료",
             };
             // What is left of the row beside its label.
             let room = panel_width as f32 - 28.0 - string_width_px(label, 16.0);
             let value = match item {
                 Item::Preset => format!("◀ {} ▶", fit(&self.active_label(), room - 40.0)),
+                Item::Screen => format!("◀ {} ▶", screen_label(self.store.screen())),
                 Item::Fix => {
                     let fixed = context.game_file().and_then(|game| self.store.fixed(&game).map(str::to_owned));
                     fixed.map_or("끔".to_owned(), |name| fit(&name, room))
@@ -252,16 +322,17 @@ impl App {
             }
         }
 
-        let hint = if items[cursor] == Item::Preset {
-            "A 목록  ◀▶ 바꾸기"
-        } else {
-            "A 선택"
+        let hint = match items[cursor] {
+            Item::Preset => self.hint("A 목록  ◀▶ 바꾸기", "Enter 목록  ◀▶ 바꾸기"),
+            Item::Screen => self.hint("◀▶ 바꾸기", "◀▶ 바꾸기  F11"),
+            _ => self.hint("A 선택", "Enter 선택"),
         };
-        panel_bar(&mut screen, x, y + panel_height as i32 - BAR, panel_width, hint, "B 닫기");
+        let back = self.hint("B 닫기", "Esc 닫기");
+        panel_bar(&mut screen, x, y + panel_height as i32 - BAR, panel_width, hint, back);
         self.present(screen, width, height);
     }
 
-    /// The table of every button, plain and with SELECT held.
+    /// The table of every pad button, plain and with SELECT held.
     fn layout(&mut self) {
         let mut row: usize = 0;
         let mut with_select = false;
@@ -288,7 +359,7 @@ impl App {
                 }
             }
 
-            if dirty {
+            if dirty || self.take_redraw() {
                 let (screen, width, height) = self.draw_layout(row, with_select, &mut top);
                 self.present(screen, width, height);
                 dirty = false;
@@ -301,7 +372,8 @@ impl App {
         let (width, height, _) = self.menu_size();
         let mut screen = Screen::new(width, height);
         let preset = format!("프리셋: {}{}", self.store.active(), if self.store.modified() { " (바뀜)" } else { "" });
-        screen.bar(0, "버튼 배치", &fit(&preset, width as f32 - 96.0));
+        let title = if self.desktop { "패드 버튼 배치" } else { "버튼 배치" };
+        screen.bar(0, title, &fit(&preset, width as f32 - 136.0));
 
         let (c1, c2, c3) = (8, (width * 29 / 100) as i32, (width * 64 / 100) as i32);
         screen.text("버튼", c1, BAR + 2, TextAlignment::Left, MUTED);
@@ -311,11 +383,7 @@ impl App {
 
         let list_top = BAR + LINE + 4;
         let rows = ((height as i32 - list_top - BAR - 2) / LINE).max(1) as usize;
-        if row < *top {
-            *top = row;
-        } else if row >= *top + rows {
-            *top = row + 1 - rows;
-        }
+        scroll(row, rows, top);
 
         let controls = self.store.controls();
         for (index, (button, name)) in TABLE_BUTTONS.iter().enumerate().skip(*top).take(rows) {
@@ -358,24 +426,14 @@ impl App {
                 ),
             }
         }
-        if *top + rows < TABLE_BUTTONS.len() {
-            screen.text(
-                "▼",
-                width as i32 - 8,
-                list_top + (rows as i32 - 1) * LINE + 1,
-                TextAlignment::Right,
-                MUTED,
-            );
-        }
-        if *top > 0 {
-            screen.text("▲", width as i32 - 8, list_top + 1, TextAlignment::Right, MUTED);
-        }
+        scroll_marks(&mut screen, width, list_top, rows, *top, TABLE_BUTTONS.len());
 
-        screen.bar(height as i32 - BAR, "A 바꾸기  ◀▶ 칸", "B 뒤로");
+        let hint = self.hint("A 바꾸기  ◀▶ 칸", "Enter 바꾸기  ◀▶ 칸");
+        screen.bar(height as i32 - BAR, hint, self.hint("B 뒤로", "Esc 뒤로"));
         (screen, width, height)
     }
 
-    /// Picks a handset key for one cell of the table, over it. `None` when
+    /// Picks a handset key for one cell of the pad table, over it. `None` when
     /// the pick is cancelled, `Some(None)` for no key.
     fn pick_key(&mut self, title: &str, current: Option<i32>, row: usize, with_select: bool, top: usize) -> Option<Option<i32>> {
         let cells = picker_cells();
@@ -393,7 +451,7 @@ impl App {
                 }
             }
 
-            if dirty {
+            if dirty || self.take_redraw() {
                 let mut top = top;
                 let (mut screen, width, height) = self.draw_layout(row, with_select, &mut top);
                 screen.fill(0, 0, width, height, DIM);
@@ -417,7 +475,166 @@ impl App {
                         color,
                     );
                 }
-                panel_bar(&mut screen, x, y + panel_height as i32 - BAR, panel_width, "A 고르기", "B 취소");
+                let (choose, cancel) = (self.hint("A 고르기", "Enter 고르기"), self.hint("B 취소", "Esc 취소"));
+                panel_bar(&mut screen, x, y + panel_height as i32 - BAR, panel_width, choose, cancel);
+                self.present(screen, width, height);
+                dirty = false;
+            }
+            std::thread::sleep(FRAME);
+        }
+    }
+
+    /// The keyboard table: each handset key and the keyboard keys for it.
+    fn keyboard_layout(&mut self) {
+        let mut row: usize = 0;
+        let mut slot: usize = 0;
+        let mut top = 0;
+        let mut status = String::new();
+        let mut repeat = Repeat::new();
+        let mut dirty = true;
+        loop {
+            for button in self.presses(&mut repeat) {
+                dirty = true;
+                status.clear();
+                let handset = TABLE_KEYS[row];
+                match button {
+                    Button::Up => row = row.checked_sub(1).unwrap_or(TABLE_KEYS.len() - 1),
+                    Button::Down => row = (row + 1) % TABLE_KEYS.len(),
+                    Button::Left => slot = slot.checked_sub(1).unwrap_or(KEYS_PER_KEY - 1),
+                    Button::Right => slot = (slot + 1) % KEYS_PER_KEY,
+                    Button::B | Button::Guide => return,
+                    // Delete, or Y on a pad: empty the cell.
+                    Button::Y => {
+                        self.store.set_keyboard(handset, slot, None);
+                    }
+                    Button::A => {
+                        if let Some(code) = self.capture_key(handset, slot, row, top)
+                            && let Some(from) = self.store.set_keyboard(handset, slot, code)
+                        {
+                            status = format!("{}: '{}'에서 옮겨 왔습니다.", scancode_label(code), key_label(Some(from)));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            if dirty || self.take_redraw() {
+                let (screen, width, height) = self.draw_keyboard(row, slot, &mut top, &status);
+                self.present(screen, width, height);
+                dirty = false;
+            }
+            std::thread::sleep(FRAME);
+        }
+    }
+
+    fn draw_keyboard(&self, row: usize, slot: usize, top: &mut usize, status: &str) -> (Screen, u32, u32) {
+        let (width, height, _) = self.menu_size();
+        let mut screen = Screen::new(width, height);
+        let preset = format!("프리셋: {}{}", self.store.active(), if self.store.modified() { " (바뀜)" } else { "" });
+        screen.bar(0, "키보드 배치", &fit(&preset, width as f32 - 112.0));
+
+        let columns = [(width * 31 / 100) as i32, (width * 66 / 100) as i32];
+        screen.text("폰 키", 8, BAR + 2, TextAlignment::Left, MUTED);
+        screen.text("키 1", columns[0], BAR + 2, TextAlignment::Left, MUTED);
+        screen.text("키 2", columns[1], BAR + 2, TextAlignment::Left, MUTED);
+        screen.fill(0, BAR + LINE + 1, width, 1, EDGE);
+
+        let list_top = BAR + LINE + 4;
+        let bottom = height as i32 - if status.is_empty() { BAR } else { 2 * BAR };
+        let rows = ((bottom - list_top - 2) / LINE).max(1) as usize;
+        scroll(row, rows, top);
+
+        let controls = self.store.controls();
+        for (index, handset) in TABLE_KEYS.iter().enumerate().skip(*top).take(rows) {
+            let y = list_top + (index - *top) as i32 * LINE;
+            let picked = index == row;
+            if picked {
+                screen.fill(0, y, width, LINE as u32, ROW);
+                let x = columns[slot] - 4;
+                let w = if slot + 1 < KEYS_PER_KEY {
+                    columns[slot + 1] - columns[slot] - 4
+                } else {
+                    width as i32 - x
+                };
+                screen.fill(x, y, w as u32, LINE as u32, HIGHLIGHT);
+            }
+            screen.text(key_label(Some(*handset)), 8, y + 1, TextAlignment::Left, TEXT);
+            for (column, x) in columns.iter().enumerate() {
+                let code = controls.keyboard(*handset, column);
+                let color = if picked && column == slot {
+                    TEXT
+                } else if code.is_some() {
+                    ACCENT
+                } else {
+                    MUTED
+                };
+                let room = if column + 1 < KEYS_PER_KEY {
+                    columns[column + 1] - x - 8
+                } else {
+                    width as i32 - x - 16
+                };
+                screen.text(&fit(&scancode_label(code), room as f32), *x, y + 1, TextAlignment::Left, color);
+            }
+        }
+        scroll_marks(&mut screen, width, list_top, rows, *top, TABLE_KEYS.len());
+
+        if !status.is_empty() {
+            screen.fill(0, height as i32 - 2 * BAR, width, BAR as u32, PANEL);
+            screen.text(
+                &fit(status, width as f32 - 16.0),
+                8,
+                height as i32 - 2 * BAR + 2,
+                TextAlignment::Left,
+                ACCENT,
+            );
+        }
+        let hint = self.hint("A 바꾸기  Y 지우기", "Enter 바꾸기  Del 지우기");
+        screen.bar(height as i32 - BAR, hint, self.hint("B 뒤로", "Esc 뒤로"));
+        (screen, width, height)
+    }
+
+    /// Waits for the keyboard key to put in one cell of the keyboard table.
+    /// `None` when cancelled (Esc, or B on a pad), `Some(None)` to empty the
+    /// cell (Delete, or Y on a pad).
+    fn capture_key(&mut self, handset: i32, slot: usize, row: usize, top: usize) -> Option<Option<i32>> {
+        let current = self.store.controls().keyboard(handset, slot);
+        let mut note = String::new();
+        let mut dirty = true;
+        loop {
+            for input in self.poll() {
+                dirty = true;
+                match input {
+                    Input::Quit => {
+                        host::stop();
+                        std::process::exit(0);
+                    }
+                    Input::Key(ESCAPE, true, _) | Input::Button(Button::B, true) => return None,
+                    Input::Key(DELETE, true, _) | Input::Button(Button::Y, true) => return Some(None),
+                    Input::Key(code, true, false) => {
+                        if mappable(code) {
+                            return Some(Some(code));
+                        }
+                        note = "이 키는 쓸 수 없습니다.".to_owned();
+                    }
+                    _ => {}
+                }
+            }
+
+            if dirty || self.take_redraw() {
+                let mut top = top;
+                let (mut screen, width, height) = self.draw_keyboard(row, slot, &mut top, "");
+                screen.fill(0, 0, width, height, DIM);
+                let (panel_width, panel_height) = (240u32, 108u32);
+                let x = (width - panel_width) as i32 / 2;
+                let y = (height - panel_height) as i32 / 2;
+                screen.fill(x - 1, y - 1, panel_width + 2, panel_height + 2, EDGE);
+                screen.fill(x, y, panel_width, panel_height, PANEL);
+                let title = format!("{} (키 {})", key_label(Some(handset)), slot + 1);
+                panel_bar(&mut screen, x, y, panel_width, &title, &format!("지금: {}", scancode_label(current)));
+                screen.text("쓸 키를 누르세요", x + panel_width as i32 / 2, y + BAR + 18, TextAlignment::Center, TEXT);
+                let line = if note.is_empty() { "…" } else { note.as_str() };
+                screen.text(line, x + panel_width as i32 / 2, y + BAR + 42, TextAlignment::Center, ACCENT);
+                panel_bar(&mut screen, x, y + panel_height as i32 - BAR, panel_width, "Esc 취소", "Del 없음");
                 self.present(screen, width, height);
                 dirty = false;
             }
@@ -476,7 +693,8 @@ impl App {
                                 status = format!("지웠습니다: {name}");
                                 confirm = None;
                             } else {
-                                status = format!("Y를 한 번 더 누르면 지웁니다: {name}");
+                                let again = self.hint("Y", "Del");
+                                status = format!("{again}를 한 번 더 누르면 지웁니다: {name}");
                                 confirm = Some(name.clone());
                             }
                         }
@@ -487,7 +705,7 @@ impl App {
                 }
             }
 
-            if dirty {
+            if dirty || self.take_redraw() {
                 self.draw_presets(context, cursor, &mut top, &status);
                 dirty = false;
             }
@@ -504,11 +722,7 @@ impl App {
 
         let list_top = BAR + 4;
         let rows = ((height as i32 - list_top - 2 * BAR - 4) / LINE).max(1) as usize;
-        if cursor < *top {
-            *top = cursor;
-        } else if cursor >= *top + rows {
-            *top = cursor + 1 - rows;
-        }
+        scroll(cursor, rows, top);
 
         let fixed = context.game_file().and_then(|game| self.store.fixed(&game).map(str::to_owned));
         for index in (*top..count).take(rows) {
@@ -537,16 +751,51 @@ impl App {
             }
         }
 
+        // On a desktop the keyboard's half of a preset is easy to forget.
+        let shown = (count - *top).min(rows) as i32;
+        if self.desktop && list_top + (shown + 1) * LINE + 2 * LINE < height as i32 - 2 * BAR {
+            screen.paragraph(
+                "프리셋에는 키보드와 패드 배치가\n함께 저장됩니다.",
+                list_top + (shown + 1) * LINE + 6,
+                MUTED,
+            );
+        }
+
         if !status.is_empty() {
             screen.text(&fit(status, width as f32 - 16.0), 8, height as i32 - 2 * BAR, TextAlignment::Left, ACCENT);
         }
         let hint = if cursor >= names.len() {
-            "A 저장"
+            self.hint("A 저장", "Enter 저장")
         } else {
-            "A 불러오기 X 덮어쓰기 Y 지우기"
+            self.hint("A 불러오기 X 덮어쓰기 Y 지우기", "Enter 불러오기 F2 덮어쓰기 Del 지우기")
         };
-        screen.bar(height as i32 - BAR, hint, "B 뒤로");
+        screen.bar(height as i32 - BAR, hint, if self.desktop { "" } else { "B 뒤로" });
         self.present(screen, width, height);
+    }
+}
+
+/// Moves the first row shown so `row` is on screen.
+fn scroll(row: usize, rows: usize, top: &mut usize) {
+    if row < *top {
+        *top = row;
+    } else if row >= *top + rows {
+        *top = row + 1 - rows;
+    }
+}
+
+/// The ▲ and ▼ at the right edge of a table with more rows above or below.
+fn scroll_marks(screen: &mut Screen, width: u32, list_top: i32, rows: usize, top: usize, count: usize) {
+    if top + rows < count {
+        screen.text(
+            "▼",
+            width as i32 - 8,
+            list_top + (rows as i32 - 1) * LINE + 1,
+            TextAlignment::Right,
+            MUTED,
+        );
+    }
+    if top > 0 {
+        screen.text("▲", width as i32 - 8, list_top + 1, TextAlignment::Right, MUTED);
     }
 }
 
@@ -653,5 +902,12 @@ mod tests {
         // The top-left key stays put going up or left.
         assert_eq!(step(&cells, at(&cells, Some(9)), Button::Up), at(&cells, Some(9)));
         assert_eq!(step(&cells, at(&cells, Some(9)), Button::Left), at(&cells, Some(9)));
+    }
+
+    #[test]
+    fn the_screen_steps_through_window_sizes_then_full_screen() {
+        assert_eq!(screen_steps(), vec![2, 3, 4, 0]);
+        assert_eq!(screen_label(0), "전체화면");
+        assert_eq!(screen_label(3), "창 3배");
     }
 }

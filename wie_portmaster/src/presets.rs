@@ -14,6 +14,9 @@ use crate::controls::{Button, Controls};
 
 pub const DEFAULT_NAME: &str = "기본";
 
+/// The largest window, as a multiple of 320x240.
+pub const SCREEN_MAX: u32 = 4;
+
 const CONTROLS_FILE: &str = "controls.txt";
 const PRESET_DIR: &str = "presets";
 const STATE_FILE: &str = "presets.txt";
@@ -24,6 +27,9 @@ pub struct Store {
     active: String,
     /// Game file name, and the preset loaded whenever it starts.
     fixed: Vec<(String, String)>,
+    /// How a desktop window is shown: its size as a multiple of 320x240, or
+    /// 0 for the full screen.
+    screen: u32,
 }
 
 impl Store {
@@ -32,6 +38,7 @@ impl Store {
             controls: Controls::load(Path::new(CONTROLS_FILE)),
             active: DEFAULT_NAME.to_owned(),
             fixed: Vec::new(),
+            screen: 3,
         };
         if let Ok(text) = std::fs::read_to_string(STATE_FILE) {
             for line in text.lines() {
@@ -39,6 +46,7 @@ impl Store {
                 match fields.as_slice() {
                     ["active", name] => store.active = (*name).to_owned(),
                     ["game", game, name] => store.fixed.push(((*game).to_owned(), (*name).to_owned())),
+                    ["screen", screen] => store.screen = screen.parse().unwrap_or(3).min(SCREEN_MAX),
                     _ => {}
                 }
             }
@@ -137,6 +145,23 @@ impl Store {
         true
     }
 
+    /// Puts a keyboard key on a handset key in the live mapping. The handset
+    /// key it was taken from, if one.
+    pub fn set_keyboard(&mut self, handset: i32, slot: usize, scancode: Option<i32>) -> Option<i32> {
+        let moved_from = self.controls.set_keyboard(handset, slot, scancode);
+        self.save();
+        moved_from
+    }
+
+    pub fn screen(&self) -> u32 {
+        self.screen
+    }
+
+    pub fn set_screen(&mut self, screen: u32) {
+        self.screen = screen.min(SCREEN_MAX);
+        self.save();
+    }
+
     /// Changes one button in the live mapping.
     pub fn set(&mut self, button: Button, with_select: bool, key: Option<i32>) {
         self.controls.set(button, with_select, key);
@@ -167,7 +192,10 @@ impl Store {
         if let Err(error) = std::fs::write(CONTROLS_FILE, self.controls.to_text()) {
             eprintln!("버튼 설정을 저장할 수 없습니다: {error}");
         }
-        let mut state = format!("# MiniMobile 프리셋 상태 - 설정 화면이 씁니다.\nactive\t{}\n", self.active);
+        let mut state = format!(
+            "# MiniMobile 프리셋 상태 - 설정 화면이 씁니다.\nactive\t{}\nscreen\t{}\n",
+            self.active, self.screen
+        );
         for (game, preset) in &self.fixed {
             state.push_str(&format!("game\t{game}\t{preset}\n"));
         }

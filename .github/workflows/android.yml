@@ -139,7 +139,10 @@ jobs:
           AltStore, SideStore or TrollStore, which sign it on the way in.
 
           \`MiniMobile-portmaster.zip\` is the port for Linux handhelds
-          (PortMaster, aarch64) - see minimobile/README.txt inside it."
+          (PortMaster, aarch64) - see minimobile/README.txt inside it.
+
+          \`MiniMobile-windows.zip\` is the Windows program (64-bit) - see
+          the README.txt inside it."
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --notes "$notes" --prerelease
@@ -276,6 +279,66 @@ jobs:
             || gh release create "$TAG" --title 'WIE Mobile (development build)' --notes 'Development build, replaced by every push.' --prerelease \
             || gh release view "$TAG" >/dev/null
           gh release upload "$TAG" MiniMobile-portmaster.zip --clobber
+
+  # The same SDL port as a Windows program, published next to the apk. It
+  # opens SDL2.dll beside it, which the zip carries. No JIT yet: the block
+  # engine's machine code follows the System V calling convention, so Windows
+  # runs the decoded blocks as the iPhone build does.
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: windows
+
+      - name: Build
+        run: cargo build --release -p wie_portmaster
+
+      - name: Fetch SDL2
+        shell: bash
+        run: |
+          set -eu
+          curl -sSfL -o sdl.zip https://github.com/libsdl-org/SDL/releases/download/release-2.30.9/SDL2-2.30.9-win32-x64.zip
+          7z x -osdl sdl.zip >/dev/null
+
+      - name: Package
+        shell: bash
+        run: |
+          set -eu
+          mkdir -p MiniMobile/games
+          cp target/release/minimobile.exe MiniMobile/MiniMobile.exe
+          cp sdl/SDL2.dll sdl/README-SDL.txt MiniMobile/
+          cp windows/README.txt MiniMobile/README.txt
+          printf '\n커밋: %s\n' "${{ github.sha }}" >> MiniMobile/README.txt
+          7z a -tzip MiniMobile-windows.zip MiniMobile >/dev/null
+
+      - name: Upload the Windows build
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: MiniMobile-windows
+          path: MiniMobile-windows.zip
+
+      - name: Publish the Windows build to the development release
+        if: github.event_name != 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: mobile-dev
+        run: |
+          set -eu
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --title 'WIE Mobile (development build)' --notes 'Development build, replaced by every push.' --prerelease \
+            || gh release view "$TAG" >/dev/null
+          gh release upload "$TAG" MiniMobile-windows.zip --clobber
 
   # The iPhone app, as an unsigned ipa next to the apk. Whatever installs it -
   # AltStore, SideStore, TrollStore - signs it on the way in. iOS gives an

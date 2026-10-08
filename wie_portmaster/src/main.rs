@@ -1,24 +1,31 @@
-//! MiniMobile for Linux handhelds, as a PortMaster port.
+//! MiniMobile on SDL2: the PortMaster port for Linux handhelds, and the
+//! Windows build.
 //!
 //! The emulator is the one the Android and iOS apps run, driven through
 //! `wie_android::host` the way the iOS app drives it: a tick at a time, the
 //! newest frame taken after each, and the mixer pulled from the audio thread.
-//! The screen, sound and pad are the handheld's own SDL2 (see `sdl`).
+//! The screen, sound, pad and keyboard are SDL2's (see `sdl`): the handheld's
+//! own, or the SDL2.dll the Windows build ships beside it.
 //!
 //! It opens on a list of the games in the folder it is given and goes back to
-//! it when a game ends or SELECT+START is pressed. Y on the list and MENU in a
-//! game open the button settings (see `settings`).
+//! it when a game ends. The settings (see `settings`) open from the list with
+//! Y or Esc, and over a game with MENU or Esc.
+//!
+//! On a desktop - Windows, or `--windowed` - it is a window: 2x to 4x of
+//! 320x240 or the full screen (F11), with games dropped on it copied into the
+//! games folder.
+
+// The Windows build is a window, not a console program.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod controls;
 mod library;
-#[cfg(test)]
-mod mockup;
 mod presets;
 mod sdl;
 mod settings;
 
 use std::{
-    ffi::{CStr, c_int, c_void},
+    ffi::{CStr, CString, c_int, c_void},
     path::{Path, PathBuf},
     ptr,
     time::{Duration, Instant},
@@ -27,7 +34,7 @@ use std::{
 use wie_android::host;
 
 use self::{
-    controls::{BUTTON_COUNT, Button},
+    controls::{BUTTON_COUNT, Button, ESCAPE, F11},
     library::Menu,
     presets::Store,
     sdl::{Event, Rect, Sdl},
@@ -40,6 +47,8 @@ const FRAME: Duration = Duration::from_micros(16_667);
 /// back it has to come to count as let go.
 const AXIS_PRESS: i16 = 16_000;
 const AXIS_RELEASE: i16 = 12_000;
+/// How long the hint over a desktop game stays up as it starts.
+const TOAST: Duration = Duration::from_secs(3);
 
 fn main() {
     // The runner's log goes to stderr, which the launch script keeps in a file
@@ -49,26 +58,54 @@ fn main() {
         unsafe { std::env::set_var("RUST_LOG", "warn") };
     }
 
-    let mut args = std::env::args().skip(1);
     let mut windowed = false;
     let mut target = None;
-    for arg in args.by_ref() {
+    for arg in std::env::args().skip(1) {
         match arg.as_str() {
             "--windowed" => windowed = true,
             _ => target = Some(PathBuf::from(arg)),
         }
     }
-    let target = target.unwrap_or_else(|| PathBuf::from("games"));
 
-    if let Err(error) = run(&target, windowed) {
-        eprintln!("{error}");
+    // Started from Explorer, the Windows build keeps its games, saves and
+    // settings beside itself, wherever it was started from.
+    #[cfg(windows)]
+    if let Some(dir) = std::env::current_exe().ok().as_deref().and_then(Path::parent) {
+        let _ = std::env::set_current_dir(dir);
+    }
+
+    let target = target.unwrap_or_else(|| PathBuf::from("games"));
+    if let Err(error) = run(&target, cfg!(windows) || windowed) {
+        report(&error);
         std::process::exit(1);
     }
 }
 
-fn run(target: &Path, windowed: bool) -> Result<(), String> {
-    let sdl = Sdl::load()?;
-    let mut app = App::new(sdl, windowed)?;
+/// A message that stops the program before it has a screen: on stderr, and
+/// in a box on Windows, where nobody sees stderr.
+fn report(message: &str) {
+    eprintln!("{message}");
+    #[cfg(windows)]
+    {
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn MessageBoxW(window: *mut c_void, text: *const u16, caption: *const u16, kind: u32) -> i32;
+        }
+        let wide = |text: &str| text.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+        // SAFETY: two nul-terminated UTF-16 strings and no owner window.
+        unsafe { MessageBoxW(ptr::null_mut(), wide(message).as_ptr(), wide("MiniMobile").as_ptr(), 0x10) };
+    }
+}
+
+fn run(target: &Path, desktop: bool) -> Result<(), String> {
+    let sdl = Sdl::load().map_err(|error| {
+        if cfg!(windows) {
+            format!("{error}\n\nSDL2.dll이 MiniMobile.exe와 같은 폴더에 있어야 합니다.")
+        } else {
+            error
+        }
+    })?;
+    let mut app = App::new(sdl, desktop)?;
 
     // A game named directly is played once; a folder is a list to pick from.
     if target.is_file() {
@@ -77,7 +114,7 @@ fn run(target: &Path, windowed: bool) -> Result<(), String> {
         }
     } else {
         let _ = std::fs::create_dir_all(target);
-        let mut menu = Menu::new(target);
+        let mut menu = Menu::new(target, desktop);
         while let Some(game) = app.choose(&mut menu) {
             if let Err(message) = app.play(&game) {
                 app.message(&message);
@@ -92,34 +129,67 @@ fn run(target: &Path, windowed: bool) -> Result<(), String> {
 
 /// What one pass over the pending events turned up.
 enum Input {
-    /// A handheld button, pressed or let go.
+    /// A pad button, pressed or let go.
     Button(Button, bool),
-    /// A keyboard key that stands for a handset key directly, pressed or let go.
-    Handset(i32, bool),
-    /// The keyboard's escape, or the window closed: leave what is showing.
-    Back,
+    /// A keyboard key by SDL scancode: pressed or let go, and whether it is the
+    /// system repeating a key held down.
+    Key(i32, bool, bool),
+    /// A file dropped on the window.
+    Drop(PathBuf),
+    /// The window closed.
     Quit,
+}
+
+/// The pad button a keyboard key stands for on the list and in the settings:
+/// the arrows, Enter or Space to choose, Esc or Backspace to go back, F2 and
+/// Delete for the second and third actions a screen offers.
+fn key_button(scancode: i32) -> Option<Button> {
+    Some(match scancode {
+        82 => Button::Up,
+        81 => Button::Down,
+        80 => Button::Left,
+        79 => Button::Right,
+        40 | 88 | 44 => Button::A,
+        ESCAPE | 42 => Button::B,
+        59 => Button::X,
+        controls::DELETE => Button::Y,
+        _ => return None,
+    })
 }
 
 struct App {
     sdl: Sdl,
+    window: *mut c_void,
     renderer: *mut c_void,
     texture: *mut c_void,
     texture_size: (i32, i32),
+    /// A window on a desktop rather than a handheld's whole screen.
+    desktop: bool,
+    /// The window size to go back to from the full screen.
+    last_window: u32,
+    /// Whatever is on screen has to be drawn again: the window changed size
+    /// or went full screen.
+    redraw: bool,
     /// The button mapping and its presets.
     store: Store,
     /// Which of a button's sources - the button itself, a stick or trigger -
     /// hold it down, one bit each.
     held: [u8; BUTTON_COUNT],
-    controllers: usize,
     audio: u32,
 }
 
 impl App {
-    fn new(sdl: Sdl, windowed: bool) -> Result<App, String> {
+    fn new(sdl: Sdl, desktop: bool) -> Result<App, String> {
+        let store = Store::load();
         // SAFETY: plain SDL2 calls on the thread that initialised it, with
         // pointers to live, nul-terminated strings.
         unsafe {
+            // Whole pixels, as the phone draws them: a title's pixel font goes
+            // soft under any filter. And on Windows, the window's real pixels
+            // rather than the system stretching a smaller one.
+            (sdl.set_hint)(c"SDL_RENDER_SCALE_QUALITY".as_ptr(), c"0".as_ptr());
+            (sdl.set_hint)(c"SDL_WINDOWS_DPI_AWARENESS".as_ptr(), c"permonitorv2".as_ptr());
+
             let flags = sdl::INIT_VIDEO | sdl::INIT_AUDIO | sdl::INIT_JOYSTICK | sdl::INIT_GAMECONTROLLER | sdl::INIT_EVENTS;
             if (sdl.init)(flags) != 0 {
                 // Some firmware has no sound device until something else lets
@@ -129,19 +199,15 @@ impl App {
                 }
             }
 
-            // Whole pixels, as the phone draws them: a title's pixel font goes
-            // soft under any filter.
-            (sdl.set_hint)(c"SDL_RENDER_SCALE_QUALITY".as_ptr(), c"0".as_ptr());
-
-            let window_flags = if windowed {
+            let window_flags = if desktop {
                 sdl::WINDOW_SHOWN | sdl::WINDOW_RESIZABLE
             } else {
                 sdl::WINDOW_SHOWN | sdl::WINDOW_FULLSCREEN_DESKTOP
             };
             let window = (sdl.create_window)(
                 c"MiniMobile".as_ptr(),
-                sdl::WINDOWPOS_UNDEFINED,
-                sdl::WINDOWPOS_UNDEFINED,
+                sdl::WINDOWPOS_CENTERED,
+                sdl::WINDOWPOS_CENTERED,
                 640,
                 480,
                 window_flags,
@@ -156,7 +222,9 @@ impl App {
             if renderer.is_null() {
                 return Err(format!("화면에 그릴 수 없습니다: {}", error(&sdl)));
             }
-            (sdl.show_cursor)(0);
+            if !desktop {
+                (sdl.show_cursor)(0);
+            }
 
             // A mapping file beside the port, for a pad the firmware's own
             // mappings do not name. SDL_GAMECONTROLLERCONFIG, which PortMaster
@@ -170,21 +238,84 @@ impl App {
 
             let audio = open_audio(&sdl);
 
+            let last_window = match store.screen() {
+                0 => 3,
+                scale => scale,
+            };
             let mut app = App {
                 sdl,
+                window,
                 renderer,
                 texture: ptr::null_mut(),
                 texture_size: (0, 0),
-                store: Store::load(),
+                desktop,
+                last_window,
+                redraw: true,
+                store,
                 held: [0; BUTTON_COUNT],
-                controllers: 0,
                 audio,
             };
+            app.apply_screen();
             for index in 0..(app.sdl.num_joysticks)() {
                 app.open_controller(index);
             }
             Ok(app)
         }
+    }
+
+    /// Sizes the desktop window as the settings say: a multiple of 320x240,
+    /// as large as the screen leaves room for up to that, or the full screen.
+    fn apply_screen(&mut self) {
+        if !self.desktop {
+            return;
+        }
+        let scale = self.store.screen();
+        // SAFETY: SDL2 calls on the window this program made.
+        unsafe {
+            if scale == 0 {
+                (self.sdl.set_window_fullscreen)(self.window, sdl::WINDOW_FULLSCREEN_DESKTOP);
+            } else {
+                (self.sdl.set_window_fullscreen)(self.window, 0);
+                let mut bounds = Rect { x: 0, y: 0, w: 0, h: 0 };
+                let mut fitting = scale;
+                if (self.sdl.get_display_usable_bounds)(0, &mut bounds) == 0 {
+                    // Room for the title bar too.
+                    while fitting > 1 && (320 * fitting as i32 > bounds.w || 240 * fitting as i32 + 40 > bounds.h) {
+                        fitting -= 1;
+                    }
+                }
+                (self.sdl.set_window_size)(self.window, 320 * fitting as i32, 240 * fitting as i32);
+                (self.sdl.set_window_position)(self.window, sdl::WINDOWPOS_CENTERED, sdl::WINDOWPOS_CENTERED);
+            }
+        }
+        self.redraw = true;
+    }
+
+    /// F11: the full screen, or back to the window it came from.
+    fn toggle_fullscreen(&mut self) {
+        let scale = self.store.screen();
+        if scale == 0 {
+            self.store.set_screen(self.last_window);
+        } else {
+            self.last_window = scale;
+            self.store.set_screen(0);
+        }
+        self.apply_screen();
+    }
+
+    /// Changes the window to `scale` (0 the full screen) from the settings.
+    fn set_screen(&mut self, scale: u32) {
+        if scale != 0 {
+            self.last_window = scale;
+        }
+        self.store.set_screen(scale);
+        self.apply_screen();
+    }
+
+    fn set_title(&self, title: &str) {
+        let title = CString::new(title.replace('\0', "")).unwrap_or_default();
+        // SAFETY: the program's window and a nul-terminated string.
+        unsafe { (self.sdl.set_window_title)(self.window, title.as_ptr()) };
     }
 
     fn open_controller(&mut self, index: c_int) {
@@ -216,11 +347,11 @@ impl App {
                     CStr::from_ptr(name).to_string_lossy()
                 }
             );
-            self.controllers += 1;
         }
     }
 
-    /// Everything that happened since the last call.
+    /// Everything that happened since the last call. F11 is taken here, on
+    /// every screen.
     fn poll(&mut self) -> Vec<Input> {
         let mut inputs = Vec::new();
         let mut event = Event::new();
@@ -228,20 +359,30 @@ impl App {
         while unsafe { (self.sdl.poll_event)(&mut event) } != 0 {
             match event.kind() {
                 sdl::QUIT => inputs.push(Input::Quit),
+                sdl::WINDOWEVENT => self.redraw = true,
+                sdl::DROPFILE => {
+                    let file = event.dropped_file();
+                    if !file.is_null() {
+                        // SAFETY: SDL hands over a nul-terminated path it
+                        // allocated, for this program to free.
+                        let path = unsafe { CStr::from_ptr(file) }.to_string_lossy().into_owned();
+                        unsafe { (self.sdl.free)(file as *mut c_void) };
+                        inputs.push(Input::Drop(PathBuf::from(path)));
+                    }
+                }
                 sdl::CONTROLLERDEVICEADDED => self.open_controller(event.which()),
-                sdl::CONTROLLERDEVICEREMOVED => self.controllers = self.controllers.saturating_sub(1),
                 sdl::CONTROLLERBUTTONDOWN | sdl::CONTROLLERBUTTONUP => {
                     if let Some(button) = Button::from_sdl(event.control()) {
                         self.hold(button, 1, event.kind() == sdl::CONTROLLERBUTTONDOWN, &mut inputs);
                     }
                 }
                 sdl::CONTROLLERAXISMOTION => self.axis(event.control(), event.axis_value(), &mut inputs),
-                // A firmware that also turns the pad into key presses
-                // (gptokeyb) would double every button; with a pad open, the
-                // keyboard is left to it.
-                sdl::KEYDOWN | sdl::KEYUP if self.controllers == 0 && !event.key_repeat() => {
-                    keyboard(event.scancode(), event.kind() == sdl::KEYDOWN, &mut inputs);
+                sdl::KEYDOWN if event.scancode() == F11 => {
+                    if self.desktop && !event.key_repeat() {
+                        self.toggle_fullscreen();
+                    }
                 }
+                sdl::KEYDOWN | sdl::KEYUP => inputs.push(Input::Key(event.scancode(), event.kind() == sdl::KEYDOWN, event.key_repeat())),
                 _ => {}
             }
         }
@@ -346,42 +487,59 @@ impl App {
     /// Shows the list until a game is picked, or `None` when the player quits.
     fn choose(&mut self, menu: &mut Menu) -> Option<PathBuf> {
         menu.refresh();
+        self.set_title("MiniMobile");
         let mut dirty = true;
         let mut repeat: Option<(Button, Instant)> = None;
 
         loop {
             for input in self.poll() {
-                match input {
-                    Input::Quit | Input::Back => return None,
+                let button = match input {
+                    Input::Quit => return None,
+                    Input::Drop(path) => {
+                        menu.add(&path);
+                        dirty = true;
+                        continue;
+                    }
+                    // Esc opens the menu, as Y does.
+                    Input::Key(ESCAPE, true, false) => Button::Y,
+                    Input::Key(code, true, repeated) => match key_button(code) {
+                        Some(button) if !repeated || matches!(button, Button::Up | Button::Down | Button::Left | Button::Right) => button,
+                        _ => continue,
+                    },
+                    Input::Key(..) => continue,
                     Input::Button(Button::Start, true) if self.select_held() => return None,
                     Input::Button(button, true) => {
-                        match button {
-                            Button::A | Button::Start => {
-                                if let Some(game) = menu.selected() {
-                                    return Some(game);
-                                }
-                            }
-                            Button::Y => {
-                                let game = menu.selected();
-                                self.settings_menu(&Context {
-                                    game: game.as_deref(),
-                                    frame: None,
-                                });
-                                repeat = None;
-                                dirty = true;
-                                continue;
-                            }
-                            _ => {}
-                        }
-                        dirty |= menu.navigate(button);
                         repeat = Some((button, Instant::now() + Duration::from_millis(400)));
+                        button
                     }
                     Input::Button(button, false) => {
                         if repeat.is_some_and(|(held, _)| held == button) {
                             repeat = None;
                         }
+                        continue;
                     }
-                    Input::Handset(..) => {}
+                };
+
+                match button {
+                    Button::A | Button::Start => {
+                        if let Some(game) = menu.selected() {
+                            return Some(game);
+                        }
+                    }
+                    Button::Y => {
+                        repeat = None;
+                        let game = menu.selected();
+                        let outcome = self.settings_menu(&Context {
+                            game: game.as_deref(),
+                            frame: None,
+                        });
+                        if let Outcome::QuitApp = outcome {
+                            return None;
+                        }
+                        dirty = true;
+                    }
+                    Button::X if self.desktop => open_folder(menu.folder()),
+                    _ => dirty |= menu.navigate(button),
                 }
             }
 
@@ -393,7 +551,7 @@ impl App {
                 repeat = Some((button, Instant::now() + Duration::from_millis(70)));
             }
 
-            if dirty {
+            if dirty || std::mem::take(&mut self.redraw) {
                 let (width, height, _) = self.menu_size();
                 let rgba = menu.draw(width, height);
                 self.show(&rgba, width, height);
@@ -403,17 +561,23 @@ impl App {
         }
     }
 
-    /// Shows `text` until A, B or START is pressed.
+    /// Shows `text` until it is dismissed.
     fn message(&mut self, text: &str) {
-        let (width, height, _) = self.menu_size();
-        let rgba = library::draw_message(text, "A 확인", width, height);
-        self.show(&rgba, width, height);
+        let hint = if self.desktop { "Enter 확인" } else { "A 확인" };
+        let mut shown = false;
         loop {
             for input in self.poll() {
                 match input {
-                    Input::Quit | Input::Back | Input::Button(Button::A | Button::B | Button::Start, true) => return,
+                    Input::Quit | Input::Button(Button::A | Button::B | Button::Start, true) => return,
+                    Input::Key(code, true, false) if matches!(key_button(code), Some(Button::A | Button::B)) => return,
                     _ => {}
                 }
+            }
+            if !shown || std::mem::take(&mut self.redraw) {
+                let (width, height, _) = self.menu_size();
+                let rgba = library::draw_message(text, hint, width, height);
+                self.show(&rgba, width, height);
+                shown = true;
             }
             std::thread::sleep(FRAME);
         }
@@ -426,6 +590,7 @@ impl App {
         let (width, height, _) = self.menu_size();
         let rgba = library::draw_message(&format!("{name}\n\n불러오는 중…"), "", width, height);
         self.show(&rgba, width, height);
+        self.set_title(&format!("MiniMobile - {name}"));
 
         let data = std::fs::read(game).map_err(|error| format!("게임 파일을 읽을 수 없습니다: {error}"))?;
         // A game fixed to a preset plays with it.
@@ -444,7 +609,7 @@ impl App {
         // SAFETY: a device id SDL handed out, or 0, which SDL ignores.
         unsafe { (self.sdl.pause_audio_device)(self.audio, 0) };
 
-        let result = self.run_game(game);
+        let result = self.run_game(game, &name);
 
         host::stop();
         // SAFETY: as above.
@@ -452,59 +617,83 @@ impl App {
         if let Err(error) = std::fs::write("last_game_log.txt", host::log()) {
             eprintln!("로그를 쓸 수 없습니다: {error}");
         }
+        self.set_title("MiniMobile");
         result
     }
 
-    fn run_game(&mut self, game: &Path) -> Result<(), String> {
-        // The newest frame, kept for the menu to show behind it.
-        let mut frame: Option<(u32, u32, Vec<u8>)> = None;
+    /// The menu over a game, with the game and its clock and sound held still
+    /// behind it.
+    fn pause(&mut self, game: &Path, name: &str, frame: Option<&(u32, u32, Vec<u8>)>) -> Outcome {
+        host::hold_clock(true);
+        // SAFETY: a device id SDL handed out, or 0, which SDL ignores.
+        unsafe { (self.sdl.pause_audio_device)(self.audio, 1) };
+        self.set_title(&format!("MiniMobile - {name} (일시정지)"));
+        let outcome = self.settings_menu(&Context {
+            game: Some(game),
+            frame: frame.map(|(width, height, rgba)| (*width, *height, rgba.as_slice())),
+        });
+        self.set_title(&format!("MiniMobile - {name}"));
+        // SAFETY: as above.
+        unsafe { (self.sdl.pause_audio_device)(self.audio, 0) };
+        host::hold_clock(false);
+        outcome
+    }
+
+    fn run_game(&mut self, game: &Path, name: &str) -> Result<(), String> {
         // The handset key each button pressed, so letting it go releases that
-        // key even if SELECT was let go in between.
+        // key even if SELECT was let go in between; and each keyboard key's.
         let mut pressed: [Option<i32>; BUTTON_COUNT] = [None; BUTTON_COUNT];
-        let release_all = |pressed: &mut [Option<i32>; BUTTON_COUNT]| {
+        let mut keys: Vec<(i32, i32)> = Vec::new();
+        let release_all = |pressed: &mut [Option<i32>; BUTTON_COUNT], keys: &mut Vec<(i32, i32)>| {
             for key in pressed.iter_mut().filter_map(Option::take) {
                 host::key(key, false);
             }
+            for (_, key) in keys.drain(..) {
+                host::key(key, false);
+            }
         };
+        // The newest frame, kept for the menu to show behind it.
+        let mut frame: Option<(u32, u32, Vec<u8>)> = None;
+        let toast = if self.desktop { "Esc 메뉴 · F11 전체화면" } else { "" };
+        // When the hint goes, counted from the title's first frame - a title
+        // can take a while to draw one.
+        let mut toast_until: Option<Instant> = None;
+        // Whether the frame on screen carries the hint, to draw it again
+        // without once the hint's time is up.
+        let mut toast_up = false;
 
         loop {
-            let started = Instant::now();
+            let tick_started = Instant::now();
 
             for input in self.poll() {
-                match input {
+                let pause = match input {
                     Input::Quit => {
-                        release_all(&mut pressed);
+                        release_all(&mut pressed, &mut keys);
+                        host::stop();
                         std::process::exit(0);
                     }
-                    Input::Back => {
-                        release_all(&mut pressed);
-                        return Ok(());
+                    Input::Drop(_) => false,
+                    // Esc on the keyboard, MENU on the pad: the menu.
+                    Input::Key(ESCAPE, true, false) | Input::Button(Button::Guide, true) => true,
+                    Input::Key(_, _, true) => false,
+                    Input::Key(code, true, false) => {
+                        if let Some(key) = self.store.controls().keyboard_key(code)
+                            && !keys.iter().any(|(held, _)| *held == code)
+                        {
+                            host::key(key, true);
+                            keys.push((code, key));
+                        }
+                        false
                     }
-                    // The handheld's menu / hotkey button: the menu, with the
-                    // game and its clock and sound held still behind it.
-                    Input::Button(Button::Guide, true) => {
-                        release_all(&mut pressed);
-                        host::hold_clock(true);
-                        // SAFETY: a device id SDL handed out, or 0, which SDL ignores.
-                        unsafe { (self.sdl.pause_audio_device)(self.audio, 1) };
-                        let outcome = self.settings_menu(&Context {
-                            game: Some(game),
-                            frame: frame.as_ref().map(|(width, height, rgba)| (*width, *height, rgba.as_slice())),
-                        });
-                        // SAFETY: as above.
-                        unsafe { (self.sdl.pause_audio_device)(self.audio, 0) };
-                        host::hold_clock(false);
-                        if let Outcome::EndGame = outcome {
-                            return Ok(());
+                    Input::Key(code, false, false) => {
+                        if let Some(at) = keys.iter().position(|(held, _)| *held == code) {
+                            host::key(keys.remove(at).1, false);
                         }
-                        if let Some((width, height, rgba)) = &frame {
-                            let (width, height, rgba) = (*width, *height, rgba.clone());
-                            self.show(&rgba, width, height);
-                        }
+                        false
                     }
                     // SELECT+START: straight back to the list.
                     Input::Button(Button::Start, true) if self.select_held() => {
-                        release_all(&mut pressed);
+                        release_all(&mut pressed, &mut keys);
                         return Ok(());
                     }
                     Input::Button(button, true) => {
@@ -512,13 +701,22 @@ impl App {
                             host::key(key, true);
                             pressed[button.index()] = Some(key);
                         }
+                        false
                     }
                     Input::Button(button, false) => {
                         if let Some(key) = pressed[button.index()].take() {
                             host::key(key, false);
                         }
+                        false
                     }
-                    Input::Handset(key, down) => host::key(key, down),
+                };
+
+                if pause {
+                    release_all(&mut pressed, &mut keys);
+                    if let Outcome::EndGame | Outcome::QuitApp = self.pause(game, name, frame.as_ref()) {
+                        return Ok(());
+                    }
+                    self.redraw = true;
                 }
             }
 
@@ -526,9 +724,28 @@ impl App {
             if !failure.is_empty() {
                 return Err(failure);
             }
-            if let Some((width, height, rgba)) = host::take_frame_rgba() {
+            if let Some(new_frame) = host::take_frame_rgba() {
+                frame = Some(new_frame);
+                self.redraw = true;
+                toast_until.get_or_insert_with(|| Instant::now() + TOAST);
+            }
+            let toast_time = toast_until.is_some_and(|until| Instant::now() < until);
+            if toast_up && !toast_time {
+                toast_up = false;
+                self.redraw = true;
+            }
+            if std::mem::take(&mut self.redraw)
+                && let Some((width, height, rgba)) = &frame
+            {
+                let (width, height) = (*width, *height);
+                // The hint over the first seconds of a desktop game.
+                toast_up = !toast.is_empty() && toast_time;
+                let rgba = if toast_up {
+                    library::with_toast(rgba, width, height, toast)
+                } else {
+                    rgba.clone()
+                };
                 self.show(&rgba, width, height);
-                frame = Some((width, height, rgba));
             }
             // Vibration: nothing on a handheld to give it to, but the queue
             // still has to be emptied.
@@ -545,60 +762,19 @@ impl App {
             // Sleep out the rest of the frame, or less when the title's next
             // timer comes sooner.
             let target = host::sleep_hint_ms().map_or(FRAME, |hint| Duration::from_millis(hint).min(FRAME));
-            if let Some(rest) = target.checked_sub(started.elapsed()) {
+            if let Some(rest) = target.checked_sub(tick_started.elapsed()) {
                 std::thread::sleep(rest);
             }
         }
     }
 }
 
-/// A keyboard, for trying the port on a desktop: the desktop build's keys for
-/// the handset, the arrows, Enter and Escape for the list, and F3 to F7 for
-/// X, Y, SELECT, MENU and START.
-fn keyboard(scancode: i32, down: bool, inputs: &mut Vec<Input>) {
-    let button = match scancode {
-        82 => Some(Button::Up),
-        81 => Some(Button::Down),
-        80 => Some(Button::Left),
-        79 => Some(Button::Right),
-        40 | 44 => Some(Button::A),
-        42 => Some(Button::B),
-        225 => Some(Button::L1),
-        229 => Some(Button::R1),
-        60 => Some(Button::X),
-        61 => Some(Button::Y),
-        62 => Some(Button::Select),
-        63 => Some(Button::Guide),
-        64 => Some(Button::Start),
-        _ => None,
-    };
-    if let Some(button) = button {
-        inputs.push(Input::Button(button, down));
-        return;
+/// Opens `folder` in the desktop's file manager.
+fn open_folder(folder: &Path) {
+    let program = if cfg!(windows) { "explorer" } else { "xdg-open" };
+    if let Err(error) = std::process::Command::new(program).arg(folder).spawn() {
+        eprintln!("폴더를 열 수 없습니다: {error}");
     }
-    if scancode == 41 {
-        if down {
-            inputs.push(Input::Back);
-        }
-        return;
-    }
-    // 1 2 3 / Q W E / A S D / Z X C, as the desktop build lays the number pad.
-    let key = match scancode {
-        30 => 9,
-        31 => 10,
-        32 => 11,
-        20 => 12,
-        26 => 13,
-        8 => 14,
-        4 => 15,
-        22 => 16,
-        7 => 17,
-        29 => 18,
-        27 => 8,
-        6 => 19,
-        _ => return,
-    };
-    inputs.push(Input::Handset(key, down));
 }
 
 /// Opens the sound device, playing the runner's mixer. 0 when there is none.
