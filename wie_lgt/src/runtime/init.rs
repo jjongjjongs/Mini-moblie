@@ -15,7 +15,7 @@ use spin::Mutex;
 use wipi_types::lgt::{InitParam1, InitParam2, InitStruct};
 
 use wie_backend::System;
-use wie_core_arm::{Allocator, ArmCore, EmulatedFunction, MemoryIntrinsic, ResultWriter, SvcId, ThreadId};
+use wie_core_arm::{Allocator, ArmCore, EmulatedFunction, ResultWriter, SvcId, SvcIntrinsic, ThreadId};
 use wie_util::{
     ByteRead, ByteWrite, Result, WieError, read_generic, read_null_terminated_string_bytes, write_generic, write_null_terminated_string_bytes,
 };
@@ -4500,11 +4500,11 @@ fn validate_resolved_import_address(import_table: u32, function_index: u32, addr
 /// The stdlib calls an engine may answer without leaving compiled code: the
 /// three whose whole effect is guest memory, and which a title calls far more
 /// often than anything else. See [`ArmCore::make_intrinsic_svc_stub`].
-fn stdlib_intrinsic(function_index: u32) -> Option<MemoryIntrinsic> {
+fn stdlib_intrinsic(function_index: u32) -> Option<SvcIntrinsic> {
     match function_index {
-        x if x == StdlibSvcId::Memcpy as u32 => Some(MemoryIntrinsic::Copy),
-        x if x == StdlibSvcId::Memmove as u32 => Some(MemoryIntrinsic::Move),
-        x if x == StdlibSvcId::Memset as u32 => Some(MemoryIntrinsic::Set),
+        x if x == StdlibSvcId::Memcpy as u32 => Some(SvcIntrinsic::Copy),
+        x if x == StdlibSvcId::Memmove as u32 => Some(SvcIntrinsic::Move),
+        x if x == StdlibSvcId::Memset as u32 => Some(SvcIntrinsic::Set),
         _ => None,
     }
 }
@@ -4542,7 +4542,10 @@ async fn get_import_function(
     tracing::debug!("get_import_function({import_table:#x}, {function_index:#x})");
 
     let resolved = if import_table == 0x1fb {
-        core.make_svc_stub(wipic_category, function_index)?
+        match crate::runtime::wipi_c::wipic_intrinsic(function_index) {
+            Some(kind) => core.make_intrinsic_svc_stub(wipic_category, function_index, kind)?,
+            None => core.make_svc_stub(wipic_category, function_index)?,
+        }
     } else if import_table == 0x64 {
         get_java_interface_method(core, function_index)?
     } else if import_table == 1 {

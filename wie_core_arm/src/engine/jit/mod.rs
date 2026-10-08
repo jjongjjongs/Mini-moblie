@@ -27,7 +27,7 @@ use wie_util::{Result, WieError};
 
 use super::arm32_cpu::EmulatedMemory;
 use super::fast::{Decoded, FastOp, decode, ends_trace};
-use crate::engine::{ArmEngine, ArmRegister, EngineRunResult, MemoryIntrinsic, MemoryPermission};
+use crate::engine::{ArmEngine, ArmRegister, EngineRunResult, MemoryPermission, SvcIntrinsic};
 
 mod arm_frontend;
 use arm_frontend::{ArmOp, arm_ends_trace, decode_arm};
@@ -241,7 +241,7 @@ pub struct JitEngine {
     arm_decline_hist: [u64; NUM_ARM_DECLINE],
     /// The `svc`s this engine answers itself, by address. See
     /// [`JitEngine::run_intrinsic`].
-    intrinsics: BTreeMap<u32, MemoryIntrinsic>,
+    intrinsics: BTreeMap<u32, SvcIntrinsic>,
 }
 
 /// ARM decline reasons, ordered to match [`arm_decline_category`].
@@ -756,31 +756,82 @@ impl JitEngine {
         }
     }
 
-    /// Answers an intrinsic `svc` from the registers its stub was entered with -
-    /// `r0` the destination, `r1` the source or the fill byte, `r2` the length -
-    /// the way the platform's handler for it would, and says whether it did.
+    /// Answers an intrinsic `svc` from the registers its stub was entered with,
+    /// the way the platform's handler for it would, and says whether it did. A
+    /// copy takes `r0` as the destination, `r1` as the source or the fill byte
+    /// and `r2` as the length; the rest read and answer in `r0` - see
+    /// [`SvcIntrinsic`]. One that would read what is not mapped is declined, for
+    /// the handler to report.
     ///
     /// The copy goes a chunk at a time through the same size of buffer as
     /// [`crate::stdlib::mem_copy`], so a `memcpy` over ranges that overlap
     /// comes out exactly as it does there. A range that is not wholly mapped is
     /// left alone, for the handler to report the way it always has; checking
     /// before writing anything means a declined call has not half happened.
-    fn run_intrinsic(&mut self, kind: MemoryIntrinsic) -> bool {
+    fn run_intrinsic(&mut self, kind: SvcIntrinsic) -> bool {
         use crate::stdlib::COPY_CHUNK;
 
         let [dst, source, len] = [self.ctx.regs[0], self.ctx.regs[1], self.ctx.regs[2]];
+
+        // A word wherever it is, aligned or not, or `None` where nothing is
+        // mapped.
+        let word = |mem: &EmulatedMemory, address: u32| {
+            let mut bytes = [0u8; 4];
+            mem.read_range(address, 4, &mut bytes).ok().map(|_| u32::from_le_bytes(bytes))
+        };
+
+        // The ones that only read, and answer in r0.
+        let answer = match kind {
+            SvcIntrinsic::Field { offset, if_null } => Some(if dst == 0 {
+                Some(if_null)
+            } else {
+                word(&self.mem, dst.wrapping_add(offset))
+            }),
+            SvcIntrinsic::Rgb565 => {
+                let pixel = (((dst as u8 as u32) >> 3) << 11) | (((source as u8 as u32) >> 2) << 5) | ((len as u8 as u32) >> 3);
+                Some(Some(pixel))
+            }
+            SvcIntrinsic::FramebufferPointer { screen_at, rows_at, if_null } => Some(if dst == 0 {
+                Some(if_null)
+            } else {
+                // The framebuffer's own fields have to be there; the two
+                // globals read as zero when they are not, as the handler reads
+                // them.
+                word(&self.mem, dst.wrapping_add(0x10))
+                    .zip(word(&self.mem, dst.wrapping_add(8)))
+                    .map(|(buf, bpl)| {
+                        let lead = if word(&self.mem, screen_at).unwrap_or(0) == dst {
+                            word(&self.mem, rows_at).unwrap_or(0).wrapping_mul(bpl)
+                        } else {
+                            0
+                        };
+                        buf.wrapping_sub(lead)
+                    })
+            }),
+            _ => None,
+        };
+        if let Some(answer) = answer {
+            let Some(value) = answer else {
+                return false;
+            };
+            self.ctx.regs[0] = value;
+            crate::INTRINSIC_CALLS.fetch_add(1, ::core::sync::atomic::Ordering::Relaxed);
+
+            return true;
+        }
+
         if len == 0 {
             return true;
         }
 
         let mapped = |mem: &EmulatedMemory, address: u32| address.checked_add(len).is_some() && mem.is_mapped(address, len as usize);
-        if !mapped(&self.mem, dst) || (kind != MemoryIntrinsic::Set && !mapped(&self.mem, source)) {
+        if !mapped(&self.mem, dst) || (kind != SvcIntrinsic::Set && !mapped(&self.mem, source)) {
             return false;
         }
 
         let mut buf = [0u8; COPY_CHUNK];
         match kind {
-            MemoryIntrinsic::Set => {
+            SvcIntrinsic::Set => {
                 buf.fill(source as u8);
                 let mut done = 0;
                 while done < len {
@@ -790,10 +841,10 @@ impl JitEngine {
                     done += chunk as u32;
                 }
             }
-            MemoryIntrinsic::Copy | MemoryIntrinsic::Move => {
+            _ => {
                 // Only `memmove` with the destination inside the source runs
                 // from the back, as `crate::stdlib::mem_move` does.
-                let backwards = kind == MemoryIntrinsic::Move && dst > source && dst - source < len;
+                let backwards = kind == SvcIntrinsic::Move && dst > source && dst - source < len;
                 let mut done = 0;
                 while done < len {
                     let chunk = ((len - done) as usize).min(COPY_CHUNK);
@@ -1113,7 +1164,7 @@ impl ArmEngine for JitEngine {
         self.mem.is_mapped(address, size)
     }
 
-    fn set_svc_intrinsic(&mut self, svc_address: u32, kind: MemoryIntrinsic) {
+    fn set_svc_intrinsic(&mut self, svc_address: u32, kind: SvcIntrinsic) {
         self.intrinsics.insert(svc_address, kind);
     }
 }
@@ -1349,7 +1400,7 @@ mod tests {
 
     use super::super::fast::{Decoded, decode};
     use super::JitEngine;
-    use crate::engine::{Arm32CpuEngine, ArmEngine, ArmRegister, EngineRunResult, MemoryIntrinsic, MemoryPermission};
+    use crate::engine::{Arm32CpuEngine, ArmEngine, ArmRegister, EngineRunResult, MemoryPermission, SvcIntrinsic};
 
     const CODE: u32 = 0x1000;
     const DATA: u32 = 0x0010_0000;
@@ -1738,7 +1789,7 @@ mod tests {
         regs[13] = DATA + 0x8000;
         let mut e = setup(JitEngine::new(), &code, &regs);
         e.mem_write(DATA, &[1, 2, 3, 4, 5, 6, 7]).unwrap();
-        e.set_svc_intrinsic(CODE, MemoryIntrinsic::Copy);
+        e.set_svc_intrinsic(CODE, SvcIntrinsic::Copy);
 
         run_to_end(&mut e, CODE + 6);
 
@@ -1761,7 +1812,7 @@ mod tests {
         regs[2] = 3;
         regs[13] = DATA + 0x8000;
         let mut e = setup(JitEngine::new(), &code, &regs);
-        e.set_svc_intrinsic(CODE, MemoryIntrinsic::Set);
+        e.set_svc_intrinsic(CODE, SvcIntrinsic::Set);
         run_to_end(&mut e, CODE + 4);
         let mut filled = [0u8; 4];
         e.mem_read(DATA + 0x10, 4, &mut filled).unwrap();
@@ -1775,11 +1826,54 @@ mod tests {
         regs[13] = DATA + 0x8000;
         let mut e = setup(JitEngine::new(), &code, &regs);
         e.mem_write(DATA, &[1, 2, 3, 4, 5, 6]).unwrap();
-        e.set_svc_intrinsic(CODE, MemoryIntrinsic::Move);
+        e.set_svc_intrinsic(CODE, SvcIntrinsic::Move);
         run_to_end(&mut e, CODE + 4);
         let mut moved = [0u8; 6];
         e.mem_read(DATA, 6, &mut moved).unwrap();
         assert_eq!(moved, [1, 2, 1, 2, 3, 4]);
+    }
+
+    /// Runs one intrinsic `svc` with `regs` and hands back r0.
+    fn answer(kind: SvcIntrinsic, setup_memory: &[(u32, u32)], regs: [u32; 3]) -> u32 {
+        let code = thumb(&[0xdf05, B_NEXT]);
+        let mut all = [0u32; 15];
+        all[..3].copy_from_slice(&regs);
+        all[13] = DATA + 0x8000;
+        let mut e = setup(JitEngine::new(), &code, &all);
+        for &(address, value) in setup_memory {
+            e.mem_write(address, &value.to_le_bytes()).unwrap();
+        }
+        e.set_svc_intrinsic(CODE, kind);
+        run_to_end(&mut e, CODE + 4);
+
+        e.reg_read(ArmRegister::R0)
+    }
+
+    #[test]
+    fn the_answering_intrinsics_read_what_their_handlers_read() {
+        let field = SvcIntrinsic::Field {
+            offset: 4,
+            if_null: u32::MAX,
+        };
+        assert_eq!(answer(field, &[(DATA + 4, 320)], [DATA, 0, 0]), 320);
+        assert_eq!(answer(field, &[], [0, 0, 0]), u32::MAX);
+
+        // White, and a colour whose low bits each channel drops.
+        assert_eq!(answer(SvcIntrinsic::Rgb565, &[], [0xff, 0xff, 0xff]), 0xffff);
+        assert_eq!(answer(SvcIntrinsic::Rgb565, &[], [0x1ff, 0x07, 0x10]), 0xf822);
+
+        // Not the screen: the buffer as it is. The screen: less its leading rows.
+        let pointer = SvcIntrinsic::FramebufferPointer {
+            screen_at: DATA + 0x100,
+            rows_at: DATA + 0x104,
+            if_null: u32::MAX,
+        };
+        let framebuffer = [(DATA + 8, 480), (DATA + 0x10, 0x4000_1000), (DATA + 0x104, 20)];
+        assert_eq!(answer(pointer, &framebuffer, [DATA, 0, 0]), 0x4000_1000);
+        let mut screen = framebuffer.to_vec();
+        screen.push((DATA + 0x100, DATA));
+        assert_eq!(answer(pointer, &screen, [DATA, 0, 0]), 0x4000_1000 - 20 * 480);
+        assert_eq!(answer(pointer, &[], [0, 0, 0]), u32::MAX);
     }
 
     #[test]
@@ -1791,7 +1885,7 @@ mod tests {
         regs[2] = 4;
         regs[13] = DATA + 0x8000;
         let mut e = setup(JitEngine::new(), &code, &regs);
-        e.set_svc_intrinsic(CODE, MemoryIntrinsic::Copy);
+        e.set_svc_intrinsic(CODE, SvcIntrinsic::Copy);
 
         match e.run(CODE + 4, 1_000_000) {
             Ok(EngineRunResult::Svc { category, lr, .. }) => {

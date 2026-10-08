@@ -66,7 +66,7 @@ pub static SVC_CATEGORY_COUNT: [::core::sync::atomic::AtomicU64; 256] = [const {
 pub static LIVE_THREADS: ::core::sync::atomic::AtomicU64 = ::core::sync::atomic::AtomicU64::new(0);
 pub static PEAK_THREADS: ::core::sync::atomic::AtomicU64 = ::core::sync::atomic::AtomicU64::new(0);
 
-/// Platform calls a JIT answered inside `run` (see [`MemoryIntrinsic`]), which
+/// Platform calls a JIT answered inside `run` (see [`SvcIntrinsic`]), which
 /// [`SVC_COUNT`] therefore never sees.
 pub static INTRINSIC_CALLS: ::core::sync::atomic::AtomicU64 = ::core::sync::atomic::AtomicU64::new(0);
 
@@ -75,6 +75,6 @@ pub use self::{
     binary_patches::install_binary_patches,
     context::ArmCoreContext,
     core::{ArmCore, HEAP_BASE, HEAP_SIZE, RUN_FUNCTION_LR, RunFunctionResult},
-    engine::MemoryIntrinsic,
+    engine::SvcIntrinsic,
     function::{EmulatedFunction, EmulatedFunctionParam, RegisteredFunction, RegisteredFunctionHolder, ResultWriter, SvcId},
 };

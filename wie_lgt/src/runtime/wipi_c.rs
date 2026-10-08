@@ -436,6 +436,38 @@ pub fn register_wipic_svc_handler(core: &mut ArmCore, system: &System, jvm: &Jvm
 /// which for these one-field reads cost far more than the work itself. Returns
 /// `Ok(true)` when the call was fully serviced, `Ok(false)` to defer to the
 /// generic handler. The caller has already matched `SVC_CATEGORY_WIPIC`.
+/// The WIPI-C calls an engine may answer without leaving compiled code - see
+/// [`ArmCore::make_intrinsic_svc_stub`] - each the same answer
+/// [`try_fast_wipic_getter`] and the generic handler give.
+///
+/// 영웅서기4 asks for its framebuffer's pointer, width and height about eleven
+/// thousand times a second between them, and for a pixel colour another two
+/// thousand: the answers are a field of a struct in its own memory and a
+/// shift, and the round trip out of compiled code cost more than either.
+pub(crate) fn wipic_intrinsic(function_index: u32) -> Option<wie_core_arm::SvcIntrinsic> {
+    use wie_core_arm::SvcIntrinsic;
+
+    const NO_FRAMEBUFFER: u32 = graphics::NO_FRAMEBUFFER as u32;
+
+    match function_index {
+        x if x == WIPICSvcId::GetFramebufferWidth as u32 => Some(SvcIntrinsic::Field {
+            offset: core::mem::offset_of!(WIPICFramebuffer, width) as u32,
+            if_null: NO_FRAMEBUFFER,
+        }),
+        x if x == WIPICSvcId::GetFramebufferHeight as u32 => Some(SvcIntrinsic::Field {
+            offset: core::mem::offset_of!(WIPICFramebuffer, height) as u32,
+            if_null: NO_FRAMEBUFFER,
+        }),
+        x if x == WIPICSvcId::GetFramebufferPointer as u32 => Some(SvcIntrinsic::FramebufferPointer {
+            screen_at: graphics::SCREEN_FRAMEBUFFER_PTR,
+            rows_at: graphics::ANNUNCIATOR_ROWS_PTR,
+            if_null: NO_FRAMEBUFFER,
+        }),
+        x if x == WIPICSvcId::GetPixelFromRgb as u32 => Some(SvcIntrinsic::Rgb565),
+        _ => None,
+    }
+}
+
 pub(crate) fn try_fast_wipic_getter(core: &mut ArmCore) -> Result<bool> {
     const ID_GET_FRAMEBUFFER_POINTER: u32 = WIPICSvcId::GetFramebufferPointer as u32;
     const ID_GET_IMAGE_FRAMEBUFFER: u32 = WIPICSvcId::GetImageFramebuffer as u32;

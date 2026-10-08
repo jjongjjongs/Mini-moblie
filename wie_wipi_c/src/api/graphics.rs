@@ -39,7 +39,7 @@ pub use self::image::ImageLayout;
 pub use self::bitmap_font::{clear as clear_bios_font, install_from_bios as install_bios_font};
 
 pub const FRAMEBUFFER_DEPTH: u32 = 16; // XXX hardcode to 16bpp as some game requires 16bpp framebuffer
-const SCREEN_FRAMEBUFFER_PTR: u32 = 0x7fff1000;
+pub const SCREEN_FRAMEBUFFER_PTR: u32 = 0x7fff1000;
 /// Guest word holding the height of the handset's status strip (the WIPI
 /// "annunciator"), which sits above the drawing area a title is given. Zero
 /// unless the platform stores one, and nothing below changes while it is zero.

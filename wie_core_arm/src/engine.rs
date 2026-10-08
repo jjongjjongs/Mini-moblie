@@ -20,17 +20,27 @@ pub use jit::JitEngine;
 
 /// A platform call an engine may answer on its own, without leaving `run`.
 ///
-/// Each is a C library routine over guest memory whose whole effect is that
-/// memory: [`ArmCore::make_intrinsic_svc_stub`](crate::ArmCore::make_intrinsic_svc_stub)
+/// Each is a call whose whole effect is guest memory and `r0`, with nothing
+/// for the platform to decide:
+/// [`ArmCore::make_intrinsic_svc_stub`](crate::ArmCore::make_intrinsic_svc_stub)
 /// says which stub stands for which.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum MemoryIntrinsic {
+pub enum SvcIntrinsic {
     /// `memcpy(dst, src, len)`.
     Copy,
     /// `memmove(dst, src, len)`.
     Move,
     /// `memset(dst, value, len)`.
     Set,
+    /// The word at `r0 + offset`, or `if_null` when `r0` is zero.
+    Field { offset: u32, if_null: u32 },
+    /// An RGB565 pixel from the low bytes of `r0`, `r1` and `r2`.
+    Rgb565,
+    /// The pixel pointer of the framebuffer at `r0` - the word at `+0x10` -
+    /// less the rows in front of it when it is the screen: when the word at
+    /// `screen_at` is `r0`, the word at `rows_at` times its bytes per line
+    /// (`+8`). `if_null` when `r0` is zero.
+    FramebufferPointer { screen_at: u32, rows_at: u32, if_null: u32 },
 }
 
 pub enum EngineRunResult {
@@ -51,7 +61,7 @@ pub trait ArmEngine: Send + AsAny {
     /// Answer the `svc` at `svc_address` as `kind` without returning from
     /// `run`, where the engine can. An engine that cannot leaves the call to
     /// the platform's handler, which answers it the same way.
-    fn set_svc_intrinsic(&mut self, _svc_address: u32, _kind: MemoryIntrinsic) {}
+    fn set_svc_intrinsic(&mut self, _svc_address: u32, _kind: SvcIntrinsic) {}
 }
 
 #[allow(clippy::enum_variant_names)]

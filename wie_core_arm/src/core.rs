@@ -846,7 +846,7 @@ impl ArmCore {
     ///
     /// The stub is still a real one, and the handler registered for its
     /// category still answers it under an engine that does not do this.
-    pub fn make_intrinsic_svc_stub(&mut self, category: u32, id: impl Into<u32>, kind: crate::engine::MemoryIntrinsic) -> Result<u32> {
+    pub fn make_intrinsic_svc_stub(&mut self, category: u32, id: impl Into<u32>, kind: crate::engine::SvcIntrinsic) -> Result<u32> {
         let stub = self.make_svc_stub(category, id)?;
 
         // The `svc` sits after the four instructions that load the id.
