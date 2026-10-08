@@ -592,6 +592,10 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // out sideways for a handset held landscape, so the picture reaches the
     // upright panel a quarter turn off until it is turned back.
     (TitlePlatform::Lgt, "00031347", sideways()),
+    // 소울세이버: drawn for a handset held landscape onto its 240x320 panel, its
+    // own on-screen pad and buttons included, and played by touch - the
+    // touches it hears are the upright panel's, which it turns itself.
+    (TitlePlatform::Lgt, "0003106B", sideways()),
     // 학교가는 길: an org.kwis.msp.lwc title whose ProxyCard repaints partial
     // regions that leave the previous screen's own pixels standing - its comic
     // select screen kept the title band drawn over it, and the building screen

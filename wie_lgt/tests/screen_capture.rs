@@ -649,10 +649,39 @@ fn run_scripted_over(
     // than its own loop, so the hold has to be settable.
     let hold: u32 = std::env::var("WIE_HOLD").ok().and_then(|x| x.parse().ok()).unwrap_or(20);
 
+    // Taps on the screen, as `tick:x:y,...`: each pressed at its tick, moved 3
+    // pixels right 5 ticks later and lifted 10 ticks later. Setting any turns
+    // touch on, as the player's switch does.
+    let touches: Vec<(u32, i32, i32)> = std::env::var("WIE_TOUCH")
+        .ok()
+        .map(|spec| {
+            spec.split(',')
+                .filter(|x| !x.trim().is_empty())
+                .map(|touch| {
+                    let parts: Vec<i32> = touch.split(':').map(|x| x.trim().parse().expect("tick:x:y")).collect();
+                    (parts[0] as u32, parts[1], parts[2])
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    wie_backend::set_touch_enabled(!touches.is_empty());
+
     let mut ticks = 0u32;
     while !exited.load(Ordering::SeqCst) && ticks < ticks_limit {
         if ticks.is_multiple_of(40) {
             emulator.handle_event(Event::Redraw);
+        }
+
+        for &(at, x, y) in &touches {
+            let kind = match ticks.checked_sub(at) {
+                Some(0) => wie_backend::PointerKind::Pressed,
+                Some(5) => wie_backend::PointerKind::Dragged,
+                Some(10) => wie_backend::PointerKind::Released,
+                _ => continue,
+            };
+            let x = if kind == wie_backend::PointerKind::Pressed { x } else { x + 3 };
+            eprintln!("[{label}] touch {kind:?} at {x},{y} on tick {ticks}");
+            emulator.handle_event(Event::Pointer { kind, x, y });
         }
 
         if let Some(dir) = &frame_dump

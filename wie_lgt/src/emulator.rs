@@ -246,11 +246,17 @@ impl LgtEmulator {
         // read resolves and the title's offline auth check passes instead of
         // falling through to an online billing handshake that cannot complete.
         // A real root copy always takes precedence.
-        const AUTH_FILES: [&str; 3] = ["certification", "cert.c2s", "certi.pzx"];
+        //
+        // The same goes for anything in a folder named for the certificate
+        // (`…인증서`, `…인증파일`): 소울게이트's dump keeps its `c.nm` and
+        // `hd_0.nm` under `소울게이트인증서/`, the title reads both from its root,
+        // and without them it asks to fetch a certificate from a server that
+        // is long gone.
         for (filename, data) in files {
             let filename = filename.trim_start_matches("P/");
-            let base = filename.rsplit(['/', '\\']).next().unwrap_or(filename);
-            if base != filename && AUTH_FILES.contains(&base) && !files.keys().any(|k| k.trim_start_matches("P/") == base) {
+            if let Some(base) = nested_auth_file(filename)
+                && !files.keys().any(|k| k.trim_start_matches("P/") == base)
+            {
                 tracing::info!("exposing nested auth file {filename:?} at data-dir root as {base:?}");
                 system.filesystem().add_virtual(base, data.clone());
             }
@@ -776,8 +782,47 @@ fn title_expects_annunciator(aid: &str) -> bool {
 /// copies it onto the screen turned. It asks for no rotation because there is
 /// no such call in WIPI-C to ask with; the handset was simply turned sideways
 /// in the player's hand. See `wie_backend::present`.
+/// The name a packaged certificate file is read under at the data-dir root,
+/// when `filename` is one kept in a folder: a known auth file anywhere, or any
+/// file in a folder named for the certificate (`…인증서`, `…인증파일`). See
+/// where `from_archive` exposes these.
+fn nested_auth_file(filename: &str) -> Option<&str> {
+    const AUTH_FILES: [&str; 3] = ["certification", "cert.c2s", "certi.pzx"];
+
+    let mut parts = filename.rsplit(['/', '\\']);
+    let base = parts.next()?;
+    let folder = parts.next()?;
+
+    (AUTH_FILES.contains(&base) || folder.contains("인증")).then_some(base)
+}
+
 fn title_draws_sideways(aid: &str) -> bool {
     title_quirks(TitlePlatform::Lgt, aid).drawn_sideways
+}
+
+#[cfg(test)]
+mod nested_auth_file_tests {
+    use super::nested_auth_file;
+
+    #[test]
+    fn a_known_auth_file_in_any_folder_is_read_at_the_root() {
+        assert_eq!(nested_auth_file("인증파일/certification"), Some("certification"));
+        assert_eq!(nested_auth_file("backup\\certi.pzx"), Some("certi.pzx"));
+    }
+
+    /// 소울게이트's dump keeps its certificate pair in a folder named for it.
+    #[test]
+    fn anything_in_a_certificate_folder_is_read_at_the_root() {
+        assert_eq!(nested_auth_file("소울게이트인증서/hd_0.nm"), Some("hd_0.nm"));
+        assert_eq!(nested_auth_file("소울게이트인증서/c.nm"), Some("c.nm"));
+    }
+
+    #[test]
+    fn other_files_stay_where_they_are() {
+        assert_eq!(nested_auth_file("certification"), None, "already at the root");
+        assert_eq!(nested_auth_file("dat/ef/ef.ada"), None);
+        assert_eq!(nested_auth_file("인증서"), None, "a bare name, not a folder");
+    }
 }
 
 #[cfg(test)]
