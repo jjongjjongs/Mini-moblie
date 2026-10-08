@@ -9,17 +9,17 @@ use wie_backend::canvas::{ArgbPixel, Canvas, Clip, Color, ImageBufferCanvas, Tex
 
 use crate::controls::Button;
 
-const FONT: f32 = 16.0;
-const LINE: i32 = 18;
-const BAR: i32 = 20;
+pub(crate) const FONT: f32 = 16.0;
+pub(crate) const LINE: i32 = 18;
+pub(crate) const BAR: i32 = 20;
 
-const BACKGROUND: Color = rgb(0x12, 0x16, 0x1c);
-const BAR_COLOR: Color = rgb(0x1e, 0x5c, 0x45);
-const HIGHLIGHT: Color = rgb(0x2e, 0x7d, 0x5b);
-const TEXT: Color = rgb(0xf2, 0xf4, 0xf5);
-const MUTED: Color = rgb(0x8c, 0x96, 0x9e);
+pub(crate) const BACKGROUND: Color = rgb(0x12, 0x16, 0x1c);
+pub(crate) const BAR_COLOR: Color = rgb(0x1e, 0x5c, 0x45);
+pub(crate) const HIGHLIGHT: Color = rgb(0x2e, 0x7d, 0x5b);
+pub(crate) const TEXT: Color = rgb(0xf2, 0xf4, 0xf5);
+pub(crate) const MUTED: Color = rgb(0x8c, 0x96, 0x9e);
 
-const fn rgb(r: u8, g: u8, b: u8) -> Color {
+pub(crate) const fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color { a: 0xff, r, g, b }
 }
 
@@ -209,14 +209,14 @@ fn wrap(text: &str, width: f32) -> Vec<String> {
     lines
 }
 
-struct Screen {
+pub(crate) struct Screen {
     canvas: ImageBufferCanvas<VecImageBuffer<ArgbPixel>>,
     width: u32,
     height: u32,
 }
 
 impl Screen {
-    fn new(width: u32, height: u32) -> Screen {
+    pub(crate) fn new(width: u32, height: u32) -> Screen {
         let mut screen = Screen {
             canvas: ImageBufferCanvas::new(VecImageBuffer::new(width, height)),
             width,
@@ -226,7 +226,7 @@ impl Screen {
         screen
     }
 
-    fn clip(&self) -> Clip {
+    pub(crate) fn clip(&self) -> Clip {
         Clip {
             x: 0,
             y: 0,
@@ -235,18 +235,18 @@ impl Screen {
         }
     }
 
-    fn fill(&mut self, x: i32, y: i32, width: u32, height: u32, color: Color) {
+    pub(crate) fn fill(&mut self, x: i32, y: i32, width: u32, height: u32, color: Color) {
         let clip = self.clip();
         self.canvas.fill_rect(x, y, width, height, color, clip);
     }
 
-    fn text(&mut self, text: &str, x: i32, y: i32, alignment: TextAlignment, color: Color) {
+    pub(crate) fn text(&mut self, text: &str, x: i32, y: i32, alignment: TextAlignment, color: Color) {
         let clip = self.clip();
         self.canvas.draw_text(text, x, y, FONT, baseline_px(FONT), alignment, color, clip);
     }
 
     /// A bar across the screen at `y`, with `left` and `right` at its ends.
-    fn bar(&mut self, y: i32, left: &str, right: &str) {
+    pub(crate) fn bar(&mut self, y: i32, left: &str, right: &str) {
         self.fill(0, y, self.width, BAR as u32, BAR_COLOR);
         let text_y = y + (BAR - FONT as i32) / 2;
         self.text(left, 6, text_y, TextAlignment::Left, TEXT);
@@ -255,13 +255,13 @@ impl Screen {
         }
     }
 
-    fn paragraph(&mut self, text: &str, top: i32, color: Color) {
+    pub(crate) fn paragraph(&mut self, text: &str, top: i32, color: Color) {
         for (index, line) in wrap(text, self.width as f32 - 24.0).iter().enumerate() {
             self.text(line, self.width as i32 / 2, top + index as i32 * LINE, TextAlignment::Center, color);
         }
     }
 
-    fn rgba(self) -> Vec<u8> {
+    pub(crate) fn rgba(self) -> Vec<u8> {
         self.canvas
             .image()
             .colors()

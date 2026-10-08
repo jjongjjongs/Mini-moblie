@@ -10,6 +10,8 @@
 
 mod controls;
 mod library;
+#[cfg(test)]
+mod mockup;
 mod sdl;
 
 use std::{
