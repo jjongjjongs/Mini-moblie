@@ -43,10 +43,9 @@ pub static RUN_CALLS: ::core::sync::atomic::AtomicU64 = ::core::sync::atomic::At
 pub const fn engine_name() -> &'static str {
     if cfg!(all(feature = "jit", any(target_arch = "x86_64", target_arch = "aarch64"))) {
         "jit"
-    } else if cfg!(feature = "fast_cpu") {
-        "fast"
     } else {
-        "interpreter"
+        // The block engine running its decoded ops, without machine code.
+        "block-interpreter"
     }
 }
 

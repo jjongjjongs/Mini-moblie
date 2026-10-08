@@ -6,13 +6,10 @@ license.workspace = true
 
 [features]
 default = []
-# Use the experimental block-caching Thumb engine (FastCpuEngine) instead of the
-# reference interpreter. Opt-in so it can be A/B tested on-device; correctness is
-# pinned by the differential tests in `engine::fast`.
-fast_cpu = []
-# Use the machine-code JIT (JitEngine), which compiles Thumb basic blocks to
-# native x86-64 / AArch64. Opt-in; correctness is pinned by differential tests
-# against the interpreter in `engine::jit`. Only usable on x86-64 / AArch64.
+# Have the block engine (JitEngine) compile its blocks to native x86-64 /
+# AArch64. Without it - or on any other host - the engine runs the decoded
+# blocks itself. Correctness is pinned by differential tests against the
+# interpreter in `engine::jit`.
 jit = ["dep:dynasmrt"]
 
 [dependencies]

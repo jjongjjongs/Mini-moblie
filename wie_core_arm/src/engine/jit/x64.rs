@@ -163,8 +163,7 @@ pub(crate) fn compile_block(ops: &[FastOp], start_pc: u32) -> Option<(Code, usiz
             );
         }
         match *op {
-            FastOp::CondBranch { cond, target, next } => {
-                let _ = next;
+            FastOp::CondBranch { cond, target } => {
                 // Single-flag conditions test a CPSR bit inline (mask, take-when-
                 // set); compound ones fall back to the interpreter's cond_met.
                 let single: Option<(u32, bool)> = match cond {

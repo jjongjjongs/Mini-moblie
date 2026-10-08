@@ -197,8 +197,7 @@ pub(crate) fn compile_block(ops: &[FastOp], start_pc: u32) -> Option<(Code, usiz
             );
         }
         match *op {
-            FastOp::CondBranch { cond, target, next } => {
-                let _ = next;
+            FastOp::CondBranch { cond, target } => {
                 let cond = cond as u32;
                 emit_guest_flags(&mut a);
                 if in_range(target) {

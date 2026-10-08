@@ -13,7 +13,7 @@ use wie_util::{ByteRead, ByteWrite, Result, WieError, read_generic, write_generi
 use crate::{
     EmulatedFunction, ResultWriter, ThreadId,
     context::ArmCoreContext,
-    engine::{Arm32CpuEngine, ArmEngine, ArmRegister, EngineRunResult, MemoryPermission},
+    engine::{ArmEngine, ArmRegister, EngineRunResult, MemoryPermission},
     function::{RegisteredFunction, RegisteredFunctionHolder},
     thread::ThreadState,
     thread_wrapper::ArmCoreThreadWrapper,
@@ -145,23 +145,13 @@ pub struct ArmCore {
     pub(crate) inner: Arc<Mutex<ArmCoreInner>>, // TODO can we change it to another lock like async-lock?
 }
 
-/// The non-debug execution engine, chosen at compile time: the machine-code JIT
-/// (`jit` feature, x86-64) if available, else the block-caching interpreter
-/// (`fast_cpu`), else the reference interpreter.
-// The trailing interpreter/fast-engine arms stay compiled (via `cfg!`, not
-// `#[cfg]`) even when the JIT is selected, so `FastCpuEngine`/`Arm32CpuEngine`
-// remain referenced and warning-free across every feature combination; they are
-// then unreachable in the JIT build, which the allow acknowledges.
-#[allow(unreachable_code)]
+/// The non-debug execution engine: the block engine, which runs its traces as
+/// machine code where the `jit` feature builds a backend for the host
+/// (x86-64, AArch64), and otherwise runs them as decoded ops. Either way each
+/// instruction is decoded once, rather than on every step as
+/// [`Arm32CpuEngine`](crate::engine::Arm32CpuEngine) does.
 fn default_engine() -> Box<dyn ArmEngine> {
-    #[cfg(all(feature = "jit", any(target_arch = "x86_64", target_arch = "aarch64")))]
-    return Box::new(crate::engine::JitEngine::new());
-
-    if cfg!(feature = "fast_cpu") {
-        Box::new(crate::engine::FastCpuEngine::new())
-    } else {
-        Box::new(Arm32CpuEngine::new())
-    }
+    Box::new(crate::engine::JitEngine::new())
 }
 
 impl ArmCore {
@@ -170,7 +160,7 @@ impl ArmCore {
             #[cfg(not(target_arch = "wasm32"))]
             let engine = Box::new(DebuggedArm32CpuEngine::new()) as Box<dyn ArmEngine>;
             #[cfg(target_arch = "wasm32")]
-            let engine = Box::new(Arm32CpuEngine::new());
+            let engine = Box::new(crate::engine::Arm32CpuEngine::new());
 
             engine
         } else {

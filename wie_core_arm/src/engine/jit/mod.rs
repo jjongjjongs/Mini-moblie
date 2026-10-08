@@ -18,6 +18,14 @@
 //! `arm32_cpu::Cpu` step for that one instruction — so the engine is correct by
 //! construction and merely faster on the hot paths. Correctness is pinned by
 //! differential tests against `Arm32CpuEngine`.
+//!
+//! Where there is no machine-code backend - the `jit` feature is off, or the
+//! host is neither x86-64 nor AArch64, as on a 32-bit ARM handset - the same
+//! engine runs with `interp`, which keeps each block as its decoded ops and
+//! runs those. It is slower than native code, but each instruction is still
+//! decoded once rather than on every step, and the block cache and the
+//! answered `svc`s work the same; the differential tests run against it
+//! whenever the JIT is not built.
 
 use alloc::{boxed::Box, collections::BTreeMap, format};
 
@@ -32,14 +40,22 @@ use crate::engine::{ArmEngine, ArmRegister, EngineRunResult, MemoryPermission, S
 mod arm_frontend;
 use arm_frontend::{ArmOp, arm_ends_trace, decode_arm};
 
-#[cfg(target_arch = "x86_64")]
+// The backend turns a decoded trace into something `run` can call: native code
+// where the JIT is built for the host, and otherwise the decoded ops themselves,
+// run by `interp` - so a host without the JIT still decodes each instruction
+// once, keeps the block cache, and answers the intrinsic calls.
+#[cfg(all(feature = "jit", target_arch = "x86_64"))]
 mod x64;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(feature = "jit", target_arch = "x86_64"))]
 use x64 as backend;
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(feature = "jit", target_arch = "aarch64"))]
 mod aarch64;
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(feature = "jit", target_arch = "aarch64"))]
 use aarch64 as backend;
+#[cfg(not(all(feature = "jit", any(target_arch = "x86_64", target_arch = "aarch64"))))]
+mod interp;
+#[cfg(not(all(feature = "jit", any(target_arch = "x86_64", target_arch = "aarch64"))))]
+use interp as backend;
 
 /// Longest straight-line run compiled into one block.
 const MAX_BLOCK_LEN: usize = 256;
@@ -150,6 +166,17 @@ struct Slot {
     gen_tag: u32,
     pc: u32,
     block: Option<CompiledBlock>,
+}
+
+/// A block cache with every slot empty, built on the heap: an unoptimised
+/// build would assemble the array on the stack first, and two of them are more
+/// than a test thread's stack holds.
+fn empty_cache() -> Box<[Slot; CACHE_SLOTS]> {
+    let slots: Box<[Slot]> = (0..CACHE_SLOTS).map(|_| Slot::default()).collect();
+    let Ok(cache) = slots.try_into() else {
+        unreachable!("built with CACHE_SLOTS slots")
+    };
+    cache
 }
 
 /// Reasons the JIT declines an instruction and falls back to the interpreter,
@@ -311,8 +338,8 @@ impl JitEngine {
             cpu: Cpu::new(),
             mem: Box::new(EmulatedMemory::new()),
             ctx: Box::new(JitCtx::new()),
-            cache: Box::new(core::array::from_fn(|_| Slot::default())),
-            arm_cache: Box::new(core::array::from_fn(|_| Slot::default())),
+            cache: empty_cache(),
+            arm_cache: empty_cache(),
             generation: 1,
             // Heap-built (a 1 MiB array must not go through the stack).
             code_pages: alloc::vec![false; CODE_PAGE_COUNT].into_boxed_slice(),
@@ -1190,7 +1217,7 @@ impl ArmEngine for JitEngine {
 /// Evaluate an ARM condition code against CPSR, reusing the interpreter's exact
 /// logic so compiled conditional branches match bit-for-bit.
 // The AArch64 backend tests conditions with the host's own flags.
-#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+#[cfg_attr(not(all(feature = "jit", target_arch = "x86_64")), allow(dead_code))]
 pub(crate) extern "C" fn jit_cond_met(cond: u32, cpsr: u32) -> u32 {
     arm32_cpu::util::arm::cond_met(cond, cpsr) as u32
 }
