@@ -12,6 +12,7 @@
 mod audio;
 mod database;
 mod filesystem;
+pub mod host;
 mod logging;
 mod ma3;
 mod network;

@@ -1,0 +1,33 @@
+# XcodeGen spec for the iOS app. CI generates MiniMobile.xcodeproj from this
+# (`xcodegen generate`) after building `wie_ios` for aarch64-apple-ios, so the
+# project file itself is not kept in the repository.
+name: MiniMobile
+options:
+  bundleIdPrefix: com.jjongjjongs
+  deploymentTarget:
+    iOS: "15.0"
+targets:
+  MiniMobile:
+    type: application
+    platform: iOS
+    sources:
+      - MiniMobile
+    settings:
+      base:
+        PRODUCT_NAME: MiniMobile
+        PRODUCT_BUNDLE_IDENTIFIER: com.jjongjjongs.minimobile
+        INFOPLIST_FILE: MiniMobile/Info.plist
+        SWIFT_VERSION: "5.0"
+        SWIFT_OBJC_BRIDGING_HEADER: MiniMobile/Bridging-Header.h
+        HEADER_SEARCH_PATHS: $(SRCROOT)/../wie_ios/include
+        LIBRARY_SEARCH_PATHS: $(SRCROOT)/../target/aarch64-apple-ios/release
+        OTHER_LDFLAGS: -lwie_ios
+        TARGETED_DEVICE_FAMILY: "1,2"
+        MARKETING_VERSION: "0.0.1"
+        CURRENT_PROJECT_VERSION: "1"
+        ENABLE_BITCODE: "NO"
+        # The ipa is unsigned; whatever installs it (AltStore, SideStore,
+        # TrollStore) signs it on the way in.
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGN_IDENTITY: ""

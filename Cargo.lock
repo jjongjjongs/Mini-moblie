@@ -3593,6 +3593,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wie_ios"
+version = "0.0.1"
+dependencies = [
+ "wie_android",
+]
+
+[[package]]
 name = "wie_j2me"
 version = "0.0.1"
 dependencies = [

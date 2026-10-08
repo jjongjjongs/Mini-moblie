@@ -133,7 +133,10 @@ jobs:
           store.
 
           \`wie-linux-x86_64.tar.gz\` is the Linux build of the same commit,
-          uploaded by its own job - see the README inside it."
+          uploaded by its own job - see the README inside it.
+
+          \`wie-mobile-ios.ipa\` is the iPhone app, unsigned: install it with
+          AltStore, SideStore or TrollStore, which sign it on the way in."
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --notes "$notes" --prerelease
@@ -208,3 +211,69 @@ jobs:
             || gh release create "$TAG" --title 'WIE Mobile (development build)' --notes 'Development build, replaced by every push.' --prerelease \
             || gh release view "$TAG" >/dev/null
           gh release upload "$TAG" wie-linux-x86_64.tar.gz --clobber
+
+  # The iPhone app, as an unsigned ipa next to the apk. Whatever installs it -
+  # AltStore, SideStore, TrollStore - signs it on the way in. iOS gives an
+  # installed app no executable memory, so the emulator runs its blocks as
+  # decoded ops there (no `jit` feature).
+  ios:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build the emulator library
+        run: cargo build --release -p wie_ios --target aarch64-apple-ios
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Build the app
+        working-directory: ios
+        run: |
+          set -eu
+          xcodegen generate
+          xcodebuild \
+            -project MiniMobile.xcodeproj \
+            -scheme MiniMobile \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package
+        run: |
+          set -eu
+          mkdir -p Payload
+          cp -R ios/build/Build/Products/Release-iphoneos/MiniMobile.app Payload/
+          zip -qry wie-mobile-ios.ipa Payload
+
+      - name: Upload the ipa
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: wie-mobile-ios
+          path: wie-mobile-ios.ipa
+
+      - name: Publish the ipa to the development release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: mobile-dev
+        run: |
+          set -eu
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --title 'WIE Mobile (development build)' --notes 'Development build, replaced by every push.' --prerelease \
+            || gh release view "$TAG" >/dev/null
+          gh release upload "$TAG" wie-mobile-ios.ipa --clobber
