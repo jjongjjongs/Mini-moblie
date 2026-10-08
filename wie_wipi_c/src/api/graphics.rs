@@ -1416,7 +1416,7 @@ pub async fn draw_image(
     // the sprite holds and the blit skips them - the same shape as the
     // operation-less keyed path, without staging either surface whole or
     // calling the guest a pixel at a time. See `PixelOp::SourceKey`.
-    if kind == pixel_op::PixelOp::SourceKey && source_first {
+    if kind == pixel_op::PixelOp::SourceKey {
         let src_fb = FrameBuffer(source);
         let src_image = src_fb.image(context)?;
         // The colours gathered with the borrow let go of before any guest call,
@@ -2407,6 +2407,12 @@ pub async fn copy_frame_buffer(
     // black on a green block instead.
     let operation = pixel_op::of_context(context, gctx.pixel_op_func_ptr, gctx.param1).await?;
     let source_first = context.pixel_op_takes_source_first();
+    tracing::debug!(
+        "MC_grpCopyFrameBuffer through {:?} (operation {:#x}, param {:#x})",
+        operation.map(|(kind, _)| kind),
+        gctx.pixel_op_func_ptr,
+        gctx.param1
+    );
 
     // A frame buffer has no mask plane and no transparent colour of its own, so
     // nothing is keyed before the operation - it decides every pixel. Without
@@ -2423,7 +2429,7 @@ pub async fn copy_frame_buffer(
 
     // A colour-keyed copy the title planted as its operation - see
     // `PixelOp::SourceKey` and the matching path in `draw_image`.
-    if kind == pixel_op::PixelOp::SourceKey && source_first {
+    if kind == pixel_op::PixelOp::SourceKey {
         let src_image = src_framebuffer.image(context)?;
         let distinct = distinct_colours(&*src_image, sx, sy, w, h);
         let keys = source_key_colours(context, function, gctx.param1, distinct).await?;
@@ -3952,6 +3958,49 @@ mod tests {
             (0xff, 0x00, 0x00),
             "the glyph should take the text colour"
         );
+    }
+
+    /// A keyed copy is recognised on a handset that passes the destination
+    /// first too, where it answers with its second argument.
+    ///
+    /// 드래곤하트2 (LGT) draws each line of text over magenta in an offscreen
+    /// and copies it to the screen through `0x23bd`: the destination where the
+    /// source is magenta, the source everywhere else. LGT passes the
+    /// destination first, so for every probe it answered with its second
+    /// argument and was taken for a plain copy - and every line came down in a
+    /// magenta box.
+    #[futures_test::test]
+    async fn a_keyed_copy_is_recognised_with_the_destination_first() {
+        let mut context = test_context();
+
+        context.set_pixel_op_takes_source_first(false);
+
+        const MAGENTA: u32 = 0xf81f;
+        context.set_guest_function(|_, args| if args[1] == MAGENTA { args[0] } else { args[1] });
+
+        let pgc_handle = context.alloc(core::mem::size_of::<super::WIPICGraphicsContext>() as u32).unwrap();
+        let pgc = context.data_ptr(pgc_handle).unwrap();
+        init_context(&mut context, pgc).await.unwrap();
+
+        // A two-pixel line - magenta, then a dark red glyph pixel - copied over
+        // a white background.
+        let destination = framebuffer_of(&mut context, 2, 1, &[0xffff_ffff, 0xffff_ffff]).await;
+        let source = framebuffer_of(&mut context, 2, 1, &[0xffff_00ff, 0xff80_0000]).await;
+
+        // A function address of its own, so the shared classification cache does
+        // not hand this test an operation another one taught it.
+        set_context(&mut context, pgc, Idx::PixelopIdx, 0x23bd).await.unwrap();
+
+        copy_frame_buffer(&mut context, destination, 0, 0, 2, 1, source, 0, 0, pgc).await.unwrap();
+
+        let handle = read_generic(&context, context.data_ptr(destination).unwrap()).unwrap();
+        let copied = super::FrameBuffer(handle).image(&mut context).unwrap();
+
+        let kept = copied.get_pixel(0, 0);
+        assert_eq!((kept.r, kept.g, kept.b), (0xff, 0xff, 0xff), "the magenta should leave the background");
+
+        let drawn = copied.get_pixel(1, 0);
+        assert_eq!((drawn.r, drawn.g, drawn.b), (0x80, 0x00, 0x00), "the glyph should be copied");
     }
 
     /// A fade of the title's own is recognised and done here, not asked about

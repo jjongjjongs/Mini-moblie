@@ -57,8 +57,9 @@ pub enum PixelOp {
     /// are drawn this way, keying `0x2484` (a green) out at `0x11514c`:
     /// `cmp r0, #0x2484; bne return r0; return r1`.
     ///
-    /// Taken for `Second`'s neighbour it is not: it answers with its *first*
-    /// argument, not its second, and the key branch never shows in the probing
+    /// On KTF, which passes the source first, it answers with its *first*
+    /// argument; on LGT, which passes the destination first, with its second -
+    /// either way with the source. The key branch never shows in the probing
     /// because the key is a constant in the title's code and never one of the
     /// pixels asked about. So the operation reads as a plain source-copy, and
     /// the key is discovered per draw from the colours the sprite actually
@@ -418,10 +419,19 @@ pub async fn classify(context: &mut dyn WIPICContext, function: WIPICWord, param
         // of its own - fails it and is asked per pixel, where its recolour is
         // done. A title whose key happens to be one of the probe colours fails
         // it too and is asked per pixel as well, which still draws right.
-        if matches(&asked, &second) {
-            PixelOp::Second
-        } else if matches(&asked, &first) {
+        //
+        // The source is the first argument on a handset that passes it first
+        // (KTF) and the second on one that passes the destination first (LGT).
+        // 드래곤하트2 (LGT) keys its text this way: each line is drawn over
+        // magenta and copied to the screen through `0x23bd`, which answers
+        // with its second argument - the source - for every probe. Taken as
+        // `Second`, a plain copy, the magenta came down as a box behind every
+        // line.
+        let source: &dyn Fn(u16, u16) -> u16 = if source_first { &first } else { &second };
+        if matches(&asked, source) {
             PixelOp::SourceKey
+        } else if matches(&asked, &second) {
+            PixelOp::Second
         } else if let Some((target, weight)) = fit_fade(&|model| matches(&asked, model)) {
             PixelOp::Fade { target, weight }
         } else if let Some((level, weight)) = (-4..=4)
