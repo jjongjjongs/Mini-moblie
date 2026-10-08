@@ -2,7 +2,7 @@ use wie_util::{ByteRead, ByteWrite, Result};
 
 use crate::ArmCore;
 
-const COPY_CHUNK: usize = 4096;
+pub(crate) const COPY_CHUNK: usize = 4096;
 const STR_SCAN_CHUNK: usize = 256;
 
 pub async fn memcpy(core: &mut ArmCore, _: &mut (), ptr_dst: u32, ptr_src: u32, len: u32) -> Result<()> {

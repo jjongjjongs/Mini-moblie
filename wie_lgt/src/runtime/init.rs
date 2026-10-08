@@ -15,7 +15,7 @@ use spin::Mutex;
 use wipi_types::lgt::{InitParam1, InitParam2, InitStruct};
 
 use wie_backend::System;
-use wie_core_arm::{Allocator, ArmCore, EmulatedFunction, ResultWriter, SvcId, ThreadId};
+use wie_core_arm::{Allocator, ArmCore, EmulatedFunction, MemoryIntrinsic, ResultWriter, SvcId, ThreadId};
 use wie_util::{
     ByteRead, ByteWrite, Result, WieError, read_generic, read_null_terminated_string_bytes, write_generic, write_null_terminated_string_bytes,
 };
@@ -43,7 +43,7 @@ use super::{
     },
     savepoint::SavePointState,
     stdlib::register_stdlib_svc_handler,
-    svc_ids::InitSvcId,
+    svc_ids::{InitSvcId, StdlibSvcId},
     wipi_c::register_wipic_svc_handler,
 };
 
@@ -4497,6 +4497,18 @@ fn validate_resolved_import_address(import_table: u32, function_index: u32, addr
     Ok(address)
 }
 
+/// The stdlib calls an engine may answer without leaving compiled code: the
+/// three whose whole effect is guest memory, and which a title calls far more
+/// often than anything else. See [`ArmCore::make_intrinsic_svc_stub`].
+fn stdlib_intrinsic(function_index: u32) -> Option<MemoryIntrinsic> {
+    match function_index {
+        x if x == StdlibSvcId::Memcpy as u32 => Some(MemoryIntrinsic::Copy),
+        x if x == StdlibSvcId::Memmove as u32 => Some(MemoryIntrinsic::Move),
+        x if x == StdlibSvcId::Memset as u32 => Some(MemoryIntrinsic::Set),
+        _ => None,
+    }
+}
+
 async fn get_import_function(
     core: &mut ArmCore,
     wipic_category: u32,
@@ -4534,7 +4546,10 @@ async fn get_import_function(
     } else if import_table == 0x64 {
         get_java_interface_method(core, function_index)?
     } else if import_table == 1 {
-        core.make_svc_stub(stdlib_category, function_index)?
+        match stdlib_intrinsic(function_index) {
+            Some(kind) => core.make_intrinsic_svc_stub(stdlib_category, function_index, kind)?,
+            None => core.make_svc_stub(stdlib_category, function_index)?,
+        }
     } else {
         match (import_table, function_index) {
             // LoM's legacy module 0 function 0 is its FatalError-style import.

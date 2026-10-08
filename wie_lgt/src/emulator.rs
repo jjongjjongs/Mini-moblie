@@ -988,6 +988,10 @@ impl Emulator for LgtEmulator {
             let svc = wie_core_arm::SVC_COUNT.swap(0, core::sync::atomic::Ordering::Relaxed);
             let runs = wie_core_arm::RUN_CALLS.swap(0, core::sync::atomic::Ordering::Relaxed);
             let fb = wie_core_arm::JIT_FALLBACKS.swap(0, core::sync::atomic::Ordering::Relaxed);
+            // The calls the JIT answered without an SVC, which the SVC rate no
+            // longer counts.
+            let intrinsics = wie_core_arm::INTRINSIC_CALLS.swap(0, core::sync::atomic::Ordering::Relaxed);
+            let intrinsics_per_s = intrinsics as f64 * 1000.0 / dt_ms as f64;
             let svc_per_s = svc as f64 * 1000.0 / dt_ms as f64;
             let runs_per_s = runs as f64 * 1000.0 / dt_ms as f64;
             let fb_per_s = fb as f64 * 1000.0 / dt_ms as f64;
@@ -997,7 +1001,7 @@ impl Emulator for LgtEmulator {
             let live_threads = wie_core_arm::LIVE_THREADS.load(core::sync::atomic::Ordering::Relaxed);
             let peak_threads = wie_core_arm::PEAK_THREADS.load(core::sync::atomic::Ordering::Relaxed);
             tracing::info!(
-                "[perf] {mips:.1} MIPS, {tps:.1} tick/s, {svc_per_s:.0} svc/s, {runs_per_s:.0} run/s, {fb_per_s:.0} fallback/s, threads={live_threads} (peak {peak_threads}) ({executed} insn / {ticks} ticks in {dt_ms} ms)"
+                "[perf] {mips:.1} MIPS, {tps:.1} tick/s, {svc_per_s:.0} svc/s, {intrinsics_per_s:.0} intrinsic/s, {runs_per_s:.0} run/s, {fb_per_s:.0} fallback/s, threads={live_threads} (peak {peak_threads}) ({executed} insn / {ticks} ticks in {dt_ms} ms)"
             );
             report_hot_regions();
             report_hot_svc(dt_ms);

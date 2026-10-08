@@ -19,7 +19,7 @@
 //! construction and merely faster on the hot paths. Correctness is pinned by
 //! differential tests against `Arm32CpuEngine`.
 
-use alloc::{boxed::Box, format};
+use alloc::{boxed::Box, collections::BTreeMap, format};
 
 use arm32_cpu::{Cpu, Mode, reg, util::bit::BitUtilExt};
 
@@ -27,7 +27,7 @@ use wie_util::{Result, WieError};
 
 use super::arm32_cpu::EmulatedMemory;
 use super::fast::{Decoded, FastOp, decode, ends_trace};
-use crate::engine::{ArmEngine, ArmRegister, EngineRunResult, MemoryPermission};
+use crate::engine::{ArmEngine, ArmRegister, EngineRunResult, MemoryIntrinsic, MemoryPermission};
 
 mod arm_frontend;
 use arm_frontend::{ArmOp, arm_ends_trace, decode_arm};
@@ -239,6 +239,9 @@ pub struct JitEngine {
     /// so when `arm-mode` dominates the profile this names the exact ARM op class
     /// the compiler should learn next (e.g. halfword transfers, multiply).
     arm_decline_hist: [u64; NUM_ARM_DECLINE],
+    /// The `svc`s this engine answers itself, by address. See
+    /// [`JitEngine::run_intrinsic`].
+    intrinsics: BTreeMap<u32, MemoryIntrinsic>,
 }
 
 /// ARM decline reasons, ordered to match [`arm_decline_category`].
@@ -314,6 +317,7 @@ impl JitEngine {
             fallback_total: 0,
             other_hist: [0; 256],
             arm_decline_hist: [0; NUM_ARM_DECLINE],
+            intrinsics: BTreeMap::new(),
             smc_flushes: 0,
             smc_invalidations: 0,
         }
@@ -752,6 +756,62 @@ impl JitEngine {
         }
     }
 
+    /// Answers an intrinsic `svc` from the registers its stub was entered with -
+    /// `r0` the destination, `r1` the source or the fill byte, `r2` the length -
+    /// the way the platform's handler for it would, and says whether it did.
+    ///
+    /// The copy goes a chunk at a time through the same size of buffer as
+    /// [`crate::stdlib::mem_copy`], so a `memcpy` over ranges that overlap
+    /// comes out exactly as it does there. A range that is not wholly mapped is
+    /// left alone, for the handler to report the way it always has; checking
+    /// before writing anything means a declined call has not half happened.
+    fn run_intrinsic(&mut self, kind: MemoryIntrinsic) -> bool {
+        use crate::stdlib::COPY_CHUNK;
+
+        let [dst, source, len] = [self.ctx.regs[0], self.ctx.regs[1], self.ctx.regs[2]];
+        if len == 0 {
+            return true;
+        }
+
+        let mapped = |mem: &EmulatedMemory, address: u32| address.checked_add(len).is_some() && mem.is_mapped(address, len as usize);
+        if !mapped(&self.mem, dst) || (kind != MemoryIntrinsic::Set && !mapped(&self.mem, source)) {
+            return false;
+        }
+
+        let mut buf = [0u8; COPY_CHUNK];
+        match kind {
+            MemoryIntrinsic::Set => {
+                buf.fill(source as u8);
+                let mut done = 0;
+                while done < len {
+                    let chunk = ((len - done) as usize).min(COPY_CHUNK);
+                    // Mapped, as checked above, so these cannot fail.
+                    let _ = self.mem.write_range(dst + done, &buf[..chunk]);
+                    done += chunk as u32;
+                }
+            }
+            MemoryIntrinsic::Copy | MemoryIntrinsic::Move => {
+                // Only `memmove` with the destination inside the source runs
+                // from the back, as `crate::stdlib::mem_move` does.
+                let backwards = kind == MemoryIntrinsic::Move && dst > source && dst - source < len;
+                let mut done = 0;
+                while done < len {
+                    let chunk = ((len - done) as usize).min(COPY_CHUNK);
+                    let offset = if backwards { len - done - chunk as u32 } else { done };
+                    let _ = self.mem.read_range(source + offset, chunk, &mut buf[..chunk]);
+                    let _ = self.mem.write_range(dst + offset, &buf[..chunk]);
+                    done += chunk as u32;
+                }
+            }
+        }
+
+        // A write over compiled code drops it, as any host-side write does.
+        self.invalidate_range(dst, len as usize);
+        crate::INTRINSIC_CALLS.fetch_add(1, ::core::sync::atomic::Ordering::Relaxed);
+
+        true
+    }
+
     fn read_svc_result(&mut self) -> Result<EngineRunResult> {
         let lr = self.cpu.reg_get(Mode::Supervisor, reg::LR);
         let spsr = self.cpu.reg_get(Mode::Supervisor, reg::SPSR);
@@ -972,6 +1032,17 @@ impl ArmEngine for JitEngine {
                 if let Some(hw) = self.mem.load_u16(pc)
                     && hw & 0xff00 == 0xdf00
                 {
+                    // A call this engine answers itself carries on at the stub's
+                    // `bx lr`, without leaving `run`.
+                    if let Some(&kind) = self.intrinsics.get(&pc)
+                        && self.run_intrinsic(kind)
+                    {
+                        self.ctx.regs[15] = pc.wrapping_add(2);
+                        batch.0 += 1;
+                        budget = budget.saturating_sub(1);
+                        continue;
+                    }
+
                     self.store_back(mode);
                     return Ok(EngineRunResult::Svc {
                         category: (hw & 0xff) as u32,
@@ -1040,6 +1111,10 @@ impl ArmEngine for JitEngine {
 
     fn is_mapped(&self, address: u32, size: usize) -> bool {
         self.mem.is_mapped(address, size)
+    }
+
+    fn set_svc_intrinsic(&mut self, svc_address: u32, kind: MemoryIntrinsic) {
+        self.intrinsics.insert(svc_address, kind);
     }
 }
 
@@ -1274,7 +1349,7 @@ mod tests {
 
     use super::super::fast::{Decoded, decode};
     use super::JitEngine;
-    use crate::engine::{Arm32CpuEngine, ArmEngine, ArmRegister, EngineRunResult, MemoryPermission};
+    use crate::engine::{Arm32CpuEngine, ArmEngine, ArmRegister, EngineRunResult, MemoryIntrinsic, MemoryPermission};
 
     const CODE: u32 = 0x1000;
     const DATA: u32 = 0x0010_0000;
@@ -1638,6 +1713,93 @@ mod tests {
         }
         // The op before the SVC is retired and its result visible to the handler.
         assert_eq!(e.reg_read(ArmRegister::R0), 7);
+    }
+
+    /// Runs `code` to `end` on the JIT, failing on anything but reaching it.
+    fn run_to_end(e: &mut JitEngine, end: u32) {
+        loop {
+            match e.run(end, 1_000_000) {
+                Ok(EngineRunResult::CountExhausted) => continue,
+                Ok(EngineRunResult::End) => return,
+                Ok(EngineRunResult::Svc { category, .. }) => panic!("svc {category:#x} left the engine"),
+                Err(error) => panic!("{error:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn an_intrinsic_svc_is_answered_without_leaving_run() {
+        // CODE+0: svc #5; CODE+2: movs r3, #9; CODE+4: b . to CODE+6 = end.
+        let code = thumb(&[0xdf05, 0x2309, B_NEXT]);
+        let mut regs = [0u32; 15];
+        regs[0] = DATA + 0x100;
+        regs[1] = DATA;
+        regs[2] = 6;
+        regs[13] = DATA + 0x8000;
+        let mut e = setup(JitEngine::new(), &code, &regs);
+        e.mem_write(DATA, &[1, 2, 3, 4, 5, 6, 7]).unwrap();
+        e.set_svc_intrinsic(CODE, MemoryIntrinsic::Copy);
+
+        run_to_end(&mut e, CODE + 6);
+
+        let mut copied = [0u8; 7];
+        e.mem_read(DATA + 0x100, 7, &mut copied).unwrap();
+        assert_eq!(copied, [1, 2, 3, 4, 5, 6, 0]);
+        // It went on past the svc, with the destination still in r0.
+        assert_eq!(e.reg_read(ArmRegister::R3), 9);
+        assert_eq!(e.reg_read(ArmRegister::R0), DATA + 0x100);
+    }
+
+    #[test]
+    fn memset_and_memmove_intrinsics_match_the_library_routines() {
+        let code = thumb(&[0xdf05, B_NEXT]);
+
+        // memset fills with the low byte of r1.
+        let mut regs = [0u32; 15];
+        regs[0] = DATA + 0x10;
+        regs[1] = 0x1ab;
+        regs[2] = 3;
+        regs[13] = DATA + 0x8000;
+        let mut e = setup(JitEngine::new(), &code, &regs);
+        e.set_svc_intrinsic(CODE, MemoryIntrinsic::Set);
+        run_to_end(&mut e, CODE + 4);
+        let mut filled = [0u8; 4];
+        e.mem_read(DATA + 0x10, 4, &mut filled).unwrap();
+        assert_eq!(filled, [0xab, 0xab, 0xab, 0]);
+
+        // memmove with the destination inside the source copies from the back.
+        let mut regs = [0u32; 15];
+        regs[0] = DATA + 2;
+        regs[1] = DATA;
+        regs[2] = 4;
+        regs[13] = DATA + 0x8000;
+        let mut e = setup(JitEngine::new(), &code, &regs);
+        e.mem_write(DATA, &[1, 2, 3, 4, 5, 6]).unwrap();
+        e.set_svc_intrinsic(CODE, MemoryIntrinsic::Move);
+        run_to_end(&mut e, CODE + 4);
+        let mut moved = [0u8; 6];
+        e.mem_read(DATA, 6, &mut moved).unwrap();
+        assert_eq!(moved, [1, 2, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn an_intrinsic_over_unmapped_memory_is_left_to_the_handler() {
+        let code = thumb(&[0xdf05, B_NEXT]);
+        let mut regs = [0u32; 15];
+        regs[0] = 0x5000_0000; // unmapped
+        regs[1] = DATA;
+        regs[2] = 4;
+        regs[13] = DATA + 0x8000;
+        let mut e = setup(JitEngine::new(), &code, &regs);
+        e.set_svc_intrinsic(CODE, MemoryIntrinsic::Copy);
+
+        match e.run(CODE + 4, 1_000_000) {
+            Ok(EngineRunResult::Svc { category, lr, .. }) => {
+                assert_eq!(category, 5);
+                assert_eq!(lr, CODE + 2);
+            }
+            _ => panic!("expected the svc to reach the handler"),
+        }
     }
 
     // `0xe7ff` is `b .` to the following halfword: a trailing one gives a trace a

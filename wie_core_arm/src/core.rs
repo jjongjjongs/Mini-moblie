@@ -41,7 +41,12 @@ pub const RUN_FUNCTION_LR: u32 = 0x7f000000;
 /// (Zenonia runs ~92k `run` calls a second, a third of them budget-exhaustion
 /// re-entries) paid a register save/restore and lock cycle for each. Larger
 /// batches collapse those without changing when a run actually stops.
-const RUN_INSTRUCTION_BUDGET: u32 = 8000;
+///
+/// 8000 still made a JIT running 160 million instructions a second come back
+/// out twenty thousand times for nothing - 영웅서기4 at its 고객정보활용동의
+/// screen did, three times as often as for every platform call it made once
+/// `memcpy` stopped being one. A million leaves a few a second.
+const RUN_INSTRUCTION_BUDGET: u32 = 1_000_000;
 pub const HEAP_BASE: u32 = 0x40000000;
 pub const HEAP_SIZE: u32 = 0x10000000;
 
@@ -827,6 +832,28 @@ impl ArmCore {
         tracing::trace!("Register SVC stub at {address:#x}, category={category}, id={id}");
 
         Ok(thumb_address)
+    }
+
+    /// [`Self::make_svc_stub`] for a call whose whole effect is `kind`, so an
+    /// engine that can answer it itself does, without the round trip out of
+    /// `run` and back that every other platform call costs.
+    ///
+    /// That round trip is the price of a small copy. 영웅서기4 calls `memcpy`
+    /// a quarter of a million times a second while it draws, nearly all of them
+    /// for four bytes or fewer, and each one left the compiled code, went
+    /// through the platform's dispatch and came back in again - which cost far
+    /// more than the copy.
+    ///
+    /// The stub is still a real one, and the handler registered for its
+    /// category still answers it under an engine that does not do this.
+    pub fn make_intrinsic_svc_stub(&mut self, category: u32, id: impl Into<u32>, kind: crate::engine::MemoryIntrinsic) -> Result<u32> {
+        let stub = self.make_svc_stub(category, id)?;
+
+        // The `svc` sits after the four instructions that load the id.
+        const SVC_OFFSET: u32 = 8;
+        self.inner.lock().engine.set_svc_intrinsic((stub & !1) + SVC_OFFSET, kind);
+
+        Ok(stub)
     }
 
     /// The category and id behind the stub at `address`, when `address` is one
