@@ -791,6 +791,21 @@ impl JitEngine {
                 let pixel = (((dst as u8 as u32) >> 3) << 11) | (((source as u8 as u32) >> 2) << 5) | ((len as u8 as u32) >> 3);
                 Some(Some(pixel))
             }
+            SvcIntrinsic::Rgb565Unpack => {
+                let pointers = [source, len, self.ctx.regs[3]];
+                if !pointers.iter().all(|&at| at.checked_add(4).is_some() && self.mem.is_mapped(at, 4)) {
+                    return false;
+                }
+
+                let raw = dst & 0xffff;
+                let components = [((raw >> 11) & 0x1f, 31), ((raw >> 5) & 0x3f, 63), (raw & 0x1f, 31)];
+                for (&at, (value, max)) in pointers.iter().zip(components) {
+                    let _ = self.mem.write_range(at, &((value * 255 + max / 2) / max).to_le_bytes());
+                    self.invalidate_range(at, 4);
+                }
+
+                Some(Some(dst))
+            }
             SvcIntrinsic::FramebufferPointer { screen_at, rows_at, if_null } => Some(if dst == 0 {
                 Some(if_null)
             } else {
@@ -829,13 +844,26 @@ impl JitEngine {
             return false;
         }
 
-        let mut buf = [0u8; COPY_CHUNK];
+        // Nearly every call is a few bytes, and clearing a whole chunk's buffer
+        // for each of those cost more than the copy did: a small one goes
+        // through a small buffer. One chunk either way, so the result is the
+        // same.
+        const SMALL: usize = 64;
+        let mut small = [0u8; SMALL];
+        let mut large;
+        let buf: &mut [u8] = if len as usize <= SMALL {
+            &mut small
+        } else {
+            large = [0u8; COPY_CHUNK];
+            &mut large
+        };
+        let chunk_size = buf.len();
         match kind {
             SvcIntrinsic::Set => {
                 buf.fill(source as u8);
                 let mut done = 0;
                 while done < len {
-                    let chunk = ((len - done) as usize).min(COPY_CHUNK);
+                    let chunk = ((len - done) as usize).min(chunk_size);
                     // Mapped, as checked above, so these cannot fail.
                     let _ = self.mem.write_range(dst + done, &buf[..chunk]);
                     done += chunk as u32;
@@ -847,7 +875,7 @@ impl JitEngine {
                 let backwards = kind == SvcIntrinsic::Move && dst > source && dst - source < len;
                 let mut done = 0;
                 while done < len {
-                    let chunk = ((len - done) as usize).min(COPY_CHUNK);
+                    let chunk = ((len - done) as usize).min(chunk_size);
                     let offset = if backwards { len - done - chunk as u32 } else { done };
                     let _ = self.mem.read_range(source + offset, chunk, &mut buf[..chunk]);
                     let _ = self.mem.write_range(dst + offset, &buf[..chunk]);
@@ -1177,6 +1205,8 @@ impl ArmEngine for JitEngine {
 
 /// Evaluate an ARM condition code against CPSR, reusing the interpreter's exact
 /// logic so compiled conditional branches match bit-for-bit.
+// The AArch64 backend tests conditions with the host's own flags.
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
 pub(crate) extern "C" fn jit_cond_met(cond: u32, cpsr: u32) -> u32 {
     arm32_cpu::util::arm::cond_met(cond, cpsr) as u32
 }
@@ -1766,6 +1796,49 @@ mod tests {
         assert_eq!(e.reg_read(ArmRegister::R0), 7);
     }
 
+    /// Operand pairs whose `cmp` leaves every combination of N, Z, C and V that
+    /// a subtraction can.
+    const FLAG_PAIRS: [(u32, u32); 7] = [
+        (0, 0),
+        (1, 0),
+        (0, 1),
+        (0x8000_0000, 1),
+        (0x7fff_ffff, 0xffff_ffff),
+        (0x8000_0000, 0x8000_0000),
+        (5, 3),
+    ];
+
+    #[test]
+    fn every_thumb_condition_branches_as_the_interpreter_does() {
+        for cond in 0..14u16 {
+            // cmp r0, r1; b<cond> +8; movs r2,#1; b +10; movs r2,#2; b . to the end.
+            let code = thumb(&[0x4288, 0xd001 | (cond << 8), 0x2201, 0xe000, 0x2202, B_NEXT]);
+            for (left, right) in FLAG_PAIRS {
+                let mut regs = [0u32; 15];
+                regs[0] = left;
+                regs[1] = right;
+                regs[13] = DATA + 0x8000;
+                assert_same(&code, &regs, CODE + 12);
+            }
+        }
+    }
+
+    #[test]
+    fn every_arm_condition_executes_as_the_interpreter_does() {
+        for cond in 0..14u32 {
+            // cmp r0, r1; mov<cond> r2, #1; b to the end, so the block stops
+            // there and is compiled rather than stepped.
+            let code = arm(&[0xe150_0001, (cond << 28) | 0x03a0_2001, 0xeaff_ffff]);
+            for (left, right) in FLAG_PAIRS {
+                let mut regs = [0u32; 15];
+                regs[0] = left;
+                regs[1] = right;
+                regs[13] = DATA + 0x8000;
+                assert_same_arm(&code, &regs, CODE + 12);
+            }
+        }
+    }
+
     /// Runs `code` to `end` on the JIT, failing on anything but reaching it.
     fn run_to_end(e: &mut JitEngine, end: u32) {
         loop {
@@ -1861,6 +1934,19 @@ mod tests {
         // White, and a colour whose low bits each channel drops.
         assert_eq!(answer(SvcIntrinsic::Rgb565, &[], [0xff, 0xff, 0xff]), 0xffff);
         assert_eq!(answer(SvcIntrinsic::Rgb565, &[], [0x1ff, 0x07, 0x10]), 0xf822);
+
+        // And back: r0 is kept, and each component is rounded to 0..=255.
+        let code = thumb(&[0xdf05, B_NEXT]);
+        let mut regs = [0u32; 15];
+        regs[..4].copy_from_slice(&[0xf822, DATA, DATA + 4, DATA + 8]);
+        regs[13] = DATA + 0x8000;
+        let mut e = setup(JitEngine::new(), &code, &regs);
+        e.set_svc_intrinsic(CODE, SvcIntrinsic::Rgb565Unpack);
+        run_to_end(&mut e, CODE + 4);
+        let mut unpacked = [0u8; 12];
+        e.mem_read(DATA, 12, &mut unpacked).unwrap();
+        let word = |i: usize| u32::from_le_bytes(unpacked[i * 4..i * 4 + 4].try_into().unwrap());
+        assert_eq!((e.reg_read(ArmRegister::R0), word(0), word(1), word(2)), (0xf822, 255, 4, 16));
 
         // Not the screen: the buffer as it is. The screen: less its leading rows.
         let pointer = SvcIntrinsic::FramebufferPointer {
@@ -2216,6 +2302,59 @@ mod tests {
         regs[4] = DATA + 0x400;
         regs[13] = DATA + 0x8000;
         assert_same_arm(&code, &regs, CODE + 0x14);
+    }
+
+    #[test]
+    fn jit_arm_transfers_off_the_fast_path_match_the_interpreter() {
+        // A misaligned word load rotates, byte and halfword transfers land where
+        // they should, and a store into the code's own page is checked for
+        // self-modification - every case the inline path hands to a helper,
+        // next to the ones it takes itself.
+        let code = arm(&[
+            0xe594_1001, // ldr   r1, [r4, #1]     (misaligned: rotated)
+            0xe5c4_0009, // strb  r0, [r4, #9]
+            0xe5d4_2009, // ldrb  r2, [r4, #9]
+            0xe1c4_00be, // strh  r0, [r4, #14]
+            0xe1d4_30be, // ldrh  r3, [r4, #14]
+            0xe1d4_50fe, // ldrsh r5, [r4, #14]
+            0xe585_0000, // str   r0, [r5]          (r5 -> the code page)
+            0xe594_6000, // ldr   r6, [r4]
+            B_NEXT_ARM,
+        ]);
+        let mut regs = [0u32; 15];
+        regs[0] = 0x8765_43a1;
+        regs[4] = DATA + 0x400;
+        regs[13] = DATA + 0x8000;
+        assert_same_arm(&code, &regs, CODE + 0x24);
+
+        // The store into the code page, with r5 pointing there from the start.
+        let code = arm(&[0xe585_0000, 0xe1a0_0000, B_NEXT_ARM]);
+        let mut regs = [0u32; 15];
+        regs[0] = 0xe1a0_0000;
+        regs[5] = CODE + 0x400;
+        regs[13] = DATA + 0x8000;
+        assert_same_arm(&code, &regs, CODE + 0xc);
+    }
+
+    #[test]
+    fn every_arm_immediate_shift_and_its_carry_match_the_interpreter() {
+        for ty in 0..4u32 {
+            for amount in [0u32, 1, 2, 15, 31] {
+                // cmp r3, r4 (to set the carry going in); movs r2, r1, <ty> #amount;
+                // b to the end.
+                let code = arm(&[0xe153_0004, 0xe1b0_2001 | (amount << 7) | (ty << 5), 0xeaff_ffff]);
+                for value in [0x8000_0001u32, 0x7fff_fffe, 0, 0xffff_ffff] {
+                    for (left, right) in [(1u32, 0u32), (0, 1)] {
+                        let mut regs = [0u32; 15];
+                        regs[1] = value;
+                        regs[3] = left;
+                        regs[4] = right;
+                        regs[13] = DATA + 0x8000;
+                        assert_same_arm(&code, &regs, CODE + 12);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

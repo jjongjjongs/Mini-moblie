@@ -5,7 +5,7 @@ use wipi_types::{
     wipic::WIPICWord,
 };
 
-use wie_core_arm::ArmCore;
+use wie_core_arm::{ArmCore, SvcIntrinsic};
 use wie_util::{Result, WieError};
 use wie_wipi_c::{
     MethodImpl, WIPICContext, WIPICMethodBody,
@@ -169,8 +169,19 @@ pub fn get_graphics_interface(core: &mut ArmCore) -> Result<WIPICGraphicsInterfa
         get_rgb_pixels: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::GetRgbPixels))?,
         set_rgb_pixels: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::SetRgbPixels))?,
         flush_lcd: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::FlushLcd))?,
-        get_pixel_from_rgb: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::GetPixelFromRgb))?,
-        get_rgb_from_pixel: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::GetRgbFromPixel))?,
+        // Both are arithmetic, and the calls a title makes per pixel, so an
+        // engine that can answer them without leaving compiled code does - with
+        // what `try_fast_wipic_call` answers.
+        get_pixel_from_rgb: core.make_intrinsic_svc_stub(
+            SVC_CATEGORY_WIPIC,
+            table_id.function_id(WIPICGraphicsMethodId::GetPixelFromRgb),
+            SvcIntrinsic::Rgb565,
+        )?,
+        get_rgb_from_pixel: core.make_intrinsic_svc_stub(
+            SVC_CATEGORY_WIPIC,
+            table_id.function_id(WIPICGraphicsMethodId::GetRgbFromPixel),
+            SvcIntrinsic::Rgb565Unpack,
+        )?,
         get_display_info: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::GetDisplayInfo))?,
         repaint: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::Repaint))?,
         get_font: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::GetFont))?,

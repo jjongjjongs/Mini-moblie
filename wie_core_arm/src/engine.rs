@@ -36,6 +36,10 @@ pub enum SvcIntrinsic {
     Field { offset: u32, if_null: u32 },
     /// An RGB565 pixel from the low bytes of `r0`, `r1` and `r2`.
     Rgb565,
+    /// The inverse: the RGB565 pixel in `r0`'s low half spread over 0..=255
+    /// per component, rounding to nearest, and written as words through `r1`,
+    /// `r2` and `r3`. `r0` is the answer as it was.
+    Rgb565Unpack,
     /// The pixel pointer of the framebuffer at `r0` - the word at `+0x10` -
     /// less the rows in front of it when it is the screen: when the word at
     /// `screen_at` is `r0`, the word at `rows_at` times its bytes per line

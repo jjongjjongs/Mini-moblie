@@ -2,9 +2,9 @@
 //!
 //! A faithful mirror of the x86-64 backend (`x64.rs`): same trace/linking/budget
 //! structure and the same instruction *selection* (via the shared `decode`
-//! frontend), only the *encoding* differs. It is deliberately kept simple —
-//! every conditional branch calls the interpreter's `cond_met` rather than
-//! inlining flag tests. Its correctness is pinned by the same differential
+//! frontend), only the *encoding* differs. A guest condition is tested with the
+//! host's own: the guest CPSR goes into NZCV, whose bits and condition numbering
+//! are ARM's, and a `b.<cond>` does the rest. Its correctness is pinned by the same differential
 //! tests (`engine::jit::tests`), which pass on AArch64 hardware and under
 //! `qemu-aarch64`:
 //!
@@ -27,10 +27,7 @@ use dynasmrt::{AssemblyOffset, DynamicLabel, DynasmApi, DynasmLabelApi, Executab
 use crate::engine::fast::{FastOp, ends_trace};
 
 use super::arm_frontend::{ArmOp, Off, Op2, arm_ends_trace};
-use super::{
-    JitCtx, exit, jit_alu_shift, jit_arm_multiply, jit_arm_shift, jit_cond_met, jit_load8, jit_load16, jit_load32, jit_store8, jit_store16,
-    jit_store32,
-};
+use super::{JitCtx, exit, jit_alu_shift, jit_arm_multiply, jit_arm_shift, jit_load8, jit_load16, jit_load32, jit_store8, jit_store16, jit_store32};
 
 /// `dynasm!` selects the target architecture per invocation, defaulting to x64;
 /// this wrapper prepends `.arch aarch64` so every code-emitting helper assembles
@@ -61,6 +58,8 @@ const FAULTED: u32 = 72;
 const SMC: u32 = 76;
 const BUDGET: u32 = 96;
 const SCRATCH: u32 = 100;
+/// Offset of `JitCtx::code_pages` (the per-4 KiB "holds compiled code" flags).
+const CODE_PAGES: u32 = 88;
 /// Offset of `JitCtx::pages` (base of the guest page table).
 const PAGES: u32 = 104;
 
@@ -201,15 +200,11 @@ pub(crate) fn compile_block(ops: &[FastOp], start_pc: u32) -> Option<(Code, usiz
             FastOp::CondBranch { cond, target, next } => {
                 let _ = next;
                 let cond = cond as u32;
-                a64!(a
-                    ; movz w0, #cond
-                    ; ldr w1, [x19, #CPSR]
-                );
-                emit_call(&mut a, jit_cond_met as *const () as u64);
+                emit_guest_flags(&mut a);
                 if in_range(target) {
-                    a64!(a ; cbnz w0, => *labels.get(&target).unwrap());
+                    emit_bcond_to(&mut a, cond, *labels.get(&target).unwrap());
                 } else {
-                    a64!(a ; cbz w0, >notaken);
+                    emit_bcond_notaken(&mut a, cond ^ 1);
                     mov_imm32!(a, w10, target);
                     a64!(a
                         ; str w10, [x19, #PC]
@@ -319,39 +314,93 @@ pub(crate) fn compile_arm_block(ops: &[ArmOp], start_pc: u32) -> Option<(Code, u
     Some((Code { buf, entry }, limit))
 }
 
+/// Loads the guest's flags into the host's own.
+///
+/// AArch64 keeps N, Z, C and V in bits 31..28 of NZCV, where ARM keeps them in
+/// CPSR, and numbers its conditions the way ARM does, so a guest condition is
+/// the host's own condition once the guest CPSR is in NZCV. Clobbers `x9` and
+/// the host flags, which nothing compiled keeps live across a guest branch.
+fn emit_guest_flags(a: &mut Asm) {
+    // `msr nzcv, x9`: the system register is named by its encoding, op0 3,
+    // op1 3, CRn 4, CRm 2, op2 0 (0xd51b4209 with `x9`).
+    const NZCV: u32 = 0x5a10;
+    a64!(a ; ldr w9, [x19, #CPSR] ; msr NZCV, x9);
+}
+
+/// `b.<cond>` to `label`, on flags [`emit_guest_flags`] loaded. `cond` is an ARM
+/// condition below AL.
+fn emit_bcond_to(a: &mut Asm, cond: u32, label: DynamicLabel) {
+    match cond {
+        0x0 => a64!(a ; b.eq =>label),
+        0x1 => a64!(a ; b.ne =>label),
+        0x2 => a64!(a ; b.hs =>label),
+        0x3 => a64!(a ; b.lo =>label),
+        0x4 => a64!(a ; b.mi =>label),
+        0x5 => a64!(a ; b.pl =>label),
+        0x6 => a64!(a ; b.vs =>label),
+        0x7 => a64!(a ; b.vc =>label),
+        0x8 => a64!(a ; b.hi =>label),
+        0x9 => a64!(a ; b.ls =>label),
+        0xa => a64!(a ; b.ge =>label),
+        0xb => a64!(a ; b.lt =>label),
+        0xc => a64!(a ; b.gt =>label),
+        _ => a64!(a ; b.le =>label),
+    }
+}
+
+/// `b.<cond>` forward to the next `notaken:`.
+fn emit_bcond_notaken(a: &mut Asm, cond: u32) {
+    match cond {
+        0x0 => a64!(a ; b.eq >notaken),
+        0x1 => a64!(a ; b.ne >notaken),
+        0x2 => a64!(a ; b.hs >notaken),
+        0x3 => a64!(a ; b.lo >notaken),
+        0x4 => a64!(a ; b.mi >notaken),
+        0x5 => a64!(a ; b.pl >notaken),
+        0x6 => a64!(a ; b.vs >notaken),
+        0x7 => a64!(a ; b.vc >notaken),
+        0x8 => a64!(a ; b.hi >notaken),
+        0x9 => a64!(a ; b.ls >notaken),
+        0xa => a64!(a ; b.ge >notaken),
+        0xb => a64!(a ; b.lt >notaken),
+        0xc => a64!(a ; b.gt >notaken),
+        _ => a64!(a ; b.le >notaken),
+    }
+}
+
+/// `b.<cond>` forward to the next `skip:`.
+fn emit_bcond_skip(a: &mut Asm, cond: u32) {
+    match cond {
+        0x0 => a64!(a ; b.eq >skip),
+        0x1 => a64!(a ; b.ne >skip),
+        0x2 => a64!(a ; b.hs >skip),
+        0x3 => a64!(a ; b.lo >skip),
+        0x4 => a64!(a ; b.mi >skip),
+        0x5 => a64!(a ; b.pl >skip),
+        0x6 => a64!(a ; b.vs >skip),
+        0x7 => a64!(a ; b.vc >skip),
+        0x8 => a64!(a ; b.hi >skip),
+        0x9 => a64!(a ; b.ls >skip),
+        0xa => a64!(a ; b.ge >skip),
+        0xb => a64!(a ; b.lt >skip),
+        0xc => a64!(a ; b.gt >skip),
+        _ => a64!(a ; b.le >skip),
+    }
+}
+
 /// Emit a guard that branches to `>skip` when `cond` is not met. Returns whether
 /// a guard was emitted (AL needs none).
 fn emit_arm_guard(a: &mut Asm, cond: u8) -> bool {
-    // (bit, take_when_set)
-    let single: Option<(u32, bool)> = match cond {
-        0x0 => Some((30, true)),
-        0x1 => Some((30, false)),
-        0x2 => Some((29, true)),
-        0x3 => Some((29, false)),
-        0x4 => Some((31, true)),
-        0x5 => Some((31, false)),
-        0x6 => Some((28, true)),
-        0x7 => Some((28, false)),
-        _ => None,
-    };
-    match single {
-        Some((bit, take_when_set)) => {
-            a64!(a ; ldr w9, [x19, #CPSR]);
-            if take_when_set {
-                a64!(a ; tbz w9, #bit, >skip);
-            } else {
-                a64!(a ; tbnz w9, #bit, >skip);
-            }
-            true
-        }
-        None if cond >= 0xe => false,
-        None => {
-            a64!(a ; movz w0, #cond as u32 ; ldr w1, [x19, #CPSR]);
-            emit_call(a, jit_cond_met as *const () as u64);
-            a64!(a ; cbz w0, >skip);
-            true
-        }
+    if cond >= 0xe {
+        return false;
     }
+
+    // Skip on the inverse, which for every ARM condition below AL is the one
+    // with its low bit flipped.
+    emit_guest_flags(a);
+    emit_bcond_skip(a, cond as u32 ^ 1);
+
+    true
 }
 
 /// operand2 -> value in `w10`, shifter carry in `w11`.
@@ -367,6 +416,28 @@ fn emit_arm_op2(a: &mut Asm, op2: Op2) {
 }
 
 fn emit_arm_shift_call(a: &mut Asm, rm: u8, ty: u8, amount_imm: u32, reg_shift: bool, rs: Option<u8>) {
+    // A shift by an immediate is known here, and every one but the three
+    // amount-0 encodings that mean something else (LSR #32, ASR #32, RRX) is a
+    // single host instruction and a bit of the operand for its carry - the
+    // interpreter's `shift_*` exactly.
+    if !reg_shift && (amount_imm != 0 || ty == 0) {
+        let n = amount_imm;
+        // Where the carry comes from: the last bit shifted out.
+        let out_left = 32 - n;
+        let out_right = n.wrapping_sub(1);
+        a64!(a ; ldr w0, [x19, #ro(rm)]);
+        match (ty, n) {
+            // LSL #0: the register as it is, and the carry unchanged.
+            (0, 0) => a64!(a ; mov w10, w0 ; ldr w11, [x19, #CPSR] ; lsr w11, w11, #29),
+            (0, _) => a64!(a ; lsl w10, w0, #n ; lsr w11, w0, #out_left),
+            (1, _) => a64!(a ; lsr w10, w0, #n ; lsr w11, w0, #out_right),
+            (2, _) => a64!(a ; asr w10, w0, #n ; lsr w11, w0, #out_right),
+            _ => a64!(a ; ror w10, w0, #n ; lsr w11, w0, #out_right),
+        }
+        a64!(a ; and w11, w11, #1);
+        return;
+    }
+
     a64!(a ; ldr w0, [x19, #ro(rm)] ; movz w1, #ty as u32);
     if let Some(rs) = rs {
         a64!(a ; ldr w2, [x19, #ro(rs)] ; and w2, w2, #0xff);
@@ -521,8 +592,7 @@ fn emit_arm_load_store(a: &mut Asm, op: &ArmOp, pc: u32) {
         if do_wb {
             a64!(a ; str w10, [x19, #ro(rn)]);
         }
-        a64!(a ; mov x0, x19);
-        emit_call(a, if byte { jit_load8 } else { jit_load32 } as *const () as u64);
+        emit_guest_load(a, if byte { 8 } else { 32 });
         a64!(a
             ; str w0, [x19, #ro(rd)]
             ; ldr w9, [x19, #FAULTED]
@@ -535,8 +605,7 @@ fn emit_arm_load_store(a: &mut Asm, op: &ArmOp, pc: u32) {
         if do_wb {
             a64!(a ; str w10, [x19, #ro(rn)]);
         }
-        a64!(a ; mov x0, x19);
-        emit_call(a, if byte { jit_store8 } else { jit_store32 } as *const () as u64);
+        emit_guest_store(a, if byte { 8 } else { 32 });
         a64!(a ; ldr w9, [x19, #FAULTED] ; cbz w9, >nofault);
         mov_imm32!(a, w12, pc.wrapping_add(4));
         a64!(a ; str w12, [x19, #PC] ; movz w0, #exit::FAULT ; b ->epilogue ; nofault:);
@@ -547,6 +616,85 @@ fn emit_arm_load_store(a: &mut Asm, op: &ArmOp, pc: u32) {
     if guarded {
         a64!(a ; skip:);
     }
+}
+
+/// A guest load of `size` bits from the address in `w1`, zero-extended into
+/// `w0`, through the inline fast path where it can: a mapped, naturally
+/// aligned access reads the guest page directly. Anything else - unmapped,
+/// misaligned - calls the helper, which reproduces the fault and the rotate
+/// exactly. Clobbers `x0`, `x9`, `x10` and the caller-saved registers a call
+/// does.
+fn emit_guest_load(a: &mut Asm, size: u8) {
+    let helper = match size {
+        8 => jit_load8 as *const () as u64,
+        16 => jit_load16 as *const () as u64,
+        _ => jit_load32 as *const () as u64,
+    };
+    a64!(a
+        ; mov x0, x19
+        ; lsr w9, w1, #16
+        ; lsl w9, w9, #3
+        ; ldr x10, [x19, #PAGES]
+        ; ldr x10, [x10, w9, uxtw]
+        ; cbz x10, >slow
+    );
+    match size {
+        16 => a64!(a ; tst w1, #1 ; b.ne >slow),
+        32 => a64!(a ; tst w1, #3 ; b.ne >slow),
+        _ => {}
+    }
+    a64!(a ; and w9, w1, #0xffff);
+    match size {
+        8 => a64!(a ; ldrb w0, [x10, w9, uxtw]),
+        16 => a64!(a ; ldrh w0, [x10, w9, uxtw]),
+        _ => a64!(a ; ldr w0, [x10, w9, uxtw]),
+    }
+    a64!(a ; b >done ; slow:);
+    emit_call(a, helper);
+    a64!(a ; done:);
+}
+
+/// A guest store of `size` bits of `w2` to the address in `w1`, through the
+/// inline fast path where it can: a mapped, naturally aligned store to a page
+/// holding no compiled code writes the guest page directly, and can neither
+/// fault nor be self-modifying. Anything else calls the helper, which does the
+/// masking, the fault and the SMC bookkeeping. Either way the caller's fault
+/// and SMC checks that follow read the context as before. Clobbers `x0`,
+/// `x9`..`x12` and the caller-saved registers a call does.
+fn emit_guest_store(a: &mut Asm, size: u8) {
+    let helper = match size {
+        8 => jit_store8 as *const () as u64,
+        16 => jit_store16 as *const () as u64,
+        _ => jit_store32 as *const () as u64,
+    };
+    a64!(a
+        ; mov x0, x19
+        ; lsr w9, w1, #16
+        ; lsl w9, w9, #3
+        ; ldr x10, [x19, #PAGES]
+        ; ldr x10, [x10, w9, uxtw]
+        ; cbz x10, >slow
+    );
+    match size {
+        16 => a64!(a ; tst w1, #1 ; b.ne >slow),
+        32 => a64!(a ; tst w1, #3 ; b.ne >slow),
+        _ => {}
+    }
+    a64!(a
+        ; ldr x11, [x19, #CODE_PAGES]
+        ; lsr w12, w1, #12
+        ; ldrb w12, [x11, w12, uxtw]
+        ; cbnz w12, >slow
+        ; and w9, w1, #0xffff
+    );
+    match size {
+        8 => a64!(a ; strb w2, [x10, w9, uxtw]),
+        16 => a64!(a ; strh w2, [x10, w9, uxtw]),
+        _ => a64!(a ; str w2, [x10, w9, uxtw]),
+    }
+    a64!(a ; b >done ; slow:);
+    emit_call(a, helper);
+    a64!(a ; done:);
 }
 
 fn emit_arm_half_xfer(a: &mut Asm, op: &ArmOp, pc: u32) {
@@ -603,8 +751,7 @@ fn emit_arm_half_xfer(a: &mut Asm, op: &ArmOp, pc: u32) {
         if do_wb {
             a64!(a ; str w10, [x19, #ro(rn)]);
         }
-        a64!(a ; mov x0, x19);
-        emit_call(a, if halfword { jit_load16 } else { jit_load8 } as *const () as u64);
+        emit_guest_load(a, if halfword { 16 } else { 8 });
         if signed {
             if halfword {
                 a64!(a ; sxth w0, w0);
@@ -624,8 +771,7 @@ fn emit_arm_half_xfer(a: &mut Asm, op: &ArmOp, pc: u32) {
         if do_wb {
             a64!(a ; str w10, [x19, #ro(rn)]);
         }
-        a64!(a ; mov x0, x19);
-        emit_call(a, jit_store16 as *const () as u64);
+        emit_guest_store(a, 16);
         a64!(a ; ldr w9, [x19, #FAULTED] ; cbz w9, >nofault);
         mov_imm32!(a, w12, pc.wrapping_add(4));
         a64!(a ; str w12, [x19, #PC] ; movz w0, #exit::FAULT ; b ->epilogue ; nofault:);
@@ -675,7 +821,7 @@ fn emit_arm_block_body(a: &mut Asm, op: &ArmOp, pc: u32) {
             a64!(a ; sub w1, w1, #(-off) as u32);
         }
         if load {
-            emit_call(a, jit_load32 as *const () as u64);
+            emit_guest_load(a, 32);
             a64!(a ; str w0, [x19, #ro(r)]);
         } else {
             if r == 15 {
@@ -685,7 +831,7 @@ fn emit_arm_block_body(a: &mut Asm, op: &ArmOp, pc: u32) {
             } else {
                 a64!(a ; ldr w2, [x19, #ro(r)]);
             }
-            emit_call(a, jit_store32 as *const () as u64);
+            emit_guest_store(a, 32);
         }
     }
     a64!(a ; ldr w9, [x19, #FAULTED] ; cbz w9, >nofault);
@@ -934,7 +1080,7 @@ fn emit_push_pop(a: &mut Asm, load: bool, extra: bool, rlist: u8, pc: u32) {
         for (i, &r) in regs.iter().enumerate() {
             let off = i as u32 * 4;
             a64!(a ; mov x0, x19 ; ldr w1, [x19, #ro(13)] ; add w1, w1, #off);
-            emit_call(a, jit_load32 as *const () as u64);
+            emit_guest_load(a, 32);
             if r == 15 {
                 // POP {..,pc}: T from bit 0, PC = val & !1.
                 a64!(a
@@ -958,7 +1104,7 @@ fn emit_push_pop(a: &mut Asm, load: bool, extra: bool, rlist: u8, pc: u32) {
         for (i, &r) in regs.iter().enumerate() {
             let off = total4 - i as u32 * 4; // amount subtracted from SP
             a64!(a ; mov x0, x19 ; ldr w1, [x19, #ro(13)] ; sub w1, w1, #off ; ldr w2, [x19, #ro(r)]);
-            emit_call(a, jit_store32 as *const () as u64);
+            emit_guest_store(a, 32);
         }
         a64!(a ; ldr w9, [x19, #ro(13)] ; sub w9, w9, #total4 ; str w9, [x19, #ro(13)]);
     }
@@ -998,7 +1144,7 @@ fn emit_block_xfer(a: &mut Asm, load: bool, rb: u8, rlist: u8, pc: u32) {
         let off = i as u32 * 4;
         if load {
             a64!(a ; mov x0, x19 ; ldr w1, [x19, #SCRATCH] ; add w1, w1, #off);
-            emit_call(a, jit_load32 as *const () as u64);
+            emit_guest_load(a, 32);
             a64!(a ; str w0, [x19, #ro(r)]);
         } else {
             a64!(a ; mov x0, x19 ; ldr w1, [x19, #SCRATCH] ; add w1, w1, #off);
@@ -1007,7 +1153,7 @@ fn emit_block_xfer(a: &mut Asm, load: bool, rb: u8, rlist: u8, pc: u32) {
             } else {
                 a64!(a ; ldr w2, [x19, #ro(r)]);
             }
-            emit_call(a, jit_store32 as *const () as u64);
+            emit_guest_store(a, 32);
         }
     }
     a64!(a ; ldr w9, [x19, #FAULTED] ; cbz w9, >nofault);
@@ -1341,6 +1487,36 @@ fn emit_store(a: &mut Asm, size: u8, rd: u8, addr: impl FnOnce(&mut Asm), pc: u3
     a64!(a ; mov x0, x19);
     addr(a);
     a64!(a ; ldr w2, [x19, #ro(rd)]);
+    // Inline fast path, as for loads: a mapped, naturally aligned store to a
+    // page that holds no compiled code writes the guest page directly. It can
+    // neither fault nor be self-modifying, so it skips both checks below. An
+    // unmapped page, a misaligned address or a code page takes the helper,
+    // which does the masking, the fault and the SMC bookkeeping exactly.
+    a64!(a
+        ; lsr w9, w1, #16          // 64 KiB page index
+        ; lsl w9, w9, #3           // *8 bytes per page pointer
+        ; ldr x10, [x19, #PAGES]
+        ; ldr x10, [x10, w9, uxtw] // page base (null = unmapped)
+        ; cbz x10, >slow
+    );
+    match size {
+        16 => a64!(a ; tst w1, #1 ; b.ne >slow),
+        32 => a64!(a ; tst w1, #3 ; b.ne >slow),
+        _ => {}
+    }
+    a64!(a
+        ; ldr x11, [x19, #CODE_PAGES]
+        ; lsr w12, w1, #12         // 4 KiB code-tracking page
+        ; ldrb w12, [x11, w12, uxtw]
+        ; cbnz w12, >slow
+        ; and w9, w1, #0xffff      // in-page offset
+    );
+    match size {
+        8 => a64!(a ; strb w2, [x10, w9, uxtw]),
+        16 => a64!(a ; strh w2, [x10, w9, uxtw]),
+        _ => a64!(a ; str w2, [x10, w9, uxtw]),
+    }
+    a64!(a ; b >done ; slow:);
     emit_call(a, helper);
     a64!(a ; ldr w9, [x19, #FAULTED] ; cbz w9, >nofault);
     mov_imm32!(a, w10, pc.wrapping_add(2));
@@ -1358,5 +1534,6 @@ fn emit_store(a: &mut Asm, size: u8, rd: u8, addr: impl FnOnce(&mut Asm), pc: u3
         ; movz w0, #exit::SMC
         ; b ->epilogue
         ; nosmc:
+        ; done:
     );
 }
