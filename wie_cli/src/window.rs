@@ -126,8 +126,11 @@ enum Scaler {
     Native,
     /// hq2x, hq3x, hq4x scaling.
     Hqx { scale: i8 },
-    /// Lanczos3 scaling
-    Lanczos3 { scale: f64, resizer: fast_image_resize::Resizer },
+    /// Nearest-neighbour scaling, as the Android player draws: each of the
+    /// title's pixels becomes a block of whole pixels. A smoothing filter turns
+    /// the handset's pixel fonts soft and fringed, so text looked like another
+    /// face here than on a phone.
+    Pixel { scale: f64, resizer: fast_image_resize::Resizer },
 }
 
 impl fmt::Display for Scaler {
@@ -135,7 +138,7 @@ impl fmt::Display for Scaler {
         match self {
             Scaler::Native => f.write_str("Native")?,
             Scaler::Hqx { scale } => f.write_fmt(format_args!("Hq{scale}x"))?,
-            Scaler::Lanczos3 { scale, resizer: _ } => f.write_fmt(format_args!("Lanczos3({scale})"))?,
+            Scaler::Pixel { scale, resizer: _ } => f.write_fmt(format_args!("Pixel({scale})"))?,
         }
         Ok(())
     }
@@ -145,7 +148,7 @@ impl Scaler {
     fn new(scale: f64) -> Scaler {
         match scale {
             _ if (scale - 1.0).abs() < 1e-3 => Scaler::Native,
-            _ => Scaler::Lanczos3 {
+            _ => Scaler::Pixel {
                 scale,
                 resizer: fast_image_resize::Resizer::new(),
             },
@@ -166,7 +169,7 @@ impl Scaler {
         match self {
             Scaler::Native => 1.0,
             Scaler::Hqx { scale } => *scale as f64,
-            Scaler::Lanczos3 { scale, resizer: _ } => *scale,
+            Scaler::Pixel { scale, resizer: _ } => *scale,
         }
     }
 
@@ -174,7 +177,7 @@ impl Scaler {
         match self {
             Scaler::Native => PhysicalSize::new(logical_size.width, logical_size.height),
             Scaler::Hqx { scale } => PhysicalSize::new(logical_size.width * *scale as u32, logical_size.height * *scale as u32),
-            Scaler::Lanczos3 { scale, resizer: _ } => PhysicalSize::new(
+            Scaler::Pixel { scale, resizer: _ } => PhysicalSize::new(
                 (logical_size.width as f64 * *scale).floor() as u32,
                 (logical_size.height as f64 * *scale).floor() as u32,
             ),
@@ -188,7 +191,7 @@ impl Scaler {
             Scaler::Hqx { scale } if *scale == 3 => hqx::hq3x(src.as_slice(), dst.as_mut_slice(), src_size.width as usize, src_size.height as usize),
             Scaler::Hqx { scale } if *scale == 4 => hqx::hq4x(src.as_slice(), dst.as_mut_slice(), src_size.width as usize, src_size.height as usize),
             Scaler::Hqx { scale } => panic!("invalid hqx scale factor {scale}"),
-            Scaler::Lanczos3 { scale: _, resizer } => {
+            Scaler::Pixel { scale: _, resizer } => {
                 let (_, srcarr, _) = unsafe { src.align_to::<u8>() };
                 let srcimg = fast_image_resize::images::ImageRef::new(src_size.width, src_size.height, srcarr, PixelType::U8x4).unwrap();
                 let (_, dstarr, _) = unsafe { dst.as_mut_slice().align_to_mut::<u8>() };
@@ -198,10 +201,7 @@ impl Scaler {
                         &srcimg,
                         &mut dstimg,
                         Some(&ResizeOptions {
-                            #[cfg(debug_assertions)]
                             algorithm: ResizeAlg::Nearest,
-                            #[cfg(not(debug_assertions))]
-                            algorithm: ResizeAlg::Convolution(fast_image_resize::FilterType::Lanczos3),
                             cropping: SrcCropping::None,
                             mul_div_alpha: false,
                         }),
