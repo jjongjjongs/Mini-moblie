@@ -11,6 +11,8 @@
 
 mod controls;
 mod library;
+#[cfg(test)]
+mod mockup;
 mod presets;
 mod sdl;
 mod settings;
