@@ -239,6 +239,28 @@ impl EmulatedMemory {
         Ok(())
     }
 
+    /// Sets `size` bytes from `address` to `value`, a page at a time.
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
+    pub(crate) fn fill_range(&mut self, address: u32, size: usize, value: u8) -> Result<()> {
+        let mut remaining_size = size;
+        let mut current_address = address;
+
+        while remaining_size > 0 {
+            let page_address = current_address & !PAGE_MASK;
+            let page_data = self.pages[page_address as usize / PAGE_SIZE]
+                .as_mut()
+                .ok_or(WieError::InvalidMemoryAccess(current_address))?;
+            let offset = (current_address - page_address) as usize;
+            let available_bytes = (PAGE_SIZE - offset).min(remaining_size);
+
+            page_data[offset..offset + available_bytes].fill(value);
+            remaining_size -= available_bytes;
+            current_address = current_address.wrapping_add(available_bytes as u32);
+        }
+
+        Ok(())
+    }
+
     /// Borrow the mapped 64 KiB page containing `addr`, or `None` if unmapped.
     #[inline(always)]
     fn page(&self, addr: u32) -> Option<&[u8; PAGE_SIZE]> {

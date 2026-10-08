@@ -495,10 +495,9 @@ impl FrameBuffer {
         for (row, (snap_row, drawn_row)) in snapshot.chunks_exact(bpl).zip(drawn.chunks_exact(bpl)).enumerate() {
             // The changed span within the row - nothing outside it is touched, so
             // a direct write elsewhere in the row survives.
-            let Some(first) = (0..bpl).find(|&i| snap_row[i] != drawn_row[i]) else {
+            let Some((first, last)) = changed_span(snap_row, drawn_row) else {
                 continue;
             };
-            let last = (first..bpl).rev().find(|&i| snap_row[i] != drawn_row[i]).unwrap();
             // Snap the span out to whole-pixel boundaries. A 16bpp pixel splits
             // green across its two bytes, so writing a half pixel (when only one
             // of the two bytes changed) would corrupt the colour - the green
@@ -521,6 +520,43 @@ impl FrameBuffer {
             _ => Rgb8Pixel::to_color(pixel),
         }
     }
+}
+
+/// The first and last byte at which two equal-length rows differ, if any. A
+/// flush diffs every row of the surface, so the rows are compared eight bytes
+/// at a time and only a differing word is looked into.
+fn changed_span(snapshot: &[u8], drawn: &[u8]) -> Option<(usize, usize)> {
+    const WORD: usize = 8;
+    let (snapshot_words, snapshot_tail) = snapshot.as_chunks::<WORD>();
+    let (drawn_words, drawn_tail) = drawn.as_chunks::<WORD>();
+    let diffs = || {
+        snapshot_words
+            .iter()
+            .zip(drawn_words)
+            .map(|(snapshot, drawn)| u64::from_le_bytes(*snapshot) ^ u64::from_le_bytes(*drawn))
+            .enumerate()
+    };
+    let tail = || {
+        snapshot_tail
+            .iter()
+            .zip(drawn_tail)
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(i, _)| snapshot_words.len() * WORD + i)
+    };
+
+    let first = diffs()
+        .find(|&(_, diff)| diff != 0)
+        .map(|(index, diff)| index * WORD + (diff.trailing_zeros() / 8) as usize)
+        .or_else(|| tail().next())?;
+    let last = tail().next_back().or_else(|| {
+        diffs()
+            .rev()
+            .find(|&(_, diff)| diff != 0)
+            .map(|(index, diff)| index * WORD + WORD - 1 - (diff.leading_zeros() / 8) as usize)
+    })?;
+
+    Some((first, last))
 }
 
 pub struct FramebufferCanvas<'a> {
@@ -940,6 +976,30 @@ mod test {
 
         let color = Color { a: 0xff, r: 0, g: 0, b: 0 };
         assert!(!fb.fill_rect_direct(&mut context, 0, 0, 4, 2, color).unwrap());
+    }
+
+    /// The word-wise span search finds the bytes a byte-by-byte one does, at
+    /// every length and for differences in, across and outside the words.
+    #[test]
+    fn changed_span_matches_a_byte_by_byte_search() {
+        for len in 0..40usize {
+            let snapshot: Vec<u8> = (0..len).map(|i| (i * 7) as u8).collect();
+            for first in 0..len {
+                for last in first..len {
+                    for touched in [vec![first, last], vec![first], vec![last]] {
+                        let mut drawn = snapshot.clone();
+                        for &i in &touched {
+                            drawn[i] ^= 0x5a;
+                        }
+                        let expected = (0..len)
+                            .find(|&i| snapshot[i] != drawn[i])
+                            .map(|f| (f, (0..len).rev().find(|&i| snapshot[i] != drawn[i]).unwrap()));
+                        assert_eq!(super::changed_span(&snapshot, &drawn), expected, "len {len}, touched {touched:?}");
+                    }
+                }
+            }
+            assert_eq!(super::changed_span(&snapshot, &snapshot), None);
+        }
     }
 
     #[test]

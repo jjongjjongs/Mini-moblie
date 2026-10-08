@@ -242,6 +242,9 @@ pub struct JitEngine {
     /// The `svc`s this engine answers itself, by address. See
     /// [`JitEngine::run_intrinsic`].
     intrinsics: BTreeMap<u32, SvcIntrinsic>,
+    /// What an intrinsic copy goes through, kept so a copy does not clear a
+    /// buffer first.
+    copy_buffer: Box<[u8]>,
 }
 
 /// ARM decline reasons, ordered to match [`arm_decline_category`].
@@ -318,6 +321,7 @@ impl JitEngine {
             other_hist: [0; 256],
             arm_decline_hist: [0; NUM_ARM_DECLINE],
             intrinsics: BTreeMap::new(),
+            copy_buffer: alloc::vec![0; crate::stdlib::COPY_CHUNK].into_boxed_slice(),
             smc_flushes: 0,
             smc_invalidations: 0,
         }
@@ -769,8 +773,6 @@ impl JitEngine {
     /// left alone, for the handler to report the way it always has; checking
     /// before writing anything means a declined call has not half happened.
     fn run_intrinsic(&mut self, kind: SvcIntrinsic) -> bool {
-        use crate::stdlib::COPY_CHUNK;
-
         let [dst, source, len] = [self.ctx.regs[0], self.ctx.regs[1], self.ctx.regs[2]];
 
         // A word wherever it is, aligned or not, or `None` where nothing is
@@ -844,35 +846,17 @@ impl JitEngine {
             return false;
         }
 
-        // Nearly every call is a few bytes, and clearing a whole chunk's buffer
-        // for each of those cost more than the copy did: a small one goes
-        // through a small buffer. One chunk either way, so the result is the
-        // same.
-        const SMALL: usize = 64;
-        let mut small = [0u8; SMALL];
-        let mut large;
-        let buf: &mut [u8] = if len as usize <= SMALL {
-            &mut small
-        } else {
-            large = [0u8; COPY_CHUNK];
-            &mut large
-        };
-        let chunk_size = buf.len();
         match kind {
+            // Mapped, as checked above, so this cannot fail.
             SvcIntrinsic::Set => {
-                buf.fill(source as u8);
-                let mut done = 0;
-                while done < len {
-                    let chunk = ((len - done) as usize).min(chunk_size);
-                    // Mapped, as checked above, so these cannot fail.
-                    let _ = self.mem.write_range(dst + done, &buf[..chunk]);
-                    done += chunk as u32;
-                }
+                let _ = self.mem.fill_range(dst, len as usize, source as u8);
             }
             _ => {
                 // Only `memmove` with the destination inside the source runs
                 // from the back, as `crate::stdlib::mem_move` does.
                 let backwards = kind == SvcIntrinsic::Move && dst > source && dst - source < len;
+                let buf = &mut self.copy_buffer[..];
+                let chunk_size = buf.len();
                 let mut done = 0;
                 while done < len {
                     let chunk = ((len - done) as usize).min(chunk_size);
@@ -1904,6 +1888,47 @@ mod tests {
         let mut moved = [0u8; 6];
         e.mem_read(DATA, 6, &mut moved).unwrap();
         assert_eq!(moved, [1, 2, 1, 2, 3, 4]);
+    }
+
+    /// Calls longer than a copy chunk, across a 64KiB page boundary, and
+    /// overlapping either way, leave memory as the byte-at-a-time routines do.
+    #[test]
+    fn long_intrinsic_calls_across_pages_match_the_library_routines() {
+        let code = thumb(&[0xdf05, B_NEXT]);
+        let pattern: Vec<u8> = (0..0x6000u32).map(|i| (i * 31 + i / 251) as u8).collect();
+        // Destination, source and length, all relative to DATA.
+        let cases = [
+            (SvcIntrinsic::Set, 0xfff3, 0x15a, 0x2345),
+            (SvcIntrinsic::Copy, 0xe001, 0x1_3007, 0x2ffd),
+            (SvcIntrinsic::Move, 0xf00b, 0xe000, 0x3333),
+            (SvcIntrinsic::Move, 0xe000, 0xf00b, 0x3333),
+        ];
+
+        for (kind, dst, source, len) in cases {
+            let mut regs = [0u32; 15];
+            regs[0] = DATA + dst;
+            regs[1] = if kind == SvcIntrinsic::Set { source } else { DATA + source };
+            regs[2] = len;
+            regs[13] = DATA + 0x8_0000;
+            let mut e = setup(JitEngine::new(), &code, &regs);
+            e.mem_write(DATA + 0xd000, &pattern).unwrap();
+            e.mem_write(DATA + 0x1_3000, &pattern).unwrap();
+            e.set_svc_intrinsic(CODE, kind);
+            run_to_end(&mut e, CODE + 4);
+
+            let mut expected = alloc::vec![0u8; 0x2_0000];
+            expected[0xd000..0x13000].copy_from_slice(&pattern);
+            expected[0x1_3000..0x1_9000].copy_from_slice(&pattern);
+            let (dst, source, len) = (dst as usize, source as usize, len as usize);
+            match kind {
+                SvcIntrinsic::Set => expected[dst..dst + len].fill(source as u8),
+                _ => expected.copy_within(source..source + len, dst),
+            }
+
+            let mut memory = alloc::vec![0u8; 0x2_0000];
+            e.mem_read(DATA, memory.len(), &mut memory).unwrap();
+            assert!(memory == expected, "{kind:?} {dst:#x} {source:#x} {len:#x}");
+        }
     }
 
     /// Runs one intrinsic `svc` with `regs` and hands back r0.
