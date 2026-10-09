@@ -406,9 +406,10 @@ pub(crate) async fn jb_monitor_exit(core: &mut ArmCore, jvm: &mut Jvm, ptr_insta
     }
 
     let instance: Box<dyn jvm::ClassInstance> = Box::new(JavaClassInstance::from_raw(ptr_instance, core));
-    if let Err(x) = jvm.monitor_exit(&instance).await {
-        return Err(JvmSupport::to_wie_err(jvm, x).await);
-    }
+    let handed_over = match jvm.monitor_exit_handing_over(&instance).await {
+        Ok(handed_over) => handed_over,
+        Err(x) => return Err(JvmSupport::to_wie_err(jvm, x).await),
+    };
 
     // Give whoever was waiting on this monitor a turn before carrying on.
     //
@@ -423,7 +424,19 @@ pub(crate) async fn jb_monitor_exit(core: &mut ArmCore, jvm: &mut Jvm, ptr_insta
     // A handset has two threads and a preemptive scheduler, so releasing a
     // lock is a point where the waiting thread gets to run. This is that
     // point.
-    YieldFuture::new().await;
+    //
+    // Only when someone was waiting, though. Releasing a lock nobody wants is
+    // not a point where a handset switches threads, and switching anyway
+    // hands the other threads a turn in the middle of whatever this one does
+    // next. 영웅서기2's 이어하기 hung on that: its sound loader leaves a
+    // synchronized helper and then marks its shared step field done (-1),
+    // and the yield let the main thread first set that field to the next
+    // step (3) and start the thread meant to run it - so the loader's -1
+    // landed on top of the 3, the new thread found nothing to do, and the
+    // map load the main thread was waiting for never ran.
+    if handed_over {
+        YieldFuture::new().await;
+    }
 
     Ok(0)
 }

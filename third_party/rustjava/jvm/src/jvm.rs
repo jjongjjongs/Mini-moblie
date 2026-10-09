@@ -599,9 +599,16 @@ impl Jvm {
     }
 
     pub async fn monitor_exit(&self, obj: &Box<dyn ClassInstance>) -> Result<()> {
+        self.monitor_exit_handing_over(obj).await.map(|_| ())
+    }
+
+    /// Exits `obj`'s monitor as [`Self::monitor_exit`] does, and answers whether
+    /// that released it to a thread blocked waiting to enter it - the one case
+    /// where a cooperative caller has to yield for the release to mean anything.
+    pub async fn monitor_exit_handing_over(&self, obj: &Box<dyn ClassInstance>) -> Result<bool> {
         let thread_id = (self.inner.get_current_thread_id)();
         match self.get_or_create_monitor(obj).exit(thread_id) {
-            Ok(()) => Ok(()),
+            Ok(handed_over) => Ok(handed_over),
             Err(_) => Err(self
                 .exception("java/lang/IllegalMonitorStateException", "current thread does not own the monitor")
                 .await),

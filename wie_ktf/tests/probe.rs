@@ -146,6 +146,12 @@ fn ktf_probe() {
         wie_wipi_c::api::graphics::clear_bios_font();
     }
 
+    // Branch traces and write watches, spelled as the handset's probe setting
+    // is (`pc:3a376/500,w:1518700`) - see `wie_backend::probe::set_watches`.
+    if let Ok(spec) = std::env::var("WIE_WATCH") {
+        wie_backend::probe::set_watches(&spec).expect("WIE_WATCH");
+    }
+
     let ticks_limit: u32 = std::env::var("WIE_TICKS").ok().and_then(|x| x.parse().ok()).unwrap_or(4000);
     let archive = std::fs::read(&path).expect("read archive");
     let files = extract_zip(&archive).expect("extract archive");
