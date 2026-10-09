@@ -22,6 +22,7 @@ use crate::{
 use self::{audio::Audio, event_queue::EventQueue, input_method::InputMethod};
 
 pub use self::{
+    audio::set_music_through_effects,
     event_queue::{Event, KeyCode, PointerKind, set_touch_enabled, touch_enabled},
     file_system::FilesystemOverlay,
     input_method::InputMethodOutput,

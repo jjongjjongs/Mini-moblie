@@ -200,9 +200,13 @@ pub fn speed() -> f32 {
 }
 
 /// Whether the sound plays one thing at a time - the music held back while an
-/// effect plays - rather than everything mixed together.
+/// effect plays - rather than everything together, the music playing on under
+/// the effects even when a title stops it to play them.
 pub fn set_one_sound_at_a_time(enabled: bool) {
-    let _ = std::panic::catch_unwind(AssertUnwindSafe(|| crate::audio::set_one_at_a_time(enabled)));
+    let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        crate::audio::set_one_at_a_time(enabled);
+        wie_backend::set_music_through_effects(!enabled);
+    }));
 }
 
 /// Holds the title's clock still while `held` - for a pause menu over it -

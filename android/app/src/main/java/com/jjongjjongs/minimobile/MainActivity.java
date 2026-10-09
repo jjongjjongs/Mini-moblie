@@ -4522,7 +4522,7 @@ public final class MainActivity extends Activity {
 
         // Where each sound plays along the timeline, as from-to fractions.
         float[] effects = {0.22f, 0.34f, 0.62f, 0.77f};
-        View mixed = optionCard("동시", "지금 방식", "배경음과 효과음을 함께 재생해요.", null,
+        View mixed = optionCard("동시", null, "배경음과 효과음을 함께 재생해요. 게임이 효과음 때문에 배경음을 끊어도 계속 들려요.", null,
                 soundLanes(new float[] {0f, 1f}, effects));
         View oneAtATime = optionCard("각각", null, "한 번에 하나만 재생해요. 효과음이 나는 동안 배경음이 잠깐 멈췄다 이어져요.", null,
                 soundLanes(new float[] {0f, 0.21f, 0.35f, 0.61f, 0.78f, 1f}, effects));

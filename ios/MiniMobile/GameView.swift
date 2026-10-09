@@ -734,7 +734,7 @@ private struct SoundView: View {
         NavigationView {
             Form {
                 Section {
-                    option(false, title: "동시", tag: "지금 방식", detail: "배경음과 효과음을 함께 재생해요.", music: [0...1])
+                    option(false, title: "동시", tag: nil, detail: "배경음과 효과음을 함께 재생해요. 게임이 효과음 때문에 배경음을 끊어도 계속 들려요.", music: [0...1])
                     option(true, title: "각각", tag: nil, detail: "한 번에 하나만 재생해요. 효과음이 나는 동안 배경음이 잠깐 멈췄다 이어져요.",
                            music: [0...0.21, 0.35...0.61, 0.78...1])
                 } footer: {
