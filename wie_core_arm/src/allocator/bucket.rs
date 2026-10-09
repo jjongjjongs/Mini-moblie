@@ -9,10 +9,14 @@ pub const BUCKET_MAX: usize = 512;
 // (slot_size, slot_count). slot_count is a multiple of 8 so the header has no
 // trailing partial byte to mask. Sizes chosen generously per slot class to fit
 // inside the 128 MB BucketAllocator half of the heap; total layout is
-// ~0x785A000 (~120 MB), leaving ~8 MB of intentional slack.
+// ~0x7C6A000 (~124 MB), leaving ~3.5 MB of intentional slack.
+//
+// Eight bytes is every KTF object's header, and a KTF title's objects are
+// never given back, so that bucket runs out first: 학교가는길 builds some
+// fifty strings a frame and filled half a million slots in its shop.
 const BUCKETS: [(usize, usize); 8] = [
     (4, 0x100000),
-    (8, 0x80000),
+    (8, 0x100000),
     (16, 0x80000),
     (32, 0x40000),
     (64, 0x40000),
