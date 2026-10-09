@@ -216,7 +216,8 @@ public final class ControlPatch {
                     i = this.prefs.getInt("pad_default_revision", 0);
                 }
                 ControlPads.upgradeDefault(this.mapping, i);
-                if (string == null || i < 1) {
+                ControlPads.addPhoneKeys(this.mapping, i);
+                if (string == null || i < ControlPads.PHONE_REVISION) {
                     savePads();
                 }
             } catch (Exception e) {
@@ -243,7 +244,7 @@ public final class ControlPatch {
                 for (Map.Entry<String, TreeMap<Integer, Integer>> entry : this.padSlots.entrySet()) {
                     jSONObject.put(entry.getKey(), mapJson(entry.getValue()));
                 }
-                this.prefs.edit().putString("pad_current", mapJson(this.mapping).toString()).putString("pad_slots", jSONObject.toString()).putInt("pad_default_revision", 1).apply();
+                this.prefs.edit().putString("pad_current", mapJson(this.mapping).toString()).putString("pad_slots", jSONObject.toString()).putInt("pad_default_revision", ControlPads.PHONE_REVISION).apply();
             } catch (Exception e) {
                 Log.e(ControlPatch.TAG, "save mapping", e);
                 ControlPatch.toast(this.a, "매핑 저장 실패");
@@ -415,6 +416,17 @@ public final class ControlPatch {
         return of(view).editor.hidden(obj);
     }
 
+    /**
+     * Whether a key came from a phone's own keypad or a keyboard rather than a
+     * pad: one of the phone keys (see {@link ControlPads#isPhoneKey}) from a
+     * real device. The on-screen keyboard's keys come from no device and are
+     * left to the text field they are typed into.
+     */
+    static boolean isPhoneKey(KeyEvent keyEvent) {
+        return keyEvent.getDeviceId() != android.view.KeyCharacterMap.VIRTUAL_KEYBOARD
+                && ControlPads.isPhoneKey(keyEvent.getKeyCode());
+    }
+
     static boolean isPad(InputEvent inputEvent) {
         int source = inputEvent.getSource();
         InputDevice device = inputEvent.getDevice();
@@ -452,6 +464,12 @@ public final class ControlPatch {
         return of(activity).ui.activityResult(i, i2, intent);
     }
 
+    /** Whether the keypad is being edited, which back finishes. */
+    public static boolean editing(Activity activity) {
+        Session session = sessions.get(activity);
+        return session != null && session.editor.editing;
+    }
+
     public static boolean onBack(Activity activity) {
         Session session = sessions.get(activity);
         if (session == null || !session.editor.editing) {
@@ -479,12 +497,18 @@ public final class ControlPatch {
     }
 
     public static boolean onGamepadKey(Activity activity, KeyEvent keyEvent) {
-        if (!isPad(keyEvent)) {
+        boolean phoneKey = !isPad(keyEvent) && isPhoneKey(keyEvent);
+        if (!isPad(keyEvent) && !phoneKey) {
             return false;
         }
         Session of = of(activity);
-        if (of.ui.captureKey(keyEvent) || of.blocked()) {
+        if (of.ui.captureKey(keyEvent)) {
             return true;
+        }
+        if (of.blocked()) {
+            // A phone key over a dialog is the dialog's: its list to move
+            // through, its text field to type in.
+            return !phoneKey;
         }
         if (!flag(activity, "playerVisible")) {
             return false;

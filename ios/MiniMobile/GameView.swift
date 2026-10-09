@@ -84,12 +84,64 @@ struct GameView: View {
     @State private var touch = false
     /// The frame pixel the finger on the screen is at, nil with none down.
     @State private var touchedAt: FramePoint?
+    /// Whether the pad is put away, the whole screen left to the game (see
+    /// `GamePad`).
+    @State private var padHidden = false
 
     private var layout: PadLayout {
         PadLayout.decode(padMode == .below ? layoutBelow : layoutOverlay, mode: padMode)
     }
 
     var body: some View {
+        Group {
+            if padHidden && draft == nil {
+                fullScreen
+            } else {
+                withPad
+            }
+        }
+        .background(Color(white: 0.08).ignoresSafeArea())
+        .statusBar(hidden: true)
+        .onAppear {
+            speed = GameSpeed.get(game)
+            touch = GameTouch.get(game)
+            padHidden = GamePad.hidden(game)
+            emulator.start(game: game)
+        }
+        .onDisappear { emulator.stop() }
+        .sheet(item: $sheet) { sheet in
+            switch sheet {
+            case .speed:
+                SpeedView(game: game, speed: $speed)
+            case .settings:
+                GameSettingsView(onEditPad: beginEditing)
+            case .log:
+                LogView()
+            }
+        }
+    }
+
+    /// The pad put away: the screen alone, with the menu on a translucent
+    /// button over its corner, as the bar that held it is gone too.
+    private var fullScreen: some View {
+        ZStack(alignment: .topTrailing) {
+            screen(alignment: .center)
+                .ignoresSafeArea(edges: .bottom)
+            Menu {
+                menuItems
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.headline)
+                    .foregroundColor(.white)
+                    .frame(width: 36, height: 36)
+                    .background(Circle().fill(Color.white.opacity(0.22)))
+            }
+            .padding(8)
+        }
+        .background(Color.black.ignoresSafeArea())
+    }
+
+    private var withPad: some View {
         VStack(spacing: 6) {
             if draft != nil {
                 editBar
@@ -114,24 +166,6 @@ struct GameView: View {
             }
         }
         .padding(8)
-        .background(Color(white: 0.08).ignoresSafeArea())
-        .statusBar(hidden: true)
-        .onAppear {
-            speed = GameSpeed.get(game)
-            touch = GameTouch.get(game)
-            emulator.start(game: game)
-        }
-        .onDisappear { emulator.stop() }
-        .sheet(item: $sheet) { sheet in
-            switch sheet {
-            case .speed:
-                SpeedView(game: game, speed: $speed)
-            case .settings:
-                GameSettingsView(onEditPad: beginEditing)
-            case .log:
-                LogView()
-            }
-        }
     }
 
     // MARK: - Bars
@@ -155,21 +189,7 @@ struct GameView: View {
             }
             Spacer()
             Menu {
-                Button { sheet = .speed } label: {
-                    Label("게임 속도 (\(GameSpeed.format(speed)))", systemImage: "speedometer")
-                }
-                Button { sheet = .settings } label: {
-                    Label("화면·패드 설정", systemImage: "slider.horizontal.3")
-                }
-                Button(action: beginEditing) {
-                    Label("가상 패드 편집", systemImage: "square.grid.3x3")
-                }
-                Button(action: toggleTouch) {
-                    Label(touch ? "화면 터치: 켜짐" : "화면 터치: 꺼짐", systemImage: touch ? "hand.tap.fill" : "hand.tap")
-                }
-                Button { sheet = .log } label: {
-                    Label("로그 보기", systemImage: "doc.text.magnifyingglass")
-                }
+                menuItems
             } label: {
                 Image(systemName: "ellipsis.circle")
                     .font(.title3)
@@ -178,6 +198,42 @@ struct GameView: View {
         }
         .foregroundColor(.white)
         .padding(.horizontal, 4)
+    }
+
+    /// The game's menu, behind ⋯ in the bar or, with the pad put away, on
+    /// the button over the screen.
+    @ViewBuilder
+    private var menuItems: some View {
+        Button(action: togglePad) {
+            Label(padHidden ? "키패드 꺼내기" : "키패드 숨기기",
+                  systemImage: padHidden ? "keyboard" : "keyboard.chevron.compact.down")
+        }
+        Button { sheet = .speed } label: {
+            Label("게임 속도 (\(GameSpeed.format(speed)))", systemImage: "speedometer")
+        }
+        Button { sheet = .settings } label: {
+            Label("화면·패드 설정", systemImage: "slider.horizontal.3")
+        }
+        if !padHidden {
+            Button(action: beginEditing) {
+                Label("가상 패드 편집", systemImage: "square.grid.3x3")
+            }
+        }
+        Button(action: toggleTouch) {
+            Label(touch ? "화면 터치: 켜짐" : "화면 터치: 꺼짐", systemImage: touch ? "hand.tap.fill" : "hand.tap")
+        }
+        Button { sheet = .log } label: {
+            Label("로그 보기", systemImage: "doc.text.magnifyingglass")
+        }
+        // The bar with 닫기 is put away with the pad.
+        if padHidden {
+            Button(role: .destructive) {
+                emulator.stop()
+                dismiss()
+            } label: {
+                Label("게임 닫기", systemImage: "xmark")
+            }
+        }
     }
 
     private var editBar: some View {
@@ -318,7 +374,19 @@ struct GameView: View {
             }
     }
 
+    /// Puts the pad away, or brings it back, and keeps the choice for this
+    /// title.
+    /// (A key held on the pad is let go as the pad leaves - see `PadView`.)
+    private func togglePad() {
+        padHidden.toggle()
+        GamePad.setHidden(padHidden, for: game)
+    }
+
     private func beginEditing() {
+        // Editing needs the pad on screen.
+        if padHidden {
+            togglePad()
+        }
         sheet = nil
         selectedKey = nil
         draft = layout

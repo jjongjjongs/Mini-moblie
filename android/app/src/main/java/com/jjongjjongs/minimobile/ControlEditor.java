@@ -422,6 +422,11 @@ final class ControlEditor {
             ControlPatch.toast(this.s.a, "게임을 실행한 뒤 키패드를 편집해 주세요.");
             return;
         }
+        if (view.getParent() == null) {
+            // Hidden from the gear menu: there is nothing on screen to move.
+            ControlPatch.toast(this.s.a, "⚙ 메뉴에서 키패드를 꺼낸 뒤 편집해 주세요.");
+            return;
+        }
         bind(view);
         if (!this.editing) {
             this.beforeEdit = this.s.data.activeCopy();

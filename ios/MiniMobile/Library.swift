@@ -227,6 +227,18 @@ enum GameTouch {
     }
 }
 
+/// Whether a title is played with the pad put away, the whole screen left to
+/// the game - kept per title, as the speed is.
+enum GamePad {
+    static func hidden(_ game: GameFile) -> Bool {
+        UserDefaults.standard.bool(forKey: "padHidden.\(game.name)")
+    }
+
+    static func setHidden(_ hidden: Bool, for game: GameFile) {
+        UserDefaults.standard.set(hidden, forKey: "padHidden.\(game.name)")
+    }
+}
+
 /// Matching a search against a title: a plain substring, or - when the query is
 /// only initial consonants, as Korean players type it - against the initial
 /// consonant of each syllable ("ㅇㅇㅅㄱ" finds 영웅서기).

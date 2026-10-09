@@ -393,7 +393,19 @@ public final class MainActivity extends Activity {
     private volatile boolean foreground = true;
     /** Set while the exit-confirmation dialog is up, to freeze the game. */
     private volatile boolean paused;
+    /** How long back is held on a phone's keypad to open the game menu rather than press 취소. */
+    private static final long BACK_HOLD_MS = 600;
+
     private boolean playerVisible;
+    /**
+     * Whether the on-screen keypad is put away for the running title, leaving
+     * the whole screen to the game. Kept per title (see {@link #gameKeypadHidden}).
+     */
+    private boolean keypadHidden;
+    /** A long press of back on a phone's own keypad, waiting to open the game menu. */
+    private Runnable backHold;
+    /** Whether the back key now held has already opened the game menu. */
+    private boolean backHeldLong;
     private int statusCounter;
     /**
      * Set once the game has painted a frame. The boot status the tick reports
@@ -727,6 +739,9 @@ public final class MainActivity extends Activity {
     // twice. Non-pad events return false and fall through untouched.
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
+        if (phoneBackKey(event)) {
+            return true;
+        }
         if (ControlPatch.onGamepadKey(this, event)) {
             return true;
         }
@@ -780,14 +795,7 @@ public final class MainActivity extends Activity {
         // In a game, back asks before leaving. The game is frozen while the
         // dialog is up: 예 quits to the library, 아니요 (or dismissing the dialog
         // with back / an outside tap) resumes it in place.
-        paused = true;
-        new AlertDialog.Builder(this)
-                .setTitle("종료")
-                .setMessage("애플리케이션을 종료하시겠습니까?")
-                .setPositiveButton("예", (dialog, which) -> exitGameToLibrary())
-                .setNegativeButton("아니요", (dialog, which) -> paused = false)
-                .setOnCancelListener(dialog -> paused = false)
-                .show();
+        confirmLeaveGame();
     }
 
     /** Stops the running game and returns to the library. */
@@ -3844,6 +3852,7 @@ public final class MainActivity extends Activity {
         paused = false;
         currentGame = game;
         currentGameName = displayName(game);
+        keypadHidden = gameKeypadHidden(game);
         framePainted = false;
         // Whichever way the phone is being held: the player opens the way the
         // window already is, not the way the last one was.
@@ -3896,7 +3905,9 @@ public final class MainActivity extends Activity {
     private void buildPlayerContent() {
         detach(gameView);
         detach(keypad);
-        gameView.landscape = landscapeMode;
+        // With the keypad put away the screen has the whole area, fitted to
+        // it at its own shape either way up.
+        gameView.landscape = landscapeMode && !keypadHidden;
         keypad.landscape = landscapeMode;
         keypad.requestLayout();
 
@@ -3904,7 +3915,11 @@ public final class MainActivity extends Activity {
         content.setOrientation(LinearLayout.VERTICAL);
         content.setBackgroundColor(COLOR_BG);
 
-        if (landscapeMode) {
+        if (keypadHidden) {
+            gameView.setBackgroundColor(Color.BLACK);
+            content.setBackgroundColor(Color.BLACK);
+            content.addView(gameView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        } else if (landscapeMode) {
             // One keypad view across the whole area with the two key columns,
             // the screen floated over the empty gap between them, so a finger
             // on each side is still one view's business.
@@ -3915,9 +3930,11 @@ public final class MainActivity extends Activity {
             FrameLayout.LayoutParams screenParams =
                     new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT);
             screenParams.gravity = android.view.Gravity.CENTER;
+            gameView.setBackgroundColor(COLOR_SCREEN_BEZEL);
             arena.addView(gameView, screenParams);
             content.addView(arena, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
         } else {
+            gameView.setBackgroundColor(COLOR_SCREEN_BEZEL);
             content.addView(gameView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, GAME_WEIGHT));
             content.addView(keypad, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, KEYPAD_WEIGHT));
         }
@@ -4083,28 +4100,44 @@ public final class MainActivity extends Activity {
      */
     private void showGameMenu() {
         boolean collecting = NativeBridge.nativeLogCollecting() != 0;
-        String[] items = {
-                collecting ? "로그 수집 종료·저장" : "로그 수집 시작",
-                "로그 진단 설정",
-                "조작 설정 (키패드·게임패드)",
-                rotateMenuLabel(),
-                "게임 속도",
-                "화면 터치",
-        };
-        String[] icons = {"📋", "🔧", "⚙", "🔄", "⏩", "👆"};
+        List<GameMenuRow> rows = new ArrayList<>();
+        rows.add(new GameMenuRow("⌨", keypadHidden ? "키패드 꺼내기" : "키패드 숨기기", null, this::toggleKeypad));
+        rows.add(new GameMenuRow("📋", collecting ? "로그 수집 종료·저장" : "로그 수집 시작", null, () -> {
+            if (collecting) {
+                stopLogCollectAndSave();
+            } else {
+                startLogCollect();
+            }
+        }));
+        rows.add(new GameMenuRow("🔧", "로그 진단 설정", null, this::showDiagnosticsDialog));
+        rows.add(new GameMenuRow("⚙", "조작 설정 (키패드·게임패드)", null, () -> ControlPatch.showSettings(this)));
+        rows.add(new GameMenuRow("🔄", rotateMenuLabel(), null, this::toggleOrientation));
         // The speed row says what the speed is, so the menu answers the
         // question without opening anything.
         String speedValue = currentGame != null ? formatSpeed(gameSpeed(currentGame)) : formatSpeed(1f);
+        rows.add(new GameMenuRow("⏩", "게임 속도", speedValue, this::showSpeedDialog));
+        rows.add(new GameMenuRow("👆", "화면 터치", touchOn ? "켜짐" : "꺼짐", this::toggleTouch));
+        // A phone with its own keypad may have no touch screen to reach back
+        // through, so the way out is here too.
+        if (hasPhoneKeypad()) {
+            rows.add(new GameMenuRow("⏏", "게임 끝내기", null, this::confirmLeaveGame));
+        }
+        List<String> labels = new ArrayList<>();
+        for (GameMenuRow row : rows) {
+            labels.add(row.label);
+        }
+
         android.widget.ArrayAdapter<String> adapter =
-                new android.widget.ArrayAdapter<String>(this, 0, items) {
+                new android.widget.ArrayAdapter<String>(this, 0, labels) {
                     @Override
                     public View getView(int position, View convertView, ViewGroup parent) {
-                        LinearLayout row = new LinearLayout(MainActivity.this);
-                        row.setOrientation(LinearLayout.HORIZONTAL);
-                        row.setGravity(android.view.Gravity.CENTER_VERTICAL);
-                        row.setPadding(dp(18), dp(12), dp(18), dp(12));
+                        LinearLayout line = new LinearLayout(MainActivity.this);
+                        line.setOrientation(LinearLayout.HORIZONTAL);
+                        line.setGravity(android.view.Gravity.CENTER_VERTICAL);
+                        line.setPadding(dp(18), dp(12), dp(18), dp(12));
                         TextView icon = new TextView(MainActivity.this);
-                        icon.setText(icons[position]);
+                        GameMenuRow row = rows.get(position);
+                        icon.setText(row.icon);
                         icon.setTextSize(15f);
                         icon.setGravity(android.view.Gravity.CENTER);
                         GradientDrawable box = new GradientDrawable();
@@ -4114,53 +4147,136 @@ public final class MainActivity extends Activity {
                         icon.setBackground(box);
                         LinearLayout.LayoutParams ip = new LinearLayout.LayoutParams(dp(30), dp(30));
                         ip.rightMargin = dp(12);
-                        row.addView(icon, ip);
+                        line.addView(icon, ip);
                         TextView label = new TextView(MainActivity.this);
                         label.setText(getItem(position));
                         label.setTextColor(COLOR_TEXT);
                         label.setTextSize(15f);
-                        row.addView(label, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-                        if (position == 4 || position == 5) {
+                        line.addView(label, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                        String shown = row.value;
+                        if (shown != null) {
                             TextView value = new TextView(MainActivity.this);
-                            value.setText(position == 4 ? speedValue : (touchOn ? "켜짐" : "꺼짐"));
-                            value.setTextColor(position == 5 && !touchOn ? COLOR_SUBTEXT : COLOR_ACCENT);
+                            value.setText(shown);
+                            boolean off = "꺼짐".equals(shown);
+                            value.setTextColor(off ? COLOR_SUBTEXT : COLOR_ACCENT);
                             value.setTextSize(15f);
                             value.setTypeface(Typeface.DEFAULT_BOLD);
-                            row.addView(value);
+                            line.addView(value);
                         }
-                        return row;
+                        return line;
                     }
                 };
         new AlertDialog.Builder(new android.view.ContextThemeWrapper(this, android.R.style.Theme_Material_Dialog_Alert))
                 .setTitle(running && currentGameName != null ? currentGameName : "게임")
-                .setAdapter(adapter, (dialog, which) -> {
-                    switch (which) {
-                        case 0:
-                            if (collecting) {
-                                stopLogCollectAndSave();
-                            } else {
-                                startLogCollect();
-                            }
-                            break;
-                        case 1:
-                            showDiagnosticsDialog();
-                            break;
-                        case 2:
-                            ControlPatch.showSettings(this);
-                            break;
-                        case 3:
-                            toggleOrientation();
-                            break;
-                        case 4:
-                            showSpeedDialog();
-                            break;
-                        case 5:
-                            toggleTouch();
-                            break;
-                    }
-                })
+                .setAdapter(adapter, (dialog, which) -> rows.get(which).action.run())
                 .setNegativeButton("닫기", null)
                 .show();
+    }
+
+    /** A row of the game menu: its icon, label, the value on its right (or null) and what a tap does. */
+    private static final class GameMenuRow {
+        final String icon;
+        final String label;
+        final String value;
+        final Runnable action;
+
+        GameMenuRow(String icon, String label, String value, Runnable action) {
+            this.icon = icon;
+            this.label = label;
+            this.value = value;
+            this.action = action;
+        }
+    }
+
+    /**
+     * Whether the phone has a handset's number pad of its own - a folder phone
+     * running Android - rather than only a touch screen.
+     */
+    private boolean hasPhoneKeypad() {
+        return getResources().getConfiguration().keyboard == Configuration.KEYBOARD_12KEY;
+    }
+
+    /**
+     * Whether the keypad was put away when this title was last played. A
+     * title never played puts it away on a phone with a keypad of its own,
+     * whose keys play it.
+     */
+    private boolean gameKeypadHidden(File game) {
+        return getSharedPreferences("mini_keypad", MODE_PRIVATE).getBoolean(game.getName(), hasPhoneKeypad());
+    }
+
+    /**
+     * Puts the on-screen keypad away, leaving the whole screen to the game,
+     * or brings it back; kept for the running title.
+     */
+    private void toggleKeypad() {
+        File game = currentGame;
+        if (game == null || gameView == null || keypad == null) {
+            return;
+        }
+        releaseKeypad();
+        keypadHidden = !keypadHidden;
+        getSharedPreferences("mini_keypad", MODE_PRIVATE).edit().putBoolean(game.getName(), keypadHidden).apply();
+        buildPlayerContent();
+        Toast.makeText(this,
+                keypadHidden ? "키패드를 숨겼습니다. ⚙ → 키패드 꺼내기로 되돌립니다." : "키패드를 꺼냈습니다.",
+                Toast.LENGTH_SHORT).show();
+    }
+
+    /** Asks before leaving the game for the library, the game held still meanwhile. */
+    private void confirmLeaveGame() {
+        paused = true;
+        new AlertDialog.Builder(this)
+                .setTitle("종료")
+                .setMessage("애플리케이션을 종료하시겠습니까?")
+                .setPositiveButton("예", (dialog, which) -> exitGameToLibrary())
+                .setNegativeButton("아니요", (dialog, which) -> paused = false)
+                .setOnCancelListener(dialog -> paused = false)
+                .show();
+    }
+
+    /**
+     * Back on a phone's own keypad, in a game: a tap is the handset's clear
+     * key (취소), which is what that key is on the phone; held, it opens the
+     * game menu instead - the way to the menu on a phone that may have no
+     * touch screen. Whether the event was taken.
+     */
+    private boolean phoneBackKey(KeyEvent event) {
+        if (event.getKeyCode() != KeyEvent.KEYCODE_BACK || !playerVisible || !hasPhoneKeypad()
+                || keyMapVisible || ControlPatch.editing(this)
+                || event.getDeviceId() == android.view.KeyCharacterMap.VIRTUAL_KEYBOARD) {
+            return false;
+        }
+        if (event.getAction() == KeyEvent.ACTION_DOWN) {
+            if (event.getRepeatCount() == 0) {
+                backHeldLong = false;
+                if (backHold != null) {
+                    wedgeWatch.removeCallbacks(backHold);
+                }
+                backHold = () -> {
+                    backHold = null;
+                    backHeldLong = true;
+                    showGameMenu();
+                };
+                wedgeWatch.postDelayed(backHold, BACK_HOLD_MS);
+            }
+            return true;
+        }
+        if (event.getAction() == KeyEvent.ACTION_UP) {
+            if (backHold != null) {
+                wedgeWatch.removeCallbacks(backHold);
+                backHold = null;
+            }
+            if (!backHeldLong && !event.isCanceled()) {
+                // A tap: pressed and let go, the release a moment later so a
+                // title that reads the key as held still sees it down.
+                sendKey(CODE_CLEAR, true);
+                wedgeWatch.postDelayed(() -> sendKey(CODE_CLEAR, false), 60);
+            }
+            backHeldLong = false;
+            return true;
+        }
+        return true;
     }
 
     /**

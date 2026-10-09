@@ -180,7 +180,27 @@ final class ControlDialogs {
     }
 
     static String physicalName(int i) {
-        return KeyEvent.keyCodeToString(i).replace("KEYCODE_BUTTON_", "").replace("KEYCODE_", "");
+        // A phone's own keys by what is printed on them.
+        switch (i) {
+            case KeyEvent.KEYCODE_STAR:
+                return "✱";
+            case KeyEvent.KEYCODE_POUND:
+                return "#";
+            case KeyEvent.KEYCODE_CALL:
+                return "통화";
+            case KeyEvent.KEYCODE_SOFT_LEFT:
+                return "왼쪽소프트";
+            case KeyEvent.KEYCODE_SOFT_RIGHT:
+                return "오른쪽소프트";
+            case KeyEvent.KEYCODE_MENU:
+                return "메뉴";
+            case KeyEvent.KEYCODE_DEL:
+                return "지우기";
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+                return "가운데";
+            default:
+                return KeyEvent.keyCodeToString(i).replace("KEYCODE_BUTTON_", "").replace("KEYCODE_", "");
+        }
     }
 
     boolean activityResult(int i, int i2, Intent intent) {
@@ -481,7 +501,7 @@ final class ControlDialogs {
     }
 
     void mainMenu() {
-        final String[] strArr = {"키패드 위치·크기 편집", "버튼별 표시·숨김", "버튼별 연사 ON/OFF", "현재 배치 저장", "저장된 배치 불러오기·삭제", "배치 파일로 백업", "배치 파일에서 복원", "현재 배치 초기화", "게임패드 매핑"};
+        final String[] strArr = {"키패드 위치·크기 편집", "버튼별 표시·숨김", "버튼별 연사 ON/OFF", "현재 배치 저장", "저장된 배치 불러오기·삭제", "배치 파일로 백업", "배치 파일에서 복원", "현재 배치 초기화", "게임패드·물리 키 매핑"};
         final String[] iconArr = {"✏", "👁", "⚡", "💾", "📂", "📤", "📥", "↺", "🎮"};
         LinearLayout column = column();
         column.addView(this.style.hint("설정을 변경하는 동안 게임을 일시정지합니다."));
@@ -552,7 +572,7 @@ final class ControlDialogs {
         LinearLayout header = new LinearLayout(this.style.context);
         header.setGravity(16);
         header.setPadding(0, this.style.dp(2.0f), 0, this.style.dp(4.0f));
-        TextView title = this.style.text("게임패드 매핑", 18.0f, this.style.INK);
+        TextView title = this.style.text("게임패드·물리 키 매핑", 18.0f, this.style.INK);
         title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
         header.addView(title, new LinearLayout.LayoutParams(0, -2, 1.0f));
         header.addView(headerButton("프리셋", new Runnable() {
@@ -569,7 +589,7 @@ final class ControlDialogs {
         }));
         column.addView(header);
 
-        column.addView(this.style.hint("키의 + 를 눌러 연결할 패드 버튼을 누르세요. 변경은 바로 저장됩니다.\n연결된 패드: " + connectedPadName()));
+        column.addView(this.style.hint("키의 + 를 누른 뒤 연결할 패드 버튼이나 폰의 키(폴더폰 키패드)를 누르세요. 변경은 바로 저장됩니다.\n연결된 패드: " + connectedPadName()));
 
         this.padRows = new LinearLayout[21];
         this.padRowViews = new LinearLayout[21];
