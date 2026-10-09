@@ -132,8 +132,8 @@ jobs:
           Android will ask for permission to install it from outside the
           store.
 
-          \`wie-linux-x86_64.tar.gz\` is the Linux build of the same commit,
-          uploaded by its own job - see the README inside it.
+          \`MiniMobile-linux-x86_64.tar.gz\` is the Linux PC program of the
+          same commit, uploaded by its own job - see the README.txt inside it.
 
           \`wie-mobile-ios.ipa\` is the iPhone app, unsigned: install it with
           AltStore, SideStore or TrollStore, which sign it on the way in.
@@ -163,9 +163,11 @@ jobs:
           # shows up next to the real one and is easy to download by mistake.
           gh release delete-asset "$TAG" app-debug.apk --yes 2>/dev/null || true
 
-  # The same emulator as a Linux desktop program, published next to the apk.
-  # It loads titles through the Android app's own loader (bundled firmware and
-  # handset font included), so a title behaves the same on both.
+  # The Linux PC program: the same SDL port as the Windows and PortMaster
+  # builds, opened as a window by its launcher. Cross-compiled with zig
+  # against glibc 2.17 like the PortMaster build, and it opens the desktop's
+  # own SDL2 at run time, so it runs on any distribution of the last decade
+  # with nothing else to install.
   linux:
     runs-on: ubuntu-latest
 
@@ -178,31 +180,35 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-x86_64
 
-      - name: Install required packages
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Install zig and cargo-zigbuild
+        run: |
+          set -eu
+          pip install ziglang==0.17.0
+          echo "$(python3 -c 'import os, ziglang; print(os.path.dirname(ziglang.__file__))')" >> "$GITHUB_PATH"
+          cargo install --locked cargo-zigbuild@0.23.4
 
       - name: Build
-        run: cargo build --release -p wie_cli --features jit
+        run: cargo zigbuild --release -p wie_portmaster --features jit --target x86_64-unknown-linux-gnu.2.17
 
       - name: Package
         run: |
           set -eu
-          mkdir -p wie-linux-x86_64
-          cp target/release/wie_cli wie-linux-x86_64/
-          cp wie_cli/README_LINUX.txt wie-linux-x86_64/README.txt
-          # Built against this runner's C library, so it runs on that one or
-          # anything newer - which is worth saying where it is unpacked.
-          printf '\n이 빌드에 필요한 C 라이브러리: %s 이상\n커밋: %s\n' \
-            "$(ldd --version | head -1 | sed 's/.* //; s/^/glibc /')" "${{ github.sha }}" >> wie-linux-x86_64/README.txt
-          tar czf wie-linux-x86_64.tar.gz wie-linux-x86_64
+          mkdir -p MiniMobile/games
+          cp target/x86_64-unknown-linux-gnu/release/minimobile MiniMobile/
+          cp linux/MiniMobile.sh linux/README.txt MiniMobile/
+          chmod +x MiniMobile/minimobile MiniMobile/MiniMobile.sh
+          printf '\n커밋: %s\n' "${{ github.sha }}" >> MiniMobile/README.txt
+          tar czf MiniMobile-linux-x86_64.tar.gz MiniMobile
 
       - name: Upload the Linux build
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: wie-linux-x86_64
-          path: wie-linux-x86_64.tar.gz
+          name: MiniMobile-linux-x86_64
+          path: MiniMobile-linux-x86_64.tar.gz
 
       # The apk job writes the release's notes; this one only adds its file,
       # creating the release first if this job got there before it.
@@ -216,7 +222,9 @@ jobs:
           gh release view "$TAG" >/dev/null 2>&1 \
             || gh release create "$TAG" --title 'WIE Mobile (development build)' --notes 'Development build, replaced by every push.' --prerelease \
             || gh release view "$TAG" >/dev/null
-          gh release upload "$TAG" wie-linux-x86_64.tar.gz --clobber
+          gh release upload "$TAG" MiniMobile-linux-x86_64.tar.gz --clobber
+          # The old command-line Linux build this one replaces.
+          gh release delete-asset "$TAG" wie-linux-x86_64.tar.gz --yes 2>/dev/null || true
 
   # The same emulator as a PortMaster port for Linux handhelds (aarch64),
   # published next to the apk. Cross-compiled with zig against glibc 2.17 so

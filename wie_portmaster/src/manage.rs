@@ -151,7 +151,7 @@ impl App {
                 },
             ],
             options,
-            note: removal_note().to_owned(),
+            note: removal_note(self.desktop).to_owned(),
         };
 
         let with_saves = match self.ask(&dialog, back) {
@@ -159,7 +159,7 @@ impl App {
             Some(2) => true,
             _ => return None,
         };
-        Some(match saves::delete_game(game, with_saves) {
+        Some(match saves::delete_game(game, with_saves, self.desktop) {
             Ok(()) => {
                 self.store.forget(&file);
                 format!("삭제했습니다: {name}{}", if with_saves { " (세이브 포함)" } else { "" })
@@ -317,12 +317,12 @@ impl App {
             title: "세이브 지우기".to_owned(),
             lines: vec![(saves::game_name(game), TEXT), (format!("세이브 파일 {files}개"), MUTED)],
             options: vec![("취소".to_owned(), false), ("세이브 지우기".to_owned(), true)],
-            note: removal_note().to_owned(),
+            note: removal_note(self.desktop).to_owned(),
         };
         if self.ask(&dialog, None) != Some(1) {
             return None;
         }
-        Some(match saves::erase(game) {
+        Some(match saves::erase(game, self.desktop) {
             Ok(_) => "세이브를 지웠습니다".to_owned(),
             Err(error) => error,
         })
@@ -471,8 +471,8 @@ impl App {
 }
 
 /// What the player is told before something is removed.
-fn removal_note() -> &'static str {
-    if saves::RECOVERABLE {
+fn removal_note(desktop: bool) -> &'static str {
+    if saves::trash_available(desktop) {
         "지운 파일은 휴지통으로 갑니다"
     } else {
         "지우면 되돌릴 수 없습니다"

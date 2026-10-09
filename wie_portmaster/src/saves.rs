@@ -4,7 +4,8 @@
 //! The zips are the Android app's save zips (see `wie_android::host`), so a
 //! save goes between the phone, the handheld and the PC by copying the file.
 //! Each export is a new file named for when it was taken, so older ones stay.
-//! On Windows what is removed goes to the recycle bin.
+//! What is removed goes to the recycle bin on Windows, and to the desktop's
+//! trash on a Linux PC that has one.
 
 use std::{
     path::{Path, PathBuf},
@@ -104,30 +105,56 @@ pub fn import(game: &Path, zip: &SaveZip) -> Result<(usize, Option<PathBuf>), St
     Ok((restored, backup))
 }
 
-/// Removes the game's saves. How many folders went.
-pub fn erase(game: &Path) -> Result<usize, String> {
+/// Removes the game's saves, to the trash if `trash`. How many folders went.
+pub fn erase(game: &Path, trash: bool) -> Result<usize, String> {
     let dirs = host::save_dirs(&read_game(game)?, &runtime_dir())?;
     for dir in &dirs {
-        remove(dir).map_err(|error| format!("세이브를 지울 수 없습니다: {error}"))?;
+        remove(dir, trash).map_err(|error| format!("세이브를 지울 수 없습니다: {error}"))?;
     }
     Ok(dirs.len())
 }
 
-/// Removes the game's file, and its saves too if `with_saves`.
-pub fn delete_game(game: &Path, with_saves: bool) -> Result<(), String> {
+/// Removes the game's file, and its saves too if `with_saves`; to the trash
+/// if `trash`.
+pub fn delete_game(game: &Path, with_saves: bool, trash: bool) -> Result<(), String> {
     if with_saves {
-        erase(game)?;
+        erase(game, trash)?;
     }
-    remove(game).map_err(|error| format!("게임 파일을 지울 수 없습니다: {error}"))
+    remove(game, trash).map_err(|error| format!("게임 파일을 지울 수 없습니다: {error}"))
 }
 
-/// Whether a removed file can be got back.
-pub const RECOVERABLE: bool = cfg!(windows);
+/// Whether what is removed can go to a trash to be got back from: always on
+/// Windows; on Linux on a desktop (not a handheld) with `gio`, which puts
+/// things in the trash the desktop's file manager shows.
+pub fn trash_available(desktop: bool) -> bool {
+    cfg!(windows) || (desktop && gio().is_some())
+}
 
-/// Removes a file or a folder: to the recycle bin on Windows, for good
-/// elsewhere.
+/// Where `gio` is, if on the path.
 #[cfg(not(windows))]
-fn remove(path: &Path) -> std::io::Result<()> {
+fn gio() -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join("gio"))
+        .find(|path| path.is_file())
+}
+
+#[cfg(windows)]
+fn gio() -> Option<PathBuf> {
+    None
+}
+
+/// Removes a file or a folder: to the trash if `trash` and there is one
+/// (see [`trash_available`]), for good otherwise.
+#[cfg(not(windows))]
+fn remove(path: &Path, trash: bool) -> std::io::Result<()> {
+    if trash && let Some(gio) = gio() {
+        let status = std::process::Command::new(gio).arg("trash").arg(path).status()?;
+        return if status.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other("휴지통으로 옮길 수 없습니다"))
+        };
+    }
     if path.is_dir() {
         std::fs::remove_dir_all(path)
     } else {
@@ -135,8 +162,9 @@ fn remove(path: &Path) -> std::io::Result<()> {
     }
 }
 
+/// On Windows, always to the recycle bin.
 #[cfg(windows)]
-fn remove(path: &Path) -> std::io::Result<()> {
+fn remove(path: &Path, _trash: bool) -> std::io::Result<()> {
     use std::{ffi::c_void, os::windows::ffi::OsStrExt};
 
     /// `SHFILEOPSTRUCTW`, as laid out on 64-bit Windows.
