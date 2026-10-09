@@ -91,9 +91,26 @@ const PENDING_STOP_GRACE_POLLS: u32 = 3;
 /// enough that music a title meant to stop does not hang on far past it.
 const HELD_FOR_EFFECTS_POLLS: u32 = 40;
 
+/// The grace a stopped piece of music gets under "동시" before the stop takes:
+/// long enough for the effect it was stopped for to begin. 제노니아2 takes a
+/// quarter of a second between stopping its music and playing the effect,
+/// more on a slow phone - past the short grace, so the music had already
+/// gone by the time the effect came to hold it.
+const THROUGH_EFFECTS_GRACE_POLLS: u32 = 10;
+
 /// Whether music a title stops in order to play an effect plays on under it.
 /// See [`set_music_through_effects`].
 static MUSIC_THROUGH_EFFECTS: AtomicBool = AtomicBool::new(true);
+
+/// The polls a stopped piece of music waits, with no effect after it, for the
+/// title to start it again before it stops.
+fn stop_grace_polls() -> u32 {
+    if MUSIC_THROUGH_EFFECTS.load(Ordering::Relaxed) {
+        THROUGH_EFFECTS_GRACE_POLLS
+    } else {
+        PENDING_STOP_GRACE_POLLS
+    }
+}
 
 /// Sets whether the music plays on under the effects - "동시" - when a title
 /// stops it to play them, as one with a single clip to play everything on
@@ -231,6 +248,9 @@ impl Audio {
         {
             // The music was stopped for this effect: it plays on under it, and
             // waits for the title to start it again once its effects are done.
+            if !active.held_for_effects {
+                tracing::info!("[audio] music {} stopped for an effect plays on under it", active.sink_handle);
+            }
             active.pending_stop_polls = Some(0);
             active.held_for_effects = true;
         }
@@ -474,7 +494,7 @@ impl Audio {
                     let grace = if active.held_for_effects {
                         HELD_FOR_EFFECTS_POLLS
                     } else {
-                        PENDING_STOP_GRACE_POLLS
+                        stop_grace_polls()
                     };
                     active.pending_stop_polls = Some(polls + 1);
                     polls + 1 >= grace
@@ -484,6 +504,13 @@ impl Audio {
             None => false,
         };
         if flush {
+            if let Some(active) = self.active.as_ref() {
+                tracing::info!(
+                    "[audio] music {} stops (held for effects: {})",
+                    active.sink_handle,
+                    active.held_for_effects
+                );
+            }
             // The title asked for this stop and may be waiting to hear that it
             // happened, so it is not a supersede.
             self.flush_active(false);
@@ -666,7 +693,7 @@ mod tests {
 
     use smaf_player::SmafEvent;
 
-    use super::{HELD_FOR_EFFECTS_POLLS, PENDING_STOP_GRACE_POLLS, SmafPlayer};
+    use super::{HELD_FOR_EFFECTS_POLLS, SmafPlayer, stop_grace_polls};
     use crate::{AudioSink, Database, DatabaseRepository, DefaultTaskRunner, Filesystem, Instant, Platform, Screen, System, canvas::Image};
 
     struct NullDatabase;
@@ -1036,6 +1063,10 @@ mod tests {
         for _ in 0..5 {
             system.audio().stop(latest);
             let _ = system.audio().close(latest);
+            // The effect comes a while after the stop, as 제노니아2's does.
+            for _ in 0..4 {
+                system.audio().reap();
+            }
             let effect = system.audio().load_smaf(b"SFX").unwrap();
             system.audio().play_with_completion(&system, effect, false).unwrap();
             // Longer than the short grace between effects.
@@ -1066,7 +1097,7 @@ mod tests {
         let music = system.audio().load_smaf(b"BGM-DATA").unwrap();
         system.audio().play_with_completion(&system, music, true).unwrap();
         system.audio().stop(music);
-        for _ in 0..PENDING_STOP_GRACE_POLLS {
+        for _ in 0..stop_grace_polls() {
             system.audio().reap();
         }
         assert!(system.audio().active.is_none());
