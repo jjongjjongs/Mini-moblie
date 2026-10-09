@@ -170,7 +170,7 @@ pub const KEYS_PER_KEY: usize = 2;
 
 /// The keyboard keys a mapping can name: SDL's scancode, the name a controls
 /// file gives it, and what the settings screens call it.
-const SCANCODES: [(i32, &str, &str); 87] = [
+const SCANCODES: [(i32, &str, &str); 85] = [
     (4, "A", "A"),
     (5, "B", "B"),
     (6, "C", "C"),
@@ -226,8 +226,6 @@ const SCANCODES: [(i32, &str, &str); 87] = [
     (59, "F2", "F2"),
     (60, "F3", "F3"),
     (61, "F4", "F4"),
-    (62, "F5", "F5"),
-    (63, "F6", "F6"),
     (64, "F7", "F7"),
     (65, "F8", "F8"),
     (66, "F9", "F9"),
@@ -260,9 +258,12 @@ const SCANCODES: [(i32, &str, &str); 87] = [
     (99, "KP_PERIOD", "키패드 ."),
 ];
 
-/// Keys the port keeps for itself: Esc opens the menu, F11 the full screen,
-/// Delete clears a cell while the table is open.
+/// Keys the port keeps for itself: Esc opens the menu, F5 and F6 slow the
+/// game down and speed it up, F11 the full screen, Delete clears a cell while
+/// the table is open.
 pub const ESCAPE: i32 = 41;
+pub const F5: i32 = 62;
+pub const F6: i32 = 63;
 pub const F11: i32 = 68;
 pub const DELETE: i32 = 76;
 

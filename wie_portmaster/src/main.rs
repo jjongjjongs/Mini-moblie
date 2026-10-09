@@ -9,7 +9,10 @@
 //!
 //! It opens on a list of the games in the folder it is given and goes back to
 //! it when a game ends. The settings (see `settings`) open from the list with
-//! Y or Esc, and over a game with MENU or Esc.
+//! Y or Esc, and over a game with MENU or Esc; a game's saves and the game
+//! itself are handled from there (see `manage`), and Delete on the list
+//! deletes the game picked. Each game plays at its own speed, which F5 and
+//! F6 change as it runs.
 //!
 //! On a desktop - Windows, or `--windowed` - it is a window: 2x to 4x of
 //! 320x240 or the full screen (F11), with games dropped on it copied into the
@@ -20,7 +23,9 @@
 
 mod controls;
 mod library;
+mod manage;
 mod presets;
+mod saves;
 mod sdl;
 mod settings;
 
@@ -34,11 +39,11 @@ use std::{
 use wie_android::host;
 
 use self::{
-    controls::{BUTTON_COUNT, Button, ESCAPE, F11},
+    controls::{BUTTON_COUNT, Button, DELETE, ESCAPE, F5, F6, F11},
     library::Menu,
     presets::Store,
     sdl::{Event, Rect, Sdl},
-    settings::{Context, Outcome},
+    settings::{Context, Outcome, speed_label, speed_step},
 };
 
 /// How often the game loop runs a tick when the title does not say otherwise.
@@ -49,6 +54,8 @@ const AXIS_PRESS: i16 = 16_000;
 const AXIS_RELEASE: i16 = 12_000;
 /// How long the hint over a desktop game stays up as it starts.
 const TOAST: Duration = Duration::from_secs(3);
+/// How long the speed stays up after F5 or F6.
+const SPEED_TOAST: Duration = Duration::from_millis(1500);
 
 fn main() {
     // The runner's log goes to stderr, which the launch script keeps in a file
@@ -502,6 +509,19 @@ impl App {
                     }
                     // Esc opens the menu, as Y does.
                     Input::Key(ESCAPE, true, false) => Button::Y,
+                    // Delete asks to delete the game picked.
+                    Input::Key(DELETE, true, false) => {
+                        if let Some(game) = menu.selected() {
+                            let (width, height, _) = self.menu_size();
+                            let back = menu.draw(width, height);
+                            if let Some(done) = self.delete_game(&game, Some((width, height, &back))) {
+                                menu.refresh();
+                                menu.set_status(done);
+                            }
+                            dirty = true;
+                        }
+                        continue;
+                    }
                     Input::Key(code, true, repeated) => match key_button(code) {
                         Some(button) if !repeated || matches!(button, Button::Up | Button::Down | Button::Left | Button::Right) => button,
                         _ => continue,
@@ -533,8 +553,13 @@ impl App {
                             game: game.as_deref(),
                             frame: None,
                         });
-                        if let Outcome::QuitApp = outcome {
-                            return None;
+                        match outcome {
+                            Outcome::QuitApp => return None,
+                            Outcome::Deleted(done) => {
+                                menu.refresh();
+                                menu.set_status(done);
+                            }
+                            Outcome::Close | Outcome::EndGame => {}
                         }
                         dirty = true;
                     }
@@ -590,7 +615,8 @@ impl App {
         let (width, height, _) = self.menu_size();
         let rgba = library::draw_message(&format!("{name}\n\n불러오는 중…"), "", width, height);
         self.show(&rgba, width, height);
-        self.set_title(&format!("MiniMobile - {name}"));
+        let speed = self.game_speed(game);
+        self.set_title(&game_title(&name, speed, false));
 
         let data = std::fs::read(game).map_err(|error| format!("게임 파일을 읽을 수 없습니다: {error}"))?;
         // A game fixed to a preset plays with it.
@@ -600,8 +626,11 @@ impl App {
         if let Some(preset) = fixed {
             self.store.apply(&preset);
         }
-        let runtime_dir = std::env::current_dir().unwrap_or_default().join("data");
+        let runtime_dir = saves::runtime_dir();
         let _ = std::fs::create_dir_all(&runtime_dir);
+        // The speed it was last played at; starting puts the clock back on the
+        // time of day and runs it from there at that speed.
+        host::set_speed(speed);
         let failure = host::start(data, runtime_dir, "Linux".to_owned());
         if !failure.is_empty() {
             return Err(failure);
@@ -627,12 +656,12 @@ impl App {
         host::hold_clock(true);
         // SAFETY: a device id SDL handed out, or 0, which SDL ignores.
         unsafe { (self.sdl.pause_audio_device)(self.audio, 1) };
-        self.set_title(&format!("MiniMobile - {name} (일시정지)"));
+        self.set_title(&game_title(name, host::speed(), true));
         let outcome = self.settings_menu(&Context {
             game: Some(game),
             frame: frame.map(|(width, height, rgba)| (*width, *height, rgba.as_slice())),
         });
-        self.set_title(&format!("MiniMobile - {name}"));
+        self.set_title(&game_title(name, host::speed(), false));
         // SAFETY: as above.
         unsafe { (self.sdl.pause_audio_device)(self.audio, 0) };
         host::hold_clock(false);
@@ -654,7 +683,7 @@ impl App {
         };
         // The newest frame, kept for the menu to show behind it.
         let mut frame: Option<(u32, u32, Vec<u8>)> = None;
-        let toast = if self.desktop { "Esc 메뉴 · F11 전체화면" } else { "" };
+        let mut toast = if self.desktop { "Esc 메뉴 · F11 전체화면" } else { "" }.to_owned();
         // When the hint goes, counted from the title's first frame - a title
         // can take a while to draw one.
         let mut toast_until: Option<Instant> = None;
@@ -676,6 +705,16 @@ impl App {
                     // Esc on the keyboard, MENU on the pad: the menu.
                     Input::Key(ESCAPE, true, false) | Input::Button(Button::Guide, true) => true,
                     Input::Key(_, _, true) => false,
+                    // F5 slower, F6 faster, remembered for the game.
+                    Input::Key(code @ (F5 | F6), true, false) => {
+                        let speed = speed_step(host::speed(), code == F6);
+                        self.set_game_speed(game, speed, true);
+                        self.set_title(&game_title(name, speed, false));
+                        toast = format!("배속 {}", speed_label(speed));
+                        toast_until = Some(Instant::now() + SPEED_TOAST);
+                        self.redraw = true;
+                        false
+                    }
                     Input::Key(code, true, false) => {
                         if let Some(key) = self.store.controls().keyboard_key(code)
                             && !keys.iter().any(|(held, _)| *held == code)
@@ -741,7 +780,7 @@ impl App {
                 // The hint over the first seconds of a desktop game.
                 toast_up = !toast.is_empty() && toast_time;
                 let rgba = if toast_up {
-                    library::with_toast(rgba, width, height, toast)
+                    library::with_toast(rgba, width, height, &toast)
                 } else {
                     rgba.clone()
                 };
@@ -767,6 +806,19 @@ impl App {
             }
         }
     }
+}
+
+/// The window's title over a game: its name, its speed when that is not 1x,
+/// and whether it is paused.
+fn game_title(name: &str, speed: f32, paused: bool) -> String {
+    let mut title = format!("MiniMobile - {name}");
+    if speed != 1.0 {
+        title.push_str(&format!(" ({})", speed_label(speed)));
+    }
+    if paused {
+        title.push_str(" (일시정지)");
+    }
+    title
 }
 
 /// Opens `folder` in the desktop's file manager.

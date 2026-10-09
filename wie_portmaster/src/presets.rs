@@ -5,8 +5,8 @@
 //! preset is a controls file of its own under `presets/`, named after the game
 //! it was saved from; loading one copies it into the live mapping. "기본" is
 //! the defaults and is never a file, so it cannot be overwritten or lost.
-//! `presets.txt` remembers which preset was loaded last and the presets games
-//! are fixed to.
+//! `presets.txt` remembers which preset was loaded last, the presets games
+//! are fixed to, and the speed each game plays at.
 
 use std::path::{Path, PathBuf};
 
@@ -27,6 +27,8 @@ pub struct Store {
     active: String,
     /// Game file name, and the preset loaded whenever it starts.
     fixed: Vec<(String, String)>,
+    /// Game file name, and the speed it plays at when that is not 1x.
+    speeds: Vec<(String, f32)>,
     /// How a desktop window is shown: its size as a multiple of 320x240, or
     /// 0 for the full screen.
     screen: u32,
@@ -38,6 +40,7 @@ impl Store {
             controls: Controls::load(Path::new(CONTROLS_FILE)),
             active: DEFAULT_NAME.to_owned(),
             fixed: Vec::new(),
+            speeds: Vec::new(),
             screen: 3,
         };
         if let Ok(text) = std::fs::read_to_string(STATE_FILE) {
@@ -46,6 +49,14 @@ impl Store {
                 match fields.as_slice() {
                     ["active", name] => store.active = (*name).to_owned(),
                     ["game", game, name] => store.fixed.push(((*game).to_owned(), (*name).to_owned())),
+                    ["speed", game, speed] => {
+                        if let Ok(speed) = speed.parse::<f32>()
+                            && speed.is_finite()
+                            && speed > 0.0
+                        {
+                            store.speeds.push(((*game).to_owned(), speed));
+                        }
+                    }
                     ["screen", screen] => store.screen = screen.parse().unwrap_or(3).min(SCREEN_MAX),
                     _ => {}
                 }
@@ -181,6 +192,26 @@ impl Store {
         self.save();
     }
 
+    /// The speed `game` plays at.
+    pub fn speed(&self, game: &str) -> f32 {
+        self.speeds.iter().find(|(x, _)| x == game).map_or(1.0, |(_, speed)| *speed)
+    }
+
+    pub fn set_speed(&mut self, game: &str, speed: f32) {
+        self.speeds.retain(|(x, _)| x != game);
+        if speed != 1.0 {
+            self.speeds.push((game.to_owned(), speed));
+        }
+        self.save();
+    }
+
+    /// Drops what is kept for a game that is gone.
+    pub fn forget(&mut self, game: &str) {
+        self.fixed.retain(|(x, _)| x != game);
+        self.speeds.retain(|(x, _)| x != game);
+        self.save();
+    }
+
     fn write_preset(&self, name: &str) {
         let _ = std::fs::create_dir_all(PRESET_DIR);
         if let Err(error) = std::fs::write(preset_path(name), self.controls.to_text()) {
@@ -198,6 +229,9 @@ impl Store {
         );
         for (game, preset) in &self.fixed {
             state.push_str(&format!("game\t{game}\t{preset}\n"));
+        }
+        for (game, speed) in &self.speeds {
+            state.push_str(&format!("speed\t{game}\t{speed}\n"));
         }
         if let Err(error) = std::fs::write(STATE_FILE, state) {
             eprintln!("프리셋 상태를 저장할 수 없습니다: {error}");

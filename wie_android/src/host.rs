@@ -252,6 +252,46 @@ pub fn import_save(zip_data: &[u8], runtime_dir: &Path) -> Result<usize, String>
     Ok(restored)
 }
 
+/// Every file `data` has saved, for a host to say whether there is a save and
+/// when it was last written.
+pub fn save_files(data: &[u8], runtime_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut files = Vec::new();
+    for (name, path) in save_roots(data, runtime_dir)? {
+        files_under(&path, &name, &mut files).map_err(|error| format!("세이브를 읽을 수 없습니다: {error}"))?;
+    }
+    Ok(files.into_iter().map(|(_, path)| path).collect())
+}
+
+/// The directories `data`'s saves live in, for a host that removes them its
+/// own way (to a recycle bin) rather than with [`erase_save`].
+pub fn save_dirs(data: &[u8], runtime_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    Ok(save_roots(data, runtime_dir)?.into_iter().map(|(_, path)| path).collect())
+}
+
+/// What a save zip holds: `None` when it is no save zip at all, else whether
+/// any of it is `data`'s - so a host can sort a folder of them by title.
+pub fn save_zip_belongs(zip_data: &[u8], data: &[u8]) -> Option<bool> {
+    let archive = zip::ZipArchive::new(std::io::Cursor::new(zip_data)).ok()?;
+    let roots: Vec<String> = archive
+        .file_names()
+        .filter_map(|name| {
+            let mut parts = name.split('/');
+            match (parts.next(), parts.next(), parts.next()) {
+                (Some(kind @ ("db" | "fs")), Some(id), Some(rest)) if !id.is_empty() && !rest.is_empty() => Some(format!("{kind}/{id}")),
+                _ => None,
+            }
+        })
+        .collect();
+    if roots.is_empty() {
+        return None;
+    }
+    let Some(ids) = runner::save_ids(data) else {
+        return Some(false);
+    };
+    let ours = [format!("db/{}", ids.records), format!("fs/{}", ids.files), format!("fs/{}", ids.records)];
+    Some(roots.iter().any(|root| ours.contains(root)))
+}
+
 /// Removes `data`'s saves, and returns how many directories it removed.
 pub fn erase_save(data: &[u8], runtime_dir: &Path) -> Result<usize, String> {
     let roots = save_roots(data, runtime_dir)?;
@@ -265,7 +305,7 @@ pub fn erase_save(data: &[u8], runtime_dir: &Path) -> Result<usize, String> {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{erase_save, export_save, import_save};
+    use super::{erase_save, export_save, import_save, save_dirs, save_files, save_zip_belongs};
 
     fn runtime_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("wie-host-{name}-{}", std::process::id()));
@@ -289,7 +329,13 @@ mod tests {
         std::fs::create_dir_all(record.parent().unwrap()).unwrap();
         std::fs::write(&record, b"1234").unwrap();
 
+        assert_eq!(save_files(&archive, &runtime).unwrap().len(), 2);
+        assert!(save_dirs(&archive, &runtime).unwrap().len() >= 2);
         let zip = export_save(&archive, &runtime).unwrap().expect("something saved");
+        // The zip is told apart as this title's save, and a title's own file
+        // as no save at all.
+        assert_eq!(save_zip_belongs(&zip, &archive), Some(true));
+        assert_eq!(save_zip_belongs(&archive, &archive), None);
         assert!(erase_save(&archive, &runtime).unwrap() >= 2);
         assert!(!save.exists() && !record.exists());
 
@@ -300,8 +346,22 @@ mod tests {
         // Nothing saved is nothing to export.
         erase_save(&archive, &runtime).unwrap();
         assert!(export_save(&archive, &runtime).unwrap().is_none());
+        assert!(save_files(&archive, &runtime).unwrap().is_empty());
 
         let _ = std::fs::remove_dir_all(&runtime);
+    }
+
+    /// Another title's save is a save, but not this title's.
+    #[test]
+    fn a_save_zip_of_another_title_is_told_apart() {
+        let archive = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../test_data/helloworld_ktf.zip")).unwrap();
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file("db/not-this-title/scores/1", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        std::io::Write::write_all(&mut zip, b"1").unwrap();
+        let data = zip.finish().unwrap().into_inner();
+
+        assert_eq!(save_zip_belongs(&data, &archive), Some(false));
     }
 
     /// An entry outside the save trees, or one climbing out of them, is not

@@ -22,10 +22,12 @@ use crate::{
 };
 
 const ROW: Color = rgb(0x22, 0x2a, 0x33);
-const ACCENT: Color = rgb(0x7d, 0xe0, 0xa8);
-const PANEL: Color = rgb(0x1a, 0x20, 0x28);
-const EDGE: Color = rgb(0x3c, 0x48, 0x54);
-const DIM: Color = Color { a: 0xb0, r: 0, g: 0, b: 0 };
+pub(crate) const ACCENT: Color = rgb(0x7d, 0xe0, 0xa8);
+pub(crate) const PANEL: Color = rgb(0x1a, 0x20, 0x28);
+pub(crate) const EDGE: Color = rgb(0x3c, 0x48, 0x54);
+pub(crate) const DIM: Color = Color { a: 0xb0, r: 0, g: 0, b: 0 };
+/// What cannot be undone easily: deleting.
+pub(crate) const DANGER: Color = rgb(0xf0, 0x8a, 0x80);
 
 /// Where the settings were opened from.
 pub struct Context<'a> {
@@ -60,6 +62,8 @@ pub enum Outcome {
     EndGame,
     /// "MiniMobile 종료".
     QuitApp,
+    /// The game picked on the list was deleted; what to say about it.
+    Deleted(String),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -70,6 +74,9 @@ enum Item {
     Preset,
     Fix,
     Screen,
+    Speed,
+    Saves,
+    Delete,
     EndGame,
     Close,
     QuitApp,
@@ -77,12 +84,12 @@ enum Item {
 
 /// A pad button held down keeps repeating after a moment: the directions,
 /// for moving through a list. (A held keyboard key repeats by itself.)
-struct Repeat {
+pub(crate) struct Repeat {
     held: Option<(Button, Instant)>,
 }
 
 impl Repeat {
-    fn new() -> Repeat {
+    pub(crate) fn new() -> Repeat {
         Repeat { held: None }
     }
 }
@@ -91,6 +98,28 @@ impl Repeat {
 /// then the full screen.
 fn screen_steps() -> Vec<u32> {
     (2..=SCREEN_MAX).chain(Some(0)).collect()
+}
+
+/// The speeds a game can play at, as the menu and F5/F6 step through them.
+pub(crate) const SPEEDS: [f32; 10] = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0];
+
+/// The speed a step faster (or slower) than `speed`, stopping at the ends.
+pub(crate) fn speed_step(speed: f32, faster: bool) -> f32 {
+    let nearest = (0..SPEEDS.len())
+        .min_by(|a, b| (SPEEDS[*a] - speed).abs().total_cmp(&(SPEEDS[*b] - speed).abs()))
+        .unwrap_or(2);
+    let next = if faster {
+        (nearest + 1).min(SPEEDS.len() - 1)
+    } else {
+        nearest.saturating_sub(1)
+    };
+    SPEEDS[next]
+}
+
+/// `1.5x`, `2x`, `0.75x`.
+pub(crate) fn speed_label(speed: f32) -> String {
+    let text = format!("{speed:.2}");
+    format!("{}x", text.trim_end_matches('0').trim_end_matches('.'))
 }
 
 fn screen_label(scale: u32) -> String {
@@ -103,14 +132,14 @@ fn screen_label(scale: u32) -> String {
 
 impl App {
     /// The pad's words or the keyboard's for a hint, whichever this is.
-    fn hint(&self, pad: &'static str, keys: &'static str) -> &'static str {
+    pub(crate) fn hint(&self, pad: &'static str, keys: &'static str) -> &'static str {
         if self.desktop { keys } else { pad }
     }
 
     /// The buttons pressed since the last call, a held direction repeating,
     /// and the keyboard's keys as the buttons they stand for. Closing the
     /// window ends the program.
-    fn presses(&mut self, repeat: &mut Repeat) -> Vec<Button> {
+    pub(crate) fn presses(&mut self, repeat: &mut Repeat) -> Vec<Button> {
         let mut pressed = Vec::new();
         for input in self.poll() {
             match input {
@@ -146,7 +175,7 @@ impl App {
     }
 
     /// Whether the screen has to be drawn again for the window's sake.
-    fn take_redraw(&mut self) -> bool {
+    pub(crate) fn take_redraw(&mut self) -> bool {
         std::mem::take(&mut self.redraw)
     }
 
@@ -162,7 +191,7 @@ impl App {
         (screen, width, height)
     }
 
-    fn present(&mut self, screen: Screen, width: u32, height: u32) {
+    pub(crate) fn present(&mut self, screen: Screen, width: u32, height: u32) {
         let rgba = screen.rgba();
         self.show(&rgba, width, height);
     }
@@ -172,7 +201,7 @@ impl App {
     pub fn settings_menu(&mut self, context: &Context) -> Outcome {
         let mut items = Vec::new();
         if context.in_game() {
-            items.push(Item::Resume);
+            items.extend([Item::Resume, Item::Speed]);
         }
         if self.desktop {
             items.push(Item::Keyboard);
@@ -180,6 +209,11 @@ impl App {
         items.extend([Item::Layout, Item::Preset]);
         if context.game.is_some() {
             items.push(Item::Fix);
+        }
+        // What is done to a game's files is done from the list, with the game
+        // stopped.
+        if context.game.is_some() && !context.in_game() {
+            items.extend([Item::Speed, Item::Saves, Item::Delete]);
         }
         if self.desktop {
             items.push(Item::Screen);
@@ -206,6 +240,12 @@ impl App {
                     Button::Left | Button::Right if items[cursor] == Item::Screen => {
                         self.cycle_screen(button == Button::Right);
                     }
+                    Button::Left | Button::Right if items[cursor] == Item::Speed => {
+                        if let Some(game) = context.game {
+                            let speed = speed_step(self.game_speed(game), button == Button::Right);
+                            self.set_game_speed(game, speed, context.in_game());
+                        }
+                    }
                     Button::A => match items[cursor] {
                         Item::Resume | Item::Close => return Outcome::Close,
                         Item::EndGame => return Outcome::EndGame,
@@ -214,6 +254,27 @@ impl App {
                         Item::Layout => self.layout(),
                         Item::Preset => self.presets(context),
                         Item::Screen => self.cycle_screen(true),
+                        Item::Speed => {
+                            if let Some(game) = context.game {
+                                // On past the fastest, back round to the slowest.
+                                let current = self.game_speed(game);
+                                let next = speed_step(current, true);
+                                let speed = if next == current { SPEEDS[0] } else { next };
+                                self.set_game_speed(game, speed, context.in_game());
+                            }
+                        }
+                        Item::Saves => {
+                            if let Some(game) = context.game {
+                                self.save_manager(game);
+                            }
+                        }
+                        Item::Delete => {
+                            if let Some(game) = context.game
+                                && let Some(done) = self.delete_game(game, None)
+                            {
+                                return Outcome::Deleted(done);
+                            }
+                        }
                         Item::Fix => {
                             if let Some(game) = context.game_file() {
                                 let fixed = self.store.fixed(&game).map(str::to_owned);
@@ -258,6 +319,22 @@ impl App {
         self.set_screen(steps[next]);
     }
 
+    /// The speed `game` plays at.
+    pub(crate) fn game_speed(&self, game: &Path) -> f32 {
+        let file = game.file_name().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
+        self.store.speed(&file)
+    }
+
+    /// Remembers the speed `game` plays at, and puts the clock on it now if
+    /// the game is `running`.
+    pub(crate) fn set_game_speed(&mut self, game: &Path, speed: f32, running: bool) {
+        let file = game.file_name().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
+        self.store.set_speed(&file, speed);
+        if running {
+            host::set_speed(speed);
+        }
+    }
+
     /// The active preset's name, starred once the mapping has moved off it.
     fn active_label(&self) -> String {
         let star = if self.store.modified() { "*" } else { "" };
@@ -290,6 +367,9 @@ impl App {
                 Item::Preset => "프리셋",
                 Item::Fix => "이 게임에 프리셋 고정",
                 Item::Screen => "화면",
+                Item::Speed => "배속",
+                Item::Saves => "세이브 관리",
+                Item::Delete => "이 게임 삭제",
                 Item::EndGame => "게임 끝내기",
                 Item::Close => "닫기",
                 Item::QuitApp => "MiniMobile 종료",
@@ -299,6 +379,7 @@ impl App {
             let value = match item {
                 Item::Preset => format!("◀ {} ▶", fit(&self.active_label(), room - 40.0)),
                 Item::Screen => format!("◀ {} ▶", screen_label(self.store.screen())),
+                Item::Speed => format!("◀ {} ▶", speed_label(context.game.map_or(1.0, |game| self.game_speed(game)))),
                 Item::Fix => {
                     let fixed = context.game_file().and_then(|game| self.store.fixed(&game).map(str::to_owned));
                     fixed.map_or("끔".to_owned(), |name| fit(&name, room))
@@ -325,6 +406,8 @@ impl App {
         let hint = match items[cursor] {
             Item::Preset => self.hint("A 목록  ◀▶ 바꾸기", "Enter 목록  ◀▶ 바꾸기"),
             Item::Screen => self.hint("◀▶ 바꾸기", "◀▶ 바꾸기  F11"),
+            Item::Speed if context.in_game() => self.hint("◀▶ 바꾸기", "◀▶ 바꾸기  F5 F6"),
+            Item::Speed => self.hint("◀▶ 바꾸기", "◀▶ 바꾸기"),
             _ => self.hint("A 선택", "Enter 선택"),
         };
         let back = self.hint("B 닫기", "Esc 닫기");
@@ -775,7 +858,7 @@ impl App {
 }
 
 /// Moves the first row shown so `row` is on screen.
-fn scroll(row: usize, rows: usize, top: &mut usize) {
+pub(crate) fn scroll(row: usize, rows: usize, top: &mut usize) {
     if row < *top {
         *top = row;
     } else if row >= *top + rows {
@@ -784,7 +867,7 @@ fn scroll(row: usize, rows: usize, top: &mut usize) {
 }
 
 /// The ▲ and ▼ at the right edge of a table with more rows above or below.
-fn scroll_marks(screen: &mut Screen, width: u32, list_top: i32, rows: usize, top: usize, count: usize) {
+pub(crate) fn scroll_marks(screen: &mut Screen, width: u32, list_top: i32, rows: usize, top: usize, count: usize) {
     if top + rows < count {
         screen.text(
             "▼",
@@ -799,7 +882,7 @@ fn scroll_marks(screen: &mut Screen, width: u32, list_top: i32, rows: usize, top
     }
 }
 
-fn panel_bar(screen: &mut Screen, x: i32, y: i32, width: u32, left: &str, right: &str) {
+pub(crate) fn panel_bar(screen: &mut Screen, x: i32, y: i32, width: u32, left: &str, right: &str) {
     screen.fill(x, y, width, BAR as u32, BAR_COLOR);
     screen.text(left, x + 6, y + 2, TextAlignment::Left, TEXT);
     if !right.is_empty() {
@@ -902,6 +985,19 @@ mod tests {
         // The top-left key stays put going up or left.
         assert_eq!(step(&cells, at(&cells, Some(9)), Button::Up), at(&cells, Some(9)));
         assert_eq!(step(&cells, at(&cells, Some(9)), Button::Left), at(&cells, Some(9)));
+    }
+
+    #[test]
+    fn the_speed_steps_and_stops_at_the_ends() {
+        assert_eq!(speed_step(1.0, true), 1.25);
+        assert_eq!(speed_step(1.0, false), 0.75);
+        assert_eq!(speed_step(4.0, true), 4.0);
+        assert_eq!(speed_step(0.5, false), 0.5);
+        // A speed set elsewhere steps from the nearest one offered.
+        assert_eq!(speed_step(1.4, true), 1.75);
+        assert_eq!(speed_label(1.0), "1x");
+        assert_eq!(speed_label(1.5), "1.5x");
+        assert_eq!(speed_label(0.75), "0.75x");
     }
 
     #[test]

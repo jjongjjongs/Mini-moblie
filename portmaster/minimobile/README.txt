@@ -19,7 +19,7 @@ Android 앱과 같은 에뮬레이터로 KTF / LGT / SKT / BREW / J2ME 게임을
     위/아래          게임 고르기
     좌/우, L1/R1     한 페이지씩
     A 또는 START     실행
-    Y                버튼 설정 (고른 게임 기준)
+    Y                설정 (버튼, 배속, 세이브 관리, 게임 삭제)
     SELECT+START     MiniMobile 종료
 
 게임 중 (기본값)
@@ -36,7 +36,7 @@ Android 앱과 같은 에뮬레이터로 KTF / LGT / SKT / BREW / J2ME 게임을
         A 5    B 0      X 1      Y 3
         L1 7   R1 9     L2 *     R2 #
 
-    MENU(핫키)        일시정지 메뉴 (버튼 설정, 프리셋, 게임 끝내기)
+    MENU(핫키)        일시정지 메뉴 (배속, 버튼 설정, 프리셋, 게임 끝내기)
     SELECT+START      게임 끝내고 바로 목록으로
 
 버튼 설정
@@ -53,11 +53,23 @@ Android 앱과 같은 에뮬레이터로 KTF / LGT / SKT / BREW / J2ME 게임을
     이 게임에 프리셋 고정
                        켜 두면 그 게임을 실행할 때마다 그 프리셋으로
                        바뀝니다.
+    배속               0.5배~4배. ◀▶로 바꾸고, 게임마다 기억합니다.
+    세이브 관리        (게임 목록에서만)
+                       내보내기: minimobile/saves 에 "게임 이름 세이브
+                         날짜 시각.zip"으로 저장합니다. 매번 새 파일.
+                       가져오기: saves 폴더의 세이브 zip을 고릅니다.
+                         지금 세이브는 덮어쓰기 전에 "(가져오기 전)"으로
+                         자동 보관합니다.
+                       세이브 지우기 (되돌릴 수 없음)
+                       Android 앱·Windows판의 세이브 zip과 호환됩니다.
+    이 게임 삭제       (게임 목록에서만) 게임만, 또는 세이브까지 지웁니다.
+                       되돌릴 수 없습니다.
 
 파일
 ----
     minimobile/games/              게임 파일
     minimobile/data/               세이브 (Android 앱과 같은 구조)
+    minimobile/saves/              내보낸 세이브 zip
     minimobile/controls.txt        지금 버튼 설정 (직접 고쳐도 됨)
     minimobile/presets/            프리셋
     minimobile/log.txt             마지막 실행 기록

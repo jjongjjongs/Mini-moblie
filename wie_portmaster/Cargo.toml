@@ -19,6 +19,7 @@ path = "src/main.rs"
 jit = ["wie_android/jit"]
 
 [dependencies]
+libc = { workspace = true }
 libloading = "^0.8"
 
 wie_android = { path = "../wie_android" }

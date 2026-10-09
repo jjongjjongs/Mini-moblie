@@ -65,7 +65,7 @@ impl Menu {
     }
 
     /// Reads the folder again, keeping the pick on the same file if it is
-    /// still there.
+    /// still there, else on the place it was.
     pub fn refresh(&mut self) {
         let current = self.games.get(self.selected).cloned();
         let mut games: Vec<PathBuf> = std::fs::read_dir(&self.folder)
@@ -77,7 +77,9 @@ impl Menu {
             })
             .unwrap_or_default();
         games.sort_by_key(|path| name(path).to_lowercase());
-        self.selected = current.and_then(|current| games.iter().position(|x| *x == current)).unwrap_or(0);
+        self.selected = current
+            .and_then(|current| games.iter().position(|x| *x == current))
+            .unwrap_or_else(|| self.selected.min(games.len().saturating_sub(1)));
         self.games = games;
     }
 
@@ -108,6 +110,11 @@ impl Menu {
         if let Some(at) = self.games.iter().position(|x| *x == target) {
             self.selected = at;
         }
+    }
+
+    /// Says what something done to the list came to, over its bottom bar.
+    pub fn set_status(&mut self, status: String) {
+        self.status = status;
     }
 
     pub fn selected(&self) -> Option<PathBuf> {
@@ -150,7 +157,7 @@ impl Menu {
         };
         canvas.bar(0, "MiniMobile", &count);
         if self.desktop {
-            canvas.bar(height as i32 - BAR, "Enter 실행  Esc 메뉴", "F11 전체화면");
+            canvas.bar(height as i32 - BAR, "Enter 실행  Esc 메뉴", "Del 삭제");
         } else {
             canvas.bar(height as i32 - BAR, "A 실행  Y 설정", "SELECT+START 종료");
         }

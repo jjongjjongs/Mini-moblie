@@ -3736,6 +3736,7 @@ dependencies = [
 name = "wie_portmaster"
 version = "0.0.1"
 dependencies = [
+ "libc",
  "libloading 0.8.9",
  "wie_android",
  "wie_backend",
