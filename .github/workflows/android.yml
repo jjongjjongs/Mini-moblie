@@ -94,7 +94,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: wie-mobile-debug
+          name: MiniMobile-apk
           path: android/app/build/outputs/apk/release/app-release.apk
 
       # An artifact can only be downloaded by someone signed in to GitHub, from
@@ -135,7 +135,9 @@ jobs:
           \`MiniMobile-linux-x86_64.tar.gz\` is the Linux PC program of the
           same commit, uploaded by its own job - see the README.txt inside it.
 
-          \`wie-mobile-ios.ipa\` is the iPhone app, unsigned: install it with
+          \`MiniMobile.apk\` is the Android app.
+
+          \`MiniMobile.ipa\` is the iPhone app, unsigned: install it with
           AltStore, SideStore or TrollStore, which sign it on the way in.
 
           \`MiniMobile-portmaster.zip\` is the port for Linux handhelds
@@ -153,15 +155,15 @@ jobs:
           fi
 
           # The asset takes the file's own name, so it is renamed rather than
-          # uploaded as gradle's `app-release.apk`. It keeps the name it had
-          # when the debug build was shipped, so the download link people have
-          # does not change.
-          cp android/app/build/outputs/apk/release/app-release.apk wie-mobile-debug.apk
-          gh release upload "$TAG" wie-mobile-debug.apk --clobber
+          # uploaded as gradle's `app-release.apk`.
+          cp android/app/build/outputs/apk/release/app-release.apk MiniMobile.apk
+          gh release upload "$TAG" MiniMobile.apk --clobber
 
-          # Drop a stale `app-debug.apk` asset left by an older workflow: it
-          # shows up next to the real one and is easy to download by mistake.
-          gh release delete-asset "$TAG" app-debug.apk --yes 2>/dev/null || true
+          # Drop the apk under the names older workflows used: it shows up
+          # next to the real one and is easy to download by mistake.
+          for old in app-debug.apk wie-mobile-debug.apk; do
+            gh release delete-asset "$TAG" "$old" --yes 2>/dev/null || true
+          done
 
   # The Linux PC program: the same SDL port as the Windows and PortMaster
   # builds, opened as a window by its launcher. Cross-compiled with zig
@@ -393,14 +395,14 @@ jobs:
           set -eu
           mkdir -p Payload
           cp -R ios/build/Build/Products/Release-iphoneos/MiniMobile.app Payload/
-          zip -qry wie-mobile-ios.ipa Payload
+          zip -qry MiniMobile.ipa Payload
 
       - name: Upload the ipa
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: wie-mobile-ios
-          path: wie-mobile-ios.ipa
+          name: MiniMobile-ipa
+          path: MiniMobile.ipa
 
       - name: Publish the ipa to the development release
         if: github.event_name != 'pull_request'
@@ -412,4 +414,6 @@ jobs:
           gh release view "$TAG" >/dev/null 2>&1 \
             || gh release create "$TAG" --title 'WIE Mobile (development build)' --notes 'Development build, replaced by every push.' --prerelease \
             || gh release view "$TAG" >/dev/null
-          gh release upload "$TAG" wie-mobile-ios.ipa --clobber
+          gh release upload "$TAG" MiniMobile.ipa --clobber
+          # The name older workflows used, so it does not linger beside it.
+          gh release delete-asset "$TAG" wie-mobile-ios.ipa --yes 2>/dev/null || true
