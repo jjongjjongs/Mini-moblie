@@ -816,6 +816,7 @@ impl JitEngine {
             } else {
                 word(&self.mem, dst.wrapping_add(offset))
             }),
+            SvcIntrinsic::Constant(value) => Some(Some(value)),
             SvcIntrinsic::Rgb565 => {
                 let pixel = (((dst as u8 as u32) >> 3) << 11) | (((source as u8 as u32) >> 2) << 5) | ((len as u8 as u32) >> 3);
                 Some(Some(pixel))
@@ -2025,6 +2026,9 @@ mod tests {
         };
         assert_eq!(answer(field, &[(DATA + 4, 320)], [DATA, 0, 0]), 320);
         assert_eq!(answer(field, &[], [0, 0, 0]), u32::MAX);
+
+        // A constant, whatever is in the argument registers.
+        assert_eq!(answer(SvcIntrinsic::Constant(16), &[], [0x4100_0000, 320, 7]), 16);
 
         // White, and a colour whose low bits each channel drops.
         assert_eq!(answer(SvcIntrinsic::Rgb565, &[], [0xff, 0xff, 0xff]), 0xffff);

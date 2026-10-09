@@ -464,6 +464,12 @@ pub(crate) fn wipic_intrinsic(function_index: u32) -> Option<wie_core_arm::SvcIn
             if_null: NO_FRAMEBUFFER,
         }),
         x if x == WIPICSvcId::GetPixelFromRgb as u32 => Some(SvcIntrinsic::Rgb565),
+        // The depth, which the vendor answers from a global whatever it is
+        // passed (see `get_framebuffer_bpp`). 제노니아2's own blitter asks for
+        // it per span - sixteen to eighteen thousand times a second in a
+        // fight, nearly all of its WIPI-C traffic - and each ask left
+        // compiled code for a constant.
+        x if x == WIPICSvcId::GetFramebufferBpp as u32 => Some(SvcIntrinsic::Constant(graphics::FRAMEBUFFER_DEPTH)),
         _ => None,
     }
 }

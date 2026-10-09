@@ -42,6 +42,9 @@ pub enum SvcIntrinsic {
     /// `screen_at` is `r0`, the word at `rows_at` times its bytes per line
     /// (`+8`). `if_null` when `r0` is zero.
     FramebufferPointer { screen_at: u32, rows_at: u32, if_null: u32 },
+    /// A fixed answer in r0, whatever the arguments: a getter of a value the
+    /// platform never changes.
+    Constant(u32),
 }
 
 pub enum EngineRunResult {
