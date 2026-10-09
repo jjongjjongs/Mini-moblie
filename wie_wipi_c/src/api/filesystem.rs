@@ -657,9 +657,9 @@ pub async fn remove(context: &mut dyn WIPICContext, path: WIPICWord, access: WIP
         return Ok(-1);
     }
 
-    // Virtual archive files are visible through size(), but remove() writes
-    // only to the persistent platform layer. That correctly leaves them
-    // read-only and produces the native generic unlink failure.
+    // A file packaged in the archive is removed too: the filesystem hides it
+    // from then on (see `FilesystemOverlay::remove`), as titles that delete
+    // a shipped save before starting a new game wait to see it gone.
     if !filesystem.remove(&path).await {
         return Ok(-1);
     }
@@ -1776,14 +1776,16 @@ mod tests {
     }
 
     #[futures_test::test]
-    async fn lgt_fs_remove_virtual_file_is_visible_but_read_only() {
+    async fn lgt_fs_remove_of_a_packaged_file_hides_it() {
         let mut context = filesystem_test_context();
         context.system().filesystem().add_virtual("res/remove.bin", b"virtual".to_vec());
         context.write_bytes(0x1000, b"res/remove.bin\0").unwrap();
 
         assert_eq!(context.system().filesystem().size("res/remove.bin").await, Some(7));
-        assert_eq!(remove(&mut context, 0x1000, 2).await.unwrap(), -1);
-        assert_eq!(context.system().filesystem().size("res/remove.bin").await, Some(7));
+        assert_eq!(remove(&mut context, 0x1000, 2).await.unwrap(), 0);
+        assert_eq!(context.system().filesystem().size("res/remove.bin").await, None);
+        // Gone, so a second remove finds nothing to remove.
+        assert_eq!(remove(&mut context, 0x1000, 2).await.unwrap(), -12);
     }
 
     #[futures_test::test]
