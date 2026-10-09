@@ -54,7 +54,6 @@ enum SettingKey {
 private enum GameSheet: String, Identifiable {
     case speed
     case quality
-    case sound
     case settings
     case log
 
@@ -82,8 +81,6 @@ struct GameView: View {
     @State private var speed: Float = 1
     /// How the screen is enlarged (see `GameQuality`).
     @State private var quality = ScreenQuality.dot
-    /// Whether the music gives way to effects (see `GameSound`).
-    @State private var oneSound = false
     /// The layout being edited, nil when the pad is in play.
     @State private var draft: PadLayout?
     @State private var selectedKey: Int32?
@@ -112,7 +109,6 @@ struct GameView: View {
         .onAppear {
             speed = GameSpeed.get(game)
             quality = GameQuality.get(game)
-            oneSound = GameSound.oneAtATime(game)
             touch = GameTouch.get(game)
             padHidden = GamePad.hidden(game)
             emulator.start(game: game)
@@ -125,8 +121,6 @@ struct GameView: View {
                 SpeedView(game: game, speed: $speed)
             case .quality:
                 QualityView(game: game, emulator: emulator, quality: $quality)
-            case .sound:
-                SoundView(game: game, oneSound: $oneSound)
             case .settings:
                 GameSettingsView(onEditPad: beginEditing)
             case .log:
@@ -227,9 +221,6 @@ struct GameView: View {
         }
         Button { sheet = .quality } label: {
             Label("화질 (\(quality.label))", systemImage: "photo")
-        }
-        Button { sheet = .sound } label: {
-            Label("소리 (\(oneSound ? "각각" : "동시"))", systemImage: "speaker.wave.2")
         }
         Button { sheet = .settings } label: {
             Label("화면·패드 설정", systemImage: "slider.horizontal.3")
@@ -717,87 +708,6 @@ private struct QualityPreviews {
             space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
             provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent
         )
-    }
-}
-
-/// 동시 - everything mixed, as it always was - or 각각, the music holding back
-/// while an effect plays. Each has a picture of the music and effects along a
-/// timeline. It applies as it changes and is kept for this title.
-private struct SoundView: View {
-    let game: GameFile
-    @Binding var oneSound: Bool
-    @Environment(\.dismiss) private var dismiss
-
-    private static let effects: [ClosedRange<CGFloat>] = [0.22...0.34, 0.62...0.77]
-
-    var body: some View {
-        NavigationView {
-            Form {
-                Section {
-                    option(false, title: "동시", tag: nil, detail: "배경음과 효과음을 함께 재생해요. 게임이 효과음 때문에 배경음을 끊어도 계속 들려요.", music: [0...1])
-                    option(true, title: "각각", tag: nil, detail: "한 번에 하나만 재생해요. 효과음이 나는 동안 배경음이 잠깐 멈췄다 이어져요.",
-                           music: [0...0.21, 0.35...0.61, 0.78...1])
-                } footer: {
-                    Text("소리가 겹쳐서 뭉개지거나, 원래 폰처럼 한 소리씩 듣고 싶을 때 ‘각각’을 고르세요. 이 게임에만 적용됩니다.")
-                }
-            }
-            .navigationTitle("소리")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("완료") { dismiss() }
-                }
-            }
-        }
-    }
-
-    private func option(_ value: Bool, title: String, tag: String?, detail: String, music: [ClosedRange<CGFloat>]) -> some View {
-        Button {
-            oneSound = value
-            GameSound.set(oneAtATime: value, for: game)
-            wie_set_one_sound_at_a_time(value)
-        } label: {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 6) {
-                        Text(title).font(.body.weight(.bold))
-                        if let tag {
-                            Text(tag)
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                                .padding(.horizontal, 4)
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.5)))
-                        }
-                    }
-                    Text(detail).font(.caption).foregroundColor(.secondary)
-                    lane("배경음", spans: music, color: Color(red: 0.36, green: 0.55, blue: 0.94))
-                    lane("효과음", spans: Self.effects, color: Color(red: 0.89, green: 0.61, blue: 0.31))
-                }
-                Spacer()
-                Image(systemName: oneSound == value ? "checkmark.circle.fill" : "circle")
-                    .foregroundColor(oneSound == value ? .accentColor : .secondary)
-            }
-        }
-        .foregroundColor(.primary)
-    }
-
-    private func lane(_ name: String, spans: [ClosedRange<CGFloat>], color: Color) -> some View {
-        HStack(spacing: 6) {
-            Text(name)
-                .font(.system(size: 10))
-                .foregroundColor(.secondary)
-                .frame(width: 34, alignment: .leading)
-            GeometryReader { geometry in
-                ForEach(spans.indices, id: \.self) { index in
-                    let span = spans[index]
-                    Capsule()
-                        .fill(color)
-                        .frame(width: (span.upperBound - span.lowerBound) * geometry.size.width, height: 8)
-                        .offset(x: span.lowerBound * geometry.size.width)
-                }
-            }
-            .frame(height: 8)
-        }
     }
 }
 

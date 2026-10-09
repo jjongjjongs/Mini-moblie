@@ -46,7 +46,6 @@ final class Emulator: ObservableObject {
         // the first tick.
         wie_set_speed(GameSpeed.get(game))
         wie_set_touch(GameTouch.get(game))
-        wie_set_one_sound_at_a_time(GameSound.oneAtATime(game))
         lock.lock()
         hq2x = GameQuality.get(game) == .hq2x
         lock.unlock()

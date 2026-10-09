@@ -60,12 +60,6 @@ final class NativeBridge {
     static native void nativeSetSpeed(float speed);
 
     /**
-     * Whether the music gives way while an effect plays - one sound at a
-     * time - rather than everything sounding together. Safe while a title runs.
-     */
-    static native void nativeSetOneSoundAtATime(int enabled);
-
-    /**
      * Guest instructions retired so far. It climbs while the title is running
      * and stops dead when it is not, which is what tells a title doing a long
      * piece of work - a loading screen is one tick that can last seconds -

@@ -152,15 +152,6 @@ pub fn install_audio_mixer(mixer: Arc<Mutex<crate::ma3::SynthMixer>>) {
     *AUDIO_MIXER.lock().unwrap_or_else(|x| x.into_inner()) = Some(mixer);
 }
 
-/// Sets whether the music gives way to effects - one sound at a time - in the
-/// running title's mixer and every one made after it.
-pub fn set_one_at_a_time(enabled: bool) {
-    crate::ma3::set_one_at_a_time_default(enabled);
-    if let Some(mixer) = AUDIO_MIXER.lock().unwrap_or_else(|x| x.into_inner()).as_ref() {
-        mixer.lock().unwrap_or_else(|x| x.into_inner()).set_one_at_a_time(enabled);
-    }
-}
-
 /// Renders `frames` stereo frames from the installed mixer as little-endian
 /// sixteen-bit bytes, or an empty vector when nothing is sounding. Called by the
 /// Java audio thread; that thread's AudioTrack is the clock, so the mixer
@@ -257,10 +248,6 @@ impl wie_backend::AudioSink for AndroidAudioSink {
 
     fn open_midi_voice(&self, clip: u32) -> u32 {
         self.shared.mixer().open(clip)
-    }
-
-    fn set_midi_voice_looping(&self, voice: u32, looping: bool) {
-        self.shared.mixer().set_looping(voice, looping);
     }
 
     fn close_midi_voice(&self, voice: u32) {

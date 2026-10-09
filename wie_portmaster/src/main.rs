@@ -712,10 +712,8 @@ impl App {
         let runtime_dir = saves::runtime_dir();
         let _ = std::fs::create_dir_all(&runtime_dir);
         // The speed it was last played at; starting puts the clock back on the
-        // time of day and runs it from there at that speed. Its sound as it
-        // was left too.
+        // time of day and runs it from there at that speed.
         host::set_speed(speed);
-        host::set_one_sound_at_a_time(self.game_one_sound(game));
         let failure = host::start(data, runtime_dir, "Linux".to_owned());
         if !failure.is_empty() {
             return Err(failure);

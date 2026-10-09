@@ -81,10 +81,6 @@ char *wie_carrier(const uint8_t *data, size_t length);
 void wie_set_speed(float speed);
 float wie_speed(void);
 
-// Whether the music gives way while an effect plays - one sound at a time -
-// rather than everything sounding together. Safe while a title runs.
-void wie_set_one_sound_at_a_time(bool enabled);
-
 // Saves, in the Android app's zip layout (db/<product id>/..., fs/<app id>/...),
 // so a save moves between the two. `data` is the game file whose saves are
 // meant; `runtime_dir` is the one given to `wie_start`. Each returns NULL on

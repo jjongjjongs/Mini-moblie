@@ -69,10 +69,6 @@ struct ActiveSmaf {
     /// `None` while playing. A re-play clears it, so continuous re-play never
     /// stops; a genuine stop with no re-play flushes after the grace.
     pending_stop_polls: Option<u32>,
-    /// The title stopped this clip and played an effect since, so the stop
-    /// waits out [`HELD_FOR_EFFECTS_POLLS`] from the last effect rather than
-    /// the short grace.
-    held_for_effects: bool,
 }
 
 /// Reaper poll interval and the grace (in polls) before a deferred stop takes
@@ -80,45 +76,6 @@ struct ActiveSmaf {
 /// that a real stop is barely audible as a tail.
 const REAPER_POLL_MS: u64 = 100;
 const PENDING_STOP_GRACE_POLLS: u32 = 3;
-
-/// How long music the title stopped for its effects goes on after the last
-/// effect began, in polls, waiting for the title to start it again.
-///
-/// A title with one clip to play everything on stops its music to play an
-/// effect on it, and plays the music again from the top once the effects are
-/// over: 제노니아2 plays a run of attack sounds over two seconds and starts its
-/// music again 1.3 seconds after the last. Long enough to bridge that; short
-/// enough that music a title meant to stop does not hang on far past it.
-const HELD_FOR_EFFECTS_POLLS: u32 = 40;
-
-/// The grace a stopped piece of music gets under "동시" before the stop takes:
-/// long enough for the effect it was stopped for to begin. 제노니아2 takes a
-/// quarter of a second between stopping its music and playing the effect,
-/// more on a slow phone - past the short grace, so the music had already
-/// gone by the time the effect came to hold it.
-const THROUGH_EFFECTS_GRACE_POLLS: u32 = 10;
-
-/// Whether music a title stops in order to play an effect plays on under it.
-/// See [`set_music_through_effects`].
-static MUSIC_THROUGH_EFFECTS: AtomicBool = AtomicBool::new(true);
-
-/// The polls a stopped piece of music waits, with no effect after it, for the
-/// title to start it again before it stops.
-fn stop_grace_polls() -> u32 {
-    if MUSIC_THROUGH_EFFECTS.load(Ordering::Relaxed) {
-        THROUGH_EFFECTS_GRACE_POLLS
-    } else {
-        PENDING_STOP_GRACE_POLLS
-    }
-}
-
-/// Sets whether the music plays on under the effects - "동시" - when a title
-/// stops it to play them, as one with a single clip to play everything on
-/// does. Off, the title's stop is honoured as the handset honoured it, and
-/// the music comes back when the title starts it again.
-pub fn set_music_through_effects(enabled: bool) {
-    MUSIC_THROUGH_EFFECTS.store(enabled, Ordering::Relaxed);
-}
 
 /// The volume a clip has until a title says otherwise, which is what the
 /// reference's clip record is created holding.
@@ -220,7 +177,6 @@ impl Audio {
             && active.hash == hash
         {
             active.pending_stop_polls = None;
-            active.held_for_effects = false;
             active.handle = audio_handle;
             let playback = Playback {
                 completed: active.completed.clone(),
@@ -242,17 +198,6 @@ impl Audio {
         // so it is marked as such and its ending goes unreported.
         if repeat {
             self.flush_active(true);
-        } else if MUSIC_THROUGH_EFFECTS.load(Ordering::Relaxed)
-            && let Some(active) = self.active.as_mut()
-            && active.pending_stop_polls.is_some()
-        {
-            // The music was stopped for this effect: it plays on under it, and
-            // waits for the title to start it again once its effects are done.
-            if !active.held_for_effects {
-                tracing::info!("[audio] music {} stopped for an effect plays on under it", active.sink_handle);
-            }
-            active.pending_stop_polls = Some(0);
-            active.held_for_effects = true;
         }
 
         self.stop(audio_handle);
@@ -279,7 +224,6 @@ impl Audio {
                     completed: completed.clone(),
                     superseded: superseded.clone(),
                     pending_stop_polls: None,
-                    held_for_effects: false,
                 });
                 self.ensure_reaper(system);
 
@@ -479,42 +423,25 @@ impl Audio {
             loop {
                 system_clone.sleep(REAPER_POLL_MS).await;
 
-                system_clone.audio().reap();
+                let mut audio = system_clone.audio();
+                let flush = match audio.active.as_mut() {
+                    Some(active) => match active.pending_stop_polls {
+                        Some(polls) if polls + 1 >= PENDING_STOP_GRACE_POLLS => true,
+                        Some(polls) => {
+                            active.pending_stop_polls = Some(polls + 1);
+                            false
+                        }
+                        None => false,
+                    },
+                    None => false,
+                };
+                if flush {
+                    // The title asked for this stop and may be waiting to hear
+                    // that it happened, so it is not a supersede.
+                    audio.flush_active(false);
+                }
             }
         });
-    }
-
-    /// One poll of the reaper: counts a deferred stop of the music on, and
-    /// stops it for real once it has stood its grace with nothing starting the
-    /// music again.
-    fn reap(&mut self) {
-        let flush = match self.active.as_mut() {
-            Some(active) => match active.pending_stop_polls {
-                Some(polls) => {
-                    let grace = if active.held_for_effects {
-                        HELD_FOR_EFFECTS_POLLS
-                    } else {
-                        stop_grace_polls()
-                    };
-                    active.pending_stop_polls = Some(polls + 1);
-                    polls + 1 >= grace
-                }
-                None => false,
-            },
-            None => false,
-        };
-        if flush {
-            if let Some(active) = self.active.as_ref() {
-                tracing::info!(
-                    "[audio] music {} stops (held for effects: {})",
-                    active.sink_handle,
-                    active.held_for_effects
-                );
-            }
-            // The title asked for this stop and may be waiting to hear that it
-            // happened, so it is not a supersede.
-            self.flush_active(false);
-        }
     }
 
     pub fn close(&mut self, audio_handle: AudioHandle) -> Result<(), AudioError> {
@@ -595,7 +522,6 @@ impl SmafPlayer {
         let repeat = repeat && length > 0;
 
         let voice = sink.open_midi_voice(clip);
-        sink.set_midi_voice_looping(voice, repeat);
         tracing::info!(
             "[audio] SMAF clip on isolated voice {voice}: {} events, {length}ms, repeat={repeat}",
             self.events.len()
@@ -693,7 +619,7 @@ mod tests {
 
     use smaf_player::SmafEvent;
 
-    use super::{HELD_FOR_EFFECTS_POLLS, SmafPlayer, stop_grace_polls};
+    use super::SmafPlayer;
     use crate::{AudioSink, Database, DatabaseRepository, DefaultTaskRunner, Filesystem, Instant, Platform, Screen, System, canvas::Image};
 
     struct NullDatabase;
@@ -1047,73 +973,6 @@ mod tests {
             h1 as usize,
             "the stop must target the stream the sink played (h1), not a later handle"
         );
-    }
-
-    /// A title with one clip for everything stops its music to play each
-    /// effect on it and starts the music again once they are over (제노니아2).
-    /// The music plays on under the effects, and starting it again carries on
-    /// from where it was rather than from the top.
-    #[test]
-    fn music_stopped_for_effects_plays_on_under_them() {
-        let (system, counters) = new_system_with_smaf_counters();
-        let music = system.audio().load_smaf(b"BGM-DATA").unwrap();
-        system.audio().play_with_completion(&system, music, true).unwrap();
-
-        let mut latest = music;
-        for _ in 0..5 {
-            system.audio().stop(latest);
-            let _ = system.audio().close(latest);
-            // The effect comes a while after the stop, as 제노니아2's does.
-            for _ in 0..4 {
-                system.audio().reap();
-            }
-            let effect = system.audio().load_smaf(b"SFX").unwrap();
-            system.audio().play_with_completion(&system, effect, false).unwrap();
-            // Longer than the short grace between effects.
-            for _ in 0..5 {
-                system.audio().reap();
-            }
-            latest = effect;
-        }
-        assert!(system.audio().active.is_some(), "the music is still playing under the effects");
-        assert_eq!(counters.stop.load(Ordering::SeqCst), 0);
-
-        let again = system.audio().load_smaf(b"BGM-DATA").unwrap();
-        system.audio().play_with_completion(&system, again, true).unwrap();
-        assert_eq!(
-            counters.play.load(Ordering::SeqCst),
-            6,
-            "the music once and five effects - it was not started again"
-        );
-        assert!(system.audio().active.as_ref().is_some_and(|active| active.pending_stop_polls.is_none()));
-    }
-
-    /// Music stopped with no effect after it stops after the short grace, and
-    /// music held for effects stops once they have long been over without it
-    /// being started again.
-    #[test]
-    fn music_stopped_for_good_still_stops() {
-        let (system, counters) = new_system_with_smaf_counters();
-        let music = system.audio().load_smaf(b"BGM-DATA").unwrap();
-        system.audio().play_with_completion(&system, music, true).unwrap();
-        system.audio().stop(music);
-        for _ in 0..stop_grace_polls() {
-            system.audio().reap();
-        }
-        assert!(system.audio().active.is_none());
-        assert_eq!(counters.stop.load(Ordering::SeqCst), 1);
-
-        let music = system.audio().load_smaf(b"BGM-DATA").unwrap();
-        system.audio().play_with_completion(&system, music, true).unwrap();
-        system.audio().stop(music);
-        let effect = system.audio().load_smaf(b"SFX").unwrap();
-        system.audio().play_with_completion(&system, effect, false).unwrap();
-        for _ in 0..HELD_FOR_EFFECTS_POLLS - 1 {
-            system.audio().reap();
-        }
-        assert!(system.audio().active.is_some());
-        system.audio().reap();
-        assert!(system.audio().active.is_none());
     }
 
     #[futures_test::test]

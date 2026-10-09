@@ -6,7 +6,7 @@
 //! it was saved from; loading one copies it into the live mapping. "기본" is
 //! the defaults and is never a file, so it cannot be overwritten or lost.
 //! `presets.txt` remembers which preset was loaded last, the presets games
-//! are fixed to, and the speed, screen quality and sound each game plays with.
+//! are fixed to, and the speed and screen quality each game plays with.
 
 use std::path::{Path, PathBuf};
 
@@ -32,8 +32,6 @@ pub struct Store {
     /// Game file name, and how its screen is enlarged when that is not 도트:
     /// 0 기본, 2 HQ2X, as the Android app numbers them.
     qualities: Vec<(String, u8)>,
-    /// The games that play one sound at a time.
-    one_sound: Vec<String>,
     /// How a desktop window is shown: its size as a multiple of 320x240, or
     /// 0 for the full screen.
     screen: u32,
@@ -47,7 +45,6 @@ impl Store {
             fixed: Vec::new(),
             speeds: Vec::new(),
             qualities: Vec::new(),
-            one_sound: Vec::new(),
             screen: 3,
         };
         if let Ok(text) = std::fs::read_to_string(STATE_FILE) {
@@ -71,7 +68,6 @@ impl Store {
                             store.qualities.push(((*game).to_owned(), quality));
                         }
                     }
-                    ["sound", game, "one"] => store.one_sound.push((*game).to_owned()),
                     ["screen", screen] => store.screen = screen.parse().unwrap_or(3).min(SCREEN_MAX),
                     _ => {}
                 }
@@ -233,25 +229,11 @@ impl Store {
         self.save();
     }
 
-    /// Whether `game` plays one sound at a time.
-    pub fn one_sound(&self, game: &str) -> bool {
-        self.one_sound.iter().any(|x| x == game)
-    }
-
-    pub fn set_one_sound(&mut self, game: &str, enabled: bool) {
-        self.one_sound.retain(|x| x != game);
-        if enabled {
-            self.one_sound.push(game.to_owned());
-        }
-        self.save();
-    }
-
     /// Drops what is kept for a game that is gone.
     pub fn forget(&mut self, game: &str) {
         self.fixed.retain(|(x, _)| x != game);
         self.speeds.retain(|(x, _)| x != game);
         self.qualities.retain(|(x, _)| x != game);
-        self.one_sound.retain(|x| x != game);
         self.save();
     }
 
@@ -278,9 +260,6 @@ impl Store {
         }
         for (game, quality) in &self.qualities {
             state.push_str(&format!("quality\t{game}\t{quality}\n"));
-        }
-        for game in &self.one_sound {
-            state.push_str(&format!("sound\t{game}\tone\n"));
         }
         if let Err(error) = std::fs::write(STATE_FILE, state) {
             eprintln!("프리셋 상태를 저장할 수 없습니다: {error}");

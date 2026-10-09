@@ -29,13 +29,7 @@ mod tone;
 mod voice;
 mod wave;
 
-use std::{
-    collections::BTreeMap,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 use crate::ma3::{
     bus::{clamp_i16, mix_q15, saturate_pcm, soft_limit, stereo_gain_q15},
@@ -454,20 +448,6 @@ fn gains(state: &Channel, velocity: u8, master_volume: u8) -> (i32, i32) {
     stereo_gain_q15(state.volume, state.expression, velocity, master_volume, state.pan)
 }
 
-/// Whether a mixer made from now on sounds one thing at a time; see
-/// [`SynthMixer::set_one_at_a_time`].
-static ONE_AT_A_TIME: AtomicBool = AtomicBool::new(false);
-
-/// How long the music takes to fade out under an effect, and back in after,
-/// in output frames: long enough not to click, short enough not to be heard
-/// as a fade.
-const DUCK_FRAMES: f32 = SAMPLE_RATE as f32 * 0.015;
-
-/// Sets whether the mixers made from now on sound one thing at a time.
-pub fn set_one_at_a_time_default(enabled: bool) {
-    ONE_AT_A_TIME.store(enabled, Ordering::Relaxed);
-}
-
 /// A set of independent [`Synth`] voices, one per playing clip, summed to one
 /// output.
 ///
@@ -500,13 +480,6 @@ pub struct SynthMixer {
     /// looping background track and the effects fired over it play at once
     /// rather than the effects replacing the music.
     songs: Vec<SongPlayback>,
-    /// Sound one thing at a time: the background music held back while an
-    /// effect plays, and picked up where it left off after. Off, everything
-    /// sounding is mixed together, which is what the handsets did.
-    one_at_a_time: bool,
-    /// How loud the music is against the effects, 0 to 1: under 1 only while
-    /// it gives way to an effect.
-    music_gain: f32,
 }
 
 /// A pre-rendered song mixed into the output, optionally looping.
@@ -533,8 +506,6 @@ struct MixerVoice {
     /// decays (release tails finished), then `render` drops it, so a stop does
     /// not cut the tail.
     closing: bool,
-    /// The clip loops - background music rather than an effect.
-    looping: bool,
 }
 
 /// A recorded wave playing back into the mix, resampled from its own rate to the
@@ -588,8 +559,6 @@ impl SynthMixer {
             clip_volumes: BTreeMap::new(),
             pcm: Vec::new(),
             songs: Vec::new(),
-            one_at_a_time: ONE_AT_A_TIME.load(Ordering::Relaxed),
-            music_gain: 1.0,
         }
     }
 
@@ -673,62 +642,8 @@ impl SynthMixer {
         self.next_id = self.next_id.wrapping_add(1).max(1);
         let mut synth = Synth::new();
         synth.set_master_volume(self.clip_volume(clip));
-        self.voices.insert(
-            id,
-            MixerVoice {
-                clip,
-                synth,
-                closing: false,
-                looping: false,
-            },
-        );
+        self.voices.insert(id, MixerVoice { clip, synth, closing: false });
         id
-    }
-
-    /// Sets whether the music gives way to effects; see `one_at_a_time`.
-    pub fn set_one_at_a_time(&mut self, enabled: bool) {
-        self.one_at_a_time = enabled;
-    }
-
-    /// Marks whether a voice's clip loops, which makes it music rather than
-    /// an effect.
-    pub fn set_looping(&mut self, voice: u32, looping: bool) {
-        if let Some(entry) = self.voices.get_mut(&voice) {
-            entry.looping = looping;
-        }
-    }
-
-    /// Whether an effect - anything that plays once - is sounding.
-    fn effect_sounding(&self) -> bool {
-        !self.pcm.is_empty()
-            || self.songs.iter().any(|song| !song.repeat && song.position < song.samples.len())
-            || self.voices.values().any(|entry| !entry.looping)
-    }
-
-    /// The music's gain at each frame of the next `frames`, easing toward
-    /// silence while an effect sounds in one-at-a-time mode and back to full
-    /// after. `None` while the music plays at full.
-    fn music_ramp(&mut self, frames: usize) -> Option<Vec<f32>> {
-        let target = if self.one_at_a_time && self.effect_sounding() { 0.0 } else { 1.0 };
-        if self.music_gain == target && target == 1.0 {
-            return None;
-        }
-
-        let step = 1.0 / DUCK_FRAMES;
-        let mut gain = self.music_gain;
-        let ramp = (0..frames)
-            .map(|_| {
-                gain = if target < gain {
-                    (gain - step).max(target)
-                } else {
-                    (gain + step).min(target)
-                };
-                gain
-            })
-            .collect();
-        self.music_gain = gain;
-
-        Some(ramp)
     }
 
     /// Marks a voice's clip as finished; the voice keeps rendering until its
@@ -792,26 +707,14 @@ impl SynthMixer {
         let mut accumulator: Option<Vec<i32>> = None;
         let mut finished: Vec<u32> = Vec::new();
         let mut active_voices = 0usize;
-        let music = self.music_ramp(frames);
 
         for (id, entry) in &mut self.voices {
             match entry.synth.render(frames) {
                 Some(samples) => {
                     active_voices += 1;
                     let acc = accumulator.get_or_insert_with(|| vec![0i32; frames * CHANNELS]);
-                    match music.as_ref().filter(|_| entry.looping) {
-                        // A sequence keeps its own time, so music played this
-                        // way is only turned down under an effect, not held.
-                        Some(ramp) => {
-                            for (index, (slot, sample)) in acc.iter_mut().zip(samples.iter()).enumerate() {
-                                *slot += (f32::from(*sample) * ramp[index / CHANNELS]) as i32;
-                            }
-                        }
-                        None => {
-                            for (slot, sample) in acc.iter_mut().zip(samples.iter()) {
-                                *slot += i32::from(*sample);
-                            }
-                        }
+                    for (slot, sample) in acc.iter_mut().zip(samples.iter()) {
+                        *slot += i32::from(*sample);
                     }
                 }
                 None => {
@@ -867,16 +770,7 @@ impl SynthMixer {
         if !self.songs.is_empty() {
             let acc = accumulator.get_or_insert_with(|| vec![0i32; frames * CHANNELS]);
             self.songs.retain_mut(|song| {
-                for (index, slot) in acc.iter_mut().enumerate() {
-                    // Looping music under an effect fades out and then waits
-                    // where it is, to go on from there once the effect is over.
-                    let gain = match music.as_ref().filter(|_| song.repeat) {
-                        Some(ramp) => ramp[index / CHANNELS],
-                        None => 1.0,
-                    };
-                    if gain <= 0.0 {
-                        continue;
-                    }
+                for slot in acc.iter_mut() {
                     if song.position >= song.samples.len() {
                         if song.repeat && !song.samples.is_empty() {
                             song.position = 0;
@@ -884,8 +778,7 @@ impl SynthMixer {
                             return false;
                         }
                     }
-                    let sample = i32::from(song.samples[song.position]) * i32::from(song.volume) / i32::from(FULL_VOLUME);
-                    *slot += if gain < 1.0 { (sample as f32 * gain) as i32 } else { sample };
+                    *slot += i32::from(song.samples[song.position]) * i32::from(song.volume) / i32::from(FULL_VOLUME);
                     song.position += 1;
                 }
                 true
@@ -993,45 +886,6 @@ mod tests {
     use std::sync::Arc;
 
     use super::{CHANNELS, Channel, MAX_VOICES, SAMPLE_RATE, Synth, SynthMixer, modulation_depth};
-
-    /// One at a time, the music fades out under an effect and waits, then
-    /// goes on from where it was once the effect has played.
-    #[test]
-    fn one_at_a_time_holds_the_music_under_an_effect() {
-        let mut mixer = SynthMixer::new();
-        mixer.set_one_at_a_time(true);
-        let music: Vec<i16> = (0..20_000).map(|frame| (frame / 2) as i16).collect();
-        mixer.set_song(1, Arc::new(music), true);
-        mixer.render(100).expect("music");
-
-        mixer.set_song(2, Arc::new(vec![0; 2_000 * CHANNELS]), false);
-        let under = mixer.render(1_000).expect("effect");
-        let faded = &under[under.len() - 2..];
-        assert_eq!(faded, &[0, 0], "the music is silent once faded");
-        let held_at = mixer.songs.iter().find(|song| song.id == 1).unwrap().position;
-        mixer.render(500).expect("effect");
-        assert_eq!(
-            mixer.songs.iter().find(|song| song.id == 1).unwrap().position,
-            held_at,
-            "and does not move on"
-        );
-
-        mixer.render(500).expect("the effect plays out");
-        let after = mixer.render(2_000).expect("music again");
-        assert!(after[after.len() - 1] > 0, "the music comes back");
-        assert!(mixer.songs.iter().find(|song| song.id == 1).unwrap().position > held_at);
-    }
-
-    /// Mixed, an effect plays over the music without touching it.
-    #[test]
-    fn mixed_plays_the_music_under_an_effect() {
-        let mut mixer = SynthMixer::new();
-        mixer.set_one_at_a_time(false);
-        mixer.set_song(1, Arc::new(vec![100; 4_000]), true);
-        mixer.set_song(2, Arc::new(vec![0; 4_000]), false);
-
-        assert!(mixer.render(1_000).expect("both").iter().all(|&sample| sample == 100));
-    }
 
     #[test]
     fn song_mixes_then_finishes() {

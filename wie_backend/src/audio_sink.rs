@@ -24,11 +24,6 @@ pub trait AudioSink: Sync + Send {
     fn open_midi_voice(&self, _clip: u32) -> u32 {
         0
     }
-    /// Says whether the clip behind `voice` loops - background music - or
-    /// plays once, as an effect does. A sink that plays one sound at a time
-    /// holds the music back while an effect sounds, and this is how it tells
-    /// the two apart.
-    fn set_midi_voice_looping(&self, _voice: u32, _looping: bool) {}
     /// Marks a voice's clip as finished. The voice keeps sounding until its
     /// release tails decay, then the sink drops it.
     fn close_midi_voice(&self, _voice: u32) {}

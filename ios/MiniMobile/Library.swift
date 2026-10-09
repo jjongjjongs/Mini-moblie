@@ -274,18 +274,6 @@ enum GameQuality {
     }
 }
 
-/// Whether a title plays one sound at a time - the music holding back while
-/// an effect plays - kept per title. Off, everything sounds together.
-enum GameSound {
-    static func oneAtATime(_ game: GameFile) -> Bool {
-        UserDefaults.standard.bool(forKey: "oneSound.\(game.name)")
-    }
-
-    static func set(oneAtATime: Bool, for game: GameFile) {
-        UserDefaults.standard.set(oneAtATime, forKey: "oneSound.\(game.name)")
-    }
-}
-
 /// Whether touches on the game screen reach a title, kept per title as the
 /// speed is. Off unless the player turned it on for a title made for a touch
 /// handset.

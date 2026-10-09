@@ -84,7 +84,6 @@ enum Item {
     Screen,
     Speed,
     Quality,
-    Sound,
     Saves,
     Delete,
     EndGame,
@@ -242,7 +241,7 @@ impl App {
     pub fn settings_menu(&mut self, context: &Context) -> Outcome {
         let mut items = Vec::new();
         if context.in_game() {
-            items.extend([Item::Resume, Item::Speed, Item::Quality, Item::Sound]);
+            items.extend([Item::Resume, Item::Speed, Item::Quality]);
         }
         if self.desktop {
             items.push(Item::Keyboard);
@@ -254,7 +253,7 @@ impl App {
         // What is done to a game's files is done from the list, with the game
         // stopped.
         if context.game.is_some() && !context.in_game() {
-            items.extend([Item::Speed, Item::Quality, Item::Sound, Item::Saves, Item::Delete]);
+            items.extend([Item::Speed, Item::Quality, Item::Saves, Item::Delete]);
         }
         if self.desktop {
             items.push(Item::Screen);
@@ -294,12 +293,6 @@ impl App {
                             self.set_game_quality(game, quality);
                         }
                     }
-                    Button::Left | Button::Right if items[cursor] == Item::Sound => {
-                        if let Some(game) = context.game {
-                            let one = !self.game_one_sound(game);
-                            self.set_game_one_sound(game, one, context.in_game());
-                        }
-                    }
                     Button::Left | Button::Right if items[cursor] == Item::Preset => {
                         self.cycle_preset(button == Button::Right);
                     }
@@ -333,12 +326,6 @@ impl App {
                             if let Some(game) = context.game {
                                 let quality = self.game_quality(game).step(true);
                                 self.set_game_quality(game, quality);
-                            }
-                        }
-                        Item::Sound => {
-                            if let Some(game) = context.game {
-                                let one = !self.game_one_sound(game);
-                                self.set_game_one_sound(game, one, context.in_game());
                             }
                         }
                         Item::Saves => {
@@ -425,18 +412,6 @@ impl App {
         host::show_frame_again();
     }
 
-    /// Whether `game` plays one sound at a time.
-    pub(crate) fn game_one_sound(&self, game: &Path) -> bool {
-        self.store.one_sound(&file_of(game))
-    }
-
-    fn set_game_one_sound(&mut self, game: &Path, enabled: bool, running: bool) {
-        self.store.set_one_sound(&file_of(game), enabled);
-        if running {
-            host::set_one_sound_at_a_time(enabled);
-        }
-    }
-
     /// The active preset's name, starred once the mapping has moved off it.
     fn active_label(&self) -> String {
         let star = if self.store.modified() { "*" } else { "" };
@@ -479,7 +454,6 @@ impl App {
                 Item::Screen => "화면",
                 Item::Speed => "배속",
                 Item::Quality => "화질",
-                Item::Sound => "소리",
                 Item::Saves => "세이브 관리",
                 Item::Delete => "이 게임 삭제",
                 Item::EndGame => "게임 끝내기",
@@ -493,14 +467,6 @@ impl App {
                 Item::Screen => format!("◀ {} ▶", screen_label(self.store.screen())),
                 Item::Speed => format!("◀ {} ▶", speed_label(context.game.map_or(1.0, |game| self.game_speed(game)))),
                 Item::Quality => format!("◀ {} ▶", context.game.map_or(Quality::Dot, |game| self.game_quality(game)).label()),
-                Item::Sound => format!(
-                    "◀ {} ▶",
-                    if context.game.is_some_and(|game| self.game_one_sound(game)) {
-                        "각각"
-                    } else {
-                        "동시"
-                    }
-                ),
                 Item::Fix => {
                     let fixed = context.game_file().and_then(|game| self.store.fixed(&game).map(str::to_owned));
                     fixed.map_or("끔".to_owned(), |name| fit(&name, room))
@@ -537,7 +503,7 @@ impl App {
             Item::Screen => self.hint("◀▶ 바꾸기", "◀▶ 바꾸기  F11"),
             Item::Speed if context.in_game() => self.hint("◀▶ 0.1씩", "◀▶ 0.1씩  F5 F6"),
             Item::Speed => self.hint("◀▶ 0.1씩", "◀▶ 0.1씩"),
-            Item::Quality | Item::Sound => self.hint("◀▶ 바꾸기", "◀▶ 바꾸기"),
+            Item::Quality => self.hint("◀▶ 바꾸기", "◀▶ 바꾸기"),
             _ => self.hint("A 선택", "Enter 선택"),
         };
         let back = self.hint("B 닫기", "Esc 닫기");

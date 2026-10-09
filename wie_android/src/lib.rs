@@ -190,18 +190,6 @@ pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativ
     guard(|| speed::set_speed(value));
 }
 
-/// `nativeSetOneSoundAtATime(boolean)`
-///
-/// Whether the music gives way while an effect plays - one sound at a time -
-/// rather than everything sounding together.
-///
-/// # Safety
-/// Called by the JVM with a valid `env` reference.
-#[unsafe(no_mangle)]
-pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativeSetOneSoundAtATime(_env: JNIEnv, _class: JClass, enabled: jint) {
-    host::set_one_sound_at_a_time(enabled != 0);
-}
-
 /// `nativeGuestProgress() -> long`
 ///
 /// Guest instructions retired so far. It climbs while the title is running and

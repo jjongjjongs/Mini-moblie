@@ -4116,8 +4116,6 @@ public final class MainActivity extends Activity {
         String speedValue = currentGame != null ? formatSpeed(gameSpeed(currentGame)) : formatSpeed(1f);
         rows.add(new GameMenuRow("⏩", "게임 속도", speedValue, this::showSpeedDialog));
         rows.add(new GameMenuRow("🖼", "화질", QUALITY_NAMES[screenQuality], this::showQualityDialog));
-        boolean oneSound = currentGame != null && gameOneSound(currentGame);
-        rows.add(new GameMenuRow("🔊", "소리", oneSound ? "각각" : "동시", this::showSoundDialog));
         rows.add(new GameMenuRow("👆", "화면 터치", touchOn ? "켜짐" : "꺼짐", this::toggleTouch));
         // A phone with its own keypad may have no touch screen to reach back
         // through, so the way out is here too.
@@ -4364,11 +4362,6 @@ public final class MainActivity extends Activity {
         editor.apply();
     }
 
-    /** Whether `game` plays one sound at a time; off unless chosen for it. */
-    private boolean gameOneSound(File game) {
-        return getSharedPreferences("mini_sound", MODE_PRIVATE).getBoolean(game.getName(), false);
-    }
-
     /**
      * The quality window from the gear menu: 기본, 도트 and HQ2X, each with a
      * picture of the middle of the screen drawn that way. A choice shows on
@@ -4503,71 +4496,6 @@ public final class MainActivity extends Activity {
         return bitmap;
     }
 
-    /**
-     * The sound window from the gear menu: 동시 - everything mixed, as it
-     * always was - or 각각, the music holding back while an effect plays. Each
-     * has a picture of the music and effects along a timeline.
-     */
-    private void showSoundDialog() {
-        final File game = currentGame;
-        if (game == null) {
-            return;
-        }
-        final boolean[] chosen = {gameOneSound(game)};
-
-        LinearLayout body = new LinearLayout(this);
-        body.setOrientation(LinearLayout.VERTICAL);
-        body.setPadding(dp(16), 0, dp(16), dp(4));
-        body.addView(settingScope("이 게임에만 적용 · 다음에 열어도 유지"));
-
-        // Where each sound plays along the timeline, as from-to fractions.
-        float[] effects = {0.22f, 0.34f, 0.62f, 0.77f};
-        View mixed = optionCard("동시", null, "배경음과 효과음을 함께 재생해요. 게임이 효과음 때문에 배경음을 끊어도 계속 들려요.", null,
-                soundLanes(new float[] {0f, 1f}, effects));
-        View oneAtATime = optionCard("각각", null, "한 번에 하나만 재생해요. 효과음이 나는 동안 배경음이 잠깐 멈췄다 이어져요.", null,
-                soundLanes(new float[] {0f, 0.21f, 0.35f, 0.61f, 0.78f, 1f}, effects));
-        final Runnable refresh = () -> {
-            markOption(mixed, !chosen[0]);
-            markOption(oneAtATime, chosen[0]);
-        };
-        mixed.setOnClickListener(v -> {
-            chosen[0] = false;
-            refresh.run();
-        });
-        oneAtATime.setOnClickListener(v -> {
-            chosen[0] = true;
-            refresh.run();
-        });
-        body.addView(mixed);
-        LinearLayout.LayoutParams second = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        second.topMargin = dp(8);
-        body.addView(oneAtATime, second);
-
-        TextView note = new TextView(this);
-        note.setText("소리가 겹쳐서 뭉개지거나, 원래 폰처럼 한 소리씩 듣고 싶을 때 ‘각각’을 고르세요.");
-        note.setTextSize(12f);
-        note.setTextColor(COLOR_SUBTEXT);
-        note.setLineSpacing(0f, 1.2f);
-        LinearLayout.LayoutParams noteParams = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        noteParams.topMargin = dp(12);
-        body.addView(note, noteParams);
-        refresh.run();
-
-        new AlertDialog.Builder(new android.view.ContextThemeWrapper(this, android.R.style.Theme_Material_Dialog_Alert))
-                .setTitle("소리")
-                .setView(scrolling(body))
-                .setPositiveButton("적용", (dialog, which) -> {
-                    getSharedPreferences("mini_sound", MODE_PRIVATE).edit().putBoolean(game.getName(), chosen[0]).apply();
-                    if (game.equals(currentGame)) {
-                        NativeBridge.nativeSetOneSoundAtATime(chosen[0] ? 1 : 0);
-                    }
-                })
-                .setNegativeButton("취소", null)
-                .show();
-    }
-
     /** The grey "이 게임에만 적용" line under a setting window's title. */
     private TextView settingScope(String text) {
         TextView scope = new TextView(this);
@@ -4663,46 +4591,6 @@ public final class MainActivity extends Activity {
         mark.setColor(on ? COLOR_ACCENT : Color.TRANSPARENT);
         mark.setStroke(dp(2), on ? COLOR_ACCENT : Color.rgb(107, 111, 123));
         radio.setBackground(mark);
-    }
-
-    /**
-     * Two lanes along a timeline - 배경음 in blue, 효과음 in orange - each
-     * drawn as the from-to fractions given for it.
-     */
-    private View soundLanes(float[] music, float[] effects) {
-        LinearLayout lanes = new LinearLayout(this);
-        lanes.setOrientation(LinearLayout.VERTICAL);
-        lanes.addView(soundLane("배경음", music, Color.rgb(91, 141, 239)));
-        lanes.addView(soundLane("효과음", effects, Color.rgb(227, 155, 79)));
-        return lanes;
-    }
-
-    private View soundLane(String name, float[] spans, int color) {
-        LinearLayout lane = new LinearLayout(this);
-        lane.setOrientation(LinearLayout.HORIZONTAL);
-        lane.setGravity(android.view.Gravity.CENTER_VERTICAL);
-        lane.setPadding(0, dp(2), 0, dp(2));
-        TextView label = new TextView(this);
-        label.setText(name);
-        label.setTextSize(10f);
-        label.setTextColor(COLOR_SUBTEXT);
-        lane.addView(label, new LinearLayout.LayoutParams(dp(36), ViewGroup.LayoutParams.WRAP_CONTENT));
-        View bar = new View(this) {
-            private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-            private final RectF span = new RectF();
-
-            @Override
-            protected void onDraw(Canvas canvas) {
-                paint.setColor(color);
-                float radius = getHeight() / 2.5f;
-                for (int i = 0; i + 1 < spans.length; i += 2) {
-                    span.set(spans[i] * getWidth(), 0, spans[i + 1] * getWidth(), getHeight());
-                    canvas.drawRoundRect(span, radius, radius, paint);
-                }
-            }
-        };
-        lane.addView(bar, new LinearLayout.LayoutParams(0, dp(8), 1f));
-        return lane;
     }
 
     /** The speeds the dialog offers as one-tap chips, in tenths. */
@@ -5093,8 +4981,7 @@ public final class MainActivity extends Activity {
             // turned it on for one made for a touch handset.
             touchOn = gameTouch(game);
             NativeBridge.nativeSetTouch(touchOn ? 1 : 0);
-            // The sound and the screen as the player left them for this title.
-            NativeBridge.nativeSetOneSoundAtATime(gameOneSound(game) ? 1 : 0);
+            // The screen as the player left it for this title.
             int quality = gameQuality(game);
             screenQuality = quality;
             runOnUiThread(() -> {

@@ -250,12 +250,6 @@ pub extern "C" fn wie_set_speed(speed: f32) {
     host::set_speed(speed);
 }
 
-/// Whether the music gives way while an effect plays - one sound at a time.
-#[unsafe(no_mangle)]
-pub extern "C" fn wie_set_one_sound_at_a_time(enabled: bool) {
-    host::set_one_sound_at_a_time(enabled);
-}
-
 #[unsafe(no_mangle)]
 pub extern "C" fn wie_speed() -> f32 {
     host::speed()
