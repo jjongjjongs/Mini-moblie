@@ -93,11 +93,82 @@ pub extern "C" fn wie_key(index: i32, pressed: bool) {
 /// for writes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wie_take_frame(rgba: *mut u8, capacity: usize, width: *mut u32, height: *mut u32) -> bool {
+    // SAFETY: as the caller promises.
+    unsafe { take_frame(host::take_frame_rgba, rgba, capacity, width, height) }
+}
+
+/// [`wie_take_frame`], the frame doubled through hq2x: twice the title's
+/// width and height, its edges smoothed.
+///
+/// # Safety
+/// As [`wie_take_frame`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wie_take_frame_hq2x(rgba: *mut u8, capacity: usize, width: *mut u32, height: *mut u32) -> bool {
+    // SAFETY: as the caller promises.
+    unsafe { take_frame(host::take_frame_rgba_hq2x, rgba, capacity, width, height) }
+}
+
+/// Has the next take hand over the last frame again, though the title paints
+/// nothing new - for a change in how it is shown.
+#[unsafe(no_mangle)]
+pub extern "C" fn wie_show_frame_again() {
+    host::show_frame_again();
+}
+
+/// Copies the last frame taken, as the title drew it, into `rgba` without
+/// taking anything. False when there is none or it does not fit.
+///
+/// # Safety
+/// As [`wie_take_frame`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wie_last_frame(rgba: *mut u8, capacity: usize, width: *mut u32, height: *mut u32) -> bool {
+    let Some((w, h, pixels)) = host::last_frame_rgba() else {
+        return false;
+    };
+    if rgba.is_null() || width.is_null() || height.is_null() || pixels.len() > capacity {
+        return false;
+    }
+    // SAFETY: as the caller promises, and `pixels` fits in `capacity`.
+    unsafe {
+        *width = w;
+        *height = h;
+        std::ptr::copy_nonoverlapping(pixels.as_ptr(), rgba, pixels.len());
+    }
+    true
+}
+
+/// Doubles `rgba`, `width` by `height`, through hq2x into `out`, which holds
+/// four times as many bytes. False when it cannot.
+///
+/// # Safety
+/// `rgba` holds `width * height * 4` bytes and `out` four times that.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wie_hq2x(rgba: *const u8, width: u32, height: u32, out: *mut u8) -> bool {
+    if rgba.is_null() || out.is_null() || width == 0 || height == 0 {
+        return false;
+    }
+    let length = (width * height * 4) as usize;
+    // SAFETY: as the caller promises.
+    let source = unsafe { std::slice::from_raw_parts(rgba, length) };
+    let Some(doubled) = host::hq2x_rgba(width, height, source) else {
+        return false;
+    };
+    // SAFETY: `out` holds `length * 4` bytes, which is what hq2x makes.
+    unsafe { std::ptr::copy_nonoverlapping(doubled.as_ptr(), out, doubled.len().min(length * 4)) };
+    true
+}
+
+/// A way of taking the newest frame: its width, height and RGBA pixels.
+type TakeFrame = fn() -> Option<(u32, u32, Vec<u8>)>;
+
+/// # Safety
+/// As [`wie_take_frame`].
+unsafe fn take_frame(take: TakeFrame, rgba: *mut u8, capacity: usize, width: *mut u32, height: *mut u32) -> bool {
     let Ok(mut pending) = PENDING_FRAME.lock() else {
         return false;
     };
     // A newer frame replaces one still waiting.
-    if let Some(frame) = host::take_frame_rgba() {
+    if let Some(frame) = take() {
         *pending = Some(frame);
     }
     let Some((w, h, pixels)) = pending.as_ref() else {
@@ -177,6 +248,12 @@ pub unsafe extern "C" fn wie_carrier(data: *const u8, length: usize) -> *mut c_c
 #[unsafe(no_mangle)]
 pub extern "C" fn wie_set_speed(speed: f32) {
     host::set_speed(speed);
+}
+
+/// Whether the music gives way while an effect plays - one sound at a time.
+#[unsafe(no_mangle)]
+pub extern "C" fn wie_set_one_sound_at_a_time(enabled: bool) {
+    host::set_one_sound_at_a_time(enabled);
 }
 
 #[unsafe(no_mangle)]

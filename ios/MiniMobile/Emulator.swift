@@ -7,16 +7,21 @@ import UIKit
 /// published for the screen, and its sound pulled by the audio engine.
 final class Emulator: ObservableObject {
     @Published private(set) var frame: CGImage?
+    /// How many of `frame`'s pixels each of the title's takes: 2 when it was
+    /// doubled through hq2x, else 1.
+    @Published private(set) var frameScale: Int = 1
     @Published private(set) var message: String?
 
     private let lock = NSLock()
     private var running = false
+    /// Whether frames are taken doubled through hq2x. Guarded by `lock`.
+    private var hq2x = false
     private var thread: Thread?
     private let audio = AudioOutput()
 
     /// The largest frame the emulator draws is a handset panel; this is room
-    /// for anything up to 1024x1024.
-    private static let frameCapacity = 1024 * 1024 * 4
+    /// for anything up to 2048x2048 - a panel up to 1024x1024 doubled.
+    private static let frameCapacity = 2048 * 2048 * 4
     /// How often the loop runs a tick when the title does not say otherwise.
     private static let interval: Double = 1.0 / 60.0
 
@@ -41,6 +46,10 @@ final class Emulator: ObservableObject {
         // the first tick.
         wie_set_speed(GameSpeed.get(game))
         wie_set_touch(GameTouch.get(game))
+        wie_set_one_sound_at_a_time(GameSound.oneAtATime(game))
+        lock.lock()
+        hq2x = GameQuality.get(game) == .hq2x
+        lock.unlock()
 
         let runtimeDirectory = Library.dataDirectory.path
         let failure = data.withUnsafeBytes { buffer -> String? in
@@ -80,6 +89,27 @@ final class Emulator: ObservableObject {
         wie_key(index, pressed)
     }
 
+    /// Takes frames doubled through hq2x, or as the title drew them, from now
+    /// on - the frame on screen again at once, should the title paint nothing
+    /// new.
+    func setHq2x(_ enabled: Bool) {
+        lock.lock()
+        hq2x = enabled
+        lock.unlock()
+        wie_show_frame_again()
+    }
+
+    /// The last frame the title drew, as it drew it, or nil before the first.
+    func lastFrame() -> CGImage? {
+        var pixels = [UInt8](repeating: 0, count: Self.frameCapacity / 4)
+        var width: UInt32 = 0
+        var height: UInt32 = 0
+        let taken = pixels.withUnsafeMutableBufferPointer { buffer in
+            wie_last_frame(buffer.baseAddress, buffer.count, &width, &height)
+        }
+        return taken ? Self.image(from: pixels, width: Int(width), height: Int(height)) : nil
+    }
+
     private func loop() {
         var pixels = [UInt8](repeating: 0, count: Self.frameCapacity)
 
@@ -93,11 +123,20 @@ final class Emulator: ObservableObject {
 
             var width: UInt32 = 0
             var height: UInt32 = 0
+            lock.lock()
+            let doubled = hq2x
+            lock.unlock()
             let painted = pixels.withUnsafeMutableBufferPointer { buffer in
-                wie_take_frame(buffer.baseAddress, buffer.count, &width, &height)
+                doubled
+                    ? wie_take_frame_hq2x(buffer.baseAddress, buffer.count, &width, &height)
+                    : wie_take_frame(buffer.baseAddress, buffer.count, &width, &height)
             }
             if painted, let image = Self.image(from: pixels, width: Int(width), height: Int(height)) {
-                DispatchQueue.main.async { [weak self] in self?.frame = image }
+                let scale = doubled ? 2 : 1
+                DispatchQueue.main.async { [weak self] in
+                    self?.frameScale = scale
+                    self?.frame = image
+                }
             }
 
             var vibration: UInt32 = 0

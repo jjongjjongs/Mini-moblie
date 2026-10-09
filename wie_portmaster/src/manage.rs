@@ -16,6 +16,7 @@ use crate::{
     controls::Button,
     library::{self, BAR, HIGHLIGHT, LINE, MUTED, Screen, TEXT, fit},
     open_folder,
+    pointer::Target,
     saves::{self, SAVES_DIR, SaveZip},
     settings::{ACCENT, DANGER, DIM, EDGE, PANEL, Repeat, panel_bar, scroll, scroll_marks},
 };
@@ -56,7 +57,12 @@ impl App {
         let mut repeat = Repeat::new();
         let mut dirty = true;
         loop {
-            for button in self.presses(&mut repeat) {
+            let pressed = self.presses(&mut repeat);
+            if let Some((pointed, _)) = self.take_pointed() {
+                cursor = pointed.min(dialog.options.len() - 1);
+                dirty = true;
+            }
+            for button in pressed {
                 dirty = true;
                 match button {
                     Button::Up => cursor = cursor.checked_sub(1).unwrap_or(dialog.options.len() - 1),
@@ -78,6 +84,7 @@ impl App {
     fn draw_dialog(&mut self, dialog: &Dialog, cursor: usize, back: Option<(u32, u32, &[u8])>) {
         let (width, height, _) = self.menu_size();
         let mut screen = Screen::new(width, height);
+        self.clear_hits();
         if let Some((back_width, back_height, rgba)) = back {
             screen.backdrop(rgba, back_width, back_height);
             screen.fill(0, 0, width, height, DIM);
@@ -105,6 +112,7 @@ impl App {
             if picked {
                 screen.fill(x, row_y, panel_width, LINE as u32, HIGHLIGHT);
             }
+            self.hit(x, row_y, panel_width as i32, LINE, Target::Row(index));
             let color = if picked {
                 TEXT
             } else if *danger {
@@ -120,7 +128,7 @@ impl App {
         }
 
         let (choose, cancel) = (self.hint("A 선택", "Enter 선택"), self.hint("B 취소", "Esc 취소"));
-        panel_bar(&mut screen, x, y + panel_height as i32 - BAR, panel_width, choose, cancel);
+        self.back_bar(&mut screen, x, y + panel_height as i32 - BAR, panel_width, choose, cancel);
         self.present(screen, width, height);
     }
 
@@ -183,7 +191,12 @@ impl App {
         let mut repeat = Repeat::new();
         let mut dirty = true;
         loop {
-            for button in self.presses(&mut repeat) {
+            let pressed = self.presses(&mut repeat);
+            if let Some((pointed, _)) = self.take_pointed() {
+                cursor = pointed.min(rows.len() - 1);
+                dirty = true;
+            }
+            for button in pressed {
                 dirty = true;
                 let done = match button {
                     Button::Up => {
@@ -237,6 +250,7 @@ impl App {
     fn draw_save_manager(&mut self, game: &Path, rows: &[SaveRow], cursor: usize, summary: Option<&saves::Summary>, ours: usize, note: Option<&str>) {
         let (width, height, _) = self.menu_size();
         let mut screen = Screen::new(width, height);
+        self.clear_hits();
         let panel_width = (width - 16).min(288);
         let body_height = 2 * LINE + 8;
         let panel_height = (2 * BAR + 8 + body_height + rows.len() as i32 * LINE) as u32;
@@ -279,6 +293,7 @@ impl App {
             if picked {
                 screen.fill(x, row_y, panel_width, LINE as u32, HIGHLIGHT);
             }
+            self.hit(x, row_y, panel_width as i32, LINE, Target::Row(index));
             let color = if picked {
                 TEXT
             } else if *row == SaveRow::Erase {
@@ -298,7 +313,7 @@ impl App {
             }
         }
         let (choose, back) = (self.hint("A 선택", "Enter 선택"), self.hint("B 뒤로", "Esc 뒤로"));
-        panel_bar(&mut screen, x, y + panel_height as i32 - BAR, panel_width, choose, back);
+        self.back_bar(&mut screen, x, y + panel_height as i32 - BAR, panel_width, choose, back);
 
         let rgba = screen.rgba();
         let rgba = match note {
@@ -337,7 +352,14 @@ impl App {
         let mut repeat = Repeat::new();
         let mut dirty = true;
         loop {
-            for button in self.presses(&mut repeat) {
+            let pressed = self.presses(&mut repeat);
+            if let Some((pointed, _)) = self.take_pointed()
+                && pointed < zips.len()
+            {
+                cursor = pointed;
+                dirty = true;
+            }
+            for button in pressed {
                 dirty = true;
                 match button {
                     Button::Up if !zips.is_empty() => cursor = cursor.checked_sub(1).unwrap_or(zips.len() - 1),
@@ -394,9 +416,11 @@ impl App {
     fn draw_import(&self, game: &Path, zips: &[SaveZip], cursor: usize, top: &mut usize) -> (u32, u32, Vec<u8>) {
         let (width, height, _) = self.menu_size();
         let mut screen = Screen::new(width, height);
+        self.clear_hits();
         screen.bar(0, "세이브 가져오기", "saves 폴더");
         let (choose, back) = (self.hint("A 가져오기", "Enter 가져오기  F2 폴더 열기"), self.hint("B 뒤로", "Esc 뒤로"));
         screen.bar(height as i32 - BAR, choose, back);
+        self.back_hit(width, height);
 
         if zips.is_empty() {
             screen.paragraph(
@@ -451,6 +475,7 @@ impl App {
                     if picked {
                         screen.fill(0, y, width, LINE as u32, HIGHLIGHT);
                     }
+                    self.hit(0, y, width as i32, LINE, Target::Row(*zip_index));
                     let when = zip.modified.map_or(String::new(), |time| saves::local(time).short_label());
                     let color = if picked || zip.ours { TEXT } else { MUTED };
                     // Under the game's own heading, its exports by what follows

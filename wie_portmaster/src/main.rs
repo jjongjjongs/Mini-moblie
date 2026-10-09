@@ -16,7 +16,8 @@
 //!
 //! On a desktop - Windows, or `--windowed` - it is a window: 2x to 4x of
 //! 320x240 or the full screen (F11), with games dropped on it copied into the
-//! games folder.
+//! games folder. The mouse works the list and the settings as well as the
+//! keys do (see `pointer`), and its right button opens the menu over a game.
 
 // The Windows build is a window, not a console program.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
@@ -24,6 +25,7 @@
 mod controls;
 mod library;
 mod manage;
+mod pointer;
 mod presets;
 mod saves;
 mod sdl;
@@ -41,9 +43,10 @@ use wie_android::host;
 use self::{
     controls::{BUTTON_COUNT, Button, DELETE, ESCAPE, F5, F6, F11},
     library::Menu,
+    pointer::{Mouse, Pointer},
     presets::Store,
     sdl::{Event, Rect, Sdl},
-    settings::{Context, Outcome, speed_label, speed_step},
+    settings::{Context, Outcome, Quality, speed_label, speed_step},
 };
 
 /// How often the game loop runs a tick when the title does not say otherwise.
@@ -143,6 +146,8 @@ enum Input {
     Key(i32, bool, bool),
     /// A file dropped on the window.
     Drop(PathBuf),
+    /// The mouse, in the pixels of what is on screen.
+    Mouse(Mouse),
     /// The window closed.
     Quit,
 }
@@ -170,6 +175,9 @@ struct App {
     renderer: *mut c_void,
     texture: *mut c_void,
     texture_size: (i32, i32),
+    /// Whether the texture is scaled smoothly - a game shown 기본 or HQ2X -
+    /// or pixel for pixel, as the settings always are.
+    texture_smooth: bool,
     /// A window on a desktop rather than a handheld's whole screen.
     desktop: bool,
     /// The window size to go back to from the full screen.
@@ -183,6 +191,8 @@ struct App {
     /// hold it down, one bit each.
     held: [u8; BUTTON_COUNT],
     audio: u32,
+    /// The mouse, and the parts of the screen on show to it.
+    pointer: Pointer,
 }
 
 impl App {
@@ -255,12 +265,14 @@ impl App {
                 renderer,
                 texture: ptr::null_mut(),
                 texture_size: (0, 0),
+                texture_smooth: false,
                 desktop,
                 last_window,
                 redraw: true,
                 store,
                 held: [0; BUTTON_COUNT],
                 audio,
+                pointer: Pointer::default(),
             };
             app.apply_screen();
             for index in 0..(app.sdl.num_joysticks)() {
@@ -390,6 +402,20 @@ impl App {
                     }
                 }
                 sdl::KEYDOWN | sdl::KEYUP => inputs.push(Input::Key(event.scancode(), event.kind() == sdl::KEYDOWN, event.key_repeat())),
+                sdl::MOUSEMOTION => {
+                    let (x, y) = self.window_to_canvas(event.mouse_position());
+                    inputs.push(Input::Mouse(Mouse::Move(x, y, event.mouse_held() & 1 != 0)));
+                }
+                sdl::MOUSEBUTTONDOWN => {
+                    let (x, y) = self.window_to_canvas(event.mouse_position());
+                    match event.mouse_button() {
+                        sdl::BUTTON_LEFT => inputs.push(Input::Mouse(Mouse::Press(x, y))),
+                        sdl::BUTTON_RIGHT => inputs.push(Input::Mouse(Mouse::Back)),
+                        _ => {}
+                    }
+                }
+                sdl::MOUSEBUTTONUP if event.mouse_button() == sdl::BUTTON_LEFT => inputs.push(Input::Mouse(Mouse::Release)),
+                sdl::MOUSEWHEEL if event.wheel() != 0 => inputs.push(Input::Mouse(Mouse::Wheel(event.wheel()))),
                 _ => {}
             }
         }
@@ -443,9 +469,26 @@ impl App {
         (width.max(1), height.max(1))
     }
 
+    /// A point in the window as one in the canvas last shown. The window's
+    /// points and the screen's pixels differ on a display that scales.
+    fn window_to_canvas(&self, (x, y): (i32, i32)) -> (i32, i32) {
+        let (mut window_width, mut window_height) = (0, 0);
+        // SAFETY: a live window and two out-parameters.
+        unsafe { (self.sdl.get_window_size)(self.window, &mut window_width, &mut window_height) };
+        let (output_width, output_height) = self.output_size();
+        let x = if window_width > 0 { x * output_width / window_width } else { x };
+        let y = if window_height > 0 { y * output_height / window_height } else { y };
+        self.pointer.shown.to_canvas(x, y)
+    }
+
     /// Shows `rgba`, `width` by `height`, as large as the screen takes at its
-    /// own shape, on black.
+    /// own shape, on black, pixel for pixel.
     fn show(&mut self, rgba: &[u8], width: u32, height: u32) {
+        self.show_scaled(rgba, width, height, false);
+    }
+
+    /// [`Self::show`], scaled smoothly when `smooth`.
+    fn show_scaled(&mut self, rgba: &[u8], width: u32, height: u32, smooth: bool) {
         let (width, height) = (width as i32, height as i32);
         if width <= 0 || height <= 0 || rgba.len() < (width * height * 4) as usize {
             return;
@@ -459,16 +502,29 @@ impl App {
             w: shown_width,
             h: shown_height,
         };
+        self.pointer.shown = pointer::Shown {
+            width: width as u32,
+            height: height as u32,
+            x: target.x,
+            y: target.y,
+            shown_width: target.w,
+            shown_height: target.h,
+        };
 
         // SAFETY: SDL2 calls on a live renderer, with a texture made for it and
         // a pixel buffer at least `height` rows of `width * 4` bytes.
         unsafe {
-            if self.texture.is_null() || self.texture_size != (width, height) {
+            if self.texture.is_null() || self.texture_size != (width, height) || self.texture_smooth != smooth {
                 if !self.texture.is_null() {
                     (self.sdl.destroy_texture)(self.texture);
                 }
+                // How a texture is scaled is settled as it is made, by the hint
+                // standing then - which every SDL2 reads.
+                let quality = if smooth { c"1" } else { c"0" };
+                (self.sdl.set_hint)(c"SDL_RENDER_SCALE_QUALITY".as_ptr(), quality.as_ptr());
                 self.texture = (self.sdl.create_texture)(self.renderer, sdl::PIXELFORMAT_ABGR8888, sdl::TEXTUREACCESS_STREAMING, width, height);
                 self.texture_size = (width, height);
+                self.texture_smooth = smooth;
                 if self.texture.is_null() {
                     eprintln!("화면 버퍼를 만들 수 없습니다: {}", error(&self.sdl));
                     return;
@@ -507,8 +563,34 @@ impl App {
                         dirty = true;
                         continue;
                     }
-                    // Esc opens the menu, as Y does.
-                    Input::Key(ESCAPE, true, false) => Button::Y,
+                    // Esc opens the menu, as Y does - and the mouse's right
+                    // button. Over a game the pointer picks it, and a click
+                    // plays it.
+                    Input::Key(ESCAPE, true, false) | Input::Mouse(Mouse::Back) => Button::Y,
+                    Input::Mouse(Mouse::Move(_, y, _)) => {
+                        if let Some(index) = menu.game_at(y) {
+                            dirty |= menu.select(index);
+                        }
+                        continue;
+                    }
+                    Input::Mouse(Mouse::Press(x, y)) => {
+                        if let Some(index) = menu.game_at(y) {
+                            menu.select(index);
+                            Button::A
+                        } else if menu.on_folder_box(x, y) {
+                            Button::X
+                        } else {
+                            continue;
+                        }
+                    }
+                    Input::Mouse(Mouse::Wheel(turn)) => {
+                        let button = if turn > 0 { Button::Up } else { Button::Down };
+                        for _ in 0..turn.unsigned_abs().min(3) {
+                            dirty |= menu.navigate(button);
+                        }
+                        continue;
+                    }
+                    Input::Mouse(Mouse::Release) => continue,
                     // Delete asks to delete the game picked.
                     Input::Key(DELETE, true, false) => {
                         if let Some(game) = menu.selected() {
@@ -594,6 +676,7 @@ impl App {
             for input in self.poll() {
                 match input {
                     Input::Quit | Input::Button(Button::A | Button::B | Button::Start, true) => return,
+                    Input::Mouse(Mouse::Press(..) | Mouse::Back) => return,
                     Input::Key(code, true, false) if matches!(key_button(code), Some(Button::A | Button::B)) => return,
                     _ => {}
                 }
@@ -629,8 +712,10 @@ impl App {
         let runtime_dir = saves::runtime_dir();
         let _ = std::fs::create_dir_all(&runtime_dir);
         // The speed it was last played at; starting puts the clock back on the
-        // time of day and runs it from there at that speed.
+        // time of day and runs it from there at that speed. Its sound as it
+        // was left too.
         host::set_speed(speed);
+        host::set_one_sound_at_a_time(self.game_one_sound(game));
         let failure = host::start(data, runtime_dir, "Linux".to_owned());
         if !failure.is_empty() {
             return Err(failure);
@@ -683,7 +768,8 @@ impl App {
         };
         // The newest frame, kept for the menu to show behind it.
         let mut frame: Option<(u32, u32, Vec<u8>)> = None;
-        let mut toast = if self.desktop { "Esc 메뉴 · F11 전체화면" } else { "" }.to_owned();
+        self.clear_hits();
+        let mut toast = if self.desktop { "Esc·우클릭 메뉴 · F11 전체화면" } else { "" }.to_owned();
         // When the hint goes, counted from the title's first frame - a title
         // can take a while to draw one.
         let mut toast_until: Option<Instant> = None;
@@ -702,8 +788,10 @@ impl App {
                         std::process::exit(0);
                     }
                     Input::Drop(_) => false,
-                    // Esc on the keyboard, MENU on the pad: the menu.
-                    Input::Key(ESCAPE, true, false) | Input::Button(Button::Guide, true) => true,
+                    // Esc on the keyboard, MENU on the pad, the mouse's right
+                    // button: the menu.
+                    Input::Key(ESCAPE, true, false) | Input::Button(Button::Guide, true) | Input::Mouse(Mouse::Back) => true,
+                    Input::Mouse(_) => false,
                     Input::Key(_, _, true) => false,
                     // F5 slower, F6 faster, remembered for the game.
                     Input::Key(code @ (F5 | F6), true, false) => {
@@ -755,6 +843,8 @@ impl App {
                     if let Outcome::EndGame | Outcome::QuitApp = self.pause(game, name, frame.as_ref()) {
                         return Ok(());
                     }
+                    // Nothing on the game's screen answers the mouse.
+                    self.clear_hits();
                     self.redraw = true;
                 }
             }
@@ -763,7 +853,14 @@ impl App {
             if !failure.is_empty() {
                 return Err(failure);
             }
-            if let Some(new_frame) = host::take_frame_rgba() {
+            // Doubled through hq2x as it is taken when the game is set to it.
+            let quality = self.game_quality(game);
+            let taken = if quality == Quality::Hq2x {
+                host::take_frame_rgba_hq2x()
+            } else {
+                host::take_frame_rgba()
+            };
+            if let Some(new_frame) = taken {
                 frame = Some(new_frame);
                 self.redraw = true;
                 toast_until.get_or_insert_with(|| Instant::now() + TOAST);
@@ -784,7 +881,7 @@ impl App {
                 } else {
                     rgba.clone()
                 };
-                self.show(&rgba, width, height);
+                self.show_scaled(&rgba, width, height, quality != Quality::Dot);
             }
             // Vibration: nothing on a handheld to give it to, but the queue
             // still has to be emptied.

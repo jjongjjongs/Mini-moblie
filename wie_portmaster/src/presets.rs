@@ -6,7 +6,7 @@
 //! it was saved from; loading one copies it into the live mapping. "기본" is
 //! the defaults and is never a file, so it cannot be overwritten or lost.
 //! `presets.txt` remembers which preset was loaded last, the presets games
-//! are fixed to, and the speed each game plays at.
+//! are fixed to, and the speed, screen quality and sound each game plays with.
 
 use std::path::{Path, PathBuf};
 
@@ -29,6 +29,11 @@ pub struct Store {
     fixed: Vec<(String, String)>,
     /// Game file name, and the speed it plays at when that is not 1x.
     speeds: Vec<(String, f32)>,
+    /// Game file name, and how its screen is enlarged when that is not 도트:
+    /// 0 기본, 2 HQ2X, as the Android app numbers them.
+    qualities: Vec<(String, u8)>,
+    /// The games that play one sound at a time.
+    one_sound: Vec<String>,
     /// How a desktop window is shown: its size as a multiple of 320x240, or
     /// 0 for the full screen.
     screen: u32,
@@ -41,6 +46,8 @@ impl Store {
             active: DEFAULT_NAME.to_owned(),
             fixed: Vec::new(),
             speeds: Vec::new(),
+            qualities: Vec::new(),
+            one_sound: Vec::new(),
             screen: 3,
         };
         if let Ok(text) = std::fs::read_to_string(STATE_FILE) {
@@ -57,6 +64,14 @@ impl Store {
                             store.speeds.push(((*game).to_owned(), speed));
                         }
                     }
+                    ["quality", game, quality] => {
+                        if let Ok(quality) = quality.parse::<u8>()
+                            && quality <= 2
+                        {
+                            store.qualities.push(((*game).to_owned(), quality));
+                        }
+                    }
+                    ["sound", game, "one"] => store.one_sound.push((*game).to_owned()),
                     ["screen", screen] => store.screen = screen.parse().unwrap_or(3).min(SCREEN_MAX),
                     _ => {}
                 }
@@ -205,10 +220,38 @@ impl Store {
         self.save();
     }
 
+    /// How `game`'s screen is enlarged: 0 기본, 1 도트, 2 HQ2X.
+    pub fn quality(&self, game: &str) -> u8 {
+        self.qualities.iter().find(|(x, _)| x == game).map_or(1, |(_, quality)| *quality)
+    }
+
+    pub fn set_quality(&mut self, game: &str, quality: u8) {
+        self.qualities.retain(|(x, _)| x != game);
+        if quality != 1 {
+            self.qualities.push((game.to_owned(), quality));
+        }
+        self.save();
+    }
+
+    /// Whether `game` plays one sound at a time.
+    pub fn one_sound(&self, game: &str) -> bool {
+        self.one_sound.iter().any(|x| x == game)
+    }
+
+    pub fn set_one_sound(&mut self, game: &str, enabled: bool) {
+        self.one_sound.retain(|x| x != game);
+        if enabled {
+            self.one_sound.push(game.to_owned());
+        }
+        self.save();
+    }
+
     /// Drops what is kept for a game that is gone.
     pub fn forget(&mut self, game: &str) {
         self.fixed.retain(|(x, _)| x != game);
         self.speeds.retain(|(x, _)| x != game);
+        self.qualities.retain(|(x, _)| x != game);
+        self.one_sound.retain(|x| x != game);
         self.save();
     }
 
@@ -232,6 +275,12 @@ impl Store {
         }
         for (game, speed) in &self.speeds {
             state.push_str(&format!("speed\t{game}\t{speed}\n"));
+        }
+        for (game, quality) in &self.qualities {
+            state.push_str(&format!("quality\t{game}\t{quality}\n"));
+        }
+        for game in &self.one_sound {
+            state.push_str(&format!("sound\t{game}\tone\n"));
         }
         if let Err(error) = std::fs::write(STATE_FILE, state) {
             eprintln!("프리셋 상태를 저장할 수 없습니다: {error}");

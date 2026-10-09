@@ -522,6 +522,7 @@ impl SmafPlayer {
         let repeat = repeat && length > 0;
 
         let voice = sink.open_midi_voice(clip);
+        sink.set_midi_voice_looping(voice, repeat);
         tracing::info!(
             "[audio] SMAF clip on isolated voice {voice}: {} events, {length}ms, repeat={repeat}",
             self.events.len()

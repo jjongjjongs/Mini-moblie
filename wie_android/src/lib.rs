@@ -13,6 +13,7 @@ mod audio;
 mod database;
 mod filesystem;
 pub mod host;
+pub mod hq2x;
 mod logging;
 mod ma3;
 mod network;
@@ -189,6 +190,18 @@ pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativ
     guard(|| speed::set_speed(value));
 }
 
+/// `nativeSetOneSoundAtATime(boolean)`
+///
+/// Whether the music gives way while an effect plays - one sound at a time -
+/// rather than everything sounding together.
+///
+/// # Safety
+/// Called by the JVM with a valid `env` reference.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativeSetOneSoundAtATime(_env: JNIEnv, _class: JClass, enabled: jint) {
+    host::set_one_sound_at_a_time(enabled != 0);
+}
+
 /// `nativeGuestProgress() -> long`
 ///
 /// Guest instructions retired so far. It climbs while the title is running and
@@ -281,15 +294,54 @@ pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativ
 /// Called by the JVM with a valid `env` reference.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativeFrame(env: JNIEnv, _class: JClass) -> jshortArray {
-    let frame = match std::panic::catch_unwind(AssertUnwindSafe(|| with_runner(|runner| runner.take_frame()))) {
-        Ok(Some(frame)) => frame,
-        Ok(None) => return std::ptr::null_mut(),
+    match std::panic::catch_unwind(AssertUnwindSafe(|| with_runner(|runner| runner.take_frame()))) {
+        Ok(Some(frame)) => frame_array(env, frame),
+        Ok(None) => std::ptr::null_mut(),
         Err(_) => {
             tracing::error!("Panic while collecting a frame");
-            return std::ptr::null_mut();
+            std::ptr::null_mut()
         }
+    }
+}
+
+/// `nativeHq2x(short[] frame) -> short[]`: a frame laid out as `nativeFrame`
+/// hands it, doubled through hq2x, or null when `frame` is not one. The
+/// player doubles each frame this way when the screen is set to HQ2X, and the
+/// pictures of each choice in that setting are made with it too.
+///
+/// # Safety
+/// Called by the JVM with a valid `env` reference.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativeHq2x(
+    env: JNIEnv,
+    _class: JClass,
+    frame: JShortArray,
+) -> jshortArray {
+    let Ok(length) = env.get_array_length(&frame) else {
+        return std::ptr::null_mut();
+    };
+    let mut values = vec![0i16; length.max(0) as usize];
+    if length < 2 || env.get_short_array_region(&frame, 0, &mut values).is_err() {
+        return std::ptr::null_mut();
+    }
+    let (width, height) = (values[0] as u16 as u32, values[1] as u16 as u32);
+    if width == 0 || height == 0 || values.len() != (width * height) as usize + 2 || width * 2 > i16::MAX as u32 || height * 2 > i16::MAX as u32 {
+        return std::ptr::null_mut();
+    }
+    let source = platform::Frame {
+        width,
+        height,
+        pixels: values.split_off(2),
+    };
+    let Ok(doubled) = std::panic::catch_unwind(AssertUnwindSafe(|| source.hq2x())) else {
+        return std::ptr::null_mut();
     };
 
+    frame_array(env, doubled)
+}
+
+/// `frame` as `{width, height, RGB565 pixels...}` for Java.
+fn frame_array(env: JNIEnv, frame: platform::Frame) -> jshortArray {
     let length = frame.pixels.len() + 2;
     let array = match env.new_short_array(length as jint) {
         Ok(array) => array,

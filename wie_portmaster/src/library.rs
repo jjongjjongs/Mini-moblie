@@ -44,6 +44,9 @@ pub struct Menu {
     added: Vec<PathBuf>,
     /// What the last drop came to.
     status: String,
+    /// Where the button to open the games folder was drawn on an empty list,
+    /// as x, y, width and height.
+    folder_box: Option<(i32, i32, i32, i32)>,
 }
 
 impl Menu {
@@ -57,6 +60,7 @@ impl Menu {
             desktop,
             added: Vec::new(),
             status: String::new(),
+            folder_box: None,
         }
     }
 
@@ -121,6 +125,32 @@ impl Menu {
         self.games.get(self.selected).cloned()
     }
 
+    /// The game drawn at `y` on the list as last shown.
+    pub fn game_at(&self, y: i32) -> Option<usize> {
+        let list_top = BAR + 4;
+        if self.games.is_empty() || y < list_top {
+            return None;
+        }
+        let row = ((y - list_top) / LINE) as usize;
+        let index = self.top + row;
+        (row < self.rows && index < self.games.len()).then_some(index)
+    }
+
+    /// Picks the game at `index`. Whether that changed anything.
+    pub fn select(&mut self, index: usize) -> bool {
+        let changed = index != self.selected && index < self.games.len();
+        if changed {
+            self.selected = index;
+        }
+        changed
+    }
+
+    /// Whether `x`, `y` is on the button that opens the games folder.
+    pub fn on_folder_box(&self, x: i32, y: i32) -> bool {
+        self.folder_box
+            .is_some_and(|(left, top, width, height)| x >= left && x < left + width && y >= top && y < top + height)
+    }
+
     /// Moves the pick for a button. Whether anything changed.
     pub fn navigate(&mut self, button: Button) -> bool {
         if self.games.is_empty() {
@@ -176,6 +206,7 @@ impl Menu {
             height as i32 - 2 * BAR
         };
 
+        self.folder_box = None;
         if self.games.is_empty() {
             if self.desktop {
                 canvas.paragraph("게임이 없습니다.", BAR + 22, TEXT);
@@ -187,6 +218,7 @@ impl Menu {
                 let (box_width, box_y) = (148, BAR + 52 + 5 * LINE + 6);
                 let box_x = (width as i32 - box_width) / 2;
                 canvas.fill(box_x, box_y, box_width as u32, 22, ROW);
+                self.folder_box = Some((box_x, box_y, box_width, 22));
                 canvas.text("F2 games 폴더 열기", width as i32 / 2, box_y + 3, TextAlignment::Center, ACCENT);
             } else {
                 let text = format!(

@@ -50,7 +50,6 @@ import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
-import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 import android.view.WindowManager;
@@ -4116,6 +4115,9 @@ public final class MainActivity extends Activity {
         // question without opening anything.
         String speedValue = currentGame != null ? formatSpeed(gameSpeed(currentGame)) : formatSpeed(1f);
         rows.add(new GameMenuRow("⏩", "게임 속도", speedValue, this::showSpeedDialog));
+        rows.add(new GameMenuRow("🖼", "화질", QUALITY_NAMES[screenQuality], this::showQualityDialog));
+        boolean oneSound = currentGame != null && gameOneSound(currentGame);
+        rows.add(new GameMenuRow("🔊", "소리", oneSound ? "각각" : "동시", this::showSoundDialog));
         rows.add(new GameMenuRow("👆", "화면 터치", touchOn ? "켜짐" : "꺼짐", this::toggleTouch));
         // A phone with its own keypad may have no touch screen to reach back
         // through, so the way out is here too.
@@ -4319,13 +4321,392 @@ public final class MainActivity extends Activity {
                 Toast.LENGTH_LONG).show();
     }
 
-    /** The speeds the dialog offers as one-tap chips. */
-    private static final float[] SPEED_CHIPS = {0.5f, 1f, 1.5f, 2f, 3f, 4f};
+    /** The screen enlarged with smoothing: the "기본" choice. */
+    static final int QUALITY_SMOOTH = 0;
+    /** The screen enlarged pixel for pixel, as it always was: "도트". */
+    static final int QUALITY_DOT = 1;
+    /** The screen doubled through hq2x first, then enlarged with smoothing. */
+    static final int QUALITY_HQ2X = 2;
 
-    /** The slider's range and step: 0.5x to 4x in quarters. */
-    private static final float SPEED_MIN = 0.5f;
-    private static final float SPEED_STEP = 0.25f;
-    private static final int SPEED_STEPS = 14;
+    private static final String[] QUALITY_NAMES = {"기본", "도트", "HQ2X"};
+    /** The key, among the per-title ones, for the choice made for every title. */
+    private static final String QUALITY_EVERY_GAME = "*";
+
+    /**
+     * How the running title's screen is enlarged. Read by the emulator thread,
+     * which doubles each frame through hq2x before handing it over when this
+     * says to.
+     */
+    private volatile int screenQuality = QUALITY_DOT;
+
+    /**
+     * How `game`'s screen is enlarged: its own choice, else the one made for
+     * every title, else 도트 - which is how the screen was always drawn.
+     */
+    private int gameQuality(File game) {
+        SharedPreferences prefs = getSharedPreferences("mini_quality", MODE_PRIVATE);
+        int value = prefs.getInt(game.getName(), prefs.getInt(QUALITY_EVERY_GAME, QUALITY_DOT));
+
+        return value >= QUALITY_SMOOTH && value <= QUALITY_HQ2X ? value : QUALITY_DOT;
+    }
+
+    /**
+     * Keeps `quality` for `game`, or for every title - dropping each one's own
+     * choice, so they all follow it.
+     */
+    private void saveGameQuality(File game, int quality, boolean everyGame) {
+        SharedPreferences.Editor editor = getSharedPreferences("mini_quality", MODE_PRIVATE).edit();
+        if (everyGame) {
+            editor.clear().putInt(QUALITY_EVERY_GAME, quality);
+        } else {
+            editor.putInt(game.getName(), quality);
+        }
+        editor.apply();
+    }
+
+    /** Whether `game` plays one sound at a time; off unless chosen for it. */
+    private boolean gameOneSound(File game) {
+        return getSharedPreferences("mini_sound", MODE_PRIVATE).getBoolean(game.getName(), false);
+    }
+
+    /**
+     * The quality window from the gear menu: 기본, 도트 and HQ2X, each with a
+     * picture of the middle of the screen drawn that way. A choice shows on
+     * the screen behind at once; 취소 puts it back.
+     */
+    private void showQualityDialog() {
+        final File game = currentGame;
+        if (game == null || gameView == null) {
+            return;
+        }
+        final int saved = screenQuality;
+        final int[] chosen = {saved};
+
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(16), 0, dp(16), dp(4));
+        body.addView(settingScope("이 게임에만 적용 · 다음에 열어도 유지"));
+
+        Bitmap[] previews = qualityPreviews(gameView.sourceFrame());
+        String[] descriptions = {
+                "부드럽게 확대해요. 픽셀 경계가 살짝 흐려져요.",
+                "픽셀을 그대로 키워요. 또렷하고 각진 옛날 폰 느낌.",
+                "계단진 테두리를 매끈하게 다듬어 그려요.",
+        };
+        final View[] cards = new View[3];
+        final Runnable refresh = () -> {
+            for (int i = 0; i < cards.length; i++) {
+                markOption(cards[i], i == chosen[0]);
+            }
+        };
+        for (int i = 0; i < 3; i++) {
+            final int quality = i;
+            View card = optionCard(QUALITY_NAMES[i], i == QUALITY_DOT ? "지금 방식" : null, descriptions[i],
+                    previews != null ? previews[i] : null, null);
+            card.setOnClickListener(v -> {
+                chosen[0] = quality;
+                showQuality(quality);
+                refresh.run();
+            });
+            cards[i] = card;
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            params.topMargin = i > 0 ? dp(8) : 0;
+            body.addView(card, params);
+        }
+
+        final android.widget.CheckBox everyGame = new android.widget.CheckBox(this);
+        everyGame.setText("모든 게임에 이 화질 쓰기");
+        everyGame.setTextColor(COLOR_SUBTEXT);
+        everyGame.setTextSize(12.5f);
+        everyGame.setButtonTintList(android.content.res.ColorStateList.valueOf(COLOR_ACCENT));
+        LinearLayout.LayoutParams everyParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        everyParams.topMargin = dp(8);
+        body.addView(everyGame, everyParams);
+        refresh.run();
+
+        final boolean[] applied = {false};
+        AlertDialog dialog = new AlertDialog.Builder(new android.view.ContextThemeWrapper(this, android.R.style.Theme_Material_Dialog_Alert))
+                .setTitle("화질")
+                .setView(scrolling(body))
+                .setPositiveButton("적용", (d, which) -> {
+                    applied[0] = true;
+                    saveGameQuality(game, chosen[0], everyGame.isChecked());
+                    showQuality(chosen[0]);
+                })
+                .setNegativeButton("취소", null)
+                .create();
+        // However the window goes away without 적용, the screen goes back.
+        dialog.setOnDismissListener(d -> {
+            if (!applied[0]) {
+                showQuality(saved);
+            }
+        });
+        dialog.show();
+    }
+
+    /** Draws the running title's screen with `quality` from now on. */
+    private void showQuality(int quality) {
+        screenQuality = quality;
+        if (gameView != null) {
+            gameView.setQuality(quality);
+        }
+    }
+
+    /**
+     * The middle of `frame`, drawn each of the three ways at the size the
+     * quality window shows it, or null when there is no frame yet.
+     */
+    private Bitmap[] qualityPreviews(short[] frame) {
+        if (frame == null || frame.length < 2) {
+            return null;
+        }
+        int width = frame[0] & 0xFFFF;
+        int height = frame[1] & 0xFFFF;
+        int cropWidth = Math.min(48, width);
+        int cropHeight = Math.min(36, height);
+        if (cropWidth <= 0 || cropHeight <= 0 || frame.length != width * height + 2) {
+            return null;
+        }
+        int left = (width - cropWidth) / 2;
+        int top = (height - cropHeight) / 2;
+
+        short[] crop = new short[cropWidth * cropHeight + 2];
+        crop[0] = (short) cropWidth;
+        crop[1] = (short) cropHeight;
+        for (int y = 0; y < cropHeight; y++) {
+            System.arraycopy(frame, 2 + (top + y) * width + left, crop, 2 + y * cropWidth, cropWidth);
+        }
+
+        int shownWidth = dp(84);
+        int shownHeight = Math.round(shownWidth * cropHeight / (float) cropWidth);
+        Bitmap plain = rgb565Bitmap(crop);
+        short[] doubled = NativeBridge.nativeHq2x(crop);
+        Bitmap smooth = doubled != null ? rgb565Bitmap(doubled) : plain;
+
+        return new Bitmap[] {
+                Bitmap.createScaledBitmap(plain, shownWidth, shownHeight, true),
+                Bitmap.createScaledBitmap(plain, shownWidth, shownHeight, false),
+                Bitmap.createScaledBitmap(smooth, shownWidth, shownHeight, true),
+        };
+    }
+
+    /** A `{width, height, RGB565...}` frame as a bitmap. */
+    private static Bitmap rgb565Bitmap(short[] frame) {
+        int width = frame[0] & 0xFFFF;
+        int height = frame[1] & 0xFFFF;
+        Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.RGB_565);
+        ByteBuffer pixels = ByteBuffer.allocateDirect(width * height * 2).order(ByteOrder.nativeOrder());
+        pixels.asShortBuffer().put(frame, 2, width * height);
+        bitmap.copyPixelsFromBuffer(pixels);
+        return bitmap;
+    }
+
+    /**
+     * The sound window from the gear menu: 동시 - everything mixed, as it
+     * always was - or 각각, the music holding back while an effect plays. Each
+     * has a picture of the music and effects along a timeline.
+     */
+    private void showSoundDialog() {
+        final File game = currentGame;
+        if (game == null) {
+            return;
+        }
+        final boolean[] chosen = {gameOneSound(game)};
+
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(16), 0, dp(16), dp(4));
+        body.addView(settingScope("이 게임에만 적용 · 다음에 열어도 유지"));
+
+        // Where each sound plays along the timeline, as from-to fractions.
+        float[] effects = {0.22f, 0.34f, 0.62f, 0.77f};
+        View mixed = optionCard("동시", "지금 방식", "배경음과 효과음을 함께 재생해요.", null,
+                soundLanes(new float[] {0f, 1f}, effects));
+        View oneAtATime = optionCard("각각", null, "한 번에 하나만 재생해요. 효과음이 나는 동안 배경음이 잠깐 멈췄다 이어져요.", null,
+                soundLanes(new float[] {0f, 0.21f, 0.35f, 0.61f, 0.78f, 1f}, effects));
+        final Runnable refresh = () -> {
+            markOption(mixed, !chosen[0]);
+            markOption(oneAtATime, chosen[0]);
+        };
+        mixed.setOnClickListener(v -> {
+            chosen[0] = false;
+            refresh.run();
+        });
+        oneAtATime.setOnClickListener(v -> {
+            chosen[0] = true;
+            refresh.run();
+        });
+        body.addView(mixed);
+        LinearLayout.LayoutParams second = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        second.topMargin = dp(8);
+        body.addView(oneAtATime, second);
+
+        TextView note = new TextView(this);
+        note.setText("소리가 겹쳐서 뭉개지거나, 원래 폰처럼 한 소리씩 듣고 싶을 때 ‘각각’을 고르세요.");
+        note.setTextSize(12f);
+        note.setTextColor(COLOR_SUBTEXT);
+        note.setLineSpacing(0f, 1.2f);
+        LinearLayout.LayoutParams noteParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        noteParams.topMargin = dp(12);
+        body.addView(note, noteParams);
+        refresh.run();
+
+        new AlertDialog.Builder(new android.view.ContextThemeWrapper(this, android.R.style.Theme_Material_Dialog_Alert))
+                .setTitle("소리")
+                .setView(scrolling(body))
+                .setPositiveButton("적용", (dialog, which) -> {
+                    getSharedPreferences("mini_sound", MODE_PRIVATE).edit().putBoolean(game.getName(), chosen[0]).apply();
+                    if (game.equals(currentGame)) {
+                        NativeBridge.nativeSetOneSoundAtATime(chosen[0] ? 1 : 0);
+                    }
+                })
+                .setNegativeButton("취소", null)
+                .show();
+    }
+
+    /** The grey "이 게임에만 적용" line under a setting window's title. */
+    private TextView settingScope(String text) {
+        TextView scope = new TextView(this);
+        scope.setText(text);
+        scope.setTextSize(12f);
+        scope.setTextColor(COLOR_SUBTEXT);
+        scope.setPadding(dp(6), 0, 0, dp(10));
+        return scope;
+    }
+
+    /** `content` in a scroll view, for a window taller than a landscape screen. */
+    private ScrollView scrolling(View content) {
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(content);
+        return scroll;
+    }
+
+    /**
+     * One choice in a setting window: an optional picture on the left, the
+     * name with an optional tag, a line about it, an optional view under that,
+     * and a radio mark on the right. {@link #markOption} shows it chosen.
+     */
+    private View optionCard(String title, String tag, String description, Bitmap picture, View below) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.HORIZONTAL);
+        card.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        card.setPadding(dp(8), dp(8), dp(10), dp(8));
+
+        if (picture != null) {
+            ImageView image = new ImageView(this);
+            image.setImageBitmap(picture);
+            image.setClipToOutline(true);
+            image.setOutlineProvider(new ViewOutlineProvider() {
+                @Override
+                public void getOutline(View view, Outline outline) {
+                    outline.setRoundRect(0, 0, view.getWidth(), view.getHeight(), dp(6));
+                }
+            });
+            LinearLayout.LayoutParams imageParams = new LinearLayout.LayoutParams(picture.getWidth(), picture.getHeight());
+            imageParams.rightMargin = dp(11);
+            card.addView(image, imageParams);
+        }
+
+        LinearLayout text = new LinearLayout(this);
+        text.setOrientation(LinearLayout.VERTICAL);
+        TextView name = new TextView(this);
+        SpannableString label = new SpannableString(tag != null ? title + "  " + tag : title);
+        if (tag != null) {
+            label.setSpan(new ForegroundColorSpan(COLOR_SUBTEXT), title.length(), label.length(), Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+            label.setSpan(new android.text.style.RelativeSizeSpan(0.72f), title.length(), label.length(), Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+        name.setText(label);
+        name.setTextSize(15f);
+        name.setTypeface(Typeface.DEFAULT_BOLD);
+        name.setTextColor(COLOR_TEXT);
+        text.addView(name);
+        TextView line = new TextView(this);
+        line.setText(description);
+        line.setTextSize(12f);
+        line.setTextColor(COLOR_SUBTEXT);
+        line.setLineSpacing(0f, 1.15f);
+        LinearLayout.LayoutParams lineParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lineParams.topMargin = dp(2);
+        text.addView(line, lineParams);
+        if (below != null) {
+            LinearLayout.LayoutParams belowParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            belowParams.topMargin = dp(6);
+            text.addView(below, belowParams);
+        }
+        card.addView(text, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        View radio = new View(this);
+        radio.setTag("radio");
+        LinearLayout.LayoutParams radioParams = new LinearLayout.LayoutParams(dp(18), dp(18));
+        radioParams.leftMargin = dp(10);
+        card.addView(radio, radioParams);
+        return card;
+    }
+
+    /** Shows an {@link #optionCard} chosen or not: its outline and its radio. */
+    private void markOption(View card, boolean on) {
+        GradientDrawable face = new GradientDrawable();
+        face.setCornerRadius(dp(10));
+        face.setColor(on ? Color.argb(26, 84, 199, 214) : Color.TRANSPARENT);
+        face.setStroke(Math.max(1, dp(1)), on ? COLOR_ACCENT : Color.rgb(58, 61, 71));
+        card.setBackground(face);
+
+        View radio = card.findViewWithTag("radio");
+        GradientDrawable mark = new GradientDrawable();
+        mark.setShape(GradientDrawable.OVAL);
+        mark.setColor(on ? COLOR_ACCENT : Color.TRANSPARENT);
+        mark.setStroke(dp(2), on ? COLOR_ACCENT : Color.rgb(107, 111, 123));
+        radio.setBackground(mark);
+    }
+
+    /**
+     * Two lanes along a timeline - 배경음 in blue, 효과음 in orange - each
+     * drawn as the from-to fractions given for it.
+     */
+    private View soundLanes(float[] music, float[] effects) {
+        LinearLayout lanes = new LinearLayout(this);
+        lanes.setOrientation(LinearLayout.VERTICAL);
+        lanes.addView(soundLane("배경음", music, Color.rgb(91, 141, 239)));
+        lanes.addView(soundLane("효과음", effects, Color.rgb(227, 155, 79)));
+        return lanes;
+    }
+
+    private View soundLane(String name, float[] spans, int color) {
+        LinearLayout lane = new LinearLayout(this);
+        lane.setOrientation(LinearLayout.HORIZONTAL);
+        lane.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        lane.setPadding(0, dp(2), 0, dp(2));
+        TextView label = new TextView(this);
+        label.setText(name);
+        label.setTextSize(10f);
+        label.setTextColor(COLOR_SUBTEXT);
+        lane.addView(label, new LinearLayout.LayoutParams(dp(36), ViewGroup.LayoutParams.WRAP_CONTENT));
+        View bar = new View(this) {
+            private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+            private final RectF span = new RectF();
+
+            @Override
+            protected void onDraw(Canvas canvas) {
+                paint.setColor(color);
+                float radius = getHeight() / 2.5f;
+                for (int i = 0; i + 1 < spans.length; i += 2) {
+                    span.set(spans[i] * getWidth(), 0, spans[i + 1] * getWidth(), getHeight());
+                    canvas.drawRoundRect(span, radius, radius, paint);
+                }
+            }
+        };
+        lane.addView(bar, new LinearLayout.LayoutParams(0, dp(8), 1f));
+        return lane;
+    }
+
+    /** The speeds the dialog offers as one-tap chips, in tenths. */
+    private static final int[] SPEED_CHIPS = {5, 10, 15, 20, 30, 40};
 
     /**
      * The speed a title was last played at, 1.0 if it never left real time.
@@ -4355,18 +4736,11 @@ public final class MainActivity extends Activity {
         return text + "x";
     }
 
-    private static int speedToStep(float value) {
-        return Math.max(0, Math.min(SPEED_STEPS, Math.round((value - SPEED_MIN) / SPEED_STEP)));
-    }
-
-    private static float stepToSpeed(int step) {
-        return SPEED_MIN + step * SPEED_STEP;
-    }
-
     /**
-     * The game-speed window from the gear menu: the speed in large type, a row
-     * of chips for the common speeds and a slider for the quarters between
-     * them. Nothing changes until 적용; 1x로 goes straight back to real time.
+     * The game-speed window from the gear menu: the speed in large type with
+     * a step either side of it, the ruler from 0.1x to 4x in tenths, and chips
+     * for the common speeds. Nothing changes until 적용; 1x로 goes straight
+     * back to real time.
      */
     private void showSpeedDialog() {
         final File game = currentGame;
@@ -4384,7 +4758,20 @@ public final class MainActivity extends Activity {
         big.setTypeface(Typeface.DEFAULT_BOLD);
         big.setTextColor(COLOR_ACCENT);
         big.setGravity(android.view.Gravity.CENTER);
-        body.addView(big);
+
+        final SpeedRuler ruler = new SpeedRuler(this, COLOR_TEXT, COLOR_SUBTEXT, COLOR_ACCENT);
+
+        // − big + : a tenth slower or faster, through the ruler so it slides.
+        LinearLayout stepper = new LinearLayout(this);
+        stepper.setOrientation(LinearLayout.HORIZONTAL);
+        stepper.setGravity(android.view.Gravity.CENTER);
+        stepper.addView(speedStepButton("−", "0.1 느리게", () -> ruler.setTenths(ruler.tenths() - 1, true)),
+                new LinearLayout.LayoutParams(dp(40), dp(40)));
+        LinearLayout.LayoutParams bigParams = new LinearLayout.LayoutParams(dp(130), ViewGroup.LayoutParams.WRAP_CONTENT);
+        stepper.addView(big, bigParams);
+        stepper.addView(speedStepButton("+", "0.1 빠르게", () -> ruler.setTenths(ruler.tenths() + 1, true)),
+                new LinearLayout.LayoutParams(dp(40), dp(40)));
+        body.addView(stepper);
 
         TextView scope = new TextView(this);
         scope.setText("이 게임에만 적용 · 다음에 열어도 유지");
@@ -4393,18 +4780,20 @@ public final class MainActivity extends Activity {
         scope.setGravity(android.view.Gravity.CENTER);
         LinearLayout.LayoutParams scopeParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        scopeParams.bottomMargin = dp(14);
+        scopeParams.topMargin = dp(4);
+        scopeParams.bottomMargin = dp(10);
         body.addView(scope, scopeParams);
+
+        body.addView(ruler, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         LinearLayout chips = new LinearLayout(this);
         chips.setOrientation(LinearLayout.HORIZONTAL);
         final TextView[] chipViews = new TextView[SPEED_CHIPS.length];
-        final SeekBar slider = new SeekBar(this);
 
         final Runnable refresh = () -> {
             big.setText(formatSpeed(chosen[0]));
             for (int i = 0; i < chipViews.length; i++) {
-                boolean on = Math.abs(SPEED_CHIPS[i] - chosen[0]) < 0.001f;
+                boolean on = Math.abs(SPEED_CHIPS[i] / 10f - chosen[0]) < 0.001f;
                 GradientDrawable face = new GradientDrawable();
                 face.setCornerRadius(dp(18));
                 face.setColor(on ? COLOR_ACCENT : Color.TRANSPARENT);
@@ -4415,18 +4804,14 @@ public final class MainActivity extends Activity {
         };
 
         for (int i = 0; i < SPEED_CHIPS.length; i++) {
-            final float value = SPEED_CHIPS[i];
+            final int tenths = SPEED_CHIPS[i];
             TextView chip = new TextView(this);
-            chip.setText(formatSpeed(value));
+            chip.setText(SpeedRuler.format(tenths));
             chip.setTextSize(13.5f);
             chip.setTypeface(Typeface.DEFAULT_BOLD);
             chip.setGravity(android.view.Gravity.CENTER);
             chip.setPadding(0, dp(8), 0, dp(8));
-            chip.setOnClickListener(v -> {
-                chosen[0] = value;
-                slider.setProgress(speedToStep(value));
-                refresh.run();
-            });
+            chip.setOnClickListener(v -> ruler.setTenths(tenths, true));
             LinearLayout.LayoutParams chipParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
             if (i > 0) {
                 chipParams.leftMargin = dp(5);
@@ -4434,54 +4819,13 @@ public final class MainActivity extends Activity {
             chips.addView(chip, chipParams);
             chipViews[i] = chip;
         }
-        body.addView(chips);
-
-        slider.setMax(SPEED_STEPS);
-        slider.setProgress(speedToStep(chosen[0]));
-        slider.setProgressTintList(android.content.res.ColorStateList.valueOf(COLOR_ACCENT));
-        slider.setThumbTintList(android.content.res.ColorStateList.valueOf(COLOR_ACCENT));
-        slider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override
-            public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
-                if (fromUser) {
-                    chosen[0] = stepToSpeed(progress);
-                    refresh.run();
-                }
-            }
-
-            @Override
-            public void onStartTrackingTouch(SeekBar bar) {
-            }
-
-            @Override
-            public void onStopTrackingTouch(SeekBar bar) {
-            }
-        });
-        LinearLayout.LayoutParams sliderParams = new LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams chipsParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        sliderParams.topMargin = dp(16);
-        body.addView(slider, sliderParams);
-
-        LinearLayout ticks = new LinearLayout(this);
-        ticks.setOrientation(LinearLayout.HORIZONTAL);
-        ticks.setPadding(dp(14), 0, dp(14), 0);
-        String[] tickLabels = {"0.5x", "1x", "2x", "3x", "4x"};
-        // Where each label sits on the 0.5x-4x track, as weights between them.
-        float[] gaps = {0.5f, 1f, 1f, 1f};
-        for (int i = 0; i < tickLabels.length; i++) {
-            if (i > 0) {
-                ticks.addView(new View(this), new LinearLayout.LayoutParams(0, 1, gaps[i - 1]));
-            }
-            TextView tick = new TextView(this);
-            tick.setText(tickLabels[i]);
-            tick.setTextSize(11f);
-            tick.setTextColor(COLOR_SUBTEXT);
-            ticks.addView(tick);
-        }
-        body.addView(ticks);
+        chipsParams.topMargin = dp(8);
+        body.addView(chips, chipsParams);
 
         TextView note = new TextView(this);
-        note.setText("빠르게 하면 게임 시간이 그만큼 빨리 흐릅니다. 무거운 장면에선 폰 성능만큼만 빨라질 수 있어요. 소리는 원래 속도로 재생됩니다.");
+        note.setText("줄자를 옆으로 밀거나 −/+ 로 0.1씩 맞출 수 있어요. 빠르게 하면 게임 시간이 그만큼 빨리 흐르고, 무거운 장면에선 폰 성능만큼만 빨라질 수 있어요. 소리는 원래 속도로 재생됩니다.");
         note.setTextSize(12f);
         note.setTextColor(COLOR_SUBTEXT);
         note.setLineSpacing(0f, 1.2f);
@@ -4490,6 +4834,13 @@ public final class MainActivity extends Activity {
         noteParams.topMargin = dp(14);
         body.addView(note, noteParams);
 
+        // A speed saved off the tenths (a quarter, from before the ruler) is
+        // shown as it is until the ruler moves.
+        ruler.setTenths(Math.round(chosen[0] * 10f), false);
+        ruler.setListener(tenths -> {
+            chosen[0] = tenths / 10f;
+            refresh.run();
+        });
         refresh.run();
 
         new AlertDialog.Builder(new android.view.ContextThemeWrapper(this, android.R.style.Theme_Material_Dialog_Alert))
@@ -4499,6 +4850,22 @@ public final class MainActivity extends Activity {
                 .setNegativeButton("취소", null)
                 .setNeutralButton("1x로", (dialog, which) -> applyGameSpeed(game, 1f))
                 .show();
+    }
+
+    /** A round − or + beside the speed. */
+    private TextView speedStepButton(String text, String description, Runnable action) {
+        TextView button = new TextView(this);
+        button.setText(text);
+        button.setContentDescription(description);
+        button.setTextSize(20f);
+        button.setTextColor(COLOR_TEXT);
+        button.setGravity(android.view.Gravity.CENTER);
+        GradientDrawable face = new GradientDrawable();
+        face.setShape(GradientDrawable.OVAL);
+        face.setStroke(Math.max(1, dp(1)), Color.rgb(85, 90, 102));
+        button.setBackground(face);
+        button.setOnClickListener(v -> action.run());
+        return button;
     }
 
     /** Remembers the speed for this title and puts the running one on it. */
@@ -4726,6 +5093,15 @@ public final class MainActivity extends Activity {
             // turned it on for one made for a touch handset.
             touchOn = gameTouch(game);
             NativeBridge.nativeSetTouch(touchOn ? 1 : 0);
+            // The sound and the screen as the player left them for this title.
+            NativeBridge.nativeSetOneSoundAtATime(gameOneSound(game) ? 1 : 0);
+            int quality = gameQuality(game);
+            screenQuality = quality;
+            runOnUiThread(() -> {
+                if (gameView != null) {
+                    gameView.setQuality(quality);
+                }
+            });
 
             String message = NativeBridge.nativeStart(
                     buffer.toByteArray(),
@@ -4921,8 +5297,12 @@ public final class MainActivity extends Activity {
         if (frame != null && frame.length > 2 && gameView != null) {
             boolean first = !framePainted;
             framePainted = true;
+            // Doubled here, on the emulator thread, so the UI thread only ever
+            // copies pixels; the frame as the title drew it goes along too, for
+            // the screen to redraw from when the quality changes.
+            short[] doubled = screenQuality == QUALITY_HQ2X ? NativeBridge.nativeHq2x(frame) : null;
             runOnUiThread(() -> {
-                gameView.setFrame(frame);
+                gameView.setFrame(frame, doubled);
                 if (first) {
                     setPlayerStatus(currentGameName);
                 }
@@ -5049,10 +5429,22 @@ public final class MainActivity extends Activity {
 
     /** Draws the emulated LCD, letterboxed into whatever space it is given. */
     private final class GameView extends View {
-        // No FILTER_BITMAP_FLAG: nearest-neighbour scaling keeps the low-res LCD
-        // crisp (sharp pixels) instead of the blur bilinear filtering gives.
+        // No FILTER_BITMAP_FLAG for 도트: nearest-neighbour scaling keeps the
+        // low-res LCD crisp (sharp pixels) instead of the blur bilinear
+        // filtering gives. 기본 and HQ2X filter - see setQuality.
         private final Paint paint = new Paint();
         private Bitmap bitmap;
+        /**
+         * How many bitmap pixels each of the title's takes: 2 while the screen
+         * is drawn from hq2x's doubled frame, else 1.
+         */
+        private int frameScale = 1;
+        /**
+         * The last frame as the title drew it, so a change of quality can
+         * redraw the screen at once rather than at the title's next paint.
+         */
+        private short[] source;
+        private int quality = QUALITY_DOT;
         /**
          * A direct buffer the frame's pixels are copied into before they reach
          * {@link Bitmap#copyPixelsFromBuffer}.
@@ -5098,8 +5490,37 @@ public final class MainActivity extends Activity {
             return bitmap != null && bitmap.getHeight() > 0 ? (float) bitmap.getWidth() / bitmap.getHeight() : 240f / 320f;
         }
 
-        /** @param frame {@code {width, height, RGB565 pixels...}} */
-        void setFrame(short[] frame) {
+        /**
+         * @param frame   {@code {width, height, RGB565 pixels...}} as the title drew it
+         * @param doubled the same through hq2x, or null to show it as it is
+         */
+        void setFrame(short[] frame, short[] doubled) {
+            source = frame;
+            show(doubled != null ? doubled : frame, doubled != null ? 2 : 1);
+        }
+
+        /** The last frame as the title drew it, or null before the first. */
+        short[] sourceFrame() {
+            return source;
+        }
+
+        /** Draws the screen enlarged `quality`'s way from now on, the last frame at once. */
+        void setQuality(int quality) {
+            if (this.quality == quality) {
+                return;
+            }
+            this.quality = quality;
+            paint.setFilterBitmap(quality != QUALITY_DOT);
+            if (source != null) {
+                short[] doubled = quality == QUALITY_HQ2X ? NativeBridge.nativeHq2x(source) : null;
+                show(doubled != null ? doubled : source, doubled != null ? 2 : 1);
+            } else {
+                invalidate();
+            }
+        }
+
+        /** Puts `frame`, `scale` bitmap pixels to the title's one, on the screen. */
+        private void show(short[] frame, int scale) {
             int width = frame[0] & 0xFFFF;
             int height = frame[1] & 0xFFFF;
 
@@ -5107,6 +5528,7 @@ public final class MainActivity extends Activity {
                 return;
             }
 
+            frameScale = scale;
             if (bitmap == null || bitmap.getWidth() != width || bitmap.getHeight() != height) {
                 bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.RGB_565);
 
@@ -5231,14 +5653,17 @@ public final class MainActivity extends Activity {
          * frame at all.
          */
         private boolean toFrame(float viewX, float viewY) {
-            float scale = Math.min((float) getWidth() / bitmap.getWidth(), (float) getHeight() / bitmap.getHeight());
-            float left = (getWidth() - bitmap.getWidth() * scale) / 2f;
-            float top = (getHeight() - bitmap.getHeight() * scale) / 2f;
+            // The title's own pixels, however many of the bitmap's each takes.
+            int width = bitmap.getWidth() / frameScale;
+            int height = bitmap.getHeight() / frameScale;
+            float scale = Math.min((float) getWidth() / width, (float) getHeight() / height);
+            float left = (getWidth() - width * scale) / 2f;
+            float top = (getHeight() - height * scale) / 2f;
             float x = (viewX - left) / scale;
             float y = (viewY - top) / scale;
-            boolean inside = x >= 0 && y >= 0 && x < bitmap.getWidth() && y < bitmap.getHeight();
-            touchX = Math.max(0, Math.min(bitmap.getWidth() - 1, (int) x));
-            touchY = Math.max(0, Math.min(bitmap.getHeight() - 1, (int) y));
+            boolean inside = x >= 0 && y >= 0 && x < width && y < height;
+            touchX = Math.max(0, Math.min(width - 1, (int) x));
+            touchY = Math.max(0, Math.min(height - 1, (int) y));
             return inside;
         }
 

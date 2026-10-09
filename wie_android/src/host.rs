@@ -9,15 +9,25 @@ use std::{
     io::{Read, Write},
     panic::AssertUnwindSafe,
     path::{Path, PathBuf},
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
 use crate::{
     logging,
-    platform::AndroidHandsetInformation,
+    platform::{AndroidHandsetInformation, Frame},
     runner::{self, with_runner},
     speed,
 };
+
+/// The last frame a host took, as the title drew it, for [`show_frame_again`]
+/// and [`last_frame_rgba`].
+static LAST_FRAME: Mutex<Option<Frame>> = Mutex::new(None);
+/// The next take hands over [`LAST_FRAME`] again if nothing newer is painted.
+static FRAME_AGAIN: AtomicBool = AtomicBool::new(false);
 
 /// Upper bound on one [`tick`], whatever the host asks for, as for Android.
 const MAX_TICK_BUDGET: Duration = Duration::from_millis(200);
@@ -42,6 +52,7 @@ pub fn start(data: Vec<u8>, runtime_dir: PathBuf, model: String) -> String {
 
     tracing::info!("host start: {} bytes, runtime dir {}", data.len(), runtime_dir.display());
     speed::realign();
+    *LAST_FRAME.lock().unwrap_or_else(|x| x.into_inner()) = None;
 
     let handset_information = AndroidHandsetInformation::new(model);
     guarded(|| with_runner(|runner| runner.start(data, runtime_dir, handset_information)))
@@ -81,16 +92,62 @@ pub fn key(index: i32, pressed: bool) {
 /// The newest painted frame since the last call, as its width, height and
 /// RGBA pixels, row by row.
 pub fn take_frame_rgba() -> Option<(u32, u32, Vec<u8>)> {
-    let frame = std::panic::catch_unwind(AssertUnwindSafe(|| with_runner(|runner| runner.take_frame()))).ok()??;
+    let frame = take_frame()?;
 
-    let mut rgba = Vec::with_capacity(frame.pixels.len() * 4);
-    for &pixel in &frame.pixels {
-        let pixel = pixel as u16;
-        let (r, g, b) = ((pixel >> 11) & 0x1f, (pixel >> 5) & 0x3f, pixel & 0x1f);
-        rgba.extend_from_slice(&[(r * 255 / 31) as u8, (g * 255 / 63) as u8, (b * 255 / 31) as u8, 0xff]);
+    Some((frame.width, frame.height, frame.rgba()))
+}
+
+/// [`take_frame_rgba`], doubled through hq2x: twice the width and height of
+/// the title's screen, its edges smoothed.
+pub fn take_frame_rgba_hq2x() -> Option<(u32, u32, Vec<u8>)> {
+    let frame = take_frame()?;
+    let frame = std::panic::catch_unwind(AssertUnwindSafe(|| frame.hq2x())).ok()?;
+
+    Some((frame.width, frame.height, frame.rgba()))
+}
+
+/// Has the next take hand over the last frame again, even if the title paints
+/// nothing new - so a change in how it is shown reaches a screen standing
+/// still.
+pub fn show_frame_again() {
+    FRAME_AGAIN.store(true, Ordering::Relaxed);
+}
+
+/// The last frame taken, as the title drew it, without taking anything.
+pub fn last_frame_rgba() -> Option<(u32, u32, Vec<u8>)> {
+    let last = LAST_FRAME.lock().unwrap_or_else(|x| x.into_inner());
+    let frame = last.as_ref()?;
+
+    Some((frame.width, frame.height, frame.rgba()))
+}
+
+/// `rgba`, `width` by `height`, doubled through hq2x. The pixels are taken as
+/// the RGB565 colours the frames are made of.
+pub fn hq2x_rgba(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
+    if rgba.len() != (width * height * 4) as usize {
+        return None;
     }
+    let pixels = rgba
+        .chunks_exact(4)
+        .map(|x| ((u16::from(x[0]) >> 3) << 11 | (u16::from(x[1]) >> 2) << 5 | u16::from(x[2]) >> 3) as i16)
+        .collect();
+    let frame = Frame { width, height, pixels };
 
-    Some((frame.width, frame.height, rgba))
+    std::panic::catch_unwind(AssertUnwindSafe(|| frame.hq2x().rgba())).ok()
+}
+
+fn take_frame() -> Option<Frame> {
+    let fresh = std::panic::catch_unwind(AssertUnwindSafe(|| with_runner(|runner| runner.take_frame()))).ok()?;
+    let mut last = LAST_FRAME.lock().unwrap_or_else(|x| x.into_inner());
+    match fresh {
+        Some(frame) => {
+            FRAME_AGAIN.store(false, Ordering::Relaxed);
+            *last = Some(frame.clone());
+            Some(frame)
+        }
+        None if FRAME_AGAIN.swap(false, Ordering::Relaxed) => last.clone(),
+        None => None,
+    }
 }
 
 /// Renders up to `frames` frames of the mixer's stereo 44.1kHz output as
@@ -140,6 +197,12 @@ pub fn set_speed(value: f32) {
 
 pub fn speed() -> f32 {
     speed::speed()
+}
+
+/// Whether the sound plays one thing at a time - the music held back while an
+/// effect plays - rather than everything mixed together.
+pub fn set_one_sound_at_a_time(enabled: bool) {
+    let _ = std::panic::catch_unwind(AssertUnwindSafe(|| crate::audio::set_one_at_a_time(enabled)));
 }
 
 /// Holds the title's clock still while `held` - for a pause menu over it -

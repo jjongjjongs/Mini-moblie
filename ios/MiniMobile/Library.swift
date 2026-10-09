@@ -189,8 +189,8 @@ enum Favorites {
 /// title can stay sped up without every other title following it.
 enum GameSpeed {
     static let chips: [Float] = [0.5, 1, 1.5, 2, 3, 4]
-    static let range: ClosedRange<Float> = 0.5...4
-    static let step: Float = 0.25
+    /// The ruler's ends, in tenths: 0.1x to 4x.
+    static let tenths: ClosedRange<Int> = 1...40
 
     static func get(_ game: GameFile) -> Float {
         let value = UserDefaults.standard.float(forKey: "speed.\(game.name)")
@@ -211,6 +211,78 @@ enum GameSpeed {
             text.removeLast()
         }
         return text + "x"
+    }
+}
+
+/// How a title's screen is enlarged.
+enum ScreenQuality: Int, CaseIterable, Identifiable {
+    /// Smoothed: the "기본" choice.
+    case smooth = 0
+    /// Pixel for pixel, sharp and blocky, as the screen always was drawn.
+    case dot = 1
+    /// Doubled through hq2x first, its stepped edges smoothed, then enlarged
+    /// smoothly.
+    case hq2x = 2
+
+    var id: Int { rawValue }
+
+    var label: String {
+        switch self {
+        case .smooth: return "기본"
+        case .dot: return "도트"
+        case .hq2x: return "HQ2X"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .smooth: return "부드럽게 확대해요. 픽셀 경계가 살짝 흐려져요."
+        case .dot: return "픽셀을 그대로 키워요. 또렷하고 각진 옛날 폰 느낌."
+        case .hq2x: return "계단진 테두리를 매끈하게 다듬어 그려요."
+        }
+    }
+}
+
+/// The quality a title's screen is shown at: its own choice, else the one made
+/// for every title, else 도트 - or 기본 for a player who had turned on the
+/// smoothing that came before it.
+enum GameQuality {
+    private static let prefix = "quality."
+    private static let everyGame = "quality.*"
+
+    static func get(_ game: GameFile) -> ScreenQuality {
+        let defaults = UserDefaults.standard
+        let stored = defaults.object(forKey: prefix + game.name) ?? defaults.object(forKey: everyGame)
+        if let raw = stored as? Int, let quality = ScreenQuality(rawValue: raw) {
+            return quality
+        }
+        return defaults.bool(forKey: SettingKey.smooth) ? .smooth : .dot
+    }
+
+    /// Keeps `quality` for `game`, or for every title - dropping each one's
+    /// own choice, so they all follow it.
+    static func set(_ quality: ScreenQuality, for game: GameFile, everyGame all: Bool) {
+        let defaults = UserDefaults.standard
+        if all {
+            for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(prefix) {
+                defaults.removeObject(forKey: key)
+            }
+            defaults.set(quality.rawValue, forKey: everyGame)
+        } else {
+            defaults.set(quality.rawValue, forKey: prefix + game.name)
+        }
+    }
+}
+
+/// Whether a title plays one sound at a time - the music holding back while
+/// an effect plays - kept per title. Off, everything sounds together.
+enum GameSound {
+    static func oneAtATime(_ game: GameFile) -> Bool {
+        UserDefaults.standard.bool(forKey: "oneSound.\(game.name)")
+    }
+
+    static func set(oneAtATime: Bool, for game: GameFile) {
+        UserDefaults.standard.set(oneAtATime, forKey: "oneSound.\(game.name)")
     }
 }
 

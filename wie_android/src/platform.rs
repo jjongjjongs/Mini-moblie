@@ -16,11 +16,43 @@ use wie_util::Result;
 use crate::{audio::AndroidAudioSink, database::AndroidDatabaseRepository, filesystem::AndroidFilesystem, ma3::SynthMixer, network::AndroidNetwork};
 
 /// A frame handed to `Screen::paint`, kept until Java collects it.
+#[derive(Clone)]
 pub struct Frame {
     pub width: u32,
     pub height: u32,
     /// Native-endian RGB565 values consumed by an Android RGB_565 Bitmap.
     pub pixels: Vec<i16>,
+}
+
+impl Frame {
+    /// This frame doubled through hq2x, its edges smoothed rather than its
+    /// pixels made into blocks.
+    pub fn hq2x(&self) -> Frame {
+        let (width, height) = (self.width as usize, self.height as usize);
+        let source: Vec<u16> = self.pixels.iter().map(|&pixel| pixel as u16).collect();
+        let pixels = crate::hq2x::hq2x(&source, width, height)
+            .into_iter()
+            .map(|colour| (((colour >> 8) & 0xf800) | ((colour >> 5) & 0x07e0) | ((colour >> 3) & 0x001f)) as u16 as i16)
+            .collect();
+
+        Frame {
+            width: self.width * 2,
+            height: self.height * 2,
+            pixels,
+        }
+    }
+
+    /// The pixels as RGBA bytes, row by row.
+    pub fn rgba(&self) -> Vec<u8> {
+        let mut rgba = Vec::with_capacity(self.pixels.len() * 4);
+        for &pixel in &self.pixels {
+            let pixel = pixel as u16;
+            let (r, g, b) = ((pixel >> 11) & 0x1f, (pixel >> 5) & 0x3f, pixel & 0x1f);
+            rgba.extend_from_slice(&[(r * 255 / 31) as u8, (g * 255 / 63) as u8, (b * 255 / 31) as u8, 0xff]);
+        }
+
+        rgba
+    }
 }
 
 /// Everything the JNI layer reads out of a running emulator. The emulator

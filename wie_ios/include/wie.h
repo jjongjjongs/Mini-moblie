@@ -53,6 +53,18 @@ void wie_key(int32_t index, bool pressed);
 // and stores its size. Returns false when nothing new was painted or `rgba` is
 // too small; `*width`/`*height` are set either way when there is a frame.
 bool wie_take_frame(uint8_t *rgba, size_t capacity, uint32_t *width, uint32_t *height);
+// As wie_take_frame, the frame doubled through hq2x: twice the title's width
+// and height, its edges smoothed rather than its pixels made into blocks.
+bool wie_take_frame_hq2x(uint8_t *rgba, size_t capacity, uint32_t *width, uint32_t *height);
+// Has the next wie_take_frame* hand over the last frame again, though the
+// title paints nothing new - so a change of quality shows on a still screen.
+void wie_show_frame_again(void);
+// Copies the last frame taken, as the title drew it, without taking it.
+// Returns false when there is none or it does not fit in `capacity` bytes.
+bool wie_last_frame(uint8_t *rgba, size_t capacity, uint32_t *width, uint32_t *height);
+// Doubles `rgba` (`width` by `height`) through hq2x into `out`, which holds
+// `width * height * 16` bytes. Returns false when it cannot.
+bool wie_hq2x(const uint8_t *rgba, uint32_t width, uint32_t height, uint8_t *out);
 
 // Fills `samples` with up to `frames` stereo frames of 44.1kHz 16-bit audio,
 // interleaved. Returns how many frames were written; 0 while nothing sounds.
@@ -68,6 +80,10 @@ char *wie_carrier(const uint8_t *data, size_t length);
 // How fast the title runs, 1.0 being real time.
 void wie_set_speed(float speed);
 float wie_speed(void);
+
+// Whether the music gives way while an effect plays - one sound at a time -
+// rather than everything sounding together. Safe while a title runs.
+void wie_set_one_sound_at_a_time(bool enabled);
 
 // Saves, in the Android app's zip layout (db/<product id>/..., fs/<app id>/...),
 // so a save moves between the two. `data` is the game file whose saves are

@@ -60,6 +60,12 @@ final class NativeBridge {
     static native void nativeSetSpeed(float speed);
 
     /**
+     * Whether the music gives way while an effect plays - one sound at a
+     * time - rather than everything sounding together. Safe while a title runs.
+     */
+    static native void nativeSetOneSoundAtATime(int enabled);
+
+    /**
      * Guest instructions retired so far. It climbs while the title is running
      * and stops dead when it is not, which is what tells a title doing a long
      * piece of work - a loading screen is one tick that can last seconds -
@@ -105,6 +111,13 @@ final class NativeBridge {
      *         {@code {width, height, RGB565 pixels...}}
      */
     static native short[] nativeFrame();
+
+    /**
+     * A frame laid out as {@link #nativeFrame} hands it, doubled through hq2x -
+     * twice its width and height, its edges smoothed - or {@code null} when it
+     * is not one. Touches nothing that runs, so any thread may call it.
+     */
+    static native short[] nativeHq2x(short[] frame);
 
     /**
      * @return the next queued audio or vibration command, or {@code null}

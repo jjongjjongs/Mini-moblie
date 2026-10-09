@@ -20,7 +20,7 @@ use std::{
 };
 
 /// The slowest and fastest the player offers.
-const MIN_SPEED: f32 = 0.25;
+const MIN_SPEED: f32 = 0.1;
 const MAX_SPEED: f32 = 8.0;
 
 /// The speed, as `f32` bits, so the loop can read it without a lock.

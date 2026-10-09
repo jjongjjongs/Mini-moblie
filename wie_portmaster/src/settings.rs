@@ -18,6 +18,7 @@ use crate::{
     controls::{Button, DELETE, ESCAPE, KEYS_PER_KEY, TABLE_BUTTONS, TABLE_KEYS, key_label, mappable, scancode_label},
     key_button,
     library::{BAR, BAR_COLOR, HIGHLIGHT, LINE, MUTED, Screen, TEXT, fit, rgb},
+    pointer::{Mouse, Target},
     presets::{DEFAULT_NAME, SCREEN_MAX},
 };
 
@@ -28,6 +29,13 @@ pub(crate) const EDGE: Color = rgb(0x3c, 0x48, 0x54);
 pub(crate) const DIM: Color = Color { a: 0xb0, r: 0, g: 0, b: 0 };
 /// What cannot be undone easily: deleting.
 pub(crate) const DANGER: Color = rgb(0xf0, 0x8a, 0x80);
+/// The height of the speed ruler under the menu's rows.
+const RULER: i32 = 32;
+
+/// A game's file name, which what is kept for it is filed under.
+fn file_of(game: &Path) -> String {
+    game.file_name().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default()
+}
 
 /// Where the settings were opened from.
 pub struct Context<'a> {
@@ -75,6 +83,8 @@ enum Item {
     Fix,
     Screen,
     Speed,
+    Quality,
+    Sound,
     Saves,
     Delete,
     EndGame,
@@ -100,26 +110,56 @@ fn screen_steps() -> Vec<u32> {
     (2..=SCREEN_MAX).chain(Some(0)).collect()
 }
 
-/// The speeds a game can play at, as the menu and F5/F6 step through them.
-pub(crate) const SPEEDS: [f32; 10] = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0];
+/// The slowest and fastest a game plays, in tenths: 0.1x and 4x. The menu
+/// and F5/F6 step a tenth at a time between them, and the ruler under the
+/// menu's speed row spans them.
+pub(crate) const SPEED_MIN: u32 = 1;
+pub(crate) const SPEED_MAX: u32 = 40;
 
-/// The speed a step faster (or slower) than `speed`, stopping at the ends.
+/// The speed a tenth faster (or slower) than `speed`, stopping at the ends.
 pub(crate) fn speed_step(speed: f32, faster: bool) -> f32 {
-    let nearest = (0..SPEEDS.len())
-        .min_by(|a, b| (SPEEDS[*a] - speed).abs().total_cmp(&(SPEEDS[*b] - speed).abs()))
-        .unwrap_or(2);
-    let next = if faster {
-        (nearest + 1).min(SPEEDS.len() - 1)
-    } else {
-        nearest.saturating_sub(1)
-    };
-    SPEEDS[next]
+    let tenths = (speed * 10.0).round() as i32 + if faster { 1 } else { -1 };
+    tenths.clamp(SPEED_MIN as i32, SPEED_MAX as i32) as f32 / 10.0
 }
 
 /// `1.5x`, `2x`, `0.75x`.
 pub(crate) fn speed_label(speed: f32) -> String {
     let text = format!("{speed:.2}");
     format!("{}x", text.trim_end_matches('0').trim_end_matches('.'))
+}
+
+/// How a game's screen is enlarged, numbered as the Android app keeps it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum Quality {
+    /// Smoothed: "기본".
+    Smooth = 0,
+    /// Pixel for pixel, as the screen always was.
+    Dot = 1,
+    /// Doubled through hq2x first, then smoothed.
+    Hq2x = 2,
+}
+
+impl Quality {
+    pub(crate) fn from_index(index: u8) -> Quality {
+        match index {
+            0 => Quality::Smooth,
+            2 => Quality::Hq2x,
+            _ => Quality::Dot,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Quality::Smooth => "기본",
+            Quality::Dot => "도트",
+            Quality::Hq2x => "HQ2X",
+        }
+    }
+
+    /// The next choice round, or the one before.
+    fn step(self, forward: bool) -> Quality {
+        Quality::from_index(((self as u8) + if forward { 1 } else { 2 }) % 3)
+    }
 }
 
 fn screen_label(scale: u32) -> String {
@@ -153,6 +193,7 @@ impl App {
                     key_button(code).filter(|button| !repeated || matches!(button, Button::Up | Button::Down | Button::Left | Button::Right)),
                 ),
                 Input::Key(..) | Input::Drop(_) => {}
+                Input::Mouse(mouse) => self.mouse_presses(mouse, &mut pressed),
                 Input::Button(button, true) => {
                     pressed.push(button);
                     repeat.held = matches!(button, Button::Up | Button::Down | Button::Left | Button::Right)
@@ -201,7 +242,7 @@ impl App {
     pub fn settings_menu(&mut self, context: &Context) -> Outcome {
         let mut items = Vec::new();
         if context.in_game() {
-            items.extend([Item::Resume, Item::Speed]);
+            items.extend([Item::Resume, Item::Speed, Item::Quality, Item::Sound]);
         }
         if self.desktop {
             items.push(Item::Keyboard);
@@ -213,7 +254,7 @@ impl App {
         // What is done to a game's files is done from the list, with the game
         // stopped.
         if context.game.is_some() && !context.in_game() {
-            items.extend([Item::Speed, Item::Saves, Item::Delete]);
+            items.extend([Item::Speed, Item::Quality, Item::Sound, Item::Saves, Item::Delete]);
         }
         if self.desktop {
             items.push(Item::Screen);
@@ -225,15 +266,40 @@ impl App {
         }
 
         let mut cursor: usize = 0;
+        // The first row shown, when there are more than fit.
+        let mut top: usize = 0;
         let mut repeat = Repeat::new();
         let mut dirty = true;
         loop {
-            for button in self.presses(&mut repeat) {
+            let pressed = self.presses(&mut repeat);
+            if let Some((row, _)) = self.take_pointed() {
+                dirty |= row != cursor;
+                cursor = row.min(items.len() - 1);
+            }
+            if let Some(tenths) = self.take_ruler()
+                && let Some(game) = context.game
+            {
+                self.set_game_speed(game, tenths as f32 / 10.0, context.in_game());
+                dirty = true;
+            }
+            for button in pressed {
                 dirty = true;
                 match button {
                     Button::Up => cursor = cursor.checked_sub(1).unwrap_or(items.len() - 1),
                     Button::Down => cursor = (cursor + 1) % items.len(),
                     Button::B | Button::Guide => return Outcome::Close,
+                    Button::Left | Button::Right if items[cursor] == Item::Quality => {
+                        if let Some(game) = context.game {
+                            let quality = self.game_quality(game).step(button == Button::Right);
+                            self.set_game_quality(game, quality);
+                        }
+                    }
+                    Button::Left | Button::Right if items[cursor] == Item::Sound => {
+                        if let Some(game) = context.game {
+                            let one = !self.game_one_sound(game);
+                            self.set_game_one_sound(game, one, context.in_game());
+                        }
+                    }
                     Button::Left | Button::Right if items[cursor] == Item::Preset => {
                         self.cycle_preset(button == Button::Right);
                     }
@@ -259,8 +325,20 @@ impl App {
                                 // On past the fastest, back round to the slowest.
                                 let current = self.game_speed(game);
                                 let next = speed_step(current, true);
-                                let speed = if next == current { SPEEDS[0] } else { next };
+                                let speed = if next == current { SPEED_MIN as f32 / 10.0 } else { next };
                                 self.set_game_speed(game, speed, context.in_game());
+                            }
+                        }
+                        Item::Quality => {
+                            if let Some(game) = context.game {
+                                let quality = self.game_quality(game).step(true);
+                                self.set_game_quality(game, quality);
+                            }
+                        }
+                        Item::Sound => {
+                            if let Some(game) = context.game {
+                                let one = !self.game_one_sound(game);
+                                self.set_game_one_sound(game, one, context.in_game());
                             }
                         }
                         Item::Saves => {
@@ -288,7 +366,7 @@ impl App {
             }
 
             if dirty || self.take_redraw() {
-                self.draw_menu(context, &items, cursor);
+                self.draw_menu(context, &items, cursor, &mut top);
                 dirty = false;
             }
             std::thread::sleep(FRAME);
@@ -335,16 +413,48 @@ impl App {
         }
     }
 
+    /// How `game`'s screen is enlarged.
+    pub(crate) fn game_quality(&self, game: &Path) -> Quality {
+        Quality::from_index(self.store.quality(&file_of(game)))
+    }
+
+    /// Remembers how `game`'s screen is enlarged. A game running takes it up
+    /// with its next frame, and the frame on screen is drawn again for it.
+    fn set_game_quality(&mut self, game: &Path, quality: Quality) {
+        self.store.set_quality(&file_of(game), quality as u8);
+        host::show_frame_again();
+    }
+
+    /// Whether `game` plays one sound at a time.
+    pub(crate) fn game_one_sound(&self, game: &Path) -> bool {
+        self.store.one_sound(&file_of(game))
+    }
+
+    fn set_game_one_sound(&mut self, game: &Path, enabled: bool, running: bool) {
+        self.store.set_one_sound(&file_of(game), enabled);
+        if running {
+            host::set_one_sound_at_a_time(enabled);
+        }
+    }
+
     /// The active preset's name, starred once the mapping has moved off it.
     fn active_label(&self) -> String {
         let star = if self.store.modified() { "*" } else { "" };
         format!("{}{star}", self.store.active())
     }
 
-    fn draw_menu(&mut self, context: &Context, items: &[Item], cursor: usize) {
+    fn draw_menu(&mut self, context: &Context, items: &[Item], cursor: usize, top: &mut usize) {
         let (mut screen, width, height) = self.canvas(context);
+        self.clear_hits();
         let panel_width = (width - 16).min(288);
-        let panel_height = (2 * BAR + 8 + items.len() as i32 * LINE) as u32;
+        // The speed's ruler under the rows, when there is a speed to set.
+        let ruler = items.contains(&Item::Speed) && context.game.is_some();
+        let ruler_height = if ruler { RULER } else { 0 };
+        // As many rows as the screen has room for, scrolled to the cursor.
+        let room = height as i32 - 2 * BAR - 8 - ruler_height - 4;
+        let rows = ((room / LINE).max(1) as usize).min(items.len());
+        scroll(cursor, rows, top);
+        let panel_height = (2 * BAR + 8 + rows as i32 * LINE + ruler_height) as u32;
         let x = (width - panel_width) as i32 / 2;
         let y = ((height as i32 - panel_height as i32) / 2).max(0);
         screen.fill(x - 1, y - 1, panel_width + 2, panel_height + 2, EDGE);
@@ -358,7 +468,7 @@ impl App {
         };
         panel_bar(&mut screen, x, y, panel_width, &title, &note);
 
-        for (index, item) in items.iter().enumerate() {
+        for (index, item) in items.iter().enumerate().skip(*top).take(rows) {
             let label = match item {
                 Item::Resume => "게임으로 돌아가기",
                 Item::Keyboard => "키보드 배치 바꾸기",
@@ -368,6 +478,8 @@ impl App {
                 Item::Fix => "이 게임에 프리셋 고정",
                 Item::Screen => "화면",
                 Item::Speed => "배속",
+                Item::Quality => "화질",
+                Item::Sound => "소리",
                 Item::Saves => "세이브 관리",
                 Item::Delete => "이 게임 삭제",
                 Item::EndGame => "게임 끝내기",
@@ -380,39 +492,111 @@ impl App {
                 Item::Preset => format!("◀ {} ▶", fit(&self.active_label(), room - 40.0)),
                 Item::Screen => format!("◀ {} ▶", screen_label(self.store.screen())),
                 Item::Speed => format!("◀ {} ▶", speed_label(context.game.map_or(1.0, |game| self.game_speed(game)))),
+                Item::Quality => format!("◀ {} ▶", context.game.map_or(Quality::Dot, |game| self.game_quality(game)).label()),
+                Item::Sound => format!(
+                    "◀ {} ▶",
+                    if context.game.is_some_and(|game| self.game_one_sound(game)) {
+                        "각각"
+                    } else {
+                        "동시"
+                    }
+                ),
                 Item::Fix => {
                     let fixed = context.game_file().and_then(|game| self.store.fixed(&game).map(str::to_owned));
                     fixed.map_or("끔".to_owned(), |name| fit(&name, room))
                 }
                 _ => String::new(),
             };
-            let row_y = y + BAR + 4 + index as i32 * LINE;
+            let row_y = y + BAR + 4 + (index - *top) as i32 * LINE;
             let picked = index == cursor;
             if picked {
                 screen.fill(x, row_y, panel_width, LINE as u32, HIGHLIGHT);
             }
             screen.text(label, x + 8, row_y + 1, TextAlignment::Left, if picked { TEXT } else { MUTED });
+            self.hit(x, row_y, panel_width as i32, LINE, Target::Row(index));
             if !value.is_empty() {
-                screen.text(
-                    &value,
-                    x + panel_width as i32 - 8,
-                    row_y + 1,
-                    TextAlignment::Right,
-                    if picked { TEXT } else { ACCENT },
-                );
+                let right = x + panel_width as i32 - 8;
+                screen.text(&value, right, row_y + 1, TextAlignment::Right, if picked { TEXT } else { ACCENT });
+                // ◀ and ▶ step the value, as the pad's do.
+                if value.starts_with('◀') {
+                    let left = right - string_width_px(&value, 16.0) as i32;
+                    self.hit(left - 4, row_y, 22, LINE, Target::Step(index, false));
+                    self.hit(right - 18, row_y, 26, LINE, Target::Step(index, true));
+                }
             }
+        }
+
+        if ruler && let Some(game) = context.game {
+            let row = items.iter().position(|item| *item == Item::Speed).unwrap_or(0);
+            let ruler_y = y + BAR + 4 + rows as i32 * LINE;
+            self.draw_ruler(&mut screen, x + 14, ruler_y, panel_width as i32 - 28, self.game_speed(game), row);
         }
 
         let hint = match items[cursor] {
             Item::Preset => self.hint("A 목록  ◀▶ 바꾸기", "Enter 목록  ◀▶ 바꾸기"),
             Item::Screen => self.hint("◀▶ 바꾸기", "◀▶ 바꾸기  F11"),
-            Item::Speed if context.in_game() => self.hint("◀▶ 바꾸기", "◀▶ 바꾸기  F5 F6"),
-            Item::Speed => self.hint("◀▶ 바꾸기", "◀▶ 바꾸기"),
+            Item::Speed if context.in_game() => self.hint("◀▶ 0.1씩", "◀▶ 0.1씩  F5 F6"),
+            Item::Speed => self.hint("◀▶ 0.1씩", "◀▶ 0.1씩"),
+            Item::Quality | Item::Sound => self.hint("◀▶ 바꾸기", "◀▶ 바꾸기"),
             _ => self.hint("A 선택", "Enter 선택"),
         };
         let back = self.hint("B 닫기", "Esc 닫기");
-        panel_bar(&mut screen, x, y + panel_height as i32 - BAR, panel_width, hint, back);
+        self.back_bar(&mut screen, x, y + panel_height as i32 - BAR, panel_width, hint, back);
+        // More rows above or below than are shown: a mark in the bar that way,
+        // clear of the title and the hints.
+        if *top > 0 {
+            screen.text("▲", x + 60, y + 2, TextAlignment::Center, TEXT);
+        }
+        if *top + rows < items.len() {
+            screen.text(
+                "▼",
+                x + panel_width as i32 / 2,
+                y + panel_height as i32 - BAR + 2,
+                TextAlignment::Center,
+                TEXT,
+            );
+        }
         self.present(screen, width, height);
+    }
+
+    /// The speed ruler: a tick for every tenth from 0.1x to 4x along
+    /// `width`, taller at the halves and tallest, numbered, at the whole
+    /// speeds, with a marker at `speed`. Clicked or dragged, it sets the
+    /// speed of the menu's row `row`.
+    fn draw_ruler(&self, screen: &mut Screen, x: i32, y: i32, width: i32, speed: f32, row: usize) {
+        let span = (SPEED_MAX - SPEED_MIN) as i32;
+        let at = |tenths: i32| x + (tenths - SPEED_MIN as i32) * width / span;
+        for tenths in SPEED_MIN as i32..=SPEED_MAX as i32 {
+            let (length, color) = if tenths % 10 == 0 {
+                (9, TEXT)
+            } else if tenths % 5 == 0 {
+                (6, MUTED)
+            } else {
+                (3, EDGE)
+            };
+            screen.fill(at(tenths), y + 4, 1, length, color);
+            if tenths % 10 == 0 {
+                screen.text(&format!("{}x", tenths / 10), at(tenths), y + 13, TextAlignment::Center, MUTED);
+            }
+        }
+        let current = ((speed * 10.0).round() as i32).clamp(SPEED_MIN as i32, SPEED_MAX as i32);
+        screen.fill(at(current) - 1, y + 1, 3, 13, ACCENT);
+        self.hit(x - 6, y, width + 12, RULER, Target::Ruler(row, x, width));
+    }
+
+    /// The screen's bottom bar goes back when its right half is clicked, as
+    /// its right end says.
+    pub(crate) fn back_hit(&self, width: u32, height: u32) {
+        self.hit(width as i32 / 2, height as i32 - BAR, width as i32 / 2, BAR, Target::Press(Button::B));
+    }
+
+    /// A panel's bottom bar, which goes back - as `right` says - when its right
+    /// half is clicked.
+    pub(crate) fn back_bar(&self, screen: &mut Screen, x: i32, y: i32, width: u32, left: &str, right: &str) {
+        panel_bar(screen, x, y, width, left, right);
+        if !right.is_empty() {
+            self.hit(x + width as i32 / 2, y, width as i32 / 2, BAR, Target::Press(Button::B));
+        }
     }
 
     /// The table of every pad button, plain and with SELECT held.
@@ -423,7 +607,13 @@ impl App {
         let mut repeat = Repeat::new();
         let mut dirty = true;
         loop {
-            for button in self.presses(&mut repeat) {
+            let pressed = self.presses(&mut repeat);
+            if let Some((pointed, column)) = self.take_pointed() {
+                row = pointed.min(TABLE_BUTTONS.len() - 1);
+                with_select = column.map_or(with_select, |column| column == 1);
+                dirty = true;
+            }
+            for button in pressed {
                 dirty = true;
                 match button {
                     Button::Up => row = row.checked_sub(1).unwrap_or(TABLE_BUTTONS.len() - 1),
@@ -454,6 +644,7 @@ impl App {
     fn draw_layout(&self, row: usize, with_select: bool, top: &mut usize) -> (Screen, u32, u32) {
         let (width, height, _) = self.menu_size();
         let mut screen = Screen::new(width, height);
+        self.clear_hits();
         let preset = format!("프리셋: {}{}", self.store.active(), if self.store.modified() { " (바뀜)" } else { "" });
         let title = if self.desktop { "패드 버튼 배치" } else { "버튼 배치" };
         screen.bar(0, title, &fit(&preset, width as f32 - 136.0));
@@ -482,6 +673,9 @@ impl App {
                 screen.fill(x, y, w as u32, LINE as u32, HIGHLIGHT);
             }
             screen.text(name, c1, y + 1, TextAlignment::Left, TEXT);
+            // The name and the plain key are the first column, SELECT+ the second.
+            self.hit(0, y, c3 - 4, LINE, Target::Cell(index, 0));
+            self.hit(c3 - 4, y, width as i32 - c3 + 4, LINE, Target::Cell(index, 1));
             let plain = controls.get(*button, false);
             screen.text(
                 key_label(plain),
@@ -513,6 +707,7 @@ impl App {
 
         let hint = self.hint("A 바꾸기  ◀▶ 칸", "Enter 바꾸기  ◀▶ 칸");
         screen.bar(height as i32 - BAR, hint, self.hint("B 뒤로", "Esc 뒤로"));
+        self.back_hit(width, height);
         (screen, width, height)
     }
 
@@ -524,7 +719,12 @@ impl App {
         let mut repeat = Repeat::new();
         let mut dirty = true;
         loop {
-            for button in self.presses(&mut repeat) {
+            let pressed = self.presses(&mut repeat);
+            if let Some((pointed, _)) = self.take_pointed() {
+                cursor = pointed.min(cells.len() - 1);
+                dirty = true;
+            }
+            for button in pressed {
                 dirty = true;
                 match button {
                     Button::Up | Button::Down | Button::Left | Button::Right => cursor = step(&cells, cursor, button),
@@ -538,6 +738,8 @@ impl App {
                 let mut top = top;
                 let (mut screen, width, height) = self.draw_layout(row, with_select, &mut top);
                 screen.fill(0, 0, width, height, DIM);
+                // Only the picker answers the mouse while it is up.
+                self.clear_hits();
 
                 let (panel_width, panel_height) = (272u32, 196u32);
                 let x = (width - panel_width) as i32 / 2;
@@ -548,6 +750,7 @@ impl App {
                 for (index, cell) in cells.iter().enumerate() {
                     let fill = if index == cursor { HIGHLIGHT } else { ROW };
                     screen.fill(x + cell.x, y + cell.y, cell.width as u32, cell.height as u32, fill);
+                    self.hit(x + cell.x, y + cell.y, cell.width, cell.height, Target::Row(index));
                     let color = if cell.key.is_none() && index != cursor { MUTED } else { TEXT };
                     let label = if cell.key.is_none() { "없음" } else { key_label(cell.key) };
                     screen.text(
@@ -559,7 +762,7 @@ impl App {
                     );
                 }
                 let (choose, cancel) = (self.hint("A 고르기", "Enter 고르기"), self.hint("B 취소", "Esc 취소"));
-                panel_bar(&mut screen, x, y + panel_height as i32 - BAR, panel_width, choose, cancel);
+                self.back_bar(&mut screen, x, y + panel_height as i32 - BAR, panel_width, choose, cancel);
                 self.present(screen, width, height);
                 dirty = false;
             }
@@ -576,7 +779,13 @@ impl App {
         let mut repeat = Repeat::new();
         let mut dirty = true;
         loop {
-            for button in self.presses(&mut repeat) {
+            let pressed = self.presses(&mut repeat);
+            if let Some((pointed, column)) = self.take_pointed() {
+                row = pointed.min(TABLE_KEYS.len() - 1);
+                slot = column.unwrap_or(slot).min(KEYS_PER_KEY - 1);
+                dirty = true;
+            }
+            for button in pressed {
                 dirty = true;
                 status.clear();
                 let handset = TABLE_KEYS[row];
@@ -613,6 +822,7 @@ impl App {
     fn draw_keyboard(&self, row: usize, slot: usize, top: &mut usize, status: &str) -> (Screen, u32, u32) {
         let (width, height, _) = self.menu_size();
         let mut screen = Screen::new(width, height);
+        self.clear_hits();
         let preset = format!("프리셋: {}{}", self.store.active(), if self.store.modified() { " (바뀜)" } else { "" });
         screen.bar(0, "키보드 배치", &fit(&preset, width as f32 - 112.0));
 
@@ -642,6 +852,9 @@ impl App {
                 screen.fill(x, y, w as u32, LINE as u32, HIGHLIGHT);
             }
             screen.text(key_label(Some(*handset)), 8, y + 1, TextAlignment::Left, TEXT);
+            // The handset key's name goes with the first key.
+            self.hit(0, y, columns[1] - 4, LINE, Target::Cell(index, 0));
+            self.hit(columns[1] - 4, y, width as i32 - columns[1] + 4, LINE, Target::Cell(index, 1));
             for (column, x) in columns.iter().enumerate() {
                 let code = controls.keyboard(*handset, column);
                 let color = if picked && column == slot {
@@ -673,6 +886,7 @@ impl App {
         }
         let hint = self.hint("A 바꾸기  Y 지우기", "Enter 바꾸기  Del 지우기");
         screen.bar(height as i32 - BAR, hint, self.hint("B 뒤로", "Esc 뒤로"));
+        self.back_hit(width, height);
         (screen, width, height)
     }
 
@@ -691,7 +905,7 @@ impl App {
                         host::stop();
                         std::process::exit(0);
                     }
-                    Input::Key(ESCAPE, true, _) | Input::Button(Button::B, true) => return None,
+                    Input::Key(ESCAPE, true, _) | Input::Button(Button::B, true) | Input::Mouse(Mouse::Back) => return None,
                     Input::Key(DELETE, true, _) | Input::Button(Button::Y, true) => return Some(None),
                     Input::Key(code, true, false) => {
                         if mappable(code) {
@@ -717,7 +931,7 @@ impl App {
                 screen.text("쓸 키를 누르세요", x + panel_width as i32 / 2, y + BAR + 18, TextAlignment::Center, TEXT);
                 let line = if note.is_empty() { "…" } else { note.as_str() };
                 screen.text(line, x + panel_width as i32 / 2, y + BAR + 42, TextAlignment::Center, ACCENT);
-                panel_bar(&mut screen, x, y + panel_height as i32 - BAR, panel_width, "Esc 취소", "Del 없음");
+                panel_bar(&mut screen, x, y + panel_height as i32 - BAR, panel_width, "Esc·우클릭 취소", "Del 없음");
                 self.present(screen, width, height);
                 dirty = false;
             }
@@ -739,9 +953,14 @@ impl App {
             // The last row saves the mapping as a new preset.
             let count = names.len() + 1;
             cursor = cursor.min(count - 1);
+            let pressed = self.presses(&mut repeat);
+            if let Some((pointed, _)) = self.take_pointed() {
+                cursor = pointed.min(count - 1);
+                dirty = true;
+            }
             let name = names.get(cursor).cloned();
 
-            for button in self.presses(&mut repeat) {
+            for button in pressed {
                 dirty = true;
                 if button != Button::Y {
                     confirm = None;
@@ -799,6 +1018,7 @@ impl App {
     fn draw_presets(&mut self, context: &Context, cursor: usize, top: &mut usize, status: &str) {
         let (width, height, _) = self.menu_size();
         let mut screen = Screen::new(width, height);
+        self.clear_hits();
         let names = self.store.names();
         let count = names.len() + 1;
         screen.bar(0, "프리셋", &format!("{}/{}", cursor.min(names.len() - 1) + 1, names.len()));
@@ -814,6 +1034,7 @@ impl App {
             if picked {
                 screen.fill(0, y, width, LINE as u32, HIGHLIGHT);
             }
+            self.hit(0, y, width as i32, LINE, Target::Row(index));
             let (label, notes) = match names.get(index) {
                 Some(name) => {
                     let mut notes = Vec::new();
@@ -988,16 +1209,25 @@ mod tests {
     }
 
     #[test]
-    fn the_speed_steps_and_stops_at_the_ends() {
-        assert_eq!(speed_step(1.0, true), 1.25);
-        assert_eq!(speed_step(1.0, false), 0.75);
+    fn the_speed_steps_a_tenth_and_stops_at_the_ends() {
+        assert_eq!(speed_step(1.0, true), 1.1);
+        assert_eq!(speed_step(1.0, false), 0.9);
         assert_eq!(speed_step(4.0, true), 4.0);
-        assert_eq!(speed_step(0.5, false), 0.5);
-        // A speed set elsewhere steps from the nearest one offered.
-        assert_eq!(speed_step(1.4, true), 1.75);
+        assert_eq!(speed_step(0.1, false), 0.1);
+        // A speed kept from before the tenths steps from the nearest tenth.
+        assert_eq!(speed_step(0.75, true), 0.9);
         assert_eq!(speed_label(1.0), "1x");
         assert_eq!(speed_label(1.5), "1.5x");
+        assert_eq!(speed_label(0.3), "0.3x");
         assert_eq!(speed_label(0.75), "0.75x");
+    }
+
+    #[test]
+    fn the_quality_steps_round_its_three_choices() {
+        assert_eq!(Quality::Dot.step(true), Quality::Hq2x);
+        assert_eq!(Quality::Hq2x.step(true), Quality::Smooth);
+        assert_eq!(Quality::Smooth.step(false), Quality::Hq2x);
+        assert_eq!(Quality::from_index(9), Quality::Dot);
     }
 
     #[test]

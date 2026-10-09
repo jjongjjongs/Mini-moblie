@@ -38,6 +38,13 @@ pub const WINDOWEVENT: u32 = 0x200;
 pub const DROPFILE: u32 = 0x1000;
 pub const KEYDOWN: u32 = 0x300;
 pub const KEYUP: u32 = 0x301;
+pub const MOUSEMOTION: u32 = 0x400;
+pub const MOUSEBUTTONDOWN: u32 = 0x401;
+pub const MOUSEBUTTONUP: u32 = 0x402;
+pub const MOUSEWHEEL: u32 = 0x403;
+
+pub const BUTTON_LEFT: u8 = 1;
+pub const BUTTON_RIGHT: u8 = 3;
 pub const CONTROLLERAXISMOTION: u32 = 0x650;
 pub const CONTROLLERBUTTONDOWN: u32 = 0x651;
 pub const CONTROLLERBUTTONUP: u32 = 0x652;
@@ -105,6 +112,29 @@ impl Event {
     pub fn axis_value(&self) -> i16 {
         i16::from_ne_bytes(self.raw[16..18].try_into().unwrap())
     }
+
+    /// Where the pointer is, in the window: `SDL_MouseMotionEvent.x`/`.y`
+    /// and `SDL_MouseButtonEvent.x`/`.y`, which sit at the same offsets.
+    pub fn mouse_position(&self) -> (i32, i32) {
+        (self.i32_at(20), self.i32_at(24))
+    }
+
+    /// `SDL_MouseMotionEvent.state`: the buttons held, bit 0 the left.
+    pub fn mouse_held(&self) -> u32 {
+        self.u32_at(16)
+    }
+
+    /// `SDL_MouseButtonEvent.button`.
+    pub fn mouse_button(&self) -> u8 {
+        self.raw[16]
+    }
+
+    /// `SDL_MouseWheelEvent.y`: up is positive, unless `direction` says the
+    /// system flipped it.
+    pub fn wheel(&self) -> i32 {
+        let y = self.i32_at(20);
+        if self.u32_at(24) == 1 { -y } else { y }
+    }
 }
 
 pub type AudioCallback = unsafe extern "C" fn(userdata: *mut c_void, stream: *mut u8, len: c_int);
@@ -165,6 +195,7 @@ functions! {
     get_display_usable_bounds = "SDL_GetDisplayUsableBounds": fn(c_int, *mut Rect) -> c_int;
     free = "SDL_free": fn(*mut c_void);
     get_renderer_output_size = "SDL_GetRendererOutputSize": fn(*mut c_void, *mut c_int, *mut c_int) -> c_int;
+    get_window_size = "SDL_GetWindowSize": fn(*mut c_void, *mut c_int, *mut c_int);
     create_texture = "SDL_CreateTexture": fn(*mut c_void, u32, c_int, c_int, c_int) -> *mut c_void;
     destroy_texture = "SDL_DestroyTexture": fn(*mut c_void);
     update_texture = "SDL_UpdateTexture": fn(*mut c_void, *const Rect, *const c_void, c_int) -> c_int;
