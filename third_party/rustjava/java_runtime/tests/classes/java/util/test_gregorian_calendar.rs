@@ -114,7 +114,12 @@ async fn test_calendar_get_instance_with_null_zone() -> Result<()> {
     // rather than throwing, so this must hand back a usable calendar.
     let null_zone: ClassInstanceRef<Object> = ClassInstanceRef::new(None);
     let calendar: ClassInstanceRef<Object> = jvm
-        .invoke_static("java/util/Calendar", "getInstance", "(Ljava/util/TimeZone;)Ljava/util/Calendar;", (null_zone,))
+        .invoke_static(
+            "java/util/Calendar",
+            "getInstance",
+            "(Ljava/util/TimeZone;)Ljava/util/Calendar;",
+            (null_zone,),
+        )
         .await?;
 
     let _: () = jvm.invoke_virtual(&calendar, "setTimeInMillis", "(J)V", (0i64,)).await?;

@@ -82,7 +82,10 @@ impl InputStreamReader {
         // same as one that writes "EUC-KR". 맛대맛 reads every line of its text
         // through `new InputStreamReader(in, "EUC_KR")`; without this each one
         // threw UnsupportedEncodingException and its dialogue drew empty.
-        let charset_name = JavaLangString::to_rust_string(jvm, &charset).await?.to_ascii_uppercase().replace('_', "-");
+        let charset_name = JavaLangString::to_rust_string(jvm, &charset)
+            .await?
+            .to_ascii_uppercase()
+            .replace('_', "-");
         let charset_name = match charset_name.as_str() {
             "UTF-8" | "UTF8" => "UTF-8",
             "EUC-KR" | "EUCKR" | "KS-C-5601-1987" | "MS949" | "CP949" => "EUC-KR",
