@@ -531,6 +531,40 @@ pub fn ktf_local_entaz_response(request: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
+/// What answers 학교가는길's cash purchase (현금 구매).
+///
+/// 학교가는길 (KTF `01033848`, 픽토소프트) talks to `BillSocket://` through
+/// its own small client (`NetworkW` over a socket class). Its `sendData`
+/// writes `[command][u32le length][text]`: the 100원/300원 items ask with
+/// command `3` and the text `1`, six bytes in all (`03 01 00 00 00 31`). Its
+/// reader (`run()`, `0x116278`) takes the answer as
+/// `[command][result][u32le length][body]`: a first byte of zero means not
+/// yet and is read again, `101` makes the rest a file to download, and
+/// anything else is followed by the length and that much body. With the
+/// packet in, `NetworkW.sendData` (`0x188f84`) calls the purchase made when
+/// the result byte is `1` and refused otherwise; for a purchase it looks at
+/// nothing else, the body included.
+///
+/// So the purchase is answered `[03][01][0 0 0 0]`: its own command, a result
+/// of one and no body. The ez-i SDK's twenty bytes it was getting before had
+/// it read a length of 65 MB and wait for that.
+///
+/// `None` for anything else.
+pub fn ktf_local_school_purchase_response(request: &[u8]) -> Option<Vec<u8>> {
+    const PURCHASE: u8 = 3;
+    const HEAD: usize = 5;
+
+    if request.len() < HEAD || request[0] != PURCHASE {
+        return None;
+    }
+    let length = u32::from_le_bytes([request[1], request[2], request[3], request[4]]) as usize;
+    if HEAD + length != request.len() || !request[HEAD..].iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+
+    Some(vec![PURCHASE, 1, 0, 0, 0, 0])
+}
+
 /// What answers 템페스트's 정품인증, reached through the `FastRelay` library.
 ///
 /// 템페스트 (KTF `010100D4`, 컴투스) speaks the GP4 family's frames both ways:
@@ -10250,6 +10284,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| ktf_local_entaz_response(request))
         .or_else(|| lgt_local_rann_pr_response(request))
         .or_else(|| lgt_local_ea_text_response(request))
+        .or_else(|| ktf_local_school_purchase_response(request))
 }
 
 #[cfg(test)]
@@ -10980,6 +11015,18 @@ mod tests {
         let reply = response(&notices).expect("the notice board is answered");
         assert_eq!(reply.len(), 20, "a head alone");
         assert_eq!(&reply[4..8], &[0, 0, 0, 0], "with no body behind it");
+    }
+
+    #[test]
+    fn school_cash_purchase_is_granted() {
+        // 학교가는길's 100원/300원 item: command 3, the text "1".
+        let request = [0x03, 0x01, 0x00, 0x00, 0x00, 0x31];
+        assert_eq!(ktf_local_school_purchase_response(&request), Some(vec![0x03, 0x01, 0, 0, 0, 0]));
+        assert_eq!(response(&request), Some(vec![0x03, 0x01, 0, 0, 0, 0]));
+        // Not its frame: another command, a length that does not match, text.
+        assert_eq!(ktf_local_school_purchase_response(&[0x02, 0x01, 0x00, 0x00, 0x00, 0x31]), None);
+        assert_eq!(ktf_local_school_purchase_response(&[0x03, 0x02, 0x00, 0x00, 0x00, 0x31]), None);
+        assert_eq!(ktf_local_school_purchase_response(&[0x03, 0x01, 0x00, 0x00, 0x00, b'a']), None);
     }
 
     /// A record whose length field does not match what was written, or a

@@ -129,6 +129,8 @@ impl BucketAllocator {
             }
         }
 
+        tracing::error!("Every {slot_size}-byte slot is taken; no room for {size} bytes");
+
         Err(WieError::AllocationFailure)
     }
 
