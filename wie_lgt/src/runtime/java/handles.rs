@@ -92,6 +92,12 @@ pub struct JavaHandles {
     /// type, so a method that takes it as `Object` (`System.arraycopy`) needs
     /// this to wrap it as the right JVM array rather than guessing.
     array_element_types: Arc<Mutex<BTreeMap<u32, u8>>>,
+    /// Element descriptor byte for each JVM array whose elements were copied
+    /// into a guest block (see `materialize_array_block`). Between crossings
+    /// the compiled code reads and writes that block and not the JVM array, so
+    /// the two have to be brought level again whenever the array goes back
+    /// across.
+    mirrored_array_types: Arc<Mutex<BTreeMap<u32, u8>>>,
     /// Every guest object/array this hands out, for the garbage collector. The
     /// key is the instance handle; the value is the block it points to and its
     /// size. Raw allocations (thread stacks, save points, firmware structures)
@@ -168,6 +174,7 @@ impl JavaHandles {
             entries: Default::default(),
             addresses: Default::default(),
             array_element_types: Default::default(),
+            mirrored_array_types: Default::default(),
             gc_objects: Default::default(),
             gc_static_roots: Default::default(),
             jvm: Default::default(),
@@ -223,6 +230,18 @@ impl JavaHandles {
     /// The element descriptor byte of a compiled array, if one was recorded.
     pub fn array_element_type(&self, handle: u32) -> Option<u8> {
         self.array_element_types.lock().get(&handle).copied()
+    }
+
+    /// Records that the JVM array under `handle` now has its elements in a
+    /// guest block as well, of the element type `element`.
+    pub fn record_mirrored_array(&self, handle: u32, element: u8) {
+        self.mirrored_array_types.lock().insert(handle, element);
+    }
+
+    /// The element descriptor byte of a JVM array mirrored into guest memory,
+    /// if `handle` is one.
+    pub fn mirrored_array_type(&self, handle: u32) -> Option<u8> {
+        self.mirrored_array_types.lock().get(&handle).copied()
     }
 
     /// Records how many words an instance's field array needs.
@@ -567,6 +586,7 @@ impl JavaHandles {
                 self.addresses.lock().remove(&instance.identity());
             }
             self.array_element_types.lock().remove(&handle);
+            self.mirrored_array_types.lock().remove(&handle);
 
             let _ = Allocator::free(&mut core, object.payload, object.payload_size);
             let _ = Allocator::free(&mut core, handle, INSTANCE_HEADER_SIZE);

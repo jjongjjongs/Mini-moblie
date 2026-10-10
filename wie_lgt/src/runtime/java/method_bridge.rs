@@ -197,10 +197,20 @@ struct GuestArrayWritebacks {
     chars: Vec<CharArrayWriteback>,
     primitives: Vec<PrimitiveArrayWriteback>,
     references: Vec<ReferenceArrayWriteback>,
+    /// JVM arrays mirrored into guest blocks that were brought up to date from
+    /// their blocks for the call, to be mirrored back once it returns.
+    mirrored: Vec<u32>,
 }
 
 impl GuestArrayWritebacks {
     async fn write_back(&self, jvm: &Jvm, handles: &JavaHandles) -> Result<()> {
+        // Whatever the call wrote into a mirrored array - `selectRecord` into
+        // a buffer, `System.arraycopy` into it - goes back to the block the
+        // compiled code reads.
+        for &handle in &self.mirrored {
+            materialize_primitive_array_result(jvm, handles, handle).await?;
+        }
+
         for writeback in &self.bytes {
             let bytes: Vec<i8> = match jvm.load_array(&writeback.array, 0, writeback.length).await {
                 Ok(bytes) => bytes,
@@ -424,6 +434,10 @@ async fn marshal_arguments(
     let mut word = first_word;
 
     for parameter in parameters {
+        if matches!(parameter.as_bytes()[0], b'[' | b'L') {
+            refresh_mirrored_array(jvm, handles, words[word], writebacks).await?;
+        }
+
         let value = match parameter.as_bytes()[0] {
             b'Z' => JavaValue::Boolean(words[word] != 0),
             b'B' => JavaValue::Byte(words[word] as i8),
@@ -800,6 +814,7 @@ pub(super) async fn materialize_primitive_array_result(jvm: &Jvm, handles: &Java
     };
 
     handles.materialize_array_block(handle, length, &bytes)?;
+    handles.record_mirrored_array(handle, element.as_bytes()[0]);
 
     Ok(Some(MirroredArray {
         handle,
@@ -807,6 +822,58 @@ pub(super) async fn materialize_primitive_array_result(jvm: &Jvm, handles: &Java
         count: length as usize,
         mirrored: bytes,
     }))
+}
+
+/// Brings the JVM array under `handle` level with its guest block, if it is a
+/// JVM array mirrored into one, before it is handed back to the platform.
+///
+/// Once mirrored, the block is the array as far as the compiled code knows:
+/// it reads and writes the elements there, never through the platform. Handed
+/// back to a platform method, though, the handle names the JVM array, which
+/// still holds what it held when it was mirrored. 붕어빵타이쿤3 keeps the
+/// record `selectRecord` returned as its save buffer, fills it with the game
+/// in guest memory, and passes it to `updateRecord` - which wrote the record
+/// as it had been read, the same bytes into every store, until the next start
+/// read a save with no day in it and threw.
+async fn refresh_mirrored_array(jvm: &Jvm, handles: &JavaHandles, handle: u32, writebacks: &mut GuestArrayWritebacks) -> Result<()> {
+    let Some(element) = handles.mirrored_array_type(handle) else {
+        return Ok(());
+    };
+    let Some(mut instance) = handles.get(handle) else {
+        return Ok(());
+    };
+
+    macro_rules! refresh {
+        ($ty:ty, $width:literal) => {{
+            let values: Vec<$ty> = handles
+                .read_array_bytes(handle, $width)?
+                .chunks_exact($width)
+                .map(|chunk| <$ty>::from_le_bytes(chunk.try_into().unwrap()))
+                .collect();
+
+            if let Err(error) = jvm.store_array(&mut instance, 0, values).await {
+                return Err(JvmSupport::to_wie_err(jvm, error).await);
+            }
+        }};
+    }
+
+    match element {
+        b'C' => refresh!(u16, 2),
+        b'B' | b'Z' => refresh!(i8, 1),
+        b'S' => refresh!(i16, 2),
+        b'I' => refresh!(i32, 4),
+        b'F' => refresh!(f32, 4),
+        // A mirrored block is laid down at the narrow arrays' offset whatever
+        // its width, so an eight-byte array's block is not where
+        // `read_array_bytes` looks; those are left as they were.
+        _ => return Ok(()),
+    }
+
+    if !writebacks.mirrored.contains(&handle) {
+        writebacks.mirrored.push(handle);
+    }
+
+    Ok(())
 }
 
 /// A JVM array whose elements were copied into a guest block, and the copy that
