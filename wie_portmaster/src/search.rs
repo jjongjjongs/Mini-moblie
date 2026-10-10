@@ -53,7 +53,7 @@ const FINAL_PAIRS: [(char, char, char); 11] = [
 /// in `FINALS` plus one).
 fn split(c: char) -> Option<(usize, usize, usize)> {
     let code = (c as u32).checked_sub(0xAC00)?;
-    (code < 11172).then(|| ((code / 588) as usize, (code % 588 / 28) as usize, (code % 28) as usize))
+    (code < 11172).then_some(((code / 588) as usize, (code % 588 / 28) as usize, (code % 28) as usize))
 }
 
 fn join(initial: usize, vowel: usize, last: usize) -> char {
