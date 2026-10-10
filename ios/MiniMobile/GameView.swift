@@ -49,6 +49,18 @@ enum SettingKey {
     static let haptics = "pad.haptics"
     static let layoutBelow = "pad.layout.below"
     static let layoutOverlay = "pad.layout.overlay"
+    /// The 숫자 크게 layout's own positions, so editing it never moves the
+    /// ordinary pad's keys.
+    static let layoutNumbers = "pad.layout.numbers"
+    static let padTheme = "pad.theme"
+}
+
+/// Which stored layout and which standard one the pad is drawn from.
+func padArrangement(mode: PadMode, shape: PadShape) -> PadArrangement {
+    switch mode {
+    case .overlay: return .overlay
+    case .below: return shape == .numbers ? .numbers : .below
+    }
 }
 
 private enum GameSheet: String, Identifiable {
@@ -76,8 +88,12 @@ struct GameView: View {
     @AppStorage(SettingKey.haptics) private var haptics = true
     @AppStorage(SettingKey.layoutBelow) private var layoutBelow = ""
     @AppStorage(SettingKey.layoutOverlay) private var layoutOverlay = ""
+    @AppStorage(SettingKey.layoutNumbers) private var layoutNumbers = ""
+    @AppStorage(SettingKey.padTheme) private var padTheme = PadTheme.gold
 
     @State private var sheet: GameSheet?
+    /// This title's pad shape (see `PadShape`).
+    @State private var padShape = PadShape.standard
     @State private var speed: Float = 1
     /// How the screen is enlarged (see `GameQuality`).
     @State private var quality = ScreenQuality.dot
@@ -92,8 +108,16 @@ struct GameView: View {
     /// `GamePad`).
     @State private var padHidden = false
 
+    private var arrangement: PadArrangement {
+        padArrangement(mode: padMode, shape: padShape)
+    }
+
     private var layout: PadLayout {
-        PadLayout.decode(padMode == .below ? layoutBelow : layoutOverlay, mode: padMode)
+        switch arrangement {
+        case .below: return PadLayout.decode(layoutBelow, standard: .below)
+        case .numbers: return PadLayout.decode(layoutNumbers, standard: .numbers)
+        case .overlay: return PadLayout.decode(layoutOverlay, standard: .overlay)
+        }
     }
 
     var body: some View {
@@ -111,6 +135,7 @@ struct GameView: View {
             quality = GameQuality.get(game)
             touch = GameTouch.get(game)
             padHidden = GamePad.hidden(game)
+            padShape = GamePad.shape(game)
             emulator.start(game: game)
         }
         .onDisappear { emulator.stop() }
@@ -122,7 +147,7 @@ struct GameView: View {
             case .quality:
                 QualityView(game: game, emulator: emulator, quality: $quality)
             case .settings:
-                GameSettingsView(onEditPad: beginEditing)
+                GameSettingsView(game: game, padShape: shapeBinding, onEditPad: beginEditing)
             case .log:
                 LogView()
             }
@@ -164,6 +189,7 @@ struct GameView: View {
                         screen(alignment: .center)
                         pad
                             .frame(height: geometry.size.height * min(max(padHeight, 0.25), 0.65))
+                            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(padTheme.palette.tray))
                     }
                 case .overlay:
                     ZStack {
@@ -222,6 +248,20 @@ struct GameView: View {
         Button { sheet = .quality } label: {
             Label("화질 (\(quality.label))", systemImage: "photo")
         }
+        Menu {
+            Picker("키패드 디자인", selection: $padTheme) {
+                ForEach(PadTheme.allCases) { Text($0.label).tag($0) }
+            }
+        } label: {
+            Label("키패드 디자인 (\(padTheme.label))", systemImage: "paintpalette")
+        }
+        Menu {
+            Picker("키패드 모양", selection: shapeBinding) {
+                ForEach(PadShape.allCases) { Text($0.label).tag($0) }
+            }
+        } label: {
+            Label("키패드 모양 (\(padShape.label)) · 이 게임만", systemImage: "circle.grid.3x3")
+        }
         Button { sheet = .settings } label: {
             Label("화면·패드 설정", systemImage: "slider.horizontal.3")
         }
@@ -257,15 +297,15 @@ struct GameView: View {
                     selectedKey = nil
                 }
                 Spacer()
-                Text("패드 편집 · \(padMode.label)")
+                Text("패드 편집 · \(arrangement == .numbers ? "숫자 크게" : padMode.label)")
                     .font(.headline)
                 Spacer()
                 Button("저장") {
                     if let draft {
-                        if padMode == .below {
-                            layoutBelow = draft.encoded()
-                        } else {
-                            layoutOverlay = draft.encoded()
+                        switch arrangement {
+                        case .below: layoutBelow = draft.encoded()
+                        case .numbers: layoutNumbers = draft.encoded()
+                        case .overlay: layoutOverlay = draft.encoded()
                         }
                     }
                     draft = nil
@@ -275,7 +315,7 @@ struct GameView: View {
             }
             HStack(spacing: 8) {
                 Button("기본 배치") {
-                    draft = PadLayout.standard(padMode)
+                    draft = PadLayout.standard(arrangement)
                     selectedKey = nil
                 }
                 .buttonStyle(.bordered)
@@ -342,14 +382,17 @@ struct GameView: View {
             PadEditor(
                 layout: Binding(get: { draft ?? layout }, set: { draft = $0 }),
                 selected: $selectedKey,
-                labelScale: labelScale
+                labelScale: labelScale,
+                palette: padTheme.palette
             )
         } else {
             PadView(
                 layout: layout,
                 opacity: padMode == .below ? opacityBelow : opacityOverlay,
                 labelScale: labelScale,
-                haptics: haptics
+                haptics: haptics,
+                palette: padTheme.palette,
+                letters: arrangement != .numbers
             ) { index, pressed in
                 emulator.key(index, pressed: pressed)
             }
@@ -389,6 +432,14 @@ struct GameView: View {
                 }
                 touchedAt = nil
             }
+    }
+
+    /// This title's pad shape, kept as it changes.
+    private var shapeBinding: Binding<PadShape> {
+        Binding(get: { padShape }, set: { shape in
+            padShape = shape
+            GamePad.setShape(shape, for: game)
+        })
     }
 
     /// Puts the pad away, or brings it back, and keeps the choice for this
@@ -713,6 +764,8 @@ private struct QualityPreviews {
 
 /// Screen scaling and the pad's look, applied as they change.
 private struct GameSettingsView: View {
+    let game: GameFile
+    @Binding var padShape: PadShape
     let onEditPad: () -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -725,8 +778,18 @@ private struct GameSettingsView: View {
     @AppStorage(SettingKey.haptics) private var haptics = true
     @AppStorage(SettingKey.layoutBelow) private var layoutBelow = ""
     @AppStorage(SettingKey.layoutOverlay) private var layoutOverlay = ""
+    @AppStorage(SettingKey.layoutNumbers) private var layoutNumbers = ""
+    @AppStorage(SettingKey.padTheme) private var padTheme = PadTheme.gold
 
     @State private var confirmingReset = false
+
+    private var arrangement: PadArrangement {
+        padArrangement(mode: padMode, shape: padShape)
+    }
+
+    private var arrangementLabel: String {
+        arrangement == .numbers ? "숫자 크게" : padMode.label
+    }
 
     var body: some View {
         NavigationView {
@@ -743,10 +806,22 @@ private struct GameSettingsView: View {
                 }
 
                 Section {
-                    Picker("배치", selection: $padMode) {
-                        ForEach(PadMode.allCases) { Text($0.label).tag($0) }
+                    designs
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("위치").font(.caption).foregroundColor(.secondary)
+                        Picker("위치", selection: $padMode) {
+                            ForEach(PadMode.allCases) { Text($0.label).tag($0) }
+                        }
+                        .pickerStyle(.segmented)
                     }
-                    .pickerStyle(.segmented)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("모양 · 이 게임(\(game.title))에만").font(.caption).foregroundColor(.secondary).lineLimit(1)
+                        Picker("모양", selection: $padShape) {
+                            ForEach(PadShape.allCases) { Text($0.label).tag($0) }
+                        }
+                        .pickerStyle(.segmented)
+                        .disabled(padMode == .overlay)
+                    }
                     if padMode == .below {
                         slider("패드 높이", value: $padHeight, range: 0.25...0.65)
                         slider("불투명도", value: $opacityBelow, range: 0.2...1)
@@ -757,6 +832,8 @@ private struct GameSettingsView: View {
                     Toggle("누를 때 진동", isOn: $haptics)
                 } header: {
                     Text("가상 패드")
+                } footer: {
+                    Text("디자인은 모든 게임에 함께 적용됩니다. ‘숫자 크게’는 리듬게임처럼 숫자키를 많이 쓰는 게임용으로, 화면 아래 위치에서 쓰고 게임마다 따로 기억됩니다.")
                 }
 
                 Section {
@@ -768,7 +845,7 @@ private struct GameSettingsView: View {
                         confirmingReset = true
                     }
                 } footer: {
-                    Text("편집은 지금 배치(\(padMode.label))에만 적용됩니다. 두 배치는 따로 저장됩니다.")
+                    Text("편집은 지금 배치(\(arrangementLabel))에만 적용됩니다. 배치마다 따로 저장됩니다.")
                 }
             }
             .navigationTitle("화면·패드 설정")
@@ -778,16 +855,47 @@ private struct GameSettingsView: View {
                     Button("완료") { dismiss() }
                 }
             }
-            .confirmationDialog("\(padMode.label) 배치를 기본값으로 되돌릴까요?", isPresented: $confirmingReset, titleVisibility: .visible) {
+            .confirmationDialog("\(arrangementLabel) 배치를 기본값으로 되돌릴까요?", isPresented: $confirmingReset, titleVisibility: .visible) {
                 Button("되돌리기", role: .destructive) {
-                    if padMode == .below {
-                        layoutBelow = ""
-                    } else {
-                        layoutOverlay = ""
+                    switch arrangement {
+                    case .below: layoutBelow = ""
+                    case .numbers: layoutNumbers = ""
+                    case .overlay: layoutOverlay = ""
                     }
                 }
             }
         }
+    }
+
+    /// The three designs as small pictures of the pad itself; a tap applies one.
+    private var designs: some View {
+        HStack(spacing: 8) {
+            ForEach(PadTheme.allCases) { theme in
+                let chosen = theme == padTheme
+                Button {
+                    padTheme = theme
+                } label: {
+                    VStack(spacing: 6) {
+                        GeometryReader { geometry in
+                            PadFaces(layout: PadLayout.standard(.below), size: geometry.size, pressed: [],
+                                     labelScale: 0.7, palette: theme.palette, letters: false)
+                        }
+                        .frame(height: 84)
+                        .background(theme.palette.tray)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .stroke(chosen ? Color.accentColor : Color.clear, lineWidth: 2)
+                        )
+                        Text(theme.label)
+                            .font(.caption.weight(.semibold))
+                            .foregroundColor(chosen ? .accentColor : .primary)
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.vertical, 4)
     }
 
     private func slider(_ title: String, value: Binding<Double>, range: ClosedRange<Double>) -> some View {

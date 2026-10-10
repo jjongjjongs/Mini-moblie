@@ -347,6 +347,15 @@ enum GamePad {
     static func setHidden(_ hidden: Bool, for game: GameFile) {
         UserDefaults.standard.set(hidden, forKey: "padHidden.\(game.name)")
     }
+
+    /// The title's pad shape: 숫자 크게 for a rhythm game, else the ordinary pad.
+    static func shape(_ game: GameFile) -> PadShape {
+        PadShape(rawValue: UserDefaults.standard.string(forKey: "padShape.\(game.name)") ?? "") ?? .standard
+    }
+
+    static func setShape(_ shape: PadShape, for game: GameFile) {
+        UserDefaults.standard.set(shape.rawValue, forKey: "padShape.\(game.name)")
+    }
 }
 
 /// Matching a search against a title: a plain substring, or - when the query is

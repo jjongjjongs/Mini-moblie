@@ -46,6 +46,11 @@ final class ControlEditor {
     final KeyRef[] byCode = new KeyRef[21];
     int selected = -1;
     int pointer = -1;
+    /** The four directions and OK dragged or sized as one disc. */
+    boolean groupDrag;
+    final RectF groupBox = new RectF();
+    final RectF[] groupStart = new RectF[5];
+    float[][] groupBefore;
     final Paint paint = new Paint(1);
     final Path gridPath = new Path();
     final Path overlapPath = new Path();
@@ -245,7 +250,15 @@ final class ControlEditor {
                     canvas.drawRoundRect(keyRef3.bounds, ControlPatch.dp(this.s.a, 7.0f), ControlPatch.dp(this.s.a, 7.0f), this.paint);
                 }
             }
-            if (this.selected >= 0 && this.byCode[this.selected] != null && !layout().hidden[this.selected]) {
+            if (this.selected >= 0 && this.selected <= 4 && ringGroup()) {
+                RectF box = groupBounds();
+                this.paint.setColor(Color.rgb(132, 224, 236));
+                this.paint.setStrokeWidth(ControlPatch.dp(this.s.a, 3.0f));
+                canvas.drawOval(box, this.paint);
+                float handle = Math.min(ControlPatch.dp(this.s.a, 16.0f), box.width() * 0.2f);
+                this.paint.setStyle(Paint.Style.FILL);
+                canvas.drawRect(box.right - handle, box.bottom - handle, box.right, box.bottom, this.paint);
+            } else if (this.selected >= 0 && this.byCode[this.selected] != null && !layout().hidden[this.selected]) {
                 RectF rectF = this.byCode[this.selected].bounds;
                 this.paint.setColor(Color.rgb(132, 224, 236));
                 this.paint.setStrokeWidth(ControlPatch.dp(this.s.a, 3.0f));
@@ -333,6 +346,61 @@ final class ControlEditor {
         refresh();
     }
 
+    /**
+     * Whether the keypad draws the directions and OK as one disc, which the
+     * editor then moves and sizes as one: the keys' codes 0 to 4.
+     */
+    boolean ringGroup() {
+        if (this.view == null || !ControlPatch.flag(this.view, "ring")) {
+            return false;
+        }
+        for (int code = 0; code <= 4; code++) {
+            if (this.byCode[code] == null) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** The square the disc's five keys span. */
+    RectF groupBounds() {
+        RectF box = new RectF(this.byCode[0].bounds);
+        for (int code = 1; code <= 4; code++) {
+            box.union(this.byCode[code].bounds);
+        }
+        return box;
+    }
+
+    /** Moves the disc by an offset snapped on its bounding square, or scales it from its top-left. */
+    void moveGroup(float dx, float dy, boolean resize) {
+        float width = this.view.getWidth();
+        float height = this.view.getHeight();
+        float min = this.s.a.getResources().getDisplayMetrics().density * 24.0f;
+        if (!resize) {
+            float[] snap = ControlGrid.snap(this.groupBox.left + dx, this.groupBox.top + dy, this.groupBox.width(), this.groupBox.height(),
+                    width, height, gridStep(), min, false);
+            float ox = snap[0] - this.groupBox.left;
+            float oy = snap[1] - this.groupBox.top;
+            for (int code = 0; code <= 4; code++) {
+                RectF start = this.groupStart[code];
+                this.byCode[code].bounds.set(start.left + ox, start.top + oy, start.right + ox, start.bottom + oy);
+                saveRect(this.byCode[code]);
+            }
+            return;
+        }
+        float[] snap = ControlGrid.snap(this.groupBox.left, this.groupBox.top, this.groupBox.width() + dx, this.groupBox.height() + dy,
+                width, height, gridStep(), min * 3, true);
+        float sx = snap[2] / this.groupBox.width();
+        float sy = snap[3] / this.groupBox.height();
+        for (int code = 0; code <= 4; code++) {
+            RectF start = this.groupStart[code];
+            float left = this.groupBox.left + (start.left - this.groupBox.left) * sx;
+            float top = this.groupBox.top + (start.top - this.groupBox.top) * sy;
+            this.byCode[code].bounds.set(left, top, left + start.width() * sx, top + start.height() * sy);
+            saveRect(this.byCode[code]);
+        }
+    }
+
     KeyRef hit(float f, float f2) {
         return (KeyRef) ControlHit.pick(this.keys, layout().hidden, f, f2, true);
     }
@@ -342,7 +410,12 @@ final class ControlEditor {
     }
 
     ControlData.Layout layout() {
-        return this.s.data.layout(landscape());
+        return this.s.data.layout(landscape(), numbers());
+    }
+
+    /** Whether the keypad shows the 숫자 크게 arrangement (portrait only). */
+    boolean numbers() {
+        return this.view != null && ControlPatch.flag(this.view, "numbers") && !landscape();
     }
 
     void positionToolbar(ViewGroup viewGroup, View view) {
@@ -455,6 +528,28 @@ final class ControlEditor {
             boolean z = false;
             switch (motionEvent.getActionMasked()) {
                 case 0:
+                    if (ringGroup() && groupBounds().contains(motionEvent.getX(), motionEvent.getY())) {
+                        RectF box = groupBounds();
+                        this.groupBox.set(box);
+                        this.groupBefore = new float[5][];
+                        for (int code = 0; code <= 4; code++) {
+                            this.groupStart[code] = new RectF(this.byCode[code].bounds);
+                            float[] before = layout().rect[code];
+                            this.groupBefore[code] = before != null ? (float[]) before.clone() : null;
+                        }
+                        select(4);
+                        this.pointer = motionEvent.getPointerId(0);
+                        this.startX = motionEvent.getX();
+                        this.startY = motionEvent.getY();
+                        this.dragging = true;
+                        this.groupDrag = true;
+                        this.dragChanged = false;
+                        this.dragLayout = layout();
+                        float handle = Math.min(ControlPatch.dp(this.s.a, 26.0f), box.width() * 0.25f);
+                        this.resizing = motionEvent.getX() >= box.right - handle && motionEvent.getY() >= box.bottom - handle;
+                        break;
+                    }
+                    this.groupDrag = false;
                     KeyRef hit = hit(motionEvent.getX(), motionEvent.getY());
                     if (hit != null) {
                         select(hit.code);
@@ -489,6 +584,10 @@ final class ControlEditor {
                         float y = motionEvent.getY(findPointerIndex) - this.startY;
                         if (this.dragChanged || Math.max(Math.abs(x), Math.abs(y)) >= ControlPatch.dp(this.s.a, 2.0f)) {
                             this.dragChanged = true;
+                            if (this.groupDrag) {
+                                moveGroup(x, y, this.resizing);
+                                break;
+                            }
                             if (!this.resizing) {
                                 setRect(this.selected, x + this.dragStart.left, this.dragStart.top + y, this.dragStart.width(), this.dragStart.height());
                                 break;
@@ -500,7 +599,12 @@ final class ControlEditor {
                     }
                     break;
                 case 3:
-                    if (this.dragging && this.selected >= 0 && this.dragLayout != null) {
+                    if (this.dragging && this.groupDrag && this.dragLayout != null && this.groupBefore != null) {
+                        for (int code = 0; code <= 4; code++) {
+                            this.dragLayout.rect[code] = this.groupBefore[code];
+                        }
+                        refresh();
+                    } else if (this.dragging && this.selected >= 0 && this.dragLayout != null) {
                         this.dragLayout.rect[this.selected] = this.dragBeforeRect != null ? (float[]) this.dragBeforeRect.clone() : null;
                         refresh();
                     }
@@ -528,7 +632,11 @@ final class ControlEditor {
             return;
         }
         String str = String.valueOf(landscape() ? "가로" : "세로") + " · " + layout().gridDp + "dp 자동맞춤 · 이동: 끌기 / 크기: 우하단 ■";
-        if (this.selected >= 0 && this.byCode[this.selected] != null) {
+        if (this.selected >= 0 && this.selected <= 4 && ringGroup()) {
+            RectF rectF = groupBounds();
+            float f = this.s.a.getResources().getDisplayMetrics().density;
+            str = "방향키 원판 · X " + Math.round(rectF.left / f) + " Y " + Math.round(rectF.top / f) + " · " + Math.round(rectF.width() / f) + " × " + Math.round(rectF.height() / f) + " dp";
+        } else if (this.selected >= 0 && this.byCode[this.selected] != null) {
             RectF rectF = this.byCode[this.selected].bounds;
             float f = this.s.a.getResources().getDisplayMetrics().density;
             str = String.valueOf(ControlData.NAMES[this.selected]) + " · X " + Math.round(rectF.left / f) + " Y " + Math.round(rectF.top / f) + " · " + Math.round(rectF.width() / f) + " × " + Math.round(rectF.height() / f) + " dp";

@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Date;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.SortedMap;
@@ -501,21 +502,24 @@ final class ControlDialogs {
     }
 
     void mainMenu() {
-        final String[] strArr = {"키패드 위치·크기 편집", "버튼별 표시·숨김", "버튼별 연사 ON/OFF", "현재 배치 저장", "저장된 배치 불러오기·삭제", "배치 파일로 백업", "배치 파일에서 복원", "현재 배치 초기화", "게임패드·물리 키 매핑"};
-        final String[] iconArr = {"✏", "👁", "⚡", "💾", "📂", "📤", "📥", "↺", "🎮"};
+        MainActivity player = this.s.a instanceof MainActivity ? (MainActivity) this.s.a : null;
+        String design = player != null ? KeypadTheme.NAMES[player.keypadThemeId()] : "";
+        String arrangement = player != null && player.keypadNumbers() ? "숫자 크게" : "기본";
+        final String[] strArr = {"키패드 디자인 · " + design, "키패드 배치 · " + arrangement, "키패드 위치·크기 편집", "버튼별 표시·숨김", "버튼별 연사 ON/OFF", "현재 배치 저장", "저장된 배치 불러오기·삭제", "배치 파일로 백업", "배치 파일에서 복원", "현재 배치 초기화", "게임패드·물리 키 매핑"};
+        final String[] iconArr = {"🎨", "🎹", "✏", "👁", "⚡", "💾", "📂", "📤", "📥", "↺", "🎮"};
         LinearLayout column = column();
         column.addView(this.style.hint("설정을 변경하는 동안 게임을 일시정지합니다."));
         ScrollView scrollView = new ScrollView(this.style.context);
         scrollView.addView(column);
         LinearLayout linearLayout = null;
         final AlertDialog create = builder("조작 설정").setView(scrollView).setPositiveButton("게임으로 돌아가기", (DialogInterface.OnClickListener) null).create();
-        for (int i = 0; i < 9; i++) {
+        for (int i = 0; i < strArr.length; i++) {
             final int idx = i;
             if (idx == 0) {
                 linearLayout = this.style.section(column, "키패드");
-            } else if (idx == 3) {
+            } else if (idx == 5) {
                 linearLayout = this.style.section(column, "배치 저장·백업·초기화");
-            } else if (idx == 8) {
+            } else if (idx == 10) {
                 linearLayout = this.style.section(column, "게임패드");
             }
             this.style.menuRow(linearLayout, iconArr[idx], strArr[idx], new View.OnClickListener() {
@@ -523,30 +527,36 @@ final class ControlDialogs {
                 public void onClick(View view) {
                     switch (idx) {
                         case 0:
-                            ControlDialogs.this.s.editor.start();
+                            ControlDialogs.this.keypadDesign();
                             break;
                         case 1:
-                            ControlDialogs.this.visibility();
+                            ControlDialogs.this.keypadArrangement();
                             break;
                         case 2:
-                            ControlDialogs.this.rapidSettings();
+                            ControlDialogs.this.s.editor.start();
                             break;
                         case 3:
-                            ControlDialogs.this.saveName(false);
+                            ControlDialogs.this.visibility();
                             break;
                         case 4:
-                            ControlDialogs.this.loadSlots(false);
+                            ControlDialogs.this.rapidSettings();
                             break;
                         case 5:
-                            ControlDialogs.this.pickFile(true);
+                            ControlDialogs.this.saveName(false);
                             break;
                         case 6:
-                            ControlDialogs.this.pickFile(false);
+                            ControlDialogs.this.loadSlots(false);
                             break;
                         case 7:
-                            ControlDialogs.this.resetLayout();
+                            ControlDialogs.this.pickFile(true);
                             break;
                         case 8:
+                            ControlDialogs.this.pickFile(false);
+                            break;
+                        case 9:
+                            ControlDialogs.this.resetLayout();
+                            break;
+                        case 10:
                             ControlDialogs.this.padMenu();
                             break;
                     }
@@ -555,6 +565,147 @@ final class ControlDialogs {
             });
         }
         track(create);
+    }
+
+    /**
+     * 키패드 디자인: the three designs as small pictures of the keypad itself.
+     * Picking one shows it on the real keypad behind the dialog at once;
+     * 적용 keeps it for every title, and anything else puts the old one back.
+     */
+    void keypadDesign() {
+        if (!(this.s.a instanceof MainActivity)) {
+            return;
+        }
+        final MainActivity player = (MainActivity) this.s.a;
+        final int saved = player.keypadThemeId();
+        final int[] chosen = {saved};
+        final boolean[] applied = {false};
+
+        LinearLayout column = column();
+        column.addView(this.style.hint("모든 게임에 함께 적용됩니다. 키 위치·크기는 그대로예요."));
+        final List<LinearLayout> rows = new ArrayList<>();
+        for (int id = 0; id < KeypadTheme.NAMES.length; id++) {
+            final int theme = id;
+            LinearLayout row = optionRow(player.keypadPreview(theme, false), 132, 84,
+                    KeypadTheme.NAMES[theme], KeypadTheme.DESCRIPTIONS[theme]);
+            row.setOnClickListener(v -> {
+                chosen[0] = theme;
+                markOption(rows, theme);
+                player.showKeypadTheme(theme);
+            });
+            rows.add(row);
+            column.addView(row);
+        }
+        markOption(rows, saved);
+
+        ScrollView scrollView = new ScrollView(this.style.context);
+        scrollView.addView(column);
+        AlertDialog dialog = builder("키패드 디자인").setView(scrollView)
+                .setPositiveButton("적용", (d, which) -> {
+                    applied[0] = true;
+                    player.saveKeypadTheme(chosen[0]);
+                    ControlPatch.toast(this.s.a, "키패드 디자인: " + KeypadTheme.NAMES[chosen[0]]);
+                })
+                .setNegativeButton("취소", null).create();
+        track(dialog, () -> {
+            if (!applied[0]) {
+                player.showKeypadTheme(saved);
+            }
+        });
+    }
+
+    /**
+     * 키패드 배치: the ordinary keypad or 숫자 크게, which gives the number pad
+     * the room - for rhythm games, played on the numbers. Kept per title, so
+     * it can be on for one game and off for the rest.
+     */
+    void keypadArrangement() {
+        if (!(this.s.a instanceof MainActivity)) {
+            return;
+        }
+        final MainActivity player = (MainActivity) this.s.a;
+        final boolean saved = player.keypadNumbers();
+        final boolean[] chosen = {saved};
+        int theme = player.keypadThemeId();
+
+        LinearLayout column = column();
+        column.addView(this.style.hint("리듬게임처럼 숫자키를 많이 쓰는 게임엔 ‘숫자 크게’가 편해요. 이 게임에만 적용되고, 가로 화면에서는 기본 배치로 보여요."));
+        final List<LinearLayout> rows = new ArrayList<>();
+        String[] names = {"기본", "숫자 크게"};
+        String[] descriptions = {"방향키와 숫자판을 반씩. 대부분의 게임에 맞아요.", "숫자판을 가운데 크게. 나머지 키는 위에 한 줄로."};
+        for (int option = 0; option < 2; option++) {
+            final int index = option;
+            LinearLayout row = optionRow(player.keypadPreview(theme, option == 1), 96, 104, names[option], descriptions[option]);
+            row.setOnClickListener(v -> {
+                chosen[0] = index == 1;
+                markOption(rows, index);
+            });
+            rows.add(row);
+            column.addView(row);
+        }
+        markOption(rows, saved ? 1 : 0);
+
+        ScrollView scrollView = new ScrollView(this.style.context);
+        scrollView.addView(column);
+        track(builder("키패드 배치").setView(scrollView)
+                .setPositiveButton("적용", (d, which) -> {
+                    if (chosen[0] != saved) {
+                        player.saveKeypadNumbers(chosen[0]);
+                        ControlPatch.toast(this.s.a, "키패드 배치: " + (chosen[0] ? "숫자 크게" : "기본"));
+                    }
+                })
+                .setNegativeButton("취소", null).create());
+    }
+
+    /** One choice in a picker: a picture, a name over a line saying what it is, and a radio mark. */
+    LinearLayout optionRow(View picture, int widthDp, int heightDp, String name, String description) {
+        LinearLayout row = new LinearLayout(this.style.context);
+        row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        row.setPadding(this.style.dp(9), this.style.dp(9), this.style.dp(12), this.style.dp(9));
+        LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(-1, -2);
+        rowParams.topMargin = this.style.dp(8);
+        row.setLayoutParams(rowParams);
+        row.setClickable(true);
+
+        picture.setClipToOutline(true);
+        picture.setOutlineProvider(new android.view.ViewOutlineProvider() {
+            @Override
+            public void getOutline(View view, android.graphics.Outline outline) {
+                outline.setRoundRect(0, 0, view.getWidth(), view.getHeight(), ControlDialogs.this.style.dp(9));
+            }
+        });
+        row.addView(picture, new LinearLayout.LayoutParams(this.style.dp(widthDp), this.style.dp(heightDp)));
+
+        LinearLayout text = new LinearLayout(this.style.context);
+        text.setOrientation(LinearLayout.VERTICAL);
+        text.setPadding(this.style.dp(12), 0, this.style.dp(8), 0);
+        TextView title = this.style.text(name, 14.5f, this.style.INK);
+        title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        text.addView(title);
+        TextView line = this.style.text(description, 12f, this.style.MUTED);
+        line.setPadding(0, this.style.dp(3), 0, 0);
+        text.addView(line);
+        row.addView(text, new LinearLayout.LayoutParams(0, -2, 1f));
+
+        TextView radio = new TextView(this.style.context);
+        radio.setTag("radio");
+        row.addView(radio, new LinearLayout.LayoutParams(this.style.dp(20), this.style.dp(20)));
+        return row;
+    }
+
+    /** Outlines the chosen row and fills its radio mark. */
+    void markOption(List<LinearLayout> rows, int chosen) {
+        for (int index = 0; index < rows.size(); index++) {
+            boolean on = index == chosen;
+            LinearLayout row = rows.get(index);
+            row.setBackground(this.style.rounded(on ? this.style.SOFT : this.style.BG, on ? this.style.GREEN : this.style.LINE, on ? 2 : 1, 14));
+            View radio = row.findViewWithTag("radio");
+            android.graphics.drawable.GradientDrawable mark = new android.graphics.drawable.GradientDrawable();
+            mark.setShape(android.graphics.drawable.GradientDrawable.OVAL);
+            mark.setColor(on ? this.style.BG : 0);
+            mark.setStroke(this.style.dp(on ? 6 : 2), on ? this.style.GREEN : this.style.MUTED);
+            radio.setBackground(mark);
+        }
     }
 
     EditText nameField() {
@@ -1162,11 +1313,14 @@ final class ControlDialogs {
 
     void resetLayout() {
         final boolean landscape = this.s.editor.landscape();
+        final boolean numbers = this.s.editor.numbers();
         track(builder("현재 배치 초기화").setMessage(String.valueOf(landscape ? "가로" : "세로") + " 버튼의 위치·크기·숨김과 격자 간격을 기본값으로 되돌립니다. 저장된 배치는 유지됩니다.").setPositiveButton("초기화", new DialogInterface.OnClickListener() { // from class: com.jjongjjongs.minimobile.ControlDialogs.11
             @Override // android.content.DialogInterface.OnClickListener
             public void onClick(DialogInterface dialogInterface, int i) {
                 if (landscape) {
                     ControlDialogs.this.s.data.landscape = new ControlData.Layout();
+                } else if (numbers) {
+                    ControlDialogs.this.s.data.numbers = new ControlData.Layout();
                 } else {
                     ControlDialogs.this.s.data.portrait = new ControlData.Layout();
                 }

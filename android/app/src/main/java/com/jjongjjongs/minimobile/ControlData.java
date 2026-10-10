@@ -18,6 +18,12 @@ public final class ControlData {
     public static final int[] ORDER = {0, 1, 2, 3, 4, 5, 6, 7, 20, 9, 10, 11, 12, 13, 14, 15, 16, 17, 8, 18, 19};
     public Layout portrait = new Layout();
     public Layout landscape = new Layout();
+    /**
+     * Portrait under the 숫자 크게 arrangement, a title's choice for rhythm
+     * games: its own positions, so editing one arrangement never moves the
+     * keys of the other.
+     */
+    public Layout numbers = new Layout();
     public RapidSettings rapid = new RapidSettings();
     public final LinkedHashMap<String, ControlData> slots = new LinkedHashMap<>();
 
@@ -209,6 +215,10 @@ public final class ControlData {
         ControlData controlData = new ControlData();
         controlData.portrait = Layout.parse(jSONObject.getJSONObject("portrait"));
         controlData.landscape = Layout.parse(jSONObject.getJSONObject("landscape"));
+        // A backup from before the arrangement existed has none.
+        if (jSONObject.has("numbers")) {
+            controlData.numbers = Layout.parse(jSONObject.getJSONObject("numbers"));
+        }
         if (jSONObject.has("rapid_fire")) {
             controlData.rapid = RapidSettings.parse(jSONObject.getJSONObject("rapid_fire"));
         }
@@ -219,17 +229,19 @@ public final class ControlData {
         ControlData controlData = new ControlData();
         controlData.portrait = this.portrait.copy();
         controlData.landscape = this.landscape.copy();
+        controlData.numbers = this.numbers.copy();
         controlData.rapid = this.rapid.copy();
         return controlData;
     }
 
     public JSONObject activeJson() throws JSONException {
-        return new JSONObject().put("portrait", this.portrait.json()).put("landscape", this.landscape.json()).put("rapid_fire", this.rapid.json());
+        return new JSONObject().put("portrait", this.portrait.json()).put("landscape", this.landscape.json()).put("numbers", this.numbers.json()).put("rapid_fire", this.rapid.json());
     }
 
     public void applyActive(ControlData controlData) {
         this.portrait = controlData.portrait.copy();
         this.landscape = controlData.landscape.copy();
+        this.numbers = controlData.numbers.copy();
         this.rapid = controlData.rapid.copy();
     }
 
@@ -243,5 +255,10 @@ public final class ControlData {
 
     public Layout layout(boolean z) {
         return z ? this.landscape : this.portrait;
+    }
+
+    /** The layout in use: landscape, or portrait in one of its two arrangements. */
+    public Layout layout(boolean landscape, boolean numbers) {
+        return landscape ? this.landscape : numbers ? this.numbers : this.portrait;
     }
 }

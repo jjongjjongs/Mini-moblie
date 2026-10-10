@@ -248,18 +248,8 @@ public final class MainActivity extends Activity {
     /** The pad the keys sit on: dark, matching the device body. */
     private static final int COLOR_KEYPAD_TRAY = Color.rgb(30, 26, 22);
 
-    // The keypad is the gold-on-dark face of a Korean feature phone: a warm
-    // near-black panel with every glyph and every key outline engraved in
-    // champagne gold. One palette for every key - numbers, directions, soft
-    // keys, save and back all read as the same milled surface, the way a
-    // handset's pad does.
-    private static final int COLOR_KEY_FACE_TOP = Color.rgb(54, 47, 39);
-    private static final int COLOR_KEY_FACE_BOTTOM = Color.rgb(39, 34, 28);
-    private static final int COLOR_KEY_EDGE = Color.rgb(150, 122, 74);
-    private static final int COLOR_KEY_INK = Color.rgb(226, 194, 138);
-    /** The letters engraved beside a digit, a stop dimmer than the digit. */
-    private static final int COLOR_KEY_INK_SUB = Color.rgb(170, 140, 94);
-    private static final int COLOR_KEY_PRESSED = Color.rgb(108, 89, 57);
+    // How the keys themselves look is the player's choice of three designs;
+    // see KeypadTheme.
 
     // Light "Mini Mobile" palette for the library/home screen: a clean white
     // ground with a single green accent, matching the approved home redesign.
@@ -401,6 +391,12 @@ public final class MainActivity extends Activity {
      * the whole screen to the game. Kept per title (see {@link #gameKeypadHidden}).
      */
     private boolean keypadHidden;
+    /** The keypad's design, one for every title (see {@link KeypadTheme}). */
+    private int keypadTheme = KeypadTheme.GOLD;
+    /** Whether the running title uses the 숫자 크게 arrangement; kept per title. */
+    private boolean keypadNumbers;
+    /** The band behind the keys in landscape, coloured as the design's tray. */
+    private FrameLayout keypadArena;
     /** A long press of back on a phone's own keypad, waiting to open the game menu. */
     private Runnable backHold;
     /** Whether the back key now held has already opened the game menu. */
@@ -4237,6 +4233,8 @@ public final class MainActivity extends Activity {
         currentGame = game;
         currentGameName = displayName(game);
         keypadHidden = gameKeypadHidden(game);
+        keypadTheme = KeypadTheme.saved(this);
+        keypadNumbers = getSharedPreferences("mini_keypad_numbers", MODE_PRIVATE).getBoolean(game.getName(), false);
         framePainted = false;
         // Whichever way the phone is being held: the player opens the way the
         // window already is, not the way the last one was.
@@ -4293,7 +4291,9 @@ public final class MainActivity extends Activity {
         // it at its own shape either way up.
         gameView.landscape = landscapeMode && !keypadHidden;
         keypad.landscape = landscapeMode;
+        keypad.numbers = keypadNumbers;
         keypad.requestLayout();
+        keypadArena = null;
 
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
@@ -4308,7 +4308,8 @@ public final class MainActivity extends Activity {
             // the screen floated over the empty gap between them, so a finger
             // on each side is still one view's business.
             FrameLayout arena = new FrameLayout(this);
-            arena.setBackgroundColor(COLOR_KEYPAD_TRAY);
+            arena.setBackgroundColor(KeypadTheme.of(keypadTheme).trayBottom);
+            keypadArena = arena;
             arena.addView(keypad,
                     new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
             FrameLayout.LayoutParams screenParams =
@@ -4606,6 +4607,58 @@ public final class MainActivity extends Activity {
         Toast.makeText(this,
                 keypadHidden ? "키패드를 숨겼습니다. ⚙ → 키패드 꺼내기로 되돌립니다." : "키패드를 꺼냈습니다.",
                 Toast.LENGTH_SHORT).show();
+    }
+
+    /** The keypad design in use (see {@link KeypadTheme}). */
+    int keypadThemeId() {
+        return keypadTheme;
+    }
+
+    /**
+     * Shows the keypad in a design without keeping it, so the picker can show
+     * it on the real keypad while it is open; {@link #saveKeypadTheme} keeps one.
+     */
+    void showKeypadTheme(int id) {
+        keypadTheme = id;
+        if (keypadArena != null) {
+            keypadArena.setBackgroundColor(KeypadTheme.of(id).trayBottom);
+        }
+        if (keypad != null) {
+            keypad.invalidate();
+        }
+    }
+
+    void saveKeypadTheme(int id) {
+        KeypadTheme.save(this, id);
+        showKeypadTheme(id);
+    }
+
+    /** Whether the running title is set to the 숫자 크게 arrangement. */
+    boolean keypadNumbers() {
+        return keypadNumbers;
+    }
+
+    /** Sets the running title's arrangement and lays the keypad out again. */
+    void saveKeypadNumbers(boolean on) {
+        File game = currentGame;
+        if (game == null) {
+            return;
+        }
+        keypadNumbers = on;
+        getSharedPreferences("mini_keypad_numbers", MODE_PRIVATE).edit().putBoolean(game.getName(), on).apply();
+        if (keypad != null) {
+            releaseKeypad();
+            keypad.numbers = on;
+            keypad.relayout();
+        }
+    }
+
+    /** A picture of the keypad in a design and arrangement, for the pickers. */
+    View keypadPreview(int theme, boolean numbers) {
+        KeypadView view = new KeypadView(this, true);
+        view.previewTheme = theme;
+        view.numbers = numbers;
+        return view;
     }
 
     /** Asks before leaving the game for the library, the game held still meanwhile. */
@@ -5993,8 +6046,37 @@ public final class MainActivity extends Activity {
          */
         private float screenAspect = 240f / 320f;
 
+        /**
+         * The 숫자 크게 arrangement: the number pad given the keypad's room and
+         * everything else folded into one slim row above it, for a rhythm game
+         * played on the numbers. Portrait only; kept per title.
+         */
+        boolean numbers;
+
+        /**
+         * Whether the direction keys are drawn as one disc this frame - read by
+         * the layout editor, which then moves and sizes the five together.
+         */
+        boolean ring;
+
+        /**
+         * A picture of the keypad for the design and arrangement pickers: it
+         * draws in {@link #previewTheme} and takes no touches, and the layout
+         * editor knows nothing of it.
+         */
+        private final boolean preview;
+        int previewTheme;
+
+        private final Paint shade = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final RectF scratch = new RectF();
+
         KeypadView(MainActivity activity) {
+            this(activity, false);
+        }
+
+        KeypadView(MainActivity activity, boolean preview) {
             super(activity);
+            this.preview = preview;
             setBackgroundColor(COLOR_KEYPAD_TRAY);
 
             ink.setTextAlign(Paint.Align.CENTER);
@@ -6058,6 +6140,10 @@ public final class MainActivity extends Activity {
         protected void onSizeChanged(int width, int height, int oldWidth, int oldHeight) {
             if (landscape) {
                 layoutLandscape(width, height);
+                return;
+            }
+            if (numbers) {
+                layoutNumbers(width, height);
                 return;
             }
 
@@ -6205,78 +6291,380 @@ public final class MainActivity extends Activity {
             ink.setTextSize(Math.min(cell * 0.42f, dp(20)));
         }
 
+        /**
+         * The 숫자 크게 arrangement. The keypad keeps the room it always has;
+         * inside it the number pad sits centred and a size up, capped so the
+         * keys stay keys rather than slabs, and the soft keys, the directions,
+         * OK, save and back share one slim row above it - enough to work a
+         * game's menus without taking the pad's room.
+         */
+        private void layoutNumbers(int width, int height) {
+            float pad = dp(6);
+            float gap = dp(5);
+            float strip = Math.min(dp(40), (height - 2 * pad) * 0.15f);
+
+            // L, R, the directions in the order a thumb reads them, OK, then
+            // save and back, which carry words and get a little more width.
+            int[] order = {0, 1, 5, 4, 8, 7, 6, 2, 3};
+            float[] weight = {1, 1, 1, 1, 1, 1, 1, 1.3f, 1.3f};
+            float total = 0;
+            for (float w : weight) {
+                total += w;
+            }
+            float unit = (width - 2 * pad - gap * (order.length - 1)) / total;
+            float x = pad;
+            for (int i = 0; i < order.length; i++) {
+                place(order[i], x, pad, unit * weight[i], strip);
+                x += unit * weight[i] + gap;
+            }
+
+            float top = pad + strip + gap * 1.6f;
+            float numberWidth = Math.min((width - 2 * pad - 2 * gap) / 3f, width * 0.25f);
+            float numberHeight = (height - top - pad - 3 * gap) / 4f;
+            float left = (width - 3 * numberWidth - 2 * gap) / 2f;
+            for (int index = 0; index < 12; index++) {
+                place(9 + index, left + (index % 3) * (numberWidth + gap), top + (index / 3) * (numberHeight + gap),
+                        numberWidth, numberHeight);
+            }
+
+            ink.setTextSize(Math.min(numberHeight * 0.45f, dp(24)));
+        }
+
+        /** Places the keys again at the present size, after the arrangement changed. */
+        void relayout() {
+            if (getWidth() > 0 && getHeight() > 0) {
+                onSizeChanged(getWidth(), getHeight(), getWidth(), getHeight());
+            }
+            invalidate();
+        }
+
+        private KeypadTheme theme() {
+            return KeypadTheme.of(preview ? previewTheme : keypadTheme);
+        }
+
         private void place(int index, float x, float y, float width, float height) {
             Key key = keys.get(index);
             key.bounds.set(x, y, x + width, y + height);
             key.shade();
-            ControlPatch.afterPlace(this, index);
+            if (!preview) {
+                ControlPatch.afterPlace(this, index);
+            }
+        }
+
+        // Where the direction keys and OK are in the key list.
+        private static final int KEY_UP = 4;
+        private static final int KEY_LEFT = 5;
+        private static final int KEY_OK = 6;
+        private static final int KEY_RIGHT = 7;
+        private static final int KEY_DOWN = 8;
+
+        /**
+         * Whether the four directions and OK are drawn as one disc: they are
+         * all shown and still stand in a plus round OK, as every layout places
+         * them until a player moves one on its own. Moved apart, or with one
+         * hidden, they go back to being five keys.
+         */
+        private boolean ringActive() {
+            if (numbers && !landscape) {
+                return false;
+            }
+            Key ok = keys.get(KEY_OK);
+            for (int index = KEY_UP; index <= KEY_DOWN; index++) {
+                Key key = keys.get(index);
+                if (key.bounds.isEmpty() || (!preview && ControlPatch.hidden(this, key))) {
+                    return false;
+                }
+            }
+            RectF up = keys.get(KEY_UP).bounds;
+            RectF down = keys.get(KEY_DOWN).bounds;
+            RectF left = keys.get(KEY_LEFT).bounds;
+            RectF right = keys.get(KEY_RIGHT).bounds;
+            float cx = ok.bounds.centerX();
+            float cy = ok.bounds.centerY();
+            float tolerance = Math.max(ok.bounds.width(), ok.bounds.height()) * 0.3f;
+            if (!(Math.abs(up.centerX() - cx) < tolerance && Math.abs(down.centerX() - cx) < tolerance
+                    && Math.abs(left.centerY() - cy) < tolerance && Math.abs(right.centerY() - cy) < tolerance
+                    && up.bottom <= cy && down.top >= cy && left.right <= cx && right.left >= cx)) {
+                return false;
+            }
+            // A key a player tucked into a corner of the plus would sit on the
+            // disc and lose its touches to it; then the five stay five keys.
+            float radius = ringRadius();
+            for (int index = 0; index < keys.size(); index++) {
+                if (index >= KEY_UP && index <= KEY_DOWN) {
+                    continue;
+                }
+                Key key = keys.get(index);
+                if (key.bounds.isEmpty() || (!preview && ControlPatch.hidden(this, key))) {
+                    continue;
+                }
+                float nearX = Math.max(key.bounds.left, Math.min(cx, key.bounds.right));
+                float nearY = Math.max(key.bounds.top, Math.min(cy, key.bounds.bottom));
+                if (Math.hypot(nearX - cx, nearY - cy) < radius - 1) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /** The disc's radius: as far as the plus reaches on its shortest arm. */
+        private float ringRadius() {
+            RectF ok = keys.get(KEY_OK).bounds;
+            float cx = ok.centerX();
+            float cy = ok.centerY();
+            return Math.min(Math.min(cy - keys.get(KEY_UP).bounds.top, keys.get(KEY_DOWN).bounds.bottom - cy),
+                    Math.min(cx - keys.get(KEY_LEFT).bounds.left, keys.get(KEY_RIGHT).bounds.right - cx));
+        }
+
+        /**
+         * The key a finger on the disc presses: OK in the middle, otherwise the
+         * quarter it is in - so the corners between the arms, which no key's
+         * rectangle covers, are directions too. Null off the disc.
+         */
+        private Key ringKeyAt(float x, float y) {
+            RectF ok = keys.get(KEY_OK).bounds;
+            float dx = x - ok.centerX();
+            float dy = y - ok.centerY();
+            float radius = ringRadius();
+            float distance = (float) Math.hypot(dx, dy);
+            if (distance > radius) {
+                return null;
+            }
+            if (distance <= radius * 0.36f) {
+                return keys.get(KEY_OK);
+            }
+            double angle = Math.toDegrees(Math.atan2(dy, dx));
+            if (angle >= -45 && angle < 45) {
+                return keys.get(KEY_RIGHT);
+            }
+            if (angle >= 45 && angle < 135) {
+                return keys.get(KEY_DOWN);
+            }
+            if (angle >= -135 && angle < -45) {
+                return keys.get(KEY_UP);
+            }
+            return keys.get(KEY_LEFT);
         }
 
         @Override
         protected void onDraw(Canvas canvas) {
-            ControlPatch.beforeDraw(this, canvas);
-            float radius = dp(8);
+            KeypadTheme theme = theme();
+
+            // The tray, except in landscape, where this view lies over the
+            // screen and the band behind it is the tray.
+            if (!landscape) {
+                shade.setShader(new android.graphics.LinearGradient(0, 0, 0, getHeight(), theme.trayTop, theme.trayBottom,
+                        android.graphics.Shader.TileMode.CLAMP));
+                canvas.drawRect(0, 0, getWidth(), getHeight(), shade);
+                shade.setShader(null);
+            }
+
+            if (!preview) {
+                ControlPatch.beforeDraw(this, canvas);
+            }
             subInk.setTextSize(ink.getTextSize() * 0.42f);
 
-            for (Key key : keys) {
-                if (ControlPatch.hidden(this, key)) {
-                    continue;
-                }
-                if (key.down) {
-                    fill.setShader(null);
-                    fill.setColor(key.pressedColor());
-                } else {
-                    fill.setShader(key.shader);
-                    fill.setColor(Color.WHITE);
-                }
-                canvas.drawRoundRect(key.bounds, radius, radius, fill);
-                fill.setShader(null);
-
-                edge.setColor(key.borderColor());
-                canvas.drawRoundRect(key.bounds, radius, radius, edge);
-
-                ink.setColor(key.textColor());
-                float was = ink.getTextSize();
-
-                if (key.jamo == null && key.latin == null) {
-                    // A label wider than its key is shrunk to fit rather than
-                    // clipped, so a word can be used where a digit was.
-                    fit(ink, key.label, key.bounds.width() * 0.82f);
-                    canvas.drawText(key.label, key.bounds.centerX(), key.bounds.centerY() + ink.getTextSize() * 0.36f, ink);
-                    ink.setTextSize(was);
-                    continue;
-                }
-
-                // Engraved the way a handset prints it: the digit on the left
-                // of the key, the letters stacked in the space to its right.
-                float centerY = key.bounds.centerY();
-                float digitX = key.bounds.left + key.bounds.width() * 0.30f;
-                float letterX = key.bounds.left + key.bounds.width() * 0.71f;
-                float letterRoom = key.bounds.width() * 0.48f;
-
-                fit(ink, key.label, key.bounds.width() * 0.30f);
-                canvas.drawText(key.label, digitX, centerY + ink.getTextSize() * 0.36f, ink);
-                ink.setTextSize(was);
-
-                subInk.setColor(key.subTextColor());
-                float subWas = subInk.getTextSize();
-                if (key.jamo != null && key.latin != null) {
-                    fit(subInk, key.jamo, letterRoom);
-                    // Two lines straddling the key's middle, so the pair reads
-                    // as one block against the digit rather than sitting low.
-                    canvas.drawText(key.jamo, letterX, centerY - subWas * 0.22f, subInk);
-                    subInk.setTextSize(subWas);
-
-                    fit(subInk, key.latin, letterRoom);
-                    canvas.drawText(key.latin, letterX, centerY + subWas * 0.94f, subInk);
-                } else {
-                    String only = key.jamo != null ? key.jamo : key.latin;
-                    fit(subInk, only, letterRoom);
-                    canvas.drawText(only, letterX, centerY + subInk.getTextSize() * 0.36f, subInk);
-                }
-                subInk.setTextSize(subWas);
+            ring = ringActive();
+            if (ring) {
+                drawRing(canvas, theme);
             }
-            ControlPatch.afterDraw(this, canvas);
+
+            for (int index = 0; index < keys.size(); index++) {
+                Key key = keys.get(index);
+                if (ring && index >= KEY_UP && index <= KEY_DOWN) {
+                    continue;
+                }
+                if (!preview && ControlPatch.hidden(this, key)) {
+                    continue;
+                }
+                drawKey(canvas, theme, key);
+            }
+
+            if (!preview) {
+                ControlPatch.afterDraw(this, canvas);
+            }
+        }
+
+        private void drawKey(Canvas canvas, KeypadTheme theme, Key key) {
+            RectF bounds = key.bounds;
+            boolean function = key.style == KEY_SOFT || key.style == KEY_SAVE || key.style == KEY_CLEAR;
+            boolean number = key.jamo != null || key.latin != null || key.code == CODE_STAR || key.code == CODE_HASH;
+            float shortSide = Math.min(bounds.width(), bounds.height());
+
+            float radius;
+            if (function) {
+                radius = theme.pillFunctions ? shortSide / 2f : Math.min(dp(theme.fnRadiusDp), shortSide / 2f);
+            } else if (number && theme.pillNumbers) {
+                radius = shortSide / 2f;
+            } else {
+                radius = Math.min(dp(theme.radiusDp), shortSide / 2f);
+            }
+
+            boolean hollow = function && theme.hollowFunctions;
+            int top = theme.faceTop;
+            int bottom = theme.faceBottom;
+            if (key.style == KEY_SAVE && theme.saveFill != 0) {
+                top = bottom = theme.saveFill;
+                hollow = false;
+            }
+            if (key.down) {
+                top = theme.pressedTop;
+                bottom = theme.pressedBottom;
+                hollow = false;
+            }
+
+            // A key stands a little proud of the tray: its shadow first, a
+            // touch lower, gone while it is held down.
+            if (theme.shadow != 0 && !hollow && !key.down) {
+                scratch.set(bounds);
+                scratch.offset(0, dp(2));
+                fill.setShader(null);
+                fill.setColor(theme.shadow);
+                canvas.drawRoundRect(scratch, radius, radius, fill);
+            }
+            if (!hollow) {
+                fill.setShader(new android.graphics.LinearGradient(0, bounds.top, 0, bounds.bottom, top, bottom,
+                        android.graphics.Shader.TileMode.CLAMP));
+                fill.setColor(Color.WHITE);
+                canvas.drawRoundRect(bounds, radius, radius, fill);
+                fill.setShader(null);
+            }
+
+            int edgeColor = !function ? theme.edge
+                    : key.style == KEY_SAVE ? theme.saveEdge : key.style == KEY_CLEAR ? theme.backEdge : theme.fnEdge;
+            if (key.down && theme.edge == 0) {
+                edgeColor = 0;
+            }
+            if (edgeColor != 0) {
+                edge.setColor(edgeColor);
+                canvas.drawRoundRect(bounds, radius, radius, edge);
+            }
+
+            int inkColor = key.down ? theme.pressedInk
+                    : !function ? theme.ink
+                    : key.style == KEY_SAVE ? theme.saveInk : key.style == KEY_CLEAR ? theme.backInk : theme.fnInk;
+            ink.setColor(inkColor);
+            float was = ink.getTextSize();
+
+            // The slim row of the 숫자 크게 arrangement has no room for a
+            // four-letter word, and a picture of the pad none for letters.
+            String label = numbers && !landscape && key.style == KEY_CLEAR ? "뒤로" : key.label;
+            boolean letters = (key.jamo != null || key.latin != null) && !(numbers && !landscape) && !preview;
+
+            if (function) {
+                ink.setTextSize(Math.min(was, bounds.height() * 0.38f));
+            }
+
+            if (!letters) {
+                // A label wider than its key is shrunk to fit rather than
+                // clipped, so a word can be used where a digit was.
+                fit(ink, label, bounds.width() * 0.82f);
+                canvas.drawText(label, bounds.centerX(), bounds.centerY() + ink.getTextSize() * 0.36f, ink);
+                ink.setTextSize(was);
+                return;
+            }
+
+            // Engraved the way a handset prints it: the digit on the left of
+            // the key, the letters stacked in the space to its right.
+            float centerY = bounds.centerY();
+            float digitX = bounds.left + bounds.width() * 0.30f;
+            float letterX = bounds.left + bounds.width() * 0.71f;
+            float letterRoom = bounds.width() * 0.48f;
+
+            fit(ink, label, bounds.width() * 0.30f);
+            canvas.drawText(label, digitX, centerY + ink.getTextSize() * 0.36f, ink);
+            ink.setTextSize(was);
+
+            subInk.setColor(key.down ? theme.pressedInk : theme.subInk);
+            float subWas = subInk.getTextSize();
+            if (key.jamo != null && key.latin != null) {
+                fit(subInk, key.jamo, letterRoom);
+                // Two lines straddling the key's middle, so the pair reads as
+                // one block against the digit rather than sitting low.
+                canvas.drawText(key.jamo, letterX, centerY - subWas * 0.22f, subInk);
+                subInk.setTextSize(subWas);
+
+                fit(subInk, key.latin, letterRoom);
+                canvas.drawText(key.latin, letterX, centerY + subWas * 0.94f, subInk);
+            } else {
+                String only = key.jamo != null ? key.jamo : key.latin;
+                fit(subInk, only, letterRoom);
+                canvas.drawText(only, letterX, centerY + subInk.getTextSize() * 0.36f, subInk);
+            }
+            subInk.setTextSize(subWas);
+        }
+
+        /**
+         * The four directions and OK as one disc: quartered by faint seams,
+         * an arrow on each quarter, OK a raised button in the middle, and a
+         * held direction lighting its whole quarter.
+         */
+        private void drawRing(Canvas canvas, KeypadTheme theme) {
+            RectF ok = keys.get(KEY_OK).bounds;
+            float cx = ok.centerX();
+            float cy = ok.centerY();
+            float radius = ringRadius();
+            float inner = radius * 0.36f;
+
+            if (theme.shadow != 0) {
+                fill.setShader(null);
+                fill.setColor(theme.shadow);
+                canvas.drawCircle(cx, cy + dp(2), radius, fill);
+            }
+            fill.setShader(new android.graphics.LinearGradient(0, cy - radius, 0, cy + radius, theme.ringTop, theme.ringBottom,
+                    android.graphics.Shader.TileMode.CLAMP));
+            fill.setColor(Color.WHITE);
+            canvas.drawCircle(cx, cy, radius, fill);
+            fill.setShader(null);
+
+            // A held quarter: right is drawn from -45 degrees, and each next
+            // one a quarter turn on.
+            scratch.set(cx - radius, cy - radius, cx + radius, cy + radius);
+            int[] quarters = {KEY_RIGHT, KEY_DOWN, KEY_LEFT, KEY_UP};
+            fill.setColor(theme.wedgePressed);
+            for (int quarter = 0; quarter < 4; quarter++) {
+                if (keys.get(quarters[quarter]).down) {
+                    canvas.drawArc(scratch, -45 + quarter * 90, 90, true, fill);
+                }
+            }
+
+            if (theme.ringSeam != 0) {
+                edge.setColor(theme.ringSeam);
+                for (int seam = 0; seam < 4; seam++) {
+                    double angle = Math.toRadians(45 + seam * 90);
+                    float dx = (float) Math.cos(angle);
+                    float dy = (float) Math.sin(angle);
+                    canvas.drawLine(cx + dx * inner, cy + dy * inner, cx + dx * radius, cy + dy * radius, edge);
+                }
+            }
+            edge.setColor(theme.ringEdge);
+            canvas.drawCircle(cx, cy, radius, edge);
+
+            float was = ink.getTextSize();
+            ink.setTextSize(radius * 0.2f);
+            String[] arrows = {"▶", "▼", "◀", "▲"};
+            float reach = radius * 0.7f;
+            float[][] at = {{reach, 0}, {0, reach}, {-reach, 0}, {0, -reach}};
+            for (int quarter = 0; quarter < 4; quarter++) {
+                ink.setColor(keys.get(quarters[quarter]).down ? theme.arrowPressed : theme.arrow);
+                canvas.drawText(arrows[quarter], cx + at[quarter][0], cy + at[quarter][1] + ink.getTextSize() * 0.36f, ink);
+            }
+
+            boolean held = keys.get(KEY_OK).down;
+            fill.setShader(new android.graphics.LinearGradient(0, cy - inner, 0, cy + inner,
+                    held ? theme.pressedTop : theme.okTop, held ? theme.pressedBottom : theme.okBottom,
+                    android.graphics.Shader.TileMode.CLAMP));
+            fill.setColor(Color.WHITE);
+            canvas.drawCircle(cx, cy, inner, fill);
+            fill.setShader(null);
+            if (theme.okEdge != 0) {
+                edge.setColor(theme.okEdge);
+                canvas.drawCircle(cx, cy, inner, edge);
+            }
+            ink.setColor(held ? theme.pressedInk : theme.okInk);
+            ink.setTextSize(inner * 0.55f);
+            canvas.drawText("OK", cx, cy + ink.getTextSize() * 0.36f, ink);
+            ink.setTextSize(was);
         }
 
         /** Shrinks {@code paint} just enough that {@code text} fits {@code room}. */
@@ -6289,6 +6677,9 @@ public final class MainActivity extends Activity {
 
         @Override
         public boolean onTouchEvent(MotionEvent event) {
+            if (preview) {
+                return false;
+            }
             if (ControlPatch.beforeTouch(this, event)) {
                 return true;
             }
@@ -6352,6 +6743,12 @@ public final class MainActivity extends Activity {
         }
 
         private Key keyAt(float x, float y) {
+            if (ringActive()) {
+                Key key = ringKeyAt(x, y);
+                if (key != null) {
+                    return key;
+                }
+            }
             return (Key) ControlPatch.keyAt(this, x, y);
         }
 
@@ -6411,7 +6808,6 @@ public final class MainActivity extends Activity {
         final int code;
         final int style;
         final RectF bounds = new RectF();
-        android.graphics.Shader shader;
         boolean down;
 
         Key(String label, int code, int style) {
@@ -6426,51 +6822,12 @@ public final class MainActivity extends Activity {
             this.latin = latin;
         }
 
-        /** Rebuilds the face gradient for the bounds the key was just given. */
+        /**
+         * Called whenever the key is given new bounds, the layout editor's
+         * included. The face is shaded at draw time from the chosen design,
+         * so there is nothing to rebuild here.
+         */
         void shade() {
-            shader = new android.graphics.LinearGradient(
-                    0, bounds.top, 0, bounds.bottom,
-                    topColor(), bottomColor(), android.graphics.Shader.TileMode.CLAMP);
-        }
-
-        // One face and one outline for every key - numbers, directions, soft
-        // keys, save and back alike - because that is how a handset's pad
-        // reads: a single milled surface, gold on dark, with the glyph the only
-        // thing that ever differs. The top/bottom pair keeps the barest
-        // gradient so a face has some depth without looking glossy.
-        private int topColor() {
-            return COLOR_KEY_FACE_TOP;
-        }
-
-        private int bottomColor() {
-            return COLOR_KEY_FACE_BOTTOM;
-        }
-
-        int borderColor() {
-            return COLOR_KEY_EDGE;
-        }
-
-        int pressedColor() {
-            return COLOR_KEY_PRESSED;
-        }
-
-        // The one place the handset itself breaks the gold: the call key is
-        // printed green and the end key red, and those two sit exactly where
-        // save and back do here. Only the glyph is tinted - the face and the
-        // outline stay the same as every other key, as they do on the phone.
-        int textColor() {
-            switch (style) {
-                case KEY_SAVE:
-                    return Color.rgb(122, 196, 126);
-                case KEY_CLEAR:
-                    return Color.rgb(214, 96, 88);
-                default:
-                    return COLOR_KEY_INK;
-            }
-        }
-
-        int subTextColor() {
-            return COLOR_KEY_INK_SUB;
         }
     }
 }
