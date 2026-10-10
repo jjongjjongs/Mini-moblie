@@ -1,8 +1,8 @@
-use alloc::{boxed::Box, sync::Arc, vec};
+use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use java_class_proto::{JavaFieldProto, JavaMethodProto, MethodBody};
-use jvm::{Array, ClassInstanceRef, JavaError, JavaValue, Jvm, Result as JvmResult, runtime::JavaLangString};
+use jvm::{Array, ClassInstanceRef, JavaError, JavaValue, Jvm, JvmPin, Result as JvmResult, runtime::JavaLangString};
 
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 use wie_midp::classes::javax::microedition::media::Player;
@@ -239,6 +239,7 @@ impl BaseClip {
                 context.spawn(
                     jvm,
                     Box::new(ClipCompletionRunner {
+                        _pins: jvm.pin_all([&this.instance]),
                         clip: this,
                         completed,
                         stopped,
@@ -335,6 +336,8 @@ struct ClipCompletionRunner {
     clip: ClassInstanceRef<BaseClip>,
     completed: Arc<AtomicBool>,
     stopped: Arc<AtomicBool>,
+    /// `clip`, for as long as this task waits on it.
+    _pins: Vec<JvmPin>,
 }
 
 #[async_trait::async_trait]

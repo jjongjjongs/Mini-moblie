@@ -3645,6 +3645,7 @@ dependencies = [
  "bytemuck",
  "encoding_rs",
  "futures",
+ "hashbrown",
  "java_class_proto",
  "java_constants",
  "java_runtime",

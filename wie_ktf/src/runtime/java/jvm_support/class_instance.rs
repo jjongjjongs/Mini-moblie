@@ -3,19 +3,18 @@ use core::{
     fmt::{self, Debug, Formatter},
     hash::{Hash, Hasher},
     iter,
-    mem::size_of,
 };
 use java_constants::FieldAccessFlags;
 
 use jvm::{ClassDefinition, ClassInstance, Field, JavaType, JavaValue, Result as JvmResult};
 use wipi_types::ktf::java::JavaClassInstance as RawJavaClassInstance;
 
-use wie_core_arm::{Allocator, ArmCore};
+use wie_core_arm::ArmCore;
 use wie_util::{ByteRead, ByteWrite, read_generic, write_generic};
 
 use crate::runtime::java::jvm_support::KtfJvmSupport;
 
-use super::{KtfJvmWord, Result, class_definition::JavaClassDefinition, field::JavaField, value::JavaValueExt};
+use super::{KtfJvmWord, Result, class_definition::JavaClassDefinition, collector::KtfHeap, field::JavaField, value::JavaValueExt};
 
 #[derive(Clone)]
 pub struct JavaClassInstance {
@@ -73,8 +72,7 @@ impl JavaClassInstance {
     }
 
     pub(super) fn instantiate(core: &mut ArmCore, class: &JavaClassDefinition, field_size: usize) -> Result<Self> {
-        let ptr_raw = Allocator::alloc(core, size_of::<RawJavaClassInstance>() as _)?;
-        let ptr_fields = Allocator::alloc(core, (field_size + 4) as _)?;
+        let (ptr_raw, ptr_fields) = KtfHeap::of(core).alloc_object(core, (field_size + 4) as _)?;
 
         let zero = iter::repeat_n(0, (field_size + 4) as _).collect::<Vec<_>>();
         core.write_bytes(ptr_fields, &zero)?;
@@ -119,14 +117,8 @@ impl ClassInstance for JavaClassInstance {
     /// frames later reading a length that has become another block's
     /// bookkeeping.
     ///
-    /// Nothing reclaims them instead, so a KTF title's heap only grows. That is
-    /// also what the reference emulator does, which is worth saying because it
-    /// makes this a design rather than a debt: its KTF runtime builds its Java
-    /// objects in guest memory the same way and has no collector for them at
-    /// all - the only `collectGarbage` in the whole binary belongs to its
-    /// SK-VM, and there is no free, destroy or reclaim of a KTF Java object
-    /// anywhere in it. Its one root-visitor for KTF covers strings, for state
-    /// snapshots.
+    /// The memory is given back by [`KtfHeap`] instead, which asks the guest's
+    /// side as well as the JVM's.
     fn destroy(self: Box<Self>) {}
 
     fn identity(&self) -> usize {
@@ -151,13 +143,10 @@ impl ClassInstance for JavaClassInstance {
         Box::new(self.class().unwrap())
     }
 
+    /// The same object whichever wrapper names it: an array can be looked
+    /// up by a plain instance of its address, which is what the collector has.
     fn equals(&self, other: &dyn ClassInstance) -> JvmResult<bool> {
-        let other = other.as_any().downcast_ref::<JavaClassInstance>();
-        if other.is_none() {
-            return Ok(false);
-        }
-
-        Ok(self.ptr_raw == other.unwrap().ptr_raw)
+        Ok(self.identity() == other.identity())
     }
 
     fn get_field(&self, field: &dyn Field) -> JvmResult<JavaValue> {

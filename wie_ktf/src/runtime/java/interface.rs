@@ -27,6 +27,18 @@ pub fn register_java_interface_svc_handler(core: &mut ArmCore, jvm: &Jvm) -> Res
 }
 
 async fn handle_java_interface_svc(core: &mut ArmCore, jvm: &mut Jvm, id: SvcId) -> Result<()> {
+    // In a frame of its own, so what the call makes is released once it is
+    // back in the title's hands - see `JavaMethodProxy::call`.
+    let framed = jvm.try_push_native_frame(Vec::new());
+    let result = handle_java_interface_svc_framed(core, jvm, id).await;
+    if framed {
+        jvm.pop_frame();
+    }
+
+    result
+}
+
+async fn handle_java_interface_svc_framed(core: &mut ArmCore, jvm: &mut Jvm, id: SvcId) -> Result<()> {
     let (_, lr) = core.read_pc_lr()?;
 
     match JavaSvcId::try_from(id)? {

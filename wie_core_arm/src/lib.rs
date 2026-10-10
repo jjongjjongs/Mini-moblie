@@ -73,7 +73,7 @@ pub use self::{
     allocator::Allocator,
     binary_patches::install_binary_patches,
     context::ArmCoreContext,
-    core::{ArmCore, HEAP_BASE, HEAP_SIZE, RUN_FUNCTION_LR, RunFunctionResult},
+    core::{ArmCore, GcStackRoots, HEAP_BASE, HEAP_SIZE, RUN_FUNCTION_LR, RunFunctionResult},
     engine::SvcIntrinsic,
     function::{EmulatedFunction, EmulatedFunctionParam, RegisteredFunction, RegisteredFunctionHolder, ResultWriter, SvcId},
 };

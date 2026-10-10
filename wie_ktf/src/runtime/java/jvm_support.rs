@@ -4,6 +4,7 @@ mod class_definition;
 mod class_file;
 mod class_instance;
 mod classes;
+pub mod collector;
 mod field;
 mod jvm_implementation;
 mod method;
@@ -34,6 +35,7 @@ use self::{
         net::wie::{ClassLoaderContext, KtfClassLoader},
         wec::{DMInfo, GatewayIP, OEMDevice, SYSTheme},
     },
+    collector::KtfHeap,
     name::JavaFullName,
 };
 use super::interface::register_java_interface_svc_handler;
@@ -217,6 +219,17 @@ impl KtfJvmSupport {
         let jvm_implementation = KtfJvmImplementation::new(core);
         let jvm = JvmSupport::new_jvm(system, jar_name, Box::new(protos), &[], jvm_implementation.clone()).await?;
         register_java_interface_svc_handler(core, &jvm)?;
+
+        // The objects' memory is reclaimed from here on: when the heap runs out,
+        // and after the JVM's own collection once enough has been made.
+        let heap = KtfHeap::of(core);
+        heap.set_jvm(jvm.clone());
+        let hook_core = core.clone();
+        jvm.set_gc_hook(Arc::new(move |_| {
+            if let Err(error) = heap.collect_if_due(&mut hook_core.clone()) {
+                tracing::error!("KTF collection failed: {error}");
+            }
+        }));
 
         for (name, index) in BUILT_IN_VTABLES {
             Self::reserve_vtable_index(core, &jvm, name, index).await?;
@@ -600,7 +613,7 @@ mod test {
     use wie_core_arm::{Allocator, ArmCore};
     use wie_util::{Result, WieError, write_generic};
 
-    use super::{JavaArrayClassInstance, KtfJvmSupport, method::JavaMethod};
+    use super::{JavaArrayClassInstance, KtfJvmSupport, collector::KtfHeap, method::JavaMethod};
 
     use test_utils::TestPlatform;
 
@@ -767,6 +780,67 @@ mod test {
             // Same address, read back from the guest as the ARM code would.
             let survivor = JavaArrayClassInstance::from_raw(address, &core);
             assert_eq!(survivor.array_length().unwrap(), 387);
+
+            done_clone.store(true, Ordering::SeqCst);
+
+            Ok(())
+        });
+
+        while !done.load(Ordering::SeqCst) {
+            system.tick()?;
+        }
+
+        Ok(())
+    }
+
+    /// What the title's own memory names - by an object's address, or by a
+    /// pointer into its elements - outlives a collection; what nothing names
+    /// gives its memory back.
+    #[test]
+    fn a_collection_frees_only_what_nothing_reaches() -> Result<()> {
+        let mut system = System::new(Box::new(TestPlatform::new()), "", "", DefaultTaskRunner);
+
+        let done = Arc::new(AtomicBool::new(false));
+        let done_clone = done.clone();
+        let mut system_clone = system.clone();
+
+        system.spawn(async move || {
+            let (jvm, mut core) = init_jvm(&mut system_clone).await?;
+
+            // Made in a frame that then goes, so the JVM holds none of them.
+            jvm.push_native_frame();
+            let kept = KtfJvmSupport::class_instance_raw(&jvm.instantiate_array("B", 100).await.unwrap());
+            let walked = jvm.instantiate_array("I", 10).await.unwrap();
+            let dropped = KtfJvmSupport::class_instance_raw(&jvm.instantiate_array("B", 100).await.unwrap());
+            jvm.pop_frame();
+
+            let walked_raw = KtfJvmSupport::class_instance_raw(&walked);
+            let elements = walked
+                .as_any()
+                .downcast_ref::<JavaArrayClassInstance>()
+                .unwrap()
+                .class_instance
+                .field_address(8)?;
+            drop(walked);
+
+            // A block of the title's own: one object by its address, the other
+            // by a pointer partway into its elements.
+            let block = Allocator::alloc(&mut core, 8)?;
+            write_generic(&mut core, block, kept)?;
+            write_generic(&mut core, block + 4, elements)?;
+
+            let heap = KtfHeap::of(&core);
+            let collection = heap.collect(&mut core)?;
+
+            assert!(collection.freed >= 1);
+            assert!(heap.is_live(kept));
+            assert!(heap.is_live(walked_raw));
+            assert!(!heap.is_live(dropped));
+
+            // Its memory is handed out again - this slot or one freed with it,
+            // whichever the allocator comes to first.
+            let again = KtfJvmSupport::class_instance_raw(&jvm.instantiate_array("B", 100).await.unwrap());
+            assert!(again <= dropped);
 
             done_clone.store(true, Ordering::SeqCst);
 

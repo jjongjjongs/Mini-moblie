@@ -3,7 +3,7 @@ use core::time::Duration;
 
 use java_class_proto::{JavaFieldProto, JavaMethodProto};
 use java_constants::{FieldAccessFlags, MethodAccessFlags};
-use jvm::{ClassInstanceRef, Jvm, Result, runtime::JavaLangString};
+use jvm::{ClassInstanceRef, Jvm, JvmPin, Result, runtime::JavaLangString};
 
 use crate::{
     RuntimeClassProto, RuntimeContext, SpawnCallback,
@@ -192,6 +192,10 @@ impl Thread {
             jvm: Jvm,
             thread_id: i32,
             this: ClassInstanceRef<Thread>,
+            /// Until the task attaches, which is what roots the thread, nothing
+            /// but this task holds it - `new Thread(this).start()` keeps no
+            /// reference of its own.
+            _pin: JvmPin,
         }
 
         #[async_trait::async_trait]
@@ -258,6 +262,7 @@ impl Thread {
             Box::new(ThreadStartProxy {
                 jvm: jvm.clone(),
                 thread_id: id,
+                _pin: jvm.pin(&this),
                 this: this.clone(),
             }),
         );

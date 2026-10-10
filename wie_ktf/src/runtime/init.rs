@@ -417,6 +417,18 @@ fn handle_native_module_svc(core: &mut ArmCore, id: SvcId) -> Result<()> {
 
 /// A slot of `MNInterface`.
 async fn handle_module_svc(core: &mut ArmCore, jvm: &mut Jvm, id: SvcId) -> Result<()> {
+    // In a frame of its own, so what the call makes is released once it is
+    // back in the title's hands - see `JavaMethodProxy::call`.
+    let framed = jvm.try_push_native_frame(Vec::new());
+    let result = handle_module_svc_framed(core, jvm, id).await;
+    if framed {
+        jvm.pop_frame();
+    }
+
+    result
+}
+
+async fn handle_module_svc_framed(core: &mut ArmCore, jvm: &mut Jvm, id: SvcId) -> Result<()> {
     // A native module reaches the slot with the slot's own address in `r0`;
     // nothing a compiled Java module hands over is that.
     if core.svc_stub_id(core.read_param(0)?) == Some((SVC_CATEGORY_MODULE, id.0)) {
@@ -1085,6 +1097,18 @@ fn method_argument_words(descriptor: &str, access_flags: MethodAccessFlags) -> u
 /// | 4    | a frame popped                                    |
 /// | 5    | an array index found out of bounds                |
 async fn handle_module_jump_svc(core: &mut ArmCore, jvm: &mut Jvm, id: SvcId) -> Result<()> {
+    // In a frame of its own, so what the call makes is released once it is
+    // back in the title's hands - see `JavaMethodProxy::call`.
+    let framed = jvm.try_push_native_frame(Vec::new());
+    let result = handle_module_jump_svc_framed(core, jvm, id).await;
+    if framed {
+        jvm.pop_frame();
+    }
+
+    result
+}
+
+async fn handle_module_jump_svc_framed(core: &mut ArmCore, jvm: &mut Jvm, id: SvcId) -> Result<()> {
     let (_, lr) = core.read_pc_lr()?;
 
     match id.0 {
@@ -1366,6 +1390,18 @@ fn get_module_interface(core: &mut ArmCore) -> Result<u32> {
 }
 
 async fn handle_init_svc(core: &mut ArmCore, jvm: &mut Jvm, id: SvcId) -> Result<()> {
+    // In a frame of its own, so what the call makes is released once it is
+    // back in the title's hands - see `JavaMethodProxy::call`.
+    let framed = jvm.try_push_native_frame(Vec::new());
+    let result = handle_init_svc_framed(core, jvm, id).await;
+    if framed {
+        jvm.pop_frame();
+    }
+
+    result
+}
+
+async fn handle_init_svc_framed(core: &mut ArmCore, jvm: &mut Jvm, id: SvcId) -> Result<()> {
     let (_, lr) = core.read_pc_lr()?;
 
     match InitSvcId::try_from(id)? {

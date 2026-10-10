@@ -49,6 +49,21 @@ impl Allocator {
         }
     }
 
+    /// The start and size of the bucket slot `address` falls in, if it falls
+    /// in one. Every allocation of up to [`BUCKET_MAX`] bytes is such a slot.
+    pub fn bucket_slot_of(address: u32) -> Option<(u32, u32)> {
+        BucketAllocator::slot_of(HEAP_BASE + HEAP_SIZE / 2, address)
+    }
+
+    /// Hands every live allocation whose address `skip` does not want to
+    /// `visit`, with its bytes: what a conservative collector scans for
+    /// references. A bucket allocation comes with its whole slot, which is at
+    /// least what was asked for.
+    pub fn scan_live_blocks(core: &ArmCore, mut skip: impl FnMut(u32) -> bool, mut visit: impl FnMut(u32, &[u8])) -> Result<()> {
+        ListAllocator::scan_live_blocks(core, HEAP_BASE, HEAP_SIZE / 2, &mut skip, &mut visit)?;
+        BucketAllocator::scan_live_blocks(core, HEAP_BASE + HEAP_SIZE / 2, &mut skip, &mut visit)
+    }
+
     pub fn free_unsized(core: &mut ArmCore, address: u32) -> Result<()> {
         if address < HEAP_BASE + HEAP_SIZE / 2 {
             ListAllocator::free(core, address)
@@ -60,7 +75,9 @@ impl Allocator {
 
 #[cfg(test)]
 mod tests {
-    use wie_util::Result;
+    use alloc::vec::Vec;
+
+    use wie_util::{Result, write_generic};
 
     use crate::ArmCore;
 
@@ -76,6 +93,40 @@ mod tests {
 
         let list = Allocator::alloc(&mut core, 513)?;
         assert_eq!(Allocator::allocation_size(&core, list)?, 516);
+
+        Ok(())
+    }
+
+    /// A collector walking the heap sees every block in use, with its bytes,
+    /// and none that was freed or that it asked to pass.
+    #[test]
+    fn scan_live_blocks_visits_what_is_in_use() -> Result<()> {
+        let mut core = ArmCore::new(false, None).unwrap();
+        Allocator::init(&mut core)?;
+
+        let small = Allocator::alloc(&mut core, 8)?;
+        let freed = Allocator::alloc(&mut core, 8)?;
+        let passed = Allocator::alloc(&mut core, 100)?;
+        let large = Allocator::alloc(&mut core, 2000)?;
+        Allocator::free(&mut core, freed, 8)?;
+        write_generic(&mut core, small, 0x1234_5678u32)?;
+        write_generic(&mut core, large + 1996, 0x9abc_def0u32)?;
+
+        let mut seen = Vec::new();
+        Allocator::scan_live_blocks(&core, |address| address == passed, |address, bytes| seen.push((address, bytes.to_vec())))?;
+
+        let small_block = seen.iter().find(|(address, _)| *address == small).unwrap();
+        assert_eq!(small_block.1.len(), 8);
+        assert_eq!(&small_block.1[..4], &0x1234_5678u32.to_le_bytes());
+
+        let large_block = seen.iter().find(|(address, _)| *address == large).unwrap();
+        assert_eq!(&large_block.1[1996..2000], &0x9abc_def0u32.to_le_bytes());
+
+        assert!(!seen.iter().any(|(address, _)| *address == freed || *address == passed));
+
+        // An address anywhere in a slot names that slot.
+        assert_eq!(Allocator::bucket_slot_of(small + 5), Some((small, 8)));
+        assert_eq!(Allocator::bucket_slot_of(large), None);
 
         Ok(())
     }

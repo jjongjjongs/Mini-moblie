@@ -33,20 +33,50 @@ use crate::{
     value::JavaValue,
 };
 
+/// Pinned objects by identity, each with how many pins hold it.
+type Pins = BTreeMap<usize, (Box<dyn ClassInstance>, usize)>;
+
 struct JvmInner {
     classes: RwLock<BTreeMap<String, Class>>,
     threads: RwLock<BTreeMap<u64, JvmThread>>,
     all_objects: RwLock<HashSet<Box<dyn ClassInstance>>>,
     string_pool: RwLock<BTreeMap<Vec<u16>, Box<dyn ClassInstance>>>,
     monitors: RwLock<BTreeMap<usize, Arc<Monitor>>>,
+    /// Objects something outside the JVM's own frames still holds, by identity,
+    /// with how many [`JvmPin`]s hold each. See [`Jvm::pin`].
+    pins: RwLock<Pins>,
+    /// What [`Jvm::collect_garbage`] runs once it is done. See [`Jvm::set_gc_hook`].
+    gc_hook: RwLock<Option<GcHook>>,
     get_current_thread_id: Box<dyn Fn() -> u64 + Sync + Send>,
     bootstrap_class_loader: Box<dyn BootstrapClassLoader>,
     bootstrapping: AtomicBool,
 }
 
+/// Something an embedder runs after each of the JVM's own collections.
+pub type GcHook = Arc<dyn Fn(&Jvm) + Sync + Send>;
+
 #[derive(Clone)]
 pub struct Jvm {
     inner: Arc<JvmInner>,
+}
+
+/// Keeps an object rooted for as long as it is held. See [`Jvm::pin`].
+#[must_use = "the object is unpinned as soon as this is dropped"]
+pub struct JvmPin {
+    jvm: Jvm,
+    identity: usize,
+}
+
+impl Drop for JvmPin {
+    fn drop(&mut self) {
+        let mut pins = self.jvm.inner.pins.write();
+        if let Some((_, count)) = pins.get_mut(&self.identity) {
+            *count -= 1;
+            if *count == 0 {
+                pins.remove(&self.identity);
+            }
+        }
+    }
 }
 
 impl Jvm {
@@ -62,6 +92,8 @@ impl Jvm {
                 all_objects: RwLock::new(HashSet::new()),
                 string_pool: RwLock::new(BTreeMap::new()),
                 monitors: RwLock::new(BTreeMap::new()),
+                pins: RwLock::new(BTreeMap::new()),
+                gc_hook: RwLock::new(None),
                 get_current_thread_id: Box::new(get_current_thread_id),
                 bootstrap_class_loader: Box::new(bootstrap_class_loader),
                 bootstrapping: AtomicBool::new(true),
@@ -584,6 +616,72 @@ impl Jvm {
         self.inner.string_pool.read().values().map(|x| clone_box(&**x)).collect()
     }
 
+    /// Roots the collector takes besides classes and threads: the interned
+    /// strings and whatever is pinned.
+    fn other_gc_roots(&self) -> Vec<Box<dyn ClassInstance>> {
+        let mut roots = self.interned_strings();
+        roots.extend(self.inner.pins.read().values().map(|(object, _)| clone_box(&**object)));
+
+        roots
+    }
+
+    /// Identities of the objects whose monitor is in use - owned, entered or
+    /// waited on. Such an object is live whatever refers to it: forgetting it
+    /// would drop the monitor out from under the threads using it.
+    fn busy_monitor_identities(&self) -> Vec<usize> {
+        self.inner
+            .monitors
+            .read()
+            .iter()
+            .filter(|(_, monitor)| monitor.is_busy())
+            .map(|(identity, _)| *identity)
+            .collect()
+    }
+
+    /// Roots `object` until the returned pin is dropped.
+    ///
+    /// For an object held only somewhere no collector looks - a task spawned
+    /// to run later, which keeps the object it was handed in its own state.
+    /// Pins of one object nest: it stays rooted until every pin is dropped.
+    pub fn pin(&self, object: &Box<dyn ClassInstance>) -> JvmPin {
+        let identity = object.identity();
+        self.inner.pins.write().entry(identity).or_insert_with(|| (clone_box(&**object), 0)).1 += 1;
+
+        JvmPin { jvm: self.clone(), identity }
+    }
+
+    /// Pins each of `objects` that is not null. See [`Self::pin`].
+    pub fn pin_all<'a>(&self, objects: impl IntoIterator<Item = &'a Option<Box<dyn ClassInstance>>>) -> Vec<JvmPin> {
+        objects.into_iter().flatten().map(|object| self.pin(object)).collect()
+    }
+
+    /// Sets what runs after each [`Self::collect_garbage`] - for an embedder
+    /// that keeps objects in memory of its own and reclaims that memory itself.
+    pub fn set_gc_hook(&self, hook: GcHook) {
+        *self.inner.gc_hook.write() = Some(hook);
+    }
+
+    /// Pushes a native frame holding `objects`, if the calling thread is
+    /// attached, and says whether it did. A caller that gets `true` pops it
+    /// with [`Self::pop_frame`] once done.
+    ///
+    /// For an embedder that calls into the JVM's objects from code of its own:
+    /// what it makes there lands in this frame and is released when the frame
+    /// goes, rather than in whatever frame is under it - which, for a method
+    /// that never returns (a thread's `run` loop), is never.
+    pub fn try_push_native_frame(&self, objects: Vec<Box<dyn ClassInstance>>) -> bool {
+        let thread_id = (self.inner.get_current_thread_id)();
+        let mut threads = self.inner.threads.write();
+        let Some(thread) = threads.get_mut(&thread_id) else {
+            return false;
+        };
+
+        thread.push_native_frame();
+        thread.top_frame_mut().local_variables_mut().extend(objects);
+
+        true
+    }
+
     pub fn has_class(&self, class_name: &str) -> bool {
         self.inner.classes.read().contains_key(class_name)
     }
@@ -831,14 +929,16 @@ impl Jvm {
     pub fn collect_garbage(&self) -> Result<usize> {
         tracing::trace!("Collecting garbage");
 
+        let other_roots = self.other_gc_roots();
+        let busy = self.busy_monitor_identities();
         let garbage = {
             let threads = self.inner.threads.read();
             let all_objects = self.inner.all_objects.read();
             let classes = self.inner.classes.read();
-            let interned_strings = self.interned_strings();
 
-            determine_garbage(self, &threads, &all_objects, &classes, &interned_strings)
+            determine_garbage(self, &threads, &all_objects, &classes, &other_roots)
         };
+        let garbage = garbage.into_iter().filter(|x| !busy.contains(&x.identity())).collect::<Vec<_>>();
 
         let garbage_count = garbage.len();
 
@@ -851,6 +951,11 @@ impl Jvm {
             self.destroy(object).unwrap();
         }
 
+        let hook = self.inner.gc_hook.read().clone();
+        if let Some(hook) = hook {
+            hook(self);
+        }
+
         Ok(garbage_count)
     }
 
@@ -859,11 +964,16 @@ impl Jvm {
     /// a guest heap) can use this to pin objects the JVM still holds and avoid
     /// reclaiming them out from under the JVM.
     pub fn gc_reachable_identities(&self) -> Vec<usize> {
-        let threads = self.inner.threads.read();
-        let classes = self.inner.classes.read();
-        let interned_strings = self.interned_strings();
+        let other_roots = self.other_gc_roots();
+        let mut identities = {
+            let threads = self.inner.threads.read();
+            let classes = self.inner.classes.read();
 
-        reachable_identities(self, &threads, &classes, &interned_strings)
+            reachable_identities(self, &threads, &classes, &other_roots)
+        };
+        identities.extend(self.busy_monitor_identities());
+
+        identities
     }
 
     pub(crate) async fn register_class_internal(&self, class: Class, class_loader_wrapper: Option<&dyn ClassLoaderWrapper>) -> Result<()> {
@@ -1122,18 +1232,33 @@ impl Jvm {
             self.monitor_enter(object).await?;
         }
 
-        self.inner
-            .threads
-            .write()
-            .get_mut(&thread_id)
-            .unwrap()
-            .push_java_frame(class, class_instance, &method_str);
+        {
+            let mut threads = self.inner.threads.write();
+            let thread = threads.get_mut(&thread_id).unwrap();
+            thread.push_java_frame(class, class_instance, &method_str);
+
+            // The arguments are the callee's to keep alive while it runs: its
+            // caller may hold them nowhere a collector looks.
+            let arguments = args.iter().filter_map(|x| match x {
+                JavaValue::Object(Some(object)) => Some(object.clone()),
+                _ => None,
+            });
+            thread.top_frame_mut().local_variables_mut().extend(arguments);
+        }
 
         let result = method.run(self, args).await;
 
         tracing::trace!("Execute result: {result:?}");
 
-        self.inner.threads.write().get_mut(&thread_id).unwrap().pop_frame();
+        {
+            let mut threads = self.inner.threads.write();
+            let thread = threads.get_mut(&thread_id).unwrap();
+            thread.pop_frame();
+
+            if let Ok(JavaValue::Object(Some(object))) = &result {
+                thread.remember_return(object.clone());
+            }
+        }
 
         if let Some(object) = &synchronized_object
             && let Err(error) = self.monitor_exit(object).await

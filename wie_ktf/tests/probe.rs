@@ -6,6 +6,8 @@
 //! - `WIE_ANNUNCIATOR` - `1` or `0` forces the status strip on or off, as the app's setting does.
 //! - `WIE_BIOS`     - a firmware image whose bitmap faces text is drawn with, as the app does.
 //! - `WIE_RUNS`     - launches over the same storage when the title exits (default 1).
+//! - `WIE_GC_STRESS` - collect the title's objects before every this-many made, to
+//!   shake out a reference the collector misses.
 
 use std::sync::{
     Arc, Mutex,
@@ -150,6 +152,10 @@ fn ktf_probe() {
     // is (`pc:3a376/500,w:1518700`) - see `wie_backend::probe::set_watches`.
     if let Ok(spec) = std::env::var("WIE_WATCH") {
         wie_backend::probe::set_watches(&spec).expect("WIE_WATCH");
+    }
+
+    if let Some(interval) = std::env::var("WIE_GC_STRESS").ok().and_then(|x| x.parse().ok()) {
+        wie_ktf::GC_STRESS_INTERVAL.store(interval, std::sync::atomic::Ordering::Relaxed);
     }
 
     let ticks_limit: u32 = std::env::var("WIE_TICKS").ok().and_then(|x| x.parse().ok()).unwrap_or(4000);

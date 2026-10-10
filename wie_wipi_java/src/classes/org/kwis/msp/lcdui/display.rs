@@ -1,9 +1,9 @@
-use alloc::{boxed::Box, vec};
+use alloc::{boxed::Box, vec, vec::Vec};
 
 use java_class_proto::{JavaFieldProto, JavaMethodProto, MethodBody};
 use java_constants::{FieldAccessFlags, MethodAccessFlags};
 use java_runtime::classes::java::lang::{Object, Runnable, String};
-use jvm::{ClassInstanceRef, JavaError, JavaValue, Jvm, Result as JvmResult, runtime::JavaLangString};
+use jvm::{ClassInstanceRef, JavaError, JavaValue, Jvm, JvmPin, Result as JvmResult, runtime::JavaLangString};
 
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 
@@ -500,6 +500,7 @@ impl Display {
         context.spawn(
             jvm,
             Box::new(DelayedCallSerially {
+                _pins: jvm.pin_all([&this.instance, &runnable.instance]),
                 display: this,
                 runnable,
                 delay: timeout as u64,
@@ -864,6 +865,8 @@ struct DelayedCallSerially {
     display: ClassInstanceRef<Display>,
     runnable: ClassInstanceRef<Runnable>,
     delay: u64,
+    /// `display` and `runnable`, which only this task holds while it waits.
+    _pins: Vec<JvmPin>,
 }
 
 #[async_trait::async_trait]

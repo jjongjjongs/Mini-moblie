@@ -698,7 +698,25 @@ where
         let mut context = self.context.clone();
         let (_, lr) = core.read_pc_lr()?;
 
+        // The body runs in a frame of its own, holding the objects it was
+        // handed: what it makes lands there and goes when it returns, rather
+        // than piling up for good in the frame of a title's `run` loop that
+        // called it, and an argument that the caller kept nowhere else - only
+        // in the registers it passed it in - stays rooted for the call.
+        let objects = args
+            .iter()
+            .filter_map(|x| match x {
+                JavaValue::Object(Some(object)) => Some(object.clone()),
+                _ => None,
+            })
+            .collect();
+        let framed = self.jvm.try_push_native_frame(objects);
+
         let result = self.body.call(&self.jvm, &mut context, args.into_boxed_slice()).await;
+
+        if framed {
+            self.jvm.pop_frame();
+        }
         if let Err(JavaError::JavaException(x)) = result {
             // if we executed this from rust code, we should propagate this down
             if lr == RUN_FUNCTION_LR {

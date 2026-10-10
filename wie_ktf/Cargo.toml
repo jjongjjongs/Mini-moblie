@@ -19,6 +19,7 @@ bitflags = { workspace = true }
 bytemuck = { workspace = true }
 encoding_rs = { version = "^0.8", default-features = false, features = ["alloc"] }
 futures = { workspace = true }
+hashbrown = { version = "^0.17", features = ["default-hasher"], default-features = false }
 spin = { workspace = true }
 tracing = { workspace = true }
 

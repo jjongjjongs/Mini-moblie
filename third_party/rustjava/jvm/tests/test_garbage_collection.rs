@@ -110,3 +110,32 @@ async fn test_garbage_collection_hashtable() -> JvmResult<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_pinned_object_survives_until_unpinned() -> JvmResult<()> {
+    let jvm = test_jvm().await?;
+    jvm.push_native_frame();
+    let _ = jvm.resolve_class("java/util/Random").await?;
+    jvm.pop_frame();
+    jvm.collect_garbage()?;
+
+    // Held only by something outside the JVM's frames - a task spawned to run
+    // later - so the pin is all that keeps it.
+    jvm.push_native_frame();
+    let random = jvm.new_class("java/util/Random", "()V", ()).await?;
+    let pin = jvm.pin(&random);
+    let second_pin = jvm.pin(&random);
+    jvm.pop_frame();
+
+    assert_eq!(jvm.collect_garbage()?, 0);
+    assert!(jvm.gc_reachable_identities().contains(&random.identity()));
+
+    // Pins nest: one dropped still leaves it rooted.
+    drop(pin);
+    assert_eq!(jvm.collect_garbage()?, 0);
+
+    drop(second_pin);
+    assert_eq!(jvm.collect_garbage()?, 1);
+
+    Ok(())
+}

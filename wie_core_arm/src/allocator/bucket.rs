@@ -1,4 +1,4 @@
-use alloc::vec;
+use alloc::{vec, vec::Vec};
 
 use wie_util::{ByteRead, ByteWrite, Result, WieError};
 
@@ -11,9 +11,9 @@ pub const BUCKET_MAX: usize = 512;
 // inside the 128 MB BucketAllocator half of the heap; total layout is
 // ~0x7C6A000 (~124 MB), leaving ~3.5 MB of intentional slack.
 //
-// Eight bytes is every KTF object's header, and a KTF title's objects are
-// never given back, so that bucket runs out first: 학교가는길 builds some
-// fifty strings a frame and filled half a million slots in its shop.
+// Eight bytes is every KTF object's header, so that bucket is the busiest:
+// 학교가는길 builds some fifty strings a frame and filled half a million
+// slots in its shop before `wie_ktf`'s collector gave dead objects back.
 const BUCKETS: [(usize, usize); 8] = [
     (4, 0x100000),
     (8, 0x100000),
@@ -215,6 +215,82 @@ impl BucketAllocator {
         Ok(())
     }
 
+    /// The slot `address` falls in, as its start and size, if it falls in one.
+    pub fn slot_of(base_address: u32, address: u32) -> Option<(u32, u32)> {
+        for (bucket_index, &(slot_size, slot_count)) in BUCKETS.iter().enumerate() {
+            let slots_start = base_address + region_offset(bucket_index) as u32 + header_length(bucket_index) as u32;
+            let slots_end = slots_start + slot_size as u32 * slot_count as u32;
+
+            if address >= slots_start && address < slots_end {
+                let slot_size = slot_size as u32;
+                return Some((address - (address - slots_start) % slot_size, slot_size));
+            }
+        }
+
+        None
+    }
+
+    /// Hands every allocated slot whose start `skip` does not want to `visit`,
+    /// with its bytes.
+    ///
+    /// The slots are read a run at a time rather than one by one, since there
+    /// can be millions of them and each read of guest memory has a cost of its
+    /// own.
+    pub fn scan_live_blocks(core: &ArmCore, base_address: u32, skip: &mut dyn FnMut(u32) -> bool, visit: &mut dyn FnMut(u32, &[u8])) -> Result<()> {
+        /// How many bytes of slots are read at once.
+        const RUN: usize = 0x10000;
+
+        for (bucket_index, &(slot_size, _)) in BUCKETS.iter().enumerate() {
+            let header_address = base_address + region_offset(bucket_index) as u32;
+            let header_len = header_length(bucket_index);
+            let slots_start = header_address + header_len as u32;
+
+            let mut header = vec![0u8; header_len];
+            core.read_bytes(header_address, &mut header)?;
+
+            let slots_per_run = RUN / slot_size;
+            let mut run = vec![0u8; RUN];
+            let mut wanted = Vec::with_capacity(slots_per_run);
+            let total_slots = header_len * 8;
+
+            let mut first = 0;
+            while first < total_slots {
+                let count = slots_per_run.min(total_slots - first);
+
+                // Whole bytes of the bitmap that are all ones are free slots.
+                wanted.clear();
+                let mut slot = first;
+                while slot < first + count {
+                    let byte = header[slot / 8];
+                    if byte == 0xff && slot.is_multiple_of(8) {
+                        slot += 8;
+                        continue;
+                    }
+                    if byte & (1 << (slot % 8)) == 0 {
+                        let address = slots_start + (slot * slot_size) as u32;
+                        if !skip(address) {
+                            wanted.push(slot - first);
+                        }
+                    }
+                    slot += 1;
+                }
+
+                if !wanted.is_empty() {
+                    let length = count * slot_size;
+                    core.read_bytes(slots_start + (first * slot_size) as u32, &mut run[..length])?;
+                    for &index in &wanted {
+                        let offset = index * slot_size;
+                        visit(slots_start + ((first + index) * slot_size) as u32, &run[offset..offset + slot_size]);
+                    }
+                }
+
+                first += count;
+            }
+        }
+
+        Ok(())
+    }
+
     fn find_bucket_index(size: u32) -> usize {
         BUCKETS.iter().position(|&(s, _)| size as usize <= s).unwrap_or(BUCKETS.len() - 1)
     }
@@ -231,8 +307,8 @@ mod tests {
     // Bucket 0 (4-byte): header_length = 0x100000 / 8 = 0x20000.
     //   First slot at base + 0x20000 = 0x40020000.
     // Bucket 1 (8-byte): region_offset = 0x20000 + 4*0x100000 = 0x420000.
-    //   header_length = 0x80000 / 8 = 0x10000.
-    //   First slot at base + 0x420000 + 0x10000 = 0x40430000.
+    //   header_length = 0x100000 / 8 = 0x20000.
+    //   First slot at base + 0x420000 + 0x20000 = 0x40440000.
 
     #[test]
     fn allocation_size_recovers_bucket_slot_capacity() -> Result<()> {
@@ -271,16 +347,16 @@ mod tests {
         assert_eq!(address4, 0x40020004);
 
         let address5 = BucketAllocator::alloc(&mut core, 0x40000000, 5)?;
-        assert_eq!(address5, 0x40430000);
+        assert_eq!(address5, 0x40440000);
 
         let address6 = BucketAllocator::alloc(&mut core, 0x40000000, 6)?;
-        assert_eq!(address6, 0x40430008);
+        assert_eq!(address6, 0x40440008);
 
         let address7 = BucketAllocator::alloc(&mut core, 0x40000000, 7)?;
-        assert_eq!(address7, 0x40430010);
+        assert_eq!(address7, 0x40440010);
 
         let address8 = BucketAllocator::alloc(&mut core, 0x40000000, 8)?;
-        assert_eq!(address8, 0x40430018);
+        assert_eq!(address8, 0x40440018);
 
         Ok(())
     }

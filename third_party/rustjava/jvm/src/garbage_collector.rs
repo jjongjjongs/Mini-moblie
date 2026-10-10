@@ -3,22 +3,27 @@ use java_constants::FieldAccessFlags;
 
 use hashbrown::{HashSet, hash_set::Entry};
 
-use crate::{ClassDefinition, ClassInstance, Field, JavaValue, Jvm, class_loader::Class, thread::JvmThread};
+use crate::{
+    ClassDefinition, ClassInstance, Field, JavaValue, Jvm,
+    class_loader::Class,
+    thread::{JvmThread, StackFrame},
+};
 
 pub fn determine_garbage(
     jvm: &Jvm,
     threads: &BTreeMap<u64, JvmThread>,
     all_class_instances: &HashSet<Box<dyn ClassInstance>>,
     classes: &BTreeMap<String, Class>,
-    interned_strings: &[Box<dyn ClassInstance>],
+    other_roots: &[Box<dyn ClassInstance>],
 ) -> Vec<Box<dyn ClassInstance>> {
-    let reachable_objects = compute_reachable_objects(jvm, threads, classes, interned_strings);
+    let reachable_objects = compute_reachable_objects(jvm, threads, classes, other_roots);
 
     all_class_instances.difference(&reachable_objects).cloned().collect()
 }
 
 /// The set of object identities reachable from the JVM's own GC roots (static
-/// fields, live thread stack frames, `Thread` objects, and interned strings).
+/// fields, live thread stack frames and what they recently got back, `Thread`
+/// objects, and `other_roots`: interned strings and pinned objects).
 ///
 /// This exposes reachability without destroying anything, so an embedder that
 /// tracks a separate (e.g. guest-side) object graph can pin objects the JVM
@@ -28,9 +33,9 @@ pub fn reachable_identities(
     jvm: &Jvm,
     threads: &BTreeMap<u64, JvmThread>,
     classes: &BTreeMap<String, Class>,
-    interned_strings: &[Box<dyn ClassInstance>],
+    other_roots: &[Box<dyn ClassInstance>],
 ) -> Vec<usize> {
-    let reachable_objects = compute_reachable_objects(jvm, threads, classes, interned_strings);
+    let reachable_objects = compute_reachable_objects(jvm, threads, classes, other_roots);
 
     reachable_objects.iter().map(|x| x.identity()).collect()
 }
@@ -39,7 +44,7 @@ fn compute_reachable_objects(
     jvm: &Jvm,
     threads: &BTreeMap<u64, JvmThread>,
     classes: &BTreeMap<String, Class>,
-    interned_strings: &[Box<dyn ClassInstance>],
+    other_roots: &[Box<dyn ClassInstance>],
 ) -> HashSet<Box<dyn ClassInstance>> {
     let mut reachable_objects = HashSet::new();
 
@@ -55,11 +60,27 @@ fn compute_reachable_objects(
             find_reachable_objects(jvm, x, &mut reachable_objects);
         });
 
+    // A running method's receiver is live for as long as it runs.
+    threads
+        .values()
+        .flat_map(|thread| thread.iter_frame())
+        .filter_map(|frame| match frame {
+            StackFrame::Java(java_frame) => java_frame.class_instance.as_ref(),
+            StackFrame::Native(_) => None,
+        })
+        .for_each(|x| {
+            find_reachable_objects(jvm, x, &mut reachable_objects);
+        });
+
+    threads.values().flat_map(|thread| thread.recent_returns()).for_each(|x| {
+        find_reachable_objects(jvm, x, &mut reachable_objects);
+    });
+
     threads.values().filter_map(|thread| thread.java_thread()).for_each(|x| {
         find_reachable_objects(jvm, x, &mut reachable_objects);
     });
 
-    interned_strings.iter().for_each(|x| {
+    other_roots.iter().for_each(|x| {
         find_reachable_objects(jvm, x, &mut reachable_objects);
     });
 

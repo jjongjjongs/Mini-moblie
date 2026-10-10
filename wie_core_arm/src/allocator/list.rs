@@ -3,7 +3,7 @@ use core::mem::size_of;
 
 use bytemuck::{Pod, Zeroable};
 
-use wie_util::{Result, WieError, read_generic, write_generic};
+use wie_util::{ByteRead, Result, WieError, read_generic, write_generic};
 
 use crate::core::ArmCore;
 
@@ -97,6 +97,40 @@ impl ListAllocator {
 
         let header = ListAllocationHeader::new(header.size(), false);
         write_generic(core, base_address, header)?;
+
+        Ok(())
+    }
+
+    /// Hands every block in use whose start `skip` does not want to `visit`,
+    /// with its bytes - the payload, without the header or the canary.
+    pub fn scan_live_blocks(
+        core: &ArmCore,
+        base_address: u32,
+        base_size: u32,
+        skip: &mut dyn FnMut(u32) -> bool,
+        visit: &mut dyn FnMut(u32, &[u8]),
+    ) -> Result<()> {
+        let end = base_address + base_size;
+        let mut cursor = base_address;
+        let mut buffer = Vec::new();
+
+        while cursor < end {
+            let header: ListAllocationHeader = read_generic(core, cursor)?;
+            let block = header.size();
+            if block == 0 {
+                return Err(WieError::FatalError(format!("Invalid allocation header at {cursor:#x}")));
+            }
+
+            let payload = cursor + size_of::<ListAllocationHeader>() as u32;
+            let payload_size = block.saturating_sub(size_of::<ListAllocationHeader>() as u32 + CANARY_SIZE);
+            if header.in_use() && !skip(payload) {
+                buffer.resize(payload_size as usize, 0);
+                core.read_bytes(payload, &mut buffer)?;
+                visit(payload, &buffer);
+            }
+
+            cursor += block;
+        }
 
         Ok(())
     }

@@ -1,10 +1,10 @@
-use alloc::{boxed::Box, vec};
+use alloc::{boxed::Box, vec, vec::Vec};
 
 use java_class_proto::{JavaFieldProto, JavaMethodProto, MethodBody};
 use java_constants::{FieldAccessFlags, MethodAccessFlags};
 use java_runtime::classes::{java::io::InputStream, java::lang::String};
 use jvm::{
-    Array, ClassInstanceRef, JavaError, JavaValue, Jvm, Result as JvmResult,
+    Array, ClassInstanceRef, JavaError, JavaValue, Jvm, JvmPin, Result as JvmResult,
     runtime::{JavaIoInputStream, JavaLangString},
 };
 
@@ -185,6 +185,7 @@ impl Image {
         context.spawn(
             jvm,
             Box::new(ImageLoadRunner {
+                _pins: jvm.pin_all([&image.instance, &Some(source.clone()), &observer.instance]),
                 image: image.clone(),
                 name: source.into(),
                 observer,
@@ -787,7 +788,15 @@ impl Image {
 
         Self::add_active_animation(jvm, &image).await?;
 
-        context.spawn(jvm, Box::new(ImageAnimationRunner { image, observer, generation }))?;
+        context.spawn(
+            jvm,
+            Box::new(ImageAnimationRunner {
+                _pins: jvm.pin_all([&image.instance, &observer.instance]),
+                image,
+                observer,
+                generation,
+            }),
+        )?;
 
         Ok(())
     }
@@ -998,6 +1007,8 @@ struct ImageAnimationRunner {
     image: ClassInstanceRef<Image>,
     observer: ClassInstanceRef<ImageObserver>,
     generation: i32,
+    /// `image` and `observer`, which the title need not keep itself.
+    _pins: Vec<JvmPin>,
 }
 
 #[async_trait::async_trait]
@@ -1093,6 +1104,8 @@ struct ImageLoadRunner {
     image: ClassInstanceRef<Image>,
     name: ClassInstanceRef<String>,
     observer: ClassInstanceRef<ImageObserver>,
+    /// The three above, which nothing but this task need hold until it runs.
+    _pins: Vec<JvmPin>,
 }
 
 #[async_trait::async_trait]
@@ -1196,6 +1209,7 @@ impl MethodBody<JavaError, WieJvmContext> for ImageLoadRunner {
                         image: self.image.clone(),
                         observer: self.observer.clone(),
                         generation,
+                        _pins: jvm.pin_all([&self.image.instance, &self.observer.instance]),
                     }),
                 )?;
             }

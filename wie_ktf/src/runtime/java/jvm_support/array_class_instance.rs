@@ -106,13 +106,10 @@ impl ClassInstance for JavaArrayClassInstance {
         Box::new(self.class_instance.class().unwrap())
     }
 
+    /// The same object whichever wrapper names it: an array can be looked
+    /// up by a plain instance of its address, which is what the collector has.
     fn equals(&self, other: &dyn ClassInstance) -> JvmResult<bool> {
-        let other = other.as_any().downcast_ref::<JavaArrayClassInstance>();
-        if other.is_none() {
-            return Ok(false);
-        }
-
-        Ok(self.class_instance.ptr_raw == other.unwrap().class_instance.ptr_raw)
+        Ok(self.identity() == other.identity())
     }
 
     fn as_array_instance(&self) -> Option<&dyn ArrayClassInstance> {

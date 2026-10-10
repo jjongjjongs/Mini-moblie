@@ -1,5 +1,6 @@
 use alloc::{
     boxed::Box,
+    collections::VecDeque,
     string::{String, ToString},
     vec::Vec,
 };
@@ -27,9 +28,16 @@ impl StackFrame {
     }
 }
 
+/// How many of the objects most recently returned to a thread stay rooted.
+/// See [`JvmThread::remember_return`].
+const RECENT_RETURNS: usize = 64;
+
 pub struct JvmThread {
     stack: Vec<StackFrame>,
     java_thread: Option<Box<dyn ClassInstance>>,
+    /// The objects most recently handed back to this thread by a method it
+    /// called, newest last.
+    recent_returns: VecDeque<Box<dyn ClassInstance>>,
 }
 
 impl JvmThread {
@@ -37,7 +45,28 @@ impl JvmThread {
         Self {
             stack: Vec::new(),
             java_thread: None,
+            recent_returns: VecDeque::new(),
         }
+    }
+
+    /// Keeps an object a called method returned rooted for a while.
+    ///
+    /// A method's own frame is what roots the objects it makes, and that frame
+    /// is gone the moment it returns - so the object it returns is held by
+    /// nothing but its caller's Rust variable, which no collector can see. A
+    /// caller that keeps it across its next allocation (`String.valueOf`, then
+    /// `new StringBuffer`, then `append`) would have it collected under it.
+    /// Rooting the last few returns covers that window without growing for as
+    /// long as a long-running caller - an event loop - keeps calling.
+    pub fn remember_return(&mut self, object: Box<dyn ClassInstance>) {
+        if self.recent_returns.len() == RECENT_RETURNS {
+            self.recent_returns.pop_front();
+        }
+        self.recent_returns.push_back(object);
+    }
+
+    pub fn recent_returns(&self) -> impl Iterator<Item = &Box<dyn ClassInstance>> {
+        self.recent_returns.iter()
     }
 
     #[allow(clippy::borrowed_box)] // same as jvm.rs; callers pass it to &Box-taking apis

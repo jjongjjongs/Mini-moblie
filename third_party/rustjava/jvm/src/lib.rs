@@ -38,7 +38,7 @@ pub use self::{
     class_loader::BootstrapClassLoader,
     error::JavaError,
     field::Field,
-    jvm::Jvm,
+    jvm::{GcHook, Jvm, JvmPin},
     method::Method,
     monitor::{MonitorWait, MonitorWaitTimeout},
     r#type::JavaType,

@@ -11,3 +11,4 @@ mod runtime;
 
 pub use dump::dump_image;
 pub use emulator::KtfEmulator;
+pub use runtime::GC_STRESS_INTERVAL;

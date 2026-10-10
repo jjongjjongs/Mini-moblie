@@ -70,6 +70,14 @@ struct ProfileState {
 /// async-trait future allocation the generic path pays on every call.
 pub type FastSvcHandler = Arc<dyn Fn(&mut ArmCore, u32, u32) -> Result<bool> + Send + Sync>;
 
+/// See [`ArmCore::gc_stack_roots`].
+#[derive(Default)]
+pub struct GcStackRoots {
+    pub registers: Vec<u32>,
+    pub ranges: Vec<(u32, u32)>,
+    pub stack_blocks: Vec<u32>,
+}
+
 pub(crate) struct ArmCoreInner {
     pub(crate) engine: Box<dyn ArmEngine>,
     last_thread_id: ThreadId,
@@ -115,6 +123,12 @@ pub(crate) struct ArmCoreInner {
     /// handed out above does not outlive its thread. See
     /// [`ArmCore::free_with_thread`].
     thread_owned_allocations: BTreeMap<ThreadId, Vec<(u32, u32)>>,
+    /// Guest memory mapped outside the heap and the function stubs - a loaded
+    /// image, the global data block - as `[start, end)`. See
+    /// [`ArmCore::gc_data_regions`].
+    data_regions: Vec<(u32, u32)>,
+    /// State a platform keeps per core. See [`ArmCore::extension`].
+    extensions: BTreeMap<TypeId, Arc<dyn Any + Send + Sync>>,
 }
 
 /// Upper bound on pooled thread stacks. Peak concurrency is small (a handful),
@@ -195,6 +209,8 @@ impl ArmCore {
             reserved_fp: None,
             thread_fp: BTreeMap::new(),
             thread_owned_allocations: BTreeMap::new(),
+            data_regions: vec![(GLOBAL_DATA_BASE, GLOBAL_DATA_BASE + 0x4000)],
+            extensions: BTreeMap::new(),
         };
 
         let result = Self {
@@ -225,10 +241,10 @@ impl ArmCore {
     pub fn load(&mut self, data: &[u8], address: u32, map_size: usize) -> Result<()> {
         let mut inner = self.inner.lock();
 
-        inner
-            .engine
-            .mem_map(address, map_size.next_multiple_of(0x1000), MemoryPermission::ReadWriteExecute);
+        let map_size = map_size.next_multiple_of(0x1000);
+        inner.engine.mem_map(address, map_size, MemoryPermission::ReadWriteExecute);
         inner.engine.mem_write(address, data)?;
+        inner.data_regions.push((address, address + map_size as u32));
 
         Ok(())
     }
@@ -361,6 +377,54 @@ impl ArmCore {
         }
 
         (registers, ranges)
+    }
+
+    /// What a collector needs from the threads: every thread's registers, the
+    /// part of each stack in use, and every stack block - in use or pooled.
+    ///
+    /// Unlike [`Self::gc_thread_roots`], a thread whose stack pointer is not
+    /// in its own stack - it has stepped onto another to call out - has the
+    /// whole of its stack scanned, since the frames that made that call are
+    /// still on it. The blocks are what a collector walking the heap leaves
+    /// out: a stack's dead part is old values, and a pooled one is all old.
+    pub fn gc_stack_roots(&self) -> GcStackRoots {
+        let current = self.save_context();
+        let current_thread = self.current_thread_id();
+
+        let inner = self.inner.lock();
+
+        let mut roots = GcStackRoots::default();
+
+        // Code run outside any thread - a title's start-up - is on a stack that
+        // is an ordinary heap block, which a heap walk covers; its registers
+        // are only here.
+        if current_thread.is_none() {
+            roots.registers.extend_from_slice(&[
+                current.r0, current.r1, current.r2, current.r3, current.r4, current.r5, current.r6, current.r7, current.r8, current.sb, current.sl,
+                current.fp, current.ip, current.lr, current.sp,
+            ]);
+        }
+
+        for (&thread_id, state) in inner.threads.iter() {
+            let context = if Some(thread_id) == current_thread { &current } else { &state.context };
+
+            roots.registers.extend_from_slice(&[
+                context.r0, context.r1, context.r2, context.r3, context.r4, context.r5, context.r6, context.r7, context.r8, context.sb, context.sl,
+                context.fp, context.ip, context.lr, context.sp,
+            ]);
+
+            let low = state.stack_base as u32;
+            let high = low + state.stack_size as u32;
+            if context.sp >= low && context.sp <= high {
+                roots.ranges.push((context.sp & !3, high));
+            } else {
+                roots.ranges.push((low, high));
+            }
+            roots.stack_blocks.push(low);
+        }
+        roots.stack_blocks.extend_from_slice(&inner.stack_pool);
+
+        roots
     }
 
     /// Makes one guest word private to each thread.
@@ -864,8 +928,34 @@ impl ArmCore {
         let mut inner = self.inner.lock();
 
         inner.engine.mem_map(address, size as usize, MemoryPermission::ReadWrite);
+        if !(HEAP_BASE..HEAP_BASE + HEAP_SIZE).contains(&address) {
+            inner.data_regions.push((address, address + size));
+        }
 
         Ok(())
+    }
+
+    /// Guest memory outside the heap that can hold data - a loaded image with
+    /// its `.data` and `.bss`, the global data block, anything else mapped -
+    /// as `[start, end)` ranges, for a collector to scan for roots.
+    pub fn gc_data_regions(&self) -> Vec<(u32, u32)> {
+        self.inner.lock().data_regions.clone()
+    }
+
+    /// Per-core state of type `T`, made with `T::default()` the first time it
+    /// is asked for.
+    ///
+    /// For a platform that keeps bookkeeping about guest memory - what it
+    /// allocated, and for what - which belongs to this core and no other, and
+    /// which is needed where nothing but the core is at hand.
+    pub fn extension<T>(&self) -> Arc<T>
+    where
+        T: Any + Default + Send + Sync,
+    {
+        let mut inner = self.inner.lock();
+        let entry = inner.extensions.entry(TypeId::of::<T>()).or_insert_with(|| Arc::new(T::default()));
+
+        entry.clone().downcast::<T>().unwrap()
     }
 
     pub fn dump_reg_stack(&self, image_base: u32) -> String {

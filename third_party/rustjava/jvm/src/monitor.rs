@@ -64,6 +64,14 @@ impl Monitor {
         }
     }
 
+    /// Whether a thread owns this monitor, is blocked entering it or waits on
+    /// it - any of which makes its object live, whatever else refers to it.
+    pub(crate) fn is_busy(&self) -> bool {
+        let state = self.state.lock();
+
+        state.owner.is_some() || state.entering > 0 || !state.waiters.is_empty()
+    }
+
     pub(crate) async fn enter(self: &Arc<Self>, thread_id: u64) {
         loop {
             let listener = self.entry_event.listen();
