@@ -573,6 +573,17 @@ struct PadEditor: View {
 
     private static let snap = 0.005
     private static let smallest = 0.05
+    /// The editor's whole area, which every drag is measured in. A drag
+    /// measured on the key it moves was measured in a space that moved with
+    /// the key: each step the key took changed the drag, which moved the key
+    /// again, and the editor locked up redrawing until the app was killed.
+    private static let area = "PadEditor.area"
+
+    /// A drag measured in the editor's area, so moving what it drags leaves
+    /// it as it was.
+    private static func drag() -> DragGesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .named(area))
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -615,6 +626,7 @@ struct PadEditor: View {
                         .position(x: rect.maxX - 4, y: rect.maxY - 4)
                 }
             }
+            .coordinateSpace(name: Self.area)
         }
     }
 
@@ -642,7 +654,7 @@ struct PadEditor: View {
     }
 
     private func moveRing(in size: CGSize) -> some Gesture {
-        DragGesture(minimumDistance: 0)
+        Self.drag()
             .onChanged { value in
                 // A drag starts at no translation. Its end is not always heard
                 // - the view under it can go mid-drag - so a fresh one starts
@@ -655,18 +667,16 @@ struct PadEditor: View {
                 let box = Self.span(start)
                 let dx = Self.snapped(min(max(value.translation.width / size.width, -box.x), 1 - box.x - box.w))
                 let dy = Self.snapped(min(max(value.translation.height / size.height, -box.y), 1 - box.y - box.h))
-                for key in start {
-                    update(key.index) { moved in
-                        moved.x = key.x + dx
-                        moved.y = key.y + dy
-                    }
+                updateAll(start) { key, moved in
+                    moved.x = key.x + dx
+                    moved.y = key.y + dy
                 }
             }
             .onEnded { _ in groupOrigin = nil }
     }
 
     private func resizeRing(in size: CGSize) -> some Gesture {
-        DragGesture(minimumDistance: 0)
+        Self.drag()
             .onChanged { value in
                 if groupOrigin == nil || value.translation == .zero {
                     groupOrigin = ringGroup
@@ -678,13 +688,11 @@ struct PadEditor: View {
                 let height = min(max(box.h + value.translation.height / size.height, Self.smallest * 3), 1 - box.y)
                 let scaleX = width / box.w
                 let scaleY = height / box.h
-                for key in start {
-                    update(key.index) { sized in
-                        sized.x = Self.snapped(box.x + (key.x - box.x) * scaleX)
-                        sized.y = Self.snapped(box.y + (key.y - box.y) * scaleY)
-                        sized.w = Self.snapped(key.w * scaleX)
-                        sized.h = Self.snapped(key.h * scaleY)
-                    }
+                updateAll(start) { key, sized in
+                    sized.x = Self.snapped(box.x + (key.x - box.x) * scaleX)
+                    sized.y = Self.snapped(box.y + (key.y - box.y) * scaleY)
+                    sized.w = Self.snapped(key.w * scaleX)
+                    sized.h = Self.snapped(key.h * scaleY)
                 }
             }
             .onEnded { _ in groupOrigin = nil }
@@ -705,7 +713,7 @@ struct PadEditor: View {
     }
 
     private func move(_ key: PadKey, in size: CGSize) -> some Gesture {
-        DragGesture(minimumDistance: 0)
+        Self.drag()
             .onChanged { value in
                 if origin?.index != key.index || value.translation == .zero {
                     origin = key
@@ -721,7 +729,7 @@ struct PadEditor: View {
     }
 
     private func resize(_ key: PadKey, in size: CGSize) -> some Gesture {
-        DragGesture(minimumDistance: 0)
+        Self.drag()
             .onChanged { value in
                 if origin?.index != key.index || value.translation == .zero {
                     origin = key
@@ -738,6 +746,17 @@ struct PadEditor: View {
     private func update(_ index: Int32, _ change: (inout PadKey) -> Void) {
         guard let position = layout.keys.firstIndex(where: { $0.index == index }) else { return }
         change(&layout.keys[position])
+    }
+
+    /// Changes each of `keys`, given as it was, on the layout in one write,
+    /// so the disc's five keys redraw the editor once and not five times.
+    private func updateAll(_ keys: [PadKey], _ change: (PadKey, inout PadKey) -> Void) {
+        var changed = layout
+        for key in keys {
+            guard let position = changed.keys.firstIndex(where: { $0.index == key.index }) else { continue }
+            change(key, &changed.keys[position])
+        }
+        layout = changed
     }
 
     private static func snapped(_ value: Double) -> Double {
