@@ -7,6 +7,7 @@ mod context;
 mod core;
 mod engine;
 mod function;
+mod sprite_blit;
 pub mod stdlib;
 mod thread;
 mod thread_wrapper;
@@ -76,4 +77,5 @@ pub use self::{
     core::{ArmCore, GcStackRoots, HEAP_BASE, HEAP_SIZE, RUN_FUNCTION_LR, RunFunctionResult},
     engine::SvcIntrinsic,
     function::{EmulatedFunction, EmulatedFunctionParam, RegisteredFunction, RegisteredFunctionHolder, ResultWriter, SvcId},
+    sprite_blit::install_sprite_blits,
 };

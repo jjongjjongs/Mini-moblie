@@ -631,3 +631,32 @@ mod probe_tests {
         assert!(!probe::is_armed());
     }
 }
+
+impl crate::sprite_blit::BlitMemory for EmulatedMemory {
+    #[inline(always)]
+    fn byte(&self, address: u32) -> Option<u8> {
+        self.load_u8(address)
+    }
+
+    #[inline(always)]
+    fn half(&self, address: u32) -> Option<u16> {
+        if address & 1 == 0 {
+            self.load_u16(address)
+        } else {
+            // Across a page, possibly: a byte at a time.
+            Some(self.load_u8(address)? as u16 | (self.load_u8(address.wrapping_add(1))? as u16) << 8)
+        }
+    }
+
+    #[inline(always)]
+    fn set_half(&mut self, address: u32, value: u16) -> Option<()> {
+        if address & 1 == 0 {
+            self.store_u16(address, value)
+        } else {
+            // Both bytes have to be there before either is written.
+            self.load_u8(address.wrapping_add(1))?;
+            self.store_u8(address, value as u8)?;
+            self.store_u8(address.wrapping_add(1), (value >> 8) as u8)
+        }
+    }
+}

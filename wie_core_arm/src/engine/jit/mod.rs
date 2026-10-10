@@ -800,6 +800,10 @@ impl JitEngine {
     /// left alone, for the handler to report the way it always has; checking
     /// before writing anything means a declined call has not half happened.
     fn run_intrinsic(&mut self, kind: SvcIntrinsic) -> bool {
+        if matches!(kind, SvcIntrinsic::SpriteRle | SvcIntrinsic::SpriteRleClipped) {
+            return self.run_sprite_blit(kind);
+        }
+
         let [dst, source, len] = [self.ctx.regs[0], self.ctx.regs[1], self.ctx.regs[2]];
 
         // A word wherever it is, aligned or not, or `None` where nothing is
@@ -898,6 +902,29 @@ impl JitEngine {
 
         // A write over compiled code drops it, as any host-side write does.
         self.invalidate_range(dst, len as usize);
+        crate::INTRINSIC_CALLS.fetch_add(1, ::core::sync::atomic::Ordering::Relaxed);
+
+        true
+    }
+
+    /// A sprite blit drawn straight into guest memory. One that would touch
+    /// what is not mapped is declined, for the handler to draw again and
+    /// report; the pixels drawn before that are the ones it draws first.
+    fn run_sprite_blit(&mut self, kind: SvcIntrinsic) -> bool {
+        let regs = [self.ctx.regs[0], self.ctx.regs[1], self.ctx.regs[2], self.ctx.regs[3]];
+        let sp = self.ctx.regs[13];
+        let mem = &self.mem;
+        let Some(blit) = crate::sprite_blit::Blit::from_entry(kind, regs, |offset| mem.load_u32(sp.wrapping_add(offset)).filter(|_| sp & 3 == 0))
+        else {
+            return false;
+        };
+
+        let Ok((low, high)) = blit.run(&mut *self.mem) else {
+            return false;
+        };
+
+        // A write over compiled code drops it, as any host-side write does.
+        self.invalidate_range(low, (high - low) as usize);
         crate::INTRINSIC_CALLS.fetch_add(1, ::core::sync::atomic::Ordering::Relaxed);
 
         true
@@ -1927,6 +1954,101 @@ mod tests {
         // It went on past the svc, with the destination still in r0.
         assert_eq!(e.reg_read(ArmRegister::R3), 9);
         assert_eq!(e.reg_read(ArmRegister::R0), DATA + 0x100);
+    }
+
+    /// A sprite stream with every kind of code the blitter reads: transparent
+    /// skips, runs, an empty run, row breaks and the end mark.
+    fn sprite_codes() -> Vec<u8> {
+        let push = |codes: &mut Vec<u8>, code: u16| codes.extend_from_slice(&code.to_le_bytes());
+        let mut codes = Vec::new();
+        for row in 0..7u16 {
+            push(&mut codes, row % 3);
+            push(&mut codes, 0x8000 | (5 + row));
+            for index in 0..(5 + row) {
+                codes.push((row * 31 + index * 7) as u8);
+            }
+            push(&mut codes, 2);
+            push(&mut codes, 0x8000);
+            push(&mut codes, 0x8003);
+            codes.extend_from_slice(&[0xff, 0x00, 0x80]);
+            push(&mut codes, 0xfffe);
+        }
+        push(&mut codes, 0xffff);
+        codes
+    }
+
+    /// Draws `codes` with the title's own routine and with the native blit,
+    /// checks both leave the same screen and the same callee registers, and
+    /// says whether they drew anything.
+    fn assert_blit_matches(routine: &[u8], kind: SvcIntrinsic, clip: Option<[u32; 4]>) -> bool {
+        const END: u32 = CODE + 0x400;
+        const PALETTE: u32 = DATA;
+        const CODES: u32 = DATA + 0x1000;
+        const SCREEN: u32 = DATA + 0x4000;
+        const SCREEN_BYTES: usize = 0x2000;
+        const STACK: u32 = DATA + 0x8000;
+
+        let mut regs = [0u32; 15];
+        regs[0] = SCREEN + 0x40;
+        regs[1] = CODES;
+        regs[2] = PALETTE;
+        regs[3] = 24;
+        regs[4] = 0x4444;
+        regs[5] = 0x5555;
+        regs[6] = 0x6666;
+        regs[7] = 0x7777;
+        regs[13] = STACK;
+        regs[14] = END | 1;
+
+        let palette: Vec<u8> = (0..256u32).flat_map(|i| ((i * 0x9e37) as u16 | 1).to_le_bytes()).collect();
+        let stack: Vec<u8> = clip.unwrap_or_default().iter().flat_map(|w| w.to_le_bytes()).collect();
+
+        let draw = |code: &[u8], intrinsic: bool| {
+            let mut e = setup(JitEngine::new(), code, &regs);
+            // System mode, as the core runs a title's code in - the routine
+            // pushes, and the stack it pushes on is that mode's.
+            let cpsr = e.reg_read(ArmRegister::Cpsr);
+            e.reg_write(ArmRegister::Cpsr, (cpsr & !0x3f) | 0x1f | 0x20);
+            e.reg_write(ArmRegister::SP, STACK);
+            e.reg_write(ArmRegister::LR, END | 1);
+            e.mem_write(PALETTE, &palette).unwrap();
+            e.mem_write(CODES, &sprite_codes()).unwrap();
+            e.mem_write(SCREEN, &[0xaa; SCREEN_BYTES]).unwrap();
+            e.mem_write(STACK, &stack).unwrap();
+            if intrinsic {
+                e.set_svc_intrinsic(CODE, kind);
+            }
+            run_to_end(&mut e, END);
+
+            let mut screen = vec![0u8; SCREEN_BYTES];
+            e.mem_read(SCREEN, SCREEN_BYTES, &mut screen).unwrap();
+            let kept = [ArmRegister::R4, ArmRegister::R5, ArmRegister::R6, ArmRegister::R7, ArmRegister::SP].map(|r| e.reg_read(r));
+            (screen, kept)
+        };
+
+        let (theirs, their_regs) = draw(routine, false);
+        let (ours, our_regs) = draw(&crate::sprite_blit::ENTRY, true);
+        assert_eq!(ours, theirs);
+        assert_eq!(our_regs, their_regs);
+
+        theirs.iter().any(|&b| b != 0xaa)
+    }
+
+    #[test]
+    fn the_native_sprite_blit_draws_what_the_titles_routine_draws() {
+        assert!(assert_blit_matches(crate::sprite_blit::PLAIN, SvcIntrinsic::SpriteRle, None));
+        // Inside, across each edge, then below the sprite and right of it,
+        // where nothing is drawn.
+        let clips = [
+            [0, 64, 0, 64],
+            [3, 4, 2, 3],
+            [0u32.wrapping_sub(2), 6, 0, 7],
+            [6, 100, 5, 1],
+            [0, 64, 9, 4],
+            [40, 8, 0, 64],
+        ];
+        let drawn = clips.map(|clip| assert_blit_matches(crate::sprite_blit::CLIPPED, SvcIntrinsic::SpriteRleClipped, Some(clip)));
+        assert_eq!(drawn, [true, true, true, true, false, false]);
     }
 
     #[test]

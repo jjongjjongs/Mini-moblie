@@ -4407,6 +4407,12 @@ pub async fn load_native(
         ranges: image_ranges,
         writable_ranges,
     } = load_executable(core, data)?;
+
+    // Gamevil's titles draw every sprite through one small routine, and in a
+    // 제노니아2 field that routine was more than half of everything the title
+    // ran. Where a title carries it, it is answered natively.
+    wie_core_arm::install_sprite_blits(core, &image_ranges)?;
+
     let save_points = SavePointState::default();
 
     // Native dlet_main derives property 200 by removing the 11-byte

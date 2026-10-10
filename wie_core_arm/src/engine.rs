@@ -45,6 +45,12 @@ pub enum SvcIntrinsic {
     /// A fixed answer in r0, whatever the arguments: a getter of a value the
     /// platform never changes.
     Constant(u32),
+    /// Gamevil's run-length sprite blit: `r0` the destination, `r1` the codes,
+    /// `r2` the palette and `r3` the row stride in pixels - see
+    /// [`crate::sprite_blit`].
+    SpriteRle,
+    /// The same, clipped to the rectangle in the four words on the stack.
+    SpriteRleClipped,
 }
 
 pub enum EngineRunResult {
