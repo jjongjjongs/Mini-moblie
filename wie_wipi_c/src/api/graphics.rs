@@ -3308,7 +3308,6 @@ pub async fn draw_rect(context: &mut dyn WIPICContext, dst: WIPICIndirectPtr, x:
     let gctx = read_drawing_context(context, context.graphics_context_layout(), pgc)?;
     let (offset_x, offset_y) = context_offset(&gctx);
     let (x, y) = (x + offset_x, y + offset_y);
-    let mut canvas = framebuffer.canvas(context)?;
 
     let clip = Clip {
         x: x as _,
@@ -3319,10 +3318,62 @@ pub async fn draw_rect(context: &mut dyn WIPICContext, dst: WIPICIndirectPtr, x:
     .intersect(&context_clip(&gctx));
 
     let color = context_color(&framebuffer, &gctx);
+
+    // An outline is four thin rectangles, and an opaque one is only bytes, the
+    // way `MC_grpFillRect` writes them. The canvas path staged the whole
+    // surface for it - every byte out of guest memory, a pixel buffer, and a
+    // whole-surface comparison back - for a few dozen pixels. 제노니아2 draws
+    // two to three hundred of these a second in a fight, its health bars and
+    // frames.
+    if color.a == 0xff && draw_rect_direct(context, &framebuffer, &clip, x, y, w, h, color)? {
+        return Ok(());
+    }
+
+    let mut canvas = framebuffer.canvas(context)?;
     canvas.draw_rect(x as _, y as _, w as _, h as _, color, clip);
     canvas.flush()?;
 
     Ok(())
+}
+
+/// Writes an opaque outline straight into the framebuffer: the pixels the
+/// canvas's `draw_rect` plots, as the rectangles they make - the whole of it
+/// when it is a pixel thick, else its bottom and top rows and the columns
+/// between them - each cut to `clip`. The canvas also drops what falls off the
+/// surface, which `fill_rect_direct` does too.
+///
+/// `false`, with nothing written, when the surface is not one
+/// `fill_rect_direct` can address. The rectangles go furthest into the buffer
+/// first, so the first one is the one that would be refused.
+#[allow(clippy::too_many_arguments)]
+fn draw_rect_direct(
+    context: &mut dyn WIPICContext,
+    framebuffer: &FrameBuffer,
+    clip: &Clip,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    color: Color,
+) -> Result<bool> {
+    let right = x.wrapping_add(w - 1);
+    let bottom = y.wrapping_add(h - 1);
+    let rects = if w == 1 || h == 1 {
+        vec![(x, y, w, h)]
+    } else {
+        vec![(x, bottom, w, 1), (right, y + 1, 1, h - 2), (x, y + 1, 1, h - 2), (x, y, w, 1)]
+    };
+
+    for (left, top, width, height) in rects {
+        let Some((left, top, width, height)) = clipped_rect(clip, left, top, width, height) else {
+            continue;
+        };
+        if !framebuffer.fill_rect_direct(context, left, top, width as _, height as _, color)? {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
 }
 
 pub async fn draw_line(context: &mut dyn WIPICContext, dst: WIPICIndirectPtr, x1: i32, y1: i32, x2: i32, y2: i32, pgc: WIPICWord) -> Result<()> {
@@ -4578,6 +4629,73 @@ mod tests {
 
         let untouched = drawn.get_pixel(1, 1);
         assert_eq!((untouched.r, untouched.g, untouched.b), (0, 0, 0));
+    }
+
+    /// An opaque outline written straight into the framebuffer covers the
+    /// pixels the canvas plots for it, whatever the clip and wherever it sits
+    /// against the surface's edges.
+    #[futures_test::test]
+    async fn an_outline_drawn_directly_matches_the_canvas() {
+        use wie_backend::canvas::Clip;
+
+        let mut context = test_context();
+        let pgc_handle = context.alloc(core::mem::size_of::<super::WIPICGraphicsContext>() as u32).unwrap();
+        let pgc = context.data_ptr(pgc_handle).unwrap();
+        init_context(&mut context, pgc).await.unwrap();
+        set_context(&mut context, pgc, Idx::FgPixelIdx, 0xff12_3456).await.unwrap();
+
+        let direct = framebuffer_of(&mut context, 7, 6, &[0xff00_0000; 42]).await;
+        let staged = framebuffer_of(&mut context, 7, 6, &[0xff00_0000; 42]).await;
+        let blank = alloc::vec![0u8; 7 * 6 * 4];
+
+        let rects = [
+            (1, 1, 4, 3),
+            (0, 0, 7, 6),
+            (-2, -1, 5, 4),
+            (3, 2, 9, 9),
+            (2, 2, 1, 3),
+            (1, 3, 4, 1),
+            (2, 1, 2, 2),
+            (5, 4, 3, 3),
+        ];
+        let clips = [(0, 0, 7, 6), (1, 0, 4, 6), (0, 2, 7, 4), (2, 1, 4, 3)];
+        let mut drawn = 0;
+        for (x, y, w, h) in rects {
+            for (cx1, cy1, cx2, cy2) in clips {
+                set_clip(&mut context, pgc, cx1, cy1, cx2, cy2).await;
+                for surface in [direct, staged] {
+                    let surface = super::FrameBuffer(read_generic(&context, context.data_ptr(surface).unwrap()).unwrap());
+                    surface.write(&mut context, &blank).unwrap();
+                }
+
+                super::draw_rect(&mut context, direct, x, y, w, h, pgc).await.unwrap();
+
+                // The canvas path, as `draw_rect` takes it for a colour that
+                // is not opaque.
+                let gctx = super::read_drawing_context(&context, context.graphics_context_layout(), pgc).unwrap();
+                let handle = super::FrameBuffer(read_generic(&context, context.data_ptr(staged).unwrap()).unwrap());
+                let clip = Clip {
+                    x,
+                    y,
+                    width: w as _,
+                    height: h as _,
+                }
+                .intersect(&super::context_clip(&gctx));
+                let color = super::context_color(&handle, &gctx);
+                assert_eq!(color.a, 0xff, "an opaque colour, which is what goes direct");
+                let mut canvas = handle.canvas(&mut context).unwrap();
+                canvas.draw_rect(x, y, w as _, h as _, color, clip);
+                canvas.flush().unwrap();
+
+                let ours = super::FrameBuffer(read_generic(&context, context.data_ptr(direct).unwrap()).unwrap())
+                    .data(&context)
+                    .unwrap();
+                let theirs = handle.data(&context).unwrap();
+                assert_eq!(ours, theirs, "rect {:?} clip {:?}", (x, y, w, h), (cx1, cy1, cx2, cy2));
+                drawn += usize::from(theirs != blank);
+            }
+        }
+        assert!(drawn > 20, "only {drawn} of the cases drew anything");
     }
 
     /// A primitive is drawn relative to the context's offset.
