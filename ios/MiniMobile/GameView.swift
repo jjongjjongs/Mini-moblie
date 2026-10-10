@@ -343,23 +343,8 @@ struct GameView: View {
         GeometryReader { geometry in
             ZStack(alignment: alignment) {
                 Color.black
-                if let frame = emulator.frame {
-                    // The title's own pixels, however many of the frame's each
-                    // takes once doubled through hq2x.
-                    let pixels = CGSize(
-                        width: CGFloat(frame.width) / CGFloat(emulator.frameScale),
-                        height: CGFloat(frame.height) / CGFloat(emulator.frameScale)
-                    )
-                    let size = scale.size(of: pixels, in: geometry.size)
-                    Image(decorative: frame, scale: 1)
-                        .interpolation(quality == .dot ? .none : .high)
-                        .antialiased(quality != .dot)
-                        .resizable()
-                        .frame(width: size.width, height: size.height)
-                        .gesture(
-                            screenTouch(frame: pixels, shown: size),
-                            including: touch ? .all : .none
-                        )
+                GameScreen(feed: emulator.feed, scale: scale, quality: quality, area: geometry.size, touch: touch) { pixels, shown in
+                    screenTouch(frame: pixels, shown: shown)
                 }
                 if let message = emulator.message {
                     Text(message)
@@ -415,8 +400,8 @@ struct GameView: View {
     /// A finger on the screen, handed to the title in the frame's own pixels:
     /// a press where it lands, a drag each time it reaches another pixel, a
     /// release where it lifts.
-    private func screenTouch(frame: CGSize, shown: CGSize) -> some Gesture {
-        DragGesture(minimumDistance: 0)
+    private func screenTouch(frame: CGSize, shown: CGSize) -> AnyGesture<DragGesture.Value> {
+        AnyGesture(DragGesture(minimumDistance: 0)
             .onChanged { value in
                 let point = FramePoint(location: value.location, frame: frame, shown: shown)
                 if touchedAt == nil {
@@ -431,7 +416,7 @@ struct GameView: View {
                     wie_pointer(1, point.x, point.y)
                 }
                 touchedAt = nil
-            }
+            })
     }
 
     /// This title's pad shape, kept as it changes.
@@ -458,6 +443,37 @@ struct GameView: View {
         sheet = nil
         selectedKey = nil
         draft = layout
+    }
+}
+
+/// The title's frame, sized into the area it is given. It watches the frames
+/// itself, so a new one redraws this and nothing around it.
+private struct GameScreen: View {
+    @ObservedObject var feed: FrameFeed
+    let scale: ScreenScale
+    let quality: ScreenQuality
+    let area: CGSize
+    let touch: Bool
+    /// The touches on the screen, for a frame of so many pixels shown at so
+    /// many points.
+    let gesture: (CGSize, CGSize) -> AnyGesture<DragGesture.Value>
+
+    var body: some View {
+        if let frame = feed.image {
+            // The title's own pixels, however many of the frame's each takes
+            // once doubled through hq2x.
+            let pixels = CGSize(
+                width: CGFloat(frame.width) / CGFloat(feed.scale),
+                height: CGFloat(frame.height) / CGFloat(feed.scale)
+            )
+            let size = scale.size(of: pixels, in: area)
+            Image(decorative: frame, scale: 1)
+                .interpolation(quality == .dot ? .none : .high)
+                .antialiased(quality != .dot)
+                .resizable()
+                .frame(width: size.width, height: size.height)
+                .gesture(gesture(pixels, size), including: touch ? .all : .none)
+        }
     }
 }
 

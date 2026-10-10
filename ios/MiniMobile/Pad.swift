@@ -644,7 +644,10 @@ struct PadEditor: View {
     private func moveRing(in size: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
-                if groupOrigin == nil {
+                // A drag starts at no translation. Its end is not always heard
+                // - the view under it can go mid-drag - so a fresh one starts
+                // from where the keys are now, not where an old drag left off.
+                if groupOrigin == nil || value.translation == .zero {
                     groupOrigin = ringGroup
                     selected = Int32(WIE_KEY_OK)
                 }
@@ -665,7 +668,7 @@ struct PadEditor: View {
     private func resizeRing(in size: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
-                if groupOrigin == nil {
+                if groupOrigin == nil || value.translation == .zero {
                     groupOrigin = ringGroup
                 }
                 guard let start = groupOrigin, size.width > 0, size.height > 0 else { return }
@@ -704,7 +707,7 @@ struct PadEditor: View {
     private func move(_ key: PadKey, in size: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
-                if origin?.index != key.index {
+                if origin?.index != key.index || value.translation == .zero {
                     origin = key
                     selected = key.index
                 }
@@ -720,7 +723,7 @@ struct PadEditor: View {
     private func resize(_ key: PadKey, in size: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
-                if origin?.index != key.index {
+                if origin?.index != key.index || value.translation == .zero {
                     origin = key
                 }
                 guard let start = origin, size.width > 0, size.height > 0 else { return }

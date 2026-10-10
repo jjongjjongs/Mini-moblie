@@ -3,13 +3,22 @@ import CoreGraphics
 import QuartzCore
 import UIKit
 
+/// The frames a title draws, kept apart from the rest of the emulator's
+/// state: only the screen watches them, so a frame redraws the screen and not
+/// the bars and pad around it - nor the pad editor, which is the heaviest
+/// thing on the display and has nothing in it that a frame changes.
+final class FrameFeed: ObservableObject {
+    @Published fileprivate(set) var image: CGImage?
+    /// How many of `image`'s pixels each of the title's takes: 2 when it was
+    /// doubled through hq2x, else 1. Set before `image`, so it is current when
+    /// `image` is announced.
+    fileprivate(set) var scale = 1
+}
+
 /// One running title: the emulator's loop on a thread of its own, its frames
 /// published for the screen, and its sound pulled by the audio engine.
 final class Emulator: ObservableObject {
-    @Published private(set) var frame: CGImage?
-    /// How many of `frame`'s pixels each of the title's takes: 2 when it was
-    /// doubled through hq2x, else 1.
-    @Published private(set) var frameScale: Int = 1
+    let feed = FrameFeed()
     @Published private(set) var message: String?
 
     private let lock = NSLock()
@@ -17,6 +26,13 @@ final class Emulator: ObservableObject {
     /// Whether frames are taken doubled through hq2x. Guarded by `lock`.
     private var hq2x = false
     private var thread: Thread?
+    /// The newest frame not yet on the screen, and whether the main thread has
+    /// been asked to put it there. Guarded by `lock`. Only the newest is kept:
+    /// a frame handed to the main thread for each one drawn piled up there
+    /// whenever the main thread fell behind, every one of them a whole image,
+    /// until the app froze and was killed for the memory.
+    private var pendingFrame: (image: CGImage, scale: Int)?
+    private var frameQueued = false
     private let audio = AudioOutput()
 
     /// The largest frame the emulator draws is a handset panel; this is room
@@ -131,10 +147,13 @@ final class Emulator: ObservableObject {
                     : wie_take_frame(buffer.baseAddress, buffer.count, &width, &height)
             }
             if painted, let image = Self.image(from: pixels, width: Int(width), height: Int(height)) {
-                let scale = doubled ? 2 : 1
-                DispatchQueue.main.async { [weak self] in
-                    self?.frameScale = scale
-                    self?.frame = image
+                lock.lock()
+                pendingFrame = (image, doubled ? 2 : 1)
+                let ask = !frameQueued
+                frameQueued = true
+                lock.unlock()
+                if ask {
+                    DispatchQueue.main.async { [weak self] in self?.showPendingFrame() }
                 }
             }
 
@@ -159,6 +178,19 @@ final class Emulator: ObservableObject {
                 Thread.sleep(forTimeInterval: target - elapsed)
             }
         }
+    }
+
+    /// Puts the newest frame on the screen. On the main thread.
+    private func showPendingFrame() {
+        lock.lock()
+        let next = pendingFrame
+        pendingFrame = nil
+        frameQueued = false
+        lock.unlock()
+
+        guard let next else { return }
+        feed.scale = next.scale
+        feed.image = next.image
     }
 
     private func finish(with text: String) {
