@@ -254,37 +254,100 @@ public final class MainActivity extends Activity {
     // Light "Mini Mobile" palette for the library/home screen: a clean white
     // ground with a single green accent, matching the approved home redesign.
     // The player screen keeps the dark device palette above.
-    private static final int LIB_BG = Color.rgb(255, 255, 255);
-    private static final int LIB_SURFACE = Color.rgb(255, 255, 255);
-    private static final int LIB_INK = Color.rgb(26, 42, 32);          // #1a2a20 primary text
-    private static final int LIB_MUTED = Color.rgb(100, 117, 104);     // #647568 secondary text
-    private static final int LIB_LINE = Color.rgb(233, 241, 235);      // #e9f1eb card border
-    private static final int LIB_DIVIDER = Color.rgb(238, 243, 239);   // #eef3ef row divider
-    private static final int LIB_GREEN = Color.rgb(46, 139, 87);       // #2e8b57 accent
-    private static final int LIB_GREEN_DEEP = Color.rgb(34, 114, 71);  // #227247 accent text
-    private static final int LIB_GREEN_SOFT = Color.rgb(220, 242, 226);// #dcf2e2 chip/button fill
-    private static final int LIB_GREEN_LINE = Color.rgb(199, 232, 209);// #c7e8d1 button border
-    private static final int LIB_GREEN_SOFTER = Color.rgb(238, 248, 241);// #eef8f1 empty tile
+    private static int LIB_BG = Color.rgb(255, 255, 255);
+    private static int LIB_SURFACE = Color.rgb(255, 255, 255);
+    private static int LIB_INK = Color.rgb(26, 42, 32);          // #1a2a20 primary text
+    private static int LIB_MUTED = Color.rgb(100, 117, 104);     // #647568 secondary text
+    private static int LIB_LINE = Color.rgb(233, 241, 235);      // #e9f1eb card border
+    private static int LIB_DIVIDER = Color.rgb(238, 243, 239);   // #eef3ef row divider
+    private static int LIB_GREEN = Color.rgb(46, 139, 87);       // #2e8b57 accent
+    private static int LIB_GREEN_DEEP = Color.rgb(34, 114, 71);  // #227247 accent text
+    private static int LIB_GREEN_SOFT = Color.rgb(220, 242, 226);// #dcf2e2 chip/button fill
+    private static int LIB_GREEN_LINE = Color.rgb(199, 232, 209);// #c7e8d1 button border
+    private static int LIB_GREEN_SOFTER = Color.rgb(238, 248, 241);// #eef8f1 empty tile
 
     // Carrier badge/chip colours as {ink, soft fill, line}, soft tones chosen to
     // sit on the light library ground rather than the loud brand colours.
-    private static final int[] CARRIER_SKT = {Color.rgb(194, 65, 12), Color.rgb(253, 234, 221), Color.rgb(246, 211, 189)};
-    private static final int[] CARRIER_KTF = {Color.rgb(29, 95, 191), Color.rgb(226, 236, 251), Color.rgb(207, 224, 247)};
-    private static final int[] CARRIER_LGT = {Color.rgb(163, 38, 143), Color.rgb(247, 226, 242), Color.rgb(239, 207, 230)};
-    private static final int[] CARRIER_ETC = {Color.rgb(100, 117, 104), Color.rgb(238, 243, 239), Color.rgb(226, 233, 228)};
+    private static int[] CARRIER_SKT = {Color.rgb(194, 65, 12), Color.rgb(253, 234, 221), Color.rgb(246, 211, 189)};
+    private static int[] CARRIER_KTF = {Color.rgb(29, 95, 191), Color.rgb(226, 236, 251), Color.rgb(207, 224, 247)};
+    private static int[] CARRIER_LGT = {Color.rgb(163, 38, 143), Color.rgb(247, 226, 242), Color.rgb(239, 207, 230)};
+    private static int[] CARRIER_ETC = {Color.rgb(100, 117, 104), Color.rgb(238, 243, 239), Color.rgb(226, 233, 228)};
     // A DRM-locked download: a muted red, so the badge reads as "cannot run"
     // rather than as another carrier.
-    private static final int[] CARRIER_DRM = {Color.rgb(153, 57, 57), Color.rgb(248, 232, 232), Color.rgb(237, 213, 213)};
+    private static int[] CARRIER_DRM = {Color.rgb(153, 57, 57), Color.rgb(248, 232, 232), Color.rgb(237, 213, 213)};
 
-    private static final int LIB_DELETE = Color.rgb(192, 57, 43);       // #c0392b delete button
-    private static final int LIB_RED_SOFT = Color.rgb(253, 236, 235);   // #fdeceb danger icon tile
-    private static final int LIB_SELECT_BG = Color.rgb(243, 250, 245);  // #f3faf5 selected row tint
+    private static int LIB_DELETE = Color.rgb(192, 57, 43);       // #c0392b delete button
+    private static int LIB_RED_SOFT = Color.rgb(253, 236, 235);   // #fdeceb danger icon tile
+    private static int LIB_SELECT_BG = Color.rgb(243, 250, 245);  // #f3faf5 selected row tint
 
-    private static final int LIB_STAR = Color.rgb(230, 167, 0);         // #e6a700 favourite star
-    private static final int LIB_STAR_OFF = Color.rgb(194, 204, 197);   // #c2ccc5 unfavourited star
-    private static final int LIB_STAR_SOFT = Color.rgb(253, 243, 214);  // #fdf3d6 ⭐ chip fill
-    private static final int LIB_STAR_LINE = Color.rgb(242, 224, 168);  // #f2e0a8 ⭐ chip border
-    private static final int LIB_STAR_INK = Color.rgb(154, 116, 0);     // #9a7400 ⭐ chip text
+    private static int LIB_STAR = Color.rgb(230, 167, 0);         // #e6a700 favourite star
+    private static int LIB_STAR_OFF = Color.rgb(194, 204, 197);   // #c2ccc5 unfavourited star
+    private static int LIB_STAR_SOFT = Color.rgb(253, 243, 214);  // #fdf3d6 ⭐ chip fill
+    private static int LIB_STAR_LINE = Color.rgb(242, 224, 168);  // #f2e0a8 ⭐ chip border
+    private static int LIB_STAR_INK = Color.rgb(154, 116, 0);     // #9a7400 ⭐ chip text
+    /** The box a game's tick sits in during multi-select, while unticked. */
+    private static int LIB_CHECK_EDGE = Color.rgb(205, 216, 209);
+
+    /**
+     * Sets every library colour for the light or the dark list. The values
+     * above are the light ones; this puts them back, or swaps in the dark
+     * set, which keeps the green identity on a near-black ground.
+     */
+    private static void applyLibraryPalette(boolean dark) {
+        if (!dark) {
+            LIB_BG = Color.rgb(255, 255, 255);
+            LIB_SURFACE = Color.rgb(255, 255, 255);
+            LIB_INK = Color.rgb(26, 42, 32);
+            LIB_MUTED = Color.rgb(100, 117, 104);
+            LIB_LINE = Color.rgb(233, 241, 235);
+            LIB_DIVIDER = Color.rgb(238, 243, 239);
+            LIB_GREEN = Color.rgb(46, 139, 87);
+            LIB_GREEN_DEEP = Color.rgb(34, 114, 71);
+            LIB_GREEN_SOFT = Color.rgb(220, 242, 226);
+            LIB_GREEN_LINE = Color.rgb(199, 232, 209);
+            LIB_GREEN_SOFTER = Color.rgb(238, 248, 241);
+            CARRIER_SKT = new int[]{Color.rgb(194, 65, 12), Color.rgb(253, 234, 221), Color.rgb(246, 211, 189)};
+            CARRIER_KTF = new int[]{Color.rgb(29, 95, 191), Color.rgb(226, 236, 251), Color.rgb(207, 224, 247)};
+            CARRIER_LGT = new int[]{Color.rgb(163, 38, 143), Color.rgb(247, 226, 242), Color.rgb(239, 207, 230)};
+            CARRIER_ETC = new int[]{Color.rgb(100, 117, 104), Color.rgb(238, 243, 239), Color.rgb(226, 233, 228)};
+            CARRIER_DRM = new int[]{Color.rgb(153, 57, 57), Color.rgb(248, 232, 232), Color.rgb(237, 213, 213)};
+            LIB_DELETE = Color.rgb(192, 57, 43);
+            LIB_RED_SOFT = Color.rgb(253, 236, 235);
+            LIB_SELECT_BG = Color.rgb(243, 250, 245);
+            LIB_STAR = Color.rgb(230, 167, 0);
+            LIB_STAR_OFF = Color.rgb(194, 204, 197);
+            LIB_STAR_SOFT = Color.rgb(253, 243, 214);
+            LIB_STAR_LINE = Color.rgb(242, 224, 168);
+            LIB_STAR_INK = Color.rgb(154, 116, 0);
+            LIB_CHECK_EDGE = Color.rgb(205, 216, 209);
+            return;
+        }
+        LIB_BG = Color.rgb(15, 20, 17);
+        LIB_SURFACE = Color.rgb(22, 29, 25);
+        LIB_INK = Color.rgb(228, 236, 230);
+        LIB_MUTED = Color.rgb(138, 156, 144);
+        LIB_LINE = Color.rgb(36, 48, 42);
+        LIB_DIVIDER = Color.rgb(31, 41, 36);
+        LIB_GREEN = Color.rgb(76, 194, 126);
+        LIB_GREEN_DEEP = Color.rgb(111, 212, 154);
+        LIB_GREEN_SOFT = Color.rgb(28, 52, 38);
+        LIB_GREEN_LINE = Color.rgb(43, 74, 55);
+        LIB_GREEN_SOFTER = Color.rgb(24, 34, 28);
+        CARRIER_SKT = new int[]{Color.rgb(240, 138, 75), Color.rgb(58, 36, 24), Color.rgb(90, 53, 34)};
+        CARRIER_KTF = new int[]{Color.rgb(106, 165, 255), Color.rgb(26, 40, 64), Color.rgb(42, 61, 94)};
+        CARRIER_LGT = new int[]{Color.rgb(224, 122, 203), Color.rgb(54, 32, 58), Color.rgb(83, 50, 86)};
+        CARRIER_ETC = new int[]{Color.rgb(138, 156, 144), Color.rgb(31, 41, 36), Color.rgb(45, 58, 51)};
+        CARRIER_DRM = new int[]{Color.rgb(224, 122, 122), Color.rgb(58, 31, 31), Color.rgb(90, 46, 46)};
+        LIB_DELETE = Color.rgb(229, 83, 75);
+        LIB_RED_SOFT = Color.rgb(58, 29, 27);
+        LIB_SELECT_BG = Color.rgb(23, 39, 29);
+        LIB_STAR = Color.rgb(242, 184, 34);
+        LIB_STAR_OFF = Color.rgb(60, 74, 65);
+        LIB_STAR_SOFT = Color.rgb(58, 48, 22);
+        LIB_STAR_LINE = Color.rgb(90, 74, 30);
+        LIB_STAR_INK = Color.rgb(242, 201, 76);
+        LIB_CHECK_EDGE = Color.rgb(74, 92, 81);
+    }
 
     /**
      * How much stack the emulator thread gets.
@@ -546,6 +609,11 @@ public final class MainActivity extends Activity {
         // foreground, so playback picks up where it left off on return.
         audioOutput.resume();
         ControlPatch.onResume(this);
+        // Back on the list from elsewhere: games may have been added or
+        // removed meanwhile, so read the folder again.
+        if (!playerVisible && !keyMapVisible) {
+            refreshLibraryList();
+        }
     }
 
     @Override
@@ -819,8 +887,9 @@ public final class MainActivity extends Activity {
         landscapeMode = false;
         // The library is always upright, whichever way the player was left.
         setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
-        // The home screen is light, so the status-bar icons must go dark.
-        setLightStatusBar(true);
+        // The status-bar icons go dark over the light list, light over the dark one.
+        applyLibraryPalette(LibraryLook.dark(this));
+        setLightStatusBar(!LibraryLook.dark(this));
         // The library is an ordinary screen with its bars.
         applyImmersive(false);
 
@@ -886,9 +955,17 @@ public final class MainActivity extends Activity {
 
         // Two soft-green pill buttons, side by side.
         LinearLayout actions = new LinearLayout(this);
-        Button refresh = flatButton("목록 새로고침");
-        refresh.setOnClickListener(v -> showLibrary());
-        actions.addView(refresh, buttonParams(0));
+        // Dark or light: the button names the look it switches to. The list
+        // needs no refresh button - it reads the folder again whenever it is
+        // shown, on the way back to the app and after an import.
+        boolean dark = LibraryLook.dark(this);
+        Button look = flatButton(dark ? "☀️ 라이트 모드" : "🌙 다크 모드");
+        look.setOnClickListener(v -> {
+            LibraryLook.setDark(this, !dark);
+            showLibrary();
+            Toast.makeText(this, dark ? "라이트 모드로 바꿨어요" : "다크 모드로 바꿨어요", Toast.LENGTH_SHORT).show();
+        });
+        actions.addView(look, buttonParams(0));
         Button pick = flatButton("ZIP 가져오기");
         pick.setOnClickListener(v -> openPicker());
         actions.addView(pick, buttonParams(dp(10)));
@@ -1086,7 +1163,7 @@ public final class MainActivity extends Activity {
         keyMapVisible = true;
         editingMapping = working;
         setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
-        setLightStatusBar(true);
+        setLightStatusBar(!LibraryLook.dark(this));
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -2006,7 +2083,7 @@ public final class MainActivity extends Activity {
             return;
         }
 
-        new AlertDialog.Builder(this)
+        lightAlert()
                 .setTitle(targets.size() + "개 게임을 삭제할까요?")
                 .setMessage("목록에서 삭제됩니다. 저장한 내용은 그대로 남습니다.\n\n" + batchNames(targets))
                 .setNegativeButton("취소", null)
@@ -2292,7 +2369,7 @@ public final class MainActivity extends Activity {
             check.setTextSize(13f);
             check.setTypeface(Typeface.DEFAULT_BOLD);
             check.setGravity(android.view.Gravity.CENTER);
-            check.setBackground(roundedRect(isSelected ? LIB_GREEN : LIB_BG, isSelected ? LIB_GREEN : Color.rgb(205, 216, 209), isSelected ? 0 : 2, 6));
+            check.setBackground(roundedRect(isSelected ? LIB_GREEN : LIB_BG, isSelected ? LIB_GREEN : LIB_CHECK_EDGE, isSelected ? 0 : 2, 6));
             LinearLayout.LayoutParams checkParams = new LinearLayout.LayoutParams(dp(22), dp(22));
             checkParams.rightMargin = dp(10);
             row.addView(check, checkParams);
@@ -2573,13 +2650,14 @@ public final class MainActivity extends Activity {
     }
 
     /**
-     * An {@link AlertDialog.Builder} forced to the light dialog theme, so the
-     * icon-row menus keep their white sheet and dark text stay readable even
-     * when the device (and the default dialog theme) is dark - which left the
-     * ink titles and grey subtitles all but invisible.
+     * An {@link AlertDialog.Builder} in the list's own look - light or dark as
+     * the player chose with the list's button, never the device's - so the
+     * icon-row menus and confirmations match the list they open over and
+     * their ink stays readable on the sheet.
      */
     private AlertDialog.Builder lightAlert() {
-        return new AlertDialog.Builder(new android.view.ContextThemeWrapper(this, android.R.style.Theme_Material_Light_Dialog_Alert));
+        int theme = LibraryLook.dark(this) ? android.R.style.Theme_Material_Dialog_Alert : android.R.style.Theme_Material_Light_Dialog_Alert;
+        return new AlertDialog.Builder(new android.view.ContextThemeWrapper(this, theme));
     }
 
     /** An {@link ArrayAdapter} that renders each {@link MenuItem} via {@link #menuItemView}. */
@@ -2733,7 +2811,7 @@ public final class MainActivity extends Activity {
      * it overwrites each game's saved data from its folder and cannot be undone.
      */
     private void confirmBatchRestore(ArrayList<File> games) {
-        new AlertDialog.Builder(this)
+        lightAlert()
                 .setTitle(games.size() + "개 데이터 폴더에서 불러오기")
                 .setMessage("각 게임의 데이터 폴더(다운로드/Mini Mobile/<게임 이름>)의 내용을 지금 저장된 내용에 덮어씁니다.\n덮어쓴 뒤에는 되돌릴 수 없습니다.\n\n" + batchNames(games))
                 .setNegativeButton("취소", null)
@@ -2764,7 +2842,7 @@ public final class MainActivity extends Activity {
      * list of games, as it removes each one's saves and cannot be undone.
      */
     private void confirmBatchErase(ArrayList<File> games) {
-        new AlertDialog.Builder(this)
+        lightAlert()
                 .setTitle(games.size() + "개 게임 데이터 초기화")
                 .setMessage("선택한 게임이 저장한 내용을 모두 지웁니다.\n세이브도 함께 지워지고, 되돌릴 수 없습니다.\n남겨두려면 먼저 \"세이브 파일 꺼내기\"로 백업하세요.\n\n" + batchNames(games))
                 .setNegativeButton("취소", null)
@@ -2852,7 +2930,7 @@ public final class MainActivity extends Activity {
     /** Reads a game's data folder back into its saves, overwriting them. */
     private void restoreDataFolder(File game) {
         String title = displayName(game);
-        new AlertDialog.Builder(this)
+        lightAlert()
                 .setTitle(displayName(game))
                 .setMessage("데이터 폴더(" + DataFolder.displayPath(title) + ")의 내용을 지금 저장된 내용에 덮어씁니다.\n덮어쓴 뒤에는 되돌릴 수 없습니다.")
                 .setNegativeButton("취소", null)
@@ -2887,7 +2965,7 @@ public final class MainActivity extends Activity {
      * above it in the same menu.
      */
     private void confirmErase(File game) {
-        new AlertDialog.Builder(this)
+        lightAlert()
                 .setTitle(displayName(game))
                 .setMessage("이 게임이 저장한 내용을 모두 지웁니다.\n세이브도 함께 지워지고, 되돌릴 수 없습니다.\n\n남겨두려면 먼저 \"세이브 파일 꺼내기\"로 백업하세요.")
                 .setNegativeButton("취소", null)
@@ -2911,7 +2989,7 @@ public final class MainActivity extends Activity {
     }
 
     private void confirmDelete(File game) {
-        new AlertDialog.Builder(this)
+        lightAlert()
                 .setTitle(displayName(game))
                 .setMessage("이 게임을 목록에서 삭제할까요?\n저장한 내용은 그대로 남습니다.")
                 .setNegativeButton("취소", null)

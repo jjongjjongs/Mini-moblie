@@ -29,4 +29,10 @@
         <item name="android:colorAccent">#FF2E8B57</item>
         <item name="android:colorPrimary">#FF2E8B57</item>
     </style>
+
+    <!-- The same mapping when the player has turned the list dark. -->
+    <style name="MiniControlsDialogThemeNight" parent="@android:style/Theme.Material.Dialog.Alert">
+        <item name="android:colorAccent">#FF4CC27E</item>
+        <item name="android:colorPrimary">#FF4CC27E</item>
+    </style>
 </resources>

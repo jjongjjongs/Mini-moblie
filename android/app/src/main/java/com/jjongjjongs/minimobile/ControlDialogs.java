@@ -46,7 +46,7 @@ final class ControlDialogs {
     // Two palettes, one active. Dark is the default (in-game menus); the
     // library's gamepad mapping switches to light via palette(true).
     final ControlStyle darkStyle;
-    final ControlStyle lightStyle;
+    ControlStyle lightStyle;
     ControlStyle style;
     final Handler main = new Handler(Looper.getMainLooper());
     int captureTarget = -1;
@@ -174,9 +174,13 @@ final class ControlDialogs {
         this.style = this.darkStyle;
     }
 
-    /** Picks the palette for the dialogs opened next: light for the library's
-     * gamepad mapping, dark for everything in-game. */
+    /** Picks the palette for the dialogs opened next: the list's for the
+     * library's gamepad mapping - made afresh, as the list may have turned
+     * dark or light since - and dark for everything in-game. */
     void palette(boolean lightPalette) {
+        if (lightPalette) {
+            this.lightStyle = new ControlStyle(this.s.a, true);
+        }
         this.style = lightPalette ? this.lightStyle : this.darkStyle;
     }
 

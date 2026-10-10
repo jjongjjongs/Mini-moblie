@@ -100,8 +100,20 @@ struct SaveListView: View {
     @State private var sharing: SharedFile?
     @State private var failure: String?
 
-    private static let green = Color(red: 46 / 255, green: 139 / 255, blue: 87 / 255)
-    private static let amber = Color(red: 154 / 255, green: 116 / 255, blue: 0)
+    @Environment(\.colorScheme) private var scheme
+
+    /// The list's green and amber, lighter on the dark list so they still read.
+    private var green: Color {
+        scheme == .dark
+            ? Color(red: 111 / 255, green: 212 / 255, blue: 154 / 255)
+            : Color(red: 46 / 255, green: 139 / 255, blue: 87 / 255)
+    }
+
+    private var amber: Color {
+        scheme == .dark
+            ? Color(red: 242 / 255, green: 201 / 255, blue: 76 / 255)
+            : Color(red: 154 / 255, green: 116 / 255, blue: 0)
+    }
 
     var body: some View {
         let ours = saves.filter(\.ours)
@@ -121,7 +133,7 @@ struct SaveListView: View {
                         .textCase(nil)
                 }
                 if !ours.isEmpty {
-                    Section(header: Text("이 게임의 세이브 · \(ours.count)개").foregroundColor(Self.green)) {
+                    Section(header: Text("이 게임의 세이브 · \(ours.count)개").foregroundColor(green)) {
                         ForEach(ours) { row($0, latest: $0.id == latest) }
                     }
                 }
@@ -194,7 +206,7 @@ struct SaveListView: View {
                     .frame(width: 40, height: 40)
                     .background(
                         RoundedRectangle(cornerRadius: 11)
-                            .fill(zip.isBeforeImport ? Color.yellow.opacity(0.2) : Self.green.opacity(0.12))
+                            .fill(zip.isBeforeImport ? Color.yellow.opacity(0.2) : green.opacity(0.12))
                     )
                     .opacity(zip.ours ? 1 : 0.6)
                 VStack(alignment: .leading, spacing: 2) {
@@ -204,9 +216,9 @@ struct SaveListView: View {
                             .foregroundColor(zip.ours ? .primary : .secondary)
                             .lineLimit(1)
                         if latest {
-                            tag("최신", color: Self.green)
+                            tag("최신", color: green)
                         } else if zip.isBeforeImport {
-                            tag("가져오기 전", color: Self.amber)
+                            tag("가져오기 전", color: amber)
                         }
                     }
                     Text(subtitle(zip))
@@ -222,7 +234,7 @@ struct SaveListView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .listRowBackground(latest ? Self.green.opacity(0.08) : nil)
+        .listRowBackground(latest ? green.opacity(0.08) : nil)
         .contextMenu {
             Button { confirming = zip } label: { Label("불러오기", systemImage: "square.and.arrow.down") }
             Button { sharing = SharedFile(url: zip.url) } label: { Label("공유하기", systemImage: "square.and.arrow.up") }

@@ -27,7 +27,8 @@ final class ControlStyle {
     final boolean light;
     // Palette, chosen by `light`. Dark (default) is the player's control
     // palette so the in-game menus sit on the game without clashing; light is
-    // the library's green list palette, for the gamepad mapping opened there.
+    // the library's green list palette, for the gamepad mapping opened there -
+    // in the list's dark look when the player has turned the list dark.
     // The field names carry the light semantics (BG = surface, GREEN = accent,
     // etc.); the dark values map onto the same roles.
     final int BG;
@@ -43,9 +44,21 @@ final class ControlStyle {
 
     ControlStyle(Activity activity, boolean light) {
         this.light = light;
-        this.themeId = theme(activity, light);
+        boolean night = light && LibraryLook.dark(activity);
+        this.themeId = night ? named(activity, "MiniControlsDialogThemeNight") : theme(activity, light);
         this.context = new ContextThemeWrapper(activity, this.themeId);
-        if (light) {
+        if (night) {
+            BG = Color.rgb(22, 29, 25);
+            INK = Color.rgb(228, 236, 230);
+            MUTED = Color.rgb(138, 156, 144);
+            LINE = Color.rgb(36, 48, 42);
+            DIVIDER = Color.rgb(31, 41, 36);
+            GREEN = Color.rgb(76, 194, 126);
+            DEEP = Color.rgb(111, 212, 154);
+            SOFT = Color.rgb(28, 52, 38);
+            SOFT_LINE = Color.rgb(43, 74, 55);
+            SOFTER = Color.rgb(24, 34, 28);
+        } else if (light) {
             BG = Color.rgb(255, 255, 255);
             INK = Color.rgb(26, 42, 32);
             MUTED = Color.rgb(100, 117, 104);
@@ -80,7 +93,10 @@ final class ControlStyle {
     }
 
     static int theme(Context context, boolean light) {
-        String name = light ? "MiniControlsDialogTheme" : "MiniControlsDialogThemeDark";
+        return named(context, light ? "MiniControlsDialogTheme" : "MiniControlsDialogThemeDark");
+    }
+
+    private static int named(Context context, String name) {
         int identifier = context.getResources().getIdentifier(name, "style", context.getPackageName());
         if (identifier != 0) {
             return identifier;

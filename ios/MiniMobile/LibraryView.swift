@@ -54,6 +54,10 @@ struct LibraryView: View {
     @State private var search = ""
     @State private var filter = CarrierFilter.all
     @AppStorage(Favorites.key) private var favoritesText = ""
+    /// The list in its dark look rather than its light one: the player's
+    /// choice from the moon/sun button, kept between runs and never the
+    /// device's own setting. The game screen and pad keep their own look.
+    @AppStorage("library.dark") private var dark = false
 
     @State private var editMode = EditMode.inactive
     @State private var selection = Set<String>()
@@ -123,6 +127,7 @@ struct LibraryView: View {
         }
         .sheet(item: $sharing) { file in
             ShareSheet(items: [file.url])
+                .preferredColorScheme(dark ? .dark : .light)
         }
         .sheet(item: $savesFor, onDismiss: savesClosed) { game in
             SaveListView(
@@ -130,10 +135,12 @@ struct LibraryView: View {
                 finished: { afterSaves = $0 },
                 pickElsewhere: { pickAfterSaves = true }
             )
+            .preferredColorScheme(dark ? .dark : .light)
         }
         .fullScreenCover(item: $playing) { game in
             GameView(game: game)
         }
+        .preferredColorScheme(dark ? .dark : .light)
         .onAppear(perform: reload)
     }
 
@@ -268,7 +275,13 @@ struct LibraryView: View {
             }
             .disabled(games.isEmpty && !editMode.isEditing)
         }
-        ToolbarItem(placement: .navigationBarTrailing) {
+        ToolbarItemGroup(placement: .navigationBarTrailing) {
+            Button {
+                withAnimation { dark.toggle() }
+            } label: {
+                Image(systemName: dark ? "sun.max.fill" : "moon.fill")
+            }
+            .accessibilityLabel(dark ? "라이트 모드" : "다크 모드")
             Menu {
                 Button { importer = .games } label: { Label("게임 가져오기", systemImage: "plus") }
                 Button { importer = .save } label: { Label("세이브 가져오기", systemImage: "square.and.arrow.down") }
@@ -423,9 +436,10 @@ struct LibraryView: View {
 /// The carrier as a small colored tag, in the Android library's colors.
 struct CarrierBadge: View {
     let carrier: String?
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
-        let (text, color) = Self.style(carrier)
+        let (text, color) = Self.style(carrier, dark: scheme == .dark)
         Text(text)
             .font(.system(size: 11, weight: .bold))
             .foregroundColor(color)
@@ -434,7 +448,18 @@ struct CarrierBadge: View {
             .overlay(RoundedRectangle(cornerRadius: 5).stroke(color.opacity(0.35), lineWidth: 1))
     }
 
-    private static func style(_ carrier: String?) -> (String, Color) {
+    private static func style(_ carrier: String?, dark: Bool) -> (String, Color) {
+        if dark {
+            // Lighter inks that read on the dark list, as on Android.
+            switch carrier {
+            case "SKT": return ("SKT", Color(red: 240 / 255, green: 138 / 255, blue: 75 / 255))
+            case "KTF": return ("KTF", Color(red: 106 / 255, green: 165 / 255, blue: 255 / 255))
+            case "LGT": return ("LGT", Color(red: 224 / 255, green: 122 / 255, blue: 203 / 255))
+            case "DRM": return ("DRM", Color(red: 224 / 255, green: 122 / 255, blue: 122 / 255))
+            case nil: return ("···", .secondary)
+            default: return ("기타", Color(red: 138 / 255, green: 156 / 255, blue: 144 / 255))
+            }
+        }
         switch carrier {
         case "SKT": return ("SKT", Color(red: 194 / 255, green: 65 / 255, blue: 12 / 255))
         case "KTF": return ("KTF", Color(red: 29 / 255, green: 95 / 255, blue: 191 / 255))
