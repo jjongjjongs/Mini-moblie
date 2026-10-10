@@ -36,5 +36,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- The save zips handed to another app from 세이브 공유하기. -->
+        <provider
+            android:name=".SaveShareProvider"
+            android:authorities="${applicationId}.saves"
+            android:exported="false"
+            android:grantUriPermissions="true" />
     </application>
 </manifest>

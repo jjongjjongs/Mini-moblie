@@ -305,6 +305,40 @@ pub unsafe extern "C" fn wie_import_save(zip: *const u8, length: usize, runtime_
     }
 }
 
+/// What a save zip is to a game: -1 when it is no save zip, 1 when it holds
+/// the game's saves, 0 when another game's; and how many saved files it holds
+/// and their size.
+///
+/// # Safety
+/// `zip` points at `zip_length` readable bytes and `data` at `length`; `files`
+/// and `size` are null or valid for a write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wie_save_zip_info(
+    zip: *const u8,
+    zip_length: usize,
+    data: *const u8,
+    length: usize,
+    files: *mut usize,
+    size: *mut u64,
+) -> i32 {
+    // SAFETY: as the caller promises.
+    let (zip, data) = unsafe { (bytes(zip, zip_length), bytes(data, length)) };
+    let (count, total) = host::save_zip_contents(zip);
+    if !files.is_null() {
+        // SAFETY: as the caller promises.
+        unsafe { *files = count };
+    }
+    if !size.is_null() {
+        // SAFETY: as the caller promises.
+        unsafe { *size = total };
+    }
+    match host::save_zip_belongs(zip, data) {
+        None => -1,
+        Some(false) => 0,
+        Some(true) => 1,
+    }
+}
+
 /// # Safety
 /// `data` points at `length` readable bytes; `runtime_dir` is NUL-terminated;
 /// `removed` is valid for a write.

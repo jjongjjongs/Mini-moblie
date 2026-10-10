@@ -87,10 +87,13 @@ final class Downloads {
     static final class SaveFile {
         final String name;
         final Uri uri;
+        /** When it was last written, in milliseconds; 0 when not known. */
+        final long modified;
 
-        SaveFile(String name, Uri uri) {
+        SaveFile(String name, Uri uri, long modified) {
             this.name = name;
             this.uri = uri;
+            this.modified = modified;
         }
     }
 
@@ -119,7 +122,7 @@ final class Downloads {
             if (files != null) {
                 for (File file : files) {
                     if (file.isFile() && file.getName().toLowerCase(Locale.ROOT).endsWith(".zip")) {
-                        saves.add(new SaveFile(file.getName(), Uri.fromFile(file)));
+                        saves.add(new SaveFile(file.getName(), Uri.fromFile(file), file.lastModified()));
                     }
                 }
             }
@@ -128,7 +131,7 @@ final class Downloads {
         }
 
         String relPath = Environment.DIRECTORY_DOWNLOADS + "/" + SAVES_DIR + "/";
-        String[] projection = {MediaStore.Downloads._ID, MediaStore.Downloads.DISPLAY_NAME};
+        String[] projection = {MediaStore.Downloads._ID, MediaStore.Downloads.DISPLAY_NAME, MediaStore.Downloads.DATE_MODIFIED};
         try (Cursor cursor = context.getContentResolver().query(
                 MediaStore.Downloads.EXTERNAL_CONTENT_URI,
                 projection,
@@ -138,13 +141,15 @@ final class Downloads {
             if (cursor != null) {
                 int idColumn = cursor.getColumnIndexOrThrow(MediaStore.Downloads._ID);
                 int nameColumn = cursor.getColumnIndexOrThrow(MediaStore.Downloads.DISPLAY_NAME);
+                int modifiedColumn = cursor.getColumnIndexOrThrow(MediaStore.Downloads.DATE_MODIFIED);
                 while (cursor.moveToNext()) {
                     String name = cursor.getString(nameColumn);
                     if (name == null || !name.toLowerCase(Locale.ROOT).endsWith(".zip")) {
                         continue;
                     }
                     Uri uri = ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cursor.getLong(idColumn));
-                    saves.add(new SaveFile(name, uri));
+                    // MediaStore keeps the date in seconds.
+                    saves.add(new SaveFile(name, uri, cursor.getLong(modifiedColumn) * 1000L));
                 }
             }
         }

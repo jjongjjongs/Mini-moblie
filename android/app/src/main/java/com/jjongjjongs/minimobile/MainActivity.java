@@ -2962,53 +2962,438 @@ public final class MainActivity extends Activity {
     }
 
     /**
-     * Restores saved data from a previously exported save zip, overwriting the
-     * app's private save folder. The zip's own {@code db/<id>}/{@code fs/<id>}
-     * paths route each file to the game it belongs to, so this works from any
-     * title's menu; the file can sit in Downloads or any other folder.
+     * 세이브 불러오기: the exported save zips to pick one from - the game's own
+     * first, newest first and by the time each was taken, then other games'
+     * - and, by a long press, to share or remove one. A save kept anywhere
+     * else is still reached through the file picker at the foot of the list.
+     *
+     * <p>Picking one puts it in place. The zip's own {@code db/<id>}/{@code
+     * fs/<id>} paths route each file to the game it belongs to, so another
+     * game's save goes to that game.
      */
     private void importSaves(File game) {
-        // The saves the app exported sit in Mini Mobile/세이브; list them so one
-        // can be picked straight from there, with a fallback to the file picker
-        // for a save that lives somewhere else (a friend's, a cloud download).
-        List<Downloads.SaveFile> saves = Downloads.listSaves(this);
+        String title = displayName(game);
+        emulatorThread.execute(() -> {
+            String[] ids;
+            try {
+                ids = SaveExporter.ids(game);
+            } catch (Exception e) {
+                ids = null;
+            }
+            List<SaveShelf.Entry> saves = SaveShelf.list(this, ids);
+            runOnUiThread(() -> showSaveList(game, title, saves));
+        });
+    }
+
+    private void showSaveList(File game, String title, List<SaveShelf.Entry> saves) {
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+
+        TextView heading = new TextView(this);
+        heading.setText("세이브 불러오기");
+        heading.setTextSize(20f);
+        heading.setTypeface(Typeface.DEFAULT_BOLD);
+        heading.setTextColor(LIB_INK);
+        heading.setPadding(dp(22), dp(20), dp(22), 0);
+        root.addView(heading);
+
+        TextView where = new TextView(this);
+        where.setText(title + " · 다운로드/Mini Mobile/세이브");
+        where.setTextSize(12.5f);
+        where.setTextColor(LIB_MUTED);
+        where.setSingleLine(true);
+        where.setEllipsize(TextUtils.TruncateAt.END);
+        where.setPadding(dp(22), dp(3), dp(22), dp(6));
+        root.addView(where);
+
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(dp(10), 0, dp(10), dp(4));
+
+        AlertDialog[] shown = new AlertDialog[1];
+        int ours = 0;
+        for (SaveShelf.Entry entry : saves) {
+            if (entry.ours) {
+                ours++;
+            }
+        }
 
         if (saves.isEmpty()) {
-            new AlertDialog.Builder(this)
-                    .setTitle("세이브 불러오기")
-                    .setMessage("다운로드/Mini Mobile/세이브 폴더에 세이브가 없습니다.\n다른 위치에서 세이브(.zip)를 고르시겠어요?")
-                    .setNegativeButton("취소", null)
-                    .setPositiveButton("파일 선택", (dialog, which) -> openSavePicker())
-                    .show();
-            return;
+            TextView empty = new TextView(this);
+            empty.setText("아직 꺼낸 세이브가 없어요.\n게임을 길게 눌러 ‘세이브 파일 꺼내기’로 만들 수 있어요.");
+            empty.setTextSize(13.5f);
+            empty.setTextColor(LIB_MUTED);
+            empty.setLineSpacing(0f, 1.25f);
+            empty.setPadding(dp(12), dp(14), dp(12), dp(14));
+            list.addView(empty);
+        } else {
+            if (ours > 0) {
+                list.addView(saveSection("이 게임의 세이브 · " + ours + "개", LIB_GREEN_DEEP));
+            }
+            boolean latestMarked = false;
+            boolean othersHeaded = false;
+            for (SaveShelf.Entry entry : saves) {
+                if (!entry.ours && !othersHeaded) {
+                    list.addView(saveSection("다른 게임의 세이브 · " + (saves.size() - ours) + "개", LIB_MUTED));
+                    othersHeaded = true;
+                }
+                boolean latest = entry.ours && !entry.beforeImport() && !latestMarked;
+                latestMarked |= latest;
+
+                View row = saveRow(entry, latest);
+                row.setOnClickListener(v -> {
+                    shown[0].dismiss();
+                    confirmSaveImport(game, title, entry);
+                });
+                row.setOnLongClickListener(v -> {
+                    shown[0].dismiss();
+                    showSaveActions(game, title, entry);
+                    return true;
+                });
+                LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                rowParams.bottomMargin = dp(2);
+                list.addView(row, rowParams);
+            }
         }
 
-        CharSequence[] items = new CharSequence[saves.size() + 1];
-        for (int i = 0; i < saves.size(); i++) {
-            items[i] = saves.get(i).name;
-        }
-        items[saves.size()] = "다른 위치에서 찾기…";
+        // However many saves there are, the list scrolls within a part of the
+        // screen and the way to the file picker stays in sight below it.
+        int maxHeight = Math.round(getResources().getDisplayMetrics().heightPixels * 0.55f);
+        ScrollView scroll = new ScrollView(this) {
+            @Override
+            protected void onMeasure(int widthSpec, int heightSpec) {
+                super.onMeasure(widthSpec, MeasureSpec.makeMeasureSpec(maxHeight, MeasureSpec.AT_MOST));
+            }
+        };
+        scroll.addView(list);
+        root.addView(scroll);
 
-        new AlertDialog.Builder(this)
-                .setTitle("세이브 불러오기")
-                .setItems(items, (dialog, which) -> {
-                    if (which == saves.size()) {
-                        openSavePicker();
-                        return;
-                    }
-                    Downloads.SaveFile picked = saves.get(which);
-                    confirmRestoreFrom(picked.name, picked.uri);
-                })
+        View divider = new View(this);
+        divider.setBackgroundColor(LIB_DIVIDER);
+        LinearLayout.LayoutParams dividerParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1));
+        dividerParams.leftMargin = dp(20);
+        dividerParams.rightMargin = dp(20);
+        dividerParams.topMargin = dp(4);
+        root.addView(divider, dividerParams);
+
+        TextView elsewhere = new TextView(this);
+        elsewhere.setText("📂   다른 위치에서 찾기…");
+        elsewhere.setTextSize(15f);
+        elsewhere.setTypeface(Typeface.DEFAULT_BOLD);
+        elsewhere.setTextColor(LIB_GREEN_DEEP);
+        elsewhere.setPadding(dp(22), dp(14), dp(22), dp(10));
+        elsewhere.setForeground(saveRipple());
+        elsewhere.setOnClickListener(v -> {
+            shown[0].dismiss();
+            openSavePicker();
+        });
+        root.addView(elsewhere);
+
+        shown[0] = lightAlert()
+                .setView(root)
                 .setNegativeButton("취소", null)
                 .show();
     }
 
-    private void confirmRestoreFrom(String name, Uri uri) {
-        new AlertDialog.Builder(this)
-                .setTitle(name)
-                .setMessage("이 세이브를 지금 저장된 내용에 덮어씁니다.\n덮어쓴 뒤에는 되돌릴 수 없습니다.")
-                .setNegativeButton("취소", null)
-                .setPositiveButton("불러오기", (dialog, which) -> importSaveNow(uri))
+    /** A heading over a part of the save list, with a rule out to the edge. */
+    private View saveSection(String text, int color) {
+        LinearLayout section = new LinearLayout(this);
+        section.setOrientation(LinearLayout.HORIZONTAL);
+        section.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        section.setPadding(dp(10), dp(12), dp(10), dp(6));
+
+        TextView label = new TextView(this);
+        label.setText(text);
+        label.setTextSize(12f);
+        label.setTypeface(Typeface.DEFAULT_BOLD);
+        label.setTextColor(color);
+        section.addView(label);
+
+        View rule = new View(this);
+        rule.setBackgroundColor(LIB_LINE);
+        LinearLayout.LayoutParams ruleParams = new LinearLayout.LayoutParams(0, dp(1), 1f);
+        ruleParams.leftMargin = dp(8);
+        section.addView(rule, ruleParams);
+        return section;
+    }
+
+    /** A touch ripple over a rounded row. */
+    private android.graphics.drawable.RippleDrawable saveRipple() {
+        return new android.graphics.drawable.RippleDrawable(
+                android.content.res.ColorStateList.valueOf(0x222E8B57), null, roundedRect(Color.WHITE, 0, 0, 12));
+    }
+
+    /**
+     * One save in the list: its badge, when it was taken (or, for another
+     * game's, which game), what it holds, and how long ago.
+     */
+    private View saveRow(SaveShelf.Entry entry, boolean latest) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(10), dp(9), dp(10), dp(9));
+        if (latest) {
+            row.setBackground(roundedRect(LIB_SELECT_BG, LIB_GREEN_LINE, 1, 12));
+        }
+        row.setForeground(saveRipple());
+
+        row.addView(saveBadge(entry));
+
+        LinearLayout text = new LinearLayout(this);
+        text.setOrientation(LinearLayout.VERTICAL);
+
+        LinearLayout top = new LinearLayout(this);
+        top.setOrientation(LinearLayout.HORIZONTAL);
+        top.setGravity(android.view.Gravity.CENTER_VERTICAL);
+
+        TextView main = new TextView(this);
+        main.setText(entry.ours ? saveDay(entry.modified) : entry.title());
+        main.setTextSize(16f);
+        main.setTypeface(entry.ours ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+        main.setTextColor(entry.ours ? LIB_INK : LIB_MUTED);
+        main.setSingleLine(true);
+        main.setEllipsize(TextUtils.TruncateAt.END);
+        top.addView(main, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        if (latest) {
+            top.addView(saveTag("최신", LIB_GREEN_SOFT, LIB_GREEN_DEEP));
+        } else if (entry.beforeImport()) {
+            top.addView(saveTag("가져오기 전", LIB_STAR_SOFT, LIB_STAR_INK));
+        }
+        text.addView(top);
+
+        TextView sub = new TextView(this);
+        if (!entry.ours) {
+            sub.setText(saveDay(entry.modified));
+        } else if (entry.beforeImport()) {
+            sub.setText("불러오기 직전에 자동으로 남긴 백업");
+        } else {
+            sub.setText(saveStamp(entry.modified) + " · 파일 " + entry.files + "개 · " + formatSize(entry.bytes));
+        }
+        sub.setTextSize(12f);
+        sub.setTextColor(LIB_MUTED);
+        sub.setSingleLine(true);
+        sub.setEllipsize(TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams subParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        subParams.topMargin = dp(2);
+        text.addView(sub, subParams);
+
+        row.addView(text, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView ago = new TextView(this);
+        ago.setText(saveAgo(entry.modified));
+        ago.setTextSize(12f);
+        ago.setTextColor(LIB_MUTED);
+        ago.setPadding(dp(8), 0, 0, 0);
+        row.addView(ago);
+        return row;
+    }
+
+    /** 📦 for a save, 🛟 for the copy kept before an import; faded for another game's. */
+    private View saveBadge(SaveShelf.Entry entry) {
+        TextView icon = new TextView(this);
+        icon.setText(entry.beforeImport() ? "🛟" : "📦");
+        icon.setTextSize(18f);
+        icon.setGravity(android.view.Gravity.CENTER);
+        icon.setBackground(roundedRect(entry.beforeImport() ? LIB_STAR_SOFT : LIB_GREEN_SOFTER, 0, 0, 11));
+        if (!entry.ours) {
+            icon.setAlpha(0.6f);
+        }
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(40), dp(40));
+        params.rightMargin = dp(12);
+        icon.setLayoutParams(params);
+        return icon;
+    }
+
+    private TextView saveTag(String text, int fill, int ink) {
+        TextView tag = new TextView(this);
+        tag.setText(text);
+        tag.setTextSize(10.5f);
+        tag.setTypeface(Typeface.DEFAULT_BOLD);
+        tag.setTextColor(ink);
+        tag.setPadding(dp(7), dp(1), dp(7), dp(2));
+        tag.setBackground(roundedRect(fill, 0, 0, 99));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        params.leftMargin = dp(6);
+        tag.setLayoutParams(params);
+        return tag;
+    }
+
+    /** 10월 10일 (토) 09:02 */
+    private static String saveDay(long millis) {
+        return new java.text.SimpleDateFormat("M월 d일 (E) HH:mm", Locale.KOREAN).format(new java.util.Date(millis));
+    }
+
+    /** 2026-10-10 09:02 */
+    private static String saveStamp(long millis) {
+        return new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.ROOT).format(new java.util.Date(millis));
+    }
+
+    /** 방금 전, 5분 전, 9시간 전, 어제, 12일 전, 1년 전. */
+    private static String saveAgo(long millis) {
+        long elapsed = Math.max(0L, System.currentTimeMillis() - millis);
+        if (elapsed < 60_000L) {
+            return "방금 전";
+        }
+        if (elapsed < 3_600_000L) {
+            return (elapsed / 60_000L) + "분 전";
+        }
+        if (elapsed < 86_400_000L) {
+            return (elapsed / 3_600_000L) + "시간 전";
+        }
+        long days = elapsed / 86_400_000L;
+        if (days == 1) {
+            return "어제";
+        }
+        return days < 365 ? days + "일 전" : (days / 365) + "년 전";
+    }
+
+    /** Asks before a save from the list is put in place; 취소 goes back to the list. */
+    private void confirmSaveImport(File game, String title, SaveShelf.Entry entry) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(22), dp(6), dp(22), dp(4));
+
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.HORIZONTAL);
+        card.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        card.setPadding(dp(12), dp(12), dp(12), dp(12));
+        card.setBackground(roundedRect(LIB_GREEN_SOFTER, 0, 0, 12));
+        card.addView(saveBadge(entry));
+        LinearLayout cardText = new LinearLayout(this);
+        cardText.setOrientation(LinearLayout.VERTICAL);
+        TextView cardMain = new TextView(this);
+        cardMain.setText(entry.ours ? saveDay(entry.modified) : entry.title());
+        cardMain.setTextSize(15f);
+        cardMain.setTypeface(Typeface.DEFAULT_BOLD);
+        cardMain.setTextColor(LIB_INK);
+        cardText.addView(cardMain);
+        TextView cardSub = new TextView(this);
+        cardSub.setText((entry.ours ? "" : saveDay(entry.modified) + " · ")
+                + "파일 " + entry.files + "개 · " + formatSize(entry.bytes) + " · " + saveAgo(entry.modified));
+        cardSub.setTextSize(12f);
+        cardSub.setTextColor(LIB_MUTED);
+        cardText.addView(cardSub);
+        card.addView(cardText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        cardParams.bottomMargin = dp(12);
+        box.addView(card, cardParams);
+
+        TextView message = new TextView(this);
+        message.setText(entry.ours
+                ? "지금 저장된 내용을 이 세이브로 바꿉니다."
+                : "‘" + entry.title() + "’ 게임의 세이브예요.\n그 게임에 저장된 내용을 이 세이브로 바꿉니다.");
+        message.setTextSize(13.5f);
+        message.setTextColor(LIB_INK);
+        message.setLineSpacing(0f, 1.25f);
+        box.addView(message);
+
+        TextView note = new TextView(this);
+        note.setText(entry.ours
+                ? "🛟 지금 세이브는 ‘가져오기 전’ 백업으로 목록에 남겨둬서, 언제든 다시 되돌릴 수 있어요."
+                : "되돌릴 수 없으니, 필요하면 그 게임에서 먼저 세이브를 꺼내 두세요.");
+        note.setTextSize(12.5f);
+        note.setTextColor(entry.ours ? LIB_GREEN_DEEP : LIB_MUTED);
+        note.setLineSpacing(0f, 1.2f);
+        note.setPadding(dp(11), dp(9), dp(11), dp(9));
+        note.setBackground(roundedRect(LIB_SELECT_BG, 0, 0, 10));
+        LinearLayout.LayoutParams noteParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        noteParams.topMargin = dp(10);
+        box.addView(note, noteParams);
+
+        lightAlert()
+                .setTitle("이 세이브를 불러올까요?")
+                .setView(box)
+                .setNegativeButton("취소", (dialog, which) -> importSaves(game))
+                .setPositiveButton("불러오기", (dialog, which) -> withDownloadPermission(() -> restoreSave(game, title, entry)))
+                .show();
+    }
+
+    /**
+     * Puts a save from the list in place. Over the game's own saves, what is
+     * there now is exported first, as the PC version does, so the import can
+     * be undone from the same list.
+     */
+    private void restoreSave(File game, String title, SaveShelf.Entry entry) {
+        Toast.makeText(this, "세이브를 불러오는 중...", Toast.LENGTH_SHORT).show();
+        emulatorThread.execute(() -> {
+            try {
+                SaveExporter.Result kept = entry.ours ? SaveExporter.export(this, game, title, SaveShelf.BEFORE_IMPORT) : null;
+                SaveImporter.Result result;
+                try (InputStream input = SaveShelf.open(this, entry)) {
+                    result = SaveImporter.importZip(this, input);
+                }
+                String done = "세이브를 불러왔습니다 (" + result.files + "개). 게임을 다시 시작하면 적용됩니다."
+                        + (kept == null ? "" : "\n이전 세이브는 ‘가져오기 전’으로 남겨뒀어요.");
+                runOnUiThread(() -> Toast.makeText(this, done, Toast.LENGTH_LONG).show());
+            } catch (Exception e) {
+                runOnUiThread(() -> Toast.makeText(this, "불러오기 실패: " + e.getMessage(), Toast.LENGTH_LONG).show());
+            }
+        });
+    }
+
+    /** What a long press on a save offers. */
+    private void showSaveActions(File game, String title, SaveShelf.Entry entry) {
+        String label = entry.ours ? saveDay(entry.modified) : entry.title();
+        MenuItem[] items = {
+                new MenuItem("📦", "불러오기", "", "이 세이브로 바꾸기", false),
+                new MenuItem("📤", "공유하기", "", "카톡·드라이브 등으로 보내기", false),
+                new MenuItem("🗑", "이 세이브 파일 지우기", "", "지우면 되돌릴 수 없습니다", true),
+        };
+        lightAlert()
+                .setTitle(label + " 세이브")
+                .setAdapter(menuAdapter(items), (dialog, which) -> {
+                    if (which == 0) {
+                        confirmSaveImport(game, title, entry);
+                    } else if (which == 1) {
+                        shareSave(entry);
+                    } else {
+                        confirmSaveDelete(game, entry, label);
+                    }
+                })
+                .setNegativeButton("취소", (dialog, which) -> importSaves(game))
+                .show();
+    }
+
+    /** Hands the zip to the share sheet. */
+    private void shareSave(SaveShelf.Entry entry) {
+        emulatorThread.execute(() -> {
+            try {
+                Uri uri = SaveShelf.shareUri(this, entry);
+                runOnUiThread(() -> {
+                    Intent send = new Intent(Intent.ACTION_SEND);
+                    send.setType("application/zip");
+                    send.putExtra(Intent.EXTRA_STREAM, uri);
+                    send.setClipData(android.content.ClipData.newRawUri(entry.name, uri));
+                    send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    startActivity(Intent.createChooser(send, "세이브 공유하기"));
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> Toast.makeText(this, "공유할 수 없습니다: " + e.getMessage(), Toast.LENGTH_LONG).show());
+            }
+        });
+    }
+
+    private void confirmSaveDelete(File game, SaveShelf.Entry entry, String label) {
+        lightAlert()
+                .setTitle("이 세이브 파일을 지울까요?")
+                .setMessage(label + "\n" + entry.name + "\n\n지운 파일은 되돌릴 수 없습니다.")
+                .setNegativeButton("취소", (dialog, which) -> importSaves(game))
+                .setPositiveButton("지우기", (dialog, which) -> emulatorThread.execute(() -> {
+                    boolean all = SaveShelf.delete(this, entry);
+                    runOnUiThread(() -> {
+                        Toast.makeText(this, all
+                                ? "세이브 파일을 지웠습니다."
+                                : "앱 안의 사본은 지웠어요. 다운로드/Mini Mobile/세이브 의 파일은 파일 앱에서 지워주세요.",
+                                Toast.LENGTH_LONG).show();
+                        importSaves(game);
+                    });
+                }))
                 .show();
     }
 

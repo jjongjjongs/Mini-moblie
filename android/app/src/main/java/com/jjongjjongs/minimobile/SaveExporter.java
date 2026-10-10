@@ -42,15 +42,23 @@ final class SaveExporter {
     private SaveExporter() {
     }
 
+    /** {@link #export(Context, File, String, String)} with nothing after the time. */
+    static Result export(Context context, File archive, String title) throws Exception {
+        return export(context, archive, title, "");
+    }
+
     /**
-     * Writes {@code <title> 세이브.zip} to Downloads.
+     * Writes {@code <title> 세이브 <date> <time><note>.zip} to the saves
+     * folder, and keeps a copy for {@link SaveShelf}. Each export is a file of
+     * its own, as on the PC, so the ones before it stay to go back to.
      *
      * @param archive  the imported game file, read to find its ids
      * @param title    display name, used for the zip's name
+     * @param note     put after the time, e.g. {@code " (가져오기 전)"}
      * @return what was written, or {@code null} if the title has saved nothing
      * @throws Exception if reading or writing failed; the message is shown as-is
      */
-    static Result export(Context context, File archive, String title) throws Exception {
+    static Result export(Context context, File archive, String title, String note) throws Exception {
         List<File> roots = roots(context, archive);
 
         if (roots.isEmpty()) {
@@ -72,8 +80,7 @@ final class SaveExporter {
             return null;
         }
 
-        String name = Downloads.safeName(title) + " 세이브.zip";
-        Downloads.writeInto(context, Downloads.SAVES_DIR, name, "application/zip", buffer.toByteArray());
+        String name = SaveShelf.store(context, title, note, buffer.toByteArray());
 
         return new Result(name, files);
     }
@@ -88,7 +95,7 @@ final class SaveExporter {
      * before erasing would not hold everything the erase took away.
      */
     static List<File> roots(Context context, File archive) throws Exception {
-        String[] ids = readIds(archive);
+        String[] ids = ids(archive);
         List<File> roots = new ArrayList<>();
 
         File runtime = new File(context.getFilesDir(), "runtime");
@@ -103,7 +110,8 @@ final class SaveExporter {
         return roots;
     }
 
-    private static String[] readIds(File archive) throws Exception {
+    /** The record store id and the filesystem id the archive's saves sit under. */
+    static String[] ids(File archive) throws Exception {
         byte[] bytes;
         try (InputStream input = new FileInputStream(archive); ByteArrayOutputStream buffer = new ByteArrayOutputStream()) {
             byte[] chunk = new byte[CHUNK];

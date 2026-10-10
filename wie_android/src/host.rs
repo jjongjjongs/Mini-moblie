@@ -349,6 +349,29 @@ pub fn save_zip_belongs(zip_data: &[u8], data: &[u8]) -> Option<bool> {
     Some(roots.iter().any(|root| ours.contains(root)))
 }
 
+/// How many saved files a save zip holds and how many bytes they come to,
+/// for a host listing its zips; nothing for one that is not a zip.
+pub fn save_zip_contents(zip_data: &[u8]) -> (usize, u64) {
+    let Ok(mut archive) = zip::ZipArchive::new(std::io::Cursor::new(zip_data)) else {
+        return (0, 0);
+    };
+    let mut files = 0;
+    let mut bytes = 0;
+    for index in 0..archive.len() {
+        let Ok(entry) = archive.by_index(index) else {
+            continue;
+        };
+        let saved = entry
+            .enclosed_name()
+            .is_some_and(|path| (path.starts_with("db") || path.starts_with("fs")) && path.components().count() >= 3);
+        if !entry.is_dir() && saved {
+            files += 1;
+            bytes += entry.size();
+        }
+    }
+    (files, bytes)
+}
+
 /// Removes `data`'s saves, and returns how many directories it removed.
 pub fn erase_save(data: &[u8], runtime_dir: &Path) -> Result<usize, String> {
     let roots = save_roots(data, runtime_dir)?;
@@ -362,7 +385,7 @@ pub fn erase_save(data: &[u8], runtime_dir: &Path) -> Result<usize, String> {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{erase_save, export_save, import_save, save_dirs, save_files, save_zip_belongs};
+    use super::{erase_save, export_save, import_save, save_dirs, save_files, save_zip_belongs, save_zip_contents};
 
     fn runtime_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("wie-host-{name}-{}", std::process::id()));
@@ -393,6 +416,7 @@ mod tests {
         // as no save at all.
         assert_eq!(save_zip_belongs(&zip, &archive), Some(true));
         assert_eq!(save_zip_belongs(&archive, &archive), None);
+        assert_eq!(save_zip_contents(&zip), (2, 12));
         assert!(erase_save(&archive, &runtime).unwrap() >= 2);
         assert!(!save.exists() && !record.exists());
 

@@ -103,11 +103,19 @@ enum Library {
 
     /// Writes the title's saves to Documents/Saves as a zip, laid out as the
     /// Android app's export is, and returns where; nil when the title has
-    /// not saved anything yet.
-    static func exportSave(_ game: GameFile) throws -> URL? {
+    /// not saved anything yet. Each export is a file of its own, named for
+    /// the game and the time with `note` after it, so the ones before it stay
+    /// to go back to.
+    static func exportSave(_ game: GameFile, note: String = "") throws -> URL? {
         let data = try Data(contentsOf: game.url)
         let stamp = DateFormatter.saveStamp.string(from: Date())
-        let destination = savesDirectory.appendingPathComponent("\(game.title)_세이브_\(stamp).zip")
+        let base = "\(game.title) 세이브 \(stamp)\(note)"
+        var destination = savesDirectory.appendingPathComponent("\(base).zip")
+        var copy = 2
+        while FileManager.default.fileExists(atPath: destination.path) {
+            destination = savesDirectory.appendingPathComponent("\(base) (\(copy)).zip")
+            copy += 1
+        }
 
         var exported = false
         let failure = data.withUnsafeBytes { buffer -> String? in
@@ -118,6 +126,47 @@ enum Library {
             throw LibraryError(message: failure)
         }
         return exported ? destination : nil
+    }
+
+    /// The save zips in Documents/Saves: the game's own first, then other
+    /// games', each newest first. Zips that hold no saves are left out.
+    static func saves(for game: GameFile) -> [SaveZip] {
+        let data = (try? Data(contentsOf: game.url)) ?? Data()
+        let urls = (try? FileManager.default.contentsOfDirectory(
+            at: savesDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey]
+        )) ?? []
+
+        var zips: [SaveZip] = []
+        for url in urls where url.pathExtension.lowercased() == "zip" {
+            guard let zip = try? Data(contentsOf: url) else { continue }
+            var files = 0
+            var size: UInt64 = 0
+            let belongs = zip.withUnsafeBytes { zipBuffer -> Int32 in
+                data.withUnsafeBytes { dataBuffer -> Int32 in
+                    let zipBytes = zipBuffer.bindMemory(to: UInt8.self)
+                    let dataBytes = dataBuffer.bindMemory(to: UInt8.self)
+                    return wie_save_zip_info(zipBytes.baseAddress, zipBytes.count, dataBytes.baseAddress, dataBytes.count, &files, &size)
+                }
+            }
+            guard belongs >= 0 else { continue }
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            zips.append(SaveZip(url: url, modified: modified, files: files, bytes: Int64(size), ours: belongs == 1))
+        }
+        return zips.sorted { $0.ours != $1.ours ? $0.ours : $0.modified > $1.modified }
+    }
+
+    /// Puts a save zip from the list in place. Over the game's own saves,
+    /// what is there now is exported first, so the import can be undone from
+    /// the same list; that export is returned with the count.
+    static func importSave(_ zip: SaveZip, into game: GameFile) throws -> (restored: Int, backup: URL?) {
+        let backup = try zip.ours ? exportSave(game, note: SaveZip.beforeImport) : nil
+        let restored = try importSave(from: zip.url)
+        return (restored, backup)
+    }
+
+    static func deleteSave(_ zip: SaveZip) throws {
+        try FileManager.default.removeItem(at: zip.url)
     }
 
     /// Restores a save zip - one this app or the Android app exported - and
@@ -157,11 +206,12 @@ enum Library {
 }
 
 extension DateFormatter {
-    /// 20261008_1530, for export file names.
+    /// 2026-10-08 15.30, for export file names - as the Android app and the
+    /// PC name theirs.
     static let saveStamp: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyyMMdd_HHmm"
+        formatter.dateFormat = "yyyy-MM-dd HH.mm"
         return formatter
     }()
 }

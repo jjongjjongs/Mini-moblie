@@ -65,6 +65,12 @@ struct LibraryView: View {
     @State private var sharing: SharedFile?
     @State private var notice: Notice?
 
+    /// The game whose save list is open, and what to do once it closes: tell
+    /// the player how an import went, or open the file picker.
+    @State private var savesFor: GameFile?
+    @State private var afterSaves: String?
+    @State private var pickAfterSaves = false
+
     private var favorites: Set<String> { Favorites.decode(favoritesText) }
 
     private var shown: [GameFile] {
@@ -117,6 +123,13 @@ struct LibraryView: View {
         }
         .sheet(item: $sharing) { file in
             ShareSheet(items: [file.url])
+        }
+        .sheet(item: $savesFor, onDismiss: savesClosed) { game in
+            SaveListView(
+                game: game,
+                finished: { afterSaves = $0 },
+                pickElsewhere: { pickAfterSaves = true }
+            )
         }
         .fullScreenCover(item: $playing) { game in
             GameView(game: game)
@@ -230,7 +243,7 @@ struct LibraryView: View {
             }
             Divider()
             Button { exportSave(game) } label: { Label("세이브 내보내기", systemImage: "square.and.arrow.up") }
-            Button { importer = .save } label: { Label("세이브 가져오기", systemImage: "square.and.arrow.down") }
+            Button { savesFor = game } label: { Label("세이브 불러오기", systemImage: "square.and.arrow.down") }
             Button(role: .destructive) { erasing = game } label: { Label("세이브 삭제", systemImage: "clock.arrow.circlepath") }
             Divider()
             Button(role: .destructive) {
@@ -380,6 +393,19 @@ struct LibraryView: View {
             }
         } catch {
             notice = Notice(title: "세이브 내보내기 실패", message: error.localizedDescription)
+        }
+    }
+
+    /// After the save list: a picker asked for opens only once the sheet is
+    /// gone, as two cannot be up at once, and the same for the notice.
+    private func savesClosed() {
+        if let message = afterSaves {
+            afterSaves = nil
+            notice = Notice(title: "세이브 불러오기", message: message)
+        }
+        if pickAfterSaves {
+            pickAfterSaves = false
+            importer = .save
         }
     }
 

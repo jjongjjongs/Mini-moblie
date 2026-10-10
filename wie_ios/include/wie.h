@@ -90,6 +90,9 @@ float wie_speed(void);
 char *wie_export_save(const uint8_t *data, size_t length, const char *runtime_dir, const char *destination, bool *exported);
 // Restores a save zip, overwriting; `*restored` is how many files.
 char *wie_import_save(const uint8_t *zip, size_t length, const char *runtime_dir, size_t *restored);
+// What a save zip is to the game `data`: -1 no save zip, 1 its saves, 0 another
+// game's; `*files` and `*size` are how many saved files it holds and their bytes.
+int32_t wie_save_zip_info(const uint8_t *zip, size_t zip_length, const uint8_t *data, size_t length, size_t *files, uint64_t *size);
 // Removes the game's saves; `*removed` is how many directories.
 char *wie_erase_save(const uint8_t *data, size_t length, const char *runtime_dir, size_t *removed);
 
