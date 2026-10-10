@@ -501,6 +501,11 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // 2006현영맞고: its pictures are 300 rows tall, and the 20 under them kept
     // the title's logo under the menu.
     (TitlePlatform::Ktf, "01033511", panel(240, 320).with_bottom_cropped(20)),
+    // 마스터오브소드: makes its card 240x320 and clips every screen - title,
+    // story, the castle - to the top 304 rows, leaving 16 white under them. It
+    // keeps the strip on whatever panel it is told (288 of 304, 248 of 264),
+    // so keep 320 and crop the strip.
+    (TitlePlatform::Ktf, "01029220", panel(240, 320).with_bottom_cropped(16)),
     // 맞고삼국대전: 176x220 by its descriptor, and every screen - title, map,
     // story - fills the top 204 rows and leaves 16 blank under them.
     (TitlePlatform::Ktf, "010247AB", panel(176, 220).with_bottom_cropped(16)),
