@@ -260,8 +260,12 @@ const SCANCODES: [(i32, &str, &str); 85] = [
 
 /// Keys the port keeps for itself: Esc opens the menu, F5 and F6 slow the
 /// game down and speed it up, F11 the full screen, Delete clears a cell while
-/// the table is open.
+/// the table is open. On the list Tab opens the search, Backspace takes a
+/// letter off it, and F2 opens the games folder.
 pub const ESCAPE: i32 = 41;
+pub const BACKSPACE: i32 = 42;
+pub const TAB: i32 = 43;
+pub const F2: i32 = 59;
 pub const F5: i32 = 62;
 pub const F6: i32 = 63;
 pub const F11: i32 = 68;

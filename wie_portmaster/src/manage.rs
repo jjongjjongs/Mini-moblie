@@ -14,11 +14,11 @@ use wie_backend::canvas::{Color, TextAlignment};
 use crate::{
     App, FRAME,
     controls::Button,
-    library::{self, BAR, HIGHLIGHT, LINE, MUTED, Screen, TEXT, fit},
     open_folder,
     pointer::Target,
     saves::{self, SAVES_DIR, SaveZip},
-    settings::{ACCENT, DANGER, DIM, EDGE, PANEL, Repeat, panel_bar, scroll, scroll_marks},
+    settings::{Repeat, panel_bar, scroll, scroll_marks},
+    ui::{self, ACCENT, BAR, DANGER, DIM, EDGE, HIGHLIGHT, LINE, MUTED, Screen, TEXT, fit},
 };
 
 /// How long the note on what was just done stays up.
@@ -96,8 +96,7 @@ impl App {
         let panel_height = (2 * BAR + 8 + lines_height + dialog.options.len() as i32 * LINE + note_height) as u32;
         let x = (width - panel_width) as i32 / 2;
         let y = ((height as i32 - panel_height as i32) / 2).max(0);
-        screen.fill(x - 1, y - 1, panel_width + 2, panel_height + 2, EDGE);
-        screen.fill(x, y, panel_width, panel_height, PANEL);
+        screen.panel(x, y, panel_width, panel_height);
         panel_bar(&mut screen, x, y, panel_width, &dialog.title, "");
 
         let middle = x + panel_width as i32 / 2;
@@ -256,8 +255,7 @@ impl App {
         let panel_height = (2 * BAR + 8 + body_height + rows.len() as i32 * LINE) as u32;
         let x = (width - panel_width) as i32 / 2;
         let y = ((height as i32 - panel_height as i32) / 2).max(0);
-        screen.fill(x - 1, y - 1, panel_width + 2, panel_height + 2, EDGE);
-        screen.fill(x, y, panel_width, panel_height, PANEL);
+        screen.panel(x, y, panel_width, panel_height);
         panel_bar(
             &mut screen,
             x,
@@ -315,11 +313,10 @@ impl App {
         let (choose, back) = (self.hint("A 선택", "Enter 선택"), self.hint("B 뒤로", "Esc 뒤로"));
         self.back_bar(&mut screen, x, y + panel_height as i32 - BAR, panel_width, choose, back);
 
+        if let Some(text) = note {
+            screen.toast(text, 6);
+        }
         let rgba = screen.rgba();
-        let rgba = match note {
-            Some(text) => library::with_toast(&rgba, width, height, text),
-            None => rgba,
-        };
         self.show(&rgba, width, height);
     }
 
@@ -393,7 +390,8 @@ impl App {
                             note: String::new(),
                         };
                         let (width, height, back) = self.draw_import(game, &zips, cursor, &mut top);
-                        if self.ask(&dialog, Some((width, height, &back))) == Some(1) {
+                        let scale = ui::scale();
+                        if self.ask(&dialog, Some((width * scale, height * scale, &back))) == Some(1) {
                             return Some(match saves::import(game, zip) {
                                 Ok((count, _)) => format!("가져왔습니다 (파일 {count}개)"),
                                 Err(error) => error,
@@ -464,7 +462,7 @@ impl App {
                 ImportRow::Heading(text) => {
                     let text = fit(text, width as f32 - 40.0);
                     screen.text(&text, 8, y + 1, TextAlignment::Left, ACCENT);
-                    let end = 8 + wie_backend::canvas::string_width_px(&text, 16.0) as i32 + 6;
+                    let end = 8 + ui::width(&text) as i32 + 6;
                     if end < width as i32 - 8 {
                         screen.fill(end, y + LINE / 2, (width as i32 - 8 - end) as u32, 1, EDGE);
                     }

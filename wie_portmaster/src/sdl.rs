@@ -38,6 +38,8 @@ pub const WINDOWEVENT: u32 = 0x200;
 pub const DROPFILE: u32 = 0x1000;
 pub const KEYDOWN: u32 = 0x300;
 pub const KEYUP: u32 = 0x301;
+pub const TEXTEDITING: u32 = 0x302;
+pub const TEXTINPUT: u32 = 0x303;
 pub const MOUSEMOTION: u32 = 0x400;
 pub const MOUSEBUTTONDOWN: u32 = 0x401;
 pub const MOUSEBUTTONUP: u32 = 0x402;
@@ -111,6 +113,14 @@ impl Event {
     /// `SDL_ControllerAxisEvent.value`.
     pub fn axis_value(&self) -> i16 {
         i16::from_ne_bytes(self.raw[16..18].try_into().unwrap())
+    }
+
+    /// `SDL_TextInputEvent.text` / `SDL_TextEditingEvent.text`: what was
+    /// typed, or what the input method is still composing, in UTF-8.
+    pub fn text(&self) -> String {
+        let bytes = &self.raw[12..44];
+        let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
+        String::from_utf8_lossy(&bytes[..end]).into_owned()
     }
 
     /// Where the pointer is, in the window: `SDL_MouseMotionEvent.x`/`.y`
@@ -204,6 +214,8 @@ functions! {
     render_copy = "SDL_RenderCopy": fn(*mut c_void, *mut c_void, *const Rect, *const Rect) -> c_int;
     render_present = "SDL_RenderPresent": fn(*mut c_void);
     poll_event = "SDL_PollEvent": fn(*mut Event) -> c_int;
+    start_text_input = "SDL_StartTextInput": fn();
+    stop_text_input = "SDL_StopTextInput": fn();
     num_joysticks = "SDL_NumJoysticks": fn() -> c_int;
     is_game_controller = "SDL_IsGameController": fn(c_int) -> c_int;
     joystick_name_for_index = "SDL_JoystickNameForIndex": fn(c_int) -> *const c_char;

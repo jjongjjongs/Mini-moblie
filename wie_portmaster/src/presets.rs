@@ -32,6 +32,8 @@ pub struct Store {
     /// Game file name, and how its screen is enlarged when that is not 도트:
     /// 0 기본, 2 HQ2X, as the Android app numbers them.
     qualities: Vec<(String, u8)>,
+    /// Game file name, and when it was last started, in seconds since 1970.
+    played: Vec<(String, u64)>,
     /// How a desktop window is shown: its size as a multiple of 320x240, or
     /// 0 for the full screen.
     screen: u32,
@@ -45,6 +47,7 @@ impl Store {
             fixed: Vec::new(),
             speeds: Vec::new(),
             qualities: Vec::new(),
+            played: Vec::new(),
             screen: 3,
         };
         if let Ok(text) = std::fs::read_to_string(STATE_FILE) {
@@ -66,6 +69,11 @@ impl Store {
                             && quality <= 2
                         {
                             store.qualities.push(((*game).to_owned(), quality));
+                        }
+                    }
+                    ["played", game, at] => {
+                        if let Ok(at) = at.parse::<u64>() {
+                            store.played.push(((*game).to_owned(), at));
                         }
                     }
                     ["screen", screen] => store.screen = screen.parse().unwrap_or(3).min(SCREEN_MAX),
@@ -229,11 +237,27 @@ impl Store {
         self.save();
     }
 
+    /// When each game was last started, by file name.
+    pub fn played_all(&self) -> std::collections::HashMap<String, u64> {
+        self.played.iter().cloned().collect()
+    }
+
+    /// Remembers that `game` was started now.
+    pub fn set_played(&mut self, game: &str) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |x| x.as_secs());
+        self.played.retain(|(x, _)| x != game);
+        self.played.push((game.to_owned(), now));
+        self.save();
+    }
+
     /// Drops what is kept for a game that is gone.
     pub fn forget(&mut self, game: &str) {
         self.fixed.retain(|(x, _)| x != game);
         self.speeds.retain(|(x, _)| x != game);
         self.qualities.retain(|(x, _)| x != game);
+        self.played.retain(|(x, _)| x != game);
         self.save();
     }
 
@@ -260,6 +284,9 @@ impl Store {
         }
         for (game, quality) in &self.qualities {
             state.push_str(&format!("quality\t{game}\t{quality}\n"));
+        }
+        for (game, at) in &self.played {
+            state.push_str(&format!("played\t{game}\t{at}\n"));
         }
         if let Err(error) = std::fs::write(STATE_FILE, state) {
             eprintln!("프리셋 상태를 저장할 수 없습니다: {error}");

@@ -7,8 +7,11 @@
 //! The screen, sound, pad and keyboard are SDL2's (see `sdl`): the handheld's
 //! own, or the SDL2.dll the Windows build ships beside it.
 //!
-//! It opens on a list of the games in the folder it is given and goes back to
-//! it when a game ends. The settings (see `settings`) open from the list with
+//! It opens on a list of the games in the folder it is given (see `library`),
+//! their icons in a row to step through sideways, by carrier or by a name
+//! searched for, and goes back to it when a game ends. Its own screens are
+//! drawn at the screen's resolution in a face of their own (see `ui`); the
+//! games keep their handset fonts. The settings (see `settings`) open from the list with
 //! Y or Esc, and over a game with MENU or Esc; a game's saves and the game
 //! itself are handled from there (see `manage`), and Delete on the list
 //! deletes the game picked. Each game plays at its own speed, which F5 and
@@ -23,13 +26,16 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod controls;
+mod icons;
 mod library;
 mod manage;
 mod pointer;
 mod presets;
 mod saves;
 mod sdl;
+mod search;
 mod settings;
+mod ui;
 
 use std::{
     ffi::{CStr, CString, c_int, c_void},
@@ -41,8 +47,8 @@ use std::{
 use wie_android::host;
 
 use self::{
-    controls::{BUTTON_COUNT, Button, DELETE, ESCAPE, F5, F6, F11},
-    library::Menu,
+    controls::{BACKSPACE, BUTTON_COUNT, Button, DELETE, ESCAPE, F2, F5, F6, F11, TAB},
+    library::{Hit, Menu},
     pointer::{Mouse, Pointer},
     presets::Store,
     sdl::{Event, Rect, Sdl},
@@ -146,6 +152,10 @@ enum Input {
     Key(i32, bool, bool),
     /// A file dropped on the window.
     Drop(PathBuf),
+    /// Text typed, through the input method on a desktop.
+    Text(String),
+    /// What the input method is still composing.
+    Editing(String),
     /// The mouse, in the pixels of what is on screen.
     Mouse(Mouse),
     /// The window closed.
@@ -402,6 +412,8 @@ impl App {
                     }
                 }
                 sdl::KEYDOWN | sdl::KEYUP => inputs.push(Input::Key(event.scancode(), event.kind() == sdl::KEYDOWN, event.key_repeat())),
+                sdl::TEXTINPUT => inputs.push(Input::Text(event.text())),
+                sdl::TEXTEDITING => inputs.push(Input::Editing(event.text())),
                 sdl::MOUSEMOTION => {
                     let (x, y) = self.window_to_canvas(event.mouse_position());
                     inputs.push(Input::Mouse(Mouse::Move(x, y, event.mouse_held() & 1 != 0)));
@@ -481,10 +493,14 @@ impl App {
         self.pointer.shown.to_canvas(x, y)
     }
 
-    /// Shows `rgba`, `width` by `height`, as large as the screen takes at its
-    /// own shape, on black, pixel for pixel.
+    /// Shows one of the port's own screens: `rgba` drawn at the screen's scale
+    /// (see `ui`) for a layout `width` by `height` units, pixel for pixel. The
+    /// mouse is put back into the layout's units.
     fn show(&mut self, rgba: &[u8], width: u32, height: u32) {
-        self.show_scaled(rgba, width, height, false);
+        let scale = ui::scale();
+        self.show_scaled(rgba, width * scale, height * scale, false);
+        self.pointer.shown.width = width;
+        self.pointer.shown.height = height;
     }
 
     /// [`Self::show`], scaled smoothly when `smooth`.
@@ -544,63 +560,143 @@ impl App {
     fn menu_size(&self) -> (u32, u32, u32) {
         let (width, height) = self.output_size();
         let scale = (height / 240).min(width / 320).max(1);
+        ui::set_scale(scale as u32);
         ((width / scale) as u32, (height / scale) as u32, scale as u32)
+    }
+
+    /// Turns the desktop's text input - and with it the input method - on for
+    /// the search, or off, so it keeps out of a game's keys.
+    fn text_input(&self, on: bool) {
+        if !self.desktop {
+            return;
+        }
+        // SAFETY: plain SDL2 calls with no arguments.
+        unsafe {
+            if on {
+                (self.sdl.start_text_input)();
+            } else {
+                (self.sdl.stop_text_input)();
+            }
+        }
     }
 
     /// Shows the list until a game is picked, or `None` when the player quits.
     fn choose(&mut self, menu: &mut Menu) -> Option<PathBuf> {
         menu.refresh();
+        menu.set_played(self.store.played_all());
         self.set_title("MiniMobile");
+        self.text_input(true);
+        let picked = self.choose_loop(menu);
+        self.text_input(false);
+        picked
+    }
+
+    fn choose_loop(&mut self, menu: &mut Menu) -> Option<PathBuf> {
         let mut dirty = true;
         let mut repeat: Option<(Button, Instant)> = None;
 
         loop {
             for input in self.poll() {
+                dirty = true;
                 let button = match input {
                     Input::Quit => return None,
                     Input::Drop(path) => {
                         menu.add(&path);
-                        dirty = true;
+                        continue;
+                    }
+                    // Typing on the list starts a search with it, through the
+                    // input method on a desktop; a space alone does not.
+                    Input::Text(text) => {
+                        if menu.searching() {
+                            menu.type_text(&text);
+                        } else if !text.trim().is_empty() {
+                            menu.open_search(false);
+                            menu.type_text(&text);
+                        }
+                        continue;
+                    }
+                    Input::Editing(text) => {
+                        if !text.is_empty() {
+                            menu.open_search(false);
+                        }
+                        menu.set_editing(&text);
+                        continue;
+                    }
+                    Input::Mouse(Mouse::Back) if menu.searching() => {
+                        menu.close_search();
                         continue;
                     }
                     // Esc opens the menu, as Y does - and the mouse's right
-                    // button. Over a game the pointer picks it, and a click
-                    // plays it.
-                    Input::Key(ESCAPE, true, false) | Input::Mouse(Mouse::Back) => Button::Y,
-                    Input::Mouse(Mouse::Move(_, y, _)) => {
-                        if let Some(index) = menu.game_at(y) {
-                            dirty |= menu.select(index);
+                    // button.
+                    Input::Mouse(Mouse::Back) => Button::Y,
+                    Input::Mouse(Mouse::Move(..) | Mouse::Release) => continue,
+                    Input::Mouse(Mouse::Press(x, y)) => {
+                        match menu.hit_at(x, y) {
+                            Some(Hit::Game(index)) => {
+                                // The game in the middle plays; one beside it
+                                // comes to the middle.
+                                if !menu.select(index)
+                                    && let Some(game) = menu.selected()
+                                {
+                                    return Some(game);
+                                }
+                            }
+                            Some(Hit::Tab(tab)) => {
+                                menu.close_search();
+                                menu.set_tab(tab);
+                            }
+                            Some(Hit::Search) => menu.open_search(!self.desktop),
+                            Some(Hit::Key(index)) => menu.pad_press(Some(index)),
+                            Some(Hit::Folder) => open_folder(menu.folder()),
+                            None => {}
                         }
                         continue;
-                    }
-                    Input::Mouse(Mouse::Press(x, y)) => {
-                        if let Some(index) = menu.game_at(y) {
-                            menu.select(index);
-                            Button::A
-                        } else if menu.on_folder_box(x, y) {
-                            Button::X
-                        } else {
-                            continue;
-                        }
                     }
                     Input::Mouse(Mouse::Wheel(turn)) => {
-                        let button = if turn > 0 { Button::Up } else { Button::Down };
+                        let button = if turn > 0 { Button::Left } else { Button::Right };
                         for _ in 0..turn.unsigned_abs().min(3) {
-                            dirty |= menu.navigate(button);
+                            menu.navigate(button);
                         }
                         continue;
                     }
-                    Input::Mouse(Mouse::Release) => continue,
+                    // A search typed on the keyboard takes its keys first.
+                    Input::Key(code, true, _) if menu.searching() && !menu.pad_keyboard() => {
+                        match code {
+                            ESCAPE | TAB => menu.close_search(),
+                            BACKSPACE => menu.erase(),
+                            40 | 88 => {
+                                if let Some(game) = menu.selected() {
+                                    return Some(game);
+                                }
+                            }
+                            82 | 80 => {
+                                menu.navigate(Button::Left);
+                            }
+                            81 | 79 => {
+                                menu.navigate(Button::Right);
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    Input::Key(TAB, true, false) => {
+                        menu.open_search(false);
+                        continue;
+                    }
+                    Input::Key(F2, true, false) if self.desktop => {
+                        open_folder(menu.folder());
+                        continue;
+                    }
+                    Input::Key(ESCAPE, true, false) => Button::Y,
                     // Delete asks to delete the game picked.
                     Input::Key(DELETE, true, false) => {
                         if let Some(game) = menu.selected() {
-                            let (width, height, _) = self.menu_size();
+                            let (width, height, scale) = self.menu_size();
                             let back = menu.draw(width, height);
-                            if let Some(done) = self.delete_game(&game, Some((width, height, &back))) {
+                            if let Some(done) = self.delete_game(&game, Some((width * scale, height * scale, &back))) {
                                 menu.refresh();
                                 menu.set_status(done);
                             }
-                            dirty = true;
                         }
                         continue;
                     }
@@ -622,12 +718,42 @@ impl App {
                     }
                 };
 
+                // The pad's keyboard, while it is up.
+                if menu.pad_keyboard() {
+                    match button {
+                        Button::Up => menu.pad_move(0, -1),
+                        Button::Down => menu.pad_move(0, 1),
+                        Button::Left => menu.pad_move(-1, 0),
+                        Button::Right => menu.pad_move(1, 0),
+                        Button::A => menu.pad_press(None),
+                        Button::B => menu.erase(),
+                        Button::X => menu.close_search(),
+                        Button::L1 | Button::L2 => {
+                            menu.navigate(Button::Left);
+                        }
+                        Button::R1 | Button::R2 => {
+                            menu.navigate(Button::Right);
+                        }
+                        Button::Start => {
+                            if let Some(game) = menu.selected() {
+                                return Some(game);
+                            }
+                        }
+                        Button::Guide => menu.close_search(),
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 match button {
                     Button::A | Button::Start => {
                         if let Some(game) = menu.selected() {
                             return Some(game);
                         }
                     }
+                    Button::B if menu.searching() => menu.close_search(),
+                    Button::X => menu.open_search(true),
+                    Button::Y if menu.searching() => menu.close_search(),
                     Button::Y => {
                         repeat = None;
                         let game = menu.selected();
@@ -643,10 +769,10 @@ impl App {
                             }
                             Outcome::Close | Outcome::EndGame => {}
                         }
-                        dirty = true;
                     }
-                    Button::X if self.desktop => open_folder(menu.folder()),
-                    _ => dirty |= menu.navigate(button),
+                    _ => {
+                        menu.navigate(button);
+                    }
                 }
             }
 
@@ -654,11 +780,21 @@ impl App {
             if let Some((button, at)) = repeat
                 && Instant::now() >= at
             {
-                dirty |= menu.navigate(button);
-                repeat = Some((button, Instant::now() + Duration::from_millis(70)));
+                match (menu.pad_keyboard(), button) {
+                    (true, Button::Up) => menu.pad_move(0, -1),
+                    (true, Button::Down) => menu.pad_move(0, 1),
+                    (true, Button::Left) => menu.pad_move(-1, 0),
+                    (true, Button::Right) => menu.pad_move(1, 0),
+                    (true, _) => {}
+                    (false, _) => {
+                        menu.navigate(button);
+                    }
+                }
+                dirty = true;
+                repeat = Some((button, Instant::now() + Duration::from_millis(90)));
             }
 
-            if dirty || std::mem::take(&mut self.redraw) {
+            if menu.poll() || dirty || std::mem::take(&mut self.redraw) {
                 let (width, height, _) = self.menu_size();
                 let rgba = menu.draw(width, height);
                 self.show(&rgba, width, height);
@@ -700,6 +836,9 @@ impl App {
         self.show(&rgba, width, height);
         let speed = self.game_speed(game);
         self.set_title(&game_title(&name, speed, false));
+        if let Some(file) = game.file_name() {
+            self.store.set_played(&file.to_string_lossy());
+        }
 
         let data = std::fs::read(game).map_err(|error| format!("게임 파일을 읽을 수 없습니다: {error}"))?;
         // A game fixed to a preset plays with it.
@@ -785,7 +924,7 @@ impl App {
                         host::stop();
                         std::process::exit(0);
                     }
-                    Input::Drop(_) => false,
+                    Input::Drop(_) | Input::Text(_) | Input::Editing(_) => false,
                     // Esc on the keyboard, MENU on the pad, the mouse's right
                     // button: the menu.
                     Input::Key(ESCAPE, true, false) | Input::Button(Button::Guide, true) | Input::Mouse(Mouse::Back) => true,
@@ -875,7 +1014,7 @@ impl App {
                 // The hint over the first seconds of a desktop game.
                 toast_up = !toast.is_empty() && toast_time;
                 let rgba = if toast_up {
-                    library::with_toast(rgba, width, height, &toast)
+                    ui::with_toast(rgba, width, height, &toast)
                 } else {
                     rgba.clone()
                 };

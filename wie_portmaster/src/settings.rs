@@ -11,26 +11,17 @@ use std::{
 };
 
 use wie_android::host;
-use wie_backend::canvas::{Color, TextAlignment, string_width_px};
+use wie_backend::canvas::{Color, TextAlignment};
 
+pub(crate) use crate::ui::{ACCENT, DANGER, DIM, EDGE, PANEL};
 use crate::{
     App, FRAME, Input,
     controls::{Button, DELETE, ESCAPE, KEYS_PER_KEY, TABLE_BUTTONS, TABLE_KEYS, key_label, mappable, scancode_label},
-    key_button,
-    library::{BAR, BAR_COLOR, HIGHLIGHT, LINE, MUTED, Screen, TEXT, fit, rgb},
+    icons, key_button,
     pointer::{Mouse, Target},
     presets::{DEFAULT_NAME, SCREEN_MAX},
+    ui::{self, BAR, BODY, GREEN, HIGHLIGHT, INK, LINE, MUTED, Picture, ROW, SMALL, Screen, TEXT, TINY, TINY_BOLD, WHITE, fit, fit_with, rgb},
 };
-
-const ROW: Color = rgb(0x22, 0x2a, 0x33);
-pub(crate) const ACCENT: Color = rgb(0x7d, 0xe0, 0xa8);
-pub(crate) const PANEL: Color = rgb(0x1a, 0x20, 0x28);
-pub(crate) const EDGE: Color = rgb(0x3c, 0x48, 0x54);
-pub(crate) const DIM: Color = Color { a: 0xb0, r: 0, g: 0, b: 0 };
-/// What cannot be undone easily: deleting.
-pub(crate) const DANGER: Color = rgb(0xf0, 0x8a, 0x80);
-/// The height of the speed ruler under the menu's rows.
-const RULER: i32 = 32;
 
 /// A game's file name, which what is kept for it is filed under.
 fn file_of(game: &Path) -> String {
@@ -155,6 +146,15 @@ impl Quality {
         }
     }
 
+    /// What the choice does, in a line.
+    fn detail(self) -> &'static str {
+        match self {
+            Quality::Smooth => "부드럽게 확대해요",
+            Quality::Dot => "픽셀을 그대로 키워요",
+            Quality::Hq2x => "계단진 테두리를 다듬어요",
+        }
+    }
+
     /// The next choice round, or the one before.
     fn step(self, forward: bool) -> Quality {
         Quality::from_index(((self as u8) + if forward { 1 } else { 2 }) % 3)
@@ -191,7 +191,7 @@ impl App {
                 Input::Key(code, true, repeated) => pressed.extend(
                     key_button(code).filter(|button| !repeated || matches!(button, Button::Up | Button::Down | Button::Left | Button::Right)),
                 ),
-                Input::Key(..) | Input::Drop(_) => {}
+                Input::Key(..) | Input::Drop(_) | Input::Text(_) | Input::Editing(_) => {}
                 Input::Mouse(mouse) => self.mouse_presses(mouse, &mut pressed),
                 Input::Button(button, true) => {
                     pressed.push(button);
@@ -217,18 +217,6 @@ impl App {
     /// Whether the screen has to be drawn again for the window's sake.
     pub(crate) fn take_redraw(&mut self) -> bool {
         std::mem::take(&mut self.redraw)
-    }
-
-    /// A blank screen of the settings' size, with the running game dimmed
-    /// behind it when there is one.
-    fn canvas(&self, context: &Context) -> (Screen, u32, u32) {
-        let (width, height, _) = self.menu_size();
-        let mut screen = Screen::new(width, height);
-        if let Some((frame_width, frame_height, rgba)) = context.frame {
-            screen.backdrop(rgba, frame_width, frame_height);
-            screen.fill(0, 0, width, height, DIM);
-        }
-        (screen, width, height)
     }
 
     pub(crate) fn present(&mut self, screen: Screen, width: u32, height: u32) {
@@ -269,6 +257,7 @@ impl App {
         let mut top: usize = 0;
         let mut repeat = Repeat::new();
         let mut dirty = true;
+        let icon = context.game.and_then(icons::extract);
         loop {
             let pressed = self.presses(&mut repeat);
             if let Some((row, _)) = self.take_pointed() {
@@ -353,7 +342,7 @@ impl App {
             }
 
             if dirty || self.take_redraw() {
-                self.draw_menu(context, &items, cursor, &mut top);
+                self.draw_menu(context, icon.as_ref(), &items, cursor, &mut top);
                 dirty = false;
             }
             std::thread::sleep(FRAME);
@@ -418,84 +407,200 @@ impl App {
         format!("{}{star}", self.store.active())
     }
 
-    fn draw_menu(&mut self, context: &Context, items: &[Item], cursor: usize, top: &mut usize) {
-        let (mut screen, width, height) = self.canvas(context);
-        self.clear_hits();
-        let panel_width = (width - 16).min(288);
-        // The speed's ruler under the rows, when there is a speed to set.
-        let ruler = items.contains(&Item::Speed) && context.game.is_some();
-        let ruler_height = if ruler { RULER } else { 0 };
-        // As many rows as the screen has room for, scrolled to the cursor.
-        let room = height as i32 - 2 * BAR - 8 - ruler_height - 4;
-        let rows = ((room / LINE).max(1) as usize).min(items.len());
-        scroll(cursor, rows, top);
-        let panel_height = (2 * BAR + 8 + rows as i32 * LINE + ruler_height) as u32;
-        let x = (width - panel_width) as i32 / 2;
-        let y = ((height as i32 - panel_height as i32) / 2).max(0);
-        screen.fill(x - 1, y - 1, panel_width + 2, panel_height + 2, EDGE);
-        screen.fill(x, y, panel_width, panel_height, PANEL);
+    /// What a row of the menu is called and the mark beside it.
+    fn item_face(&self, item: Item) -> (&'static str, &'static str) {
+        match item {
+            Item::Resume => ("▶", "게임으로 돌아가기"),
+            Item::Keyboard => ("⇥", "키보드 배치 바꾸기"),
+            Item::Layout if self.desktop => ("●", "패드 버튼 배치 바꾸기"),
+            Item::Layout => ("●", "버튼 배치 바꾸기"),
+            Item::Preset => ("★", "프리셋"),
+            Item::Fix => ("✓", "이 게임에 프리셋 고정"),
+            Item::Screen => ("▢", "화면"),
+            Item::Speed => ("»", "배속"),
+            Item::Quality => ("◇", "화질"),
+            Item::Saves => ("♡", "세이브 관리"),
+            Item::Delete => ("×", "이 게임 삭제"),
+            Item::EndGame => ("⏏", "게임 끝내기"),
+            Item::Close => ("←", "닫기"),
+            Item::QuitApp => ("⏏", "MiniMobile 종료"),
+        }
+    }
 
-        let (title, note) = if context.in_game() {
-            ("메뉴".to_owned(), "일시정지".to_owned())
-        } else {
-            let game = context.game_name().unwrap_or_default();
-            ("설정".to_owned(), fit(&game, panel_width as f32 / 2.0))
-        };
-        panel_bar(&mut screen, x, y, panel_width, &title, &note);
-
-        for (index, item) in items.iter().enumerate().skip(*top).take(rows) {
-            let label = match item {
-                Item::Resume => "게임으로 돌아가기",
-                Item::Keyboard => "키보드 배치 바꾸기",
-                Item::Layout if self.desktop => "패드 버튼 배치 바꾸기",
-                Item::Layout => "버튼 배치 바꾸기",
-                Item::Preset => "프리셋",
-                Item::Fix => "이 게임에 프리셋 고정",
-                Item::Screen => "화면",
-                Item::Speed => "배속",
-                Item::Quality => "화질",
-                Item::Saves => "세이브 관리",
-                Item::Delete => "이 게임 삭제",
-                Item::EndGame => "게임 끝내기",
-                Item::Close => "닫기",
-                Item::QuitApp => "MiniMobile 종료",
-            };
-            // What is left of the row beside its label.
-            let room = panel_width as f32 - 28.0 - string_width_px(label, 16.0);
-            let value = match item {
-                Item::Preset => format!("◀ {} ▶", fit(&self.active_label(), room - 40.0)),
-                Item::Screen => format!("◀ {} ▶", screen_label(self.store.screen())),
-                Item::Speed => format!("◀ {} ▶", speed_label(context.game.map_or(1.0, |game| self.game_speed(game)))),
-                Item::Quality => format!("◀ {} ▶", context.game.map_or(Quality::Dot, |game| self.game_quality(game)).label()),
-                Item::Fix => {
-                    let fixed = context.game_file().and_then(|game| self.store.fixed(&game).map(str::to_owned));
-                    fixed.map_or("끔".to_owned(), |name| fit(&name, room))
-                }
-                _ => String::new(),
-            };
-            let row_y = y + BAR + 4 + (index - *top) as i32 * LINE;
-            let picked = index == cursor;
-            if picked {
-                screen.fill(x, row_y, panel_width, LINE as u32, HIGHLIGHT);
+    /// What a row of the menu is set to, if it is set to anything.
+    fn item_value(&self, context: &Context, item: Item) -> String {
+        match item {
+            Item::Preset => self.active_label(),
+            Item::Screen => screen_label(self.store.screen()),
+            Item::Speed => speed_label(context.game.map_or(1.0, |game| self.game_speed(game))),
+            Item::Quality => context.game.map_or(Quality::Dot, |game| self.game_quality(game)).label().to_owned(),
+            Item::Fix => {
+                let fixed = context.game_file().and_then(|game| self.store.fixed(&game).map(str::to_owned));
+                fixed.unwrap_or_else(|| "끔".to_owned())
             }
-            screen.text(label, x + 8, row_y + 1, TextAlignment::Left, if picked { TEXT } else { MUTED });
-            self.hit(x, row_y, panel_width as i32, LINE, Target::Row(index));
+            _ => String::new(),
+        }
+    }
+
+    /// The menu: a drawer down the left, over the game when one is running,
+    /// with what the row picked sets shown large beside it.
+    fn draw_menu(&mut self, context: &Context, icon: Option<&Picture>, items: &[Item], cursor: usize, top: &mut usize) {
+        let (width, height, _) = self.menu_size();
+        let mut screen = Screen::new(width, height);
+        self.clear_hits();
+        let (w, h) = (width as f32, height as f32);
+        let side = (w * 0.47).clamp(150.0, 220.0);
+
+        // The game behind, dimmed, and the drawer over its left.
+        if let Some((frame_width, frame_height, rgba)) = context.frame {
+            screen.backdrop(rgba, frame_width, frame_height);
+            screen.fill(0, 0, width, height, Color { a: 0x60, r: 0, g: 0, b: 0 });
+        } else {
+            screen.gradient(rgb(0x1e, 0x26, 0x2d), rgb(0x0a, 0x0c, 0x10));
+        }
+        screen.fill(
+            0,
+            0,
+            side as u32,
+            height,
+            Color {
+                a: 0xf6,
+                r: 0x10,
+                g: 0x14,
+                b: 0x1a,
+            },
+        );
+        screen.fill(side as i32, 0, 1, height, EDGE);
+
+        let name = context.game_name().unwrap_or_else(|| "MiniMobile".to_owned());
+        let note = if context.in_game() { "일시정지됨" } else { "설정" };
+        let text_x = match icon {
+            Some(icon) => {
+                screen.picture(icon, 10.0, 7.0, 22.0, 22.0, 5.0, 1.0);
+                38.0
+            }
+            None => 12.0,
+        };
+        screen.text_styled(
+            &fit_with(&name, side - text_x - 8.0, SMALL),
+            text_x,
+            6.0,
+            SMALL,
+            TextAlignment::Left,
+            TEXT,
+        );
+        screen.text_styled(note, text_x, 19.0, TINY, TextAlignment::Left, MUTED);
+
+        // As many rows as the drawer has room for, scrolled to the cursor.
+        let row_height = 22.0;
+        let list_top = 36.0;
+        let rows = (((h - list_top - BAR as f32 - 4.0) / row_height) as usize).clamp(1, items.len());
+        scroll(cursor, rows, top);
+        for (index, item) in items.iter().enumerate().skip(*top).take(rows) {
+            let y = list_top + (index - *top) as f32 * row_height;
+            let picked = index == cursor;
+            let (mark, label) = self.item_face(*item);
+            let value = self.item_value(context, *item);
+            let steps = matches!(item, Item::Preset | Item::Screen | Item::Speed | Item::Quality);
+            if picked {
+                screen.round(6.0, y, side - 12.0, row_height - 2.0, 6.0, WHITE);
+            }
+            let danger = matches!(item, Item::Delete | Item::QuitApp | Item::EndGame);
+            let ink = if picked {
+                INK
+            } else if danger {
+                DANGER
+            } else {
+                rgb(0xd9, 0xdf, 0xe3)
+            };
+            let mark_color = if picked { GREEN } else { rgb(0x7f, 0x8b, 0x93) };
+            screen.text_styled(mark, 17.0, y + 3.0, SMALL, TextAlignment::Center, mark_color);
+            let value_width = if value.is_empty() {
+                0.0
+            } else {
+                ui::text_width(&value, SMALL).min(side * 0.4) + if picked && steps { 24.0 } else { 6.0 }
+            };
+            screen.text_styled(&fit(label, side - 40.0 - value_width), 28.0, y + 2.0, BODY, TextAlignment::Left, ink);
+            self.hit(0, y as i32, side as i32, row_height as i32, Target::Row(index));
             if !value.is_empty() {
-                let right = x + panel_width as i32 - 8;
-                screen.text(&value, right, row_y + 1, TextAlignment::Right, if picked { TEXT } else { ACCENT });
-                // ◀ and ▶ step the value, as the pad's do.
-                if value.starts_with('◀') {
-                    let left = right - string_width_px(&value, 16.0) as i32;
-                    self.hit(left - 4, row_y, 22, LINE, Target::Step(index, false));
-                    self.hit(right - 18, row_y, 26, LINE, Target::Step(index, true));
+                let right = side - 14.0;
+                let value = fit_with(&value, side * 0.4, SMALL);
+                if picked && steps {
+                    // ‹ and › step the value, as the pad's ◀ and ▶ do.
+                    screen.text_styled("›", right, y + 3.0, SMALL, TextAlignment::Right, MUTED);
+                    let value_right = right - 10.0;
+                    let shown = screen.text_styled(&value, value_right, y + 3.0, SMALL, TextAlignment::Right, GREEN);
+                    screen.text_styled("‹", value_right - shown - 4.0, y + 3.0, SMALL, TextAlignment::Right, MUTED);
+                    let left = (value_right - shown - 12.0) as i32;
+                    self.hit(left - 4, y as i32, 14, row_height as i32, Target::Step(index, false));
+                    self.hit(right as i32 - 10, y as i32, 18, row_height as i32, Target::Step(index, true));
+                } else {
+                    screen.text_styled(&value, right, y + 3.0, SMALL, TextAlignment::Right, if picked { GREEN } else { ACCENT });
                 }
             }
         }
+        // More rows above or below than are shown.
+        if *top > 0 {
+            screen.text_styled("▲", side - 12.0, list_top - 9.0, TINY, TextAlignment::Center, MUTED);
+        }
+        if *top + rows < items.len() {
+            screen.text_styled(
+                "▼",
+                side - 12.0,
+                list_top + rows as f32 * row_height - 3.0,
+                TINY,
+                TextAlignment::Center,
+                MUTED,
+            );
+        }
 
-        if ruler && let Some(game) = context.game {
-            let row = items.iter().position(|item| *item == Item::Speed).unwrap_or(0);
-            let ruler_y = y + BAR + 4 + rows as i32 * LINE;
-            self.draw_ruler(&mut screen, x + 14, ruler_y, panel_width as i32 - 28, self.game_speed(game), row);
+        // What the row picked sets, large, beside the drawer.
+        let card_x = side + 14.0;
+        let card_width = w - side - 26.0;
+        if card_width >= 100.0 {
+            match items[cursor] {
+                Item::Speed => {
+                    if let Some(game) = context.game {
+                        let row = items.iter().position(|item| *item == Item::Speed).unwrap_or(0);
+                        self.draw_speed_card(&mut screen, card_x, (h - 62.0) / 2.0 - 10.0, card_width, self.game_speed(game), row);
+                    }
+                }
+                Item::Quality => {
+                    let quality = context.game.map_or(Quality::Dot, |game| self.game_quality(game));
+                    let choices = [Quality::Smooth, Quality::Dot, Quality::Hq2x];
+                    let picked = choices.iter().position(|x| *x == quality).unwrap_or(1);
+                    draw_choice_card(
+                        &mut screen,
+                        card_x,
+                        (h - 62.0) / 2.0 - 10.0,
+                        card_width,
+                        "화질",
+                        &["기본", "도트", "HQ2X"],
+                        picked,
+                        quality.detail(),
+                    );
+                }
+                Item::Screen => {
+                    let steps = screen_steps();
+                    let labels: Vec<String> = steps
+                        .iter()
+                        .map(|scale| if *scale == 0 { "전체".to_owned() } else { format!("{scale}배") })
+                        .collect();
+                    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+                    let picked = steps.iter().position(|x| *x == self.store.screen()).unwrap_or(0);
+                    draw_choice_card(
+                        &mut screen,
+                        card_x,
+                        (h - 62.0) / 2.0 - 10.0,
+                        card_width,
+                        "화면",
+                        &labels,
+                        picked,
+                        "창 크기 · F11 전체화면",
+                    );
+                }
+                _ => {}
+            }
         }
 
         let hint = match items[cursor] {
@@ -507,47 +612,60 @@ impl App {
             _ => self.hint("A 선택", "Enter 선택"),
         };
         let back = self.hint("B 닫기", "Esc 닫기");
-        self.back_bar(&mut screen, x, y + panel_height as i32 - BAR, panel_width, hint, back);
-        // More rows above or below than are shown: a mark in the bar that way,
-        // clear of the title and the hints.
-        if *top > 0 {
-            screen.text("▲", x + 60, y + 2, TextAlignment::Center, TEXT);
-        }
-        if *top + rows < items.len() {
-            screen.text(
-                "▼",
-                x + panel_width as i32 / 2,
-                y + panel_height as i32 - BAR + 2,
-                TextAlignment::Center,
-                TEXT,
-            );
-        }
+        screen.bar(height as i32 - BAR, hint, back);
+        self.back_hit(width, height);
         self.present(screen, width, height);
     }
 
-    /// The speed ruler: a tick for every tenth from 0.1x to 4x along
-    /// `width`, taller at the halves and tallest, numbered, at the whole
-    /// speeds, with a marker at `speed`. Clicked or dragged, it sets the
-    /// speed of the menu's row `row`.
-    fn draw_ruler(&self, screen: &mut Screen, x: i32, y: i32, width: i32, speed: f32, row: usize) {
-        let span = (SPEED_MAX - SPEED_MIN) as i32;
-        let at = |tenths: i32| x + (tenths - SPEED_MIN as i32) * width / span;
-        for tenths in SPEED_MIN as i32..=SPEED_MAX as i32 {
+    /// The speed in a white card: the number large, and the ruler under it -
+    /// a tick for every tenth from 0.1x to 4x, taller at the halves and
+    /// tallest, numbered, at the whole speeds. Clicked or dragged, the ruler
+    /// sets the speed of the menu's row `row`.
+    fn draw_speed_card(&self, screen: &mut Screen, x: f32, y: f32, width: f32, speed: f32, row: usize) {
+        screen.round(x, y + 1.5, width, 62.0, 8.0, Color { a: 0x50, r: 0, g: 0, b: 0 });
+        screen.round(x, y, width, 62.0, 8.0, WHITE);
+        screen.text_styled("배속", x + 10.0, y + 6.0, SMALL, TextAlignment::Left, INK);
+        let big = ui::Style {
+            size: 17.0,
+            line: 18.0,
+            bold: true,
+        };
+        screen.text_styled(&speed_label(speed), x + width - 10.0, y + 4.0, big, TextAlignment::Right, GREEN);
+
+        let (left, right) = (x + 12.0, x + width - 12.0);
+        let span = (SPEED_MAX - SPEED_MIN) as f32;
+        let at = |tenths: u32| left + (tenths - SPEED_MIN) as f32 * (right - left) / span;
+        let base = y + 42.0;
+        for tenths in SPEED_MIN..=SPEED_MAX {
             let (length, color) = if tenths % 10 == 0 {
-                (9, TEXT)
+                (8.0, rgb(0x3b, 0x46, 0x50))
             } else if tenths % 5 == 0 {
-                (6, MUTED)
+                (5.0, rgb(0x9a, 0xa5, 0xad))
             } else {
-                (3, EDGE)
+                (3.0, rgb(0xc4, 0xcc, 0xd2))
             };
-            screen.fill(at(tenths), y + 4, 1, length, color);
+            screen.round(at(tenths) - 0.35, base - length, 0.7, length, 0.0, color);
             if tenths % 10 == 0 {
-                screen.text(&format!("{}x", tenths / 10), at(tenths), y + 13, TextAlignment::Center, MUTED);
+                screen.text_styled(
+                    &format!("{}x", tenths / 10),
+                    at(tenths),
+                    base + 2.0,
+                    TINY,
+                    TextAlignment::Center,
+                    rgb(0x64, 0x75, 0x68),
+                );
             }
         }
-        let current = ((speed * 10.0).round() as i32).clamp(SPEED_MIN as i32, SPEED_MAX as i32);
-        screen.fill(at(current) - 1, y + 1, 3, 13, ACCENT);
-        self.hit(x - 6, y, width + 12, RULER, Target::Ruler(row, x, width));
+        let current = ((speed * 10.0).round() as u32).clamp(SPEED_MIN, SPEED_MAX);
+        screen.round(at(current) - 0.8, base - 14.0, 1.6, 15.0, 0.8, GREEN);
+        screen.round(at(current) - 3.5, base - 17.0, 7.0, 4.0, 2.0, GREEN);
+        self.hit(
+            left as i32 - 6,
+            (base - 20.0) as i32,
+            (right - left) as i32 + 12,
+            34,
+            Target::Ruler(row, left as i32, (right - left) as i32),
+        );
     }
 
     /// The screen's bottom bar goes back when its right half is clicked, as
@@ -559,7 +677,8 @@ impl App {
     /// A panel's bottom bar, which goes back - as `right` says - when its right
     /// half is clicked.
     pub(crate) fn back_bar(&self, screen: &mut Screen, x: i32, y: i32, width: u32, left: &str, right: &str) {
-        panel_bar(screen, x, y, width, left, right);
+        screen.fill(x + 8, y, width - 16, 1, EDGE);
+        screen.hints(x, y, width, left, right);
         if !right.is_empty() {
             self.hit(x + width as i32 / 2, y, width as i32 / 2, BAR, Target::Press(Button::B));
         }
@@ -710,12 +829,11 @@ impl App {
                 let (panel_width, panel_height) = (272u32, 196u32);
                 let x = (width - panel_width) as i32 / 2;
                 let y = (height - panel_height) as i32 / 2;
-                screen.fill(x - 1, y - 1, panel_width + 2, panel_height + 2, EDGE);
-                screen.fill(x, y, panel_width, panel_height, PANEL);
+                screen.panel(x, y, panel_width, panel_height);
                 panel_bar(&mut screen, x, y, panel_width, title, &format!("지금: {}", key_label(current)));
                 for (index, cell) in cells.iter().enumerate() {
                     let fill = if index == cursor { HIGHLIGHT } else { ROW };
-                    screen.fill(x + cell.x, y + cell.y, cell.width as u32, cell.height as u32, fill);
+                    screen.round((x + cell.x) as f32, (y + cell.y) as f32, cell.width as f32, cell.height as f32, 4.0, fill);
                     self.hit(x + cell.x, y + cell.y, cell.width, cell.height, Target::Row(index));
                     let color = if cell.key.is_none() && index != cursor { MUTED } else { TEXT };
                     let label = if cell.key.is_none() { "없음" } else { key_label(cell.key) };
@@ -890,14 +1008,13 @@ impl App {
                 let (panel_width, panel_height) = (240u32, 108u32);
                 let x = (width - panel_width) as i32 / 2;
                 let y = (height - panel_height) as i32 / 2;
-                screen.fill(x - 1, y - 1, panel_width + 2, panel_height + 2, EDGE);
-                screen.fill(x, y, panel_width, panel_height, PANEL);
+                screen.panel(x, y, panel_width, panel_height);
                 let title = format!("{} (키 {})", key_label(Some(handset)), slot + 1);
                 panel_bar(&mut screen, x, y, panel_width, &title, &format!("지금: {}", scancode_label(current)));
                 screen.text("쓸 키를 누르세요", x + panel_width as i32 / 2, y + BAR + 18, TextAlignment::Center, TEXT);
                 let line = if note.is_empty() { "…" } else { note.as_str() };
                 screen.text(line, x + panel_width as i32 / 2, y + BAR + 42, TextAlignment::Center, ACCENT);
-                panel_bar(&mut screen, x, y + panel_height as i32 - BAR, panel_width, "Esc·우클릭 취소", "Del 없음");
+                self.back_bar(&mut screen, x, y + panel_height as i32 - BAR, panel_width, "Esc 취소", "Del 없음");
                 self.present(screen, width, height);
                 dirty = false;
             }
@@ -1069,12 +1186,44 @@ pub(crate) fn scroll_marks(screen: &mut Screen, width: u32, list_top: i32, rows:
     }
 }
 
+/// A panel's title along its top: `left` in bold, `right` muted, a hairline
+/// under them.
 pub(crate) fn panel_bar(screen: &mut Screen, x: i32, y: i32, width: u32, left: &str, right: &str) {
-    screen.fill(x, y, width, BAR as u32, BAR_COLOR);
-    screen.text(left, x + 6, y + 2, TextAlignment::Left, TEXT);
+    let right_width = if right.is_empty() { 0.0 } else { ui::text_width(right, SMALL) + 12.0 };
+    let left = fit_with(left, width as f32 - 16.0 - right_width, ui::TITLE);
+    screen.text_styled(&left, x as f32 + 10.0, y as f32 + 2.0, ui::TITLE, TextAlignment::Left, TEXT);
     if !right.is_empty() {
-        screen.text(right, x + width as i32 - 6, y + 2, TextAlignment::Right, TEXT);
+        screen.text_styled(
+            right,
+            (x + width as i32) as f32 - 10.0,
+            y as f32 + 4.5,
+            SMALL,
+            TextAlignment::Right,
+            MUTED,
+        );
     }
+    screen.fill(x + 8, y + BAR, width - 16, 1, EDGE);
+}
+
+/// A card of choices in a row, the one in use picked out, with a line on it
+/// under them.
+#[allow(clippy::too_many_arguments)]
+fn draw_choice_card(screen: &mut Screen, x: f32, y: f32, width: f32, title: &str, choices: &[&str], picked: usize, note: &str) {
+    screen.round(x, y + 1.5, width, 62.0, 8.0, Color { a: 0x50, r: 0, g: 0, b: 0 });
+    screen.round(x, y, width, 62.0, 8.0, WHITE);
+    screen.text_styled(title, x + 10.0, y + 6.0, SMALL, TextAlignment::Left, INK);
+    let (left, right) = (x + 8.0, x + width - 8.0);
+    screen.round(left, y + 23.0, right - left, 17.0, 8.5, rgb(0xee, 0xf3, 0xef));
+    let cell = (right - left - 4.0) / choices.len() as f32;
+    for (index, choice) in choices.iter().enumerate() {
+        let cell_x = left + 2.0 + index as f32 * cell;
+        if index == picked {
+            screen.round(cell_x, y + 25.0, cell, 13.0, 6.5, GREEN);
+        }
+        let ink = if index == picked { WHITE } else { rgb(0x64, 0x75, 0x68) };
+        screen.text_styled(choice, cell_x + cell / 2.0, y + 25.5, TINY_BOLD, TextAlignment::Center, ink);
+    }
+    screen.text_styled(note, x + width / 2.0, y + 45.0, TINY, TextAlignment::Center, rgb(0x64, 0x75, 0x68));
 }
 
 /// One key in the picker, placed inside its panel.
