@@ -366,7 +366,7 @@ impl Menu {
             pad: None,
         });
         if pad && search.pad.is_none() {
-            search.pad = Some((Mode::Initials, 0));
+            search.pad = Some((Mode::Hangul, 0));
         }
     }
 
@@ -407,6 +407,21 @@ impl Menu {
         }
     }
 
+    /// Takes the last letter typed on the pad's keyboard off the search - a
+    /// syllable's last part, so 학 goes back to 하 - and closes it when there
+    /// was none.
+    pub fn erase_letter(&mut self) {
+        let Some(search) = &mut self.search else {
+            return;
+        };
+        if search.query.is_empty() {
+            self.close_search();
+        } else {
+            search::erase(&mut search.query);
+            self.repick();
+        }
+    }
+
     /// Keeps the pick on a game the search still matches.
     fn repick(&mut self) {
         let visible = self.visible();
@@ -437,10 +452,19 @@ impl Menu {
         let keys = search::keys(*mode, 280.0);
         let at = index.unwrap_or(*cursor).min(keys.len() - 1);
         *cursor = at;
+        let hangul = *mode == Mode::Hangul;
         match keys[at].action.clone() {
+            Action::Type(text) if hangul => {
+                if let Some(search) = &mut self.search {
+                    for jamo in text.chars() {
+                        search::compose(&mut search.query, jamo);
+                    }
+                }
+                self.repick();
+            }
             Action::Type(text) => self.type_text(text),
             Action::Space => self.type_text(" "),
-            Action::Erase => self.erase(),
+            Action::Erase => self.erase_letter(),
             Action::Mode(next) => {
                 if let Some(Search { pad: Some(pad), .. }) = &mut self.search {
                     let keys = search::keys(next, 280.0);

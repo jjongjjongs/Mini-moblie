@@ -726,7 +726,7 @@ impl App {
                         Button::Left => menu.pad_move(-1, 0),
                         Button::Right => menu.pad_move(1, 0),
                         Button::A => menu.pad_press(None),
-                        Button::B => menu.erase(),
+                        Button::B => menu.erase_letter(),
                         Button::X => menu.close_search(),
                         Button::L1 | Button::L2 => {
                             menu.navigate(Button::Left);
