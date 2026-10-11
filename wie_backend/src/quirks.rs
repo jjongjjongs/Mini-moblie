@@ -501,14 +501,16 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // 2006현영맞고: its pictures are 300 rows tall, and the 20 under them kept
     // the title's logo under the menu.
     (TitlePlatform::Ktf, "01033511", panel(240, 320).with_bottom_cropped(20)),
-    // 마스터오브소드: drawn for 176x220. Its HUD frame is 176 wide and its
-    // castle view 192 rows over a 32-row HUD, centred in what is left; on
-    // 240x320 that left the HUD short of the right edge, the ground short of
-    // it too, and pink above the sky and between the ground and the HUD. On
-    // 176x220 the ground meets the HUD and both meet the edges. Every screen
-    // also stops 16 rows short of the panel - it reserves them from any height
-    // it is told - so that strip is cropped.
-    (TitlePlatform::Ktf, "01029220", panel(176, 220).with_bottom_cropped(16)),
+    // 마스터오브소드: its castle rooms are eight 24-pixel tiles, 192 wide, its
+    // view 192 rows over a 32-row HUD centred in what height is left, and its
+    // HUD frame 176 wide. On 240x320 that left pink above the sky and between
+    // the ground and the HUD, and room space to the right; on 176x220 every
+    // room lost its right column, the stone pillars by the exits among it.
+    // 192x220 shows each room whole with the ground on the HUD, at the cost of
+    // a 16-column gap beside the HUD. Every screen also stops 16 rows short of
+    // the panel - it reserves them from any height it is told - so that strip
+    // is cropped.
+    (TitlePlatform::Ktf, "01029220", panel(192, 220).with_bottom_cropped(16)),
     // 맞고삼국대전: 176x220 by its descriptor, and every screen - title, map,
     // story - fills the top 204 rows and leaves 16 blank under them.
     (TitlePlatform::Ktf, "010247AB", panel(176, 220).with_bottom_cropped(16)),
