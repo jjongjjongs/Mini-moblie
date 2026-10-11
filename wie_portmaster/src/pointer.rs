@@ -36,6 +36,9 @@ pub enum Target {
     Cell(usize, usize),
     /// The ◀ or ▶ beside a row's value: forward when it is ▶.
     Step(usize, bool),
+    /// A key or button of a layout: a click picks it out, without doing
+    /// anything with it, and the pointer passing over leaves it be.
+    Select(usize),
     /// The speed ruler under a row, from `x`, `width` pixels wide.
     Ruler(usize, i32, i32),
     /// Clicking it is pressing this button.
@@ -140,7 +143,7 @@ impl App {
                 match self.target_at(x, y) {
                     Some(Target::Row(row) | Target::Step(row, _) | Target::Ruler(row, ..)) => self.pointer.pointed = Some((row, None)),
                     Some(Target::Cell(row, column)) => self.pointer.pointed = Some((row, Some(column))),
-                    Some(Target::Press(_)) | None => {}
+                    Some(Target::Press(_) | Target::Select(_)) | None => {}
                 }
             }
             Mouse::Press(x, y) => match self.target_at(x, y) {
@@ -152,6 +155,7 @@ impl App {
                     self.pointer.pointed = Some((row, Some(column)));
                     pressed.push(Button::A);
                 }
+                Some(Target::Select(row)) => self.pointer.pointed = Some((row, None)),
                 Some(Target::Step(row, forward)) => {
                     self.pointer.pointed = Some((row, None));
                     pressed.push(if forward { Button::Right } else { Button::Left });

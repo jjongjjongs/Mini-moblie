@@ -183,6 +183,18 @@ impl Store {
         moved_from
     }
 
+    /// Puts the keyboard's half of the live mapping back to the defaults.
+    pub fn reset_keyboard(&mut self) {
+        self.controls.reset_keyboard();
+        self.save();
+    }
+
+    /// Puts the pad's half of the live mapping back to the defaults.
+    pub fn reset_pad(&mut self) {
+        self.controls.reset_pad();
+        self.save();
+    }
+
     pub fn screen(&self) -> u32 {
         self.screen
     }

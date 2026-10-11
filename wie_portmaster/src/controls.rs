@@ -301,6 +301,31 @@ pub fn scancode_label(scancode: Option<i32>) -> String {
     }
 }
 
+/// What the keypad drawing calls a keyboard key, as short as its keys need:
+/// the arrows as arrows, the number pad's as Num, the modifiers by side.
+pub fn short_scancode_label(scancode: i32) -> String {
+    let short = match scancode {
+        82 => "↑",
+        81 => "↓",
+        80 => "←",
+        79 => "→",
+        224 => "LCtrl",
+        225 => "LShift",
+        226 => "LAlt",
+        228 => "RCtrl",
+        229 => "RShift",
+        230 => "RAlt",
+        _ => {
+            let label = scancode_label(Some(scancode));
+            return match label.strip_prefix("키패드 ") {
+                Some(key) => format!("Num{key}"),
+                None => label,
+            };
+        }
+    };
+    short.to_owned()
+}
+
 fn scancode_named(name: &str) -> Option<i32> {
     scancodes().find(|(_, x, _)| x.eq_ignore_ascii_case(name)).map(|(code, _, _)| *code)
 }
@@ -526,6 +551,20 @@ impl Controls {
         text
     }
 
+    /// The keyboard's half of the mapping back to the defaults, the pad's
+    /// left as it is.
+    pub fn reset_keyboard(&mut self) {
+        self.keyboard = Controls::parse("").keyboard;
+    }
+
+    /// The pad's half of the mapping - both layers - back to the defaults,
+    /// the keyboard's left as it is.
+    pub fn reset_pad(&mut self) {
+        let defaults = Controls::parse("");
+        self.plain = defaults.plain;
+        self.with_select = defaults.with_select;
+    }
+
     /// The keyboard key in one slot of a handset key.
     pub fn keyboard(&self, handset: i32, slot: usize) -> Option<i32> {
         self.keyboard[handset as usize][slot]
@@ -574,6 +613,23 @@ impl Controls {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_half_goes_back_to_the_defaults_alone() {
+        let mut controls = Controls::parse("A = 5\nKEYBOARD:OK = Q");
+        controls.reset_keyboard();
+        assert_eq!(controls.get(Button::A, false), Some(13));
+        assert_eq!(controls.keyboard(4, 0), Some(40));
+        assert_eq!(controls.keyboard(4, 1), Some(44));
+        let mut controls = Controls::parse("SELECT+A = 1\nKEYBOARD:OK = Q");
+        controls.reset_pad();
+        assert_eq!(controls.get(Button::A, true), Some(13));
+        assert_eq!(controls.keyboard(4, 0), Some(20));
+        assert_eq!(short_scancode_label(89), "Num1");
+        assert_eq!(short_scancode_label(225), "LShift");
+        assert_eq!(short_scancode_label(82), "↑");
+        assert_eq!(short_scancode_label(40), "Enter");
+    }
 
     #[test]
     fn defaults_follow_the_android_pad() {

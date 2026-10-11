@@ -13,14 +13,14 @@ use std::{
 use wie_android::host;
 use wie_backend::canvas::{Color, TextAlignment};
 
-pub(crate) use crate::ui::{ACCENT, DANGER, DIM, EDGE, PANEL};
+pub(crate) use crate::ui::{ACCENT, DANGER, EDGE};
 use crate::{
     App, FRAME, Input,
-    controls::{Button, DELETE, ESCAPE, KEYS_PER_KEY, TABLE_BUTTONS, TABLE_KEYS, key_label, mappable, scancode_label},
+    controls::Button,
     icons, key_button,
-    pointer::{Mouse, Target},
+    pointer::Target,
     presets::{DEFAULT_NAME, SCREEN_MAX},
-    ui::{self, BAR, BODY, GREEN, HIGHLIGHT, INK, LINE, MUTED, Picture, ROW, SMALL, Screen, TEXT, TINY, TINY_BOLD, WHITE, fit, fit_with, rgb},
+    ui::{self, BAR, GREEN, HIGHLIGHT, INK, LINE, MUTED, Picture, SMALL, Screen, TEXT, TINY, TINY_BOLD, WHITE, fit, fit_with, rgb},
 };
 
 /// A game's file name, which what is kept for it is filed under.
@@ -80,6 +80,34 @@ enum Item {
     EndGame,
     Close,
     QuitApp,
+}
+
+/// How many tiles the menu has to a row.
+const TILE_COLUMNS: usize = 3;
+
+/// A tile's face, a shade off the drawer.
+const TILE: Color = rgb(0x1f, 0x26, 0x2e);
+
+/// The tile a direction leads to from `from`, of `count` tiles three to a
+/// row: round to the other end of the row or the column at an edge, and down
+/// from a row with nothing straight under it to the last tile.
+fn tile_step(from: usize, count: usize, direction: Button) -> usize {
+    let column = from % TILE_COLUMNS;
+    let last_row = (count - 1) / TILE_COLUMNS;
+    match direction {
+        Button::Up if from >= TILE_COLUMNS => from - TILE_COLUMNS,
+        Button::Up => {
+            let bottom = last_row * TILE_COLUMNS + column;
+            if bottom < count { bottom } else { bottom - TILE_COLUMNS }
+        }
+        Button::Down if from + TILE_COLUMNS < count => from + TILE_COLUMNS,
+        Button::Down if from / TILE_COLUMNS < last_row => count - 1,
+        Button::Down => column,
+        Button::Left if column > 0 => from - 1,
+        Button::Left => (from + TILE_COLUMNS - 1).min(count - 1),
+        _ if column + 1 < TILE_COLUMNS && from + 1 < count => from + 1,
+        _ => from - column,
+    }
 }
 
 /// A pad button held down keeps repeating after a moment: the directions,
@@ -253,16 +281,21 @@ impl App {
         }
 
         let mut cursor: usize = 0;
-        // The first row shown, when there are more than fit.
-        let mut top: usize = 0;
+        // A value tile - the speed, the quality, the window - taken up to
+        // change: ◀ and ▶ step it instead of moving off it.
+        let mut adjusting = false;
         let mut repeat = Repeat::new();
         let mut dirty = true;
         let icon = context.game.and_then(icons::extract);
         loop {
             let pressed = self.presses(&mut repeat);
-            if let Some((row, _)) = self.take_pointed() {
-                dirty |= row != cursor;
-                cursor = row.min(items.len() - 1);
+            if let Some((tile, _)) = self.take_pointed() {
+                let tile = tile.min(items.len() - 1);
+                if tile != cursor {
+                    adjusting = false;
+                    dirty = true;
+                }
+                cursor = tile;
             }
             if let Some(tenths) = self.take_ruler()
                 && let Some(game) = context.game
@@ -273,27 +306,32 @@ impl App {
             for button in pressed {
                 dirty = true;
                 match button {
-                    Button::Up => cursor = cursor.checked_sub(1).unwrap_or(items.len() - 1),
-                    Button::Down => cursor = (cursor + 1) % items.len(),
+                    Button::Left | Button::Right if adjusting => {
+                        let forward = button == Button::Right;
+                        match items[cursor] {
+                            Item::Quality => {
+                                if let Some(game) = context.game {
+                                    let quality = self.game_quality(game).step(forward);
+                                    self.set_game_quality(game, quality);
+                                }
+                            }
+                            Item::Screen => self.cycle_screen(forward),
+                            Item::Speed => {
+                                if let Some(game) = context.game {
+                                    let speed = speed_step(self.game_speed(game), forward);
+                                    self.set_game_speed(game, speed, context.in_game());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    Button::Up | Button::Down | Button::Left | Button::Right => {
+                        adjusting = false;
+                        cursor = tile_step(cursor, items.len(), button);
+                    }
+                    Button::B | Button::Guide if adjusting => adjusting = false,
                     Button::B | Button::Guide => return Outcome::Close,
-                    Button::Left | Button::Right if items[cursor] == Item::Quality => {
-                        if let Some(game) = context.game {
-                            let quality = self.game_quality(game).step(button == Button::Right);
-                            self.set_game_quality(game, quality);
-                        }
-                    }
-                    Button::Left | Button::Right if items[cursor] == Item::Preset => {
-                        self.cycle_preset(button == Button::Right);
-                    }
-                    Button::Left | Button::Right if items[cursor] == Item::Screen => {
-                        self.cycle_screen(button == Button::Right);
-                    }
-                    Button::Left | Button::Right if items[cursor] == Item::Speed => {
-                        if let Some(game) = context.game {
-                            let speed = speed_step(self.game_speed(game), button == Button::Right);
-                            self.set_game_speed(game, speed, context.in_game());
-                        }
-                    }
+                    Button::A if adjusting => adjusting = false,
                     Button::A => match items[cursor] {
                         Item::Resume | Item::Close => return Outcome::Close,
                         Item::EndGame => return Outcome::EndGame,
@@ -301,22 +339,7 @@ impl App {
                         Item::Keyboard => self.keyboard_layout(),
                         Item::Layout => self.layout(),
                         Item::Preset => self.presets(context),
-                        Item::Screen => self.cycle_screen(true),
-                        Item::Speed => {
-                            if let Some(game) = context.game {
-                                // On past the fastest, back round to the slowest.
-                                let current = self.game_speed(game);
-                                let next = speed_step(current, true);
-                                let speed = if next == current { SPEED_MIN as f32 / 10.0 } else { next };
-                                self.set_game_speed(game, speed, context.in_game());
-                            }
-                        }
-                        Item::Quality => {
-                            if let Some(game) = context.game {
-                                let quality = self.game_quality(game).step(true);
-                                self.set_game_quality(game, quality);
-                            }
-                        }
+                        Item::Screen | Item::Speed | Item::Quality => adjusting = true,
                         Item::Saves => {
                             if let Some(game) = context.game {
                                 self.save_manager(game);
@@ -342,23 +365,11 @@ impl App {
             }
 
             if dirty || self.take_redraw() {
-                self.draw_menu(context, icon.as_ref(), &items, cursor, &mut top);
+                self.draw_menu(context, icon.as_ref(), &items, cursor, adjusting);
                 dirty = false;
             }
             std::thread::sleep(FRAME);
         }
-    }
-
-    /// Loads the preset after (or before) the one in use.
-    fn cycle_preset(&mut self, forward: bool) {
-        let names = self.store.names();
-        let current = names.iter().position(|x| x == self.store.active()).unwrap_or(0);
-        let next = if forward {
-            (current + 1) % names.len()
-        } else {
-            current.checked_sub(1).unwrap_or(names.len() - 1)
-        };
-        self.store.apply(&names[next]);
     }
 
     /// Steps the window to the next (or previous) size.
@@ -402,28 +413,28 @@ impl App {
     }
 
     /// The active preset's name, starred once the mapping has moved off it.
-    fn active_label(&self) -> String {
+    pub(crate) fn active_label(&self) -> String {
         let star = if self.store.modified() { "*" } else { "" };
         format!("{}{star}", self.store.active())
     }
 
-    /// What a row of the menu is called and the mark beside it.
+    /// What a tile of the menu is called and the mark over it.
     fn item_face(&self, item: Item) -> (&'static str, &'static str) {
         match item {
-            Item::Resume => ("▶", "게임으로 돌아가기"),
-            Item::Keyboard => ("⇥", "키보드 배치 바꾸기"),
-            Item::Layout if self.desktop => ("●", "패드 버튼 배치 바꾸기"),
-            Item::Layout => ("●", "버튼 배치 바꾸기"),
+            Item::Resume => ("▶", "돌아가기"),
+            Item::Keyboard => ("⇥", "키보드 배치"),
+            Item::Layout if self.desktop => ("●", "패드 버튼"),
+            Item::Layout => ("●", "버튼 배치"),
             Item::Preset => ("★", "프리셋"),
-            Item::Fix => ("✓", "이 게임에 프리셋 고정"),
+            Item::Fix => ("✓", "프리셋 고정"),
             Item::Screen => ("▢", "화면"),
             Item::Speed => ("»", "배속"),
             Item::Quality => ("◇", "화질"),
-            Item::Saves => ("♡", "세이브 관리"),
-            Item::Delete => ("×", "이 게임 삭제"),
+            Item::Saves => ("♡", "세이브"),
+            Item::Delete => ("×", "게임 삭제"),
             Item::EndGame => ("⏏", "게임 끝내기"),
             Item::Close => ("←", "닫기"),
-            Item::QuitApp => ("⏏", "MiniMobile 종료"),
+            Item::QuitApp => ("⏏", "앱 종료"),
         }
     }
 
@@ -443,13 +454,14 @@ impl App {
     }
 
     /// The menu: a drawer down the left, over the game when one is running,
-    /// with what the row picked sets shown large beside it.
-    fn draw_menu(&mut self, context: &Context, icon: Option<&Picture>, items: &[Item], cursor: usize, top: &mut usize) {
+    /// its items in tiles three to a row so all of them fit at once, with
+    /// what the tile picked sets shown large beside it.
+    fn draw_menu(&mut self, context: &Context, icon: Option<&Picture>, items: &[Item], cursor: usize, adjusting: bool) {
         let (width, height, _) = self.menu_size();
         let mut screen = Screen::new(width, height);
         self.clear_hits();
         let (w, h) = (width as f32, height as f32);
-        let side = (w * 0.47).clamp(150.0, 220.0);
+        let side = (w * 0.575).clamp(184.0, 240.0).min(w);
 
         // The game behind, dimmed, and the drawer over its left.
         if let Some((frame_width, frame_height, rgba)) = context.frame {
@@ -491,78 +503,86 @@ impl App {
         );
         screen.text_styled(note, text_x, 19.0, TINY, TextAlignment::Left, MUTED);
 
-        // As many rows as the drawer has room for, scrolled to the cursor.
-        let row_height = 22.0;
-        let list_top = 36.0;
-        let rows = (((h - list_top - BAR as f32 - 4.0) / row_height) as usize).clamp(1, items.len());
-        scroll(cursor, rows, top);
-        for (index, item) in items.iter().enumerate().skip(*top).take(rows) {
-            let y = list_top + (index - *top) as f32 * row_height;
+        // The tiles, as tall as the rows of them leave room for.
+        let (grid_x, grid_top, gap) = (8.0, 36.0, 4.0);
+        let rows = items.len().div_ceil(TILE_COLUMNS);
+        let tile_width = (side - 2.0 * grid_x - gap * (TILE_COLUMNS - 1) as f32) / TILE_COLUMNS as f32;
+        let room = h - grid_top - BAR as f32 - 6.0;
+        let tile_height = ((room - gap * (rows - 1) as f32) / rows as f32).min(56.0);
+        for (index, item) in items.iter().enumerate() {
+            let x = grid_x + (index % TILE_COLUMNS) as f32 * (tile_width + gap);
+            let y = grid_top + (index / TILE_COLUMNS) as f32 * (tile_height + gap);
             let picked = index == cursor;
+            let danger = matches!(item, Item::Delete | Item::QuitApp | Item::EndGame);
             let (mark, label) = self.item_face(*item);
             let value = self.item_value(context, *item);
-            let steps = matches!(item, Item::Preset | Item::Screen | Item::Speed | Item::Quality);
-            if picked {
-                screen.round(6.0, y, side - 12.0, row_height - 2.0, 6.0, WHITE);
+            let (fill, edge) = match (picked, danger) {
+                (true, _) => (WHITE, WHITE),
+                (false, true) => (TILE, DANGER),
+                (false, false) => (TILE, EDGE),
+            };
+            screen.round(x, y, tile_width, tile_height, 7.0, fill);
+            screen.outline(x, y, tile_width, tile_height, 7.0, 1.0, edge);
+            if picked && adjusting {
+                screen.outline(x - 1.5, y - 1.5, tile_width + 3.0, tile_height + 3.0, 8.5, 1.0, ACCENT);
             }
-            let danger = matches!(item, Item::Delete | Item::QuitApp | Item::EndGame);
-            let ink = if picked {
-                INK
-            } else if danger {
-                DANGER
-            } else {
-                rgb(0xd9, 0xdf, 0xe3)
+            self.hit(x as i32, y as i32, tile_width as i32, tile_height as i32, Target::Row(index));
+
+            // The mark over the name over the value, the mark left out when
+            // the tile is too short for all three.
+            let lines = TINY_BOLD.line + if value.is_empty() { 0.0 } else { TINY_BOLD.line };
+            let with_mark = tile_height >= lines + SMALL.line + 6.0;
+            let mut line_y = y + (tile_height - lines - if with_mark { SMALL.line } else { 0.0 }) / 2.0;
+            let middle = x + tile_width / 2.0;
+            let (mark_color, ink, value_color) = match (picked, danger) {
+                (true, _) => (GREEN, INK, GREEN),
+                (false, true) => (DANGER, DANGER, ACCENT),
+                (false, false) => (rgb(0x7f, 0x8b, 0x93), rgb(0xd9, 0xdf, 0xe3), ACCENT),
             };
-            let mark_color = if picked { GREEN } else { rgb(0x7f, 0x8b, 0x93) };
-            screen.text_styled(mark, 17.0, y + 3.0, SMALL, TextAlignment::Center, mark_color);
-            let value_width = if value.is_empty() {
-                0.0
-            } else {
-                ui::text_width(&value, SMALL).min(side * 0.4) + if picked && steps { 24.0 } else { 6.0 }
-            };
-            screen.text_styled(&fit(label, side - 40.0 - value_width), 28.0, y + 2.0, BODY, TextAlignment::Left, ink);
-            self.hit(0, y as i32, side as i32, row_height as i32, Target::Row(index));
+            if with_mark {
+                screen.text_styled(mark, middle, line_y, SMALL, TextAlignment::Center, mark_color);
+                line_y += SMALL.line;
+            }
+            screen.text_styled(
+                &fit_with(label, tile_width - 4.0, TINY_BOLD),
+                middle,
+                line_y,
+                TINY_BOLD,
+                TextAlignment::Center,
+                ink,
+            );
+            line_y += TINY_BOLD.line;
             if !value.is_empty() {
-                let right = side - 14.0;
-                let value = fit_with(&value, side * 0.4, SMALL);
-                if picked && steps {
+                if picked && adjusting {
                     // ‹ and › step the value, as the pad's ◀ and ▶ do.
-                    screen.text_styled("›", right, y + 3.0, SMALL, TextAlignment::Right, MUTED);
-                    let value_right = right - 10.0;
-                    let shown = screen.text_styled(&value, value_right, y + 3.0, SMALL, TextAlignment::Right, GREEN);
-                    screen.text_styled("‹", value_right - shown - 4.0, y + 3.0, SMALL, TextAlignment::Right, MUTED);
-                    let left = (value_right - shown - 12.0) as i32;
-                    self.hit(left - 4, y as i32, 14, row_height as i32, Target::Step(index, false));
-                    self.hit(right as i32 - 10, y as i32, 18, row_height as i32, Target::Step(index, true));
+                    let shown = fit_with(&value, tile_width - 22.0, TINY_BOLD);
+                    screen.text_styled(&shown, middle, line_y, TINY_BOLD, TextAlignment::Center, value_color);
+                    screen.text_styled("‹", x + 6.0, line_y, TINY_BOLD, TextAlignment::Center, MUTED);
+                    screen.text_styled("›", x + tile_width - 6.0, line_y, TINY_BOLD, TextAlignment::Center, MUTED);
+                    let third = (tile_width / 3.0) as i32;
+                    self.hit(x as i32, y as i32, third, tile_height as i32, Target::Step(index, false));
+                    self.hit(
+                        (x + tile_width) as i32 - third,
+                        y as i32,
+                        third,
+                        tile_height as i32,
+                        Target::Step(index, true),
+                    );
                 } else {
-                    screen.text_styled(&value, right, y + 3.0, SMALL, TextAlignment::Right, if picked { GREEN } else { ACCENT });
+                    let shown = fit_with(&value, tile_width - 6.0, TINY_BOLD);
+                    screen.text_styled(&shown, middle, line_y, TINY_BOLD, TextAlignment::Center, value_color);
                 }
             }
         }
-        // More rows above or below than are shown.
-        if *top > 0 {
-            screen.text_styled("▲", side - 12.0, list_top - 9.0, TINY, TextAlignment::Center, MUTED);
-        }
-        if *top + rows < items.len() {
-            screen.text_styled(
-                "▼",
-                side - 12.0,
-                list_top + rows as f32 * row_height - 3.0,
-                TINY,
-                TextAlignment::Center,
-                MUTED,
-            );
-        }
 
-        // What the row picked sets, large, beside the drawer.
+        // What the tile picked sets, large, beside the drawer.
         let card_x = side + 14.0;
         let card_width = w - side - 26.0;
         if card_width >= 100.0 {
             match items[cursor] {
                 Item::Speed => {
                     if let Some(game) = context.game {
-                        let row = items.iter().position(|item| *item == Item::Speed).unwrap_or(0);
-                        self.draw_speed_card(&mut screen, card_x, (h - 62.0) / 2.0 - 10.0, card_width, self.game_speed(game), row);
+                        self.draw_speed_card(&mut screen, card_x, (h - 62.0) / 2.0 - 10.0, card_width, self.game_speed(game), cursor);
                     }
                 }
                 Item::Quality => {
@@ -604,14 +624,17 @@ impl App {
         }
 
         let hint = match items[cursor] {
-            Item::Preset => self.hint("A 목록  ◀▶ 바꾸기", "Enter 목록  ◀▶ 바꾸기"),
-            Item::Screen => self.hint("◀▶ 바꾸기", "◀▶ 바꾸기  F11"),
-            Item::Speed if context.in_game() => self.hint("◀▶ 0.1씩", "◀▶ 0.1씩  F5 F6"),
-            Item::Speed => self.hint("◀▶ 0.1씩", "◀▶ 0.1씩"),
-            Item::Quality => self.hint("◀▶ 바꾸기", "◀▶ 바꾸기"),
-            _ => self.hint("A 선택", "Enter 선택"),
+            Item::Speed if adjusting => self.hint("◀▶ 0.1씩  A 완료", "◀▶ 0.1씩  Enter 완료"),
+            _ if adjusting => self.hint("◀▶ 바꾸기  A 완료", "◀▶ 바꾸기  Enter 완료"),
+            Item::Speed | Item::Quality | Item::Screen => self.hint("A 바꾸기  ◀▶▲▼ 이동", "Enter 바꾸기  ◀▶▲▼ 이동"),
+            Item::Preset => self.hint("A 목록  ◀▶▲▼ 이동", "Enter 목록  ◀▶▲▼ 이동"),
+            _ => self.hint("A 선택  ◀▶▲▼ 이동", "Enter 선택  ◀▶▲▼ 이동"),
         };
-        let back = self.hint("B 닫기", "Esc 닫기");
+        let back = if adjusting {
+            self.hint("B 뒤로", "Esc 뒤로")
+        } else {
+            self.hint("B 닫기", "Esc 닫기")
+        };
         screen.bar(height as i32 - BAR, hint, back);
         self.back_hit(width, height);
         self.present(screen, width, height);
@@ -681,344 +704,6 @@ impl App {
         screen.hints(x, y, width, left, right);
         if !right.is_empty() {
             self.hit(x + width as i32 / 2, y, width as i32 / 2, BAR, Target::Press(Button::B));
-        }
-    }
-
-    /// The table of every pad button, plain and with SELECT held.
-    fn layout(&mut self) {
-        let mut row: usize = 0;
-        let mut with_select = false;
-        let mut top = 0;
-        let mut repeat = Repeat::new();
-        let mut dirty = true;
-        loop {
-            let pressed = self.presses(&mut repeat);
-            if let Some((pointed, column)) = self.take_pointed() {
-                row = pointed.min(TABLE_BUTTONS.len() - 1);
-                with_select = column.map_or(with_select, |column| column == 1);
-                dirty = true;
-            }
-            for button in pressed {
-                dirty = true;
-                match button {
-                    Button::Up => row = row.checked_sub(1).unwrap_or(TABLE_BUTTONS.len() - 1),
-                    Button::Down => row = (row + 1) % TABLE_BUTTONS.len(),
-                    Button::Left | Button::Right => with_select = !with_select,
-                    Button::B | Button::Guide => return,
-                    Button::A => {
-                        let (target, name) = TABLE_BUTTONS[row];
-                        let current = self.store.controls().get(target, with_select);
-                        let title = format!("{name} 버튼 ({})", if with_select { "SELECT+" } else { "그냥" });
-                        if let Some(key) = self.pick_key(&title, current, row, with_select, top) {
-                            self.store.set(target, with_select, key);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-
-            if dirty || self.take_redraw() {
-                let (screen, width, height) = self.draw_layout(row, with_select, &mut top);
-                self.present(screen, width, height);
-                dirty = false;
-            }
-            std::thread::sleep(FRAME);
-        }
-    }
-
-    fn draw_layout(&self, row: usize, with_select: bool, top: &mut usize) -> (Screen, u32, u32) {
-        let (width, height, _) = self.menu_size();
-        let mut screen = Screen::new(width, height);
-        self.clear_hits();
-        let preset = format!("프리셋: {}{}", self.store.active(), if self.store.modified() { " (바뀜)" } else { "" });
-        let title = if self.desktop { "패드 버튼 배치" } else { "버튼 배치" };
-        screen.bar(0, title, &fit(&preset, width as f32 - 136.0));
-
-        let (c1, c2, c3) = (8, (width * 29 / 100) as i32, (width * 64 / 100) as i32);
-        screen.text("버튼", c1, BAR + 2, TextAlignment::Left, MUTED);
-        screen.text("그냥", c2, BAR + 2, TextAlignment::Left, MUTED);
-        screen.text("SELECT+", c3, BAR + 2, TextAlignment::Left, MUTED);
-        screen.fill(0, BAR + LINE + 1, width, 1, EDGE);
-
-        let list_top = BAR + LINE + 4;
-        let rows = ((height as i32 - list_top - BAR - 2) / LINE).max(1) as usize;
-        scroll(row, rows, top);
-
-        let controls = self.store.controls();
-        for (index, (button, name)) in TABLE_BUTTONS.iter().enumerate().skip(*top).take(rows) {
-            let y = list_top + (index - *top) as i32 * LINE;
-            let picked = index == row;
-            if picked {
-                screen.fill(0, y, width, LINE as u32, ROW);
-                let (x, w) = if with_select {
-                    (c3 - 4, width as i32 - c3 + 4)
-                } else {
-                    (c2 - 4, c3 - c2 - 4)
-                };
-                screen.fill(x, y, w as u32, LINE as u32, HIGHLIGHT);
-            }
-            screen.text(name, c1, y + 1, TextAlignment::Left, TEXT);
-            // The name and the plain key are the first column, SELECT+ the second.
-            self.hit(0, y, c3 - 4, LINE, Target::Cell(index, 0));
-            self.hit(c3 - 4, y, width as i32 - c3 + 4, LINE, Target::Cell(index, 1));
-            let plain = controls.get(*button, false);
-            screen.text(
-                key_label(plain),
-                c2,
-                y + 1,
-                TextAlignment::Left,
-                if picked && !with_select { TEXT } else { ACCENT },
-            );
-            // A button with nothing under SELECT keeps its own key there, shown
-            // muted.
-            match controls.get(*button, true) {
-                Some(key) => screen.text(
-                    key_label(Some(key)),
-                    c3,
-                    y + 1,
-                    TextAlignment::Left,
-                    if picked && with_select { TEXT } else { ACCENT },
-                ),
-                None => screen.text(
-                    key_label(plain),
-                    c3,
-                    y + 1,
-                    TextAlignment::Left,
-                    if picked && with_select { TEXT } else { MUTED },
-                ),
-            }
-        }
-        scroll_marks(&mut screen, width, list_top, rows, *top, TABLE_BUTTONS.len());
-
-        let hint = self.hint("A 바꾸기  ◀▶ 칸", "Enter 바꾸기  ◀▶ 칸");
-        screen.bar(height as i32 - BAR, hint, self.hint("B 뒤로", "Esc 뒤로"));
-        self.back_hit(width, height);
-        (screen, width, height)
-    }
-
-    /// Picks a handset key for one cell of the pad table, over it. `None` when
-    /// the pick is cancelled, `Some(None)` for no key.
-    fn pick_key(&mut self, title: &str, current: Option<i32>, row: usize, with_select: bool, top: usize) -> Option<Option<i32>> {
-        let cells = picker_cells();
-        let mut cursor = cells.iter().position(|cell| cell.key == current).unwrap_or(0);
-        let mut repeat = Repeat::new();
-        let mut dirty = true;
-        loop {
-            let pressed = self.presses(&mut repeat);
-            if let Some((pointed, _)) = self.take_pointed() {
-                cursor = pointed.min(cells.len() - 1);
-                dirty = true;
-            }
-            for button in pressed {
-                dirty = true;
-                match button {
-                    Button::Up | Button::Down | Button::Left | Button::Right => cursor = step(&cells, cursor, button),
-                    Button::A => return Some(cells[cursor].key),
-                    Button::B | Button::Guide => return None,
-                    _ => {}
-                }
-            }
-
-            if dirty || self.take_redraw() {
-                let mut top = top;
-                let (mut screen, width, height) = self.draw_layout(row, with_select, &mut top);
-                screen.fill(0, 0, width, height, DIM);
-                // Only the picker answers the mouse while it is up.
-                self.clear_hits();
-
-                let (panel_width, panel_height) = (272u32, 196u32);
-                let x = (width - panel_width) as i32 / 2;
-                let y = (height - panel_height) as i32 / 2;
-                screen.panel(x, y, panel_width, panel_height);
-                panel_bar(&mut screen, x, y, panel_width, title, &format!("지금: {}", key_label(current)));
-                for (index, cell) in cells.iter().enumerate() {
-                    let fill = if index == cursor { HIGHLIGHT } else { ROW };
-                    screen.round((x + cell.x) as f32, (y + cell.y) as f32, cell.width as f32, cell.height as f32, 4.0, fill);
-                    self.hit(x + cell.x, y + cell.y, cell.width, cell.height, Target::Row(index));
-                    let color = if cell.key.is_none() && index != cursor { MUTED } else { TEXT };
-                    let label = if cell.key.is_none() { "없음" } else { key_label(cell.key) };
-                    screen.text(
-                        label,
-                        x + cell.x + cell.width / 2,
-                        y + cell.y + (cell.height - 16) / 2,
-                        TextAlignment::Center,
-                        color,
-                    );
-                }
-                let (choose, cancel) = (self.hint("A 고르기", "Enter 고르기"), self.hint("B 취소", "Esc 취소"));
-                self.back_bar(&mut screen, x, y + panel_height as i32 - BAR, panel_width, choose, cancel);
-                self.present(screen, width, height);
-                dirty = false;
-            }
-            std::thread::sleep(FRAME);
-        }
-    }
-
-    /// The keyboard table: each handset key and the keyboard keys for it.
-    fn keyboard_layout(&mut self) {
-        let mut row: usize = 0;
-        let mut slot: usize = 0;
-        let mut top = 0;
-        let mut status = String::new();
-        let mut repeat = Repeat::new();
-        let mut dirty = true;
-        loop {
-            let pressed = self.presses(&mut repeat);
-            if let Some((pointed, column)) = self.take_pointed() {
-                row = pointed.min(TABLE_KEYS.len() - 1);
-                slot = column.unwrap_or(slot).min(KEYS_PER_KEY - 1);
-                dirty = true;
-            }
-            for button in pressed {
-                dirty = true;
-                status.clear();
-                let handset = TABLE_KEYS[row];
-                match button {
-                    Button::Up => row = row.checked_sub(1).unwrap_or(TABLE_KEYS.len() - 1),
-                    Button::Down => row = (row + 1) % TABLE_KEYS.len(),
-                    Button::Left => slot = slot.checked_sub(1).unwrap_or(KEYS_PER_KEY - 1),
-                    Button::Right => slot = (slot + 1) % KEYS_PER_KEY,
-                    Button::B | Button::Guide => return,
-                    // Delete, or Y on a pad: empty the cell.
-                    Button::Y => {
-                        self.store.set_keyboard(handset, slot, None);
-                    }
-                    Button::A => {
-                        if let Some(code) = self.capture_key(handset, slot, row, top)
-                            && let Some(from) = self.store.set_keyboard(handset, slot, code)
-                        {
-                            status = format!("{}: '{}'에서 옮겨 왔습니다.", scancode_label(code), key_label(Some(from)));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-
-            if dirty || self.take_redraw() {
-                let (screen, width, height) = self.draw_keyboard(row, slot, &mut top, &status);
-                self.present(screen, width, height);
-                dirty = false;
-            }
-            std::thread::sleep(FRAME);
-        }
-    }
-
-    fn draw_keyboard(&self, row: usize, slot: usize, top: &mut usize, status: &str) -> (Screen, u32, u32) {
-        let (width, height, _) = self.menu_size();
-        let mut screen = Screen::new(width, height);
-        self.clear_hits();
-        let preset = format!("프리셋: {}{}", self.store.active(), if self.store.modified() { " (바뀜)" } else { "" });
-        screen.bar(0, "키보드 배치", &fit(&preset, width as f32 - 112.0));
-
-        let columns = [(width * 31 / 100) as i32, (width * 66 / 100) as i32];
-        screen.text("폰 키", 8, BAR + 2, TextAlignment::Left, MUTED);
-        screen.text("키 1", columns[0], BAR + 2, TextAlignment::Left, MUTED);
-        screen.text("키 2", columns[1], BAR + 2, TextAlignment::Left, MUTED);
-        screen.fill(0, BAR + LINE + 1, width, 1, EDGE);
-
-        let list_top = BAR + LINE + 4;
-        let bottom = height as i32 - if status.is_empty() { BAR } else { 2 * BAR };
-        let rows = ((bottom - list_top - 2) / LINE).max(1) as usize;
-        scroll(row, rows, top);
-
-        let controls = self.store.controls();
-        for (index, handset) in TABLE_KEYS.iter().enumerate().skip(*top).take(rows) {
-            let y = list_top + (index - *top) as i32 * LINE;
-            let picked = index == row;
-            if picked {
-                screen.fill(0, y, width, LINE as u32, ROW);
-                let x = columns[slot] - 4;
-                let w = if slot + 1 < KEYS_PER_KEY {
-                    columns[slot + 1] - columns[slot] - 4
-                } else {
-                    width as i32 - x
-                };
-                screen.fill(x, y, w as u32, LINE as u32, HIGHLIGHT);
-            }
-            screen.text(key_label(Some(*handset)), 8, y + 1, TextAlignment::Left, TEXT);
-            // The handset key's name goes with the first key.
-            self.hit(0, y, columns[1] - 4, LINE, Target::Cell(index, 0));
-            self.hit(columns[1] - 4, y, width as i32 - columns[1] + 4, LINE, Target::Cell(index, 1));
-            for (column, x) in columns.iter().enumerate() {
-                let code = controls.keyboard(*handset, column);
-                let color = if picked && column == slot {
-                    TEXT
-                } else if code.is_some() {
-                    ACCENT
-                } else {
-                    MUTED
-                };
-                let room = if column + 1 < KEYS_PER_KEY {
-                    columns[column + 1] - x - 8
-                } else {
-                    width as i32 - x - 16
-                };
-                screen.text(&fit(&scancode_label(code), room as f32), *x, y + 1, TextAlignment::Left, color);
-            }
-        }
-        scroll_marks(&mut screen, width, list_top, rows, *top, TABLE_KEYS.len());
-
-        if !status.is_empty() {
-            screen.fill(0, height as i32 - 2 * BAR, width, BAR as u32, PANEL);
-            screen.text(
-                &fit(status, width as f32 - 16.0),
-                8,
-                height as i32 - 2 * BAR + 2,
-                TextAlignment::Left,
-                ACCENT,
-            );
-        }
-        let hint = self.hint("A 바꾸기  Y 지우기", "Enter 바꾸기  Del 지우기");
-        screen.bar(height as i32 - BAR, hint, self.hint("B 뒤로", "Esc 뒤로"));
-        self.back_hit(width, height);
-        (screen, width, height)
-    }
-
-    /// Waits for the keyboard key to put in one cell of the keyboard table.
-    /// `None` when cancelled (Esc, or B on a pad), `Some(None)` to empty the
-    /// cell (Delete, or Y on a pad).
-    fn capture_key(&mut self, handset: i32, slot: usize, row: usize, top: usize) -> Option<Option<i32>> {
-        let current = self.store.controls().keyboard(handset, slot);
-        let mut note = String::new();
-        let mut dirty = true;
-        loop {
-            for input in self.poll() {
-                dirty = true;
-                match input {
-                    Input::Quit => {
-                        host::stop();
-                        std::process::exit(0);
-                    }
-                    Input::Key(ESCAPE, true, _) | Input::Button(Button::B, true) | Input::Mouse(Mouse::Back) => return None,
-                    Input::Key(DELETE, true, _) | Input::Button(Button::Y, true) => return Some(None),
-                    Input::Key(code, true, false) => {
-                        if mappable(code) {
-                            return Some(Some(code));
-                        }
-                        note = "이 키는 쓸 수 없습니다.".to_owned();
-                    }
-                    _ => {}
-                }
-            }
-
-            if dirty || self.take_redraw() {
-                let mut top = top;
-                let (mut screen, width, height) = self.draw_keyboard(row, slot, &mut top, "");
-                screen.fill(0, 0, width, height, DIM);
-                let (panel_width, panel_height) = (240u32, 108u32);
-                let x = (width - panel_width) as i32 / 2;
-                let y = (height - panel_height) as i32 / 2;
-                screen.panel(x, y, panel_width, panel_height);
-                let title = format!("{} (키 {})", key_label(Some(handset)), slot + 1);
-                panel_bar(&mut screen, x, y, panel_width, &title, &format!("지금: {}", scancode_label(current)));
-                screen.text("쓸 키를 누르세요", x + panel_width as i32 / 2, y + BAR + 18, TextAlignment::Center, TEXT);
-                let line = if note.is_empty() { "…" } else { note.as_str() };
-                screen.text(line, x + panel_width as i32 / 2, y + BAR + 42, TextAlignment::Center, ACCENT);
-                self.back_bar(&mut screen, x, y + panel_height as i32 - BAR, panel_width, "Esc 취소", "Del 없음");
-                self.present(screen, width, height);
-                dirty = false;
-            }
-            std::thread::sleep(FRAME);
         }
     }
 
@@ -1226,101 +911,25 @@ fn draw_choice_card(screen: &mut Screen, x: f32, y: f32, width: f32, title: &str
     screen.text_styled(note, x + width / 2.0, y + 45.0, TINY, TextAlignment::Center, rgb(0x64, 0x75, 0x68));
 }
 
-/// One key in the picker, placed inside its panel.
-struct Cell {
-    key: Option<i32>,
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-}
-
-/// The picker's keys: a handset's number pad on the left, the other keys in
-/// two columns on the right, and "none" under them.
-fn picker_cells() -> Vec<Cell> {
-    let mut cells = Vec::new();
-    // 1 2 3 / 4 5 6 / 7 8 9 / * 0 #, by key index.
-    let pad = [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 8, 19];
-    for (index, key) in pad.into_iter().enumerate() {
-        cells.push(Cell {
-            key: Some(key),
-            x: 10 + (index % 3) as i32 * 38,
-            y: BAR + 8 + (index / 3) as i32 * 28,
-            width: 34,
-            height: 24,
-        });
-    }
-    // ▲ ▼ / ◀ ▶ / 확인 취소 / 좌소프트 우소프트 / 통화 종료.
-    let keys = [0, 1, 2, 3, 4, 7, 5, 6, 20, 21];
-    for (index, key) in keys.into_iter().enumerate() {
-        cells.push(Cell {
-            key: Some(key),
-            x: 130 + (index % 2) as i32 * 68,
-            y: BAR + 8 + (index / 2) as i32 * 23,
-            width: 64,
-            height: 20,
-        });
-    }
-    cells.push(Cell {
-        key: None,
-        x: 130,
-        y: BAR + 8 + 5 * 23,
-        width: 132,
-        height: 20,
-    });
-    cells
-}
-
-/// The cell a direction leads to from `from`: of the cells wholly past its
-/// edge that way, the nearest, distance across the direction counting double;
-/// `from` itself at an edge.
-fn step(cells: &[Cell], from: usize, direction: Button) -> usize {
-    let centre = |cell: &Cell| (cell.x + cell.width / 2, cell.y + cell.height / 2);
-    let origin = &cells[from];
-    let (fx, fy) = centre(origin);
-    cells
-        .iter()
-        .enumerate()
-        .filter(|(_, cell)| match direction {
-            Button::Up => cell.y + cell.height <= origin.y,
-            Button::Down => cell.y >= origin.y + origin.height,
-            Button::Left => cell.x + cell.width <= origin.x,
-            _ => cell.x >= origin.x + origin.width,
-        })
-        .map(|(index, cell)| {
-            let (cx, cy) = centre(cell);
-            let (along, across) = match direction {
-                Button::Up | Button::Down => ((cy - fy).abs(), cx - fx),
-                _ => ((cx - fx).abs(), cy - fy),
-            };
-            (index, along + 2 * across.abs())
-        })
-        .min_by_key(|(_, distance)| *distance)
-        .map_or(from, |(index, _)| index)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn at(cells: &[Cell], key: Option<i32>) -> usize {
-        cells.iter().position(|cell| cell.key == key).unwrap()
-    }
-
     #[test]
-    fn the_picker_moves_like_a_keypad() {
-        let cells = picker_cells();
-        // 1 → 2 → 3 along the top row, 5 down to 8, and from 3 across to ▲.
-        assert_eq!(step(&cells, at(&cells, Some(9)), Button::Right), at(&cells, Some(10)));
-        assert_eq!(step(&cells, at(&cells, Some(13)), Button::Down), at(&cells, Some(16)));
-        assert_eq!(step(&cells, at(&cells, Some(11)), Button::Right), at(&cells, Some(0)));
-        // The bottom of the right column reaches "none", and nothing is below it.
-        let none = at(&cells, None);
-        assert_eq!(step(&cells, at(&cells, Some(20)), Button::Down), none);
-        assert_eq!(step(&cells, none, Button::Down), none);
-        // The top-left key stays put going up or left.
-        assert_eq!(step(&cells, at(&cells, Some(9)), Button::Up), at(&cells, Some(9)));
-        assert_eq!(step(&cells, at(&cells, Some(9)), Button::Left), at(&cells, Some(9)));
+    fn the_tiles_move_in_rows_of_three() {
+        // Eleven tiles: three full rows and two on the last.
+        assert_eq!(tile_step(4, 11, Button::Up), 1);
+        assert_eq!(tile_step(1, 11, Button::Up), 10);
+        assert_eq!(tile_step(2, 11, Button::Up), 8);
+        assert_eq!(tile_step(8, 11, Button::Down), 10);
+        assert_eq!(tile_step(10, 11, Button::Down), 1);
+        assert_eq!(tile_step(3, 11, Button::Left), 5);
+        assert_eq!(tile_step(5, 11, Button::Right), 3);
+        assert_eq!(tile_step(10, 11, Button::Right), 9);
+        assert_eq!(tile_step(9, 11, Button::Left), 10);
+        // Seven: the last alone on its row.
+        assert_eq!(tile_step(5, 7, Button::Down), 6);
+        assert_eq!(tile_step(6, 7, Button::Down), 0);
     }
 
     #[test]

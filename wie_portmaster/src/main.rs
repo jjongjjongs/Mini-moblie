@@ -29,6 +29,7 @@ mod controls;
 mod icons;
 mod library;
 mod manage;
+mod mapping;
 mod pointer;
 mod presets;
 mod saves;
@@ -164,7 +165,8 @@ enum Input {
 
 /// The pad button a keyboard key stands for on the list and in the settings:
 /// the arrows, Enter or Space to choose, Esc or Backspace to go back, F2 and
-/// Delete for the second and third actions a screen offers.
+/// Delete for the second and third actions a screen offers, Tab for the
+/// other tab or slot of a layout and F9 to put a layout back to the defaults.
 fn key_button(scancode: i32) -> Option<Button> {
     Some(match scancode {
         82 => Button::Up,
@@ -175,6 +177,8 @@ fn key_button(scancode: i32) -> Option<Button> {
         ESCAPE | 42 => Button::B,
         59 => Button::X,
         controls::DELETE => Button::Y,
+        TAB => Button::Select,
+        66 => Button::L3,
         _ => return None,
     })
 }
