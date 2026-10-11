@@ -395,6 +395,13 @@ public final class MainActivity extends Activity {
     // null value is cached too - it means "this archive carries no icon".
     private final java.util.HashMap<String, Bitmap> iconCache = new java.util.HashMap<>();
     private LinearLayout libraryListContainer;
+    /** The section header's sort switch: 최근 플레이순 or 이름순. */
+    private TextView librarySortPill;
+    /** The app bar's list and grid buttons. */
+    private TextView libraryListButton;
+    private TextView libraryGridButton;
+    /** Covers already read or just taken, by game file name. */
+    private final java.util.HashMap<String, Bitmap> coverCache = new java.util.HashMap<>();
     private LinearLayout libraryChipRow;
     private TextView librarySectCount;
     private TextView librarySectTitle;
@@ -873,6 +880,10 @@ public final class MainActivity extends Activity {
     // --- library ---------------------------------------------------------
 
     private void showLibrary() {
+        // The game being left leaves its last screen as its cover.
+        if (playerVisible && currentGame != null) {
+            saveCover(currentGame);
+        }
         ControlPatch.onLeave(this);
         running = false;
         playerVisible = false;
@@ -898,12 +909,17 @@ public final class MainActivity extends Activity {
         root.setBackgroundColor(LIB_BG);
 
         // A small title strip at the very top, like the mockup's app bar.
-        TextView bar = new TextView(this);
-        bar.setText("Mini Mobile");
-        bar.setTextSize(16f);
-        bar.setTypeface(Typeface.DEFAULT_BOLD);
-        bar.setTextColor(LIB_INK);
-        bar.setPadding(dp(18), dp(12), dp(18), dp(6));
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        bar.setPadding(dp(18), dp(10), dp(14), dp(4));
+        TextView barTitle = new TextView(this);
+        barTitle.setText("Mini Mobile");
+        barTitle.setTextSize(16f);
+        barTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        barTitle.setTextColor(LIB_INK);
+        bar.addView(barTitle, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        bar.addView(buildViewToggle());
         root.addView(bar);
 
         LinearLayout content = new LinearLayout(this);
@@ -1037,6 +1053,19 @@ public final class MainActivity extends Activity {
         librarySectCount.setTextSize(12f);
         librarySectCount.setTextColor(LIB_MUTED);
         sect.addView(librarySectCount);
+        librarySortPill = new TextView(this);
+        librarySortPill.setTextSize(12f);
+        librarySortPill.setTypeface(Typeface.DEFAULT_BOLD);
+        librarySortPill.setTextColor(LIB_GREEN_DEEP);
+        librarySortPill.setBackground(roundedRect(LIB_GREEN_SOFTER, LIB_GREEN_LINE, 1, 999));
+        librarySortPill.setPadding(dp(10), dp(4), dp(10), dp(4));
+        librarySortPill.setOnClickListener(v -> {
+            libraryPrefs().edit().putString("sort", librarySortRecent() ? "name" : "recent").apply();
+            refreshLibraryList();
+        });
+        LinearLayout.LayoutParams sortParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        sortParams.leftMargin = dp(8);
+        sect.addView(librarySortPill, sortParams);
         // A '선택' / '취소' toggle that enters and leaves multi-select.
         librarySelectAction = new TextView(this);
         librarySelectAction.setTextSize(12.5f);
@@ -1853,6 +1882,9 @@ public final class MainActivity extends Activity {
             }
         }
         rebuildCarrierChips(all.length, fav, skt, ktf, lgt, etc);
+        if (librarySortPill != null) {
+            librarySortPill.setText(librarySortRecent() ? "최근 플레이순 ▾" : "이름순 ▾");
+        }
 
         String query = librarySearch.toLowerCase(java.util.Locale.ROOT);
         ArrayList<File> shown = new ArrayList<>();
@@ -2091,6 +2123,7 @@ public final class MainActivity extends Activity {
                     int removed = 0;
                     for (File game : targets) {
                         if (game.delete()) {
+                            forgetPlayed(game);
                             removed++;
                         }
                     }
@@ -2299,7 +2332,10 @@ public final class MainActivity extends Activity {
             return buildEmptyState();
         }
 
-        Arrays.sort(games, Comparator.comparing(File::getName, String.CASE_INSENSITIVE_ORDER));
+        sortGames(games);
+        if (libraryGrid()) {
+            return buildGameGrid(games);
+        }
 
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
@@ -2433,11 +2469,14 @@ public final class MainActivity extends Activity {
         tagParams.rightMargin = dp(6);
         metaLine.addView(tag, tagParams);
 
-        TextView size = new TextView(this);
-        size.setText(formatSize(game.length()));
-        size.setTextSize(11.5f);
-        size.setTextColor(LIB_MUTED);
-        metaLine.addView(size);
+        long played = lastPlayed(game);
+        TextView when = new TextView(this);
+        when.setText(playedLabel(played));
+        when.setTextSize(11.5f);
+        when.setTextColor(played > 0 ? LIB_GREEN_DEEP : LIB_MUTED);
+        when.setSingleLine(true);
+        when.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        metaLine.addView(when);
 
         meta.addView(metaLine);
         row.addView(meta, metaParams);
@@ -2477,6 +2516,339 @@ public final class MainActivity extends Activity {
         }
 
         return row;
+    }
+
+    // --- library: views, sorting, last played, covers --------------------
+
+    private SharedPreferences libraryPrefs() {
+        return getSharedPreferences("mini_library", MODE_PRIVATE);
+    }
+
+    /** Whether the library shows covers in a grid rather than rows. */
+    private boolean libraryGrid() {
+        return "grid".equals(libraryPrefs().getString("view", "list"));
+    }
+
+    /** Whether the library puts the last played first, rather than by name. */
+    private boolean librarySortRecent() {
+        return !"name".equals(libraryPrefs().getString("sort", "recent"));
+    }
+
+    /** The list and grid buttons at the top right, the one in use filled. */
+    private View buildViewToggle() {
+        LinearLayout group = new LinearLayout(this);
+        group.setOrientation(LinearLayout.HORIZONTAL);
+        group.setBackground(roundedRect(LIB_GREEN_SOFTER, LIB_LINE, 1, 10));
+        group.setPadding(dp(2), dp(2), dp(2), dp(2));
+        libraryListButton = viewToggleButton("☰", "목록으로 보기", false);
+        libraryGridButton = viewToggleButton("▦", "격자로 보기", true);
+        group.addView(libraryListButton, new LinearLayout.LayoutParams(dp(38), dp(30)));
+        LinearLayout.LayoutParams gridParams = new LinearLayout.LayoutParams(dp(38), dp(30));
+        gridParams.leftMargin = dp(2);
+        group.addView(libraryGridButton, gridParams);
+        markViewToggle();
+        return group;
+    }
+
+    private TextView viewToggleButton(String glyph, String description, boolean grid) {
+        TextView button = new TextView(this);
+        button.setText(glyph);
+        button.setTextSize(16f);
+        button.setGravity(android.view.Gravity.CENTER);
+        button.setContentDescription(description);
+        button.setOnClickListener(v -> {
+            if (libraryGrid() != grid) {
+                libraryPrefs().edit().putString("view", grid ? "grid" : "list").apply();
+                markViewToggle();
+                refreshLibraryList();
+            }
+        });
+        return button;
+    }
+
+    private void markViewToggle() {
+        boolean grid = libraryGrid();
+        for (TextView button : new TextView[]{libraryListButton, libraryGridButton}) {
+            if (button == null) {
+                continue;
+            }
+            boolean on = (button == libraryGridButton) == grid;
+            button.setTextColor(on ? LIB_GREEN_DEEP : LIB_MUTED);
+            button.setBackground(on ? roundedRect(LIB_SURFACE, LIB_GREEN_LINE, 1, 8) : null);
+        }
+    }
+
+    /** Last played first, then the never played, each by name; or all by name. */
+    private void sortGames(File[] games) {
+        Comparator<File> byName = Comparator.comparing(File::getName, String.CASE_INSENSITIVE_ORDER);
+        if (!librarySortRecent()) {
+            Arrays.sort(games, byName);
+            return;
+        }
+        java.util.Map<String, ?> played = getSharedPreferences("mini_last_played", MODE_PRIVATE).getAll();
+        Comparator<File> byRecent = Comparator.comparingLong(game -> {
+            Object at = played.get(game.getName());
+            return at instanceof Long ? -(Long) at : 0L;
+        });
+        Arrays.sort(games, byRecent.thenComparing(byName));
+    }
+
+    /** When `game` was last started, 0 for never. */
+    private long lastPlayed(File game) {
+        return getSharedPreferences("mini_last_played", MODE_PRIVATE).getLong(game.getName(), 0L);
+    }
+
+    private void markPlayed(File game) {
+        getSharedPreferences("mini_last_played", MODE_PRIVATE).edit().putLong(game.getName(), System.currentTimeMillis()).apply();
+    }
+
+    /** A deleted game takes its last-played time and its cover with it. */
+    private void forgetPlayed(File game) {
+        getSharedPreferences("mini_last_played", MODE_PRIVATE).edit().remove(game.getName()).apply();
+        coverCache.remove(game.getName());
+        coverFile(game).delete();
+    }
+
+    /** 오늘 21:34, 어제 09:12, 10월 8일 14:40, 2025년 3월 2일; or never. */
+    private String playedLabel(long at) {
+        if (at <= 0) {
+            return "아직 플레이 안 함";
+        }
+        java.util.Calendar then = java.util.Calendar.getInstance();
+        then.setTimeInMillis(at);
+        java.util.Calendar today = java.util.Calendar.getInstance();
+        java.util.Calendar yesterday = java.util.Calendar.getInstance();
+        yesterday.add(java.util.Calendar.DAY_OF_YEAR, -1);
+        String time = String.format(java.util.Locale.KOREA, "%02d:%02d", then.get(java.util.Calendar.HOUR_OF_DAY), then.get(java.util.Calendar.MINUTE));
+        if (sameDay(then, today)) {
+            return "오늘 " + time;
+        }
+        if (sameDay(then, yesterday)) {
+            return "어제 " + time;
+        }
+        int month = then.get(java.util.Calendar.MONTH) + 1;
+        int day = then.get(java.util.Calendar.DAY_OF_MONTH);
+        if (then.get(java.util.Calendar.YEAR) == today.get(java.util.Calendar.YEAR)) {
+            return month + "월 " + day + "일 " + time;
+        }
+        return then.get(java.util.Calendar.YEAR) + "년 " + month + "월 " + day + "일";
+    }
+
+    private static boolean sameDay(java.util.Calendar a, java.util.Calendar b) {
+        return a.get(java.util.Calendar.YEAR) == b.get(java.util.Calendar.YEAR)
+                && a.get(java.util.Calendar.DAY_OF_YEAR) == b.get(java.util.Calendar.DAY_OF_YEAR);
+    }
+
+    private File coverFile(File game) {
+        return new File(new File(getFilesDir(), "covers"), game.getName() + ".png");
+    }
+
+    /**
+     * Keeps the screen the game is being left on as its cover: in memory at
+     * once, for the list about to show, and on disk for next time.
+     */
+    private void saveCover(File game) {
+        if (gameView == null || gameView.bitmap == null || !framePainted) {
+            return;
+        }
+        final Bitmap shot;
+        try {
+            shot = gameView.bitmap.copy(Bitmap.Config.ARGB_8888, false);
+        } catch (RuntimeException e) {
+            return;
+        }
+        if (shot == null) {
+            return;
+        }
+        coverCache.put(game.getName(), shot);
+        final File file = coverFile(game);
+        new Thread(() -> {
+            File dir = file.getParentFile();
+            if (dir != null && !dir.isDirectory() && !dir.mkdirs()) {
+                return;
+            }
+            try (FileOutputStream out = new FileOutputStream(file)) {
+                shot.compress(Bitmap.CompressFormat.PNG, 100, out);
+            } catch (IOException e) {
+                Log.w(TAG, "cover not saved", e);
+            }
+        }, "cover").start();
+    }
+
+    /** The game's cover, null when it has never been played to a screen. */
+    private Bitmap coverOf(File game) {
+        String key = game.getName();
+        if (coverCache.containsKey(key)) {
+            return coverCache.get(key);
+        }
+        File file = coverFile(game);
+        Bitmap cover = file.isFile() ? BitmapFactory.decodeFile(file.getAbsolutePath()) : null;
+        coverCache.put(key, cover);
+        return cover;
+    }
+
+    /** The games three to a row, each a cover over its name and when it was played. */
+    private View buildGameGrid(File[] games) {
+        LinearLayout grid = new LinearLayout(this);
+        grid.setOrientation(LinearLayout.VERTICAL);
+        for (int i = 0; i < games.length; i += 3) {
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            for (int column = 0; column < 3; column++) {
+                LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+                if (column > 0) {
+                    params.leftMargin = dp(10);
+                }
+                row.addView(i + column < games.length ? createGameTile(games[i + column]) : new View(this), params);
+            }
+            LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            if (i > 0) {
+                rowParams.topMargin = dp(14);
+            }
+            grid.addView(row, rowParams);
+        }
+        return grid;
+    }
+
+    /** A box three quarters as wide as it is tall: a handset's screen. */
+    private final class CoverFrame extends FrameLayout {
+        CoverFrame() {
+            super(MainActivity.this);
+        }
+
+        @Override
+        protected void onMeasure(int widthSpec, int heightSpec) {
+            int width = MeasureSpec.getSize(widthSpec);
+            super.onMeasure(MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY),
+                    MeasureSpec.makeMeasureSpec(width * 4 / 3, MeasureSpec.EXACTLY));
+        }
+    }
+
+    private View createGameTile(File game) {
+        LinearLayout tile = new LinearLayout(this);
+        tile.setOrientation(LinearLayout.VERTICAL);
+
+        CoverFrame cover = new CoverFrame();
+        cover.setBackground(roundedRect(colorForName(game.getName()), 0, 0, 10));
+        roundCorners(cover, 10);
+        cover.setElevation(dp(2));
+        Bitmap shot = coverOf(game);
+        if (shot != null) {
+            // The screen as the game left it, its pixels kept sharp; a wide
+            // one is shown whole on black rather than cut.
+            cover.setBackground(roundedRect(Color.rgb(12, 14, 16), 0, 0, 10));
+            ImageView image = new ImageView(this);
+            android.graphics.drawable.BitmapDrawable drawable = new android.graphics.drawable.BitmapDrawable(getResources(), shot);
+            drawable.setFilterBitmap(false);
+            image.setImageDrawable(drawable);
+            image.setScaleType(shot.getWidth() > shot.getHeight() ? ImageView.ScaleType.FIT_CENTER : ImageView.ScaleType.CENTER_CROP);
+            cover.addView(image, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        } else {
+            // Never played: its icon, large, on its colour.
+            LinearLayout middle = new LinearLayout(this);
+            middle.setOrientation(LinearLayout.VERTICAL);
+            middle.setGravity(android.view.Gravity.CENTER);
+            Bitmap icon = cachedIcon(game);
+            if (icon != null) {
+                ImageView image = new ImageView(this);
+                image.setImageBitmap(icon);
+                image.setScaleType(ImageView.ScaleType.FIT_CENTER);
+                image.setBackground(roundedRect(Color.WHITE, 0, 0, 12));
+                image.setPadding(dp(4), dp(4), dp(4), dp(4));
+                roundCorners(image, 12);
+                middle.addView(image, new LinearLayout.LayoutParams(dp(52), dp(52)));
+            } else {
+                String label = displayName(game);
+                TextView letter = new TextView(this);
+                letter.setText(label.isEmpty() ? "?" : label.substring(0, 1));
+                letter.setTextSize(22f);
+                letter.setTypeface(Typeface.DEFAULT_BOLD);
+                letter.setTextColor(colorForName(game.getName()));
+                letter.setGravity(android.view.Gravity.CENTER);
+                letter.setBackground(roundedRect(Color.WHITE, 0, 0, 12));
+                middle.addView(letter, new LinearLayout.LayoutParams(dp(52), dp(52)));
+            }
+            TextView first = new TextView(this);
+            first.setText("첫 플레이 전");
+            first.setTextSize(10f);
+            first.setTextColor(Color.argb(220, 255, 255, 255));
+            first.setPadding(0, dp(8), 0, 0);
+            middle.addView(first);
+            cover.addView(middle, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        }
+
+        // The carrier at the top left, the favourite star or the tick at the right.
+        String bucket = carrierBucket(game);
+        TextView badge = new TextView(this);
+        badge.setText(bucket.equals("ETC") ? "기타" : bucket);
+        badge.setTextSize(9.5f);
+        badge.setTypeface(Typeface.DEFAULT_BOLD);
+        badge.setTextColor(Color.WHITE);
+        badge.setBackground(roundedRect(carrierColors(bucket)[0], 0, 0, 5));
+        badge.setPadding(dp(5), dp(1), dp(5), dp(1));
+        FrameLayout.LayoutParams badgeParams = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                android.view.Gravity.TOP | android.view.Gravity.START);
+        badgeParams.setMargins(dp(6), dp(6), 0, 0);
+        cover.addView(badge, badgeParams);
+
+        boolean isSelected = selected.contains(game.getAbsolutePath());
+        if (selectMode) {
+            TextView check = new TextView(this);
+            check.setText(isSelected ? "✓" : "");
+            check.setTextColor(Color.WHITE);
+            check.setTextSize(13f);
+            check.setTypeface(Typeface.DEFAULT_BOLD);
+            check.setGravity(android.view.Gravity.CENTER);
+            check.setBackground(roundedRect(isSelected ? LIB_GREEN : Color.argb(120, 0, 0, 0), Color.WHITE, 2, 11));
+            FrameLayout.LayoutParams checkParams = new FrameLayout.LayoutParams(dp(22), dp(22), android.view.Gravity.TOP | android.view.Gravity.END);
+            checkParams.setMargins(0, dp(6), dp(6), 0);
+            cover.addView(check, checkParams);
+            if (isSelected) {
+                cover.setForeground(new android.graphics.drawable.ColorDrawable(Color.argb(70, 46, 139, 87)));
+            }
+        } else if (isFavorite(game)) {
+            TextView star = new TextView(this);
+            star.setText("★");
+            star.setTextSize(15f);
+            star.setTextColor(LIB_STAR);
+            star.setShadowLayer(dp(2), 0, dp(1), Color.argb(140, 0, 0, 0));
+            FrameLayout.LayoutParams starParams = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                    android.view.Gravity.TOP | android.view.Gravity.END);
+            starParams.setMargins(0, dp(3), dp(6), 0);
+            cover.addView(star, starParams);
+        }
+        tile.addView(cover, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        TextView name = new TextView(this);
+        name.setText(displayName(game));
+        name.setTextColor(LIB_INK);
+        name.setTextSize(12.5f);
+        name.setTypeface(Typeface.DEFAULT_BOLD);
+        name.setSingleLine(true);
+        name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        name.setPadding(dp(2), dp(6), dp(2), 0);
+        tile.addView(name);
+
+        long played = lastPlayed(game);
+        TextView when = new TextView(this);
+        when.setText(playedLabel(played));
+        when.setTextSize(11f);
+        when.setTextColor(played > 0 ? LIB_GREEN_DEEP : LIB_MUTED);
+        when.setSingleLine(true);
+        when.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        when.setPadding(dp(2), 0, dp(2), 0);
+        tile.addView(when);
+
+        if (selectMode) {
+            tile.setOnClickListener(v -> toggleSelect(game));
+        } else {
+            tile.setOnClickListener(v -> showPlayer(game));
+            tile.setOnLongClickListener(v -> {
+                enterSelectMode(game);
+                return true;
+            });
+        }
+        return tile;
     }
 
     private String formatSize(long bytes) {
@@ -2994,7 +3366,9 @@ public final class MainActivity extends Activity {
                 .setMessage("이 게임을 목록에서 삭제할까요?\n저장한 내용은 그대로 남습니다.")
                 .setNegativeButton("취소", null)
                 .setPositiveButton("삭제", (dialog, which) -> {
-                    game.delete();
+                    if (game.delete()) {
+                        forgetPlayed(game);
+                    }
                     showLibrary();
                 })
                 .show();
@@ -4310,6 +4684,7 @@ public final class MainActivity extends Activity {
         paused = false;
         currentGame = game;
         currentGameName = displayName(game);
+        markPlayed(game);
         keypadHidden = gameKeypadHidden(game);
         keypadTheme = KeypadTheme.saved(this);
         keypadNumbers = getSharedPreferences("mini_keypad_numbers", MODE_PRIVATE).getBoolean(game.getName(), false);

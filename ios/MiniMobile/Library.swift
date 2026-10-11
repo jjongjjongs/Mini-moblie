@@ -72,6 +72,7 @@ enum Library {
     static func delete(_ game: GameFile) {
         try? FileManager.default.removeItem(at: game.url)
         Favorites.remove(game.name)
+        PlayHistory.forget(game)
     }
 
     // MARK: - Carrier

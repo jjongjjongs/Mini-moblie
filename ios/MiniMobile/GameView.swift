@@ -136,6 +136,7 @@ struct GameView: View {
             touch = GameTouch.get(game)
             padHidden = GamePad.hidden(game)
             padShape = GamePad.shape(game)
+            PlayHistory.markPlayed(game)
             emulator.start(game: game)
             let emulator = self.emulator
             Gamepad.shared.send = { [weak emulator] key, pressed in
@@ -143,6 +144,10 @@ struct GameView: View {
             }
         }
         .onDisappear {
+            // The screen the title is left on becomes its cover.
+            if let frame = emulator.lastFrame() {
+                PlayHistory.saveCover(game, frame: frame)
+            }
             Gamepad.shared.releaseAll()
             Gamepad.shared.send = nil
             emulator.stop()

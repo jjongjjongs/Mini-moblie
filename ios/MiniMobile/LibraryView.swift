@@ -58,6 +58,10 @@ struct LibraryView: View {
     /// choice from the moon/sun button, kept between runs and never the
     /// device's own setting. The game screen and pad keep their own look.
     @AppStorage("library.dark") private var dark = false
+    /// Covers in a grid rather than rows, and the order: the player's choice,
+    /// kept between runs.
+    @AppStorage("library.grid") private var grid = false
+    @AppStorage("library.sort") private var sortRaw = LibrarySort.recent.rawValue
 
     @State private var editMode = EditMode.inactive
     @State private var selection = Set<String>()
@@ -77,13 +81,22 @@ struct LibraryView: View {
 
     private var favorites: Set<String> { Favorites.decode(favoritesText) }
 
+    private var sort: LibrarySort { LibrarySort(rawValue: sortRaw) ?? .recent }
+
     private var shown: [GameFile] {
-        games.filter { filter.admits(carriers[$0.name] ?? "") && TitleSearch.matches($0.title, search) }
+        sort.sorted(games.filter { filter.admits(carriers[$0.name] ?? "") && TitleSearch.matches($0.title, search) })
     }
 
     var body: some View {
         NavigationView {
-            list
+            Group {
+                // Picking games to act on is done in the list.
+                if grid && !editMode.isEditing {
+                    gridView
+                } else {
+                    list
+                }
+            }
                 .navigationTitle("Mini Mobile")
                 .navigationBarTitleDisplayMode(.inline)
                 .searchable(text: $search, prompt: Text("게임 검색 (초성 가능)"))
@@ -137,7 +150,7 @@ struct LibraryView: View {
             )
             .preferredColorScheme(dark ? .dark : .light)
         }
-        .fullScreenCover(item: $playing) { game in
+        .fullScreenCover(item: $playing, onDismiss: reload) { game in
             GameView(game: game)
         }
         .preferredColorScheme(dark ? .dark : .light)
@@ -201,6 +214,21 @@ struct LibraryView: View {
                     }
                     .buttonStyle(.plain)
                 }
+                Button {
+                    sortRaw = (sort == .recent ? LibrarySort.name : LibrarySort.recent).rawValue
+                } label: {
+                    HStack(spacing: 3) {
+                        Text(sort.label)
+                        Image(systemName: "chevron.down").font(.caption2.weight(.bold))
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .foregroundColor(.accentColor)
+                    .overlay(Capsule().stroke(Color.accentColor.opacity(0.5), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("정렬: \(sort.label)")
             }
         }
         .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
@@ -212,9 +240,12 @@ struct LibraryView: View {
         let favorite = favorites.contains(game.name)
         let label = HStack(spacing: 10) {
             CarrierBadge(carrier: carriers[game.name])
-            Text(game.title)
-                .foregroundColor(.primary)
-                .lineLimit(2)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(game.title)
+                    .foregroundColor(.primary)
+                    .lineLimit(2)
+                playedText(game)
+            }
             Spacer(minLength: 0)
             if favorite {
                 Image(systemName: "star.fill")
@@ -243,23 +274,116 @@ struct LibraryView: View {
                 Label("삭제", systemImage: "trash")
             }
         }
-        .contextMenu {
-            Button { playing = game } label: { Label("실행", systemImage: "play.fill") }
-            Button { toggleFavorite(game) } label: {
-                Label(favorite ? "즐겨찾기 해제" : "즐겨찾기", systemImage: favorite ? "star.slash" : "star")
+        .contextMenu { gameMenu(game) }
+    }
+
+    /// What a long press on a game offers, in the list and the grid alike.
+    @ViewBuilder
+    private func gameMenu(_ game: GameFile) -> some View {
+        let favorite = favorites.contains(game.name)
+        Button { playing = game } label: { Label("실행", systemImage: "play.fill") }
+        Button { toggleFavorite(game) } label: {
+            Label(favorite ? "즐겨찾기 해제" : "즐겨찾기", systemImage: favorite ? "star.slash" : "star")
+        }
+        Divider()
+        Button { exportSave(game) } label: { Label("세이브 내보내기", systemImage: "square.and.arrow.up") }
+        Button { savesFor = game } label: { Label("세이브 불러오기", systemImage: "square.and.arrow.down") }
+        Button(role: .destructive) { erasing = game } label: { Label("세이브 삭제", systemImage: "clock.arrow.circlepath") }
+        Divider()
+        Button(role: .destructive) {
+            Library.delete(game)
+            reload()
+        } label: {
+            Label("게임 삭제", systemImage: "trash")
+        }
+    }
+
+    private func playedText(_ game: GameFile) -> some View {
+        let played = PlayHistory.lastPlayed(game) != nil
+        return Text(PlayHistory.label(game))
+            .font(.caption)
+            .foregroundColor(played ? .accentColor : .secondary)
+            .lineLimit(1)
+    }
+
+    // MARK: - Grid
+
+    /// The games as covers, three to a row, each over its title and when it
+    /// was last played: the screen it was left on, or its letter before then.
+    private var gridView: some View {
+        let visible = self.shown
+        let starred = visible.filter { favorites.contains($0.name) }
+        let rest = visible.filter { !favorites.contains($0.name) }
+
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                filterBar
+                if games.isEmpty {
+                    Text("오른쪽 위 + 버튼으로 게임 파일(zip, jar)을 가져오세요.\n'파일' 앱의 Mini Mobile/Games 폴더에 넣어도 됩니다.")
+                        .foregroundColor(.secondary)
+                } else if visible.isEmpty {
+                    Text("맞는 게임이 없습니다.")
+                        .foregroundColor(.secondary)
+                }
+                if !starred.isEmpty {
+                    gridSection("즐겨찾기", starred)
+                }
+                if !rest.isEmpty {
+                    gridSection(starred.isEmpty ? "게임 \(rest.count)" : "나머지 \(rest.count)", rest)
+                }
             }
-            Divider()
-            Button { exportSave(game) } label: { Label("세이브 내보내기", systemImage: "square.and.arrow.up") }
-            Button { savesFor = game } label: { Label("세이브 불러오기", systemImage: "square.and.arrow.down") }
-            Button(role: .destructive) { erasing = game } label: { Label("세이브 삭제", systemImage: "clock.arrow.circlepath") }
-            Divider()
-            Button(role: .destructive) {
-                Library.delete(game)
-                reload()
-            } label: {
-                Label("게임 삭제", systemImage: "trash")
+            .padding(.horizontal, 16)
+            .padding(.bottom, 20)
+        }
+        .background(Color(.systemGroupedBackground).ignoresSafeArea())
+    }
+
+    private func gridSection(_ title: String, _ games: [GameFile]) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.footnote.weight(.semibold))
+                .foregroundColor(.secondary)
+                .textCase(.uppercase)
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), alignment: .leading, spacing: 14) {
+                ForEach(games) { tile($0) }
             }
         }
+    }
+
+    private func tile(_ game: GameFile) -> some View {
+        let favorite = favorites.contains(game.name)
+        let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+        return Button { playing = game } label: {
+            VStack(alignment: .leading, spacing: 3) {
+                Color.clear
+                    .aspectRatio(CGFloat(3.0 / 4.0), contentMode: .fit)
+                    .overlay(GameCover(game: game))
+                    .clipShape(shape)
+                    .overlay(alignment: .topLeading) {
+                        CarrierBadge(carrier: carriers[game.name])
+                            .scaleEffect(0.85, anchor: .topLeading)
+                            .background(RoundedRectangle(cornerRadius: 5).fill(Color(.systemBackground).opacity(0.85)))
+                            .padding(6)
+                    }
+                    .overlay(alignment: .topTrailing) {
+                        if favorite {
+                            Image(systemName: "star.fill")
+                                .foregroundColor(.yellow)
+                                .shadow(color: .black.opacity(0.5), radius: 2, y: 1)
+                                .padding(6)
+                        }
+                    }
+                    .shadow(color: .black.opacity(0.18), radius: 4, y: 2)
+                Text(game.title)
+                    .font(.footnote.weight(.semibold))
+                    .foregroundColor(.primary)
+                    .lineLimit(1)
+                    .padding(.top, 3)
+                playedText(game)
+            }
+        }
+        .buttonStyle(.plain)
+        .contextMenu { gameMenu(game) }
     }
 
     // MARK: - Toolbar
@@ -276,6 +400,13 @@ struct LibraryView: View {
             .disabled(games.isEmpty && !editMode.isEditing)
         }
         ToolbarItemGroup(placement: .navigationBarTrailing) {
+            Button {
+                withAnimation { grid.toggle() }
+            } label: {
+                Image(systemName: grid ? "list.bullet" : "square.grid.3x2")
+            }
+            .accessibilityLabel(grid ? "목록으로 보기" : "격자로 보기")
+            .disabled(editMode.isEditing)
             Button {
                 withAnimation { dark.toggle() }
             } label: {
