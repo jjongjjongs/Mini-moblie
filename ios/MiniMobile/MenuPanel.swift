@@ -104,3 +104,70 @@ struct MenuPanel<Content: View, Footer: View>: View {
         .environment(\.colorScheme, .dark)
     }
 }
+
+/// The window asking before the game is closed, over the game and in the look
+/// of the menu's others. A gamepad answers it too: A is 예, B is 아니요.
+struct ExitConfirm: View {
+    let onYes: () -> Void
+    let onNo: () -> Void
+    @State private var outerCapture: ((PadButton?) -> Void)?
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.55)
+                .ignoresSafeArea()
+                .onTapGesture(perform: onNo)
+            VStack(spacing: 0) {
+                Text("종료")
+                    .font(.system(size: 19, weight: .bold))
+                    .foregroundColor(MenuPalette.ink)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 22)
+                    .padding(.top, 22)
+                Text("애플리케이션을 종료하시겠습니까?")
+                    .font(.system(size: 15))
+                    .foregroundColor(MenuPalette.muted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 22)
+                    .padding(.top, 12)
+                    .padding(.bottom, 16)
+                Rectangle()
+                    .fill(MenuPalette.line)
+                    .frame(height: 1)
+                HStack(spacing: 8) {
+                    Spacer()
+                    Button("아니요", action: onNo)
+                        .buttonStyle(MenuButtonStyle(kind: .secondary))
+                    Button("예", action: onYes)
+                        .buttonStyle(MenuButtonStyle(kind: .primary))
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 14)
+                .padding(.bottom, 20)
+            }
+            .background(RoundedRectangle(cornerRadius: 16).fill(MenuPalette.panel))
+            .overlay(RoundedRectangle(cornerRadius: 16).stroke(MenuPalette.line, lineWidth: 1))
+            .frame(maxWidth: 360)
+            .padding(.horizontal, 20)
+        }
+        .environment(\.colorScheme, .dark)
+        .onAppear {
+            // A key held into the window is let go: its release is the window's.
+            Gamepad.shared.releaseAll()
+            outerCapture = Gamepad.shared.capture
+            Gamepad.shared.capture = { button in
+                switch button {
+                case .a?:
+                    onYes()
+                case .b?:
+                    onNo()
+                default:
+                    break
+                }
+            }
+        }
+        .onDisappear {
+            Gamepad.shared.capture = outerCapture
+        }
+    }
+}

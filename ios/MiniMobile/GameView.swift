@@ -107,6 +107,8 @@ struct GameView: View {
     /// Whether the pad is put away, the whole screen left to the game (see
     /// `GamePad`).
     @State private var padHidden = false
+    /// Whether the window asking before the game closes is up.
+    @State private var confirmingExit = false
 
     private var arrangement: PadArrangement {
         padArrangement(mode: padMode, shape: padShape)
@@ -129,6 +131,17 @@ struct GameView: View {
             }
         }
         .background(Color(white: 0.08).ignoresSafeArea())
+        .overlay {
+            if confirmingExit {
+                ExitConfirm(onYes: {
+                    confirmingExit = false
+                    emulator.stop()
+                    dismiss()
+                }, onNo: {
+                    confirmingExit = false
+                })
+            }
+        }
         .statusBar(hidden: true)
         .onAppear {
             speed = GameSpeed.get(game)
@@ -215,10 +228,7 @@ struct GameView: View {
 
     private var topBar: some View {
         HStack {
-            Button("닫기") {
-                emulator.stop()
-                dismiss()
-            }
+            Button("닫기") { confirmingExit = true }
             Spacer()
             Text(game.title)
                 .font(.headline)
@@ -288,8 +298,7 @@ struct GameView: View {
         // The bar with 닫기 is put away with the pad.
         if padHidden {
             Button(role: .destructive) {
-                emulator.stop()
-                dismiss()
+                confirmingExit = true
             } label: {
                 Label("게임 닫기", systemImage: "xmark")
             }
