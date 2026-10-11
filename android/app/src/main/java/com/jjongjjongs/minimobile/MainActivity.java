@@ -4899,11 +4899,12 @@ public final class MainActivity extends Activity {
                         return line;
                     }
                 };
-        new DialogFooter.Builder(new android.view.ContextThemeWrapper(this, android.R.style.Theme_Material_Dialog_Alert))
+        ControlStyle style = new ControlStyle(this, false);
+        showMenuDialog(style, new AlertDialog.Builder(style.context)
                 .setTitle(running && currentGameName != null ? currentGameName : "게임")
                 .setAdapter(adapter, (dialog, which) -> rows.get(which).action.run())
                 .setNegativeButton("닫기", null)
-                .show();
+                .create());
     }
 
     /** A row of the game menu: its icon, label, the value on its right (or null) and what a tap does. */
@@ -5529,13 +5530,17 @@ public final class MainActivity extends Activity {
     }
 
     /**
-     * Shows one of the game menu's windows in the look of 조작 설정: its dark
+     * Shows the game menu, or one of its windows, in the look of 조작 설정: its dark
      * panel, its rounded buttons - 적용 filled, 취소 beside it, and a third
      * (1x로) only outlined, off on the far side - over the footer's hairline.
      */
     private void showMenuDialog(ControlStyle style, AlertDialog dialog) {
         dialog.setOnShowListener(shown -> {
             style.decorate(dialog);
+            // The menu's rows stand apart on their icons, without lines between.
+            if (dialog.getListView() != null) {
+                dialog.getListView().setDivider(null);
+            }
             Button neutral = dialog.getButton(AlertDialog.BUTTON_NEUTRAL);
             if (neutral != null) {
                 style.quiet(neutral);
