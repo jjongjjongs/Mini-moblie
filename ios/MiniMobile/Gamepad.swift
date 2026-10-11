@@ -262,8 +262,8 @@ struct PadMappingView: View {
         .sheet(item: $choosing) { choice in
             KeyChoiceView(title: "\(choice.button.name) 버튼 (\(choice.withSelect ? "SELECT+" : "그냥"))",
                           current: choice.withSelect ? gamepad.mapping.select[choice.button.rawValue] : gamepad.mapping.plain[choice.button.rawValue],
-                          allowsNone: true,
-                          noneLabel: choice.withSelect ? "없음 (그냥 누를 때와 같게)" : "없음") { key in
+                          notes: notes(select: choice.withSelect),
+                          noneNote: choice.withSelect ? "그냥과 같게" : "") { key in
                 if choice.withSelect {
                     gamepad.mapping.select[choice.button.rawValue] = key
                 } else {
@@ -287,6 +287,16 @@ struct PadMappingView: View {
             }
         }
         .onDisappear { gamepad.capture = nil }
+    }
+
+    /// On each handset key, the pad buttons already pressing it in a layer.
+    private func notes(select layer: Bool) -> [Int32: String] {
+        var notes: [Int32: String] = [:]
+        for button in PadButton.allCases {
+            guard let key = (layer ? gamepad.mapping.select : gamepad.mapping.plain)[button.rawValue] else { continue }
+            notes[key] = notes[key].map { $0 + "·" + button.name } ?? button.name
+        }
+        return notes
     }
 
     private var tabs: some View {
@@ -422,33 +432,71 @@ struct PadMappingView: View {
     }
 }
 
-/// The handset's keys to choose from: the number pad, then the rest.
+/// The handset's keypad, to choose the key a gamepad button presses: the soft
+/// keys, the directions and the call keys on the left, the number pad on the
+/// right, as the PC builds draw their keyboard layout. Each key carries the
+/// pad buttons already on it; the key the button has now is outlined. A tap
+/// chooses, and so do the pad's D-pad and A; B leaves it as it is.
 private struct KeyChoiceView: View {
     let title: String
     let current: Int32?
-    let allowsNone: Bool
-    let noneLabel: String
+    let notes: [Int32: String]
+    let noneNote: String
     let choose: (Int32?) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @State private var cursor = 0
+    @State private var outerCapture: ((PadButton?) -> Void)?
 
-    private static let numberPad: [Int32] = [1, 2, 3, 4, 5, 6, 7, 8, 9].map { Int32(WIE_KEY_NUM0) + $0 }
-        + [Int32(WIE_KEY_STAR), Int32(WIE_KEY_NUM0), Int32(WIE_KEY_HASH)]
-    private static let others: [Int32] = [
-        Int32(WIE_KEY_UP), Int32(WIE_KEY_DOWN), Int32(WIE_KEY_LEFT), Int32(WIE_KEY_RIGHT),
-        Int32(WIE_KEY_OK), Int32(WIE_KEY_CLEAR), Int32(WIE_KEY_LEFT_SOFT), Int32(WIE_KEY_RIGHT_SOFT),
-        Int32(WIE_KEY_CALL), Int32(WIE_KEY_HANGUP),
-    ]
+    /// A key of the keypad: the handset key (nil for none), its column -
+    /// three on the left block, three on the number pad - and its row.
+    private struct Cell {
+        let key: Int32?
+        let column: Int
+        let row: Int
+    }
+
+    private static let cells: [Cell] = {
+        let num = { (digit: Int32) in Int32(WIE_KEY_NUM0) + digit }
+        return [
+            Cell(key: Int32(WIE_KEY_LEFT_SOFT), column: 0, row: 0), Cell(key: Int32(WIE_KEY_UP), column: 1, row: 0),
+            Cell(key: Int32(WIE_KEY_RIGHT_SOFT), column: 2, row: 0),
+            Cell(key: Int32(WIE_KEY_LEFT), column: 0, row: 1), Cell(key: Int32(WIE_KEY_OK), column: 1, row: 1),
+            Cell(key: Int32(WIE_KEY_RIGHT), column: 2, row: 1),
+            Cell(key: Int32(WIE_KEY_CALL), column: 0, row: 2), Cell(key: Int32(WIE_KEY_DOWN), column: 1, row: 2),
+            Cell(key: Int32(WIE_KEY_HANGUP), column: 2, row: 2),
+            Cell(key: Int32(WIE_KEY_CLEAR), column: 1, row: 3), Cell(key: nil, column: 2, row: 3),
+            Cell(key: num(1), column: 3, row: 0), Cell(key: num(2), column: 4, row: 0), Cell(key: num(3), column: 5, row: 0),
+            Cell(key: num(4), column: 3, row: 1), Cell(key: num(5), column: 4, row: 1), Cell(key: num(6), column: 5, row: 1),
+            Cell(key: num(7), column: 3, row: 2), Cell(key: num(8), column: 4, row: 2), Cell(key: num(9), column: 5, row: 2),
+            Cell(key: Int32(WIE_KEY_STAR), column: 3, row: 3), Cell(key: num(0), column: 4, row: 3),
+            Cell(key: Int32(WIE_KEY_HASH), column: 5, row: 3),
+        ]
+    }()
+
+    /// Where a key sits on a 320-unit-wide plan.
+    private static func frame(_ cell: Cell) -> CGRect {
+        let width: CGFloat = (320 - 8 - 14 - 16) / 6
+        let x = 4 + CGFloat(cell.column) * (width + 4) + (cell.column >= 3 ? 10 : 0)
+        return CGRect(x: x, y: 1 + CGFloat(cell.row) * 40, width: width, height: 36)
+    }
 
     var body: some View {
         NavigationView {
             ScrollView {
-                VStack(spacing: 16) {
-                    grid(Self.numberPad, columns: 3)
-                    grid(Self.others, columns: 4)
-                    if allowsNone {
-                        cell(noneLabel, chosen: current == nil) { pick(nil) }
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("누를 폰 키를 고르세요. 지금: \(current == nil ? (noneNote.isEmpty ? "없음" : noneNote) : handsetKeyLabel(current))")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                    GeometryReader { geometry in
+                        let scale = geometry.size.width / 320
+                        ZStack(alignment: .topLeading) {
+                            ForEach(Self.cells.indices, id: \.self) { index in
+                                key(index, scale: scale)
+                            }
+                        }
                     }
+                    .aspectRatio(CGFloat(320.0 / 158.0), contentMode: .fit)
                 }
                 .padding(16)
             }
@@ -460,28 +508,96 @@ private struct KeyChoiceView: View {
                 }
             }
         }
-    }
-
-    private func grid(_ keys: [Int32], columns: Int) -> some View {
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: columns), spacing: 8) {
-            ForEach(keys, id: \.self) { key in
-                cell(handsetKeyLabel(key), chosen: key == current) { pick(key) }
+        .onAppear {
+            cursor = Self.cells.firstIndex { $0.key == current } ?? 0
+            outerCapture = Gamepad.shared.capture
+            Gamepad.shared.capture = { button in
+                switch button {
+                case .up?, .down?, .left?, .right?:
+                    cursor = step(from: cursor, button!)
+                case .a?:
+                    pick(Self.cells[cursor].key)
+                case .b?:
+                    dismiss()
+                default:
+                    break
+                }
             }
         }
+        .onDisappear {
+            Gamepad.shared.capture = outerCapture
+        }
     }
 
-    private func cell(_ label: String, chosen: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(label)
-                .font(.headline)
-                .frame(maxWidth: .infinity, minHeight: 44)
-                .foregroundColor(chosen ? Color.white : Color.primary)
-                .background(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(chosen ? Color.accentColor : Color(.secondarySystemBackground))
-                )
+    private func key(_ index: Int, scale: CGFloat) -> some View {
+        let cell = Self.cells[index]
+        let rect = Self.frame(cell)
+        let focused = index == cursor
+        let now = cell.key == current
+        let name = cell.key == nil ? "없음" : handsetKeyLabel(cell.key)
+        let note = cell.key.map { notes[$0] ?? "" } ?? noneNote
+        let shape = RoundedRectangle(cornerRadius: 8 * scale, style: .continuous)
+        return Button {
+            cursor = index
+            pick(cell.key)
+        } label: {
+            VStack(spacing: 1 * scale) {
+                Text(name)
+                    .font(.system(size: (name.count > 2 ? 10.5 : 13) * scale, weight: .bold))
+                    .foregroundColor(focused ? Color.white : cell.key == nil ? Color.secondary : Color.primary)
+                if !note.isEmpty {
+                    Text(note)
+                        .font(.system(size: 7.5 * scale, weight: .semibold))
+                        .foregroundColor(focused ? Color.white.opacity(0.85) : Color.accentColor)
+                }
+            }
+            .lineLimit(1)
+            .minimumScaleFactor(0.6)
+            .padding(.horizontal, 2)
+            .frame(width: rect.width * scale, height: rect.height * scale)
+            .background(shape.fill(focused ? Color.accentColor : Color(.secondarySystemBackground)))
+            .overlay(shape.stroke(now ? Color.accentColor : Color(.separator), lineWidth: now ? 2 : 1))
         }
         .buttonStyle(.plain)
+        .offset(x: rect.minX * scale, y: rect.minY * scale)
+    }
+
+    /// The key a direction leads to: of the keys wholly past this one's edge
+    /// that way, the nearest, distance across the direction counting double.
+    private func step(from: Int, _ direction: PadButton) -> Int {
+        let origin = Self.frame(Self.cells[from])
+        var best = from
+        var bestDistance = CGFloat.greatestFiniteMagnitude
+        for (index, cell) in Self.cells.enumerated() {
+            let rect = Self.frame(cell)
+            let past: Bool
+            let along: CGFloat
+            let across: CGFloat
+            switch direction {
+            case .up:
+                past = rect.maxY <= origin.minY
+                along = origin.midY - rect.midY
+                across = rect.midX - origin.midX
+            case .down:
+                past = rect.minY >= origin.maxY
+                along = rect.midY - origin.midY
+                across = rect.midX - origin.midX
+            case .left:
+                past = rect.maxX <= origin.minX
+                along = origin.midX - rect.midX
+                across = rect.midY - origin.midY
+            default:
+                past = rect.minX >= origin.maxX
+                along = rect.midX - origin.midX
+                across = rect.midY - origin.midY
+            }
+            let distance = along + 2 * abs(across)
+            if past && distance < bestDistance {
+                best = index
+                bestDistance = distance
+            }
+        }
+        return best
     }
 
     private func pick(_ key: Int32?) {
