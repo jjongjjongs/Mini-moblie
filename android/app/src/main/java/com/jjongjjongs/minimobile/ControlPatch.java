@@ -94,6 +94,10 @@ public final class ControlPatch {
         boolean axesNeutral = true;
         final TreeMap<Integer, Integer> mapping = new TreeMap<>();
         final LinkedHashMap<String, TreeMap<Integer, Integer>> padSlots = new LinkedHashMap<>();
+        /** The pad's second layer: what each button presses with SELECT held. */
+        final TreeMap<Integer, Integer> selectMapping = new TreeMap<>();
+        /** The pads holding SELECT down, by device. */
+        final Set<Integer> selectHeld = new HashSet<>();
 
         Session(Activity activity) {
             this.a = activity;
@@ -148,7 +152,7 @@ public final class ControlPatch {
                 String next = keys.next();
                 int parseInt = Integer.parseInt(next);
                 int i = jSONObject.getInt(next);
-                if (parseInt < 0 || parseInt > 2048 || i < 0 || i >= 21) {
+                if (parseInt < 0 || parseInt > ControlPads.SELECT_OFFSET + 2048 || i < 0 || i >= 21) {
                     throw new Exception("bad mapping");
                 }
                 treeMap.put(Integer.valueOf(parseInt), Integer.valueOf(i));
@@ -163,8 +167,50 @@ public final class ControlPatch {
         }
 
         void axis(String str, int i, boolean z) {
-            Integer num = this.mapping.get(Integer.valueOf(i));
-            ControlPatch.input.set(str, num == null ? -1 : num.intValue(), z);
+            ControlPatch.input.set(str, padKey(i), z);
+        }
+
+        /**
+         * The handset key a pad button presses now: its second layer's while
+         * SELECT is held and that layer has one, else its own; -1 for none.
+         */
+        int padKey(int keyCode) {
+            Integer num = null;
+            if (!this.selectHeld.isEmpty()) {
+                num = this.selectMapping.get(keyCode);
+            }
+            if (num == null) {
+                num = this.mapping.get(keyCode);
+            }
+            return num == null ? -1 : num.intValue();
+        }
+
+        /** Both layers as one map, as a preset keeps them. */
+        TreeMap<Integer, Integer> snapshot() {
+            TreeMap<Integer, Integer> slot = new TreeMap<>(this.mapping);
+            for (Map.Entry<Integer, Integer> entry : this.selectMapping.entrySet()) {
+                slot.put(entry.getKey() + ControlPads.SELECT_OFFSET, entry.getValue());
+            }
+            return slot;
+        }
+
+        /**
+         * Takes both layers from a preset. One saved before there was a second
+         * layer gets the default one.
+         */
+        void restore(Map<Integer, Integer> slot) {
+            this.mapping.clear();
+            this.selectMapping.clear();
+            for (Map.Entry<Integer, Integer> entry : slot.entrySet()) {
+                if (entry.getKey() >= ControlPads.SELECT_OFFSET) {
+                    this.selectMapping.put(entry.getKey() - ControlPads.SELECT_OFFSET, entry.getValue());
+                } else {
+                    this.mapping.put(entry.getKey(), entry.getValue());
+                }
+            }
+            if (this.selectMapping.isEmpty()) {
+                this.selectMapping.putAll(ControlPads.selectDefaults());
+            }
         }
 
         boolean blocked() {
@@ -215,6 +261,8 @@ public final class ControlPatch {
                 if (string != null) {
                     i = this.prefs.getInt("pad_default_revision", 0);
                 }
+                String select = this.prefs.getString("pad_select", null);
+                this.selectMapping.putAll(select == null ? ControlPads.selectDefaults() : parseMap(new JSONObject(select)));
                 ControlPads.upgradeDefault(this.mapping, i);
                 ControlPads.addPhoneKeys(this.mapping, i);
                 if (string == null || i < ControlPads.PHONE_REVISION) {
@@ -223,6 +271,8 @@ public final class ControlPatch {
             } catch (Exception e) {
                 this.mapping.clear();
                 this.mapping.putAll(ControlPads.defaults());
+                this.selectMapping.clear();
+                this.selectMapping.putAll(ControlPads.selectDefaults());
                 Log.e(ControlPatch.TAG, "read mapping", e);
             }
         }
@@ -244,7 +294,7 @@ public final class ControlPatch {
                 for (Map.Entry<String, TreeMap<Integer, Integer>> entry : this.padSlots.entrySet()) {
                     jSONObject.put(entry.getKey(), mapJson(entry.getValue()));
                 }
-                this.prefs.edit().putString("pad_current", mapJson(this.mapping).toString()).putString("pad_slots", jSONObject.toString()).putInt("pad_default_revision", ControlPads.PHONE_REVISION).apply();
+                this.prefs.edit().putString("pad_current", mapJson(this.mapping).toString()).putString("pad_select", mapJson(this.selectMapping).toString()).putString("pad_slots", jSONObject.toString()).putInt("pad_default_revision", ControlPads.PHONE_REVISION).apply();
             } catch (Exception e) {
                 Log.e(ControlPatch.TAG, "save mapping", e);
                 ControlPatch.toast(this.a, "매핑 저장 실패");
@@ -502,7 +552,19 @@ public final class ControlPatch {
             return false;
         }
         Session of = of(activity);
+        // Which pads hold SELECT is followed whatever is on screen, so a
+        // release over a dialog is not missed.
+        if (keyEvent.getKeyCode() == ControlPads.SELECT) {
+            if (keyEvent.getAction() == 0) {
+                of.selectHeld.add(keyEvent.getDeviceId());
+            } else if (keyEvent.getAction() == 1) {
+                of.selectHeld.remove(keyEvent.getDeviceId());
+            }
+        }
         if (of.ui.captureKey(keyEvent)) {
+            return true;
+        }
+        if (isPad(keyEvent) && of.ui.layoutKey(keyEvent)) {
             return true;
         }
         if (of.blocked()) {
@@ -518,8 +580,13 @@ public final class ControlPatch {
             return true;
         }
         if (action == 0 || action == 1) {
-            Integer num = of.mapping.get(Integer.valueOf(keyEvent.getKeyCode()));
-            input.set("pad:" + keyEvent.getDeviceId() + ":key:" + keyEvent.getKeyCode(), num == null ? -1 : num.intValue(), action == 0);
+            int code = keyEvent.getKeyCode();
+            // SELECT is the second layer's key while that layer has anything
+            // on it, and presses nothing itself.
+            if (code == ControlPads.SELECT && !of.selectMapping.isEmpty()) {
+                return true;
+            }
+            input.set("pad:" + keyEvent.getDeviceId() + ":key:" + code, of.padKey(code), action == 0);
         }
         return true;
     }

@@ -69,6 +69,90 @@ final class ControlPads {
         return added;
     }
 
+    /**
+     * The gamepad buttons the layout screen draws, as the key codes they
+     * arrive as, in its order: the D-pad, the face buttons, the shoulders and
+     * triggers, the sticks pressed in, START. SELECT is not among them - held,
+     * it switches the buttons to their second layer - and neither is HOME.
+     */
+    static final int[] PAD_CODES = {
+            KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN,
+            KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
+            KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_BUTTON_B,
+            KeyEvent.KEYCODE_BUTTON_X, KeyEvent.KEYCODE_BUTTON_Y,
+            KeyEvent.KEYCODE_BUTTON_L1, KeyEvent.KEYCODE_BUTTON_R1,
+            KeyEvent.KEYCODE_BUTTON_L2, KeyEvent.KEYCODE_BUTTON_R2,
+            KeyEvent.KEYCODE_BUTTON_THUMBL, KeyEvent.KEYCODE_BUTTON_THUMBR,
+            KeyEvent.KEYCODE_BUTTON_START,
+    };
+
+    static final String[] PAD_NAMES = {
+            "D▲", "D▼", "D◀", "D▶", "A", "B", "X", "Y",
+            "L1", "R1", "L2", "R2", "L3", "R3", "START",
+    };
+
+    /** SELECT: held, the pad's buttons press their second layer's keys. */
+    static final int SELECT = KeyEvent.KEYCODE_BUTTON_SELECT;
+
+    /**
+     * Where a preset keeps its second layer: each key code this far up, in
+     * the same table as the first, so a preset stays one map.
+     */
+    static final int SELECT_OFFSET = 4096;
+
+    /**
+     * The second layer a pad starts with: the number pad, as the PC and
+     * handheld builds have it - the D-pad on 2 8 4 6, A on 5, B on 0, X and Y
+     * on 1 and 3, the shoulders on 7 and 9 and the triggers on * and #.
+     */
+    static TreeMap<Integer, Integer> selectDefaults() {
+        TreeMap<Integer, Integer> keys = new TreeMap<>();
+        keys.put(KeyEvent.KEYCODE_DPAD_UP, 10);
+        keys.put(KeyEvent.KEYCODE_DPAD_DOWN, 16);
+        keys.put(KeyEvent.KEYCODE_DPAD_LEFT, 12);
+        keys.put(KeyEvent.KEYCODE_DPAD_RIGHT, 14);
+        keys.put(KeyEvent.KEYCODE_BUTTON_A, 13);
+        keys.put(KeyEvent.KEYCODE_DPAD_CENTER, 13);
+        keys.put(KeyEvent.KEYCODE_BUTTON_B, 8);
+        keys.put(KeyEvent.KEYCODE_BUTTON_X, 9);
+        keys.put(KeyEvent.KEYCODE_BUTTON_Y, 11);
+        keys.put(KeyEvent.KEYCODE_BUTTON_L1, 15);
+        keys.put(KeyEvent.KEYCODE_BUTTON_R1, 17);
+        keys.put(KeyEvent.KEYCODE_BUTTON_L2, 18);
+        keys.put(KeyEvent.KEYCODE_BUTTON_R2, 19);
+        return keys;
+    }
+
+    /** Whether a key code is one of a pad's buttons (the D-pad's centre as A). */
+    static boolean isPadCode(int keyCode) {
+        if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER) {
+            return true;
+        }
+        for (int code : LEGACY_CODES) {
+            if (code == keyCode) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Puts a first layer's pad buttons back where {@link #defaults} has them,
+     * leaving the phone's own keys - which share the table - as they are.
+     */
+    static void resetPadButtons(Map<Integer, Integer> map) {
+        TreeMap<Integer, Integer> defaults = defaults();
+        for (int code : LEGACY_CODES) {
+            map.remove(code);
+        }
+        map.remove(KeyEvent.KEYCODE_DPAD_CENTER);
+        for (Map.Entry<Integer, Integer> entry : defaults.entrySet()) {
+            if (isPadCode(entry.getKey())) {
+                map.put(entry.getKey(), entry.getValue());
+            }
+        }
+    }
+
     private ControlPads() {
     }
 

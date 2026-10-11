@@ -137,8 +137,16 @@ struct GameView: View {
             padHidden = GamePad.hidden(game)
             padShape = GamePad.shape(game)
             emulator.start(game: game)
+            let emulator = self.emulator
+            Gamepad.shared.send = { [weak emulator] key, pressed in
+                emulator?.key(key, pressed: pressed)
+            }
         }
-        .onDisappear { emulator.stop() }
+        .onDisappear {
+            Gamepad.shared.releaseAll()
+            Gamepad.shared.send = nil
+            emulator.stop()
+        }
         .onChange(of: quality) { value in emulator.setHq2x(value == .hq2x) }
         .sheet(item: $sheet) { sheet in
             switch sheet {
@@ -862,6 +870,16 @@ private struct GameSettingsView: View {
                     }
                 } footer: {
                     Text("편집은 지금 배치(\(arrangementLabel))에만 적용됩니다. 배치마다 따로 저장됩니다.")
+                }
+
+                Section {
+                    NavigationLink("게임패드 버튼 배치") {
+                        PadMappingView()
+                    }
+                } header: {
+                    Text("게임패드")
+                } footer: {
+                    Text("블루투스나 USB로 연결한 게임패드의 버튼마다 누를 폰 키를 정합니다. 모든 게임에 함께 적용됩니다.")
                 }
             }
             .navigationTitle("화면·패드 설정")
