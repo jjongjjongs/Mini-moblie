@@ -198,9 +198,10 @@ enum LibrarySort: String {
     }
 }
 
-/// A title's cover in the grid, square: the screen it was last left on,
-/// else its icon, either filling the square with its pixels kept sharp, or -
-/// a game with neither - its first letter on its own colour.
+/// A title's cover in the grid, square: its icon, else - an archive without
+/// one - the screen it was last left on, either filling the square with its
+/// pixels kept sharp; or, a game with neither, its first letter on its own
+/// colour.
 struct GameCover: View {
     let game: GameFile
     let icon: UIImage?
@@ -209,7 +210,7 @@ struct GameCover: View {
         let tint = Color(hue: Self.hue(game.name), saturation: 0.45, brightness: 0.55)
         ZStack {
             tint
-            if let image = PlayHistory.cover(game) ?? icon {
+            if let image = icon ?? PlayHistory.cover(game) {
                 Image(uiImage: image)
                     .resizable()
                     .interpolation(.none)

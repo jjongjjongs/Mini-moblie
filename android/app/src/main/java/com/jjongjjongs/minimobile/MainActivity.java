@@ -2732,12 +2732,12 @@ public final class MainActivity extends Activity {
         cover.setBackground(roundedRect(colorForName(game.getName()), 0, 0, 12));
         roundCorners(cover, 12);
         cover.setElevation(dp(2));
-        // The screen the game was left on, else its icon, filling the square
-        // with their pixels kept sharp; a game with neither shows its first
-        // letter on its colour.
-        Bitmap picture = coverOf(game);
+        // The game's icon, else - an archive without one - the screen it was
+        // last left on, filling the square with its pixels kept sharp; a game
+        // with neither shows its first letter on its colour.
+        Bitmap picture = cachedIcon(game);
         if (picture == null) {
-            picture = cachedIcon(game);
+            picture = coverOf(game);
         }
         if (picture != null) {
             ImageView image = new ImageView(this);
