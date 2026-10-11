@@ -75,7 +75,7 @@ call:
 Basic operations 0x01-0x0a look unchanged in shape: for example, `04 vv`
 pushes a variable.
 
-Still unknown:
+Still unknown when this was first written (most of it is answered in the next section):
 
 - The opcodes up to 0x7a: about 120 of them, against v1's 59 basic,
   assignment and increment operations.
