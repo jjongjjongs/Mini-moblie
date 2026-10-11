@@ -5011,13 +5011,14 @@ public final class MainActivity extends Activity {
     /** Asks before leaving the game for the library, the game held still meanwhile. */
     private void confirmLeaveGame() {
         paused = true;
-        new DialogFooter.Builder(this)
+        ControlStyle style = new ControlStyle(this, false);
+        showMenuDialog(style, new AlertDialog.Builder(style.context)
                 .setTitle("종료")
                 .setMessage("애플리케이션을 종료하시겠습니까?")
                 .setPositiveButton("예", (dialog, which) -> exitGameToLibrary())
                 .setNegativeButton("아니요", (dialog, which) -> paused = false)
                 .setOnCancelListener(dialog -> paused = false)
-                .show();
+                .create());
     }
 
     /**
@@ -5205,7 +5206,8 @@ public final class MainActivity extends Activity {
         refresh.run();
 
         final boolean[] applied = {false};
-        AlertDialog dialog = new DialogFooter.Builder(new android.view.ContextThemeWrapper(this, android.R.style.Theme_Material_Dialog_Alert))
+        ControlStyle style = new ControlStyle(this, false);
+        AlertDialog dialog = new AlertDialog.Builder(style.context)
                 .setTitle("화질")
                 .setView(scrolling(body))
                 .setPositiveButton("적용", (d, which) -> {
@@ -5221,7 +5223,7 @@ public final class MainActivity extends Activity {
                 showQuality(saved);
             }
         });
-        dialog.show();
+        showMenuDialog(style, dialog);
     }
 
     /** Draws the running title's screen with `quality` from now on. */
@@ -5516,13 +5518,30 @@ public final class MainActivity extends Activity {
         });
         refresh.run();
 
-        new DialogFooter.Builder(new android.view.ContextThemeWrapper(this, android.R.style.Theme_Material_Dialog_Alert))
+        ControlStyle style = new ControlStyle(this, false);
+        showMenuDialog(style, new AlertDialog.Builder(style.context)
                 .setTitle("게임 속도")
                 .setView(body)
                 .setPositiveButton("적용", (dialog, which) -> applyGameSpeed(game, chosen[0]))
                 .setNegativeButton("취소", null)
                 .setNeutralButton("1x로", (dialog, which) -> applyGameSpeed(game, 1f))
-                .show();
+                .create());
+    }
+
+    /**
+     * Shows one of the game menu's windows in the look of 조작 설정: its dark
+     * panel, its rounded buttons - 적용 filled, 취소 beside it, and a third
+     * (1x로) only outlined, off on the far side - over the footer's hairline.
+     */
+    private void showMenuDialog(ControlStyle style, AlertDialog dialog) {
+        dialog.setOnShowListener(shown -> {
+            style.decorate(dialog);
+            Button neutral = dialog.getButton(AlertDialog.BUTTON_NEUTRAL);
+            if (neutral != null) {
+                style.quiet(neutral);
+            }
+        });
+        dialog.show();
     }
 
     /** A round − or + beside the speed. */

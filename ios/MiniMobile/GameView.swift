@@ -506,77 +506,113 @@ struct FramePoint: Equatable {
 }
 
 /// The game speed: the speed with a tenth either side of it, the ruler from
-/// 0.1x to 4x, and the common speeds as chips. It applies as it changes and is
-/// kept for this title.
+/// 0.1x to 4x, and the common speeds as chips. Nothing changes until 적용,
+/// which keeps it for this title; 1x로 goes straight back to real time.
 private struct SpeedView: View {
     let game: GameFile
     @Binding var speed: Float
     @Environment(\.dismiss) private var dismiss
+    @State private var chosen: Float
+
+    init(game: GameFile, speed: Binding<Float>) {
+        self.game = game
+        _speed = speed
+        _chosen = State(initialValue: speed.wrappedValue)
+    }
 
     private var tenths: Int {
-        Int((speed * 10).rounded())
+        Int((chosen * 10).rounded())
     }
 
     var body: some View {
-        NavigationView {
-            Form {
-                Section {
-                    HStack(spacing: 18) {
-                        step("minus", by: -1)
-                        Text(GameSpeed.format(speed))
-                            .font(.system(size: 44, weight: .bold, design: .rounded))
-                            .monospacedDigit()
-                            .frame(minWidth: 130)
-                        step("plus", by: 1)
-                    }
-                    .frame(maxWidth: .infinity)
-                    SpeedRuler(tenths: Binding(get: { tenths }, set: { speed = Float($0) / 10 }))
-                        .frame(height: 58)
-                    HStack(spacing: 6) {
-                        ForEach(GameSpeed.chips, id: \.self) { value in
-                            Button(GameSpeed.format(value)) {
-                                withAnimation(.easeOut(duration: 0.25)) { speed = value }
-                            }
-                            .buttonStyle(.bordered)
-                            .tint(speed == value ? Color.accentColor : Color.secondary)
+        MenuPanel(title: "게임 속도") {
+            VStack(spacing: 0) {
+                HStack(spacing: 18) {
+                    step("minus", by: -1)
+                    Text(GameSpeed.format(chosen))
+                        .font(.system(size: 44, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundColor(MenuPalette.accent)
+                        .frame(minWidth: 130)
+                    step("plus", by: 1)
+                }
+                .frame(maxWidth: .infinity)
+                Text("이 게임에만 적용 · 다음에 열어도 유지")
+                    .font(.system(size: 12.5))
+                    .foregroundColor(MenuPalette.muted)
+                    .padding(.top, 4)
+                    .padding(.bottom, 10)
+                SpeedRuler(tenths: Binding(get: { tenths }, set: { chosen = Float($0) / 10 }))
+                    .frame(height: 58)
+                HStack(spacing: 5) {
+                    ForEach(GameSpeed.chips, id: \.self) { value in
+                        Button(GameSpeed.format(value)) {
+                            withAnimation(.easeOut(duration: 0.25)) { chosen = value }
                         }
-                    }
-                    .frame(maxWidth: .infinity)
-                } footer: {
-                    Text("줄자를 옆으로 밀거나 −/+ 로 0.1씩 맞출 수 있어요. 이 게임에만 적용되고, 다음에 실행할 때도 유지됩니다. 소리는 원래 속도로 재생됩니다.")
-                }
-            }
-            .navigationTitle("게임 속도")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button("1x로") {
-                        withAnimation(.easeOut(duration: 0.25)) { speed = 1 }
+                        .buttonStyle(SpeedChipStyle(on: chosen == value))
                     }
                 }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("완료") { dismiss() }
-                }
+                .padding(.top, 8)
+                Text("줄자를 옆으로 밀거나 −/+ 로 0.1씩 맞출 수 있어요. 빠르게 하면 게임 시간이 그만큼 빨리 흐르고, 무거운 장면에선 폰 성능만큼만 빨라질 수 있어요. 소리는 원래 속도로 재생됩니다.")
+                    .font(.system(size: 12))
+                    .foregroundColor(MenuPalette.muted)
+                    .lineSpacing(3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 14)
             }
+        } footer: {
+            Button("1x로") {
+                apply(1)
+                dismiss()
+            }
+            .buttonStyle(MenuButtonStyle(kind: .quiet))
+            Spacer()
+            Button("취소") { dismiss() }
+                .buttonStyle(MenuButtonStyle(kind: .secondary))
+            Button("적용") {
+                apply(chosen)
+                dismiss()
+            }
+            .buttonStyle(MenuButtonStyle(kind: .primary))
         }
-        .onChange(of: speed) { value in
-            GameSpeed.set(value, for: game)
-            wie_set_speed(value)
-        }
+    }
+
+    /// Keeps `value` for this title and puts the running one on it.
+    private func apply(_ value: Float) {
+        speed = value
+        GameSpeed.set(value, for: game)
+        wie_set_speed(value)
     }
 
     /// A round − or +: a tenth slower or faster.
     private func step(_ symbol: String, by change: Int) -> some View {
         Button {
             let next = min(max(tenths + change, GameSpeed.tenths.lowerBound), GameSpeed.tenths.upperBound)
-            withAnimation(.easeOut(duration: 0.2)) { speed = Float(next) / 10 }
+            withAnimation(.easeOut(duration: 0.2)) { chosen = Float(next) / 10 }
         } label: {
             Image(systemName: symbol)
                 .font(.title3.weight(.semibold))
+                .foregroundColor(MenuPalette.ink)
                 .frame(width: 40, height: 40)
-                .overlay(Circle().stroke(Color.secondary.opacity(0.6)))
+                .overlay(Circle().stroke(MenuPalette.outline))
         }
         .buttonStyle(.borderless)
+    }
+}
+
+/// A common speed under the ruler: filled when it is the one chosen.
+private struct SpeedChipStyle: ButtonStyle {
+    let on: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 13.5, weight: .bold))
+            .foregroundColor(on ? MenuPalette.onAccent : MenuPalette.ink)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+            .background(Capsule().fill(on ? MenuPalette.accent : Color.clear))
+            .overlay(Capsule().stroke(on ? MenuPalette.accent : MenuPalette.outline, lineWidth: 1))
+            .opacity(configuration.isPressed ? 0.7 : 1)
     }
 }
 
@@ -665,8 +701,9 @@ private struct SpeedRuler: View {
 }
 
 /// How the screen is enlarged: 기본, 도트 or HQ2X, each with a picture of the
-/// middle of the screen drawn that way. It applies as it changes - on the
-/// screen behind at once - and is kept for this title, or every title.
+/// middle of the screen drawn that way. A choice shows on the screen behind at
+/// once; 적용 keeps it for this title, or every title, and anything else puts
+/// the screen back.
 private struct QualityView: View {
     let game: GameFile
     let emulator: Emulator
@@ -674,61 +711,100 @@ private struct QualityView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var everyGame = false
     @State private var previews: QualityPreviews?
+    @State private var saved: ScreenQuality
+    @State private var applied = false
+
+    init(game: GameFile, emulator: Emulator, quality: Binding<ScreenQuality>) {
+        self.game = game
+        self.emulator = emulator
+        _quality = quality
+        _saved = State(initialValue: quality.wrappedValue)
+    }
 
     var body: some View {
-        NavigationView {
-            Form {
-                Section {
-                    ForEach(ScreenQuality.allCases) { option in
-                        Button {
-                            quality = option
-                            GameQuality.set(option, for: game, everyGame: everyGame)
-                        } label: {
-                            HStack(spacing: 12) {
-                                if let previews {
-                                    previews.image(option)
-                                        .frame(width: 84, height: 63)
-                                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                                }
-                                VStack(alignment: .leading, spacing: 3) {
-                                    HStack(spacing: 6) {
-                                        Text(option.label).font(.body.weight(.bold))
-                                        if option == .dot {
-                                            Text("지금 방식")
-                                                .font(.caption2)
-                                                .foregroundColor(.secondary)
-                                                .padding(.horizontal, 4)
-                                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.5)))
-                                        }
-                                    }
-                                    Text(option.detail)
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                                Spacer()
-                                Image(systemName: quality == option ? "checkmark.circle.fill" : "circle")
-                                    .foregroundColor(quality == option ? .accentColor : .secondary)
-                            }
-                        }
-                        .foregroundColor(.primary)
+        MenuPanel(title: "화질") {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("이 게임에만 적용 · 다음에 열어도 유지")
+                    .font(.system(size: 12.5))
+                    .foregroundColor(MenuPalette.muted)
+                ForEach(ScreenQuality.allCases) { option in
+                    Button {
+                        quality = option
+                    } label: {
+                        card(option)
                     }
-                    Toggle("모든 게임에 이 화질 쓰기", isOn: $everyGame)
-                        .onChange(of: everyGame) { all in
-                            GameQuality.set(quality, for: game, everyGame: all)
-                        }
-                } footer: {
-                    Text("고르는 즉시 게임 화면에 반영돼요. 이 게임에만 적용되고, 다음에 실행할 때도 유지됩니다.")
+                    .buttonStyle(.plain)
                 }
-            }
-            .navigationTitle("화질")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("완료") { dismiss() }
+                Button {
+                    everyGame.toggle()
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: everyGame ? "checkmark.square.fill" : "square")
+                            .foregroundColor(MenuPalette.accent)
+                        Text("모든 게임에 이 화질 쓰기")
+                            .font(.system(size: 12.5))
+                            .foregroundColor(MenuPalette.muted)
+                    }
                 }
+                .buttonStyle(.plain)
+                .padding(.top, 2)
             }
+        } footer: {
+            Spacer()
+            Button("취소") { dismiss() }
+                .buttonStyle(MenuButtonStyle(kind: .secondary))
+            Button("적용") {
+                applied = true
+                GameQuality.set(quality, for: game, everyGame: everyGame)
+                dismiss()
+            }
+            .buttonStyle(MenuButtonStyle(kind: .primary))
         }
         .onAppear { previews = QualityPreviews(emulator.lastFrame()) }
+        // However the window goes away without 적용, the screen goes back.
+        .onDisappear {
+            if !applied {
+                quality = saved
+            }
+        }
+    }
+
+    /// One way to draw the screen: its picture, name and what it does, and
+    /// whether it is the one chosen.
+    private func card(_ option: ScreenQuality) -> some View {
+        let on = quality == option
+        return HStack(spacing: 11) {
+            if let previews {
+                previews.image(option)
+                    .frame(width: 84, height: 63)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(option.label)
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundColor(MenuPalette.ink)
+                    if option == .dot {
+                        Text("지금 방식")
+                            .font(.system(size: 11))
+                            .foregroundColor(MenuPalette.muted)
+                    }
+                }
+                Text(option.detail)
+                    .font(.system(size: 12))
+                    .foregroundColor(MenuPalette.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+            Circle()
+                .fill(on ? MenuPalette.accent : Color.clear)
+                .overlay(Circle().stroke(on ? MenuPalette.accent : MenuPalette.outline, lineWidth: 2))
+                .frame(width: 18, height: 18)
+        }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 10).fill(on ? MenuPalette.accent.opacity(0.1) : Color.clear))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(on ? MenuPalette.accent : MenuPalette.raisedLine, lineWidth: 1))
+        .contentShape(Rectangle())
     }
 }
 

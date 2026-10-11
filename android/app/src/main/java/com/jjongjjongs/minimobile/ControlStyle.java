@@ -132,6 +132,19 @@ final class ControlStyle {
         return stateListDrawable;
     }
 
+    /**
+     * A footer button set apart from 취소 and 적용, at the far side of them:
+     * outlined only, in the quiet text colour.
+     */
+    void quiet(Button button) {
+        button.setTextColor(MUTED);
+        StateListDrawable stateListDrawable = new StateListDrawable();
+        stateListDrawable.addState(new int[]{R.attr.state_pressed}, rounded(SOFT, SOFT_LINE, 1, 15));
+        stateListDrawable.addState(new int[]{R.attr.state_focused}, rounded(BG, GREEN, 1, 15));
+        stateListDrawable.addState(new int[0], rounded(BG, SOFT_LINE, 1, 15));
+        button.setBackground(stateListDrawable);
+    }
+
     LinearLayout column() {
         LinearLayout linearLayout = new LinearLayout(this.context);
         linearLayout.setOrientation(1);
