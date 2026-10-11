@@ -63,6 +63,13 @@ func padArrangement(mode: PadMode, shape: PadShape) -> PadArrangement {
     }
 }
 
+/// Which window of the game menu is up.
+private enum MenuWindow {
+    case main
+    case design
+    case shape
+}
+
 private enum GameSheet: String, Identifiable {
     case speed
     case quality
@@ -109,6 +116,8 @@ struct GameView: View {
     @State private var padHidden = false
     /// Whether the window asking before the game closes is up.
     @State private var confirmingExit = false
+    /// The game menu's window on screen, nil with the menu closed.
+    @State private var menuWindow: MenuWindow?
 
     private var arrangement: PadArrangement {
         padArrangement(mode: padMode, shape: padShape)
@@ -132,16 +141,15 @@ struct GameView: View {
         }
         .background(Color(white: 0.08).ignoresSafeArea())
         .overlay {
+            if let window = menuWindow {
+                menu(window)
+            }
             if confirmingExit {
-                ExitConfirm(onYes: {
-                    confirmingExit = false
-                    emulator.stop()
-                    dismiss()
-                }, onNo: {
-                    confirmingExit = false
-                })
+                ExitConfirm(onYes: closeGame, onNo: { confirmingExit = false })
             }
         }
+        .onChange(of: menuWindow) { _ in updateCapture() }
+        .onChange(of: confirmingExit) { _ in updateCapture() }
         .statusBar(hidden: true)
         .onAppear {
             speed = GameSpeed.get(game)
@@ -182,8 +190,8 @@ struct GameView: View {
         ZStack(alignment: .topTrailing) {
             screen(alignment: .center)
                 .ignoresSafeArea(edges: .bottom)
-            Menu {
-                menuItems
+            Button {
+                menuWindow = .main
             } label: {
                 Image(systemName: "ellipsis")
                     .font(.headline)
@@ -241,8 +249,8 @@ struct GameView: View {
                     .background(Capsule().fill(Color.orange.opacity(0.8)))
             }
             Spacer()
-            Menu {
-                menuItems
+            Button {
+                menuWindow = .main
             } label: {
                 Image(systemName: "ellipsis.circle")
                     .font(.title3)
@@ -254,54 +262,152 @@ struct GameView: View {
     }
 
     /// The game's menu, behind ⋯ in the bar or, with the pad put away, on
-    /// the button over the screen.
+    /// the button over the screen: the APK's own menu, row for row, and the
+    /// two windows that pick the pad's design and shape.
     @ViewBuilder
-    private var menuItems: some View {
-        Button(action: togglePad) {
-            Label(padHidden ? "키패드 꺼내기" : "키패드 숨기기",
-                  systemImage: padHidden ? "keyboard" : "keyboard.chevron.compact.down")
+    private func menu(_ window: MenuWindow) -> some View {
+        switch window {
+        case .main: mainMenu
+        case .design: designWindow
+        case .shape: shapeWindow
         }
-        Button { sheet = .speed } label: {
-            Label("게임 속도 (\(GameSpeed.format(speed)))", systemImage: "speedometer")
-        }
-        Button { sheet = .quality } label: {
-            Label("화질 (\(quality.label))", systemImage: "photo")
-        }
-        Menu {
-            Picker("키패드 디자인", selection: $padTheme) {
-                ForEach(PadTheme.allCases) { Text($0.label).tag($0) }
+    }
+
+    private var mainMenu: some View {
+        MenuDialog(title: game.title, onDismiss: { menuWindow = nil }) {
+            VStack(spacing: 0) {
+                MenuRow(symbol: padHidden ? "keyboard" : "keyboard.chevron.compact.down",
+                        label: padHidden ? "키패드 꺼내기" : "키패드 숨기기") {
+                    menuWindow = nil
+                    togglePad()
+                }
+                MenuRow(symbol: "speedometer", label: "게임 속도", value: GameSpeed.format(speed)) { open(.speed) }
+                MenuRow(symbol: "photo", label: "화질", value: quality.label) { open(.quality) }
+                MenuRow(symbol: "paintpalette", label: "키패드 디자인", value: padTheme.label, opens: true) {
+                    menuWindow = .design
+                }
+                MenuRow(symbol: "circle.grid.3x3", label: "키패드 모양", note: "· 이 게임만", value: padShape.label, opens: true) {
+                    menuWindow = .shape
+                }
+                MenuRow(symbol: "slider.horizontal.3", label: "화면·패드 설정", opens: true) { open(.settings) }
+                if !padHidden {
+                    MenuRow(symbol: "square.grid.3x3", label: "가상 패드 편집") {
+                        menuWindow = nil
+                        beginEditing()
+                    }
+                }
+                MenuRow(symbol: touch ? "hand.tap.fill" : "hand.tap", label: "화면 터치",
+                        value: touch ? "켜짐" : "꺼짐", valueOff: !touch) {
+                    menuWindow = nil
+                    toggleTouch()
+                }
+                MenuRow(symbol: "doc.text.magnifyingglass", label: "로그 보기") { open(.log) }
+                // The bar with 닫기 is put away with the pad.
+                if padHidden {
+                    MenuRow(symbol: "xmark", label: "게임 닫기") {
+                        menuWindow = nil
+                        confirmingExit = true
+                    }
+                }
             }
-        } label: {
-            Label("키패드 디자인 (\(padTheme.label))", systemImage: "paintpalette")
+            .padding(.bottom, 6)
+        } footer: {
+            Spacer()
+            Button("닫기") { menuWindow = nil }
+                .buttonStyle(MenuButtonStyle(kind: .secondary))
         }
-        Menu {
-            Picker("키패드 모양", selection: shapeBinding) {
-                ForEach(PadShape.allCases) { Text($0.label).tag($0) }
+    }
+
+    /// The pad's three designs; a choice applies at once, to every title, and
+    /// goes back to the menu.
+    private var designWindow: some View {
+        MenuDialog(title: "키패드 디자인", onDismiss: { menuWindow = nil }) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("모든 게임에 함께 적용됩니다.")
+                    .font(.system(size: 12.5))
+                    .foregroundColor(MenuPalette.muted)
+                ForEach(PadTheme.allCases) { theme in
+                    MenuOption(label: theme.label, on: theme == padTheme) {
+                        LinearGradient(colors: [theme.palette.faceTop, theme.palette.faceBottom], startPoint: .top, endPoint: .bottom)
+                            .overlay(RoundedRectangle(cornerRadius: 7).stroke(theme.palette.edge ?? MenuPalette.raisedLine, lineWidth: 1))
+                    } action: {
+                        padTheme = theme
+                        menuWindow = .main
+                    }
+                }
             }
-        } label: {
-            Label("키패드 모양 (\(padShape.label)) · 이 게임만", systemImage: "circle.grid.3x3")
+            .padding(.horizontal, 22)
+            .padding(.bottom, 18)
+        } footer: {
+            Spacer()
+            Button("뒤로") { menuWindow = .main }
+                .buttonStyle(MenuButtonStyle(kind: .secondary))
         }
-        Button { sheet = .settings } label: {
-            Label("화면·패드 설정", systemImage: "slider.horizontal.3")
-        }
-        if !padHidden {
-            Button(action: beginEditing) {
-                Label("가상 패드 편집", systemImage: "square.grid.3x3")
+    }
+
+    /// The pad's shapes, for this title alone.
+    private var shapeWindow: some View {
+        MenuDialog(title: "키패드 모양", onDismiss: { menuWindow = nil }) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("이 게임에만 적용됩니다.")
+                    .font(.system(size: 12.5))
+                    .foregroundColor(MenuPalette.muted)
+                ForEach(PadShape.allCases) { shape in
+                    MenuOption(label: shape.label, on: shape == padShape) {
+                        ZStack {
+                            MenuPalette.raised
+                            Image(systemName: shape == .numbers ? "textformat.123" : "circle.grid.3x3")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(MenuPalette.accent)
+                        }
+                    } action: {
+                        shapeBinding.wrappedValue = shape
+                        menuWindow = .main
+                    }
+                }
             }
+            .padding(.horizontal, 22)
+            .padding(.bottom, 18)
+        } footer: {
+            Spacer()
+            Button("뒤로") { menuWindow = .main }
+                .buttonStyle(MenuButtonStyle(kind: .secondary))
         }
-        Button(action: toggleTouch) {
-            Label(touch ? "화면 터치: 켜짐" : "화면 터치: 꺼짐", systemImage: touch ? "hand.tap.fill" : "hand.tap")
-        }
-        Button { sheet = .log } label: {
-            Label("로그 보기", systemImage: "doc.text.magnifyingglass")
-        }
-        // The bar with 닫기 is put away with the pad.
-        if padHidden {
-            Button(role: .destructive) {
-                confirmingExit = true
-            } label: {
-                Label("게임 닫기", systemImage: "xmark")
+    }
+
+    /// Closes the menu for one of the game's sheets.
+    private func open(_ next: GameSheet) {
+        menuWindow = nil
+        sheet = next
+    }
+
+    private func closeGame() {
+        confirmingExit = false
+        Gamepad.shared.capture = nil
+        emulator.stop()
+        dismiss()
+    }
+
+    /// While a menu window or 종료 is up a gamepad answers it rather than the
+    /// game: B goes back (or 아니요), A says 예. Keys held into it are let go.
+    private func updateCapture() {
+        if confirmingExit {
+            Gamepad.shared.releaseAll()
+            Gamepad.shared.capture = { button in
+                switch button {
+                case .a?: closeGame()
+                case .b?: confirmingExit = false
+                default: break
+                }
             }
+        } else if menuWindow != nil {
+            Gamepad.shared.releaseAll()
+            Gamepad.shared.capture = { button in
+                guard button == .b else { return }
+                menuWindow = menuWindow == .main ? nil : .main
+            }
+        } else {
+            Gamepad.shared.capture = nil
         }
     }
 
