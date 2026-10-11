@@ -3539,6 +3539,7 @@ dependencies = [
  "wie_backend",
  "wie_brew",
  "wie_core_arm",
+ "wie_gnex",
  "wie_j2me",
  "wie_ktf",
  "wie_lgt",
@@ -3629,6 +3630,17 @@ dependencies = [
  "spin",
  "test_utils",
  "toml",
+ "tracing",
+ "wie_backend",
+ "wie_util",
+]
+
+[[package]]
+name = "wie_gnex"
+version = "0.0.1"
+dependencies = [
+ "encoding_rs",
+ "test_utils",
  "tracing",
  "wie_backend",
  "wie_util",

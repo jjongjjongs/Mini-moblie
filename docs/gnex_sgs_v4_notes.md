@@ -83,3 +83,49 @@ Still unknown:
   near +0x40/+0x41: 0x8a-0x90 are frequent and look like v1's 0x4a-0x50
   address operations.
 - Bitmap resource format, screen size, and the msg/sys callback contracts.
+
+## Running it: `wie_gnex`
+
+`wie_gnex` runs these titles. The emulator picks it for an archive that holds a
+`.mod` naming `application/x-gnex-sgs` beside a version-4 `.sgs`. It runs
+놈투(GS) through the GAMEVIL logo to its animated title screen.
+
+What was worked out beyond the tables above:
+
+- **Opcodes**:
+  - 0x05/0x06/0x07 push a signed 16-bit, an unsigned 16-bit and a 32-bit
+    immediate.
+  - 0x08-0x0b store; 0x0c/0x0d mark and cut the stack.
+  - 0x0e inc, 0x0f dec, 0x10 dup, 0x11 negate, 0x12 swap, 0x13 add, 0x14 sub.
+  - 0x50-0x5e: mul, div, mod, and, or, not, xor, shr, shl, >, <, >=, <=, ==, !=.
+  - 0x5f-0x76 assign: four destinations × the sources `var[var2[i]]`,
+    `var[var2]`, `var[i]`, `var`, imm16, imm32.
+  - 0x77-0x7a add an immediate.
+  - 0x89-0x8c store and keep; 0x8d/0x8e push an address; 0x8f read it;
+    0x90/0x91 write it.
+  - 0x92 n calls service n.
+  - 0x94-0x97 draw a bitmap: (x, y, res), +mirror, +palette, +both.
+  - 0xe8-0xf3 add, sub or mul the top of the stack with a variable.
+- **System variables**: 0 is the event parameter, 4/5 are the screen's width
+  and height, and 10 is the runtime version (1.1).
+- **Services**: see `wie_gnex/src/services.rs`. They include:
+  - text: 0x28 attributes, 0x55 draw;
+  - drawing: 0x22 clip (x, y, w, h), 0x26 colour, 0x46 fill rect,
+    0x3a/0x3b clear white/black, 0x36 palette bank;
+  - frames: 0x51/0x52 save/restore the backdrop, 0x5f present;
+  - 0x2d pack a palette;
+  - timers 0x95-0x9a, save words 0x93/0x94;
+  - strings 0x9d-0xb2, numbers 0xc8-0xd9, vectors 0xdd-0xdf;
+  - 0x1d8 system property.
+- **Licence check**: 놈투 checks a licence unless the platform property
+  `PLATFORM` is `WIPI`.
+
+Still to do:
+
+- The other four titles stop at:
+  - 절묘한타이밍: a variable index out of range;
+  - 물가에돌튕기기2: service 0x8b;
+  - 2006프로야구: an older `4.x` encoding;
+  - 마구마구: service 0x1f.
+- Sound plays nothing yet.
+- Save words are not kept across runs.

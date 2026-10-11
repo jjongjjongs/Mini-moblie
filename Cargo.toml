@@ -18,6 +18,7 @@ members = [
     "wie_ktf_dump",
     "wie_lgt",
     "wie_skt",
+    "wie_gnex",
     "wie_midi",
 ]
 
@@ -76,6 +77,7 @@ wie_util = { path = "wie_util" }
 wie_core_arm = { path = "wie_core_arm" }
 wie_jvm_support = { path = "wie_jvm_support" }
 wie_skvm = { path = "wie_skvm" }
+wie_gnex = { path = "wie_gnex" }
 wie_wipi_c = { path = "wie_wipi_c" }
 wie_wipi_java = { path = "wie_wipi_java" }
 

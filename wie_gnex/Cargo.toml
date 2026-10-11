@@ -1,0 +1,15 @@
+[package]
+name = "wie_gnex"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+encoding_rs = { version = "^0.8", default-features = false, features = ["alloc"] }
+tracing = { workspace = true }
+
+wie_backend = { workspace = true }
+wie_util = { workspace = true }
+
+[dev-dependencies]
+test_utils = { workspace = true }

@@ -8,6 +8,7 @@ use std::{
 
 use wie_backend::{Emulator, Event, KeyCode, Options, Platform, PointerKind, drm_container, extract_zip};
 use wie_brew::BrewEmulator;
+use wie_gnex::GnexEmulator;
 use wie_j2me::J2MEEmulator;
 use wie_ktf::KtfEmulator;
 use wie_lgt::LgtEmulator;
@@ -740,6 +741,7 @@ pub fn title_panel(data: &[u8]) -> (u32, u32) {
     LgtEmulator::screen_size(data)
         .or_else(|| BrewEmulator::screen_size(data))
         .or_else(|| SktEmulator::screen_size(data))
+        .or_else(|| GnexEmulator::screen_size(data))
         .or_else(|| KtfEmulator::screen_size(data))
         .or_else(|| j2me_panel(data))
         .unwrap_or((SCREEN_WIDTH, SCREEN_HEIGHT))
@@ -809,6 +811,13 @@ pub fn build_emulator(platform: Box<dyn Platform>, data: &[u8], options: Options
         return LgtEmulator::from_archive(platform, files, options)
             .map(|x| Box::new(x) as Box<dyn Emulator + Send>)
             .map_err(|x| format!("LGT 아카이브를 실행할 수 없습니다: {x}"));
+    }
+    // SKT's GNEX titles are a script and its descriptor, run by their own
+    // interpreter rather than the JVM.
+    if GnexEmulator::loadable_archive(&files) {
+        return GnexEmulator::from_archive(platform, files)
+            .map(|x| Box::new(x) as Box<dyn Emulator + Send>)
+            .map_err(|x| format!("GNEX 게임을 실행할 수 없습니다: {x}"));
     }
     if SktEmulator::loadable_archive(&files) {
         return SktEmulator::from_archive(platform, files)
@@ -957,7 +966,7 @@ pub fn carrier(data: &[u8]) -> &'static str {
     if LgtEmulator::loadable_archive(&files) {
         return "LGT";
     }
-    if SktEmulator::loadable_archive(&files) {
+    if SktEmulator::loadable_archive(&files) || GnexEmulator::loadable_archive(&files) {
         return "SKT";
     }
 
@@ -1010,6 +1019,8 @@ pub fn inspect(data: &[u8]) -> String {
         "KTF archive"
     } else if LgtEmulator::loadable_archive(&files) {
         "LGT archive"
+    } else if GnexEmulator::loadable_archive(&files) {
+        "SKT GNEX script"
     } else if SktEmulator::loadable_archive(&files) {
         "SKT archive"
     } else if KtfEmulator::loadable_jar(&jar) {
