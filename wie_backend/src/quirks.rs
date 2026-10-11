@@ -509,6 +509,9 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // also stops 16 rows short of the panel - it reserves them from any height
     // it is told - so that strip is cropped.
     (TitlePlatform::Ktf, "01029220", panel(176, 220).with_bottom_cropped(16)),
+    // 리버스 (나스카): drawn for 240x320, but its menu, the story pages and
+    // the dialogue all stop at row 304, leaving the 16 under them white.
+    (TitlePlatform::Ktf, "010353DF", panel(240, 320).with_bottom_cropped(16)),
     // 맞고삼국대전: 176x220 by its descriptor, and every screen - title, map,
     // story - fills the top 204 rows and leaves 16 blank under them.
     (TitlePlatform::Ktf, "010247AB", panel(176, 220).with_bottom_cropped(16)),
@@ -563,6 +566,21 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // of a 240x320 one, and its play field draws for 176x204 too, leaving a
     // dark band above it.
     (TitlePlatform::Ktf, "010100A2", panel(176, 204)),
+    // 블레이드마스터 (펀토리): its title is two 176x102 halves, 176x204 whole,
+    // and every screen lays itself out to the panel it is told. On 240x320 the
+    // title sat in the bottom-left corner and the menus off-centre over a
+    // tiled backdrop; on 176x220 the title left 16 black rows above it.
+    (TitlePlatform::Ktf, "0103443C", panel(176, 204)),
+    // 상인라그나로크 (그라비티): a 176x176 picture between two 182x8 banners,
+    // the banners pinned to the panel's top and bottom edges. On 240x320 the
+    // picture floated between them in a black field; on 176x204 the banners
+    // meet it.
+    (TitlePlatform::Ktf, "0102C8E7", panel(176, 204)),
+    // 마그나카르타-진 (소프트맥스): its logos and menus are laid out for 176
+    // columns - the menu centred on x=88 - while only the menu's corner
+    // ornaments follow the panel. On 240x320 everything sat in the top-left
+    // with the corners far from it.
+    (TitlePlatform::Ktf, "01032F0D", panel(176, 204)),
     // 고기집타이쿤 (퍼니큐브): the descriptor says 176x220 and the title needs
     // to be told 220, but it draws in the top 204 - the handset's soft-key
     // strip had the 16 rows under it - so those rows kept whatever an earlier
