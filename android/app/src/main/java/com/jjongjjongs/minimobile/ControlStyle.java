@@ -256,6 +256,11 @@ final class ControlStyle {
     }
 
     void menuRow(LinearLayout linearLayout, String icon, String str, View.OnClickListener onClickListener) {
+        menuRow(linearLayout, icon, str, null, onClickListener);
+    }
+
+    /** A row with a line under its title saying what is behind it. */
+    void menuRow(LinearLayout linearLayout, String icon, String str, String detail, View.OnClickListener onClickListener) {
         divider(linearLayout);
         LinearLayout linearLayout2 = new LinearLayout(this.context);
         linearLayout2.setGravity(16);
@@ -270,7 +275,17 @@ final class ControlStyle {
             iconParams.rightMargin = dp(12.0f);
             linearLayout2.addView(glyph, iconParams);
         }
-        linearLayout2.addView(text(str, 14.0f, INK), new LinearLayout.LayoutParams(0, -2, 1.0f));
+        if (detail == null) {
+            linearLayout2.addView(text(str, 14.0f, INK), new LinearLayout.LayoutParams(0, -2, 1.0f));
+        } else {
+            LinearLayout lines = new LinearLayout(this.context);
+            lines.setOrientation(LinearLayout.VERTICAL);
+            lines.addView(text(str, 14.0f, INK));
+            TextView under = text(detail, 12.0f, MUTED);
+            under.setPadding(0, dp(2.0f), 0, 0);
+            lines.addView(under);
+            linearLayout2.addView(lines, new LinearLayout.LayoutParams(0, -2, 1.0f));
+        }
         TextView text = text("›", 22.0f, DEEP);
         text.setPadding(dp(10.0f), 0, 0, 0);
         linearLayout2.addView(text);

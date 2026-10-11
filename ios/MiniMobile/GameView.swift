@@ -805,8 +805,6 @@ private struct GameSettingsView: View {
     @AppStorage(SettingKey.layoutNumbers) private var layoutNumbers = ""
     @AppStorage(SettingKey.padTheme) private var padTheme = PadTheme.gold
 
-    @State private var confirmingReset = false
-
     private var arrangement: PadArrangement {
         padArrangement(mode: padMode, shape: padShape)
     }
@@ -865,9 +863,16 @@ private struct GameSettingsView: View {
                         dismiss()
                         onEditPad()
                     }
-                    Button("기본 배치로 되돌리기", role: .destructive) {
-                        confirmingReset = true
+                    NavigationLink {
+                        PadLayoutStorageView(arrangementLabel: arrangementLabel, resetCurrent: resetLayout)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("배치 저장·백업·초기화")
+                            Text("저장 · 불러오기 · 파일 백업·복원 · 초기화").font(.caption).foregroundColor(.secondary)
+                        }
                     }
+                } header: {
+                    Text("배치")
                 } footer: {
                     Text("편집은 지금 배치(\(arrangementLabel))에만 적용됩니다. 배치마다 따로 저장됩니다.")
                 }
@@ -889,15 +894,15 @@ private struct GameSettingsView: View {
                     Button("완료") { dismiss() }
                 }
             }
-            .confirmationDialog("\(arrangementLabel) 배치를 기본값으로 되돌릴까요?", isPresented: $confirmingReset, titleVisibility: .visible) {
-                Button("되돌리기", role: .destructive) {
-                    switch arrangement {
-                    case .below: layoutBelow = ""
-                    case .numbers: layoutNumbers = ""
-                    case .overlay: layoutOverlay = ""
-                    }
-                }
-            }
+        }
+    }
+
+    /// Puts the arrangement in use back to its standard layout.
+    private func resetLayout() {
+        switch arrangement {
+        case .below: layoutBelow = ""
+        case .numbers: layoutNumbers = ""
+        case .overlay: layoutOverlay = ""
         }
     }
 

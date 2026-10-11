@@ -515,8 +515,8 @@ final class ControlDialogs {
         MainActivity player = this.s.a instanceof MainActivity ? (MainActivity) this.s.a : null;
         String design = player != null ? KeypadTheme.NAMES[player.keypadThemeId()] : "";
         String arrangement = player != null && player.keypadNumbers() ? "숫자 크게" : "기본";
-        final String[] strArr = {"키패드 디자인 · " + design, "키패드 배치 · " + arrangement, "키패드 위치·크기 편집", "버튼별 표시·숨김", "버튼별 연사 ON/OFF", "현재 배치 저장", "저장된 배치 불러오기·삭제", "배치 파일로 백업", "배치 파일에서 복원", "현재 배치 초기화", "게임패드 버튼 배치"};
-        final String[] iconArr = {"🎨", "🎹", "✏", "👁", "⚡", "💾", "📂", "📤", "📥", "↺", "🎮"};
+        final String[] strArr = {"키패드 디자인 · " + design, "키패드 배치 · " + arrangement, "키패드 위치·크기 편집", "버튼별 표시·숨김", "버튼별 연사 ON/OFF", "배치 저장·백업·초기화", "게임패드 버튼 배치"};
+        final String[] iconArr = {"🎨", "🎹", "✏", "👁", "⚡", "🗂", "🎮"};
         LinearLayout column = column();
         column.addView(this.style.hint("설정을 변경하는 동안 게임을 일시정지합니다."));
         ScrollView scrollView = new ScrollView(this.style.context);
@@ -528,11 +528,12 @@ final class ControlDialogs {
             if (idx == 0) {
                 linearLayout = this.style.section(column, "키패드");
             } else if (idx == 5) {
-                linearLayout = this.style.section(column, "배치 저장·백업·초기화");
-            } else if (idx == 10) {
+                linearLayout = this.style.section(column, "배치");
+            } else if (idx == 6) {
                 linearLayout = this.style.section(column, "게임패드");
             }
-            this.style.menuRow(linearLayout, iconArr[idx], strArr[idx], new View.OnClickListener() {
+            String detail = idx == 5 ? "저장 · 불러오기 · 파일 백업·복원 · 초기화" : null;
+            this.style.menuRow(linearLayout, iconArr[idx], strArr[idx], detail, new View.OnClickListener() {
                 @Override // android.view.View.OnClickListener
                 public void onClick(View view) {
                     switch (idx) {
@@ -552,22 +553,71 @@ final class ControlDialogs {
                             ControlDialogs.this.rapidSettings();
                             break;
                         case 5:
-                            ControlDialogs.this.saveName(false);
+                            ControlDialogs.this.layoutStorageMenu();
                             break;
                         case 6:
+                            ControlDialogs.this.padMenu();
+                            break;
+                    }
+                    create.dismiss();
+                }
+            });
+        }
+        track(create);
+    }
+
+    /**
+     * 배치 저장·백업·초기화: the layout saved on this device and loaded or
+     * deleted, backed up to a file and restored from one, or put back to the
+     * standard - one row of 조작 설정 opening onto all five.
+     */
+    void layoutStorageMenu() {
+        final String[] titles = {"현재 배치 저장", "저장된 배치 불러오기·삭제", "배치 파일로 백업", "배치 파일에서 복원", "현재 배치 초기화"};
+        final String[] icons = {"💾", "📂", "📤", "📥", "↺"};
+        int saved = this.s.data.slots.size();
+        final String[] details = {"이름을 붙여 저장해 둡니다", saved == 0 ? "저장한 배치 없음" : "저장한 배치 " + saved + "개", "다른 기기로 옮길 때", null, "처음 배치로 되돌립니다"};
+        String current = this.s.editor.landscape() ? "가로 화면" : this.s.editor.numbers() ? "세로 · 숫자 크게" : "세로 · 기본";
+
+        LinearLayout column = column();
+        column.addView(this.style.hint("지금 배치(" + current + ")를 저장하거나 되돌립니다."));
+        ScrollView scrollView = new ScrollView(this.style.context);
+        scrollView.addView(column);
+        final AlertDialog create = builder("배치 저장·백업·초기화").setView(scrollView)
+                .setNegativeButton("뒤로", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialogInterface, int i) {
+                        ControlDialogs.this.mainMenu();
+                    }
+                })
+                .setPositiveButton("게임으로 돌아가기", (DialogInterface.OnClickListener) null).create();
+        LinearLayout section = null;
+        for (int i = 0; i < titles.length; i++) {
+            final int idx = i;
+            if (idx == 0) {
+                section = this.style.section(column, "이 기기에");
+            } else if (idx == 2) {
+                section = this.style.section(column, "파일로");
+            } else if (idx == 4) {
+                section = this.style.section(column, "되돌리기");
+            }
+            this.style.menuRow(section, icons[idx], titles[idx], details[idx], new View.OnClickListener() {
+                @Override
+                public void onClick(View view) {
+                    switch (idx) {
+                        case 0:
+                            ControlDialogs.this.saveName(false);
+                            break;
+                        case 1:
                             ControlDialogs.this.loadSlots(false);
                             break;
-                        case 7:
+                        case 2:
                             ControlDialogs.this.pickFile(true);
                             break;
-                        case 8:
+                        case 3:
                             ControlDialogs.this.pickFile(false);
                             break;
-                        case 9:
+                        case 4:
                             ControlDialogs.this.resetLayout();
-                            break;
-                        case 10:
-                            ControlDialogs.this.padMenu();
                             break;
                     }
                     create.dismiss();
