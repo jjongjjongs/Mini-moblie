@@ -1446,7 +1446,7 @@ public final class MainActivity extends Activity {
         moved.setPadding(dp(2), dp(4), dp(2), dp(14));
         sheet.addView(moved);
 
-        AlertDialog dialog = new AlertDialog.Builder(this).setView(sheet).create();
+        AlertDialog dialog = new DialogFooter.Builder(this).setView(sheet).create();
 
         Button done = flatButton("완료");
         done.setTextColor(LIB_BG);
@@ -1539,7 +1539,7 @@ public final class MainActivity extends Activity {
         scroll.setVerticalScrollBarEnabled(false);
         scroll.addView(sheet);
 
-        AlertDialog dialog = new AlertDialog.Builder(this).setView(scroll).create();
+        AlertDialog dialog = new DialogFooter.Builder(this).setView(scroll).create();
 
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
@@ -1674,7 +1674,7 @@ public final class MainActivity extends Activity {
             return;
         }
 
-        new AlertDialog.Builder(this)
+        new DialogFooter.Builder(this)
                 .setTitle("프리셋 바꾸기")
                 .setMessage("바꾼 키매핑이 저장되지 않습니다.")
                 .setPositiveButton("바꾸기", (dialog, which) -> loadPreset(sheet, working, index))
@@ -1729,7 +1729,7 @@ public final class MainActivity extends Activity {
         // built once - by whichever dialog the player actually leaves through.
         final boolean[] handedOver = {false};
 
-        AlertDialog.Builder builder = new AlertDialog.Builder(this)
+        AlertDialog.Builder builder = new DialogFooter.Builder(this)
                 .setTitle("프리셋 이름")
                 .setView(box)
                 .setPositiveButton("저장", (dialog, which) -> {
@@ -1763,7 +1763,7 @@ public final class MainActivity extends Activity {
         String name = padPresets.at(index).name;
         boolean inUse = index == padPresets.activeIndex();
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new DialogFooter.Builder(this)
                 .setTitle("‘" + name + "’ 삭제")
                 .setMessage("이 프리셋의 키매핑이 사라집니다.")
                 .setPositiveButton("삭제", (d, which) -> {
@@ -1815,7 +1815,7 @@ public final class MainActivity extends Activity {
             return;
         }
 
-        new AlertDialog.Builder(this)
+        new DialogFooter.Builder(this)
                 .setTitle("저장하지 않고 나가기")
                 .setMessage("바꾼 키매핑이 저장되지 않습니다.")
                 .setPositiveButton("나가기", (dialog, which) -> showLibrary())
@@ -2657,7 +2657,7 @@ public final class MainActivity extends Activity {
      */
     private AlertDialog.Builder lightAlert() {
         int theme = LibraryLook.dark(this) ? android.R.style.Theme_Material_Dialog_Alert : android.R.style.Theme_Material_Light_Dialog_Alert;
-        return new AlertDialog.Builder(new android.view.ContextThemeWrapper(this, theme));
+        return new DialogFooter.Builder(new android.view.ContextThemeWrapper(this, theme));
     }
 
     /** An {@link ArrayAdapter} that renders each {@link MenuItem} via {@link #menuItemView}. */
@@ -3600,7 +3600,7 @@ public final class MainActivity extends Activity {
         filter.setSingleLine(true);
         fields.addView(filter);
 
-        new AlertDialog.Builder(this)
+        new DialogFooter.Builder(this)
                 .setTitle("진단 설정")
                 .setView(fields)
                 .setPositiveButton("적용", (dialog, which) -> {
@@ -4530,7 +4530,7 @@ public final class MainActivity extends Activity {
         ends.addView(high, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         content.addView(ends);
 
-        AlertDialog dialog = new AlertDialog.Builder(ctx)
+        AlertDialog dialog = new DialogFooter.Builder(ctx)
                 .setTitle("메뉴 버튼 투명도")
                 .setView(content)
                 .setPositiveButton("적용", (d, w) -> setGearOpacity(current[0]))
@@ -4630,7 +4630,7 @@ public final class MainActivity extends Activity {
                         return line;
                     }
                 };
-        new AlertDialog.Builder(new android.view.ContextThemeWrapper(this, android.R.style.Theme_Material_Dialog_Alert))
+        new DialogFooter.Builder(new android.view.ContextThemeWrapper(this, android.R.style.Theme_Material_Dialog_Alert))
                 .setTitle(running && currentGameName != null ? currentGameName : "게임")
                 .setAdapter(adapter, (dialog, which) -> rows.get(which).action.run())
                 .setNegativeButton("닫기", null)
@@ -4742,7 +4742,7 @@ public final class MainActivity extends Activity {
     /** Asks before leaving the game for the library, the game held still meanwhile. */
     private void confirmLeaveGame() {
         paused = true;
-        new AlertDialog.Builder(this)
+        new DialogFooter.Builder(this)
                 .setTitle("종료")
                 .setMessage("애플리케이션을 종료하시겠습니까?")
                 .setPositiveButton("예", (dialog, which) -> exitGameToLibrary())
@@ -4936,7 +4936,7 @@ public final class MainActivity extends Activity {
         refresh.run();
 
         final boolean[] applied = {false};
-        AlertDialog dialog = new AlertDialog.Builder(new android.view.ContextThemeWrapper(this, android.R.style.Theme_Material_Dialog_Alert))
+        AlertDialog dialog = new DialogFooter.Builder(new android.view.ContextThemeWrapper(this, android.R.style.Theme_Material_Dialog_Alert))
                 .setTitle("화질")
                 .setView(scrolling(body))
                 .setPositiveButton("적용", (d, which) -> {
@@ -5247,7 +5247,7 @@ public final class MainActivity extends Activity {
         });
         refresh.run();
 
-        new AlertDialog.Builder(new android.view.ContextThemeWrapper(this, android.R.style.Theme_Material_Dialog_Alert))
+        new DialogFooter.Builder(new android.view.ContextThemeWrapper(this, android.R.style.Theme_Material_Dialog_Alert))
                 .setTitle("게임 속도")
                 .setView(body)
                 .setPositiveButton("적용", (dialog, which) -> applyGameSpeed(game, chosen[0]))

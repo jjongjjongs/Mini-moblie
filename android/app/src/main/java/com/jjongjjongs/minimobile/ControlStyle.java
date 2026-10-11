@@ -191,56 +191,7 @@ final class ControlStyle {
                 }
             }
         }
-        footer(alertDialog);
-    }
-
-    /**
-     * The row of buttons along a dialog's bottom, set off from what is above
-     * it by a hairline across the dialog and lifted off its bottom edge: room
-     * under the buttons as there is beside them, rather than a few pixels.
-     * The bar's padding grows the bar, where a margin on the buttons would be
-     * clipped by it.
-     */
-    void footer(AlertDialog alertDialog) {
-        Button shown = null;
-        for (int which : new int[]{-1, -2, -3}) {
-            Button button = alertDialog.getButton(which);
-            if (button != null && button.getVisibility() == View.VISIBLE && button.getText() != null && button.getText().length() > 0) {
-                shown = button;
-                break;
-            }
-        }
-        if (shown == null || !(shown.getParent() instanceof ViewGroup)) {
-            return;
-        }
-        ViewGroup bar = (ViewGroup) shown.getParent();
-        bar.setPadding(dp(12.0f), dp(14.0f), dp(12.0f), dp(20.0f));
-        View panel = bar.getParent() instanceof View ? (View) bar.getParent() : bar;
-        final android.graphics.Paint line = new android.graphics.Paint();
-        line.setColor(LINE);
-        final int thickness = Math.max(1, dp(1.0f));
-        panel.setBackground(new android.graphics.drawable.Drawable() {
-            @Override
-            public void draw(android.graphics.Canvas canvas) {
-                android.graphics.Rect bounds = getBounds();
-                canvas.drawRect(bounds.left, bounds.top, bounds.right, bounds.top + thickness, line);
-            }
-
-            @Override
-            public void setAlpha(int alpha) {
-                line.setAlpha(alpha);
-            }
-
-            @Override
-            public void setColorFilter(android.graphics.ColorFilter colorFilter) {
-                line.setColorFilter(colorFilter);
-            }
-
-            @Override
-            public int getOpacity() {
-                return android.graphics.PixelFormat.TRANSLUCENT;
-            }
-        });
+        DialogFooter.apply(alertDialog, LINE);
     }
 
     void divider(LinearLayout linearLayout) {
