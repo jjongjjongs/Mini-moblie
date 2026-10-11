@@ -400,8 +400,6 @@ public final class MainActivity extends Activity {
     /** The app bar's list and grid buttons. */
     private TextView libraryListButton;
     private TextView libraryGridButton;
-    /** Covers already read or just taken, by game file name. */
-    private final java.util.HashMap<String, Bitmap> coverCache = new java.util.HashMap<>();
     private LinearLayout libraryChipRow;
     private TextView librarySectCount;
     private TextView librarySectTitle;
@@ -576,6 +574,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        new Thread(this::dropOldCovers, "covers").start();
 
         audioOutput = new AndroidAudioOutput(this);
         padMapping = PadMapping.load(this);
@@ -880,10 +879,6 @@ public final class MainActivity extends Activity {
     // --- library ---------------------------------------------------------
 
     private void showLibrary() {
-        // The game being left leaves its last screen as its cover.
-        if (playerVisible && currentGame != null) {
-            saveCover(currentGame);
-        }
         ControlPatch.onLeave(this);
         running = false;
         playerVisible = false;
@@ -2469,14 +2464,11 @@ public final class MainActivity extends Activity {
         tagParams.rightMargin = dp(6);
         metaLine.addView(tag, tagParams);
 
-        long played = lastPlayed(game);
-        TextView when = new TextView(this);
-        when.setText(playedLabel(played));
-        when.setTextSize(11.5f);
-        when.setTextColor(played > 0 ? LIB_GREEN_DEEP : LIB_MUTED);
-        when.setSingleLine(true);
-        when.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        metaLine.addView(when);
+        TextView size = new TextView(this);
+        size.setText(formatSize(game.length()));
+        size.setTextSize(11.5f);
+        size.setTextColor(LIB_MUTED);
+        metaLine.addView(size);
 
         meta.addView(metaLine);
         row.addView(meta, metaParams);
@@ -2602,92 +2594,27 @@ public final class MainActivity extends Activity {
         getSharedPreferences("mini_last_played", MODE_PRIVATE).edit().putLong(game.getName(), System.currentTimeMillis()).apply();
     }
 
-    /** A deleted game takes its last-played time and its cover with it. */
+    /** A deleted game takes its last-played time with it. */
     private void forgetPlayed(File game) {
         getSharedPreferences("mini_last_played", MODE_PRIVATE).edit().remove(game.getName()).apply();
-        coverCache.remove(game.getName());
-        coverFile(game).delete();
-    }
-
-    /** 오늘 21:34, 어제 09:12, 10월 8일 14:40, 2025년 3월 2일; or never. */
-    private String playedLabel(long at) {
-        if (at <= 0) {
-            return "아직 플레이 안 함";
-        }
-        java.util.Calendar then = java.util.Calendar.getInstance();
-        then.setTimeInMillis(at);
-        java.util.Calendar today = java.util.Calendar.getInstance();
-        java.util.Calendar yesterday = java.util.Calendar.getInstance();
-        yesterday.add(java.util.Calendar.DAY_OF_YEAR, -1);
-        String time = String.format(java.util.Locale.KOREA, "%02d:%02d", then.get(java.util.Calendar.HOUR_OF_DAY), then.get(java.util.Calendar.MINUTE));
-        if (sameDay(then, today)) {
-            return "오늘 " + time;
-        }
-        if (sameDay(then, yesterday)) {
-            return "어제 " + time;
-        }
-        int month = then.get(java.util.Calendar.MONTH) + 1;
-        int day = then.get(java.util.Calendar.DAY_OF_MONTH);
-        if (then.get(java.util.Calendar.YEAR) == today.get(java.util.Calendar.YEAR)) {
-            return month + "월 " + day + "일 " + time;
-        }
-        return then.get(java.util.Calendar.YEAR) + "년 " + month + "월 " + day + "일";
-    }
-
-    private static boolean sameDay(java.util.Calendar a, java.util.Calendar b) {
-        return a.get(java.util.Calendar.YEAR) == b.get(java.util.Calendar.YEAR)
-                && a.get(java.util.Calendar.DAY_OF_YEAR) == b.get(java.util.Calendar.DAY_OF_YEAR);
-    }
-
-    private File coverFile(File game) {
-        return new File(new File(getFilesDir(), "covers"), game.getName() + ".png");
     }
 
     /**
-     * Keeps the screen the game is being left on as its cover: in memory at
-     * once, for the list about to show, and on disk for next time.
+     * Covers the grid once kept of the screen a game was left on. Those are
+     * no longer shown, so the folder they were kept in goes.
      */
-    private void saveCover(File game) {
-        if (gameView == null || gameView.bitmap == null || !framePainted) {
-            return;
-        }
-        final Bitmap shot;
-        try {
-            shot = gameView.bitmap.copy(Bitmap.Config.ARGB_8888, false);
-        } catch (RuntimeException e) {
-            return;
-        }
-        if (shot == null) {
-            return;
-        }
-        coverCache.put(game.getName(), shot);
-        final File file = coverFile(game);
-        new Thread(() -> {
-            File dir = file.getParentFile();
-            if (dir != null && !dir.isDirectory() && !dir.mkdirs()) {
-                return;
+    private void dropOldCovers() {
+        File dir = new File(getFilesDir(), "covers");
+        File[] files = dir.listFiles();
+        if (files != null) {
+            for (File file : files) {
+                file.delete();
             }
-            try (FileOutputStream out = new FileOutputStream(file)) {
-                shot.compress(Bitmap.CompressFormat.PNG, 100, out);
-            } catch (IOException e) {
-                Log.w(TAG, "cover not saved", e);
-            }
-        }, "cover").start();
+        }
+        dir.delete();
     }
 
-    /** The game's cover, null when it has never been played to a screen. */
-    private Bitmap coverOf(File game) {
-        String key = game.getName();
-        if (coverCache.containsKey(key)) {
-            return coverCache.get(key);
-        }
-        File file = coverFile(game);
-        Bitmap cover = file.isFile() ? BitmapFactory.decodeFile(file.getAbsolutePath()) : null;
-        coverCache.put(key, cover);
-        return cover;
-    }
-
-    /** The games three to a row, each a cover over its name and when it was played. */
+    /** The games three to a row, each its icon over its name. */
     private View buildGameGrid(File[] games) {
         LinearLayout grid = new LinearLayout(this);
         grid.setOrientation(LinearLayout.VERTICAL);
@@ -2732,13 +2659,9 @@ public final class MainActivity extends Activity {
         cover.setBackground(roundedRect(colorForName(game.getName()), 0, 0, 12));
         roundCorners(cover, 12);
         cover.setElevation(dp(2));
-        // The game's icon, else - an archive without one - the screen it was
-        // last left on, filling the square with its pixels kept sharp; a game
-        // with neither shows its first letter on its colour.
+        // The game's icon, filling the square with its pixels kept sharp; a
+        // game without one shows its first letter on its colour.
         Bitmap picture = cachedIcon(game);
-        if (picture == null) {
-            picture = coverOf(game);
-        }
         if (picture != null) {
             ImageView image = new ImageView(this);
             android.graphics.drawable.BitmapDrawable drawable = new android.graphics.drawable.BitmapDrawable(getResources(), picture);
@@ -2809,15 +2732,6 @@ public final class MainActivity extends Activity {
         name.setPadding(dp(2), dp(6), dp(2), 0);
         tile.addView(name);
 
-        long played = lastPlayed(game);
-        TextView when = new TextView(this);
-        when.setText(playedLabel(played));
-        when.setTextSize(11f);
-        when.setTextColor(played > 0 ? LIB_GREEN_DEEP : LIB_MUTED);
-        when.setSingleLine(true);
-        when.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        when.setPadding(dp(2), 0, dp(2), 0);
-        tile.addView(when);
 
         if (selectMode) {
             tile.setOnClickListener(v -> toggleSelect(game));

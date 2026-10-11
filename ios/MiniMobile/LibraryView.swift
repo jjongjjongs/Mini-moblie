@@ -156,7 +156,10 @@ struct LibraryView: View {
             GameView(game: game)
         }
         .preferredColorScheme(dark ? .dark : .light)
-        .onAppear(perform: reload)
+        .onAppear {
+            PlayHistory.dropOldCovers()
+            reload()
+        }
     }
 
     // MARK: - List
@@ -242,12 +245,9 @@ struct LibraryView: View {
         let favorite = favorites.contains(game.name)
         let label = HStack(spacing: 10) {
             CarrierBadge(carrier: carriers[game.name])
-            VStack(alignment: .leading, spacing: 2) {
-                Text(game.title)
-                    .foregroundColor(.primary)
-                    .lineLimit(2)
-                playedText(game)
-            }
+            Text(game.title)
+                .foregroundColor(.primary)
+                .lineLimit(2)
             Spacer(minLength: 0)
             if favorite {
                 Image(systemName: "star.fill")
@@ -300,18 +300,9 @@ struct LibraryView: View {
         }
     }
 
-    private func playedText(_ game: GameFile) -> some View {
-        let played = PlayHistory.lastPlayed(game) != nil
-        return Text(PlayHistory.label(game))
-            .font(.caption)
-            .foregroundColor(played ? .accentColor : .secondary)
-            .lineLimit(1)
-    }
-
     // MARK: - Grid
 
-    /// The games as covers, three to a row, each over its title and when it
-    /// was last played: the screen it was left on, or its letter before then.
+    /// The games as covers, three to a row, each its icon over its title.
     private var gridView: some View {
         let visible = self.shown
         let starred = visible.filter { favorites.contains($0.name) }
@@ -381,7 +372,6 @@ struct LibraryView: View {
                     .foregroundColor(.primary)
                     .lineLimit(1)
                     .padding(.top, 3)
-                playedText(game)
             }
         }
         .buttonStyle(.plain)

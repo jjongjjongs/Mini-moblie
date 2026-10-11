@@ -1,20 +1,10 @@
 import SwiftUI
 import UIKit
 
-/// When each title was last played, and the screen it was left on - the
-/// cover the library's grid shows for it.
+/// When each title was last played, which the library's 최근 플레이순 sorts
+/// by. It is kept, not shown.
 enum PlayHistory {
     private static let key = "playHistory"
-
-    /// Covers, kept out of the Files app's sight.
-    private static var coversDirectory: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        let url = base.appendingPathComponent("Covers", isDirectory: true)
-        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
-    }
-
-    private static let covers = NSCache<NSString, UIImage>()
 
     private static func all() -> [String: Double] {
         UserDefaults.standard.dictionary(forKey: key) as? [String: Double] ?? [:]
@@ -30,67 +20,19 @@ enum PlayHistory {
         UserDefaults.standard.set(played, forKey: key)
     }
 
-    /// A deleted title takes its time and its cover with it.
+    /// A deleted title takes its time with it.
     static func forget(_ game: GameFile) {
         var played = all()
         played[game.name] = nil
         UserDefaults.standard.set(played, forKey: key)
-        covers.removeObject(forKey: game.name as NSString)
-        try? FileManager.default.removeItem(at: coverURL(game))
     }
 
-    private static func coverURL(_ game: GameFile) -> URL {
-        coversDirectory.appendingPathComponent(game.name + ".png")
+    /// The screens the grid once kept as covers are no longer shown; the
+    /// folder they were kept in goes.
+    static func dropOldCovers() {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        try? FileManager.default.removeItem(at: base.appendingPathComponent("Covers", isDirectory: true))
     }
-
-    /// Keeps `frame` as the title's cover.
-    static func saveCover(_ game: GameFile, frame: CGImage) {
-        let image = UIImage(cgImage: frame)
-        covers.setObject(image, forKey: game.name as NSString)
-        let url = coverURL(game)
-        DispatchQueue.global(qos: .utility).async {
-            if let data = image.pngData() {
-                try? data.write(to: url, options: .atomic)
-            }
-        }
-    }
-
-    static func cover(_ game: GameFile) -> UIImage? {
-        if let image = covers.object(forKey: game.name as NSString) {
-            return image
-        }
-        guard let image = UIImage(contentsOfFile: coverURL(game).path) else { return nil }
-        covers.setObject(image, forKey: game.name as NSString)
-        return image
-    }
-
-    /// 오늘 21:34, 어제 09:12, 10월 8일 14:40, 2025년 3월 2일; or never.
-    static func label(_ game: GameFile) -> String {
-        guard let date = lastPlayed(game) else { return "아직 플레이 안 함" }
-        let calendar = Calendar.current
-        let time = DateFormatter.playedTime.string(from: date)
-        if calendar.isDateInToday(date) {
-            return "오늘 \(time)"
-        }
-        if calendar.isDateInYesterday(date) {
-            return "어제 \(time)"
-        }
-        let parts = calendar.dateComponents([.year, .month, .day], from: date)
-        if parts.year == calendar.component(.year, from: Date()) {
-            return "\(parts.month ?? 0)월 \(parts.day ?? 0)일 \(time)"
-        }
-        return "\(parts.year ?? 0)년 \(parts.month ?? 0)월 \(parts.day ?? 0)일"
-    }
-}
-
-extension DateFormatter {
-    /// 21:34.
-    static let playedTime: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "ko_KR")
-        formatter.dateFormat = "HH:mm"
-        return formatter
-    }()
 }
 
 /// Each game's icon, read out of its archive by the runner (`wie_icon`, the
@@ -198,10 +140,9 @@ enum LibrarySort: String {
     }
 }
 
-/// A title's cover in the grid, square: its icon, else - an archive without
-/// one - the screen it was last left on, either filling the square with its
-/// pixels kept sharp; or, a game with neither, its first letter on its own
-/// colour.
+/// A title's cover in the grid, square: its icon, filling the square with
+/// its pixels kept sharp; or, a game without one, its first letter on its
+/// own colour.
 struct GameCover: View {
     let game: GameFile
     let icon: UIImage?
@@ -210,7 +151,7 @@ struct GameCover: View {
         let tint = Color(hue: Self.hue(game.name), saturation: 0.45, brightness: 0.55)
         ZStack {
             tint
-            if let image = icon ?? PlayHistory.cover(game) {
+            if let image = icon {
                 Image(uiImage: image)
                     .resizable()
                     .interpolation(.none)

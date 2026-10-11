@@ -144,10 +144,6 @@ struct GameView: View {
             }
         }
         .onDisappear {
-            // The screen the title is left on becomes its cover.
-            if let frame = emulator.lastFrame() {
-                PlayHistory.saveCover(game, frame: frame)
-            }
             Gamepad.shared.releaseAll()
             Gamepad.shared.send = nil
             emulator.stop()
