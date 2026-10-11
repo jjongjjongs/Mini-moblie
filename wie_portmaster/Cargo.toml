@@ -26,3 +26,6 @@ zip = { version = "^8.6", features = ["deflate"], default-features = false }
 
 wie_android = { path = "../wie_android" }
 wie_backend = { workspace = true }
+
+[build-dependencies]
+embed-resource = "3.0.12"

@@ -200,7 +200,7 @@ jobs:
           set -eu
           mkdir -p MiniMobile/games
           cp target/x86_64-unknown-linux-gnu/release/minimobile MiniMobile/
-          cp linux/MiniMobile.sh linux/README.txt MiniMobile/
+          cp linux/MiniMobile.sh linux/README.txt linux/MiniMobile.png MiniMobile/
           chmod +x MiniMobile/minimobile MiniMobile/MiniMobile.sh
           printf '\n커밋: %s\n' "${{ github.sha }}" >> MiniMobile/README.txt
           tar czf MiniMobile-linux-x86_64.tar.gz MiniMobile

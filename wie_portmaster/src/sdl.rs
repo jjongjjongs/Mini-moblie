@@ -202,6 +202,9 @@ functions! {
     set_window_fullscreen = "SDL_SetWindowFullscreen": fn(*mut c_void, u32) -> c_int;
     set_window_size = "SDL_SetWindowSize": fn(*mut c_void, c_int, c_int);
     set_window_position = "SDL_SetWindowPosition": fn(*mut c_void, c_int, c_int);
+    set_window_icon = "SDL_SetWindowIcon": fn(*mut c_void, *mut c_void);
+    create_rgb_surface_with_format_from = "SDL_CreateRGBSurfaceWithFormatFrom": fn(*mut c_void, c_int, c_int, c_int, c_int, u32) -> *mut c_void;
+    free_surface = "SDL_FreeSurface": fn(*mut c_void);
     get_display_usable_bounds = "SDL_GetDisplayUsableBounds": fn(c_int, *mut Rect) -> c_int;
     free = "SDL_free": fn(*mut c_void);
     get_renderer_output_size = "SDL_GetRendererOutputSize": fn(*mut c_void, *mut c_int, *mut c_int) -> c_int;

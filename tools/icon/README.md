@@ -1,41 +1,32 @@
-# Launcher icon
+# App icon
 
-The icon is pixel art of a shut clamshell in the pose of the photograph the
-design came from: white lid, teal shell along its lower edge, the iridescent
-cover dial, and the strap loop at the top corner. No wordmark from the
-original handset is reproduced.
+A rounded white `m` with a cyan status light, on a deep teal tile. The same
+picture is the icon of every build.
 
 ## Regenerating
 
-    python3 tools/icon/export.py
+    python3 tools/icon/monogram.py
 
-writes `android/app/src/main/res/mipmap-*dpi/` in place. Pillow is the only
-dependency.
+writes every file below in place. Pillow is the only dependency.
 
-## How it is built
+| Build | File | Notes |
+|---|---|---|
+| Android | `android/app/src/main/res/mipmap-*dpi/` | adaptive background, foreground and monochrome layers on the 108dp canvas, plus the composited square and round icons for API 24-25 |
+| iOS | `ios/MiniMobile/Assets.xcassets/AppIcon.appiconset/` | one opaque 1024px square; iOS rounds it. `ios/project.yml` names the set |
+| Windows | `wie_portmaster/assets/minimobile.ico` | 16-256px, embedded in the exe by `wie_portmaster/build.rs` |
+| Windows, Linux | `wie_portmaster/assets/window_icon.rgba` | 64x64 raw RGBA the program gives SDL for its window |
+| Linux | `linux/MiniMobile.png` | 256px, shipped in the tarball |
+| PortMaster | `portmaster/minimobile/MiniMobile.png` | 256px, shipped in the port folder |
 
-`pixel.py` lays the phone out flat in device space and carries it into the
-picture with one affine - squash for the viewing angle in *screen* space,
-then rotate in the plane. Doing the squash first instead foreshortens along
-the phone's own long axis and pulls the round dial into an egg.
+## How it is drawn
 
-That is rendered at 16 px per canvas unit, averaged down onto the pixel grid
-and snapped to the fixed palette in `PALETTE`. The palette is fixed rather
-than chosen per image because an adaptive quantiser spends its colours where
-the pixels are - the field and the white lid - and returns the dial, which is
-the whole point of the icon, in grey.
+The design lives on a 108-unit tile. The `m` is a centre line - two arches
+over three stems - stamped with round dots of the stroke width, so its ends
+and joins come out round without a vector renderer. Everything is drawn at
+16x and box-filtered down, so edges stay smooth at 16px and at 1024px alike.
 
-## Sizes
-
-The art is authored on a 108-pixel grid, one pixel per dp of the adaptive
-icon's 108dp canvas, so every density is an integer nearest-neighbour
-multiple: mdpi 1x, xhdpi 2x, xxhdpi 3x, xxxhdpi 4x. hdpi would be 1.5x and is
-left out on purpose - Android falls back to xhdpi and scales down, which
-beats a layer whose pixels are alternately one and two device pixels wide.
-
-API 24 and 25 have no adaptive icons and take the composited `ic_launcher`
-/ `ic_launcher_round` squares instead. Those have their own 48-grid master so
-that their sizes (48/96/144/192) stay integer multiples too.
-
-`draw.py` holds the smooth vector-style drafts the design was chosen from and
-the shared colour helpers `pixel.py` imports.
+On Android the launcher shows only the middle 72dp of the adaptive canvas and
+masks it to its own shape, so the tile's 108 units are fitted to those 72dp:
+masked, the icon looks like the tile. The background's gradient runs past
+them at its end colours, so a launcher that shows more of the canvas while
+animating finds no seam.

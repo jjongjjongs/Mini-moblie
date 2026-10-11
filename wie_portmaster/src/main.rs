@@ -242,6 +242,7 @@ impl App {
             if window.is_null() {
                 return Err(format!("화면을 열 수 없습니다: {}", error(&sdl)));
             }
+            set_window_icon(&sdl, window);
             let mut renderer = (sdl.create_renderer)(window, -1, sdl::RENDERER_ACCELERATED);
             if renderer.is_null() {
                 renderer = (sdl.create_renderer)(window, -1, sdl::RENDERER_SOFTWARE);
@@ -1101,4 +1102,30 @@ unsafe extern "C" fn render_audio(_userdata: *mut c_void, stream: *mut u8, len: 
 fn error(sdl: &Sdl) -> String {
     // SAFETY: SDL_GetError always returns a nul-terminated string.
     unsafe { CStr::from_ptr((sdl.get_error)()).to_string_lossy().into_owned() }
+}
+
+/// The MiniMobile tile, 64x64 RGBA, written by `tools/icon/monogram.py`.
+static WINDOW_ICON: &[u8] = include_bytes!("../assets/window_icon.rgba");
+const WINDOW_ICON_SIZE: c_int = 64;
+
+/// Gives the window the MiniMobile tile for its title bar and taskbar button.
+/// A desktop that will not take it keeps its default; nothing else changes.
+fn set_window_icon(sdl: &Sdl, window: *mut c_void) {
+    // SAFETY: the surface borrows WINDOW_ICON, which is static, for exactly
+    // as long as SDL_SetWindowIcon takes to copy it, and is freed after.
+    unsafe {
+        let surface = (sdl.create_rgb_surface_with_format_from)(
+            WINDOW_ICON.as_ptr() as *mut c_void,
+            WINDOW_ICON_SIZE,
+            WINDOW_ICON_SIZE,
+            32,
+            WINDOW_ICON_SIZE * 4,
+            sdl::PIXELFORMAT_ABGR8888,
+        );
+        if surface.is_null() {
+            return;
+        }
+        (sdl.set_window_icon)(window, surface);
+        (sdl.free_surface)(surface);
+    }
 }
