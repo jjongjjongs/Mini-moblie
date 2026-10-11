@@ -2710,7 +2710,7 @@ public final class MainActivity extends Activity {
         return grid;
     }
 
-    /** A box three quarters as wide as it is tall: a handset's screen. */
+    /** A square box: every cover the same size, whatever it holds. */
     private final class CoverFrame extends FrameLayout {
         CoverFrame() {
             super(MainActivity.this);
@@ -2720,7 +2720,7 @@ public final class MainActivity extends Activity {
         protected void onMeasure(int widthSpec, int heightSpec) {
             int width = MeasureSpec.getSize(widthSpec);
             super.onMeasure(MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY),
-                    MeasureSpec.makeMeasureSpec(width * 4 / 3, MeasureSpec.EXACTLY));
+                    MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY));
         }
     }
 
@@ -2729,52 +2729,32 @@ public final class MainActivity extends Activity {
         tile.setOrientation(LinearLayout.VERTICAL);
 
         CoverFrame cover = new CoverFrame();
-        cover.setBackground(roundedRect(colorForName(game.getName()), 0, 0, 10));
-        roundCorners(cover, 10);
+        cover.setBackground(roundedRect(colorForName(game.getName()), 0, 0, 12));
+        roundCorners(cover, 12);
         cover.setElevation(dp(2));
-        Bitmap shot = coverOf(game);
-        if (shot != null) {
-            // The screen as the game left it, its pixels kept sharp; a wide
-            // one is shown whole on black rather than cut.
-            cover.setBackground(roundedRect(Color.rgb(12, 14, 16), 0, 0, 10));
+        // The screen the game was left on, else its icon, filling the square
+        // with their pixels kept sharp; a game with neither shows its first
+        // letter on its colour.
+        Bitmap picture = coverOf(game);
+        if (picture == null) {
+            picture = cachedIcon(game);
+        }
+        if (picture != null) {
             ImageView image = new ImageView(this);
-            android.graphics.drawable.BitmapDrawable drawable = new android.graphics.drawable.BitmapDrawable(getResources(), shot);
+            android.graphics.drawable.BitmapDrawable drawable = new android.graphics.drawable.BitmapDrawable(getResources(), picture);
             drawable.setFilterBitmap(false);
             image.setImageDrawable(drawable);
-            image.setScaleType(shot.getWidth() > shot.getHeight() ? ImageView.ScaleType.FIT_CENTER : ImageView.ScaleType.CENTER_CROP);
+            image.setScaleType(ImageView.ScaleType.CENTER_CROP);
             cover.addView(image, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         } else {
-            // Never played: its icon, large, on its colour.
-            LinearLayout middle = new LinearLayout(this);
-            middle.setOrientation(LinearLayout.VERTICAL);
-            middle.setGravity(android.view.Gravity.CENTER);
-            Bitmap icon = cachedIcon(game);
-            if (icon != null) {
-                ImageView image = new ImageView(this);
-                image.setImageBitmap(icon);
-                image.setScaleType(ImageView.ScaleType.FIT_CENTER);
-                image.setBackground(roundedRect(Color.WHITE, 0, 0, 12));
-                image.setPadding(dp(4), dp(4), dp(4), dp(4));
-                roundCorners(image, 12);
-                middle.addView(image, new LinearLayout.LayoutParams(dp(52), dp(52)));
-            } else {
-                String label = displayName(game);
-                TextView letter = new TextView(this);
-                letter.setText(label.isEmpty() ? "?" : label.substring(0, 1));
-                letter.setTextSize(22f);
-                letter.setTypeface(Typeface.DEFAULT_BOLD);
-                letter.setTextColor(colorForName(game.getName()));
-                letter.setGravity(android.view.Gravity.CENTER);
-                letter.setBackground(roundedRect(Color.WHITE, 0, 0, 12));
-                middle.addView(letter, new LinearLayout.LayoutParams(dp(52), dp(52)));
-            }
-            TextView first = new TextView(this);
-            first.setText("첫 플레이 전");
-            first.setTextSize(10f);
-            first.setTextColor(Color.argb(220, 255, 255, 255));
-            first.setPadding(0, dp(8), 0, 0);
-            middle.addView(first);
-            cover.addView(middle, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            String label = displayName(game);
+            TextView letter = new TextView(this);
+            letter.setText(label.isEmpty() ? "?" : label.substring(0, 1));
+            letter.setTextSize(30f);
+            letter.setTypeface(Typeface.DEFAULT_BOLD);
+            letter.setTextColor(Color.WHITE);
+            letter.setGravity(android.view.Gravity.CENTER);
+            cover.addView(letter, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         }
 
         // The carrier at the top left, the favourite star or the tick at the right.

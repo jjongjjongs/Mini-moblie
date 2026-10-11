@@ -352,11 +352,11 @@ struct LibraryView: View {
 
     private func tile(_ game: GameFile) -> some View {
         let favorite = favorites.contains(game.name)
-        let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
         return Button { playing = game } label: {
             VStack(alignment: .leading, spacing: 3) {
                 Color.clear
-                    .aspectRatio(CGFloat(3.0 / 4.0), contentMode: .fit)
+                    .aspectRatio(1, contentMode: .fit)
                     .overlay(GameCover(game: game))
                     .clipShape(shape)
                     .overlay(alignment: .topLeading) {

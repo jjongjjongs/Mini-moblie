@@ -117,32 +117,25 @@ enum LibrarySort: String {
     }
 }
 
-/// A title's cover in the grid: the screen it was last left on, its pixels
-/// kept sharp, or - never played - its first letter on its own colour.
+/// A title's cover in the grid, square: the screen it was last left on,
+/// its pixels kept sharp and filling the square, or - never played - its
+/// first letter on its own colour.
 struct GameCover: View {
     let game: GameFile
 
     var body: some View {
         let tint = Color(hue: Self.hue(game.name), saturation: 0.45, brightness: 0.55)
         ZStack {
+            tint
             if let image = PlayHistory.cover(game) {
-                Color.black
                 Image(uiImage: image)
                     .resizable()
                     .interpolation(.none)
-                    .aspectRatio(contentMode: image.size.width > image.size.height ? .fit : .fill)
+                    .aspectRatio(contentMode: .fill)
             } else {
-                tint
-                VStack(spacing: 8) {
-                    Text(String(game.title.prefix(1)))
-                        .font(.title2.weight(.bold))
-                        .foregroundColor(tint)
-                        .frame(width: 52, height: 52)
-                        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.white))
-                    Text("첫 플레이 전")
-                        .font(.caption2)
-                        .foregroundColor(.white.opacity(0.85))
-                }
+                Text(String(game.title.prefix(1)))
+                    .font(.system(size: 34, weight: .bold))
+                    .foregroundColor(.white)
             }
         }
     }
