@@ -3785,7 +3785,6 @@ dependencies = [
  "libloading 0.8.9",
  "wie_android",
  "wie_backend",
- "zip",
 ]
 
 [[package]]

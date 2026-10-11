@@ -77,6 +77,12 @@ bool wie_take_vibration(uint32_t *duration_ms);
 // download) or "". Free with `wie_free_string`; never NULL.
 char *wie_carrier(const uint8_t *data, size_t length);
 
+// The icon of the game archive `data`, as RGBA pixels written to `rgba`
+// (`capacity` bytes) with its size in `width` and `height` - at most 256 by
+// 256, or 512 by 512 for a picture out of the title's jar. Returns false when
+// the archive has none that reads.
+bool wie_icon(const uint8_t *data, size_t length, uint8_t *rgba, size_t capacity, uint32_t *width, uint32_t *height);
+
 // How fast the title runs, 1.0 being real time.
 void wie_set_speed(float speed);
 float wie_speed(void);

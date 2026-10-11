@@ -245,6 +245,35 @@ pub unsafe extern "C" fn wie_carrier(data: *const u8, length: usize) -> *mut c_c
     CString::new(carrier).map_or(std::ptr::null_mut(), CString::into_raw)
 }
 
+/// The icon of the game archive `data`, as `width` by `height` RGBA pixels
+/// copied into `rgba`, which holds `capacity` bytes. False when the archive
+/// has none that reads, or it does not fit.
+///
+/// # Safety
+/// `data` points at `length` readable bytes, `rgba` at `capacity` writable
+/// ones, and `width` and `height` at writable `u32`s.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wie_icon(data: *const u8, length: usize, rgba: *mut u8, capacity: usize, width: *mut u32, height: *mut u32) -> bool {
+    if rgba.is_null() || width.is_null() || height.is_null() {
+        return false;
+    }
+    // SAFETY: as the caller promises.
+    let data = unsafe { bytes(data, length) };
+    let Ok(Some(icon)) = std::panic::catch_unwind(|| wie_android::icon::extract(data)) else {
+        return false;
+    };
+    if icon.rgba.len() > capacity {
+        return false;
+    }
+    // SAFETY: as the caller promises; the length was checked above.
+    unsafe {
+        std::ptr::copy_nonoverlapping(icon.rgba.as_ptr(), rgba, icon.rgba.len());
+        *width = icon.width;
+        *height = icon.height;
+    }
+    true
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn wie_set_speed(speed: f32) {
     host::set_speed(speed);

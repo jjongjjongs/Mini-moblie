@@ -73,6 +73,7 @@ enum Library {
         try? FileManager.default.removeItem(at: game.url)
         Favorites.remove(game.name)
         PlayHistory.forget(game)
+        GameIcons.forget(game)
     }
 
     // MARK: - Carrier

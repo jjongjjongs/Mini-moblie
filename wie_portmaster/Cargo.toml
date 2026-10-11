@@ -22,7 +22,6 @@ jit = ["wie_android/jit"]
 ab_glyph = "^0.2"
 libc = { workspace = true }
 libloading = "^0.8"
-zip = { version = "^8.6", features = ["deflate"], default-features = false }
 
 wie_android = { path = "../wie_android" }
 wie_backend = { workspace = true }

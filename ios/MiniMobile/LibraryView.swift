@@ -51,6 +51,8 @@ private struct Notice {
 struct LibraryView: View {
     @State private var games: [GameFile] = []
     @State private var carriers: [String: String] = [:]
+    /// Each game's icon once read, for its cover in the grid.
+    @State private var icons: [String: UIImage] = [:]
     @State private var search = ""
     @State private var filter = CarrierFilter.all
     @AppStorage(Favorites.key) private var favoritesText = ""
@@ -357,7 +359,7 @@ struct LibraryView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Color.clear
                     .aspectRatio(1, contentMode: .fit)
-                    .overlay(GameCover(game: game))
+                    .overlay(GameCover(game: game, icon: icons[game.name]))
                     .clipShape(shape)
                     .overlay(alignment: .topLeading) {
                         CarrierBadge(carrier: carriers[game.name])
@@ -459,8 +461,30 @@ struct LibraryView: View {
 
     // MARK: - Actions
 
+    /// Fills in the icons: those already read at once, the rest as their
+    /// archives are read in the background.
+    private func loadIcons() {
+        var unread: [GameFile] = []
+        for game in games where icons[game.name] == nil {
+            switch GameIcons.known(game) {
+            case .some(let image?): icons[game.name] = image
+            case .some(nil): break
+            case nil: unread.append(game)
+            }
+        }
+        guard !unread.isEmpty else { return }
+        DispatchQueue.global(qos: .utility).async {
+            for game in unread {
+                if let image = GameIcons.read(game) {
+                    DispatchQueue.main.async { icons[game.name] = image }
+                }
+            }
+        }
+    }
+
     private func reload() {
         games = Library.games()
+        loadIcons()
         let pending = games.filter { carriers[$0.name] == nil }
         guard !pending.isEmpty else { return }
 

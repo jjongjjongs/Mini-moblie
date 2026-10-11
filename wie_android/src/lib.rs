@@ -14,6 +14,7 @@ mod database;
 mod filesystem;
 pub mod host;
 pub mod hq2x;
+pub mod icon;
 mod logging;
 mod ma3;
 mod network;
