@@ -1,0 +1,18 @@
+[package]
+name = "jvm_rust"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-recursion = { workspace = true }
+async-trait = { workspace = true }
+bytemuck = { workspace = true }
+dyn-clone = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+
+classfile = { workspace = true }
+java_class_proto = { workspace = true }
+java_constants = { workspace = true }
+jvm = { workspace = true }

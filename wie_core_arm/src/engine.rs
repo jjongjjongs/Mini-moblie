@@ -1,6 +1,10 @@
 mod arm32_cpu;
+#[cfg(test)]
+mod bench;
 #[cfg(not(target_arch = "wasm32"))]
 mod debugged_arm32_cpu;
+mod fast;
+mod jit;
 
 use wie_util::{AsAny, Result};
 
@@ -9,6 +13,45 @@ pub use arm32_cpu::Arm32CpuEngine;
 pub use debugged_arm32_cpu::DebuggedArm32CpuEngine;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use debugged_arm32_cpu::{DebugBreakpointKind, DebugInner, DebugSignal, DebugStopReason};
+pub use jit::JitEngine;
+
+/// A platform call an engine may answer on its own, without leaving `run`.
+///
+/// Each is a call whose whole effect is guest memory and `r0`, with nothing
+/// for the platform to decide:
+/// [`ArmCore::make_intrinsic_svc_stub`](crate::ArmCore::make_intrinsic_svc_stub)
+/// says which stub stands for which.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum SvcIntrinsic {
+    /// `memcpy(dst, src, len)`.
+    Copy,
+    /// `memmove(dst, src, len)`.
+    Move,
+    /// `memset(dst, value, len)`.
+    Set,
+    /// The word at `r0 + offset`, or `if_null` when `r0` is zero.
+    Field { offset: u32, if_null: u32 },
+    /// An RGB565 pixel from the low bytes of `r0`, `r1` and `r2`.
+    Rgb565,
+    /// The inverse: the RGB565 pixel in `r0`'s low half spread over 0..=255
+    /// per component, rounding to nearest, and written as words through `r1`,
+    /// `r2` and `r3`. `r0` is the answer as it was.
+    Rgb565Unpack,
+    /// The pixel pointer of the framebuffer at `r0` - the word at `+0x10` -
+    /// less the rows in front of it when it is the screen: when the word at
+    /// `screen_at` is `r0`, the word at `rows_at` times its bytes per line
+    /// (`+8`). `if_null` when `r0` is zero.
+    FramebufferPointer { screen_at: u32, rows_at: u32, if_null: u32 },
+    /// A fixed answer in r0, whatever the arguments: a getter of a value the
+    /// platform never changes.
+    Constant(u32),
+    /// Gamevil's run-length sprite blit: `r0` the destination, `r1` the codes,
+    /// `r2` the palette and `r3` the row stride in pixels - see
+    /// [`crate::sprite_blit`].
+    SpriteRle,
+    /// The same, clipped to the rectangle in the four words on the stack.
+    SpriteRleClipped,
+}
 
 pub enum EngineRunResult {
     End,
@@ -24,6 +67,11 @@ pub trait ArmEngine: Send + AsAny {
     fn mem_write(&mut self, address: u32, data: &[u8]) -> Result<()>;
     fn mem_read(&mut self, address: u32, size: usize, result: &mut [u8]) -> Result<usize>;
     fn is_mapped(&self, address: u32, size: usize) -> bool;
+
+    /// Answer the `svc` at `svc_address` as `kind` without returning from
+    /// `run`, where the engine can. An engine that cannot leaves the call to
+    /// the platform's handler, which answers it the same way.
+    fn set_svc_intrinsic(&mut self, _svc_address: u32, _kind: SvcIntrinsic) {}
 }
 
 #[allow(clippy::enum_variant_names)]

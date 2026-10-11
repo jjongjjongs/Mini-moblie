@@ -1,0 +1,28 @@
+[package]
+name = "wie_portmaster"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The emulator as a PortMaster port for Linux handhelds. It drives the same
+# runner the Android and iOS apps do (`wie_android::host`), and reaches the
+# screen, sound and pad through the handheld's own SDL2, which it opens at run
+# time - so nothing is linked against at build time and one aarch64 build
+# runs on whichever firmware's SDL2 is there.
+[[bin]]
+name = "minimobile"
+path = "src/main.rs"
+
+[features]
+# Enable the machine-code JIT engine (see wie_core_arm), as the Android build
+# does.
+jit = ["wie_android/jit"]
+
+[dependencies]
+ab_glyph = "^0.2"
+libc = { workspace = true }
+libloading = "^0.8"
+zip = { version = "^8.6", features = ["deflate"], default-features = false }
+
+wie_android = { path = "../wie_android" }
+wie_backend = { workspace = true }

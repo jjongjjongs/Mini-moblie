@@ -1,17 +1,26 @@
-use alloc::vec;
+use alloc::{boxed::Box, format, vec};
 
 use java_class_proto::{JavaFieldProto, JavaMethodProto};
-use java_constants::MethodAccessFlags;
+use java_constants::{FieldAccessFlags, MethodAccessFlags};
 use java_runtime::classes::java::{
     io::{InputStream, RandomAccessFile},
     lang::String,
+    util::zip::ZipEntry,
 };
-use jvm::{Array, ClassInstanceRef, Jvm, Result as JvmResult, runtime::JavaLangString};
+use jvm::{Array, ClassInstance, ClassInstanceRef, Jvm, Result as JvmResult, runtime::JavaLangString};
 
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 
 const READ: i32 = 1;
 const READ_RESOURCE: i32 = 8;
+
+/// How many bytes of archive entries [`XFile`] keeps unpacked before it lets
+/// them go and starts over. See `XFile::init_in_archive`.
+const ARCHIVE_CACHE_LIMIT: i32 = 4 * 1024 * 1024;
+
+/// What `fsavail` answers: the same budget `RecordStore.getSizeAvailable`
+/// reports, so a title sees one amount of free space whichever store it asks.
+const FILE_SYSTEM_CAPACITY: i32 = 1_000_000;
 
 // class com.xce.io.XFile
 pub struct XFile;
@@ -24,9 +33,22 @@ impl XFile {
             interfaces: vec![],
             methods: vec![
                 JavaMethodProto::new("<init>", "(Ljava/lang/String;I)V", Self::init, Default::default()),
+                JavaMethodProto::new(
+                    "<init>",
+                    "(Ljava/lang/String;Ljava/lang/String;)V",
+                    Self::init_in_archive,
+                    Default::default(),
+                ),
                 JavaMethodProto::new("exists", "(Ljava/lang/String;)Z", Self::exists, MethodAccessFlags::STATIC),
                 JavaMethodProto::new("filesize", "(Ljava/lang/String;)I", Self::filesize, MethodAccessFlags::STATIC),
                 JavaMethodProto::new("unlink", "(Ljava/lang/String;)I", Self::unlink, MethodAccessFlags::STATIC),
+                JavaMethodProto::new("fsavail", "()I", Self::fsavail, MethodAccessFlags::STATIC),
+                JavaMethodProto::new("fsused", "()I", Self::fsused, MethodAccessFlags::STATIC),
+                JavaMethodProto::new("mkdir", "(Ljava/lang/String;)V", Self::mkdir, MethodAccessFlags::STATIC),
+                JavaMethodProto::new("rmdir", "(Ljava/lang/String;)V", Self::rmdir, MethodAccessFlags::STATIC),
+                JavaMethodProto::new("rmrdir", "(Ljava/lang/String;)V", Self::rmrdir, MethodAccessFlags::STATIC),
+                JavaMethodProto::new("flush", "()V", Self::flush, Default::default()),
+                JavaMethodProto::new("readdir", "()Ljava/lang/String;", Self::readdir, Default::default()),
                 JavaMethodProto::new("available", "()I", Self::available, Default::default()),
                 JavaMethodProto::new("read", "([BII)I", Self::read, Default::default()),
                 JavaMethodProto::new("write", "([BII)I", Self::write, Default::default()),
@@ -37,6 +59,21 @@ impl XFile {
                 JavaFieldProto::new("mode", "I", Default::default()),
                 JavaFieldProto::new("is", "Ljava/io/InputStream;", Default::default()),
                 JavaFieldProto::new("raf", "Ljava/io/RandomAccessFile;", Default::default()),
+                // The reference SK-VM XFile keeps these three protected fields,
+                // and a title that subclasses XFile reads them directly. `type`
+                // says where the bytes are: 3 means an in-memory `buf` at
+                // `offset`, anything else means read them off the file/stream.
+                // Ours is always stream- or file-backed, so `type` is never 3
+                // and `buf`/`offset` stay unset. 크레이지버스's com.xce.io.XResource
+                // extends XFile and reaches for `type` in its constructor.
+                JavaFieldProto::new("type", "I", Default::default()),
+                JavaFieldProto::new("buf", "[B", Default::default()),
+                JavaFieldProto::new("offset", "I", Default::default()),
+                // Entries already unpacked out of an archive, by archive, its
+                // length and entry name, and how many bytes they hold. See
+                // `init_in_archive`.
+                JavaFieldProto::new("archiveEntries", "Ljava/util/Hashtable;", FieldAccessFlags::STATIC),
+                JavaFieldProto::new("archiveEntryBytes", "I", FieldAccessFlags::STATIC),
             ],
             access_flags: Default::default(),
         }
@@ -52,6 +89,7 @@ impl XFile {
         tracing::debug!("com.xce.io.XFile::<init>({this:?}, {name:?}, {mode:?})");
 
         let _: () = jvm.invoke_special(&this, "java/lang/Object", "<init>", "()V", ()).await?;
+        Self::require_name(jvm, &name).await?;
 
         if mode == READ_RESOURCE {
             let class = jvm.invoke_virtual(&this, "getClass", "()Ljava/lang/Class;", ()).await?;
@@ -61,6 +99,7 @@ impl XFile {
 
             jvm.put_field(&mut this, "is", "Ljava/io/InputStream;", resource_stream).await?;
             jvm.put_field(&mut this, "mode", "I", mode).await?;
+            jvm.put_field(&mut this, "type", "I", mode).await?;
         } else {
             let file = jvm.new_class("java/io/File", "(Ljava/lang/String;)V", (name,)).await?;
 
@@ -72,6 +111,171 @@ impl XFile {
                 .await?;
             jvm.put_field(&mut this, "raf", "Ljava/io/RandomAccessFile;", raf).await?;
             jvm.put_field(&mut this, "mode", "I", mode).await?;
+            jvm.put_field(&mut this, "type", "I", mode).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Opens the entry `entry` of the archive `archive`, to be read like a
+    /// resource.
+    ///
+    /// SK-VM's XFile takes an archive and a name inside it as well as a name and
+    /// a mode: 프린세스메이커4 keeps its scenario text in a `data.jar` beside the
+    /// application and reads each `data<n>.txt` out of it through `new
+    /// XFile("data.jar", "data" + n + ".txt")`, on the thread that paints its
+    /// first in-game screen; without the constructor that paint died on a
+    /// `NoSuchMethodError` the moment the game began. The entry is read-only and
+    /// stream-backed, the same as a resource opened by name, so the read,
+    /// available and close that follow all take the resource path.
+    ///
+    /// The entry is named as a resource is, from the archive's root, and may
+    /// start with a `/` that the archive's own entry names do not have.
+    /// 테일즈판타지2 reads its battle art out of the `add0.jar` it downloads
+    /// as `new XFile("/add0.jar", "/m/16.png")`, where the jar holds `m/16.png`;
+    /// looking the name up as given found nothing, every monster and
+    /// background came back null, and the battle stopped on the first one it
+    /// drew. A leading `/` is dropped before the lookup.
+    ///
+    /// That title also reads the art back out of the archive every time it
+    /// draws it - a dozen entries a battle frame - and each read here meant
+    /// loading the whole archive and unpacking the entry again, which held a
+    /// handset's frame for most of a second. An entry is unpacked once and kept,
+    /// keyed by the archive's length as well as the names, so an archive the
+    /// title downloads again is read afresh.
+    async fn init_in_archive(
+        jvm: &Jvm,
+        _context: &mut WieJvmContext,
+        mut this: ClassInstanceRef<Self>,
+        archive: ClassInstanceRef<String>,
+        entry: ClassInstanceRef<String>,
+    ) -> JvmResult<()> {
+        tracing::debug!("com.xce.io.XFile::<init>({this:?}, {archive:?}, {entry:?})");
+
+        let _: () = jvm.invoke_special(&this, "java/lang/Object", "<init>", "()V", ()).await?;
+        Self::require_name(jvm, &archive).await?;
+        Self::require_name(jvm, &entry).await?;
+
+        let archive_name = JavaLangString::to_rust_string(jvm, &archive).await?;
+        let entry_name = JavaLangString::to_rust_string(jvm, &entry).await?;
+        let entry_name = entry_name.strip_prefix('/').unwrap_or(&entry_name);
+
+        let file = jvm.new_class("java/io/File", "(Ljava/lang/String;)V", (archive,)).await?;
+        let archive_length: i64 = jvm.invoke_virtual(&file, "length", "()J", ()).await?;
+
+        let key = JavaLangString::from_rust_string(jvm, &format!("{archive_name}\0{archive_length}\0{entry_name}")).await?;
+        let entries = Self::archive_entries(jvm).await?;
+        let cached: ClassInstanceRef<Array<i8>> = jvm
+            .invoke_virtual(&entries, "get", "(Ljava/lang/Object;)Ljava/lang/Object;", (key.clone(),))
+            .await?;
+
+        let data = if cached.is_null() {
+            let data = Self::unpack_entry(jvm, file, entry_name).await?;
+            Self::keep_entry(jvm, entries, key, &data).await?;
+            data
+        } else {
+            cached
+        };
+
+        let resource_stream = jvm.new_class("java/io/ByteArrayInputStream", "([B)V", (data,)).await?;
+
+        jvm.put_field(&mut this, "is", "Ljava/io/InputStream;", resource_stream).await?;
+        jvm.put_field(&mut this, "mode", "I", READ_RESOURCE).await?;
+        jvm.put_field(&mut this, "type", "I", READ_RESOURCE).await?;
+
+        Ok(())
+    }
+
+    /// The bytes of `entry` in the archive `file`, or `FileNotFoundException`
+    /// when the archive does not hold it.
+    async fn unpack_entry(jvm: &Jvm, file: Box<dyn ClassInstance>, entry: &str) -> JvmResult<ClassInstanceRef<Array<i8>>> {
+        let zip = jvm.new_class("java/util/zip/ZipFile", "(Ljava/io/File;)V", (file,)).await?;
+
+        let entry = JavaLangString::from_rust_string(jvm, entry).await?;
+        let zip_entry: ClassInstanceRef<ZipEntry> = jvm
+            .invoke_virtual(&zip, "getEntry", "(Ljava/lang/String;)Ljava/util/zip/ZipEntry;", (entry,))
+            .await?;
+        if zip_entry.is_null() {
+            return Err(jvm.exception("java/io/FileNotFoundException", "entry not found in archive").await);
+        }
+
+        let stream: ClassInstanceRef<InputStream> = jvm
+            .invoke_virtual(&zip, "getInputStream", "(Ljava/util/zip/ZipEntry;)Ljava/io/InputStream;", (zip_entry,))
+            .await?;
+        let length: i32 = jvm.invoke_virtual(&stream, "available", "()I", ()).await?;
+        let data = jvm.instantiate_array("B", length as _).await?;
+        let mut read = 0;
+        while read < length {
+            let count: i32 = jvm
+                .invoke_virtual(&stream, "read", "([BII)I", (data.clone(), read, length - read))
+                .await?;
+            if count <= 0 {
+                break;
+            }
+            read += count;
+        }
+
+        Ok(data.into())
+    }
+
+    /// The table of unpacked archive entries, made on first use.
+    async fn archive_entries(jvm: &Jvm) -> JvmResult<Box<dyn ClassInstance>> {
+        let entries: Option<Box<dyn ClassInstance>> = jvm
+            .get_static_field("com/xce/io/XFile", "archiveEntries", "Ljava/util/Hashtable;")
+            .await?;
+        if let Some(entries) = entries {
+            return Ok(entries);
+        }
+
+        let entries = jvm.new_class("java/util/Hashtable", "()V", ()).await?;
+        jvm.put_static_field("com/xce/io/XFile", "archiveEntries", "Ljava/util/Hashtable;", entries.clone())
+            .await?;
+
+        Ok(entries)
+    }
+
+    /// Keeps `data` under `key`, first letting every kept entry go if keeping
+    /// it would pass [`ARCHIVE_CACHE_LIMIT`].
+    async fn keep_entry(
+        jvm: &Jvm,
+        entries: Box<dyn ClassInstance>,
+        key: Box<dyn ClassInstance>,
+        data: &ClassInstanceRef<Array<i8>>,
+    ) -> JvmResult<()> {
+        let length = jvm.array_length(data).await? as i32;
+        let kept: i32 = jvm.get_static_field("com/xce/io/XFile", "archiveEntryBytes", "I").await?;
+
+        let kept = if kept + length > ARCHIVE_CACHE_LIMIT {
+            let _: () = jvm.invoke_virtual(&entries, "clear", "()V", ()).await?;
+            0
+        } else {
+            kept
+        };
+
+        let _: Option<Box<dyn ClassInstance>> = jvm
+            .invoke_virtual(
+                &entries,
+                "put",
+                "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+                (key, data.clone()),
+            )
+            .await?;
+        jvm.put_static_field("com/xce/io/XFile", "archiveEntryBytes", "I", kept + length).await?;
+
+        Ok(())
+    }
+
+    /// A null file name is the title's mistake, and it hears about it as a
+    /// `NullPointerException` it can catch, the way the reference emulator
+    /// answers it (wfeature, `stringArgument`).
+    ///
+    /// It went on into `java.io.File` instead, which took the null and then
+    /// panicked reading the path back - ending the whole run, not the
+    /// title's thread. 택티컬퀘스트 asks `XFile.exists(null)` from its title
+    /// screen, and the first key press there stopped the emulator.
+    async fn require_name(jvm: &Jvm, name: &ClassInstanceRef<String>) -> JvmResult<()> {
+        if name.is_null() {
+            return Err(jvm.exception("java/lang/NullPointerException", "String is null").await);
         }
 
         Ok(())
@@ -80,6 +284,7 @@ impl XFile {
     async fn exists(jvm: &Jvm, _context: &mut WieJvmContext, name: ClassInstanceRef<String>) -> JvmResult<bool> {
         tracing::debug!("com.xce.io.XFile::exists({name:?})");
 
+        Self::require_name(jvm, &name).await?;
         let file = jvm.new_class("java/io/File", "(Ljava/lang/String;)V", (name,)).await?;
         let exists = jvm.invoke_virtual(&file, "exists", "()Z", ()).await?;
 
@@ -89,16 +294,82 @@ impl XFile {
     async fn filesize(jvm: &Jvm, _context: &mut WieJvmContext, name: ClassInstanceRef<String>) -> JvmResult<i32> {
         tracing::debug!("com.xce.io.XFile::filesize({name:?})");
 
+        Self::require_name(jvm, &name).await?;
         let file = jvm.new_class("java/io/File", "(Ljava/lang/String;)V", (name,)).await?;
         let size: i64 = jvm.invoke_virtual(&file, "length", "()J", ()).await?;
 
         Ok(size as _)
     }
 
-    async fn unlink(_jvm: &Jvm, _context: &mut WieJvmContext, name: ClassInstanceRef<String>) -> JvmResult<i32> {
-        tracing::warn!("stub com.xce.io.XFile::unlink({name:?})");
+    async fn unlink(jvm: &Jvm, _context: &mut WieJvmContext, name: ClassInstanceRef<String>) -> JvmResult<i32> {
+        tracing::debug!("com.xce.io.XFile::unlink({name:?})");
+
+        // Delete the named file. 광개토대왕정벌기's 새로하기 wipes the old save and
+        // then spins its main loop polling XFile.exists until the file is gone; a
+        // stub that never deleted left exists true forever, so new game hung on a
+        // frozen screen. Delete through java.io.File so the backing file really
+        // goes away. Return 0 on success and -1 otherwise, the usual unlink sense.
+        Self::require_name(jvm, &name).await?;
+        let file = jvm.new_class("java/io/File", "(Ljava/lang/String;)V", (name,)).await?;
+        let deleted: bool = jvm.invoke_virtual(&file, "delete", "()Z", ()).await?;
+
+        Ok(if deleted { 0 } else { -1 })
+    }
+
+    /// Free space on the file system, which titles check before saving.
+    ///
+    /// 바운티블루스 asks it in its canvas constructor, before it has drawn
+    /// anything, and turns its save off when fewer than 250 bytes are free.
+    /// Without the method the lookup failed there and ended the thread that
+    /// would have started the game, leaving a black screen. The answer is
+    /// the budget `RecordStore.getSizeAvailable` gives, so the two stores
+    /// agree (wfeature does the same, `xFileAvail`).
+    async fn fsavail(_jvm: &Jvm, _context: &mut WieJvmContext) -> JvmResult<i32> {
+        tracing::debug!("com.xce.io.XFile::fsavail()");
+
+        Ok(FILE_SYSTEM_CAPACITY)
+    }
+
+    async fn fsused(_jvm: &Jvm, _context: &mut WieJvmContext) -> JvmResult<i32> {
+        tracing::debug!("com.xce.io.XFile::fsused()");
 
         Ok(0)
+    }
+
+    /// Directories are not kept here: every path is a name in one flat store,
+    /// so making or removing one has nothing to do.
+    async fn mkdir(_jvm: &Jvm, _context: &mut WieJvmContext, name: ClassInstanceRef<String>) -> JvmResult<()> {
+        tracing::debug!("com.xce.io.XFile::mkdir({name:?})");
+
+        Ok(())
+    }
+
+    async fn rmdir(_jvm: &Jvm, _context: &mut WieJvmContext, name: ClassInstanceRef<String>) -> JvmResult<()> {
+        tracing::debug!("com.xce.io.XFile::rmdir({name:?})");
+
+        Ok(())
+    }
+
+    async fn rmrdir(_jvm: &Jvm, _context: &mut WieJvmContext, name: ClassInstanceRef<String>) -> JvmResult<()> {
+        tracing::debug!("com.xce.io.XFile::rmrdir({name:?})");
+
+        Ok(())
+    }
+
+    /// Writes reach the file as they are made, so there is nothing buffered
+    /// to push out.
+    async fn flush(_jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<()> {
+        tracing::debug!("com.xce.io.XFile::flush({this:?})");
+
+        Ok(())
+    }
+
+    /// No directory listing: the end of one, which is what a title walking
+    /// an empty directory expects.
+    async fn readdir(_jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<ClassInstanceRef<String>> {
+        tracing::debug!("com.xce.io.XFile::readdir({this:?})");
+
+        Ok(None.into())
     }
 
     async fn available(jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<i32> {
@@ -211,5 +482,174 @@ impl XFile {
         let raf = jvm.get_field(&this, "raf", "Ljava/io/RandomAccessFile;").await?;
 
         Ok(raf)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::{boxed::Box, vec, vec::Vec};
+
+    use jvm::{Array, ClassInstanceRef, runtime::JavaLangString};
+
+    use test_utils::run_jvm_test_with_files;
+    use wie_util::Result;
+
+    use crate::get_protos;
+
+    fn protos() -> Box<[Box<[wie_jvm_support::WieJavaClassProto]>]> {
+        Box::new([wie_midp::get_protos().into(), get_protos().into()])
+    }
+
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &byte in data {
+            crc ^= byte as u32;
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+            }
+        }
+        !crc
+    }
+
+    /// A one-entry zip with the entry stored, not deflated.
+    fn stored_zip(name: &str, data: &[u8]) -> Vec<u8> {
+        let name = name.as_bytes();
+        let crc = crc32(data);
+        let size = data.len() as u32;
+        let mut zip = Vec::new();
+
+        // local file header, then the entry's data
+        zip.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        zip.extend_from_slice(&20u16.to_le_bytes());
+        zip.extend_from_slice(&[0u8; 8]); // flags, method (stored), time, date
+        zip.extend_from_slice(&crc.to_le_bytes());
+        zip.extend_from_slice(&size.to_le_bytes());
+        zip.extend_from_slice(&size.to_le_bytes());
+        zip.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(name);
+        zip.extend_from_slice(data);
+
+        // central directory
+        let central_offset = zip.len() as u32;
+        zip.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+        zip.extend_from_slice(&20u16.to_le_bytes());
+        zip.extend_from_slice(&20u16.to_le_bytes());
+        zip.extend_from_slice(&[0u8; 8]); // flags, method, time, date
+        zip.extend_from_slice(&crc.to_le_bytes());
+        zip.extend_from_slice(&size.to_le_bytes());
+        zip.extend_from_slice(&size.to_le_bytes());
+        zip.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        zip.extend_from_slice(&[0u8; 8]); // extra len, comment len, disk start, internal attrs
+        zip.extend_from_slice(&0u32.to_le_bytes()); // external attrs
+        zip.extend_from_slice(&0u32.to_le_bytes()); // local header offset
+        zip.extend_from_slice(name);
+        let central_size = zip.len() as u32 - central_offset;
+
+        // end of central directory
+        zip.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        zip.extend_from_slice(&[0u8; 4]); // disks
+        zip.extend_from_slice(&1u16.to_le_bytes());
+        zip.extend_from_slice(&1u16.to_le_bytes());
+        zip.extend_from_slice(&central_size.to_le_bytes());
+        zip.extend_from_slice(&central_offset.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+
+        zip
+    }
+
+    /// The two-name constructor reads a named entry out of the archive.
+    #[test]
+    fn an_entry_is_read_out_of_an_archive() -> Result<()> {
+        let archive = stored_zip("data0.txt", b"PRINCESS");
+
+        run_jvm_test_with_files(protos(), &[("data.jar", archive)], |jvm| async move {
+            let name = JavaLangString::from_rust_string(&jvm, "data.jar").await?;
+            let entry = JavaLangString::from_rust_string(&jvm, "data0.txt").await?;
+            let xfile = jvm
+                .new_class("com/xce/io/XFile", "(Ljava/lang/String;Ljava/lang/String;)V", (name, entry))
+                .await?;
+
+            let available: i32 = jvm.invoke_virtual(&xfile, "available", "()I", ()).await?;
+            assert_eq!(available, 8);
+
+            let buffer = jvm.instantiate_array("B", 8).await?;
+            let read: i32 = jvm.invoke_virtual(&xfile, "read", "([BII)I", (buffer.clone(), 0i32, 8i32)).await?;
+            let _: () = jvm.invoke_virtual(&xfile, "close", "()V", ()).await?;
+
+            let buffer: ClassInstanceRef<Array<i8>> = buffer.into();
+            let bytes: Vec<i8> = jvm.load_array(&buffer, 0, read.max(0) as _).await?;
+            assert_eq!(bytes.into_iter().map(|x| x as u8).collect::<Vec<_>>(), b"PRINCESS");
+
+            Ok(())
+        })
+    }
+
+    /// An entry named from the archive's root with a leading `/` is the entry
+    /// stored without one: 테일즈판타지2 opens `new XFile("/add0.jar",
+    /// "/m/16.png")` for the `m/16.png` its downloaded jar holds.
+    #[test]
+    fn an_entry_named_with_a_leading_slash_is_found() -> Result<()> {
+        let archive = stored_zip("m/16.png", b"MONSTER");
+
+        run_jvm_test_with_files(protos(), &[("add0.jar", archive)], |jvm| async move {
+            let name = JavaLangString::from_rust_string(&jvm, "/add0.jar").await?;
+            let entry = JavaLangString::from_rust_string(&jvm, "/m/16.png").await?;
+            let xfile = jvm
+                .new_class("com/xce/io/XFile", "(Ljava/lang/String;Ljava/lang/String;)V", (name, entry))
+                .await?;
+
+            let available: i32 = jvm.invoke_virtual(&xfile, "available", "()I", ()).await?;
+            assert_eq!(available, 7);
+
+            Ok(())
+        })
+    }
+
+    /// An entry opened again - from the entries already unpacked - reads the
+    /// same bytes, each open from its own start.
+    #[test]
+    fn an_entry_opened_twice_reads_the_same_bytes() -> Result<()> {
+        let archive = stored_zip("bg/0.png", b"FIELD");
+
+        run_jvm_test_with_files(protos(), &[("add0.jar", archive)], |jvm| async move {
+            for _ in 0..2 {
+                let name = JavaLangString::from_rust_string(&jvm, "/add0.jar").await?;
+                let entry = JavaLangString::from_rust_string(&jvm, "/bg/0.png").await?;
+                let xfile = jvm
+                    .new_class("com/xce/io/XFile", "(Ljava/lang/String;Ljava/lang/String;)V", (name, entry))
+                    .await?;
+
+                let buffer = jvm.instantiate_array("B", 5).await?;
+                let read: i32 = jvm.invoke_virtual(&xfile, "read", "([BII)I", (buffer.clone(), 0i32, 5i32)).await?;
+                let _: () = jvm.invoke_virtual(&xfile, "close", "()V", ()).await?;
+
+                let buffer: ClassInstanceRef<Array<i8>> = buffer.into();
+                let bytes: Vec<i8> = jvm.load_array(&buffer, 0, read.max(0) as _).await?;
+                assert_eq!(bytes.into_iter().map(|x| x as u8).collect::<Vec<_>>(), b"FIELD");
+            }
+
+            Ok(())
+        })
+    }
+
+    /// A name the archive does not hold is a `FileNotFoundException` the title
+    /// can catch, not a failure of the run.
+    #[test]
+    fn a_name_not_in_the_archive_is_file_not_found() -> Result<()> {
+        let archive = stored_zip("data0.txt", b"X");
+
+        run_jvm_test_with_files(protos(), &[("data.jar", archive)], |jvm| async move {
+            let name = JavaLangString::from_rust_string(&jvm, "data.jar").await?;
+            let entry = JavaLangString::from_rust_string(&jvm, "missing.txt").await?;
+
+            let result = jvm
+                .new_class("com/xce/io/XFile", "(Ljava/lang/String;Ljava/lang/String;)V", (name, entry))
+                .await;
+
+            assert!(result.is_err());
+
+            Ok(())
+        })
     }
 }

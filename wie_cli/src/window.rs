@@ -19,7 +19,8 @@ use wie_backend::{Screen, canvas::Image};
 #[derive(Debug)]
 pub enum WindowInternalEvent {
     RequestRedraw,
-    Paint(Vec<u32>),
+    /// A frame's pixels, and its width and height.
+    Paint(Vec<u32>, u32, u32),
     Quit,
 }
 
@@ -60,7 +61,7 @@ impl Screen for WindowHandle {
             .map(|x| ((x.a as u32) << 24) | ((x.r as u32) << 16) | ((x.g as u32) << 8) | (x.b as u32))
             .collect::<Vec<_>>();
 
-        self.send_event(WindowInternalEvent::Paint(data)).unwrap()
+        self.send_event(WindowInternalEvent::Paint(data, image.width(), image.height())).unwrap()
     }
 
     fn width(&self) -> u32 {
@@ -125,8 +126,11 @@ enum Scaler {
     Native,
     /// hq2x, hq3x, hq4x scaling.
     Hqx { scale: i8 },
-    /// Lanczos3 scaling
-    Lanczos3 { scale: f64, resizer: fast_image_resize::Resizer },
+    /// Nearest-neighbour scaling, as the Android player draws: each of the
+    /// title's pixels becomes a block of whole pixels. A smoothing filter turns
+    /// the handset's pixel fonts soft and fringed, so text looked like another
+    /// face here than on a phone.
+    Pixel { scale: f64, resizer: fast_image_resize::Resizer },
 }
 
 impl fmt::Display for Scaler {
@@ -134,7 +138,7 @@ impl fmt::Display for Scaler {
         match self {
             Scaler::Native => f.write_str("Native")?,
             Scaler::Hqx { scale } => f.write_fmt(format_args!("Hq{scale}x"))?,
-            Scaler::Lanczos3 { scale, resizer: _ } => f.write_fmt(format_args!("Lanczos3({scale})"))?,
+            Scaler::Pixel { scale, resizer: _ } => f.write_fmt(format_args!("Pixel({scale})"))?,
         }
         Ok(())
     }
@@ -144,7 +148,7 @@ impl Scaler {
     fn new(scale: f64) -> Scaler {
         match scale {
             _ if (scale - 1.0).abs() < 1e-3 => Scaler::Native,
-            _ => Scaler::Lanczos3 {
+            _ => Scaler::Pixel {
                 scale,
                 resizer: fast_image_resize::Resizer::new(),
             },
@@ -165,7 +169,7 @@ impl Scaler {
         match self {
             Scaler::Native => 1.0,
             Scaler::Hqx { scale } => *scale as f64,
-            Scaler::Lanczos3 { scale, resizer: _ } => *scale,
+            Scaler::Pixel { scale, resizer: _ } => *scale,
         }
     }
 
@@ -173,7 +177,7 @@ impl Scaler {
         match self {
             Scaler::Native => PhysicalSize::new(logical_size.width, logical_size.height),
             Scaler::Hqx { scale } => PhysicalSize::new(logical_size.width * *scale as u32, logical_size.height * *scale as u32),
-            Scaler::Lanczos3 { scale, resizer: _ } => PhysicalSize::new(
+            Scaler::Pixel { scale, resizer: _ } => PhysicalSize::new(
                 (logical_size.width as f64 * *scale).floor() as u32,
                 (logical_size.height as f64 * *scale).floor() as u32,
             ),
@@ -187,7 +191,7 @@ impl Scaler {
             Scaler::Hqx { scale } if *scale == 3 => hqx::hq3x(src.as_slice(), dst.as_mut_slice(), src_size.width as usize, src_size.height as usize),
             Scaler::Hqx { scale } if *scale == 4 => hqx::hq4x(src.as_slice(), dst.as_mut_slice(), src_size.width as usize, src_size.height as usize),
             Scaler::Hqx { scale } => panic!("invalid hqx scale factor {scale}"),
-            Scaler::Lanczos3 { scale: _, resizer } => {
+            Scaler::Pixel { scale: _, resizer } => {
                 let (_, srcarr, _) = unsafe { src.align_to::<u8>() };
                 let srcimg = fast_image_resize::images::ImageRef::new(src_size.width, src_size.height, srcarr, PixelType::U8x4).unwrap();
                 let (_, dstarr, _) = unsafe { dst.as_mut_slice().align_to_mut::<u8>() };
@@ -197,10 +201,7 @@ impl Scaler {
                         &srcimg,
                         &mut dstimg,
                         Some(&ResizeOptions {
-                            #[cfg(debug_assertions)]
                             algorithm: ResizeAlg::Nearest,
-                            #[cfg(not(debug_assertions))]
-                            algorithm: ResizeAlg::Convolution(fast_image_resize::FilterType::Lanczos3),
                             cropping: SrcCropping::None,
                             mul_div_alpha: false,
                         }),
@@ -314,6 +315,9 @@ where
     /// Displays the last content frame to the window.
     fn paint_last_frame(&mut self) -> Option<()> {
         let data = &self.last_frame;
+        if data.len() != self.content_size.width as usize * self.content_size.height as usize || self.surface.is_none() {
+            return None;
+        }
         let data_to_blit = if self.scaled_image_buf.len() == data.len() {
             data
         } else {
@@ -373,8 +377,24 @@ where
             WindowInternalEvent::RequestRedraw => {
                 self.window.as_ref().unwrap().request_redraw();
             }
-            WindowInternalEvent::Paint(data) => {
-                self.last_frame = data;
+            WindowInternalEvent::Paint(data, width, height) => {
+                // A title can draw a frame of another size than the panel it
+                // reported - as the Android player, which scales each frame by
+                // its own size, allows - so the window follows the frame.
+                let size = LogicalSize::new(width, height);
+                if size != self.content_size && width != 0 && height != 0 {
+                    self.content_size = size;
+                    self.update_scale_factor(None, None);
+                    if let Some(new_size) = self.window.as_ref().and_then(|window| window.request_inner_size(self.scaled_size)) {
+                        self.window_size = new_size;
+                    }
+                    self.last_frame = data;
+                    if self.window.is_some() {
+                        self.on_resize();
+                    }
+                } else {
+                    self.last_frame = data;
+                }
                 self.paint_last_frame();
             }
             WindowInternalEvent::Quit => {

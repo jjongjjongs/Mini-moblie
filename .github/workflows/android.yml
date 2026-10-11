@@ -1,0 +1,419 @@
+name: Android APK
+
+# The apk is the deliverable, so it gets built on the branches it is being
+# worked on as well as on main - a workflow that only runs after merge cannot
+# tell anyone whether the thing builds.
+on:
+  push:
+    branches:
+      - main
+      - 'claude/**'
+  pull_request:
+  workflow_dispatch:
+
+# Needed only by the release step, which replaces the apk hanging off a fixed
+# tag. Everything else here reads.
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    # The signing secrets are lifted to the job so a step can ask whether they
+    # exist. A step's `if` cannot read the `secrets` context - the workflow is
+    # rejected before it starts, with no job to show for it - but it can read
+    # `env`, and a secret that is not set arrives here as an empty string.
+    env:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, armv7-linux-androideabi
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # Swatinem/rust-cache keys on the lockfile *and* the compiler, saves on
+      # every run, and - crucially - cleans the workspace's own crates out of
+      # the cached `target` before saving, so a source-only change to a crate
+      # like wie_wipi_c is always recompiled. The hand-rolled cache this
+      # replaced keyed only on Cargo.lock and never re-saved: a change that did
+      # not touch Cargo.lock restored a stale `target`, cargo reused the
+      # pre-change artifacts, and the apk shipped a .so without the change.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      # The runner image ships an NDK; cargo-ndk needs to be pointed at it.
+      - name: Export NDK location
+        run: echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+
+      # The apk is installed over the last one, and Android refuses an update
+      # whose signature differs from the installed app's. A runner is a fresh
+      # machine, so the SDK's own debug key is regenerated every run and every
+      # build used to be a different signature - which is why a patch could
+      # only be installed by uninstalling first. One key, kept in a secret,
+      # fixes it.
+      #
+      # Without the secret the build still runs and still produces an apk; it
+      # just falls back to the per-run debug key, and says so.
+      - name: Restore signing key
+        if: env.ANDROID_KEYSTORE_BASE64 != ''
+        run: |
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > android/minimobile.jks
+          echo "MINIMOBILE_KEYSTORE_FILE=minimobile.jks" >> "$GITHUB_ENV"
+
+      - name: Build APK
+        working-directory: android
+        # -PenableJit selects the machine-code JIT engine; drop it to ship the
+        # interpreter.
+        #
+        # The run number is the version code, so a later build is never a
+        # downgrade of an earlier one.
+        env:
+          MINIMOBILE_KEYSTORE_PASSWORD: ${{ env.ANDROID_KEYSTORE_PASSWORD }}
+          MINIMOBILE_KEY_ALIAS: minimobile
+        run: gradle --no-daemon assembleRelease -PenableJit -PversionCode=${{ github.run_number }}
+
+      - name: Upload APK
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: MiniMobile-apk
+          path: android/app/build/outputs/apk/release/app-release.apk
+
+      # An artifact can only be downloaded by someone signed in to GitHub, from
+      # a zip, which is awkward on the handset the apk is meant for. A release
+      # asset is a plain link, so the apk also goes to one - always the same
+      # tag, so the link does not change between builds.
+      - name: Publish the APK to the development release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: mobile-dev
+        run: |
+          set -eu
+
+          # Whether this apk can be installed over the last one. Builds share a
+          # key only when the signing secret was there to restore, and an apk
+          # signed with the per-run debug key needs the installed app removed
+          # first - which is worth saying on the page people download from.
+          if [ -n "${MINIMOBILE_KEYSTORE_FILE:-}" ]; then
+            signing='project key - installs over the previous build'
+          else
+            signing='per-run debug key - uninstall the previous build first'
+          fi
+
+          notes="Development build, replaced by every push.
+
+          | | |
+          |---|---|
+          | Branch | \`${{ github.ref_name }}\` |
+          | Commit | ${{ github.sha }} |
+          | Built | $(date -u '+%Y-%m-%d %H:%M UTC') |
+          | Version code | ${{ github.run_number }} |
+          | Signing | $signing |
+
+          Android will ask for permission to install it from outside the
+          store.
+
+          \`MiniMobile-linux-x86_64.tar.gz\` is the Linux PC program of the
+          same commit, uploaded by its own job - see the README.txt inside it.
+
+          \`MiniMobile.apk\` is the Android app.
+
+          \`MiniMobile.ipa\` is the iPhone app, unsigned: install it with
+          AltStore, SideStore or TrollStore, which sign it on the way in.
+
+          \`MiniMobile-portmaster.zip\` is the port for Linux handhelds
+          (PortMaster, aarch64) - see minimobile/README.txt inside it.
+
+          \`MiniMobile-windows.zip\` is the Windows program (64-bit) - see
+          the README.txt inside it."
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes "$notes" --prerelease
+          else
+            # The Linux job may have created it in the meantime.
+            gh release create "$TAG" --title 'WIE Mobile (development build)' --notes "$notes" --prerelease \
+              || gh release edit "$TAG" --notes "$notes" --prerelease
+          fi
+
+          # The asset takes the file's own name, so it is renamed rather than
+          # uploaded as gradle's `app-release.apk`.
+          cp android/app/build/outputs/apk/release/app-release.apk MiniMobile.apk
+          gh release upload "$TAG" MiniMobile.apk --clobber
+
+          # Drop the apk under the names older workflows used: it shows up
+          # next to the real one and is easy to download by mistake.
+          for old in app-debug.apk wie-mobile-debug.apk; do
+            gh release delete-asset "$TAG" "$old" --yes 2>/dev/null || true
+          done
+
+  # The Linux PC program: the same SDL port as the Windows and PortMaster
+  # builds, opened as a window by its launcher. Cross-compiled with zig
+  # against glibc 2.17 like the PortMaster build, and it opens the desktop's
+  # own SDL2 at run time, so it runs on any distribution of the last decade
+  # with nothing else to install.
+  linux:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-x86_64
+
+      - name: Install zig and cargo-zigbuild
+        run: |
+          set -eu
+          pip install ziglang==0.17.0
+          echo "$(python3 -c 'import os, ziglang; print(os.path.dirname(ziglang.__file__))')" >> "$GITHUB_PATH"
+          cargo install --locked cargo-zigbuild@0.23.4
+
+      - name: Build
+        run: cargo zigbuild --release -p wie_portmaster --features jit --target x86_64-unknown-linux-gnu.2.17
+
+      - name: Package
+        run: |
+          set -eu
+          mkdir -p MiniMobile/games
+          cp target/x86_64-unknown-linux-gnu/release/minimobile MiniMobile/
+          cp linux/MiniMobile.sh linux/README.txt MiniMobile/
+          chmod +x MiniMobile/minimobile MiniMobile/MiniMobile.sh
+          printf '\n커밋: %s\n' "${{ github.sha }}" >> MiniMobile/README.txt
+          tar czf MiniMobile-linux-x86_64.tar.gz MiniMobile
+
+      - name: Upload the Linux build
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: MiniMobile-linux-x86_64
+          path: MiniMobile-linux-x86_64.tar.gz
+
+      # The apk job writes the release's notes; this one only adds its file,
+      # creating the release first if this job got there before it.
+      - name: Publish the Linux build to the development release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: mobile-dev
+        run: |
+          set -eu
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --title 'WIE Mobile (development build)' --notes 'Development build, replaced by every push.' --prerelease \
+            || gh release view "$TAG" >/dev/null
+          gh release upload "$TAG" MiniMobile-linux-x86_64.tar.gz --clobber
+          # The old command-line Linux build this one replaces.
+          gh release delete-asset "$TAG" wie-linux-x86_64.tar.gz --yes 2>/dev/null || true
+
+  # The same emulator as a PortMaster port for Linux handhelds (aarch64),
+  # published next to the apk. Cross-compiled with zig against glibc 2.17 so
+  # it runs on the oldest firmware PortMaster serves; it opens the handheld's
+  # own SDL2 at run time, so nothing else is linked.
+  portmaster:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: portmaster-aarch64
+
+      - name: Install zig and cargo-zigbuild
+        run: |
+          set -eu
+          pip install ziglang==0.17.0
+          echo "$(python3 -c 'import os, ziglang; print(os.path.dirname(ziglang.__file__))')" >> "$GITHUB_PATH"
+          cargo install --locked cargo-zigbuild@0.23.4
+
+      - name: Build
+        run: cargo zigbuild --release -p wie_portmaster --features jit --target aarch64-unknown-linux-gnu.2.17
+
+      - name: Package
+        run: |
+          set -eu
+          mkdir -p out
+          cp portmaster/MiniMobile.sh out/
+          cp -r portmaster/minimobile out/
+          cp target/aarch64-unknown-linux-gnu/release/minimobile out/minimobile/minimobile.aarch64
+          chmod +x out/MiniMobile.sh out/minimobile/minimobile.aarch64
+          mkdir -p out/minimobile/games
+          printf '\n커밋: %s\n' "${{ github.sha }}" >> out/minimobile/README.txt
+          (cd out && zip -qry ../MiniMobile-portmaster.zip MiniMobile.sh minimobile)
+
+      - name: Upload the PortMaster build
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: MiniMobile-portmaster
+          path: MiniMobile-portmaster.zip
+
+      - name: Publish the PortMaster build to the development release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: mobile-dev
+        run: |
+          set -eu
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --title 'WIE Mobile (development build)' --notes 'Development build, replaced by every push.' --prerelease \
+            || gh release view "$TAG" >/dev/null
+          gh release upload "$TAG" MiniMobile-portmaster.zip --clobber
+
+  # The same SDL port as a Windows program, published next to the apk. It
+  # opens SDL2.dll beside it, which the zip carries. The JIT is on, as on
+  # Android: its blocks and helpers name the System V convention they are
+  # written in (see wie_core_arm's `jit_extern`), which Windows can call too.
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: windows
+
+      - name: Build
+        run: cargo build --release -p wie_portmaster --features jit
+
+      - name: Fetch SDL2
+        shell: bash
+        run: |
+          set -eu
+          curl -sSfL -o sdl.zip https://github.com/libsdl-org/SDL/releases/download/release-2.30.9/SDL2-2.30.9-win32-x64.zip
+          7z x -osdl sdl.zip >/dev/null
+
+      - name: Package
+        shell: bash
+        run: |
+          set -eu
+          mkdir -p MiniMobile/games
+          cp target/release/minimobile.exe MiniMobile/MiniMobile.exe
+          cp sdl/SDL2.dll sdl/README-SDL.txt MiniMobile/
+          cp windows/README.txt MiniMobile/README.txt
+          printf '\n커밋: %s\n' "${{ github.sha }}" >> MiniMobile/README.txt
+          7z a -tzip MiniMobile-windows.zip MiniMobile >/dev/null
+
+      - name: Upload the Windows build
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: MiniMobile-windows
+          path: MiniMobile-windows.zip
+
+      - name: Publish the Windows build to the development release
+        if: github.event_name != 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: mobile-dev
+        run: |
+          set -eu
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --title 'WIE Mobile (development build)' --notes 'Development build, replaced by every push.' --prerelease \
+            || gh release view "$TAG" >/dev/null
+          gh release upload "$TAG" MiniMobile-windows.zip --clobber
+
+  # The iPhone app, as an unsigned ipa next to the apk. Whatever installs it -
+  # AltStore, SideStore, TrollStore - signs it on the way in. iOS gives an
+  # installed app no executable memory, so the emulator runs its blocks as
+  # decoded ops there (no `jit` feature).
+  ios:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build the emulator library
+        run: cargo build --release -p wie_ios --target aarch64-apple-ios
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Build the app
+        working-directory: ios
+        run: |
+          set -eu
+          xcodegen generate
+          xcodebuild \
+            -project MiniMobile.xcodeproj \
+            -scheme MiniMobile \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package
+        run: |
+          set -eu
+          mkdir -p Payload
+          cp -R ios/build/Build/Products/Release-iphoneos/MiniMobile.app Payload/
+          zip -qry MiniMobile.ipa Payload
+
+      - name: Upload the ipa
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: MiniMobile-ipa
+          path: MiniMobile.ipa
+
+      - name: Publish the ipa to the development release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: mobile-dev
+        run: |
+          set -eu
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --title 'WIE Mobile (development build)' --notes 'Development build, replaced by every push.' --prerelease \
+            || gh release view "$TAG" >/dev/null
+          gh release upload "$TAG" MiniMobile.ipa --clobber
+          # The name older workflows used, so it does not linger beside it.
+          gh release delete-asset "$TAG" wie-mobile-ios.ipa --yes 2>/dev/null || true
