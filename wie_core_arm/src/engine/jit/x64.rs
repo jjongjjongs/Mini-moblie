@@ -22,6 +22,15 @@ use super::{
     jit_store32,
 };
 
+/// `dynasm!` takes its architecture from the machine the build runs on unless
+/// told otherwise, so an x86_64 build made on an ARM Mac would assemble this
+/// file as AArch64; this wrapper prepends `.arch x64` to every invocation.
+macro_rules! x64 {
+    ($ops:expr ; $($t:tt)*) => {
+        dynasm!($ops ; .arch x64 ; $($t)*)
+    };
+}
+
 /// A compiled block owning its executable buffer (stable pointers; a flush drops
 /// it) plus the entry offset.
 pub(crate) struct Code {
@@ -141,19 +150,19 @@ pub(crate) fn compile_block(ops: &[FastOp], start_pc: u32) -> Option<(Code, usiz
     };
 
     let entry = a.offset();
-    dynasm!(a ; .arch x64 ; push rbx ; mov rbx, rdi);
+    x64!(a ; push rbx ; mov rbx, rdi);
 
     let mut ended_unconditional = false;
     for (i, op) in ops[..limit].iter().enumerate() {
         let pc = op_pc(i);
         if let Some(label) = labels.get(&pc) {
-            dynasm!(a ; => *label);
+            x64!(a ; => *label);
         }
         if boundaries.contains(&pc) {
             let len = seg_len(pc) as i32;
             // Yield to the dispatcher if the budget is spent; otherwise charge
             // this block's instructions.
-            dynasm!(a
+            x64!(a
                 ; mov ecx, [rbx + BUDGET]
                 ; test ecx, ecx
                 ; jg >cont
@@ -180,23 +189,23 @@ pub(crate) fn compile_block(ops: &[FastOp], start_pc: u32) -> Option<(Code, usiz
                     _ => None,
                 };
                 if let Some((mask, take_when_set)) = single {
-                    dynasm!(a ; test DWORD [rbx + CPSR], mask as i32);
+                    x64!(a ; test DWORD [rbx + CPSR], mask as i32);
                     // After test, ZF==1 iff the bit is clear.
                     if in_range(target) {
                         let l = *labels.get(&target).unwrap();
                         if take_when_set {
-                            dynasm!(a ; jnz => l);
+                            x64!(a ; jnz => l);
                         } else {
-                            dynasm!(a ; jz => l);
+                            x64!(a ; jz => l);
                         }
                     } else {
                         // Jump over the taken-exit when the branch is not taken.
                         if take_when_set {
-                            dynasm!(a ; jz >notaken);
+                            x64!(a ; jz >notaken);
                         } else {
-                            dynasm!(a ; jnz >notaken);
+                            x64!(a ; jnz >notaken);
                         }
-                        dynasm!(a
+                        x64!(a
                             ; mov DWORD [rbx + PC], target as i32
                             ; mov eax, exit::CONTINUE as i32
                             ; jmp ->epilogue
@@ -204,7 +213,7 @@ pub(crate) fn compile_block(ops: &[FastOp], start_pc: u32) -> Option<(Code, usiz
                         );
                     }
                 } else {
-                    dynasm!(a
+                    x64!(a
                         ; mov edi, cond as i32
                         ; mov esi, [rbx + CPSR]
                         ; mov rax, QWORD jit_cond_met as *const () as i64
@@ -212,9 +221,9 @@ pub(crate) fn compile_block(ops: &[FastOp], start_pc: u32) -> Option<(Code, usiz
                         ; test eax, eax
                     );
                     if in_range(target) {
-                        dynasm!(a ; jnz => *labels.get(&target).unwrap());
+                        x64!(a ; jnz => *labels.get(&target).unwrap());
                     } else {
-                        dynasm!(a
+                        x64!(a
                             ; jz >notaken
                             ; mov DWORD [rbx + PC], target as i32
                             ; mov eax, exit::CONTINUE as i32
@@ -226,9 +235,9 @@ pub(crate) fn compile_block(ops: &[FastOp], start_pc: u32) -> Option<(Code, usiz
             }
             FastOp::Branch { target } => {
                 if in_range(target) {
-                    dynasm!(a ; jmp => *labels.get(&target).unwrap());
+                    x64!(a ; jmp => *labels.get(&target).unwrap());
                 } else {
-                    dynasm!(a ; mov DWORD [rbx + PC], target as i32 ; mov eax, exit::CONTINUE as i32 ; jmp ->epilogue);
+                    x64!(a ; mov DWORD [rbx + PC], target as i32 ; mov eax, exit::CONTINUE as i32 ; jmp ->epilogue);
                 }
                 ended_unconditional = true;
             }
@@ -248,9 +257,9 @@ pub(crate) fn compile_block(ops: &[FastOp], start_pc: u32) -> Option<(Code, usiz
     }
 
     if !ended_unconditional {
-        dynasm!(a ; mov DWORD [rbx + PC], end_pc as i32 ; mov eax, exit::CONTINUE as i32);
+        x64!(a ; mov DWORD [rbx + PC], end_pc as i32 ; mov eax, exit::CONTINUE as i32);
     }
-    dynasm!(a ; ->epilogue: ; pop rbx ; ret);
+    x64!(a ; ->epilogue: ; pop rbx ; ret);
 
     let buf = a.finalize().ok()?;
     Some((Code { buf, entry }, limit))
@@ -289,8 +298,7 @@ pub(crate) fn compile_arm_block(ops: &[ArmOp], start_pc: u32) -> Option<(Code, u
 
     let mut a = Asm::new().ok()?;
     let entry = a.offset();
-    dynasm!(a
-        ; .arch x64
+    x64!(a
         ; push rbx
         ; mov rbx, rdi
         // Whole-trace budget: yield if spent, else charge every op once.
@@ -315,9 +323,9 @@ pub(crate) fn compile_arm_block(ops: &[ArmOp], start_pc: u32) -> Option<(Code, u
         }
     }
     if !ended {
-        dynasm!(a ; mov DWORD [rbx + PC], end_pc as i32 ; mov eax, exit::CONTINUE as i32);
+        x64!(a ; mov DWORD [rbx + PC], end_pc as i32 ; mov eax, exit::CONTINUE as i32);
     }
-    dynasm!(a ; ->epilogue: ; pop rbx ; ret);
+    x64!(a ; ->epilogue: ; pop rbx ; ret);
 
     let buf = a.finalize().ok()?;
     Some((Code { buf, entry }, limit))
@@ -340,18 +348,18 @@ fn emit_arm_guard(a: &mut Asm, cond: u8) -> bool {
     };
     match single {
         Some((mask, take_when_set)) => {
-            dynasm!(a ; test DWORD [rbx + CPSR], mask);
+            x64!(a ; test DWORD [rbx + CPSR], mask);
             if take_when_set {
-                dynasm!(a ; jz >skip); // bit clear -> not taken
+                x64!(a ; jz >skip); // bit clear -> not taken
             } else {
-                dynasm!(a ; jnz >skip);
+                x64!(a ; jnz >skip);
             }
             true
         }
         None if cond >= 0xe => false, // AL / unconditional
         None => {
             // Compound condition: defer to the interpreter's exact predicate.
-            dynasm!(a
+            x64!(a
                 ; mov edi, cond as i32
                 ; mov esi, [rbx + CPSR]
                 ; mov rax, QWORD jit_cond_met as *const () as i64
@@ -369,7 +377,7 @@ fn emit_arm_guard(a: &mut Asm, cond: u8) -> bool {
 fn emit_arm_op2(a: &mut Asm, op2: Op2) {
     match op2 {
         Op2::Imm { val, carry } => {
-            dynasm!(a ; mov r10d, val as i32 ; mov r11d, carry as i32);
+            x64!(a ; mov r10d, val as i32 ; mov r11d, carry as i32);
         }
         Op2::ShiftImm { rm, ty, amount } => {
             emit_arm_shift_call(a, rm, ty, amount as i32, false, None);
@@ -384,16 +392,16 @@ fn emit_arm_op2(a: &mut Asm, op2: Op2) {
 /// `r10d` and carry in `r11d`. For a register shift, `amount` comes from
 /// `reg[rs] & 0xff`.
 fn emit_arm_shift_call(a: &mut Asm, rm: u8, ty: u8, amount_imm: i32, reg_shift: bool, rs: Option<u8>) {
-    dynasm!(a
+    x64!(a
         ; mov edi, [rbx + ro(rm)]
         ; mov esi, ty as i32
     );
     if let Some(rs) = rs {
-        dynasm!(a ; mov edx, [rbx + ro(rs)] ; and edx, 0xff);
+        x64!(a ; mov edx, [rbx + ro(rs)] ; and edx, 0xff);
     } else {
-        dynasm!(a ; mov edx, amount_imm);
+        x64!(a ; mov edx, amount_imm);
     }
-    dynasm!(a
+    x64!(a
         ; mov ecx, reg_shift as i32
         ; mov r8d, [rbx + CPSR]
         ; shr r8d, 29
@@ -422,10 +430,10 @@ fn emit_arm(a: &mut Asm, op: &ArmOp, pc: u32) {
             emit_arm_alu(a, opcode, s, rn);
             // Writeback (result in r8d) unless TST/TEQ/CMP/CMN.
             if !matches!(opcode, 0x8..=0xB) {
-                dynasm!(a ; mov [rbx + ro(rd)], r8d);
+                x64!(a ; mov [rbx + ro(rd)], r8d);
             }
             if guarded {
-                dynasm!(a ; skip:);
+                x64!(a ; skip:);
             }
         }
         ArmOp::Multiply { cond, inst, .. } => {
@@ -433,14 +441,14 @@ fn emit_arm(a: &mut Asm, op: &ArmOp, pc: u32) {
             // instruction - registers and flags - so this only has to hand it
             // the context and the word.
             let guarded = emit_arm_guard(a, cond);
-            dynasm!(a
+            x64!(a
                 ; mov rdi, rbx
                 ; mov esi, inst as i32
                 ; mov rax, QWORD jit_arm_multiply as *const () as i64
                 ; call rax
             );
             if guarded {
-                dynasm!(a ; skip:);
+                x64!(a ; skip:);
             }
         }
         ArmOp::LoadStore { .. } => emit_arm_load_store(a, op, pc),
@@ -449,7 +457,7 @@ fn emit_arm(a: &mut Asm, op: &ArmOp, pc: u32) {
             let guarded = emit_arm_guard(a, block_cond(op));
             emit_arm_block_body(a, op, pc);
             if guarded {
-                dynasm!(a ; skip:);
+                x64!(a ; skip:);
             }
         }
         _ => unreachable!("terminator in straight slot"),
@@ -461,41 +469,41 @@ fn emit_arm(a: &mut Asm, op: &ArmOp, pc: u32) {
 fn emit_arm_alu(a: &mut Asm, opcode: u8, s: bool, rn: u8) {
     let logical = matches!(opcode, 0x0 | 0x1 | 0x8 | 0x9 | 0xC | 0xD | 0xE | 0xF);
     match opcode {
-        0x0 | 0x8 => dynasm!(a ; mov eax, [rbx + ro(rn)] ; and eax, r10d),
-        0x1 | 0x9 => dynasm!(a ; mov eax, [rbx + ro(rn)] ; xor eax, r10d),
-        0xC => dynasm!(a ; mov eax, [rbx + ro(rn)] ; or eax, r10d),
-        0xE => dynasm!(a ; mov eax, r10d ; not eax ; and eax, [rbx + ro(rn)]),
-        0xD => dynasm!(a ; mov eax, r10d),
-        0xF => dynasm!(a ; mov eax, r10d ; not eax),
-        0x2 | 0xA => dynasm!(a ; mov eax, [rbx + ro(rn)] ; sub eax, r10d),
-        0x3 => dynasm!(a ; mov eax, r10d ; sub eax, [rbx + ro(rn)]),
-        0x4 | 0xB => dynasm!(a ; mov eax, [rbx + ro(rn)] ; add eax, r10d),
-        0x5 => dynasm!(a
+        0x0 | 0x8 => x64!(a ; mov eax, [rbx + ro(rn)] ; and eax, r10d),
+        0x1 | 0x9 => x64!(a ; mov eax, [rbx + ro(rn)] ; xor eax, r10d),
+        0xC => x64!(a ; mov eax, [rbx + ro(rn)] ; or eax, r10d),
+        0xE => x64!(a ; mov eax, r10d ; not eax ; and eax, [rbx + ro(rn)]),
+        0xD => x64!(a ; mov eax, r10d),
+        0xF => x64!(a ; mov eax, r10d ; not eax),
+        0x2 | 0xA => x64!(a ; mov eax, [rbx + ro(rn)] ; sub eax, r10d),
+        0x3 => x64!(a ; mov eax, r10d ; sub eax, [rbx + ro(rn)]),
+        0x4 | 0xB => x64!(a ; mov eax, [rbx + ro(rn)] ; add eax, r10d),
+        0x5 => x64!(a
             ; mov eax, [rbx + ro(rn)]
             ; mov ecx, [rbx + CPSR] ; shr ecx, 29 ; and ecx, 1 ; neg ecx // CF = C
             ; adc eax, r10d),
-        0x6 => dynasm!(a
+        0x6 => x64!(a
             ; mov eax, [rbx + ro(rn)]
             ; mov ecx, [rbx + CPSR] ; shr ecx, 29 ; and ecx, 1 ; xor ecx, 1 ; neg ecx // CF = 1-C
             ; sbb eax, r10d),
-        0x7 => dynasm!(a
+        0x7 => x64!(a
             ; mov eax, r10d
             ; mov ecx, [rbx + CPSR] ; shr ecx, 29 ; and ecx, 1 ; xor ecx, 1 ; neg ecx
             ; sbb eax, [rbx + ro(rn)]),
         _ => unreachable!(),
     }
     if logical {
-        dynasm!(a ; mov r8d, eax);
+        x64!(a ; mov r8d, eax);
         if s {
             // N,Z from result, C = shifter carry, V preserved.
-            dynasm!(a ; mov ecx, r11d);
+            x64!(a ; mov ecx, r11d);
             emit_flags_nzc(a);
         }
     } else if s {
         let is_add = matches!(opcode, 0x4 | 0x5 | 0xB);
         emit_flags_nzcv(a, is_add);
     } else {
-        dynasm!(a ; mov r8d, eax);
+        x64!(a ; mov r8d, eax);
     }
 }
 
@@ -531,38 +539,38 @@ fn emit_arm_load_store(a: &mut Asm, op: &ArmOp, pc: u32) {
     // Offset -> edx (may call the shifter, which clobbers scratch, so do it
     // before reading the base).
     match offset {
-        Off::Imm(v) => dynasm!(a ; mov edx, v as i32),
+        Off::Imm(v) => x64!(a ; mov edx, v as i32),
         Off::ShiftImm { rm, ty, amount } => {
             emit_arm_shift_call(a, rm, ty, amount as i32, false, None);
-            dynasm!(a ; mov edx, r10d);
+            x64!(a ; mov edx, r10d);
         }
     }
     // Base -> ecx.
     match base_pc {
-        Some(v) => dynasm!(a ; mov ecx, v as i32),
-        None => dynasm!(a ; mov ecx, [rbx + ro(rn)]),
+        Some(v) => x64!(a ; mov ecx, v as i32),
+        None => x64!(a ; mov ecx, [rbx + ro(rn)]),
     }
     // post = up ? base+off : base-off (eax); addr = pre ? post : base (esi).
-    dynasm!(a ; mov eax, ecx);
+    x64!(a ; mov eax, ecx);
     if up {
-        dynasm!(a ; add eax, edx);
+        x64!(a ; add eax, edx);
     } else {
-        dynasm!(a ; sub eax, edx);
+        x64!(a ; sub eax, edx);
     }
     if pre {
-        dynasm!(a ; mov esi, eax);
+        x64!(a ; mov esi, eax);
     } else {
-        dynasm!(a ; mov esi, ecx);
+        x64!(a ; mov esi, ecx);
     }
 
     let do_wb = (!pre || wb) && base_pc.is_none() && (!load || rd != rn);
 
     if load {
         if do_wb {
-            dynasm!(a ; mov [rbx + ro(rn)], eax); // rn = post (eax dies in the call)
+            x64!(a ; mov [rbx + ro(rn)], eax); // rn = post (eax dies in the call)
         }
         let helper = if byte { jit_load8 } else { jit_load32 } as *const () as i64;
-        dynasm!(a
+        x64!(a
             ; mov rdi, rbx
             ; mov rax, QWORD helper
             ; call rax
@@ -577,12 +585,12 @@ fn emit_arm_load_store(a: &mut Asm, op: &ArmOp, pc: u32) {
         );
     } else {
         // Capture the store value before writeback so a store of rn is correct.
-        dynasm!(a ; mov edi, [rbx + ro(rd)]);
+        x64!(a ; mov edi, [rbx + ro(rd)]);
         if do_wb {
-            dynasm!(a ; mov [rbx + ro(rn)], eax);
+            x64!(a ; mov [rbx + ro(rn)], eax);
         }
         let helper = if byte { jit_store8 } else { jit_store32 } as *const () as i64;
-        dynasm!(a
+        x64!(a
             ; mov edx, edi              // value
             ; mov rdi, rbx
             ; mov rax, QWORD helper
@@ -604,7 +612,7 @@ fn emit_arm_load_store(a: &mut Asm, op: &ArmOp, pc: u32) {
         );
     }
     if guarded {
-        dynasm!(a ; skip:);
+        x64!(a ; skip:);
     }
 }
 
@@ -630,53 +638,53 @@ fn emit_arm_half_xfer(a: &mut Asm, op: &ArmOp, pc: u32) {
     let guarded = emit_arm_guard(a, cond);
 
     match offset {
-        Off::Imm(v) => dynasm!(a ; mov edx, v as i32),
+        Off::Imm(v) => x64!(a ; mov edx, v as i32),
         Off::ShiftImm { rm, ty, amount } => {
             emit_arm_shift_call(a, rm, ty, amount as i32, false, None);
-            dynasm!(a ; mov edx, r10d);
+            x64!(a ; mov edx, r10d);
         }
     }
     match base_pc {
-        Some(v) => dynasm!(a ; mov ecx, v as i32),
-        None => dynasm!(a ; mov ecx, [rbx + ro(rn)]),
+        Some(v) => x64!(a ; mov ecx, v as i32),
+        None => x64!(a ; mov ecx, [rbx + ro(rn)]),
     }
-    dynasm!(a ; mov eax, ecx);
+    x64!(a ; mov eax, ecx);
     if up {
-        dynasm!(a ; add eax, edx);
+        x64!(a ; add eax, edx);
     } else {
-        dynasm!(a ; sub eax, edx);
+        x64!(a ; sub eax, edx);
     }
     if pre {
-        dynasm!(a ; mov esi, eax);
+        x64!(a ; mov esi, eax);
     } else {
-        dynasm!(a ; mov esi, ecx);
+        x64!(a ; mov esi, ecx);
     }
     // A halfword access ignores bit 0 of the address (ARM force-alignment); the
     // writeback keeps the unaligned value.
     if halfword {
-        dynasm!(a ; and esi, -2);
+        x64!(a ; and esi, -2);
     }
 
     let do_wb = (!pre || wb) && base_pc.is_none() && (!load || rd != rn);
 
     if load {
         if do_wb {
-            dynasm!(a ; mov [rbx + ro(rn)], eax);
+            x64!(a ; mov [rbx + ro(rn)], eax);
         }
         let helper = if halfword { jit_load16 } else { jit_load8 } as *const () as i64;
-        dynasm!(a
+        x64!(a
             ; mov rdi, rbx
             ; mov rax, QWORD helper
             ; call rax
         );
         if signed {
             if halfword {
-                dynasm!(a ; movsx eax, ax);
+                x64!(a ; movsx eax, ax);
             } else {
-                dynasm!(a ; movsx eax, al);
+                x64!(a ; movsx eax, al);
             }
         }
-        dynasm!(a
+        x64!(a
             ; mov [rbx + ro(rd)], eax
             ; mov ecx, [rbx + FAULTED]
             ; test ecx, ecx
@@ -687,12 +695,12 @@ fn emit_arm_half_xfer(a: &mut Asm, op: &ArmOp, pc: u32) {
             ; nofault:
         );
     } else {
-        dynasm!(a ; mov edi, [rbx + ro(rd)]);
+        x64!(a ; mov edi, [rbx + ro(rd)]);
         if do_wb {
-            dynasm!(a ; mov [rbx + ro(rn)], eax);
+            x64!(a ; mov [rbx + ro(rn)], eax);
         }
         let helper = jit_store16 as *const () as i64;
-        dynasm!(a
+        x64!(a
             ; mov edx, edi
             ; mov rdi, rbx
             ; mov rax, QWORD helper
@@ -714,7 +722,7 @@ fn emit_arm_half_xfer(a: &mut Asm, op: &ArmOp, pc: u32) {
         );
     }
     if guarded {
-        dynasm!(a ; skip:);
+        x64!(a ; skip:);
     }
 }
 
@@ -736,17 +744,17 @@ fn emit_arm_block_body(a: &mut Asm, op: &ArmOp, pc: u32) {
     let regs: alloc::vec::Vec<u8> = (0..16u8).filter(|&r| reglist & (1 << r) != 0).collect();
     let total = regs.len() as i32;
     // orig base -> scratch; writeback rn = post first.
-    dynasm!(a ; mov eax, [rbx + ro(rn)] ; mov [rbx + SCRATCH], eax);
+    x64!(a ; mov eax, [rbx + ro(rn)] ; mov [rbx + SCRATCH], eax);
     let post_delta = if up { total * 4 } else { -total * 4 };
     if wb {
-        dynasm!(a ; mov eax, [rbx + SCRATCH] ; add eax, post_delta ; mov [rbx + ro(rn)], eax);
+        x64!(a ; mov eax, [rbx + SCRATCH] ; add eax, post_delta ; mov [rbx + ro(rn)], eax);
     }
     let addr_base = if up { 0 } else { -total * 4 };
     let pre_incr = (pre == up) as i32;
     for (i, &r) in regs.iter().enumerate() {
         let off = addr_base + (i as i32 + pre_incr) * 4;
         if load {
-            dynasm!(a
+            x64!(a
                 ; mov rdi, rbx
                 ; mov esi, [rbx + SCRATCH]
                 ; add esi, off
@@ -755,19 +763,19 @@ fn emit_arm_block_body(a: &mut Asm, op: &ArmOp, pc: u32) {
                 ; mov [rbx + ro(r)], eax
             );
         } else {
-            dynasm!(a ; mov rdi, rbx ; mov esi, [rbx + SCRATCH] ; add esi, off);
+            x64!(a ; mov rdi, rbx ; mov esi, [rbx + SCRATCH] ; add esi, off);
             if r == 15 {
-                dynasm!(a ; mov edx, pc.wrapping_add(12) as i32);
+                x64!(a ; mov edx, pc.wrapping_add(12) as i32);
             } else if r == rn && wb && i == 0 {
-                dynasm!(a ; mov edx, [rbx + SCRATCH]); // lowest reg + writeback -> original base
+                x64!(a ; mov edx, [rbx + SCRATCH]); // lowest reg + writeback -> original base
             } else {
-                dynasm!(a ; mov edx, [rbx + ro(r)]);
+                x64!(a ; mov edx, [rbx + ro(r)]);
             }
-            dynasm!(a ; mov rax, QWORD jit_store32 as *const () as i64 ; call rax);
+            x64!(a ; mov rax, QWORD jit_store32 as *const () as i64 ; call rax);
         }
     }
     // Deferred fault (+ SMC for stores) check.
-    dynasm!(a
+    x64!(a
         ; mov ecx, [rbx + FAULTED]
         ; test ecx, ecx
         ; jz >nofault
@@ -777,7 +785,7 @@ fn emit_arm_block_body(a: &mut Asm, op: &ArmOp, pc: u32) {
         ; nofault:
     );
     if !load {
-        dynasm!(a
+        x64!(a
             ; mov ecx, [rbx + SMC]
             ; test ecx, ecx
             ; jz >nosmc
@@ -803,20 +811,20 @@ fn emit_arm_terminator(a: &mut Asm, op: &ArmOp, pc: u32, end_pc: u32) {
             target, link, ret, to_thumb, ..
         } => {
             if link {
-                dynasm!(a ; mov DWORD [rbx + ro(14)], ret as i32);
+                x64!(a ; mov DWORD [rbx + ro(14)], ret as i32);
             }
             if to_thumb {
-                dynasm!(a ; or DWORD [rbx + CPSR], (1 << 5));
+                x64!(a ; or DWORD [rbx + CPSR], (1 << 5));
             }
-            dynasm!(a ; mov DWORD [rbx + PC], target as i32);
+            x64!(a ; mov DWORD [rbx + PC], target as i32);
         }
         ArmOp::BranchEx { rm, .. } => {
             if rm == 15 {
-                dynasm!(a ; mov eax, pc.wrapping_add(8) as i32);
+                x64!(a ; mov eax, pc.wrapping_add(8) as i32);
             } else {
-                dynasm!(a ; mov eax, [rbx + ro(rm)]);
+                x64!(a ; mov eax, [rbx + ro(rm)]);
             }
-            dynasm!(a
+            x64!(a
                 ; mov ecx, eax
                 ; and ecx, 1
                 ; mov edx, ecx
@@ -837,7 +845,7 @@ fn emit_arm_terminator(a: &mut Asm, op: &ArmOp, pc: u32, end_pc: u32) {
             // flags: the S form fell back at decode).
             emit_arm_op2(a, op2);
             emit_arm_alu(a, opcode, false, rn);
-            dynasm!(a ; mov [rbx + PC], r8d);
+            x64!(a ; mov [rbx + PC], r8d);
         }
         ArmOp::Block { .. } => {
             emit_arm_block_body(a, op, pc);
@@ -845,9 +853,9 @@ fn emit_arm_terminator(a: &mut Asm, op: &ArmOp, pc: u32, end_pc: u32) {
         }
         _ => unreachable!(),
     }
-    dynasm!(a ; mov eax, exit::CONTINUE as i32 ; jmp ->epilogue);
+    x64!(a ; mov eax, exit::CONTINUE as i32 ; jmp ->epilogue);
     if guarded {
-        dynasm!(a
+        x64!(a
             ; skip:
             ; mov DWORD [rbx + PC], end_pc as i32
             ; mov eax, exit::CONTINUE as i32
@@ -860,45 +868,45 @@ fn emit_arm_terminator(a: &mut Asm, op: &ArmOp, pc: u32, end_pc: u32) {
 fn emit_op(a: &mut Asm, op: FastOp, pc: u32) {
     match op {
         FastOp::AddSubImm { sub, rd, rs, imm } => {
-            dynasm!(a ; mov eax, [rbx + ro(rs)]);
+            x64!(a ; mov eax, [rbx + ro(rs)]);
             if sub {
-                dynasm!(a ; sub eax, imm as i32);
+                x64!(a ; sub eax, imm as i32);
             } else {
-                dynasm!(a ; add eax, imm as i32);
+                x64!(a ; add eax, imm as i32);
             }
             emit_flags_nzcv(a, !sub);
-            dynasm!(a ; mov [rbx + ro(rd)], r8d);
+            x64!(a ; mov [rbx + ro(rd)], r8d);
         }
         FastOp::AddSubReg { sub, rd, rs, rn } => {
-            dynasm!(a ; mov eax, [rbx + ro(rs)]);
+            x64!(a ; mov eax, [rbx + ro(rs)]);
             if sub {
-                dynasm!(a ; sub eax, [rbx + ro(rn)]);
+                x64!(a ; sub eax, [rbx + ro(rn)]);
             } else {
-                dynasm!(a ; add eax, [rbx + ro(rn)]);
+                x64!(a ; add eax, [rbx + ro(rn)]);
             }
             emit_flags_nzcv(a, !sub);
-            dynasm!(a ; mov [rbx + ro(rd)], r8d);
+            x64!(a ; mov [rbx + ro(rd)], r8d);
         }
         FastOp::ImmOp { op, rd, imm } => match op {
             0 => {
                 // MOV: N,Z from imm; C,V preserved.
-                dynasm!(a ; mov eax, imm as i32 ; mov [rbx + ro(rd)], eax ; test eax, eax);
+                x64!(a ; mov eax, imm as i32 ; mov [rbx + ro(rd)], eax ; test eax, eax);
                 emit_flags_nz(a);
             }
             1 => {
                 // CMP: rd - imm, full NZCV, no writeback.
-                dynasm!(a ; mov eax, [rbx + ro(rd)] ; sub eax, imm as i32);
+                x64!(a ; mov eax, [rbx + ro(rd)] ; sub eax, imm as i32);
                 emit_flags_nzcv(a, false);
             }
             2 => {
-                dynasm!(a ; mov eax, [rbx + ro(rd)] ; add eax, imm as i32);
+                x64!(a ; mov eax, [rbx + ro(rd)] ; add eax, imm as i32);
                 emit_flags_nzcv(a, true);
-                dynasm!(a ; mov [rbx + ro(rd)], r8d);
+                x64!(a ; mov [rbx + ro(rd)], r8d);
             }
             3 => {
-                dynasm!(a ; mov eax, [rbx + ro(rd)] ; sub eax, imm as i32);
+                x64!(a ; mov eax, [rbx + ro(rd)] ; sub eax, imm as i32);
                 emit_flags_nzcv(a, false);
-                dynasm!(a ; mov [rbx + ro(rd)], r8d);
+                x64!(a ; mov [rbx + ro(rd)], r8d);
             }
             _ => unreachable!(),
         },
@@ -907,26 +915,26 @@ fn emit_op(a: &mut Asm, op: FastOp, pc: u32) {
             // Operand values, with the PC pipeline offset folded in as a constant.
             let load_crs = |a: &mut Asm| {
                 if crs == 15 {
-                    dynasm!(a ; mov eax, (pc.wrapping_add(4)) as i32);
+                    x64!(a ; mov eax, (pc.wrapping_add(4)) as i32);
                 } else {
-                    dynasm!(a ; mov eax, [rbx + ro(crs)]);
+                    x64!(a ; mov eax, [rbx + ro(crs)]);
                 }
             };
             match op {
                 0 => {
                     // ADD (no flags). crd != 15 guaranteed by decode.
                     load_crs(a);
-                    dynasm!(a ; add [rbx + ro(crd)], eax);
+                    x64!(a ; add [rbx + ro(crd)], eax);
                 }
                 2 => {
                     // MOV (no flags).
                     load_crs(a);
-                    dynasm!(a ; mov [rbx + ro(crd)], eax);
+                    x64!(a ; mov [rbx + ro(crd)], eax);
                 }
                 1 => {
                     // CMP: crd - crs, full NZCV.
                     load_crs(a);
-                    dynasm!(a ; mov ecx, [rbx + ro(crd)] ; sub ecx, eax ; mov eax, ecx);
+                    x64!(a ; mov ecx, [rbx + ro(crd)] ; sub ecx, eax ; mov eax, ecx);
                     emit_flags_nzcv(a, false);
                 }
                 _ => unreachable!(),
@@ -934,26 +942,26 @@ fn emit_op(a: &mut Asm, op: FastOp, pc: u32) {
         }
         FastOp::PcLoad { rd, offset } => {
             let addr = pc.wrapping_add(4).wrapping_add(offset * 4) & !3;
-            emit_load(a, 32, false, rd, |a| dynasm!(a ; mov esi, addr as i32), pc);
+            emit_load(a, 32, false, rd, |a| x64!(a ; mov esi, addr as i32), pc);
         }
         FastOp::LoadAddr { sp, rd, imm } => {
             if sp {
-                dynasm!(a ; mov eax, [rbx + ro(13)] ; add eax, (imm * 4) as i32 ; mov [rbx + ro(rd)], eax);
+                x64!(a ; mov eax, [rbx + ro(13)] ; add eax, (imm * 4) as i32 ; mov [rbx + ro(rd)], eax);
             } else {
                 let v = (pc.wrapping_add(4) & !2).wrapping_add(imm * 4);
-                dynasm!(a ; mov DWORD [rbx + ro(rd)], v as i32);
+                x64!(a ; mov DWORD [rbx + ro(rd)], v as i32);
             }
         }
         FastOp::SpAdd { sub, imm } => {
             if sub {
-                dynasm!(a ; sub DWORD [rbx + ro(13)], imm as i32);
+                x64!(a ; sub DWORD [rbx + ro(13)], imm as i32);
             } else {
-                dynasm!(a ; add DWORD [rbx + ro(13)], imm as i32);
+                x64!(a ; add DWORD [rbx + ro(13)], imm as i32);
             }
         }
         FastOp::HwXferI { load, rb, rd, offset } => {
             let off = (offset * 2) as i32;
-            let addr = |a: &mut Asm| dynasm!(a ; mov esi, [rbx + ro(rb)] ; add esi, off ; and esi, !1);
+            let addr = |a: &mut Asm| x64!(a ; mov esi, [rbx + ro(rb)] ; add esi, off ; and esi, !1);
             if load {
                 emit_load(a, 16, false, rd, addr, pc);
             } else {
@@ -962,7 +970,7 @@ fn emit_op(a: &mut Asm, op: FastOp, pc: u32) {
         }
         FastOp::SingleXferI { load, byte, rb, rd, offset } => {
             let scaled = if byte { offset } else { offset * 4 } as i32;
-            let addr = move |a: &mut Asm| dynasm!(a ; mov esi, [rbx + ro(rb)] ; add esi, scaled);
+            let addr = move |a: &mut Asm| x64!(a ; mov esi, [rbx + ro(rb)] ; add esi, scaled);
             let size = if byte { 8 } else { 32 };
             if load {
                 emit_load(a, size, false, rd, addr, pc);
@@ -971,7 +979,7 @@ fn emit_op(a: &mut Asm, op: FastOp, pc: u32) {
             }
         }
         FastOp::SpXfer { load, rd, offset } => {
-            let addr = move |a: &mut Asm| dynasm!(a ; mov esi, [rbx + ro(13)] ; add esi, offset as i32);
+            let addr = move |a: &mut Asm| x64!(a ; mov esi, [rbx + ro(13)] ; add esi, offset as i32);
             if load {
                 emit_load(a, 32, false, rd, addr, pc);
             } else {
@@ -985,7 +993,7 @@ fn emit_op(a: &mut Asm, op: FastOp, pc: u32) {
             rb,
             rd,
         } => {
-            let addr = move |a: &mut Asm| dynasm!(a ; mov esi, [rbx + ro(rb)] ; add esi, [rbx + ro(roff)]);
+            let addr = move |a: &mut Asm| x64!(a ; mov esi, [rbx + ro(rb)] ; add esi, [rbx + ro(roff)]);
             let size = if byte { 8 } else { 32 };
             if load {
                 emit_load(a, size, false, rd, addr, pc);
@@ -996,8 +1004,8 @@ fn emit_op(a: &mut Asm, op: FastOp, pc: u32) {
         FastOp::Shift { op, rd, rs, shift } => emit_shift(a, op, rd, rs, shift),
         FastOp::HwSgnXfer { s, h, ro: roff, rb, rd } => {
             // Halfword accesses align the address; the signed-byte load does not.
-            let hw_addr = move |a: &mut Asm| dynasm!(a ; mov esi, [rbx + ro(rb)] ; add esi, [rbx + ro(roff)] ; and esi, !1);
-            let byte_addr = move |a: &mut Asm| dynasm!(a ; mov esi, [rbx + ro(rb)] ; add esi, [rbx + ro(roff)]);
+            let hw_addr = move |a: &mut Asm| x64!(a ; mov esi, [rbx + ro(rb)] ; add esi, [rbx + ro(roff)] ; and esi, !1);
+            let byte_addr = move |a: &mut Asm| x64!(a ; mov esi, [rbx + ro(rb)] ; add esi, [rbx + ro(roff)]);
             match (s, h) {
                 (false, false) => emit_store(a, 16, rd, hw_addr, pc),      // strh
                 (false, true) => emit_load(a, 16, false, rd, hw_addr, pc), // ldrh
@@ -1036,7 +1044,7 @@ fn emit_push_pop(a: &mut Asm, load: bool, extra: bool, rlist: u8, pc: u32) {
         // POP: addr = SP, load ascending, then SP += total*4.
         for (i, &r) in regs.iter().enumerate() {
             let off = i as i32 * 4;
-            dynasm!(a
+            x64!(a
                 ; mov rdi, rbx
                 ; mov esi, [rbx + ro(13)]
                 ; add esi, off
@@ -1045,7 +1053,7 @@ fn emit_push_pop(a: &mut Asm, load: bool, extra: bool, rlist: u8, pc: u32) {
             );
             if r == 15 {
                 // POP {..,pc}: T from bit 0, PC = val & !1.
-                dynasm!(a
+                x64!(a
                     ; mov r8d, eax
                     ; mov ecx, r8d
                     ; and ecx, 1
@@ -1059,15 +1067,15 @@ fn emit_push_pop(a: &mut Asm, load: bool, extra: bool, rlist: u8, pc: u32) {
                     ; mov [rbx + PC], r8d
                 );
             } else {
-                dynasm!(a ; mov [rbx + ro(r)], eax);
+                x64!(a ; mov [rbx + ro(r)], eax);
             }
         }
-        dynasm!(a ; add DWORD [rbx + ro(13)], total * 4);
+        x64!(a ; add DWORD [rbx + ro(13)], total * 4);
     } else {
         // PUSH: addr = SP - total*4, store ascending, then SP = addr.
         for (i, &r) in regs.iter().enumerate() {
             let off = i as i32 * 4 - total * 4;
-            dynasm!(a
+            x64!(a
                 ; mov rdi, rbx
                 ; mov esi, [rbx + ro(13)]
                 ; add esi, off
@@ -1076,19 +1084,19 @@ fn emit_push_pop(a: &mut Asm, load: bool, extra: bool, rlist: u8, pc: u32) {
                 ; call rax
             );
         }
-        dynasm!(a ; sub DWORD [rbx + ro(13)], total * 4);
+        x64!(a ; sub DWORD [rbx + ro(13)], total * 4);
     }
 
     // Deferred fault check. A pop-with-pc has already written the popped PC; the
     // other forms report the instruction's own next PC.
-    dynasm!(a ; mov ecx, [rbx + FAULTED] ; test ecx, ecx ; jz >nofault);
+    x64!(a ; mov ecx, [rbx + FAULTED] ; test ecx, ecx ; jz >nofault);
     if !pop_pc {
-        dynasm!(a ; mov DWORD [rbx + PC], pc.wrapping_add(2) as i32);
+        x64!(a ; mov DWORD [rbx + PC], pc.wrapping_add(2) as i32);
     }
-    dynasm!(a ; mov eax, exit::FAULT as i32 ; jmp ->epilogue ; nofault:);
+    x64!(a ; mov eax, exit::FAULT as i32 ; jmp ->epilogue ; nofault:);
     if !load {
         // A push can hit a page holding compiled code (self-modifying code).
-        dynasm!(a
+        x64!(a
             ; mov ecx, [rbx + SMC]
             ; test ecx, ecx
             ; jz >nosmc
@@ -1099,7 +1107,7 @@ fn emit_push_pop(a: &mut Asm, load: bool, extra: bool, rlist: u8, pc: u32) {
         );
     }
     if pop_pc {
-        dynasm!(a ; mov eax, exit::CONTINUE as i32 ; jmp ->epilogue);
+        x64!(a ; mov eax, exit::CONTINUE as i32 ; jmp ->epilogue);
     }
 }
 
@@ -1112,7 +1120,7 @@ fn emit_push_pop(a: &mut Asm, load: bool, extra: bool, rlist: u8, pc: u32) {
 fn emit_block_xfer(a: &mut Asm, load: bool, rb: u8, rlist: u8, pc: u32) {
     let regs: alloc::vec::Vec<u8> = (0..8u8).filter(|&r| rlist & (1 << r) != 0).collect();
     let total = regs.len() as i32;
-    dynasm!(a
+    x64!(a
         ; mov eax, [rbx + ro(rb)]
         ; mov [rbx + SCRATCH], eax   // scratch = base
         ; add eax, total * 4
@@ -1121,7 +1129,7 @@ fn emit_block_xfer(a: &mut Asm, load: bool, rb: u8, rlist: u8, pc: u32) {
     for (i, &r) in regs.iter().enumerate() {
         let off = i as i32 * 4;
         if load {
-            dynasm!(a
+            x64!(a
                 ; mov rdi, rbx
                 ; mov esi, [rbx + SCRATCH]
                 ; add esi, off
@@ -1130,16 +1138,16 @@ fn emit_block_xfer(a: &mut Asm, load: bool, rb: u8, rlist: u8, pc: u32) {
                 ; mov [rbx + ro(r)], eax
             );
         } else {
-            dynasm!(a ; mov rdi, rbx ; mov esi, [rbx + SCRATCH] ; add esi, off);
+            x64!(a ; mov rdi, rbx ; mov esi, [rbx + SCRATCH] ; add esi, off);
             if r == rb && i == 0 {
-                dynasm!(a ; mov edx, [rbx + SCRATCH]); // lowest slot stores the original base
+                x64!(a ; mov edx, [rbx + SCRATCH]); // lowest slot stores the original base
             } else {
-                dynasm!(a ; mov edx, [rbx + ro(r)]);
+                x64!(a ; mov edx, [rbx + ro(r)]);
             }
-            dynasm!(a ; mov rax, QWORD jit_store32 as *const () as i64 ; call rax);
+            x64!(a ; mov rax, QWORD jit_store32 as *const () as i64 ; call rax);
         }
     }
-    dynasm!(a
+    x64!(a
         ; mov ecx, [rbx + FAULTED]
         ; test ecx, ecx
         ; jz >nofault
@@ -1149,7 +1157,7 @@ fn emit_block_xfer(a: &mut Asm, load: bool, rb: u8, rlist: u8, pc: u32) {
         ; nofault:
     );
     if !load {
-        dynasm!(a
+        x64!(a
             ; mov ecx, [rbx + SMC]
             ; test ecx, ecx
             ; jz >nosmc
@@ -1165,11 +1173,11 @@ fn emit_block_xfer(a: &mut Asm, load: bool, rb: u8, rlist: u8, pc: u32) {
 /// from bit 0, optionally set LR, and end the trace.
 fn emit_bx(a: &mut Asm, link: bool, rm: u8, pc: u32) {
     if rm == 15 {
-        dynasm!(a ; mov eax, pc.wrapping_add(4) as i32);
+        x64!(a ; mov eax, pc.wrapping_add(4) as i32);
     } else {
-        dynasm!(a ; mov eax, [rbx + ro(rm)]);
+        x64!(a ; mov eax, [rbx + ro(rm)]);
     }
-    dynasm!(a
+    x64!(a
         ; mov ecx, eax
         ; and ecx, 1                 // new T bit
         // PC = vals & (new_t ? !1 : !3) = vals & (0xFFFFFFFC | new_t<<1)
@@ -1186,15 +1194,15 @@ fn emit_bx(a: &mut Asm, link: bool, rm: u8, pc: u32) {
         ; mov [rbx + CPSR], edx
     );
     if link {
-        dynasm!(a ; mov DWORD [rbx + ro(14)], (pc.wrapping_add(2) | 1) as i32);
+        x64!(a ; mov DWORD [rbx + ro(14)], (pc.wrapping_add(2) | 1) as i32);
     }
-    dynasm!(a ; mov eax, exit::CONTINUE as i32 ; jmp ->epilogue);
+    x64!(a ; mov eax, exit::CONTINUE as i32 ; jmp ->epilogue);
 }
 
 /// Emit `mov pc, rm` (`rm != PC`). Unlike `bx`, this does not interwork: the
 /// target is `rm & !1` and the Thumb state is unchanged, so no CPSR write.
 fn emit_mov_pc(a: &mut Asm, rm: u8) {
-    dynasm!(a
+    x64!(a
         ; mov eax, [rbx + ro(rm)]
         ; and eax, !1
         ; mov [rbx + PC], eax
@@ -1206,14 +1214,14 @@ fn emit_mov_pc(a: &mut Asm, rm: u8) {
 /// Emit `bl`/`blx` immediate: set LR to the return address and PC to the
 /// pre-computed target; BLX also clears the Thumb bit. Ends the trace.
 fn emit_bl(a: &mut Asm, exchange: bool, target: u32, ret: u32) {
-    dynasm!(a
+    x64!(a
         ; mov DWORD [rbx + ro(14)], ret as i32
         ; mov DWORD [rbx + PC], target as i32
     );
     if exchange {
-        dynasm!(a ; and DWORD [rbx + CPSR], !(1 << 5));
+        x64!(a ; and DWORD [rbx + CPSR], !(1 << 5));
     }
-    dynasm!(a ; mov eax, exit::CONTINUE as i32 ; jmp ->epilogue);
+    x64!(a ; mov eax, exit::CONTINUE as i32 ; jmp ->epilogue);
 }
 
 /// Thumb `Shifted` (LSL/LSR/ASR by a 5-bit immediate). Updates N, Z and C
@@ -1224,38 +1232,38 @@ fn emit_shift(a: &mut Asm, op: u8, rd: u8, rs: u8, shift: u32) {
         match op {
             0 => {
                 // LSL #0: value unchanged, C preserved -> only N,Z change.
-                dynasm!(a ; mov eax, [rbx + ro(rs)] ; mov [rbx + ro(rd)], eax ; test eax, eax);
+                x64!(a ; mov eax, [rbx + ro(rs)] ; mov [rbx + ro(rd)], eax ; test eax, eax);
                 emit_flags_nz(a);
                 return;
             }
             1 => {
                 // LSR #0 == LSR #32: result 0, C = bit 31.
-                dynasm!(a ; mov eax, [rbx + ro(rs)] ; mov ecx, eax ; shr ecx, 31 ; xor eax, eax);
+                x64!(a ; mov eax, [rbx + ro(rs)] ; mov ecx, eax ; shr ecx, 31 ; xor eax, eax);
             }
             2 => {
                 // ASR #0 == ASR #32: result = sign-extend, C = bit 31.
-                dynasm!(a ; mov eax, [rbx + ro(rs)] ; mov ecx, eax ; shr ecx, 31 ; sar eax, 31);
+                x64!(a ; mov eax, [rbx + ro(rs)] ; mov ecx, eax ; shr ecx, 31 ; sar eax, 31);
             }
             _ => unreachable!(),
         }
     } else {
-        dynasm!(a ; mov eax, [rbx + ro(rs)] ; mov ecx, eax);
+        x64!(a ; mov eax, [rbx + ro(rs)] ; mov ecx, eax);
         match op {
-            0 => dynasm!(a ; shr ecx, (32 - shift) as i8 ; and ecx, 1 ; shl eax, shift as i8),
-            1 => dynasm!(a ; shr ecx, (shift - 1) as i8 ; and ecx, 1 ; shr eax, shift as i8),
-            2 => dynasm!(a ; shr ecx, (shift - 1) as i8 ; and ecx, 1 ; sar eax, shift as i8),
+            0 => x64!(a ; shr ecx, (32 - shift) as i8 ; and ecx, 1 ; shl eax, shift as i8),
+            1 => x64!(a ; shr ecx, (shift - 1) as i8 ; and ecx, 1 ; shr eax, shift as i8),
+            2 => x64!(a ; shr ecx, (shift - 1) as i8 ; and ecx, 1 ; sar eax, shift as i8),
             _ => unreachable!(),
         }
     }
     // res in eax, carry (0/1) in ecx.
-    dynasm!(a ; mov [rbx + ro(rd)], eax);
+    x64!(a ; mov [rbx + ro(rd)], eax);
     emit_flags_nzc(a);
 }
 
 /// Pack N, Z (from the result in `eax`) and C (0/1 in `ecx`) into CPSR,
 /// preserving V. The result must already be stored.
 fn emit_flags_nzc(a: &mut Asm) {
-    dynasm!(a
+    x64!(a
         ; test eax, eax
         ; setz r9b
         ; sets r10b
@@ -1279,49 +1287,49 @@ fn emit_alu(a: &mut Asm, op: u8, rd: u8, rs: u8) {
     match op {
         0x0 => {
             // AND (N,Z; C,V preserved)
-            dynasm!(a ; mov eax, [rbx + ro(rd)] ; and eax, [rbx + ro(rs)] ; mov [rbx + ro(rd)], eax ; test eax, eax);
+            x64!(a ; mov eax, [rbx + ro(rd)] ; and eax, [rbx + ro(rs)] ; mov [rbx + ro(rd)], eax ; test eax, eax);
             emit_flags_nz(a);
         }
         0x1 => {
             // EOR
-            dynasm!(a ; mov eax, [rbx + ro(rd)] ; xor eax, [rbx + ro(rs)] ; mov [rbx + ro(rd)], eax ; test eax, eax);
+            x64!(a ; mov eax, [rbx + ro(rd)] ; xor eax, [rbx + ro(rs)] ; mov [rbx + ro(rd)], eax ; test eax, eax);
             emit_flags_nz(a);
         }
         0xC => {
             // ORR
-            dynasm!(a ; mov eax, [rbx + ro(rd)] ; or eax, [rbx + ro(rs)] ; mov [rbx + ro(rd)], eax ; test eax, eax);
+            x64!(a ; mov eax, [rbx + ro(rd)] ; or eax, [rbx + ro(rs)] ; mov [rbx + ro(rd)], eax ; test eax, eax);
             emit_flags_nz(a);
         }
         0xE => {
             // BIC: rd & !rs
-            dynasm!(a ; mov eax, [rbx + ro(rs)] ; not eax ; and eax, [rbx + ro(rd)] ; mov [rbx + ro(rd)], eax ; test eax, eax);
+            x64!(a ; mov eax, [rbx + ro(rs)] ; not eax ; and eax, [rbx + ro(rd)] ; mov [rbx + ro(rd)], eax ; test eax, eax);
             emit_flags_nz(a);
         }
         0xF => {
             // MVN: !rs
-            dynasm!(a ; mov eax, [rbx + ro(rs)] ; not eax ; mov [rbx + ro(rd)], eax ; test eax, eax);
+            x64!(a ; mov eax, [rbx + ro(rs)] ; not eax ; mov [rbx + ro(rd)], eax ; test eax, eax);
             emit_flags_nz(a);
         }
         0x8 => {
             // TST: rd & rs, N,Z only, no writeback
-            dynasm!(a ; mov eax, [rbx + ro(rd)] ; and eax, [rbx + ro(rs)] ; test eax, eax);
+            x64!(a ; mov eax, [rbx + ro(rd)] ; and eax, [rbx + ro(rs)] ; test eax, eax);
             emit_flags_nz(a);
         }
         0xA => {
             // CMP: rd - rs, full NZCV, no writeback
-            dynasm!(a ; mov eax, [rbx + ro(rd)] ; sub eax, [rbx + ro(rs)]);
+            x64!(a ; mov eax, [rbx + ro(rd)] ; sub eax, [rbx + ro(rs)]);
             emit_flags_nzcv(a, false);
         }
         0xB => {
             // CMN: rd + rs, full NZCV, no writeback
-            dynasm!(a ; mov eax, [rbx + ro(rd)] ; add eax, [rbx + ro(rs)]);
+            x64!(a ; mov eax, [rbx + ro(rd)] ; add eax, [rbx + ro(rs)]);
             emit_flags_nzcv(a, true);
         }
         0x9 => {
             // NEG: 0 - rs, full NZCV, writeback
-            dynasm!(a ; xor eax, eax ; sub eax, [rbx + ro(rs)]);
+            x64!(a ; xor eax, eax ; sub eax, [rbx + ro(rs)]);
             emit_flags_nzcv(a, false);
-            dynasm!(a ; mov [rbx + ro(rd)], r8d);
+            x64!(a ; mov [rbx + ro(rd)], r8d);
         }
         0x5 => {
             // ADC: rd + rs + C, full NZCV, writeback. `adc` takes its carry-in
@@ -1330,22 +1338,22 @@ fn emit_alu(a: &mut Asm, op: u8, rd: u8, rs: u8) {
             // narrowed to 0 or 1 is the bit itself. `mov` does not disturb flags,
             // so loading rd in between is safe.
             emit_arm_carry_in(a, rd, false);
-            dynasm!(a ; adc eax, [rbx + ro(rs)]);
+            x64!(a ; adc eax, [rbx + ro(rs)]);
             emit_flags_nzcv(a, true);
-            dynasm!(a ; mov [rbx + ro(rd)], r8d);
+            x64!(a ; mov [rbx + ro(rd)], r8d);
         }
         0x6 => {
             // SBC: rd - rs - (1 - C), full NZCV, writeback. `sbb` borrows by the
             // host carry, and the borrow ARM wants is the inverse of its C - which
             // is what comparing the bit against one leaves behind.
             emit_arm_carry_in(a, rd, true);
-            dynasm!(a ; sbb eax, [rbx + ro(rs)]);
+            x64!(a ; sbb eax, [rbx + ro(rs)]);
             emit_flags_nzcv(a, false);
-            dynasm!(a ; mov [rbx + ro(rd)], r8d);
+            x64!(a ; mov [rbx + ro(rd)], r8d);
         }
         0xD => {
             // MUL: rd * rs (low 32 bits); N,Z from result, C forced to 0, V kept.
-            dynasm!(a ; mov eax, [rbx + ro(rd)] ; imul eax, [rbx + ro(rs)] ; mov [rbx + ro(rd)], eax ; xor ecx, ecx);
+            x64!(a ; mov eax, [rbx + ro(rd)] ; imul eax, [rbx + ro(rs)] ; mov [rbx + ro(rd)], eax ; xor ecx, ecx);
             emit_flags_nzc(a);
         }
         0x2 | 0x3 | 0x4 | 0x7 => {
@@ -1354,7 +1362,7 @@ fn emit_alu(a: &mut Asm, op: u8, rd: u8, rs: u8) {
             // interpreter's exact shift semantics (large amounts, ROR/RRX edges)
             // are reused via `jit_alu_shift` rather than re-encoded here.
             let shift_type = (((op >> 1) & 2) | (op & 1)) as i32;
-            dynasm!(a
+            x64!(a
                 ; mov edi, [rbx + ro(rd)]      // val
                 ; mov esi, [rbx + ro(rs)]      // amount
                 ; mov edx, shift_type          // shift type
@@ -1384,16 +1392,16 @@ fn emit_alu(a: &mut Asm, op: u8, rd: u8, rs: u8) {
 /// nothing may touch the flags between them and the caller's `adc`/`sbb`, and
 /// `mov` does not.
 fn emit_arm_carry_in(a: &mut Asm, rd: u8, invert: bool) {
-    dynasm!(a
+    x64!(a
         ; mov ecx, [rbx + CPSR]
         ; shr ecx, 29
         ; and ecx, 1
         ; mov eax, [rbx + ro(rd)]
     );
     if invert {
-        dynasm!(a ; cmp ecx, 1);
+        x64!(a ; cmp ecx, 1);
     } else {
-        dynasm!(a ; neg ecx);
+        x64!(a ; neg ecx);
     }
 }
 
@@ -1401,18 +1409,18 @@ fn emit_arm_carry_in(a: &mut Asm, rd: u8, invert: bool) {
 /// and pack ARM NZCV into CPSR. `is_add` selects the carry mapping (ARM carry is
 /// the add carry-out, but the inverse of the subtract borrow).
 fn emit_flags_nzcv(a: &mut Asm, is_add: bool) {
-    dynasm!(a
+    x64!(a
         ; mov r8d, eax          // save result (does not touch flags)
         ; setz r9b              // Z
         ; sets r10b             // N
         ; seto cl               // V
     );
     if is_add {
-        dynasm!(a ; setc r11b);
+        x64!(a ; setc r11b);
     } else {
-        dynasm!(a ; setnc r11b);
+        x64!(a ; setnc r11b);
     }
-    dynasm!(a
+    x64!(a
         ; movzx r9d, r9b
         ; movzx r10d, r10b
         ; movzx r11d, r11b
@@ -1434,7 +1442,7 @@ fn emit_flags_nzcv(a: &mut Asm, is_add: bool) {
 /// After `test eax, eax` (or any op leaving ZF/SF for the result), update only
 /// N and Z in CPSR, preserving C and V.
 fn emit_flags_nz(a: &mut Asm) {
-    dynasm!(a
+    x64!(a
         ; setz r9b
         ; sets r10b
         ; movzx r9d, r9b
@@ -1458,13 +1466,13 @@ fn emit_load(a: &mut Asm, size: u8, signed: bool, rd: u8, addr: impl FnOnce(&mut
         16 => jit_load16 as *const () as i64,
         _ => jit_load32 as *const () as i64,
     };
-    dynasm!(a ; mov rdi, rbx);
+    x64!(a ; mov rdi, rbx);
     addr(a); // sets esi = effective address
     // Inline fast path: a mapped, naturally aligned access reads the guest page
     // directly (host is little-endian, like the guest), skipping the helper call.
     // A null page (unmapped) or a misaligned access takes the slow path, whose
     // helper reproduces the fault / unaligned-rotate semantics exactly.
-    dynasm!(a
+    x64!(a
         ; mov ecx, esi
         ; shr ecx, 16                     // 64 KiB page index
         ; mov rdx, [rbx + PAGES]
@@ -1474,18 +1482,18 @@ fn emit_load(a: &mut Asm, size: u8, signed: bool, rd: u8, addr: impl FnOnce(&mut
     );
     if size != 8 {
         let align = (size as i32 / 8) - 1; // 16->1, 32->3
-        dynasm!(a ; test esi, align ; jnz >slow);
+        x64!(a ; test esi, align ; jnz >slow);
     }
-    dynasm!(a ; mov ecx, esi ; and ecx, 0xffff); // in-page offset
+    x64!(a ; mov ecx, esi ; and ecx, 0xffff); // in-page offset
     match (size, signed) {
-        (8, true) => dynasm!(a ; movsx r8d, BYTE [rdx + rcx]),
-        (8, false) => dynasm!(a ; movzx r8d, BYTE [rdx + rcx]),
-        (16, true) => dynasm!(a ; movsx r8d, WORD [rdx + rcx]),
-        (16, false) => dynasm!(a ; movzx r8d, WORD [rdx + rcx]),
-        _ => dynasm!(a ; mov r8d, [rdx + rcx]),
+        (8, true) => x64!(a ; movsx r8d, BYTE [rdx + rcx]),
+        (8, false) => x64!(a ; movzx r8d, BYTE [rdx + rcx]),
+        (16, true) => x64!(a ; movsx r8d, WORD [rdx + rcx]),
+        (16, false) => x64!(a ; movzx r8d, WORD [rdx + rcx]),
+        _ => x64!(a ; mov r8d, [rdx + rcx]),
     }
-    dynasm!(a ; jmp >done);
-    dynasm!(a
+    x64!(a ; jmp >done);
+    x64!(a
         ; slow:
         ; mov rax, QWORD helper
         ; call rax
@@ -1493,17 +1501,17 @@ fn emit_load(a: &mut Asm, size: u8, signed: bool, rd: u8, addr: impl FnOnce(&mut
     );
     if signed {
         match size {
-            8 => dynasm!(a ; movsx r8d, r8b),
-            16 => dynasm!(a ; movsx r8d, r8w),
+            8 => x64!(a ; movsx r8d, r8b),
+            16 => x64!(a ; movsx r8d, r8w),
             _ => {}
         }
     }
-    dynasm!(a ; done:);
+    x64!(a ; done:);
     // Write the destination *before* checking for a fault: the interpreter's
     // load path stores the (dummy 0) value into rd even when the access faults,
     // then aborts, so we must too. The fast path never faults (page is mapped),
     // so it leaves FAULTED at 0 and skips the exit.
-    dynasm!(a
+    x64!(a
         ; mov [rbx + ro(rd)], r8d
         ; mov ecx, [rbx + FAULTED]
         ; test ecx, ecx
@@ -1523,9 +1531,9 @@ fn emit_store(a: &mut Asm, size: u8, rd: u8, addr: impl FnOnce(&mut Asm), pc: u3
         16 => jit_store16 as *const () as i64,
         _ => jit_store32 as *const () as i64,
     };
-    dynasm!(a ; mov rdi, rbx);
+    x64!(a ; mov rdi, rbx);
     addr(a);
-    dynasm!(a
+    x64!(a
         ; mov edx, [rbx + ro(rd)]
         ; mov rax, QWORD helper
         ; call rax

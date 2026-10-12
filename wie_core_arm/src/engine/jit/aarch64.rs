@@ -29,9 +29,9 @@ use crate::engine::fast::{FastOp, ends_trace};
 use super::arm_frontend::{ArmOp, Off, Op2, arm_ends_trace};
 use super::{JitCtx, exit, jit_alu_shift, jit_arm_multiply, jit_arm_shift, jit_load8, jit_load16, jit_load32, jit_store8, jit_store16, jit_store32};
 
-/// `dynasm!` selects the target architecture per invocation, defaulting to x64;
-/// this wrapper prepends `.arch aarch64` so every code-emitting helper assembles
-/// AArch64 without repeating the directive.
+/// `dynasm!` selects the target architecture per invocation, defaulting to the
+/// build machine's; this wrapper prepends `.arch aarch64` so every
+/// code-emitting helper assembles AArch64 without repeating the directive.
 macro_rules! a64 {
     ($ops:expr ; $($t:tt)*) => {
         dynasm!($ops ; .arch aarch64 ; $($t)*)
