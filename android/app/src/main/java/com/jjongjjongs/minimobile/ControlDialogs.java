@@ -515,8 +515,9 @@ final class ControlDialogs {
         MainActivity player = this.s.a instanceof MainActivity ? (MainActivity) this.s.a : null;
         String design = player != null ? KeypadTheme.NAMES[player.keypadThemeId()] : "";
         String arrangement = player != null && player.keypadNumbers() ? "숫자 크게" : "기본";
-        final String[] strArr = {"키패드 디자인 · " + design, "키패드 배치 · " + arrangement, "키패드 위치·크기 편집", "버튼별 표시·숨김", "버튼별 연사 ON/OFF", "배치 저장·백업·초기화", "게임패드 버튼 배치"};
-        final String[] iconArr = {"🎨", "🎹", "✏", "👁", "⚡", "🗂", "🎮"};
+        String unfolded = player == null || player.unfoldedSideLayout() ? "가로 배치" : "세로 배치";
+        final String[] strArr = {"키패드 디자인 · " + design, "키패드 배치 · " + arrangement, "펼친 화면 · " + unfolded, "키패드 위치·크기 편집", "버튼별 표시·숨김", "버튼별 연사 ON/OFF", "배치 저장·백업·초기화", "게임패드 버튼 배치"};
+        final String[] iconArr = {"🎨", "🎹", "📖", "✏", "👁", "⚡", "🗂", "🎮"};
         LinearLayout column = column();
         column.addView(this.style.hint("설정을 변경하는 동안 게임을 일시정지합니다."));
         ScrollView scrollView = new ScrollView(this.style.context);
@@ -527,12 +528,12 @@ final class ControlDialogs {
             final int idx = i;
             if (idx == 0) {
                 linearLayout = this.style.section(column, "키패드");
-            } else if (idx == 5) {
-                linearLayout = this.style.section(column, "배치");
             } else if (idx == 6) {
+                linearLayout = this.style.section(column, "배치");
+            } else if (idx == 7) {
                 linearLayout = this.style.section(column, "게임패드");
             }
-            String detail = idx == 5 ? "저장 · 불러오기 · 파일 백업·복원 · 초기화" : null;
+            String detail = idx == 6 ? "저장 · 불러오기 · 파일 백업·복원 · 초기화" : idx == 2 ? "폴드를 펼쳤을 때·태블릿" : null;
             this.style.menuRow(linearLayout, iconArr[idx], strArr[idx], detail, new View.OnClickListener() {
                 @Override // android.view.View.OnClickListener
                 public void onClick(View view) {
@@ -544,18 +545,23 @@ final class ControlDialogs {
                             ControlDialogs.this.keypadArrangement();
                             break;
                         case 2:
-                            ControlDialogs.this.s.editor.start();
+                            if (player != null) {
+                                player.showUnfoldedLayoutDialog();
+                            }
                             break;
                         case 3:
-                            ControlDialogs.this.visibility();
+                            ControlDialogs.this.s.editor.start();
                             break;
                         case 4:
-                            ControlDialogs.this.rapidSettings();
+                            ControlDialogs.this.visibility();
                             break;
                         case 5:
-                            ControlDialogs.this.layoutStorageMenu();
+                            ControlDialogs.this.rapidSettings();
                             break;
                         case 6:
+                            ControlDialogs.this.layoutStorageMenu();
+                            break;
+                        case 7:
                             ControlDialogs.this.padMenu();
                             break;
                     }

@@ -441,6 +441,12 @@ public final class MainActivity extends Activity {
     private File currentGame;
     /** Which way the player is turned; the toggle in the title bar flips it. */
     private boolean landscapeMode;
+    /**
+     * Whether the window is wide enough upright to be an unfolded Fold or a
+     * tablet - its short side at least {@link #UNFOLDED_MIN_DP} - so the
+     * player can lay out with the keys at the sides without turning.
+     */
+    private boolean unfolded;
     /** What is waiting on the storage permission, if anything. */
     private Runnable pendingDownload;
     /** Telephone number waiting for Android's runtime CALL_PHONE permission. */
@@ -4586,6 +4592,7 @@ public final class MainActivity extends Activity {
         // Whichever way the phone is being held: the player opens the way the
         // window already is, not the way the last one was.
         landscapeMode = getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
+        unfolded = isUnfolded(getResources().getConfiguration());
         orientationPinned = false;
         // The player is a dark device again, so restore light status-bar icons.
         setLightStatusBar(false);
@@ -4636,8 +4643,13 @@ public final class MainActivity extends Activity {
         detach(keypad);
         // With the keypad put away the screen has the whole area, fitted to
         // it at its own shape either way up.
-        gameView.landscape = landscapeMode && !keypadHidden;
-        keypad.landscape = landscapeMode;
+        boolean side = sideLayout();
+        gameView.landscape = side && !keypadHidden;
+        // Upright, the window is not wide enough to give the screen its full
+        // height: it is narrowed to leave the key columns their room.
+        gameView.upright = side && !landscapeMode;
+        keypad.landscape = side;
+        keypad.upright = side && !landscapeMode;
         keypad.numbers = keypadNumbers;
         keypad.requestLayout();
         keypadArena = null;
@@ -4650,7 +4662,7 @@ public final class MainActivity extends Activity {
             gameView.setBackgroundColor(Color.BLACK);
             content.setBackgroundColor(Color.BLACK);
             content.addView(gameView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-        } else if (landscapeMode) {
+        } else if (side) {
             // One keypad view across the whole area with the two key columns,
             // the screen floated over the empty gap between them, so a finger
             // on each side is still one view's business.
@@ -4812,6 +4824,115 @@ public final class MainActivity extends Activity {
         dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> bar.setProgress(70 - 15));
     }
 
+    /** The short side, in dp, from which an upright window counts as unfolded. */
+    private static final int UNFOLDED_MIN_DP = 600;
+
+    /** How wide each key column is kept when the player is laid out sideways upright. */
+    private static final int UPRIGHT_SIDE_BAND_DP = 160;
+
+    private static boolean isUnfolded(Configuration config) {
+        return config.smallestScreenWidthDp >= UNFOLDED_MIN_DP;
+    }
+
+    /** Whether an unfolded screen takes the keys-at-the-sides layout: 펼친 화면, for every game. */
+    boolean unfoldedSideLayout() {
+        return getSharedPreferences("mini_ui", MODE_PRIVATE).getBoolean("unfolded_side_layout", true);
+    }
+
+    /** Whether the player lays the keys out at the sides: turned, or unfolded with 펼친 화면 on. */
+    private boolean sideLayout() {
+        return landscapeMode || (unfolded && unfoldedSideLayout());
+    }
+
+    /** Whether the window is unfolded right now, for 조작 설정's row. */
+    boolean unfoldedNow() {
+        return isUnfolded(getResources().getConfiguration());
+    }
+
+    /**
+     * 펼친 화면: 가로 배치 or 세로 배치, for every game, applied on the tap
+     * and the player laid out again at once.
+     */
+    void showUnfoldedLayoutDialog() {
+        final boolean current = unfoldedSideLayout();
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(16), 0, dp(16), dp(4));
+        body.addView(settingScope("모든 게임에 적용됩니다."));
+
+        ControlStyle style = new ControlStyle(this, false);
+        final AlertDialog[] dialog = new AlertDialog[1];
+        String[] titles = {"가로 배치", "세로 배치"};
+        String[] tags = {"기본", null};
+        String[] descriptions = {
+                "게임 화면을 가운데, 키를 양옆에 둡니다. 두 손으로 양쪽을 잡고 하기 좋습니다.",
+                "접었을 때처럼 화면 아래에 키패드를 둡니다. 펼쳐도 배치가 바뀌지 않습니다.",
+        };
+        for (int i = 0; i < 2; i++) {
+            final boolean side = i == 0;
+            View card = optionCard(titles[i], tags[i], descriptions[i], layoutPicture(side), null);
+            markOption(card, side == current);
+            card.setOnClickListener(v -> {
+                getSharedPreferences("mini_ui", MODE_PRIVATE).edit().putBoolean("unfolded_side_layout", side).apply();
+                if (dialog[0] != null) {
+                    dialog[0].dismiss();
+                }
+                if (playerVisible && gameView != null && keypad != null) {
+                    buildPlayerContent();
+                }
+            });
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            params.topMargin = i > 0 ? dp(8) : 0;
+            body.addView(card, params);
+        }
+        dialog[0] = new AlertDialog.Builder(style.context)
+                .setTitle("펼친 화면")
+                .setView(scrolling(body))
+                .setNegativeButton("취소", null)
+                .create();
+        showMenuDialog(style, dialog[0]);
+    }
+
+    /** A small picture of an unfolded screen laid out with the keys at the sides, or under the screen. */
+    private Bitmap layoutPicture(boolean side) {
+        int w = dp(64);
+        int h = dp(56);
+        Bitmap picture = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(picture);
+        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        paint.setColor(Color.rgb(8, 9, 11));
+        canvas.drawRoundRect(0, 0, w, h, dp(6), dp(6), paint);
+        float u = w / 64f;
+        Paint screen = new Paint(Paint.ANTI_ALIAS_FLAG);
+        screen.setColor(Color.rgb(42, 59, 90));
+        Paint key = new Paint(Paint.ANTI_ALIAS_FLAG);
+        key.setColor(Color.rgb(58, 62, 73));
+        if (side) {
+            canvas.drawRect(19 * u, 6 * u, 45 * u, 50 * u, screen);
+            for (int column = 0; column < 2; column++) {
+                float x = column == 0 ? 4 * u : 49 * u;
+                for (int row = 0; row < 4; row++) {
+                    for (int col = 0; col < 2; col++) {
+                        float kx = x + col * 6 * u;
+                        float ky = 12 * u + row * 8 * u;
+                        canvas.drawRoundRect(kx, ky, kx + 5 * u, ky + 6 * u, u, u, key);
+                    }
+                }
+            }
+        } else {
+            canvas.drawRect(18 * u, 4 * u, 46 * u, 28 * u, screen);
+            for (int row = 0; row < 3; row++) {
+                for (int col = 0; col < 7; col++) {
+                    float kx = 5 * u + col * 8 * u;
+                    float ky = 32 * u + row * 7 * u;
+                    canvas.drawRoundRect(kx, ky, kx + 6 * u, ky + 5 * u, u, u, key);
+                }
+            }
+        }
+        return picture;
+    }
+
     /**
      * What the rotate menu item says, which is what tapping it does. With the
      * phone's auto-rotate on it locks or unlocks the current orientation
@@ -4844,6 +4965,10 @@ public final class MainActivity extends Activity {
         rows.add(new GameMenuRow("🔧", "로그 진단 설정", null, this::showDiagnosticsDialog));
         rows.add(new GameMenuRow("⚙", "조작 설정 (키패드·게임패드)", null, () -> ControlPatch.showSettings(this)));
         rows.add(new GameMenuRow("🔄", rotateMenuLabel(), null, this::toggleOrientation));
+        // Only an unfolded screen has anything for this to change.
+        if (unfolded) {
+            rows.add(new GameMenuRow("📖", "펼친 화면", unfoldedSideLayout() ? "가로 배치" : "세로 배치", this::showUnfoldedLayoutDialog));
+        }
         // The speed row says what the speed is, so the menu answers the
         // question without opening anything.
         String speedValue = currentGame != null ? formatSpeed(gameSpeed(currentGame)) : formatSpeed(1f);
@@ -5750,6 +5875,9 @@ public final class MainActivity extends Activity {
         // configChanges), so the game thread never stops - only the views move.
         if (playerVisible && gameView != null && keypad != null) {
             landscapeMode = newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE;
+            // Unfolding or folding a Fold arrives here too, as a new screen
+            // size, so the player follows it without turning.
+            unfolded = isUnfolded(newConfig);
             buildPlayerContent();
         }
     }
@@ -6158,6 +6286,11 @@ public final class MainActivity extends Activity {
         private ByteBuffer pixelBuffer;
         /** In landscape the screen is centered at its own aspect; see onMeasure. */
         boolean landscape;
+        /**
+         * Laid out sideways in an upright window (an unfolded Fold): the
+         * screen gives up height so the key columns keep their width.
+         */
+        boolean upright;
 
         GameView(MainActivity activity) {
             super(activity);
@@ -6170,7 +6303,15 @@ public final class MainActivity extends Activity {
             // aspect needs, so the controls on either side stay uncovered.
             if (landscape) {
                 int h = MeasureSpec.getSize(heightSpec);
-                setMeasuredDimension(Math.min(MeasureSpec.getSize(widthSpec), Math.round(h * aspect())), h);
+                int w = Math.min(MeasureSpec.getSize(widthSpec), Math.round(h * aspect()));
+                if (upright) {
+                    int room = MeasureSpec.getSize(widthSpec) - 2 * dp(UPRIGHT_SIDE_BAND_DP);
+                    if (room > 0 && w > room) {
+                        w = room;
+                        h = Math.round(w / aspect());
+                    }
+                }
+                setMeasuredDimension(w, h);
                 return;
             }
             super.onMeasure(widthSpec, heightSpec);
@@ -6409,6 +6550,8 @@ public final class MainActivity extends Activity {
          * stays one view either way so a finger on each side is still tracked.
          */
         boolean landscape;
+        /** The side columns in an upright window; see {@link GameView#upright}. */
+        boolean upright;
 
         /**
          * The shape of the screen the bands make room for, wide over tall. A
@@ -6604,6 +6747,11 @@ public final class MainActivity extends Activity {
             // landscape screen leaves narrower bands than a portrait one, and
             // the keys shrink to fit rather than the band growing over them.
             float centerW = height * screenAspect;
+            // Upright the screen is narrowed to leave each column its band, the
+            // same way GameView measures it.
+            if (upright && width - 2f * dp(UPRIGHT_SIDE_BAND_DP) > 0) {
+                centerW = Math.min(centerW, width - 2f * dp(UPRIGHT_SIDE_BAND_DP));
+            }
             // The outer margin at one end of the band and a key's own gap at
             // the other, so the cluster never runs up against the screen.
             float sideW = (width - centerW) / 2f - pad - gap;

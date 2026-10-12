@@ -98,11 +98,13 @@ struct PadKey: Codable, Identifiable, Equatable {
 }
 
 /// Which standard layout a pad starts from: under the screen, under it as
-/// 숫자 크게, or over the screen.
+/// 숫자 크게, over the screen, or in two columns either side of it (펼친 화면,
+/// on a wide upright window).
 enum PadArrangement {
     case below
     case numbers
     case overlay
+    case sides
 }
 
 /// Every key of the pad, placed.
@@ -134,6 +136,7 @@ struct PadLayout: Codable, Equatable {
         case .below: return below
         case .numbers: return numbers
         case .overlay: return overlay
+        case .sides: return sides
         }
     }
 
@@ -243,6 +246,47 @@ struct PadLayout: Codable, Equatable {
                                y: top + Double(position / 3) * (numberHeight + gapY), w: numberWidth, h: numberHeight, hidden: false))
         }
         keys.append(PadKey(index: Int32(WIE_KEY_HANGUP), x: 1 - padX - unit * 1.3, y: top, w: unit * 1.3, h: strip, hidden: true))
+        return PadLayout(keys: keys)
+    }()
+
+    /// 펼친 화면: the screen in the middle fifth-and-three-fifths, a column of
+    /// keys in each outer fifth - the soft keys over the directions on the
+    /// left, 저장 and 뒤로 over the numbers on the right - as the Android
+    /// player lays them out sideways. Placed for an area about 0.72 as wide
+    /// as it is tall, an iPad's held upright, so the keys come out square.
+    static let sidesBand = 0.2
+    private static let sides: PadLayout = {
+        let aspect = 0.72
+        let padX = 0.012, gapX = 0.008
+        let cellW = (sidesBand - 2 * padX - 2 * gapX) / 3
+        let cellH = cellW * aspect, gapY = gapX * aspect, funcH = cellH * 0.8
+        let clusterW = 3 * cellW + 2 * gapX
+        let functionW = (clusterW - gapX) / 2
+        let leftX = padX, rightX = 1 - sidesBand + padX
+        let leftTop = (1 - (funcH + 3 * cellH + 3 * gapY)) / 2
+        let rightTop = (1 - (funcH + 4 * cellH + 4 * gapY)) / 2
+
+        var keys: [PadKey] = [
+            PadKey(index: Int32(WIE_KEY_LEFT_SOFT), x: leftX, y: leftTop, w: functionW, h: funcH, hidden: false),
+            PadKey(index: Int32(WIE_KEY_RIGHT_SOFT), x: leftX + functionW + gapX, y: leftTop, w: functionW, h: funcH, hidden: false),
+            PadKey(index: Int32(WIE_KEY_CALL), x: rightX, y: rightTop, w: functionW, h: funcH, hidden: false),
+            PadKey(index: Int32(WIE_KEY_CLEAR), x: rightX + functionW + gapX, y: rightTop, w: functionW, h: funcH, hidden: false),
+        ]
+        let plusTop = leftTop + funcH + gapY
+        let plus: [(Int32, Double, Double)] = [
+            (Int32(WIE_KEY_UP), 1, 0), (Int32(WIE_KEY_LEFT), 0, 1), (Int32(WIE_KEY_OK), 1, 1),
+            (Int32(WIE_KEY_RIGHT), 2, 1), (Int32(WIE_KEY_DOWN), 1, 2),
+        ]
+        for (index, column, row) in plus {
+            keys.append(PadKey(index: index, x: leftX + column * (cellW + gapX), y: plusTop + row * (cellH + gapY),
+                               w: cellW, h: cellH, hidden: false))
+        }
+        let numbersTop = rightTop + funcH + gapY
+        for (position, index) in PadLayout.numberOrder.enumerated() {
+            keys.append(PadKey(index: index, x: rightX + Double(position % 3) * (cellW + gapX),
+                               y: numbersTop + Double(position / 3) * (cellH + gapY), w: cellW, h: cellH, hidden: false))
+        }
+        keys.append(PadKey(index: Int32(WIE_KEY_HANGUP), x: leftX, y: plusTop + 3 * (cellH + gapY), w: functionW, h: funcH, hidden: true))
         return PadLayout(keys: keys)
     }()
 
