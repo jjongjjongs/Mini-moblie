@@ -10225,11 +10225,177 @@ mod noreason_tests {
     }
 }
 
+/// 크로노스윙's game server, which logs a session in and sells the items its
+/// shop offers.
+///
+/// Both builds - LGT `0002A5D0` and KTF `010100D2` - run the same engine and
+/// dial `210.222.18.18:18182`. Every purchase opens a connection of its own,
+/// logs in, and only once the login is answered asks for the item; with nothing
+/// answering the login the title sits on its connecting screen and the item is
+/// never given. 스킬단축기 and 염색 are two of the things bought this way.
+///
+/// Frames both ways start with a big-endian `u32` counting the whole frame, a
+/// big-endian `u16` command and a big-endian `u32` sub-command. A request adds
+/// two bytes, a zero and the carrier's letter - `L` on LGT, `K` on KTF, picked
+/// out of the `SKL` the builder (`0x1d3fc` on LGT, `0x150348` on KTF) reads -
+/// and a reply adds nothing. The login is command `10` sub-command `1`; the
+/// LGT build wrote it as
+///
+/// ```text
+/// 00 00 00 2a  00 0a  00 00 00 01  00 4c | 00 00 31 36 00 00 00 31 00 00 00 31
+/// 42 4e 76 31 30 31 | 00 * 12
+/// ```
+///
+/// - twelve bytes out of `min.txt`, or the `16`, `1`, `1` it puts there when
+///   the file is missing,
+/// - `BN` and `v101`, the version its own `V 1.0.1` spells (`v106` on KTF),
+/// - twelve bytes of zeros.
+///
+/// The packet handler at `0x23ec8` reads the length, the command and the
+/// sub-command and dispatches; command `10` lands in `0x21b40`.
+///
+/// - Sub-command `1`, the login, is read at `0x218bc`: a status byte, a byte
+///   it skips, and on a zero status ten bytes of session key. It then sends
+///   whatever the connection was opened for - a purchase among them.
+/// - Sub-command `20` is the purchase, `[u32 product]`. Its answer is read at
+///   `0x1df90`: a status byte, a skipped byte, a big-endian `u16` length and a
+///   message that long, shown on a zero status as the title's own notice
+///   before it sets the result its shop is waiting on to `1`. The shop gives
+///   the item itself once it reads that.
+///
+/// So the login is answered with a zero status and a key, and a purchase with
+/// a zero status and a notice. Nothing else the title sends - its rankings and
+/// notices among them - is answered: those read bodies of their own.
+fn chronoswing_response(request: &[u8]) -> Option<Vec<u8>> {
+    /// The length, the command, the sub-command, the zero and the letter.
+    const HEADER: usize = 12;
+    const SESSION: u16 = 10;
+    const LOGIN: u32 = 1;
+    const PURCHASE: u32 = 20;
+    /// What the login carries past its header: twelve bytes, `BN`, the
+    /// version and twelve more.
+    const LOGIN_BODY: usize = 30;
+    /// The product.
+    const PURCHASE_BODY: usize = 4;
+    const GRANTED: u8 = 0;
+    /// Handed back on the next login; anything ten bytes long will do.
+    const SESSION_KEY: &[u8; 10] = b"0000000000";
+
+    if request.len() < HEADER || u32::from_be_bytes(request[0..4].try_into().ok()?) as usize != request.len() {
+        return None;
+    }
+
+    if u16::from_be_bytes([request[4], request[5]]) != SESSION || request[10] != 0 || !matches!(request[11], b'K' | b'L') {
+        return None;
+    }
+
+    let sub = u32::from_be_bytes(request[6..10].try_into().ok()?);
+    let body = &request[HEADER..];
+
+    let reply: Vec<u8> = match sub {
+        LOGIN if body.len() == LOGIN_BODY && body[12..15] == *b"BNv" => {
+            let mut reply = vec![GRANTED, 0];
+            reply.extend_from_slice(SESSION_KEY);
+            reply
+        }
+        PURCHASE if body.len() == PURCHASE_BODY => {
+            // The notice is copied out with `strlen`, so its terminator goes
+            // with it.
+            let (notice, _, _) = encoding_rs::EUC_KR.encode("구매가 완료되었습니다.");
+            let mut reply = vec![GRANTED, 0];
+            reply.extend_from_slice(&((notice.len() + 1) as u16).to_be_bytes());
+            reply.extend_from_slice(&notice);
+            reply.push(0);
+            reply
+        }
+        _ => return None,
+    };
+
+    let length = 4 + 2 + 4 + reply.len();
+    let mut response = Vec::with_capacity(length);
+    response.extend_from_slice(&(length as u32).to_be_bytes());
+    response.extend_from_slice(&SESSION.to_be_bytes());
+    response.extend_from_slice(&sub.to_be_bytes());
+    response.extend_from_slice(&reply);
+
+    Some(response)
+}
+
+#[cfg(test)]
+mod chronoswing_tests {
+    use super::*;
+
+    /// The login the LGT build wrote, byte for byte off the device log.
+    const LOGIN: [u8; 42] = [
+        0x00, 0x00, 0x00, 0x2a, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x01, 0x00, 0x4c, 0x00, 0x00, 0x31, 0x36, 0x00, 0x00, 0x00, 0x31, 0x00, 0x00, 0x00,
+        0x31, 0x42, 0x4e, 0x76, 0x31, 0x30, 0x31, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+
+    fn purchase(letter: u8, product: u32) -> Vec<u8> {
+        let mut frame = vec![0x00, 0x00, 0x00, 0x10, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x14, 0x00, letter];
+        frame.extend_from_slice(&product.to_be_bytes());
+        frame
+    }
+
+    #[test]
+    fn the_login_is_answered_with_a_session() {
+        let reply = response(&LOGIN).expect("answered");
+
+        assert_eq!(u32::from_be_bytes(reply[0..4].try_into().unwrap()) as usize, reply.len());
+        assert_eq!(reply[4..10], [0x00, 0x0a, 0x00, 0x00, 0x00, 0x01]);
+        // A zero status, the byte the reader skips, and the ten-byte key.
+        assert_eq!(reply[10], 0);
+        assert_eq!(reply.len(), 10 + 2 + 10);
+    }
+
+    #[test]
+    fn the_ktf_login_is_answered_too() {
+        let mut login = LOGIN;
+        login[11] = b'K';
+        login[29] = b'6';
+
+        assert!(response(&login).is_some());
+    }
+
+    #[test]
+    fn a_purchase_is_granted_with_a_notice() {
+        for letter in [b'L', b'K'] {
+            let reply = response(&purchase(letter, 6)).expect("answered");
+
+            assert_eq!(u32::from_be_bytes(reply[0..4].try_into().unwrap()) as usize, reply.len());
+            assert_eq!(reply[4..10], [0x00, 0x0a, 0x00, 0x00, 0x00, 0x14]);
+            assert_eq!(reply[10], 0);
+
+            let notice = u16::from_be_bytes([reply[12], reply[13]]) as usize;
+            assert_eq!(reply.len(), 14 + notice);
+            assert_eq!(reply.last(), Some(&0));
+        }
+    }
+
+    #[test]
+    fn other_carriers_and_requests_are_left_alone() {
+        assert_eq!(chronoswing_response(&purchase(b'S', 6)), None);
+
+        // The ranking upload, sub-command 10, reads a body of its own.
+        let mut ranking = purchase(b'L', 6);
+        ranking[9] = 0x0a;
+        assert_eq!(chronoswing_response(&ranking), None);
+
+        // A length that is not the frame's own.
+        let mut truncated = LOGIN.to_vec();
+        truncated.pop();
+        assert_eq!(chronoswing_response(&truncated), None);
+    }
+}
+
 pub fn response(request: &[u8]) -> Option<Vec<u8>> {
     // First: its signature is four things at once - see
     // `lgt_local_maguer2011_response` - so nothing else can be taken for it,
     // and it cannot take anything else.
     lgt_local_maguer2011_response(request)
+        // Before the length-prefixed matchers, any of which could take a
+        // purchase this short for one of their own.
+        .or_else(|| chronoswing_response(request))
         // Before the granted frame, which answers this request in a shape the
         // title reads as a refusal.
         .or_else(|| ktf_local_makjang_capsule_response(request))

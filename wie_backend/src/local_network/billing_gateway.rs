@@ -45,6 +45,9 @@ enum Framing {
     /// The GP4 frames 템페스트 writes through the `FastRelay` library. See
     /// [`crate::billing::ktf_local_tempest_response`].
     Relay,
+    /// `[u32be length counting the whole frame][body]` - 크로노스윙's game
+    /// server.
+    BigEndianLength32,
 }
 
 /// Answers the carrier billing frames a title writes over a plain socket to one
@@ -91,6 +94,18 @@ impl BillingGatewayEndpoint {
             host,
             port,
             framing: Framing::KpTagged,
+        }
+    }
+
+    /// Answers `host:port` for frames led by a big-endian `u32` counting the
+    /// whole frame - 크로노스윙's KTF build, which opens a plain socket to the
+    /// game server its LGT build reaches through the billing gateway.
+    pub const fn new_u32_length_prefixed(name: &'static str, host: &'static str, port: u16) -> Self {
+        Self {
+            name,
+            host,
+            port,
+            framing: Framing::BigEndianLength32,
         }
     }
 
@@ -142,7 +157,28 @@ impl BillingGatewayConnection {
             Framing::WpBillMarker => self.take_wpbill_frame(),
             Framing::BigEndianLength | Framing::Relay => self.take_length_prefixed_frame(),
             Framing::KpTagged => self.take_kp_tagged_frame(),
+            Framing::BigEndianLength32 => self.take_u32_length_prefixed_frame(),
         }
+    }
+
+    /// `[u32be length][body]`, the length counting the whole frame. A length
+    /// too small to be a frame steps over one byte and tries again.
+    fn take_u32_length_prefixed_frame(&mut self) -> Option<Vec<u8>> {
+        if self.pending.len() < 4 {
+            return None;
+        }
+
+        let length = u32::from_be_bytes([self.pending[0], self.pending[1], self.pending[2], self.pending[3]]) as usize;
+        if !(4..=MAX_FRAME).contains(&length) {
+            self.pending.remove(0);
+            return None;
+        }
+
+        if self.pending.len() < length {
+            return None;
+        }
+
+        Some(self.pending.drain(..length).collect())
     }
 
     /// `[KP][u16le length][...]`, the length counting the whole frame. Bytes in
@@ -306,6 +342,30 @@ mod tests {
             pending: Vec::new(),
             outgoing: Vec::new(),
         }
+    }
+
+    /// 크로노스윙's KTF login, split across two writes, is taken whole and
+    /// answered.
+    #[test]
+    fn a_u32_length_prefixed_login_is_answered() {
+        let login: &[u8] = &[
+            0x00, 0x00, 0x00, 0x2a, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x01, 0x00, 0x4b, 0x00, 0x00, 0x31, 0x36, 0x00, 0x00, 0x00, 0x31, 0x00, 0x00, 0x00,
+            0x31, 0x42, 0x4e, 0x76, 0x31, 0x30, 0x36, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+
+        let mut connection = BillingGatewayConnection {
+            peer: "210.222.18.18:18182".into(),
+            framing: Framing::BigEndianLength32,
+            pending: Vec::new(),
+            outgoing: Vec::new(),
+        };
+        connection.write(&login[..7]);
+        assert!(!connection.readable());
+        connection.write(&login[7..]);
+
+        let reply = read_all(&mut connection);
+        assert_eq!(reply[..10], [0x00, 0x00, 0x00, 0x16, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x01]);
+        assert_eq!(reply[10], 0);
     }
 
     /// 크로이센's purchase, split across two writes, is taken whole and granted

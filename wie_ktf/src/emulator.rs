@@ -279,6 +279,21 @@ impl KtfEmulator {
         // `wie_backend::local_network::dragoneyes`.
         system.local_network().register(Box::new(wie_backend::DragonEyesEndpoint));
 
+        // 크로노스윙's game server, which every purchase logs in to first. The
+        // LGT build reaches it through the billing gateway; this one opens a
+        // plain socket, and dialed at the dead host its 스킬단축기 and 염색 are
+        // never given. See `wie_backend::billing`'s `chronoswing_response`. The
+        // port is 18182, or 18181 on the title's test setting.
+        for (name, port) in [("chronoswing(210.222.18.18:18182)", 18182), ("chronoswing(210.222.18.18:18181)", 18181)] {
+            system
+                .local_network()
+                .register(Box::new(wie_backend::BillingGatewayEndpoint::new_u32_length_prefixed(
+                    name,
+                    "210.222.18.18",
+                    port,
+                )));
+        }
+
         Allocator::init(&mut core)?;
 
         // The status strip a title has to work around, published where the
