@@ -42,13 +42,14 @@ use std::{
     ffi::{CStr, CString, c_int, c_void},
     path::{Path, PathBuf},
     ptr,
+    sync::atomic::{AtomicU8, Ordering},
     time::{Duration, Instant},
 };
 
 use wie_android::host;
 
 use self::{
-    controls::{BACKSPACE, BUTTON_COUNT, Button, DELETE, ESCAPE, F2, F5, F6, F11, TAB},
+    controls::{BACKSPACE, BUTTON_COUNT, Button, DELETE, ESCAPE, F2, F5, F6, F7, F8, F11, TAB},
     library::{Hit, Menu},
     pointer::{Mouse, Pointer},
     presets::Store,
@@ -177,6 +178,8 @@ fn key_button(scancode: i32) -> Option<Button> {
         ESCAPE | 42 => Button::B,
         59 => Button::X,
         controls::DELETE => Button::Y,
+        // M: mute, on the volume tile.
+        16 => Button::R3,
         TAB => Button::Select,
         66 => Button::L3,
         _ => return None,
@@ -212,6 +215,7 @@ struct App {
 impl App {
     fn new(sdl: Sdl, desktop: bool) -> Result<App, String> {
         let store = Store::load();
+        set_audio_volume(store.audible_volume());
         // SAFETY: plain SDL2 calls on the thread that initialised it, with
         // pointers to live, nul-terminated strings.
         unsafe {
@@ -945,6 +949,16 @@ impl App {
                         self.redraw = true;
                         false
                     }
+                    // F7 quieter, F8 louder, for every game - unless the
+                    // keyboard layout gave the key to the game.
+                    Input::Key(code @ (F7 | F8), true, false) if self.store.controls().keyboard_key(code).is_none() => {
+                        let (volume, _) = self.store.volume();
+                        self.set_volume(settings::volume_step(volume, code == F8), false);
+                        toast = format!("소리 {}", settings::volume_label(self.store.volume()));
+                        toast_until = Some(Instant::now() + SPEED_TOAST);
+                        self.redraw = true;
+                        false
+                    }
                     Input::Key(code, true, false) => {
                         if let Some(key) = self.store.controls().keyboard_key(code)
                             && !keys.iter().any(|(held, _)| *held == code)
@@ -1098,9 +1112,28 @@ unsafe extern "C" fn render_audio(_userdata: *mut c_void, stream: *mut u8, len: 
     // SAFETY: SDL hands over a buffer of `len` bytes to fill.
     let out = unsafe { std::slice::from_raw_parts_mut(stream, len) };
     let rendered = host::render_audio(len / 4);
-    let count = rendered.len().min(len);
+    let count = rendered.len().min(len) & !1;
     out[..count].copy_from_slice(&rendered[..count]);
     out[count..].fill(0);
+
+    // The volume, on a square so each step down sounds like as much of one
+    // as the step before it.
+    let volume = AUDIO_VOLUME.load(Ordering::Relaxed) as i32;
+    if volume < 100 {
+        let gain = volume * volume;
+        for sample in out[..count].chunks_exact_mut(2) {
+            let value = i16::from_le_bytes([sample[0], sample[1]]) as i32 * gain / 10_000;
+            sample.copy_from_slice(&(value as i16).to_le_bytes());
+        }
+    }
+}
+
+/// How loud every game plays, in percent, as the audio thread reads it.
+static AUDIO_VOLUME: AtomicU8 = AtomicU8::new(100);
+
+/// Has every game play at `volume` percent from the next buffer on.
+pub(crate) fn set_audio_volume(volume: u8) {
+    AUDIO_VOLUME.store(volume.min(100), Ordering::Relaxed);
 }
 
 fn error(sdl: &Sdl) -> String {

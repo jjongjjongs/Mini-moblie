@@ -11,11 +11,11 @@ import android.view.MotionEvent;
 import android.view.View;
 
 /**
- * The handset's keypad, to choose the key a gamepad button presses: the soft
+ * The handset's keypad, to choose the key to put pad buttons on: the soft
  * keys, the directions and the call keys on the left, the number pad on the
- * right, as the PC builds draw their keyboard layout. Each key carries the pad
- * buttons already on it; the key the button has now is outlined, the one the
- * pad's D-pad has reached is filled.
+ * right, as the PC builds draw their keyboard and pad layouts. Each key carries
+ * the pad buttons already on it in the layer shown; the one picked - by a tap,
+ * or the pad's D-pad - is filled.
  *
  * <p>Drawn on a 320-unit-wide plan scaled to the view's width.
  */
@@ -23,19 +23,32 @@ import android.view.View;
 final class KeypadPickerView extends View {
 
     interface Listener {
-        /** The key chosen, or -1 for none. */
+        /** The key picked out, by a tap or the D-pad. */
+        void focus(int key);
+
+        /** The key chosen: tapped again, or A on the pad. */
         void choose(int key);
+    }
+
+    /** What each handset key is called, by key code. */
+    private static final String[] KEY_LABELS = {
+            "▲", "▼", "◀", "▶", "확인", "좌소프트", "우소프트", "뒤로",
+            "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "#", "저장", "종료",
+    };
+
+    static String label(int key) {
+        return key >= 0 && key < KEY_LABELS.length ? KEY_LABELS[key] : "없음";
     }
 
     /**
      * The keys by handset key code, column and row: three columns of the
-     * left block, then three of the number pad. -1 is "none".
+     * left block, then three of the number pad.
      */
     private static final int[][] CELLS = {
             {5, 0, 0}, {0, 1, 0}, {6, 2, 0},
             {2, 0, 1}, {4, 1, 1}, {3, 2, 1},
             {20, 0, 2}, {1, 1, 2},
-            {7, 1, 3}, {-1, 2, 3},
+            {7, 1, 3},
             {9, 3, 0}, {10, 4, 0}, {11, 5, 0},
             {12, 3, 1}, {13, 4, 1}, {14, 5, 1},
             {15, 3, 2}, {16, 4, 2}, {17, 5, 2},
@@ -51,25 +64,21 @@ final class KeypadPickerView extends View {
 
     private final ControlStyle style;
     private final Listener listener;
-    private final int current;
     private final String[] notes = new String[CELLS.length];
-    private final String noneNote;
     private final RectF[] rects = new RectF[CELLS.length];
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF box = new RectF();
     private int cursor;
+    private boolean downOnPicked;
 
     /**
-     * @param current the key the button has now, -1 for none
-     * @param notes   by key code, what is on each key already: the pad buttons
-     * @param noneNote the line under "none"
+     * @param picked the key picked out to begin with
+     * @param notes  by key code, what is on each key: the pad buttons
      */
-    KeypadPickerView(ControlStyle style, int current, String[] notes, String noneNote, Listener listener) {
+    KeypadPickerView(ControlStyle style, int picked, String[] notes, Listener listener) {
         super(style.context);
         this.style = style;
         this.listener = listener;
-        this.current = current;
-        this.noneNote = noneNote;
         paint.setTypeface(Typeface.DEFAULT_BOLD);
 
         float keyWidth = (PLAN_WIDTH - 2 * 4f - BLOCK_GAP - 4 * GAP) / 6f;
@@ -79,12 +88,26 @@ final class KeypadPickerView extends View {
             float x = 4f + column * (keyWidth + GAP) + (column >= 3 ? BLOCK_GAP - GAP : 0f);
             float y = 1f + CELLS[i][2] * PITCH;
             rects[i] = new RectF(x, y, x + keyWidth, y + KEY_HEIGHT);
-            this.notes[i] = key >= 0 && key < notes.length ? notes[key] : null;
-            if (key == current) {
+            if (key == picked) {
                 cursor = i;
             }
         }
+        setNotes(notes);
         setFocusable(false);
+    }
+
+    /** What is on each key, by key code, as it is now. */
+    void setNotes(String[] byKey) {
+        for (int i = 0; i < CELLS.length; i++) {
+            int key = CELLS[i][0];
+            notes[i] = key < byKey.length ? byKey[key] : null;
+        }
+        invalidate();
+    }
+
+    /** The key picked out. */
+    int picked() {
+        return CELLS[cursor][0];
     }
 
     @Override
@@ -123,28 +146,24 @@ final class KeypadPickerView extends View {
             int key = CELLS[i][0];
             RectF rect = rects[i];
             boolean focused = i == cursor;
-            boolean now = key == current;
             box.set(rect.left * s, rect.top * s, rect.right * s, rect.bottom * s);
             float radius = 7f * s;
             paint.setStyle(Paint.Style.FILL);
-            paint.setColor(focused ? style.GREEN : key < 0 ? style.SOFTER : style.SOFT);
+            paint.setColor(focused ? style.GREEN : style.SOFT);
             canvas.drawRoundRect(box, radius, radius, paint);
             paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(Math.max(1f, s * (now ? 2f : 0.8f)));
-            paint.setColor(now ? style.GREEN : style.LINE);
+            paint.setStrokeWidth(Math.max(1f, s * 0.8f));
+            paint.setColor(style.LINE);
             canvas.drawRoundRect(box, radius, radius, paint);
 
-            String name = key < 0 ? "없음" : PadLayoutView.label(key);
-            String note = key < 0 ? noneNote : notes[i];
+            String name = label(key);
+            String note = notes[i];
+            boolean none = note == null || note.isEmpty();
             float middle = rect.centerX();
             float room = rect.width() - 4f;
-            int ink = focused ? onAccent : key < 0 ? muted : style.INK;
-            if (note == null || note.isEmpty()) {
-                text(canvas, name, middle, rect.centerY(), name.length() > 2 ? 10.5f : 13f, ink, room);
-            } else {
-                text(canvas, name, middle, rect.top + 13f, name.length() > 2 ? 10.5f : 12.5f, ink, room);
-                text(canvas, note, middle, rect.top + 26f, 7.5f, focused ? onAccent : style.DEEP, room);
-            }
+            int ink = focused ? onAccent : style.INK;
+            text(canvas, name, middle, rect.top + 13f, name.length() > 2 ? 10.5f : 12.5f, ink, room);
+            text(canvas, none ? "없음" : note, middle, rect.top + 26f, 7.5f, focused ? onAccent : none ? muted : style.DEEP, room);
         }
     }
 
@@ -160,14 +179,19 @@ final class KeypadPickerView extends View {
                 hit = i;
             }
         }
+        if (action == MotionEvent.ACTION_DOWN) {
+            // A tap on the key picked chooses it; on another, picks it out.
+            downOnPicked = hit >= 0 && hit == cursor;
+        }
         if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_MOVE) {
             if (hit >= 0 && hit != cursor) {
                 cursor = hit;
                 invalidate();
+                listener.focus(CELLS[hit][0]);
             }
             return true;
         }
-        if (action == MotionEvent.ACTION_UP && hit >= 0) {
+        if (action == MotionEvent.ACTION_UP && hit >= 0 && hit == cursor && downOnPicked) {
             listener.choose(CELLS[hit][0]);
         }
         return true;
@@ -185,6 +209,7 @@ final class KeypadPickerView extends View {
             case KeyEvent.KEYCODE_DPAD_RIGHT:
                 cursor = step(cursor, keyCode);
                 invalidate();
+                listener.focus(CELLS[cursor][0]);
                 return true;
             case KeyEvent.KEYCODE_BUTTON_A:
             case KeyEvent.KEYCODE_DPAD_CENTER:

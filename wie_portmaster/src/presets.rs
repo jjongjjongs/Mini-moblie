@@ -37,6 +37,10 @@ pub struct Store {
     /// How a desktop window is shown: its size as a multiple of 320x240, or
     /// 0 for the full screen.
     screen: u32,
+    /// How loud every game plays, in percent, and whether it is muted -
+    /// muting keeps the level to go back to.
+    volume: u8,
+    muted: bool,
 }
 
 impl Store {
@@ -49,6 +53,8 @@ impl Store {
             qualities: Vec::new(),
             played: Vec::new(),
             screen: 3,
+            volume: 100,
+            muted: false,
         };
         if let Ok(text) = std::fs::read_to_string(STATE_FILE) {
             for line in text.lines() {
@@ -77,6 +83,8 @@ impl Store {
                         }
                     }
                     ["screen", screen] => store.screen = screen.parse().unwrap_or(3).min(SCREEN_MAX),
+                    ["volume", volume] => store.volume = volume.parse().unwrap_or(100).min(100),
+                    ["muted", muted] => store.muted = *muted == "1",
                     _ => {}
                 }
             }
@@ -195,6 +203,22 @@ impl Store {
         self.save();
     }
 
+    /// How loud every game plays, in percent, and whether it is muted.
+    pub fn volume(&self) -> (u8, bool) {
+        (self.volume, self.muted)
+    }
+
+    /// The level heard: nothing while muted.
+    pub fn audible_volume(&self) -> u8 {
+        if self.muted { 0 } else { self.volume }
+    }
+
+    pub fn set_volume(&mut self, volume: u8, muted: bool) {
+        self.volume = volume.min(100);
+        self.muted = muted;
+        self.save();
+    }
+
     pub fn screen(&self) -> u32 {
         self.screen
     }
@@ -285,8 +309,8 @@ impl Store {
             eprintln!("버튼 설정을 저장할 수 없습니다: {error}");
         }
         let mut state = format!(
-            "# MiniMobile 프리셋 상태 - 설정 화면이 씁니다.\nactive\t{}\nscreen\t{}\n",
-            self.active, self.screen
+            "# MiniMobile 프리셋 상태 - 설정 화면이 씁니다.\nactive\t{}\nscreen\t{}\nvolume\t{}\nmuted\t{}\n",
+            self.active, self.screen, self.volume, self.muted as u8
         );
         for (game, preset) in &self.fixed {
             state.push_str(&format!("game\t{game}\t{preset}\n"));

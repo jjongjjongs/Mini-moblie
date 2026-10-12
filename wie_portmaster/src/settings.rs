@@ -75,6 +75,7 @@ enum Item {
     Screen,
     Speed,
     Quality,
+    Volume,
     Saves,
     Delete,
     EndGame,
@@ -135,6 +136,29 @@ pub(crate) const SPEED_MIN: u32 = 1;
 pub(crate) const SPEED_MAX: u32 = 40;
 
 /// The speed a tenth faster (or slower) than `speed`, stopping at the ends.
+/// How far one press moves the volume, in percent.
+pub(crate) const VOLUME_STEP: u8 = 10;
+
+/// The volume a step down or up from `volume`, within 0 and 100.
+pub(crate) fn volume_step(volume: u8, louder: bool) -> u8 {
+    if louder {
+        ((volume / VOLUME_STEP).saturating_add(1) * VOLUME_STEP).min(100)
+    } else {
+        volume.div_ceil(VOLUME_STEP).saturating_sub(1) * VOLUME_STEP
+    }
+}
+
+/// What the volume tile says: the level, or that it is off.
+pub(crate) fn volume_label((volume, muted): (u8, bool)) -> String {
+    if muted {
+        "음소거".to_owned()
+    } else if volume == 0 {
+        "끔".to_owned()
+    } else {
+        format!("{volume}%")
+    }
+}
+
 pub(crate) fn speed_step(speed: f32, faster: bool) -> f32 {
     let tenths = (speed * 10.0).round() as i32 + if faster { 1 } else { -1 };
     tenths.clamp(SPEED_MIN as i32, SPEED_MAX as i32) as f32 / 10.0
@@ -257,7 +281,7 @@ impl App {
     pub fn settings_menu(&mut self, context: &Context) -> Outcome {
         let mut items = Vec::new();
         if context.in_game() {
-            items.extend([Item::Resume, Item::Speed, Item::Quality]);
+            items.extend([Item::Resume, Item::Speed, Item::Quality, Item::Volume]);
         }
         if self.desktop {
             items.push(Item::Keyboard);
@@ -269,7 +293,7 @@ impl App {
         // What is done to a game's files is done from the list, with the game
         // stopped.
         if context.game.is_some() && !context.in_game() {
-            items.extend([Item::Speed, Item::Quality, Item::Saves, Item::Delete]);
+            items.extend([Item::Speed, Item::Quality, Item::Volume, Item::Saves, Item::Delete]);
         }
         if self.desktop {
             items.push(Item::Screen);
@@ -289,9 +313,16 @@ impl App {
         let icon = context.game.and_then(icons::extract);
         loop {
             let pressed = self.presses(&mut repeat);
-            if let Some((tile, _)) = self.take_pointed() {
+            // A click on the volume card's meter sets the level it is on,
+            // and is not also the A that takes the tile up or puts it down.
+            let mut metered = false;
+            if let Some((tile, column)) = self.take_pointed() {
                 let tile = tile.min(items.len() - 1);
-                if tile != cursor {
+                if let (Some(column), Item::Volume) = (column, items[tile]) {
+                    self.set_volume(((column as u8 + 1) * VOLUME_STEP).min(100), false);
+                    metered = true;
+                    dirty = true;
+                } else if tile != cursor {
                     adjusting = false;
                     dirty = true;
                 }
@@ -305,6 +336,9 @@ impl App {
             }
             for button in pressed {
                 dirty = true;
+                if metered && button == Button::A {
+                    continue;
+                }
                 match button {
                     Button::Left | Button::Right if adjusting => {
                         let forward = button == Button::Right;
@@ -316,6 +350,10 @@ impl App {
                                 }
                             }
                             Item::Screen => self.cycle_screen(forward),
+                            Item::Volume => {
+                                let (volume, _) = self.store.volume();
+                                self.set_volume(volume_step(volume, forward), false);
+                            }
                             Item::Speed => {
                                 if let Some(game) = context.game {
                                     let speed = speed_step(self.game_speed(game), forward);
@@ -329,6 +367,11 @@ impl App {
                         adjusting = false;
                         cursor = tile_step(cursor, items.len(), button);
                     }
+                    // Y on a pad, M or Delete on the keyboard: mute.
+                    Button::Y | Button::R3 if items[cursor] == Item::Volume => {
+                        let (volume, muted) = self.store.volume();
+                        self.set_volume(volume, !muted);
+                    }
                     Button::B | Button::Guide if adjusting => adjusting = false,
                     Button::B | Button::Guide => return Outcome::Close,
                     Button::A if adjusting => adjusting = false,
@@ -339,7 +382,7 @@ impl App {
                         Item::Keyboard => self.keyboard_layout(),
                         Item::Layout => self.layout(),
                         Item::Preset => self.presets(context),
-                        Item::Screen | Item::Speed | Item::Quality => adjusting = true,
+                        Item::Screen | Item::Speed | Item::Quality | Item::Volume => adjusting = true,
                         Item::Saves => {
                             if let Some(game) = context.game {
                                 self.save_manager(game);
@@ -430,6 +473,7 @@ impl App {
             Item::Screen => ("▢", "화면"),
             Item::Speed => ("»", "배속"),
             Item::Quality => ("◇", "화질"),
+            Item::Volume => ("♪", "소리"),
             Item::Saves => ("♡", "세이브"),
             Item::Delete => ("×", "게임 삭제"),
             Item::EndGame => ("⏏", "게임 끝내기"),
@@ -445,6 +489,7 @@ impl App {
             Item::Screen => screen_label(self.store.screen()),
             Item::Speed => speed_label(context.game.map_or(1.0, |game| self.game_speed(game))),
             Item::Quality => context.game.map_or(Quality::Dot, |game| self.game_quality(game)).label().to_owned(),
+            Item::Volume => volume_label(self.store.volume()),
             Item::Fix => {
                 let fixed = context.game_file().and_then(|game| self.store.fixed(&game).map(str::to_owned));
                 fixed.unwrap_or_else(|| "끔".to_owned())
@@ -600,6 +645,9 @@ impl App {
                         quality.detail(),
                     );
                 }
+                Item::Volume => {
+                    self.draw_volume_card(&mut screen, card_x, (h - 62.0) / 2.0 - 10.0, card_width, cursor);
+                }
                 Item::Screen => {
                     let steps = screen_steps();
                     let labels: Vec<String> = steps
@@ -625,6 +673,8 @@ impl App {
 
         let hint = match items[cursor] {
             Item::Speed if adjusting => self.hint("◀▶ 0.1씩  A 완료", "◀▶ 0.1씩  Enter 완료"),
+            Item::Volume if adjusting => self.hint("◀▶ 10%씩  Y 음소거  A 완료", "◀▶ 10%씩  M 음소거  Enter 완료"),
+            Item::Volume => self.hint("A 바꾸기  Y 음소거  ◀▶▲▼ 이동", "Enter 바꾸기  M 음소거  ◀▶▲▼ 이동"),
             _ if adjusting => self.hint("◀▶ 바꾸기  A 완료", "◀▶ 바꾸기  Enter 완료"),
             Item::Speed | Item::Quality | Item::Screen => self.hint("A 바꾸기  ◀▶▲▼ 이동", "Enter 바꾸기  ◀▶▲▼ 이동"),
             Item::Preset => self.hint("A 목록  ◀▶▲▼ 이동", "Enter 목록  ◀▶▲▼ 이동"),
@@ -638,6 +688,54 @@ impl App {
         screen.bar(height as i32 - BAR, hint, back);
         self.back_hit(width, height);
         self.present(screen, width, height);
+    }
+
+    /// The volume in a white card: the level large, and a meter of ten bars
+    /// under it, rising, each setting its tenth when clicked - the menu's row
+    /// `row` is the volume tile's.
+    fn draw_volume_card(&self, screen: &mut Screen, x: f32, y: f32, width: f32, row: usize) {
+        let (volume, muted) = self.store.volume();
+        // On a keyboard, the keys that change it in a game, under the meter.
+        let height = if self.desktop { 78.0 } else { 66.0 };
+        screen.round(x, y + 1.5, width, height, 8.0, Color { a: 0x50, r: 0, g: 0, b: 0 });
+        screen.round(x, y, width, height, 8.0, WHITE);
+        screen.text_styled("소리", x + 10.0, y + 6.0, SMALL, TextAlignment::Left, INK);
+        let big = ui::Style {
+            size: 17.0,
+            line: 18.0,
+            bold: true,
+        };
+        let shown = volume_label((volume, muted));
+        let color = if muted { MUTED } else { GREEN };
+        screen.text_styled(&shown, x + width - 10.0, y + 4.0, big, TextAlignment::Right, color);
+
+        let (left, right) = (x + 12.0, x + width - 12.0);
+        let bars = (100 / VOLUME_STEP) as usize;
+        let gap = 2.0;
+        let bar_width = (right - left - gap * (bars - 1) as f32) / bars as f32;
+        let base = y + 46.0;
+        let lit = if muted { 0 } else { (volume / VOLUME_STEP) as usize };
+        for bar in 0..bars {
+            let height = 4.0 + 18.0 * (bar + 1) as f32 / bars as f32;
+            let bar_x = left + bar as f32 * (bar_width + gap);
+            let fill = if bar < lit { GREEN } else { rgb(0xd5, 0xdb, 0xe0) };
+            screen.round(bar_x, base - height, bar_width, height, 1.5, fill);
+            self.hit(bar_x as i32, (base - 24.0) as i32, (bar_width + gap) as i32, 26, Target::Cell(row, bar));
+        }
+        let scale = rgb(0x64, 0x75, 0x68);
+        screen.text_styled("끔", left, base + 2.0, TINY, TextAlignment::Left, scale);
+        screen.text_styled("50%", (left + right) / 2.0, base + 2.0, TINY, TextAlignment::Center, scale);
+        screen.text_styled("100%", right, base + 2.0, TINY, TextAlignment::Right, scale);
+        if self.desktop {
+            let note = fit_with("게임 중 F7·F8로 조절", right - left, TINY);
+            screen.text_styled(&note, left, base + 15.0, TINY, TextAlignment::Left, scale);
+        }
+    }
+
+    /// Sets how loud every game plays, and has it heard at once.
+    pub(crate) fn set_volume(&mut self, volume: u8, muted: bool) {
+        self.store.set_volume(volume, muted);
+        crate::set_audio_volume(self.store.audible_volume());
     }
 
     /// The speed in a white card: the number large, and the ruler under it -

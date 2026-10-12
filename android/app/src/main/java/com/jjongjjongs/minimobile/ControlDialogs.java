@@ -48,13 +48,19 @@ final class ControlDialogs {
     final ControlStyle darkStyle;
     ControlStyle lightStyle;
     ControlStyle style;
-    /** The gamepad drawing, while it is up. */
-    PadLayoutView padView;
-    /** The keypad a key is being chosen on, while it is up. */
-    KeypadPickerView keypadPicker;
-    Dialog keypadDialog;
-    /** Whether a key is being picked for one of its buttons. */
-    boolean padPickerOpen;
+    /** The pad layout's keypad, while it is up, and what goes with it. */
+    KeypadPickerView padKeypad;
+    Dialog padMenuDialog;
+    TextView[] padTabs;
+    TextView padStatus;
+    TextView padStrip;
+    /** The layer the pad layout shows: SELECT held, or not. */
+    boolean padLayer;
+    /** The handset key a pad button is being asked for, -1 for none. */
+    int padCaptureKey = -1;
+    boolean padCaptureSelect;
+    Dialog padCaptureDialog;
+    TextView padCaptureNote;
     final Handler main = new Handler(Looper.getMainLooper());
     int captureTarget = -1;
 
@@ -305,7 +311,9 @@ final class ControlDialogs {
 
     boolean captureMotion(MotionEvent motionEvent, float f, float f2, float f3, float f4) {
         int i;
-        if (this.captureTarget < 0) {
+        // The stick and the triggers, for the key table's capture or the pad
+        // layout's.
+        if (this.captureTarget < 0 && this.padCaptureKey < 0) {
             return false;
         }
         if (!this.captureArmed) {
@@ -322,16 +330,18 @@ final class ControlDialogs {
             i = 19;
         } else if (f2 > 0.65f) {
             i = 20;
-        } else {
-            if (f3 <= 0.65f) {
-                if (f4 > 0.65f) {
-                    i = 105;
-                }
-                return true;
-            }
+        } else if (f3 > 0.65f) {
             i = 104;
+        } else if (f4 > 0.65f) {
+            i = 105;
+        } else {
+            return true;
         }
-        assign(i);
+        if (this.padCaptureKey >= 0) {
+            padAssign(i);
+        } else {
+            assign(i);
+        }
         return true;
     }
 
@@ -783,11 +793,12 @@ final class ControlDialogs {
     }
 
     /**
-     * The gamepad: a drawing of one, each button with the handset key it
-     * presses plain and with SELECT held, as the PC and handheld builds have
-     * it. A pad button pressed picks it out on the drawing; pressed again, or
-     * tapped again, it asks for a new key. The full table of every key -
-     * a folder phone's own keypad, a keyboard - is a row away.
+     * The gamepad's layout, the way the keyboard's is on the PC builds: the
+     * handset's keypad, each key with the pad buttons that press it in one
+     * layer - plain, or with SELECT held - and a key picked asks for the pad
+     * button to put on it. A button on another key moves over; one already on
+     * this key comes off. The full table of every key - a folder phone's own
+     * keypad, a keyboard - is a row away.
      */
     void padMenu() {
         LinearLayout column = column();
@@ -811,15 +822,56 @@ final class ControlDialogs {
             }
         }));
         column.addView(header);
-        column.addView(this.style.hint("패드 버튼을 누르거나 그림에서 고르세요. 고른 버튼을 한 번 더 누르면 폰 키를 바꿉니다. SELECT를 누른 채 누르면 둘째 칸의 키가 눌려요.\n연결된 패드: " + connectedPadName()));
+        column.addView(this.style.hint("폰 키를 고른 뒤 쓸 패드 버튼을 누르세요. 다른 키에 있던 버튼은 옮겨 오고, 이 키에 이미 있는 버튼을 누르면 빠집니다. 패드로는 방향키로 고르고 A, SELECT로 칸을 바꿉니다.\n연결된 패드: " + connectedPadName()));
 
-        this.padView = new PadLayoutView(this.style, this.s, new PadLayoutView.Listener() {
+        // The layer shown: a tab each.
+        LinearLayout tabs = new LinearLayout(this.style.context);
+        tabs.setPadding(0, this.style.dp(6.0f), 0, this.style.dp(6.0f));
+        this.padTabs = new TextView[2];
+        for (int i = 0; i < 2; i++) {
+            final boolean layer = i == 1;
+            TextView tab = this.style.text(layer ? "SELECT 누른 채" : "그냥 누를 때", 13.0f, this.style.INK);
+            tab.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+            tab.setPadding(this.style.dp(14.0f), this.style.dp(6.0f), this.style.dp(14.0f), this.style.dp(6.0f));
+            tab.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View view) {
+                    ControlDialogs.this.padLayer = layer;
+                    ControlDialogs.this.refreshPadRows();
+                }
+            });
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, -2);
+            params.rightMargin = this.style.dp(6.0f);
+            tabs.addView(tab, params);
+            this.padTabs[i] = tab;
+        }
+        column.addView(tabs);
+
+        this.padKeypad = new KeypadPickerView(this.style, 4, padNotes(this.padLayer), new KeypadPickerView.Listener() {
             @Override
-            public void change(int index, boolean withSelect) {
-                ControlDialogs.this.pickPadKey(index, withSelect);
+            public void focus(int key) {
+                ControlDialogs.this.padStatus.setText("");
+                ControlDialogs.this.refreshPadStrip();
+            }
+
+            @Override
+            public void choose(int key) {
+                ControlDialogs.this.capturePadButton(key);
             }
         });
-        column.addView(this.padView, new LinearLayout.LayoutParams(-1, -2));
+        column.addView(this.padKeypad, new LinearLayout.LayoutParams(-1, -2));
+
+        this.padStatus = this.style.text("", 12.5f, this.style.DEEP);
+        this.padStatus.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        this.padStatus.setGravity(17);
+        this.padStatus.setPadding(0, this.style.dp(6.0f), 0, 0);
+        column.addView(this.padStatus, new LinearLayout.LayoutParams(-1, -2));
+        this.padStrip = this.style.text("", 14.0f, this.style.INK);
+        this.padStrip.setPadding(this.style.dp(12.0f), this.style.dp(10.0f), this.style.dp(12.0f), this.style.dp(10.0f));
+        this.padStrip.setBackground(this.style.rounded(this.style.SOFTER, this.style.LINE, 1, 12));
+        LinearLayout.LayoutParams stripParams = new LinearLayout.LayoutParams(-1, -2);
+        stripParams.topMargin = this.style.dp(6.0f);
+        column.addView(this.padStrip, stripParams);
 
         LinearLayout more = this.style.section(column, "물리 키");
         this.style.menuRow(more, "⌨", "폴더폰 키패드·키보드 키 매핑", new View.OnClickListener() {
@@ -831,85 +883,177 @@ final class ControlDialogs {
 
         ScrollView scrollView = new ScrollView(this.style.context);
         scrollView.addView(column);
-        PadDialog padDialog = new PadDialog(this.s.a, this.style.themeId);
+        final PadDialog padDialog = new PadDialog(this.s.a, this.style.themeId);
         padDialog.setView(scrollView);
         padDialog.setButton(-2, "닫기", new DialogInterface.OnClickListener() {
             @Override
             public void onClick(DialogInterface dialogInterface, int i3) {
             }
         });
+        this.padMenuDialog = padDialog;
+        refreshPadRows();
         track(padDialog, new Runnable() {
             @Override
             public void run() {
-                ControlDialogs.this.padView = null;
+                ControlDialogs.this.padKeypad = null;
+                ControlDialogs.this.padMenuDialog = null;
+                ControlDialogs.this.padTabs = null;
             }
         });
     }
 
-    /**
-     * Asks for the handset key button `index` presses in one layer, on a
-     * drawing of the handset's keypad: a tap, or the pad's D-pad and A,
-     * chooses; B leaves it as it is.
-     */
-    void pickPadKey(final int index, final boolean withSelect) {
-        final int code = ControlPads.PAD_CODES[index];
-        final Map<Integer, Integer> layer = withSelect ? this.s.selectMapping : this.s.mapping;
-        Integer now = layer.get(code);
-        int current = now == null ? -1 : now;
-
-        // On each key, the pad buttons already pressing it in this layer.
-        String[] notes = new String[21];
-        for (int button = 0; button < ControlPads.PAD_CODES.length; button++) {
-            Integer key = layer.get(ControlPads.PAD_CODES[button]);
-            if (key == null || key < 0 || key >= notes.length) {
-                continue;
-            }
-            notes[key] = notes[key] == null ? ControlPads.PAD_NAMES[button] : notes[key] + "·" + ControlPads.PAD_NAMES[button];
+    /** By handset key, the pad buttons pressing it in one layer. */
+    String[] padNotes(boolean withSelect) {
+        String[] notes = new String[22];
+        for (int key = 0; key < notes.length; key++) {
+            notes[key] = padButtonsOn(key, withSelect);
         }
+        return notes;
+    }
 
-        final PadDialog dialog = new PadDialog(this.s.a, this.style.themeId);
-        this.keypadPicker = new KeypadPickerView(this.style, current, notes, withSelect ? "그냥과 같게" : "", new KeypadPickerView.Listener() {
-            @Override
-            public void choose(int key) {
-                // The D-pad's centre goes with A, as a pad may send either.
-                int[] codes = code == KeyEvent.KEYCODE_BUTTON_A ? new int[]{code, KeyEvent.KEYCODE_DPAD_CENTER} : new int[]{code};
-                for (int each : codes) {
-                    if (key < 0) {
-                        layer.remove(each);
-                    } else {
-                        layer.put(each, key);
-                    }
+    /** The pad buttons pressing `key` in one layer, by name, or "" for none. */
+    String padButtonsOn(int key, boolean withSelect) {
+        Map<Integer, Integer> layer = withSelect ? this.s.selectMapping : this.s.mapping;
+        StringBuilder names = new StringBuilder();
+        for (int button = 0; button < ControlPads.PAD_CODES.length; button++) {
+            Integer on = layer.get(ControlPads.PAD_CODES[button]);
+            if (on != null && on == key) {
+                if (names.length() > 0) {
+                    names.append(" · ");
                 }
-                ControlDialogs.this.s.savePads();
-                ControlDialogs.this.refreshPadRows();
-                dialog.dismiss();
+                names.append(ControlPads.PAD_NAMES[button]);
             }
-        });
+        }
+        return names.toString();
+    }
 
+    /** The key picked, and the buttons on it in each layer. */
+    void refreshPadStrip() {
+        if (this.padKeypad == null || this.padStrip == null) {
+            return;
+        }
+        int key = this.padKeypad.picked();
+        String plain = padButtonsOn(key, false);
+        String select = padButtonsOn(key, true);
+        this.padStrip.setText(KeypadPickerView.label(key) + "  →  그냥: " + (plain.isEmpty() ? "없음" : plain) + "   SELECT+: " + (select.isEmpty() ? "없음" : select));
+    }
+
+    /**
+     * Asks for the pad button to put on `key` in the layer shown: pressed, it
+     * goes on (or comes off, if it was there). 비우기 takes every button off
+     * the key in that layer; 취소 leaves it.
+     */
+    void capturePadButton(final int key) {
+        final boolean withSelect = this.padLayer;
+        final String layer = withSelect ? "SELECT 누른 채" : "그냥 누를 때";
         LinearLayout column = column();
-        TextView title = this.style.text(ControlPads.PAD_NAMES[index] + " 버튼 (" + (withSelect ? "SELECT+" : "그냥") + ")", 18.0f, this.style.INK);
+        TextView title = this.style.text(KeypadPickerView.label(key) + " (" + layer + ")", 18.0f, this.style.INK);
         title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
         column.addView(title);
-        column.addView(this.style.hint("누를 폰 키를 고르세요. 지금: " + (current < 0 ? (withSelect ? "그냥과 같게" : "없음") : PadLayoutView.label(current))));
-        column.addView(this.keypadPicker, new LinearLayout.LayoutParams(-1, -2));
-        ScrollView scrollView = new ScrollView(this.style.context);
-        scrollView.addView(column);
-        dialog.setView(scrollView);
+        String now = padButtonsOn(key, withSelect);
+        column.addView(this.style.hint("지금: " + (now.isEmpty() ? "없음" : now)));
+        TextView ask = this.style.text("쓸 버튼을 누르세요", 20.0f, this.style.INK);
+        ask.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        ask.setGravity(17);
+        ask.setPadding(0, this.style.dp(18.0f), 0, this.style.dp(4.0f));
+        column.addView(ask, new LinearLayout.LayoutParams(-1, -2));
+        this.padCaptureNote = this.style.text("…", 13.0f, this.style.DEEP);
+        this.padCaptureNote.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        this.padCaptureNote.setGravity(17);
+        column.addView(this.padCaptureNote, new LinearLayout.LayoutParams(-1, -2));
+        TextView rule = this.style.hint("다른 키에 있던 버튼은 이 키로 옮겨 오고, 이미 이 키에 있는 버튼을 누르면 빠집니다.");
+        rule.setGravity(17);
+        column.addView(rule, new LinearLayout.LayoutParams(-1, -2));
+
+        PadDialog dialog = new PadDialog(this.s.a, this.style.themeId);
+        dialog.setView(column);
         dialog.setButton(-2, "취소", new DialogInterface.OnClickListener() {
             @Override
             public void onClick(DialogInterface dialogInterface, int i) {
             }
         });
-        this.padPickerOpen = true;
-        this.keypadDialog = dialog;
+        dialog.setButton(-3, "비우기", new DialogInterface.OnClickListener() {
+            @Override
+            public void onClick(DialogInterface dialogInterface, int i) {
+                Map<Integer, Integer> map = withSelect ? ControlDialogs.this.s.selectMapping : ControlDialogs.this.s.mapping;
+                for (int code : ControlPads.PAD_CODES) {
+                    Integer on = map.get(code);
+                    if (on != null && on == key) {
+                        map.remove(code);
+                        if (code == KeyEvent.KEYCODE_BUTTON_A) {
+                            map.remove(KeyEvent.KEYCODE_DPAD_CENTER);
+                        }
+                    }
+                }
+                ControlDialogs.this.s.savePads();
+                ControlPatch.input.releaseAll();
+                ControlDialogs.this.padStatus.setText(KeypadPickerView.label(key) + ": " + layer + " 버튼을 모두 뺐습니다.");
+                ControlDialogs.this.refreshPadRows();
+            }
+        });
+        this.padCaptureKey = key;
+        this.padCaptureSelect = withSelect;
+        this.padCaptureDialog = dialog;
+        this.captureArmed = this.s.axesNeutral;
+        ControlPatch.input.releaseAll();
         track(dialog, new Runnable() {
             @Override
             public void run() {
-                ControlDialogs.this.padPickerOpen = false;
-                ControlDialogs.this.keypadPicker = null;
-                ControlDialogs.this.keypadDialog = null;
+                ControlDialogs.this.padCaptureKey = -1;
+                ControlDialogs.this.padCaptureDialog = null;
+                ControlDialogs.this.padCaptureNote = null;
             }
         });
+    }
+
+    /** Puts the pad button `code` on the key being captured for, or takes it off. */
+    void padAssign(int code) {
+        int key = this.padCaptureKey;
+        if (key < 0) {
+            return;
+        }
+        if (code == KeyEvent.KEYCODE_DPAD_CENTER) {
+            code = KeyEvent.KEYCODE_BUTTON_A;
+        }
+        String name = null;
+        for (int button = 0; button < ControlPads.PAD_CODES.length; button++) {
+            if (ControlPads.PAD_CODES[button] == code) {
+                name = ControlPads.PAD_NAMES[button];
+            }
+        }
+        if (name == null) {
+            if (this.padCaptureNote != null) {
+                this.padCaptureNote.setText("이 버튼은 쓸 수 없습니다.");
+            }
+            return;
+        }
+        Map<Integer, Integer> map = this.padCaptureSelect ? this.s.selectMapping : this.s.mapping;
+        // The D-pad's centre goes with A, as a pad may send either.
+        int[] codes = code == KeyEvent.KEYCODE_BUTTON_A ? new int[]{code, KeyEvent.KEYCODE_DPAD_CENTER} : new int[]{code};
+        Integer before = map.get(code);
+        String outcome;
+        if (before != null && before == key) {
+            for (int each : codes) {
+                map.remove(each);
+            }
+            outcome = name + ": '" + KeypadPickerView.label(key) + "'에서 뺐습니다.";
+        } else {
+            for (int each : codes) {
+                map.put(each, key);
+            }
+            outcome = before != null && before >= 0
+                    ? name + ": '" + KeypadPickerView.label(before) + "'에서 옮겨 왔습니다."
+                    : name + ": '" + KeypadPickerView.label(key) + "'에 붙였습니다.";
+        }
+        this.s.savePads();
+        ControlPatch.input.releaseAll();
+        if (this.padStatus != null) {
+            this.padStatus.setText(outcome);
+        }
+        if (this.padCaptureDialog != null) {
+            this.padCaptureDialog.dismiss();
+        }
+        refreshPadRows();
     }
 
     /** Puts the pad's buttons, both layers, back to the defaults, after asking. */
@@ -927,40 +1071,49 @@ final class ControlDialogs {
     }
 
     /**
-     * A pad button pressed while the gamepad drawing is up: picks it out, or
-     * asks for its key when it already is. SELECT turns to the other layer.
-     * Whether the event was the drawing's.
+     * A pad button pressed while the pad layout is up. Asking for a button,
+     * any button but SELECT (the layer key) and HOME goes on the key. On the
+     * keypad, the D-pad and A pick a key, SELECT turns to the other layer and
+     * B closes it. Whether the event was the layout's.
      */
     boolean layoutKey(KeyEvent keyEvent) {
-        if (this.keypadPicker != null && ControlPads.isPadCode(keyEvent.getKeyCode())) {
-            if (keyEvent.getAction() == 0 && keyEvent.getRepeatCount() == 0
-                    && !this.keypadPicker.padKey(keyEvent.getKeyCode())
-                    && keyEvent.getKeyCode() == KeyEvent.KEYCODE_BUTTON_B && this.keypadDialog != null) {
-                // B leaves the key as it was.
-                this.keypadDialog.dismiss();
+        int code = keyEvent.getKeyCode();
+        if (this.padCaptureKey >= 0) {
+            if (keyEvent.getAction() != 0 || keyEvent.getRepeatCount() != 0) {
+                return true;
+            }
+            if (code == ControlPads.SELECT) {
+                this.padCaptureNote.setText("SELECT는 칸 전환이라 쓸 수 없습니다.");
+            } else if (code == KeyEvent.KEYCODE_BUTTON_START && this.padCaptureSelect) {
+                this.padCaptureNote.setText("SELECT+START는 쓸 수 없습니다.");
+            } else {
+                padAssign(code);
             }
             return true;
         }
-        if (this.padView == null || this.padPickerOpen) {
+        if (this.padKeypad == null) {
             return false;
         }
-        int code = keyEvent.getKeyCode();
         if (code != ControlPads.SELECT && !ControlPads.isPadCode(code)) {
             return false;
         }
-        if (keyEvent.getAction() != 0 || keyEvent.getRepeatCount() != 0) {
+        if (keyEvent.getAction() != 0 || (keyEvent.getRepeatCount() != 0 && !isDirection(code))) {
             return true;
         }
         if (code == ControlPads.SELECT) {
-            this.padView.withSelect = !this.padView.withSelect;
-            this.padView.invalidate();
-            return true;
-        }
-        int before = this.padView.index;
-        if (this.padView.pickCode(code == KeyEvent.KEYCODE_DPAD_CENTER ? KeyEvent.KEYCODE_BUTTON_A : code) && before == this.padView.index) {
-            pickPadKey(this.padView.index, this.padView.withSelect);
+            this.padLayer = !this.padLayer;
+            refreshPadRows();
+        } else if (code == KeyEvent.KEYCODE_BUTTON_B && this.padMenuDialog != null) {
+            this.padMenuDialog.dismiss();
+        } else {
+            this.padKeypad.padKey(code);
         }
         return true;
+    }
+
+    static boolean isDirection(int code) {
+        return code == KeyEvent.KEYCODE_DPAD_UP || code == KeyEvent.KEYCODE_DPAD_DOWN
+                || code == KeyEvent.KEYCODE_DPAD_LEFT || code == KeyEvent.KEYCODE_DPAD_RIGHT;
     }
 
     /** Every key's table: the pad's buttons and a phone's own keys, by handset key. */
@@ -1536,8 +1689,16 @@ final class ControlDialogs {
     }
 
     void refreshPadRows() {
-        if (this.padView != null) {
-            this.padView.invalidate();
+        if (this.padKeypad != null) {
+            this.padKeypad.setNotes(padNotes(this.padLayer));
+            refreshPadStrip();
+        }
+        if (this.padTabs != null) {
+            for (int i = 0; i < this.padTabs.length; i++) {
+                boolean on = (i == 1) == this.padLayer;
+                this.padTabs[i].setTextColor(on ? (this.style.light ? android.graphics.Color.WHITE : this.style.BG) : this.style.MUTED);
+                this.padTabs[i].setBackground(this.style.rounded(on ? this.style.GREEN : this.style.SOFTER, this.style.LINE, on ? 0 : 1, 16));
+            }
         }
         if (this.padRows == null) {
             return;

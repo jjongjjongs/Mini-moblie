@@ -1,6 +1,7 @@
-//! The two layout screens: the handset's keypad drawn with the keyboard keys
-//! on each of its keys, and a gamepad drawn with the handset key on each of
-//! its buttons. Either can put its half of the mapping back to the defaults.
+//! The two layout screens, both the handset's keypad: one with the keyboard
+//! keys on each of its keys, one with the pad buttons. A key picked asks for
+//! the keyboard key or the pad button to put on it, pressed. Either can put
+//! its half of the mapping back to the defaults.
 
 use wie_android::host;
 use wie_backend::canvas::{Color, TextAlignment};
@@ -18,13 +19,6 @@ use crate::{
 const MICRO: Style = Style {
     size: 7.5,
     line: 9.0,
-    bold: true,
-};
-
-/// The handset key on a gamepad button.
-const CHIP: Style = Style {
-    size: 8.5,
-    line: 10.0,
     bold: true,
 };
 
@@ -94,68 +88,11 @@ fn keypad_rects(width: u32) -> Vec<Rect> {
         .collect()
 }
 
-/// Where each of the table's buttons is on the gamepad, in `TABLE_BUTTONS`'
-/// order, on a 320-unit drawing: x, y, width, height and how round.
-const PAD: [(i32, i32, i32, i32, f32); 15] = [
-    (51, 78, 29, 23, 5.0),
-    (51, 126, 29, 23, 5.0),
-    (20, 102, 29, 23, 5.0),
-    (82, 102, 29, 23, 5.0),
-    (268, 100, 35, 28, 14.0),
-    (237, 124, 35, 28, 14.0),
-    (237, 76, 35, 28, 14.0),
-    (206, 100, 35, 28, 14.0),
-    (82, 50, 56, 22, 6.0),
-    (182, 50, 56, 22, 6.0),
-    (22, 50, 56, 22, 6.0),
-    (242, 50, 56, 22, 6.0),
-    (116, 116, 37, 37, 18.5),
-    (167, 116, 37, 37, 18.5),
-    (161, 85, 48, 20, 10.0),
-];
-
-/// Where each direction leads from each of the pad's buttons, in the same
-/// order: up, down, left, right. Set by hand, since the buttons sit on
-/// diagonals no nearest-box rule reads the way a thumb does.
-const PAD_NEXT: [[usize; 4]; 15] = [
-    [10, 1, 2, 3],
-    [0, 1, 2, 3],
-    [0, 1, 2, 3],
-    [0, 1, 2, 12],
-    [6, 5, 7, 4],
-    [6, 5, 7, 4],
-    [11, 5, 14, 4],
-    [6, 5, 13, 4],
-    [8, 0, 10, 9],
-    [9, 14, 8, 11],
-    [10, 0, 10, 8],
-    [11, 6, 9, 11],
-    [8, 12, 3, 13],
-    [14, 13, 12, 7],
-    [9, 13, 3, 6],
-];
-
-fn pad_step(from: usize, direction: Button) -> usize {
-    let way = match direction {
-        Button::Up => 0,
-        Button::Down => 1,
-        Button::Left => 2,
-        _ => 3,
-    };
-    PAD_NEXT[from][way]
-}
-
-/// SELECT, which is not mapped but holds the second layer.
-const PAD_SELECT: (i32, i32, i32, i32, f32) = (111, 85, 48, 20, 10.0);
-
-fn pad_rect(left: i32, top: i32, (x, y, width, height, _): (i32, i32, i32, i32, f32)) -> Rect {
-    Rect {
-        x: left + x,
-        y: top + y,
-        width,
-        height,
-    }
-}
+/// Where the pad's keypad starts, under its tabs, and how far apart its rows
+/// are: a little tighter than the keyboard's, for the tabs and the line
+/// under it to fit.
+const PAD_KEYPAD_TOP: i32 = 43;
+const PAD_KEY_PITCH: i32 = 29;
 
 /// Where a 320x240 drawing goes on a screen of the settings' size: in the
 /// middle of it.
@@ -297,39 +234,49 @@ impl App {
         }
     }
 
-    /// The pad's buttons on a drawing of a gamepad, plain or with SELECT held.
+    /// The handset's keypad, each key with the pad buttons that press it in
+    /// one layer - plain, or with SELECT held - the way the keyboard's layout
+    /// shows its keys: pick a key, then press the button to put on it.
     pub(crate) fn layout(&mut self) {
-        // On A, the button most often changed.
-        let mut index: usize = 4;
+        // On 확인.
+        let mut index = KEYPAD.iter().position(|(key, ..)| *key == 4).unwrap_or(0);
         let mut with_select = false;
+        let mut status = String::new();
         let mut repeat = Repeat::new();
         let mut dirty = true;
         loop {
             let pressed = self.presses(&mut repeat);
             if let Some((pointed, column)) = self.take_pointed() {
-                index = pointed.min(TABLE_BUTTONS.len() - 1);
+                index = pointed.min(KEYPAD.len() - 1);
                 with_select = column.map_or(with_select, |column| column == 1);
                 dirty = true;
             }
             for button in pressed {
                 dirty = true;
+                status.clear();
+                let handset = KEYPAD[index].0;
                 match button {
-                    Button::Up | Button::Down | Button::Left | Button::Right => index = pad_step(index, button),
+                    Button::Up | Button::Down | Button::Left | Button::Right => {
+                        let (width, _, _) = self.menu_size();
+                        index = step(&keypad_rects(width), index, button);
+                    }
                     Button::L1 | Button::L2 => with_select = false,
                     Button::R1 | Button::R2 => with_select = true,
+                    // Tab on the keyboard: the other layer.
                     Button::Select => with_select = !with_select,
                     Button::B | Button::Guide => return,
+                    // Delete, or Y on a pad: nothing presses the key in this
+                    // layer any more.
+                    Button::Y => self.clear_pad_key(handset, with_select),
                     Button::X | Button::L3 => {
-                        if self.confirm_reset(false, &|app: &App| app.draw_layout(index, with_select)) {
+                        if self.confirm_reset(false, &|app: &App| app.draw_layout(index, with_select, "")) {
                             self.store.reset_pad();
+                            status = "버튼 배치를 기본값으로 되돌렸습니다.".to_owned();
                         }
                     }
                     Button::A => {
-                        let (target, name) = TABLE_BUTTONS[index];
-                        let current = self.store.controls().get(target, with_select);
-                        let title = format!("{name} 버튼 ({})", if with_select { "SELECT+" } else { "그냥" });
-                        if let Some(key) = self.pick_key(&title, current, index, with_select) {
-                            self.store.set(target, with_select, key);
+                        if let Some(outcome) = self.capture_button(handset, with_select, index) {
+                            status = outcome;
                         }
                     }
                     _ => {}
@@ -337,7 +284,7 @@ impl App {
             }
 
             if dirty || self.take_redraw() {
-                let (screen, width, height) = self.draw_layout(index, with_select);
+                let (screen, width, height) = self.draw_layout(index, with_select, &status);
                 self.present(screen, width, height);
                 dirty = false;
             }
@@ -345,18 +292,37 @@ impl App {
         }
     }
 
-    fn draw_layout(&self, index: usize, with_select: bool) -> (Screen, u32, u32) {
+    /// The pad buttons that press `handset` in one layer, by their names.
+    fn pad_buttons_of(&self, handset: i32, with_select: bool) -> Vec<&'static str> {
+        let controls = self.store.controls();
+        TABLE_BUTTONS
+            .iter()
+            .filter(|(button, _)| controls.get(*button, with_select) == Some(handset))
+            .map(|(_, name)| *name)
+            .collect()
+    }
+
+    /// Takes every button off `handset` in one layer.
+    fn clear_pad_key(&mut self, handset: i32, with_select: bool) {
+        for (button, _) in TABLE_BUTTONS {
+            if self.store.controls().get(button, with_select) == Some(handset) {
+                self.store.set(button, with_select, None);
+            }
+        }
+    }
+
+    fn draw_layout(&self, index: usize, with_select: bool, status: &str) -> (Screen, u32, u32) {
         let (width, height, _) = self.menu_size();
         let mut screen = Screen::new(width, height);
         self.clear_hits();
         self.draw_layout_title(&mut screen, width, if self.desktop { "패드 버튼 배치" } else { "버튼 배치" });
         let (left, top) = origin(width, height);
 
-        // The layer shown: a tab each.
+        // The layer shown: a tab each, over the keypad.
         let mut tab_x = (left + 8) as f32;
+        let tab_y = (top + 24) as f32;
         for (tab, label) in [(false, "그냥 누를 때"), (true, "SELECT 누른 채")] {
             let tab_width = ui::text_width(label, TINY_BOLD) + 18.0;
-            let tab_y = (top + 25) as f32;
             if tab == with_select {
                 screen.round(tab_x, tab_y, tab_width, 15.0, 7.5, WHITE);
             } else {
@@ -370,127 +336,172 @@ impl App {
             tab_x += tab_width + 4.0;
         }
 
-        // The gamepad, and on each button what it presses in that layer. A
-        // button with nothing under SELECT keeps its own key there, muted.
-        let body = (left as f32 + 12.0, top as f32 + 46.0);
-        screen.round(body.0, body.1, 296.0, 118.0, 30.0, PANEL);
-        screen.outline(body.0, body.1, 296.0, 118.0, 30.0, 1.0, EDGE);
-        let controls = self.store.controls();
-        let shown = |button: Button, layer: bool| match controls.get(button, layer) {
-            Some(key) => (Some(key), true),
-            None if layer => (controls.get(button, false), false),
-            None => (None, false),
-        };
-        for (position, ((button, name), place)) in TABLE_BUTTONS.iter().zip(PAD).enumerate() {
-            let rect = pad_rect(left, top, place);
-            let picked = position == index;
-            let (key, own) = shown(*button, with_select);
-            let value = if key.is_some() { key_label(key) } else { "없음" };
-            let value_color = match (picked, key.is_some() && own) {
-                (true, true) => INK,
-                (true, false) => MUTED,
-                (false, true) => ACCENT,
-                (false, false) => NOTHING,
+        // The keypad, a little lower than the keyboard's to make room for
+        // the tabs, each key with the buttons on it in the layer shown.
+        for (position, ((handset, _, row), rect)) in KEYPAD.iter().zip(keypad_rects(width)).enumerate() {
+            let rect = Rect {
+                y: top + PAD_KEYPAD_TOP + row * PAD_KEY_PITCH,
+                height: PAD_KEY_PITCH - 3,
+                ..rect
             };
-            let name_color = if picked { GREEN } else { MUTED };
-            draw_chip(&mut screen, rect, place.4, picked, (name, MICRO, name_color), (value, CHIP, value_color));
+            let picked = position == index;
+            let buttons = self.pad_buttons_of(*handset, with_select);
+            let mapped = if buttons.is_empty() { "없음".to_owned() } else { buttons.join(" · ") };
+            let name = key_label(Some(*handset));
+            let name_style = if ui::text_width(name, SMALL) <= rect.width as f32 - 6.0 {
+                SMALL
+            } else {
+                TINY_BOLD
+            };
+            let mapped_color = match (picked, buttons.is_empty()) {
+                (true, _) => GREEN,
+                (false, true) => NOTHING,
+                (false, false) => ACCENT,
+            };
+            draw_chip(
+                &mut screen,
+                rect,
+                6.0,
+                picked,
+                (name, name_style, if picked { INK } else { TEXT }),
+                (&mapped, MICRO, mapped_color),
+            );
             self.hit(rect.x, rect.y, rect.width, rect.height, Target::Select(position));
         }
-        let select = pad_rect(left, top, PAD_SELECT);
-        draw_chip(
-            &mut screen,
-            select,
-            PAD_SELECT.4,
-            false,
-            ("SELECT", MICRO, MUTED),
-            ("숫자 전환", MICRO, MUTED),
-        );
 
-        // The button picked, and what it presses in each layer.
+        if !status.is_empty() {
+            screen.text_styled(
+                &fit_with(status, width as f32 - 16.0, TINY_BOLD),
+                width as f32 / 2.0,
+                (top + 157) as f32,
+                TINY_BOLD,
+                TextAlignment::Center,
+                ACCENT,
+            );
+        }
+
+        // The key picked, and the buttons on it in each layer.
         let (strip_x, strip_y) = ((left + 8) as f32, (top + 170) as f32);
         screen.round(strip_x, strip_y, 304.0, 44.0, 7.0, PANEL);
         screen.outline(strip_x, strip_y, 304.0, 44.0, 7.0, 1.0, EDGE);
-        let (button, name) = TABLE_BUTTONS[index];
-        let big_width = (ui::text_width(name, SMALL) + 20.0).max(34.0);
-        screen.round(strip_x + 9.0, strip_y + 8.0, big_width, 28.0, 14.0, WHITE);
+        let handset = KEYPAD[index].0;
+        let name = key_label(Some(handset));
+        let big_width = (ui::text_width(name, SMALL) + 16.0).max(44.0);
+        screen.round(strip_x + 9.0, strip_y + 7.0, big_width, 30.0, 6.0, WHITE);
         screen.text_styled(name, strip_x + 9.0 + big_width / 2.0, strip_y + 15.5, SMALL, TextAlignment::Center, INK);
         let mut slot_x = strip_x + 9.0 + big_width + 6.0;
         slot_x += screen.text_styled("→", slot_x, strip_y + 15.5, SMALL, TextAlignment::Left, MUTED) + 10.0;
         for (layer, label) in [(false, "그냥"), (true, "SELECT+")] {
-            let (key, own) = shown(button, layer);
-            let text = if key.is_some() { key_label(key) } else { "없음" };
+            let buttons = self.pad_buttons_of(handset, layer);
+            let text = if buttons.is_empty() { "없음".to_owned() } else { buttons.join(" · ") };
             let slot_width = draw_slot(
                 &mut screen,
                 slot_x,
                 strip_y + 5.0,
                 label,
-                text,
-                key.is_some() && own,
+                &text,
+                !buttons.is_empty(),
                 layer == with_select,
-                90.0,
+                96.0,
             );
             self.hit(slot_x as i32, strip_y as i32, slot_width as i32, 44, Target::Cell(index, layer as usize));
             slot_x += slot_width + 10.0;
         }
 
-        let hint = self.hint("A 바꾸기  L1 R1 탭  X 기본값", "Enter 바꾸기  Tab 탭  F9 기본값");
+        let hint = self.hint("A 바꾸기  SELECT 칸  Y 지우기  X 기본값", "Enter 바꾸기  Tab 칸  Del 지우기  F9 기본값");
         screen.bar(height as i32 - BAR, hint, self.hint("B 뒤로", "Esc 뒤로"));
         self.back_hit(width, height);
         (screen, width, height)
     }
 
-    /// Picks a handset key for one button of the pad in one layer, over the
-    /// gamepad. `None` when the pick is cancelled, `Some(None)` for no key.
-    fn pick_key(&mut self, title: &str, current: Option<i32>, index: usize, with_select: bool) -> Option<Option<i32>> {
-        let cells = picker_cells();
-        let rects: Vec<Rect> = cells.iter().map(|cell| cell.rect).collect();
-        let mut cursor = cells.iter().position(|cell| cell.key == current).unwrap_or(0);
-        let mut repeat = Repeat::new();
+    /// Waits for the pad button to put on `handset` in one layer and puts it
+    /// there: a button on another key moves over, one already on this key
+    /// comes off. What happened, to say under the keypad; `None` when
+    /// cancelled - Esc, MENU or the mouse's right button, since every other
+    /// button is one that can be picked.
+    fn capture_button(&mut self, handset: i32, with_select: bool, index: usize) -> Option<String> {
+        let layer = if with_select { "SELECT 누른 채" } else { "그냥 누를 때" };
+        let mut note = String::new();
         let mut dirty = true;
         loop {
-            let pressed = self.presses(&mut repeat);
-            if let Some((pointed, _)) = self.take_pointed() {
-                cursor = pointed.min(cells.len() - 1);
+            for input in self.poll() {
                 dirty = true;
-            }
-            for button in pressed {
-                dirty = true;
-                match button {
-                    Button::Up | Button::Down | Button::Left | Button::Right => cursor = step(&rects, cursor, button),
-                    Button::A => return Some(cells[cursor].key),
-                    Button::B | Button::Guide => return None,
+                match input {
+                    Input::Quit => {
+                        host::stop();
+                        std::process::exit(0);
+                    }
+                    Input::Key(ESCAPE, true, _) | Input::Button(Button::Guide, true) | Input::Mouse(Mouse::Back) => return None,
+                    Input::Key(DELETE, true, _) => {
+                        self.clear_pad_key(handset, with_select);
+                        return Some(format!("{}: {layer} 버튼을 모두 뺐습니다.", key_label(Some(handset))));
+                    }
+                    Input::Button(Button::Select, true) => note = "SELECT는 칸 전환이라 쓸 수 없습니다.".to_owned(),
+                    Input::Button(Button::Start, true) if with_select => {
+                        note = "SELECT+START는 게임 종료라 쓸 수 없습니다.".to_owned();
+                    }
+                    Input::Button(button, true) => {
+                        let Some((_, name)) = TABLE_BUTTONS.iter().find(|(x, _)| *x == button) else {
+                            note = "이 버튼은 쓸 수 없습니다.".to_owned();
+                            continue;
+                        };
+                        let before = self.store.controls().get(button, with_select);
+                        if before == Some(handset) {
+                            self.store.set(button, with_select, None);
+                            return Some(format!("{name}: '{}'에서 뺐습니다.", key_label(Some(handset))));
+                        }
+                        self.store.set(button, with_select, Some(handset));
+                        return Some(match before {
+                            Some(from) => format!("{name}: '{}'에서 옮겨 왔습니다.", key_label(Some(from))),
+                            None => format!("{name}: '{}'에 붙였습니다.", key_label(Some(handset))),
+                        });
+                    }
                     _ => {}
                 }
             }
 
             if dirty || self.take_redraw() {
-                let (mut screen, width, height) = self.draw_layout(index, with_select);
+                let (mut screen, width, height) = self.draw_layout(index, with_select, "");
                 screen.fill(0, 0, width, height, DIM);
-                // Only the picker answers the mouse while it is up.
                 self.clear_hits();
-
-                let (panel_width, panel_height) = (272u32, 196u32);
+                let (panel_width, panel_height) = (248u32, 120u32);
                 let x = (width - panel_width) as i32 / 2;
                 let y = (height - panel_height) as i32 / 2;
                 screen.panel(x, y, panel_width, panel_height);
-                panel_bar(&mut screen, x, y, panel_width, title, &format!("지금: {}", key_label(current)));
-                for (position, cell) in cells.iter().enumerate() {
-                    let rect = cell.rect;
-                    let fill = if position == cursor { HIGHLIGHT } else { ROW };
-                    screen.round((x + rect.x) as f32, (y + rect.y) as f32, rect.width as f32, rect.height as f32, 4.0, fill);
-                    self.hit(x + rect.x, y + rect.y, rect.width, rect.height, Target::Row(position));
-                    let color = if cell.key.is_none() && position != cursor { MUTED } else { TEXT };
-                    let label = if cell.key.is_none() { "없음" } else { key_label(cell.key) };
-                    screen.text(
-                        label,
-                        x + rect.x + rect.width / 2,
-                        y + rect.y + (rect.height - 16) / 2,
-                        TextAlignment::Center,
-                        color,
-                    );
-                }
-                let (choose, cancel) = (self.hint("A 고르기", "Enter 고르기"), self.hint("B 취소", "Esc 취소"));
-                self.back_bar(&mut screen, x, y + panel_height as i32 - BAR, panel_width, choose, cancel);
+                let title = format!("{} ({layer})", key_label(Some(handset)));
+                let now = self.pad_buttons_of(handset, with_select);
+                let now = if now.is_empty() { "없음".to_owned() } else { now.join(" · ") };
+                panel_bar(&mut screen, x, y, panel_width, &title, &format!("지금: {now}"));
+                let middle = x + panel_width as i32 / 2;
+                screen.text("쓸 버튼을 누르세요", middle, y + BAR + 10, TextAlignment::Center, TEXT);
+                let line = if note.is_empty() { "…" } else { note.as_str() };
+                let room = panel_width as f32 - 16.0;
+                screen.text_styled(
+                    &fit_with(line, room, TINY_BOLD),
+                    middle as f32,
+                    (y + BAR + 32) as f32,
+                    TINY_BOLD,
+                    TextAlignment::Center,
+                    ACCENT,
+                );
+                let rule = "다른 키의 버튼은 옮겨 오고, 이 키의 버튼은 빠집니다";
+                screen.text_styled(
+                    &fit_with(rule, room, TINY),
+                    middle as f32,
+                    (y + BAR + 47) as f32,
+                    TINY,
+                    TextAlignment::Center,
+                    MUTED,
+                );
+                let clear = if self.desktop { "Del 비우기" } else { "" };
+                self.back_bar(
+                    &mut screen,
+                    x,
+                    y + panel_height as i32 - BAR,
+                    panel_width,
+                    clear,
+                    self.hint("MENU 취소", "Esc·MENU 취소"),
+                );
                 self.present(screen, width, height);
                 dirty = false;
             }
@@ -681,48 +692,6 @@ impl App {
     }
 }
 
-/// One key in the picker, placed inside its panel.
-struct Cell {
-    key: Option<i32>,
-    rect: Rect,
-}
-
-/// The picker's keys: a handset's number pad on the left, the other keys in
-/// two columns on the right, and "none" under them.
-fn picker_cells() -> Vec<Cell> {
-    let mut cells = Vec::new();
-    // 1 2 3 / 4 5 6 / 7 8 9 / * 0 #, by key index.
-    let pad = [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 8, 19];
-    for (index, key) in pad.into_iter().enumerate() {
-        let rect = Rect {
-            x: 10 + (index % 3) as i32 * 38,
-            y: BAR + 8 + (index / 3) as i32 * 28,
-            width: 34,
-            height: 24,
-        };
-        cells.push(Cell { key: Some(key), rect });
-    }
-    // ▲ ▼ / ◀ ▶ / 확인 취소 / 좌소프트 우소프트 / 통화 종료.
-    let keys = [0, 1, 2, 3, 4, 7, 5, 6, 20, 21];
-    for (index, key) in keys.into_iter().enumerate() {
-        let rect = Rect {
-            x: 130 + (index % 2) as i32 * 68,
-            y: BAR + 8 + (index / 2) as i32 * 23,
-            width: 64,
-            height: 20,
-        };
-        cells.push(Cell { key: Some(key), rect });
-    }
-    let rect = Rect {
-        x: 130,
-        y: BAR + 8 + 5 * 23,
-        width: 132,
-        height: 20,
-    };
-    cells.push(Cell { key: None, rect });
-    cells
-}
-
 /// The box a direction leads to from `from`: of the boxes wholly past its
 /// edge that way, the nearest, distance across the direction counting
 /// double; `from` itself at an edge.
@@ -755,28 +724,6 @@ fn step(rects: &[Rect], from: usize, direction: Button) -> usize {
 mod tests {
     use super::*;
 
-    fn rects_of(cells: &[Cell]) -> Vec<Rect> {
-        cells.iter().map(|cell| cell.rect).collect()
-    }
-
-    #[test]
-    fn the_picker_moves_like_a_keypad() {
-        let cells = picker_cells();
-        let rects = rects_of(&cells);
-        let at = |key: Option<i32>| cells.iter().position(|cell| cell.key == key).unwrap();
-        // 1 → 2 → 3 along the top row, 5 down to 8, and from 3 across to ▲.
-        assert_eq!(step(&rects, at(Some(9)), Button::Right), at(Some(10)));
-        assert_eq!(step(&rects, at(Some(13)), Button::Down), at(Some(16)));
-        assert_eq!(step(&rects, at(Some(11)), Button::Right), at(Some(0)));
-        // The bottom of the right column reaches "none", and nothing is below it.
-        let none = at(None);
-        assert_eq!(step(&rects, at(Some(20)), Button::Down), none);
-        assert_eq!(step(&rects, none, Button::Down), none);
-        // The top-left key stays put going up or left.
-        assert_eq!(step(&rects, at(Some(9)), Button::Up), at(Some(9)));
-        assert_eq!(step(&rects, at(Some(9)), Button::Left), at(Some(9)));
-    }
-
     #[test]
     fn the_keypad_moves_between_its_blocks() {
         let rects = keypad_rects(320);
@@ -790,32 +737,5 @@ mod tests {
         assert_eq!(step(&rects, at(9), Button::Left), at(6));
         // The whole keypad fits the narrowest screen.
         assert!(rects.iter().all(|rect| rect.x >= 0 && rect.x + rect.width <= 320));
-    }
-
-    #[test]
-    fn the_pad_moves_like_a_gamepad() {
-        let at = |name: &str| TABLE_BUTTONS.iter().position(|(_, x)| *x == name).unwrap();
-        // Round the face buttons: Y ← A, X over them, B under.
-        assert_eq!(pad_step(at("A"), Button::Left), at("Y"));
-        assert_eq!(pad_step(at("Y"), Button::Up), at("X"));
-        assert_eq!(pad_step(at("X"), Button::Down), at("B"));
-        // Up from the D-pad to the shoulder over it, and from D▶ on to L3.
-        assert_eq!(pad_step(at("D▲"), Button::Up), at("L2"));
-        assert_eq!(pad_step(at("D▶"), Button::Right), at("L3"));
-        // Every way leads to a button, and every button is reached.
-        let mut reached = [false; 15];
-        for ways in PAD_NEXT {
-            for next in ways {
-                reached[next] = true;
-            }
-        }
-        assert!(reached.iter().all(|x| *x));
-        // Every button stays on the 320-unit drawing.
-        let rects: Vec<Rect> = PAD.iter().map(|place| pad_rect(0, 0, *place)).collect();
-        assert!(
-            rects
-                .iter()
-                .all(|rect| rect.x >= 0 && rect.x + rect.width <= 320 && rect.y + rect.height <= 170)
-        );
     }
 }
