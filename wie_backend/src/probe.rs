@@ -340,6 +340,7 @@ pub fn wrote(address: u32, width: u32, value: u32) {
 /// pc:3a376        trace from this address, for the default number of branches
 /// pc:3a376/50000  the same, for that many branches
 /// w:1518700       report the next writes to this address
+/// w:1718c0+84     the same for every word of the 0x84 bytes from it
 /// ```
 ///
 /// Addresses are hexadecimal, with or without `0x`. An empty specification
@@ -351,6 +352,23 @@ pub fn set_watches(spec: &str) -> Result<(), String> {
         let (kind, rest) = entry
             .split_once(':')
             .ok_or_else(|| alloc::format!("{entry:?} is not `pc:<addr>` or `w:<addr>`"))?;
+
+        // A run of words, each watched: a table typed on a handset in one
+        // entry rather than one per word.
+        if kind.trim() == "w"
+            && let Some((address, length)) = rest.split_once('+')
+        {
+            let parse = |text: &str| u32::from_str_radix(text.trim().trim_start_matches("0x"), 16);
+            let address = parse(address).map_err(|_| alloc::format!("{address:?} is not a hexadecimal address"))?;
+            let length = parse(length).map_err(|_| alloc::format!("{length:?} is not a hexadecimal length"))?;
+            if length == 0 || length > 0x400 {
+                return Err(alloc::format!("{entry:?} watches more than 0x400 bytes"));
+            }
+            for word in (address..address.saturating_add(length)).step_by(4) {
+                watch_write(word, entry);
+            }
+            continue;
+        }
 
         let (address, branches) = match rest.split_once('/') {
             Some((address, branches)) => (
@@ -878,6 +896,19 @@ mod tests {
             assert!(!is_watching(), "{bad:?} armed something");
             assert!(!is_write_watching(), "{bad:?} armed something");
         }
+
+        disarm();
+    }
+
+    #[test]
+    fn a_watched_run_watches_each_of_its_words() {
+        let _guard = ONE_AT_A_TIME.lock();
+        disarm();
+
+        set_watches("w:1718c0+c").unwrap();
+        assert_eq!(watches(), "w:1718c0,w:1718c4,w:1718c8");
+        assert!(set_watches("w:1718c0+0").is_err());
+        assert!(set_watches("w:1718c0+zz").is_err());
 
         disarm();
     }
