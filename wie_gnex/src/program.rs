@@ -2,13 +2,12 @@ use alloc::{string::String, vec::Vec};
 
 use wie_util::{Result, WieError};
 
-/// One of a script's variables: where its elements start in the word memory
-/// and how many it has. Every variable, constant or not, starts from the
+/// One of a script's variables: where its elements start in the word memory.
+/// Every variable, constant or not, starts from the
 /// values the script stores for it.
 #[derive(Clone, Copy)]
 pub struct Variable {
     pub offset: usize,
-    pub count: usize,
 }
 
 /// A GNEX script in the version-4 layout: code, the variable and resource
@@ -82,7 +81,7 @@ impl Program {
         let mut cursor = vi;
         for i in 0..(vi - vd) / 8 {
             let count = u16_at(data, vd + i * 8 + 2)? as usize;
-            variables.push(Variable { offset: memory.len(), count });
+            variables.push(Variable { offset: memory.len() });
             for j in 0..count {
                 memory.push(u32_at(data, cursor + j * 4)? as i32);
             }

@@ -16,6 +16,9 @@ pub const TRANSPARENT: i32 = 4;
 pub const RAW_COLOR: i32 = 0x1000;
 
 /// Script colour `c` (0..182) as RGB332.
+/// The height text is drawn at.
+pub const TEXT_HEIGHT: f32 = 12.0;
+
 pub fn script_color(c: i32) -> u8 {
     let c = c.rem_euclid(182);
     if c >= 140 {
@@ -173,6 +176,35 @@ impl Graphics {
         }
     }
 
+    /// An ellipse about `(cx, cy)` with radii `rx` and `ry`, in the current
+    /// colour.
+    pub fn ellipse(&mut self, cx: i32, cy: i32, rx: i32, ry: i32, fill: bool) {
+        if self.color == TRANSPARENT {
+            return;
+        }
+        let v = self.mapped(self.color);
+        let (rx, ry) = (rx.abs().max(1) as i64, ry.abs().max(1) as i64);
+        let mut previous = ry as i32;
+        for dx in 0..=rx {
+            // The half-height at this column, from x²/rx² + y²/ry² = 1.
+            let dy = isqrt(ry * ry * (rx * rx - dx * dx)) / rx;
+            let (dx, dy) = (dx as i32, dy as i32);
+            for x in [cx - dx, cx + dx] {
+                if fill {
+                    for y in cy - dy..=cy + dy {
+                        self.point(x, y, v);
+                    }
+                } else {
+                    for y in dy..=previous.max(dy) {
+                        self.point(x, cy - y, v);
+                        self.point(x, cy + y, v);
+                    }
+                }
+            }
+            previous = dy;
+        }
+    }
+
     pub fn rect(&mut self, x1: i32, y1: i32, x2: i32, y2: i32, c: i32) {
         if c == TRANSPARENT {
             return;
@@ -287,6 +319,9 @@ impl Graphics {
         if data.len() < 5 {
             return Err("bitmap header truncated");
         }
+        if (9..=12).contains(&data[0]) {
+            return self.rgb_bitmap(data, x, y, mirror);
+        }
         let (kind, w, h) = (data[0], data[1] as i32, data[2] as i32);
         let (bits, colors) = match kind {
             2 | 5 => (1, 2),
@@ -330,10 +365,46 @@ impl Graphics {
         Ok(())
     }
 
+    /// The bitmaps with a palette of their own colours: types 9 to 12 hold 1,
+    /// 2, 4 and 8 bits a pixel. After the type, size and hot spot come a flag
+    /// that makes the first colour transparent, the colour count (0 for 256)
+    /// and that many RGB triples, then the pixels packed row after row.
+    fn rgb_bitmap(&mut self, data: &[u8], x: i32, y: i32, mirror: bool) -> Result<(), &'static str> {
+        if data.len() < 7 {
+            return Err("bitmap header truncated");
+        }
+        let (w, h) = (data[1] as i32, data[2] as i32);
+        let bits = 1usize << (data[0] - 9);
+        let keyed = data[5] != 0;
+        let colors = if data[6] == 0 { 256 } else { data[6] as usize };
+        let offset = 7 + 3 * colors;
+        if offset + ((w * h) as usize * bits).div_ceil(8) > data.len() {
+            return Err("bitmap truncated");
+        }
+        let palette: Vec<u8> = data[7..offset]
+            .chunks(3)
+            .map(|c| (c[0] & 0xe0) | ((c[1] & 0xe0) >> 3) | (c[2] >> 6))
+            .collect();
+        let (ox, oy) = (data[3] as i8 as i32, data[4] as i8 as i32);
+        let x = if mirror { x + ox - w } else { x - ox };
+        let y = y - oy;
+        for i in 0..(w * h) as usize {
+            let bit = i * bits;
+            let index = (data[offset + bit / 8] >> (8 - bits - bit % 8)) as usize & ((1 << bits) - 1);
+            if keyed && index == 0 {
+                continue;
+            }
+            let Some(&v) = palette.get(index) else { continue };
+            let px = i as i32 % w;
+            let px = if mirror { w - 1 - px } else { px };
+            self.point(x + px, y + i as i32 / w, v);
+        }
+        Ok(())
+    }
+
     /// `text` at `x`, `y` (its top), aligned on `x` as the script asked, in
     /// the text colour; over a filled background when `background` is set.
     pub fn text(&mut self, x: i32, y: i32, text: &str, background: bool) {
-        const HEIGHT: f32 = 12.0;
         const BASELINE: f32 = 10.0;
         let alignment = match self.text_align {
             1 => TextAlignment::Center,
@@ -357,11 +428,11 @@ impl Graphics {
                 _ => x,
             };
             let bg = Rgb332Pixel::to_color(self.mapped(self.text_bg));
-            canvas.fill_rect(left - 1, y - 1, (width + 2) as u32, HEIGHT as u32 + 2, bg, clip);
+            canvas.fill_rect(left - 1, y - 1, (width + 2) as u32, TEXT_HEIGHT as u32 + 2, bg, clip);
         }
         if self.text_fg != TRANSPARENT {
             let fg: Color = Rgb332Pixel::to_color(self.mapped(self.text_fg));
-            canvas.draw_text(text, x, y, HEIGHT, BASELINE, alignment, fg, clip);
+            canvas.draw_text(text, x, y, TEXT_HEIGHT, BASELINE, alignment, fg, clip);
         }
         self.pixels = canvas.into_inner().raw().into_owned();
     }
@@ -374,4 +445,23 @@ impl Graphics {
     pub fn frame(&self) -> VecImageBuffer<Rgb332Pixel> {
         VecImageBuffer::from_raw(self.width as u32, self.height as u32, self.shown.clone())
     }
+}
+
+/// The integer square root of `n`, rounded down.
+pub fn isqrt(n: i64) -> i64 {
+    if n <= 0 {
+        return 0;
+    }
+    let mut x = n;
+    let mut y = (x + 1) / 2;
+    while y < x {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+    x
+}
+
+/// How wide `text` draws, in the font text is drawn in.
+pub fn text_width(text: &str) -> i32 {
+    wie_backend::canvas::string_width_px(text, TEXT_HEIGHT) as i32
 }

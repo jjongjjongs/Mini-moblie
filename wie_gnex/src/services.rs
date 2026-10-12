@@ -55,10 +55,15 @@ pub fn call(service: u16, vm: &mut Vm, host: &mut Host) -> VmResult<()> {
 
         // Drawing.
         0x22 => {
-            // Clip to x, y, width, height.
-            let [x, y, w, h] = vm.args::<4>()?;
+            // Clip to the corners (x1, y1) and (x2, y2), both inside.
+            let [x1, y1, x2, y2] = vm.args::<4>()?;
             let g = &mut host.graphics;
-            g.clip = (x.max(0), y.max(0), (x + w).min(g.width), (y + h).min(g.height));
+            g.clip = (
+                x1.min(x2).max(0),
+                y1.min(y2).max(0),
+                (x1.max(x2) + 1).min(g.width),
+                (y1.max(y2) + 1).min(g.height),
+            );
         }
         0x25 => {
             // A small setting (1..4) changed around scene changes; its effect
@@ -397,12 +402,234 @@ pub fn call(service: u16, vm: &mut Vm, host: &mut Host) -> VmResult<()> {
             vm.push(value.len() as i32);
         }
 
+        // Text metrics: the font's height, and how wide a string draws.
+        0x1e => vm.push(6),
+        0x1f => vm.push(12),
+        0x20 => {
+            let resource = vm.pop()?;
+            let text = text_of(vm, resource)?;
+            vm.push(crate::graphics::text_width(&text));
+        }
+        // Clip back to the whole screen.
+        0x23 => {
+            let g = &mut host.graphics;
+            g.clip = (0, 0, g.width, g.height);
+        }
+        // A point, and ellipses about a centre: outlined and filled.
+        0x3c => {
+            let [x, y] = vm.args::<2>()?;
+            let v = host.graphics.mapped(host.graphics.color);
+            host.graphics.point(x, y, v);
+        }
+        0x4b | 0x4c => {
+            let [cx, cy, rx, ry] = vm.args::<4>()?;
+            host.graphics.ellipse(cx, cy, rx, ry, service == 0x4c);
+        }
+        // Text drawn with an effect (an outline or shadow) the scripts pick
+        // with a further value; drawn plain.
+        0x57 => {
+            let [x, y, resource] = vm.args::<3>()?;
+            let text = text_of(vm, resource)?;
+            host.graphics.text(x, y, &text, false);
+        }
+        0x59 => {
+            let [x, y, resource, _effect] = vm.args::<4>()?;
+            let text = text_of(vm, resource)?;
+            host.graphics.text(x, y, &text, false);
+        }
+
+        // Settings and switches taking one value, whose effect is not
+        // modelled: font, drawing mode, vibration and backlight among them.
+        0x07 | 0x2c | 0x30 | 0x8b | 0x9c | 0xc0 | 0x187 => {
+            vm.pop()?;
+        }
+        0x50 => {
+            vm.args::<3>()?;
+        }
+        // The screen shown, for a region (x, y, width, height): the whole
+        // frame is presented.
+        0x60 => {
+            vm.args::<4>()?;
+            host.graphics.present();
+        }
+        0xc1 => {
+            vm.args::<4>()?;
+        }
+        0xe1 => {}
+        // A reading by number that 절묘한타이밍 seeds its random numbers
+        // from; the guest clock serves.
+        0x9b => {
+            vm.pop()?;
+            vm.push(host.clock as i32);
+        }
+        0x16 | 0x2f => {
+            if service == 0x2f {
+                vm.pop()?;
+            }
+            vm.push(0);
+        }
+        // Four words of the date: year, month, day, weekday.
+        0x0e => {
+            let address = vm.pop()?;
+            for (i, value) in [2006, 1, 1, 0].into_iter().enumerate() {
+                vm.write(address + i as i32, value)?;
+            }
+        }
+        // A number into a resource as decimal text.
+        0xb4 => {
+            let [resource, value, _width, _flags] = vm.args::<4>()?;
+            vm.set_string(resource, format!("{value}").as_bytes())?;
+        }
+        // Sine and cosine of an angle in degrees, times 100; a square root.
+        0xcd | 0xce => {
+            let degrees = vm.pop()?;
+            let value = if service == 0xcd { sin100(degrees) } else { sin100(degrees + 90) };
+            vm.push(value);
+        }
+        0xd3 => {
+            let value = vm.pop()?;
+            vm.push(crate::graphics::isqrt(value as i64) as i32);
+        }
+
+        // Files, named by a string resource.
+        0x6b => {
+            let name = vm.pop()?;
+            let exists = host.files.exists(&vm.string(name)?);
+            vm.push(exists as i32);
+        }
+        0x63 => {
+            let [name, mode] = vm.args::<2>()?;
+            let handle = host.files.open(&vm.string(name)?, mode);
+            vm.push(handle);
+        }
+        0x64 => {
+            let handle = vm.pop()?;
+            let closed = host.files.close(handle);
+            vm.push(closed as i32);
+        }
+        0x65 => {
+            let name = vm.pop()?;
+            let removed = host.files.remove(&vm.string(name)?);
+            vm.push(removed as i32);
+        }
+        0x66 => {
+            let [handle, offset, origin] = vm.args::<3>()?;
+            let moved = host.files.seek(handle, offset, origin);
+            vm.push(moved as i32);
+        }
+        // Words, four bytes each: written from memory, and read into it.
+        0x67 => {
+            let [handle, address, count] = vm.args::<3>()?;
+            let mut bytes = Vec::with_capacity(count.max(0) as usize * 4);
+            for i in 0..count {
+                bytes.extend_from_slice(&vm.read(address + i)?.to_le_bytes());
+            }
+            let written = host.files.write(handle, &bytes).map_or(-1, |x| (x / 4) as i32);
+            vm.push(written);
+        }
+        0x69 => {
+            let [handle, address, count] = vm.args::<3>()?;
+            let bytes = host.files.read(handle, count.max(0) as usize * 4);
+            let read = match bytes {
+                Some(bytes) => {
+                    for (i, word) in bytes.chunks_exact(4).enumerate() {
+                        vm.write(address + i as i32, i32::from_le_bytes([word[0], word[1], word[2], word[3]]))?;
+                    }
+                    (bytes.len() / 4) as i32
+                }
+                None => -1,
+            };
+            vm.push(read);
+        }
+        // Bytes: written from a resource, and read into one, at an offset.
+        0x68 => {
+            let [handle, resource, offset, count] = vm.args::<4>()?;
+            let data = vm.resource(resource)?;
+            let start = (offset.max(0) as usize).min(data.len());
+            let end = (start + count.max(0) as usize).min(data.len());
+            let bytes = data[start..end].to_vec();
+            let written = host.files.write(handle, &bytes).map_or(-1, |x| x as i32);
+            vm.push(written);
+        }
+        0x6a => {
+            let [handle, resource, offset, count] = vm.args::<4>()?;
+            let read = match host.files.read(handle, count.max(0) as usize) {
+                Some(bytes) => {
+                    let data = vm.resource_mut(resource)?;
+                    let start = offset.max(0) as usize;
+                    if data.len() < start + bytes.len() {
+                        data.resize(start + bytes.len(), 0);
+                    }
+                    data[start..start + bytes.len()].copy_from_slice(&bytes);
+                    bytes.len() as i32
+                }
+                None => -1,
+            };
+            vm.push(read);
+        }
+        // A file's size, into the word at `address`.
+        0x62 => {
+            let [name, address] = vm.args::<2>()?;
+            let size = host.files.size(&vm.string(name)?);
+            vm.write(address, size.map_or(0, |x| x as i32))?;
+            vm.push(size.is_some() as i32);
+        }
+        // Directories: whether one exists, making one, and removing one.
+        0x6c => {
+            let name = vm.pop()?;
+            let exists = host.files.is_directory(&vm.string(name)?);
+            vm.push(exists as i32);
+        }
+        0x6d => {
+            let name = vm.pop()?;
+            let made = host.files.make_directory(&vm.string(name)?);
+            vm.push(made as i32);
+        }
+        0x6e => {
+            let name = vm.pop()?;
+            let removed = host.files.remove(&vm.string(name)?);
+            vm.push(removed as i32);
+        }
+
+        // The network: a connection (host, port) that never comes up. Its
+        // state reads as failed, so a title takes its offline path.
+        0x101 => {
+            vm.args::<2>()?;
+        }
+        0x102 => {}
+        0x104 => {
+            vm.args::<2>()?;
+        }
+        0x105 => vm.push(-1),
+        // Record and message services that are not there: each answers -1.
+        0x6f | 0x70 => {
+            vm.pop()?;
+            vm.push(-1);
+        }
+        0x72 => {
+            vm.args::<3>()?;
+            vm.push(-1);
+        }
+        0x74 => {
+            vm.args::<4>()?;
+            vm.push(-1);
+        }
+        0x77 => {
+            vm.args::<3>()?;
+            vm.push(-1);
+        }
+
         _ => {
             let top = vm.stack.iter().rev().take(6).rev().collect::<Vec<_>>();
             return Err(format!("unknown service {service:#x} (stack {top:?})"));
         }
     }
     Ok(())
+}
+
+/// A string resource as text.
+fn text_of(vm: &Vm, resource: i32) -> VmResult<String> {
+    Ok(encoding_rs::EUC_KR.decode(&vm.string(resource)?).0.into_owned())
 }
 
 fn read_byte(vm: &Vm, address: i32, offset: i32) -> VmResult<u8> {
@@ -498,4 +725,20 @@ fn format_c(format: &[u8], values: &[i32], string: Option<&[u8]>) -> Vec<u8> {
     }
     out.truncate(255);
     out
+}
+
+/// `sin(degrees) * 100`, from a quarter-wave table.
+fn sin100(degrees: i32) -> i32 {
+    const QUARTER: [i32; 91] = [
+        0, 2, 3, 5, 7, 9, 10, 12, 14, 16, 17, 19, 21, 22, 24, 26, 28, 29, 31, 33, 34, 36, 37, 39, 41, 42, 44, 45, 47, 48, 50, 52, 53, 54, 56, 57, 59,
+        60, 62, 63, 64, 66, 67, 68, 69, 71, 72, 73, 74, 75, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 87, 88, 89, 90, 91, 91, 92, 93, 93, 94, 95,
+        95, 96, 96, 97, 97, 97, 98, 98, 98, 99, 99, 99, 99, 100, 100, 100, 100, 100, 100,
+    ];
+    let d = degrees.rem_euclid(360);
+    match d {
+        0..=90 => QUARTER[d as usize],
+        91..=180 => QUARTER[(180 - d) as usize],
+        181..=270 => -QUARTER[(d - 180) as usize],
+        _ => -QUARTER[(360 - d) as usize],
+    }
 }

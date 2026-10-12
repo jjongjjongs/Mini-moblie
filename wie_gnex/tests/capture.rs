@@ -121,6 +121,10 @@ fn capture() {
     let (Ok(archive), Ok(out)) = (env::var("GNEX_ARCHIVE"), env::var("GNEX_FRAMES")) else {
         return;
     };
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .try_init();
     let files: BTreeMap<String, Vec<u8>> = extract_zip(&fs::read(archive).unwrap()).unwrap();
     assert!(GnexEmulator::loadable_archive(&files));
 

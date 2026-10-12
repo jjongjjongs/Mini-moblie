@@ -3640,8 +3640,10 @@ name = "wie_gnex"
 version = "0.0.1"
 dependencies = [
  "encoding_rs",
+ "futures",
  "test_utils",
  "tracing",
+ "tracing-subscriber",
  "wie_backend",
  "wie_util",
 ]

@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 encoding_rs = { version = "^0.8", default-features = false, features = ["alloc"] }
+futures = { workspace = true }
 tracing = { workspace = true }
 
 wie_backend = { workspace = true }
@@ -13,3 +14,4 @@ wie_util = { workspace = true }
 
 [dev-dependencies]
 test_utils = { workspace = true }
+tracing-subscriber = { version = "^0.3", features = ["env-filter"] }

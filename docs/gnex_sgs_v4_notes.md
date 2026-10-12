@@ -87,9 +87,10 @@ Still unknown when this was first written (most of it is answered in the next se
 ## Running it: `wie_gnex`
 
 `wie_gnex` runs these titles. The emulator picks it for an archive that holds a
-`.mod` naming `application/x-gnex-sgs` beside a version-4 `.sgs`. It runs
-놈투(GS) from the GAMEVIL logo, title and menu, through the story, to Stage 1
-being played.
+`.mod` naming `application/x-gnex-sgs` beside a version-4 `.sgs`. All five
+reach play: 놈투(GS) through its story to Stage 1, 절묘한타이밍 to its gear
+game, 물가에돌튕기기2 to its beach, 2006프로야구 to its team selection, and
+마구마구 to an inning.
 
 What was worked out beyond the tables above:
 
@@ -100,41 +101,62 @@ What was worked out beyond the tables above:
   - 0x0e inc, 0x0f dec, 0x10 dup, 0x11 negate, 0x12 swap, 0x13 add, 0x14 sub.
   - 0x50-0x5e: mul, div, mod, and, or, not, xor, shr, shl, >, <, >=, <=, ==, !=.
   - 0x5f-0x76 assign: four destinations × the sources `var[var2[i]]`,
-    `var[var2]`, `var[i]`, `var`, imm16, imm32.
+    `var[var2]`, `var[i]`, `var`, signed imm16, unsigned imm16 (절묘한타이밍's
+    `0x76` settles the last: one slot, not two).
   - 0x77-0x7a add an immediate.
   - 0x89-0x8c store and keep; 0x8d/0x8e push an address; 0x8f read it;
     0x90/0x91 write it.
   - 0x92 n calls service n.
-  - 0x94-0x97 draw a bitmap: (x, y, res), +mirror, +palette, +both.
-  - Address sums: 0xe8 pushes `a + b + imm`, 0xeb pushes `a + b`, 0xee
-    adds variable `a` to the top of the stack, and 0xf1 pushes `a + imm`.
+  - 0x94-0x97 draw a bitmap: (x, y, res), +mirror, +palette, +both. 0x98 and
+    0x99 (마구마구) take seven and eight values: x, y, res, [palette], two
+    unknown, the mirror and one more.
+  - Sums: 0xe8 pushes `var a + var b + imm`, 0xeb `var a + var b`, 0xee adds
+    `var a` to the top of the stack; 0xf1 pushes the *address* of `var a`
+    plus `imm`.
+  - The same operations on flat addresses (a word's position among all the
+    variables' elements laid end to end), which 2006프로야구 is compiled to
+    throughout: 0xd9 read `[a + [b]]`, 0xda read `[a]`, 0xdb/0xdc write
+    them; 0xde `[a + [b]] = [c]`, 0xdf `[a + [b]] = imm`, 0xe0 `[a] = [b +
+    [c]]`, 0xe1 `[a] = [b]`, 0xe2 `[a] = imm`, 0xe4 `[a] += imm`, 0xe6 store
+    and keep, 0xe7 push `a`; and the sums 0xea, 0xed, 0xf0 (values) and 0xf3
+    (`a + imm`, an address).
+  - An index is not held to its variable's length: 절묘한타이밍 reads past the
+    end of one into the words after it.
 - **System variables**: 0 is the event parameter, 4/5 are the screen's width
   and height, and 10 is the runtime version (1.1).
+- **Bitmaps**: types 2-8 as v1. Types 9-12 carry their own RGB palette: 1, 2,
+  4 or 8 bits a pixel; after the type, size and hot spot come a flag that
+  makes the first colour transparent, the colour count (0 for 256) and the
+  triples, then the pixels packed row after row.
 - **Services**: see `wie_gnex/src/services.rs`. They include:
-  - text: 0x28 attributes, 0x55 draw;
+  - text: 0x28 attributes, 0x55 draw (0x57/0x59 with an effect), 0x1e/0x1f
+    font width and height, 0x20 a string's width;
   - drawing:
-    - 0x22 clip (x, y, w, h);
+    - 0x22 clip to two corners, both inside; 0x23 unclip;
     - colour: 0x26 a script colour, 0x27 RGB;
-    - lines: 0x42 line, 0x43 horizontal, 0x44 vertical;
+    - 0x3c point; lines: 0x42 line, 0x43 horizontal, 0x44 vertical;
     - boxes: 0x45 outline, 0x46 fill, 0x48 rounded fill, 0x47/0x49 rounded
-      outline;
+      outline; 0x4b/0x4c ellipse outline and fill;
     - 0x3a/0x3b clear white/black, 0x36 palette bank;
     - 0x54 scroll a whole buffer;
-  - frames: 0x51/0x52 save/restore the backdrop, 0x5f present;
+  - frames: 0x51/0x52 save/restore the backdrop, 0x5f present (0x60 for a
+    region);
   - 0x2d pack a palette;
   - timers 0x95-0x9a, save words 0x93/0x94;
-  - strings 0x9d-0xb2, numbers 0xc8-0xd9, vectors 0xdd-0xdf, 0xe0 range
-    test;
+  - files, named by a string resource and kept in the handset's storage:
+    0x6b exists, 0x63 open (1 existing, 2 new, 3 read), 0x64 close, 0x65
+    delete, 0x66 seek, 0x67/0x69 write/read words, 0x68/0x6a write/read
+    bytes, 0x62 size, 0x6c-0x6e directories. A package's own data files
+    (마구마구's `bb/`, 절묘한타이밍's `f1`/`f2`) are there to read;
+  - strings 0x9d-0xb2, 0xb4; numbers 0xc8-0xd9 (0xcd/0xce sine and cosine
+    ×100, 0xd3 square root), vectors 0xdd-0xdf, 0xe0 range test;
+  - the network 0x101-0x105, which never connects;
   - 0x1d8 system property.
 - **Licence check**: 놈투 checks a licence unless the platform property
   `PLATFORM` is `WIPI`.
 
 Still to do:
 
-- The other four titles stop at:
-  - 절묘한타이밍: a variable index out of range;
-  - 물가에돌튕기기2: service 0x8b;
-  - 2006프로야구: an older `4.x` encoding;
-  - 마구마구: service 0x1f.
-- Sound plays nothing yet.
-- Save words are not kept across runs.
+- 마구마구 leaves parts of earlier frames on screen during an inning.
+- 절묘한타이밍's title shows no logo above its globe.
+- Background music plays once rather than looping.

@@ -1,6 +1,6 @@
 use alloc::{collections::BTreeMap, vec::Vec};
 
-use crate::graphics::Graphics;
+use crate::{files::Files, graphics::Graphics};
 
 /// What the script asked of the sound, for the emulator to carry out once
 /// the callback is over.
@@ -18,8 +18,8 @@ pub struct Timer {
 }
 
 /// What the script's services act on besides its own memory: the screen, its
-/// timers on the guest clock, packed palettes, the random sequence and the
-/// handset's save words.
+/// timers on the guest clock, packed palettes, the random sequence, the
+/// handset's save words and its files.
 pub struct Host {
     pub graphics: Graphics,
     pub palettes: BTreeMap<i32, Vec<u8>>,
@@ -29,10 +29,11 @@ pub struct Host {
     random: u64,
     pub saved: Vec<i32>,
     pub sounds: Vec<Sound>,
+    pub files: Files,
 }
 
 impl Host {
-    pub fn new(width: i32, height: i32) -> Self {
+    pub fn new(width: i32, height: i32, files: Files) -> Self {
         Self {
             graphics: Graphics::new(width, height),
             palettes: BTreeMap::new(),
@@ -41,6 +42,7 @@ impl Host {
             random: 0x2545_f491_4f6c_dd1d,
             saved: Vec::new(),
             sounds: Vec::new(),
+            files,
         }
     }
 

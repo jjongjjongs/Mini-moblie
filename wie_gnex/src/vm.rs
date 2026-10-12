@@ -41,15 +41,20 @@ impl Vm {
         }
     }
 
+    /// Where element `index` of `variable` is. The variables lie end to end
+    /// in one memory and the handset does not hold an index to its own
+    /// variable's length: 절묘한타이밍 reads past the end of one into the
+    /// words after it. Only the memory's own bounds are kept.
     pub fn address(&self, variable: usize, index: i32) -> VmResult<usize> {
         let v = self
             .variables
             .get(variable)
             .ok_or_else(|| format!("variable {variable:#x} does not exist"))?;
-        if index < 0 || index as usize >= v.count {
-            return Err(format!("variable {variable:#x}[{index}] out of range ({})", v.count));
+        let address = v.offset as i64 + index as i64;
+        if address < 0 || address as usize >= self.memory.len() {
+            return Err(format!("variable {variable:#x}[{index}] outside the memory"));
         }
-        Ok(v.offset + index as usize)
+        Ok(address as usize)
     }
 
     pub fn get(&self, variable: usize, index: i32) -> VmResult<i32> {
@@ -237,18 +242,14 @@ impl Vm {
                 self.push(result);
             }
             // Assignments: four destinations, each with sources
-            // `var[var2[i]]`, `var[var2]`, `var[i]`, `var`, a 16-bit and a
-            // 32-bit immediate.
+            // `var[var2[i]]`, `var[var2]`, `var[i]`, `var`, and a signed and
+            // an unsigned 16-bit immediate.
             0x5f..=0x76 => {
                 let (destination, source) = ((op - 0x5f) / 6, (op - 0x5f) % 6);
                 let (v, i) = self.location(destination)?;
                 let value = match source {
                     4 => self.slot()? as i16 as i32,
-                    5 => {
-                        let hi = self.slot()? as u32;
-                        let lo = self.slot()? as u32;
-                        (hi << 16 | lo) as i32
-                    }
+                    5 => self.slot()? as i32,
                     _ => {
                         let (sv, si) = self.location(source)?;
                         self.get(sv, si)?
@@ -338,8 +339,19 @@ impl Vm {
                 let service = self.slot()?;
                 crate::services::call(service, self, host)?;
             }
-            0x94..=0x97 => {
+            0x94..=0x99 => {
                 let (x, y, resource, mirror, palette) = match op {
+                    // The forms 마구마구 draws its sprite-sheet parts with,
+                    // through a clip: two values whose effect is not known,
+                    // the mirror, and one more; and the same with a palette.
+                    0x98 => {
+                        let [x, y, r, _, _, m, _] = self.args::<7>()?;
+                        (x, y, r, m, None)
+                    }
+                    0x99 => {
+                        let [x, y, r, p, _, _, m, _] = self.args::<8>()?;
+                        (x, y, r, m, Some(p))
+                    }
                     0x94 => {
                         let [x, y, r] = self.args::<3>()?;
                         (x, y, r, 0, None)
@@ -366,14 +378,14 @@ impl Vm {
                     ),
                     None => None,
                 };
+                tracing::trace!("bitmap {resource} at {x}, {y} mirror {mirror}");
                 let data = self.resource(resource)?;
                 host.graphics
                     .bitmap(data, x, y, mirror != 0, palette.as_deref())
                     .map_err(|x| format!("{x} (resource {resource})"))?;
             }
-            // Sums the scripts use for addresses and offsets: two variables
-            // and an immediate, two variables, the top of the stack and a
-            // variable, a variable and an immediate.
+            // Sums of values: two variables and an immediate, two variables,
+            // the top of the stack and a variable.
             0xe8 => {
                 let (a, b, c) = (self.slot()? as usize, self.slot()? as usize, self.slot()? as i16 as i32);
                 let value = self.get(a, 0)?.wrapping_add(self.get(b, 0)?).wrapping_add(c);
@@ -390,10 +402,98 @@ impl Vm {
                 let top = self.pop()?;
                 self.push(top.wrapping_add(value));
             }
+            // An element's address: variable `a`'s first word, plus an
+            // immediate.
             0xf1 => {
                 let (a, c) = (self.slot()? as usize, self.slot()? as i16 as i32);
-                let value = self.get(a, 0)?.wrapping_add(c);
+                let address = self.address(a, 0)? as i32;
+                self.push(address.wrapping_add(c));
+            }
+            // The same operations on flat addresses - a word's position among
+            // all the variables' elements laid end to end - rather than on
+            // variable numbers. 2006프로야구 is compiled to these throughout.
+            0xd9 => {
+                let (a, b) = (self.slot()? as i32, self.slot()? as i32);
+                let value = self.read(a.wrapping_add(self.read(b)?))?;
                 self.push(value);
+            }
+            0xda => {
+                let a = self.slot()? as i32;
+                let value = self.read(a)?;
+                self.push(value);
+            }
+            0xdb => {
+                let (a, b) = (self.slot()? as i32, self.slot()? as i32);
+                let value = self.pop()?;
+                self.write(a.wrapping_add(self.read(b)?), value)?;
+            }
+            0xdc => {
+                let a = self.slot()? as i32;
+                let value = self.pop()?;
+                self.write(a, value)?;
+            }
+            0xde => {
+                let (a, b, c) = (self.slot()? as i32, self.slot()? as i32, self.slot()? as i32);
+                let value = self.read(c)?;
+                self.write(a.wrapping_add(self.read(b)?), value)?;
+            }
+            0xdf => {
+                let (a, b, value) = (self.slot()? as i32, self.slot()? as i32, self.slot()? as i16 as i32);
+                self.write(a.wrapping_add(self.read(b)?), value)?;
+            }
+            0xe0 => {
+                let (a, b, c) = (self.slot()? as i32, self.slot()? as i32, self.slot()? as i32);
+                let value = self.read(b.wrapping_add(self.read(c)?))?;
+                self.write(a, value)?;
+            }
+            0xe1 => {
+                let (a, b) = (self.slot()? as i32, self.slot()? as i32);
+                let value = self.read(b)?;
+                self.write(a, value)?;
+            }
+            0xe2 => {
+                let (a, value) = (self.slot()? as i32, self.slot()? as i16 as i32);
+                self.write(a, value)?;
+            }
+            0xe3 => {
+                let a = self.slot()? as i32;
+                let hi = self.slot()? as u32;
+                let lo = self.slot()? as u32;
+                self.write(a, (hi << 16 | lo) as i32)?;
+            }
+            0xe4 => {
+                let (a, delta) = (self.slot()? as i32, self.slot()? as i16 as i32);
+                let value = self.read(a)?.wrapping_add(delta);
+                self.write(a, value)?;
+            }
+            0xe6 => {
+                let a = self.slot()? as i32;
+                let value = *self.stack.last().ok_or("stack underflow")?;
+                self.write(a, value)?;
+            }
+            0xe7 => {
+                let a = self.slot()? as i32;
+                self.push(a);
+            }
+            0xea => {
+                let (a, b, c) = (self.slot()? as i32, self.slot()? as i32, self.slot()? as i16 as i32);
+                let value = self.read(a)?.wrapping_add(self.read(b)?).wrapping_add(c);
+                self.push(value);
+            }
+            0xed => {
+                let (a, b) = (self.slot()? as i32, self.slot()? as i32);
+                let value = self.read(a)?.wrapping_add(self.read(b)?);
+                self.push(value);
+            }
+            0xf0 => {
+                let a = self.slot()? as i32;
+                let value = self.read(a)?;
+                let top = self.pop()?;
+                self.push(top.wrapping_add(value));
+            }
+            0xf3 => {
+                let (a, c) = (self.slot()? as i32, self.slot()? as i16 as i32);
+                self.push(a.wrapping_add(c));
             }
             _ => return Err(format!("unknown opcode {op:#x}")),
         }

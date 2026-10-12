@@ -4,6 +4,7 @@
 #![no_std]
 extern crate alloc;
 
+mod files;
 mod graphics;
 mod host;
 mod program;
@@ -16,6 +17,7 @@ use wie_backend::{DefaultTaskRunner, Emulator, Event, Instant, KeyCode, Platform
 use wie_util::{Result, WieError};
 
 use crate::{
+    files::Files,
     host::{Host, Sound},
     program::Program,
     vm::Vm,
@@ -81,12 +83,21 @@ impl GnexEmulator {
                 keeper.sleep(60_000).await;
             }
         });
+        // The data files a package ships beside its script, for its file
+        // services to read; what the title writes goes to the handset's own
+        // storage over them.
+        for (path, data) in &files {
+            let lower = path.to_ascii_lowercase();
+            if !(lower.ends_with(".sgs") || lower.ends_with(".mod") || lower.ends_with(".wmr")) {
+                system.filesystem().add_virtual(path, data.clone());
+            }
+        }
         let platform = system.platform();
         tracing::info!("GNEX title {}", program.title);
 
         let (width, height) = (platform.screen().width() as i32, platform.screen().height() as i32);
         let mut vm = Vm::new(&program);
-        let host = Host::new(width, height);
+        let host = Host::new(width, height, Files::new(Some(system.clone())));
 
         // System variables: the screen's size in 4 and 5, the runtime's version
         // (1.1) in 10.
