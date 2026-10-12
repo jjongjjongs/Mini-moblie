@@ -19,8 +19,32 @@ use wie_backend::{AudioSink, DatabaseRepository, Emulator, Event, Filesystem, In
 use wie_gnex::GnexEmulator;
 use wie_util::Result;
 
+/// Each frame painted, with the guest time it was painted at.
+type Frames = Arc<Mutex<Vec<(u64, Vec<u8>)>>>;
+
+/// Counts the notes the titles' sounds play, to tell that they sound at all.
+struct CountingSink(Arc<AtomicU64>);
+
+impl AudioSink for CountingSink {
+    fn play_wave(&self, _clip: u32, _channel: u8, _sampling_rate: u32, _wave_data: &[i16]) {}
+
+    fn midi_note_on(&self, _voice: u32, _channel_id: u8, _note: u8, _velocity: u8) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn midi_note_off(&self, _voice: u32, _channel_id: u8, _note: u8, _velocity: u8) {}
+
+    fn midi_program_change(&self, _voice: u32, _channel_id: u8, _program: u8) {}
+
+    fn midi_control_change(&self, _voice: u32, _channel_id: u8, _control: u8, _value: u8) {}
+
+    fn midi_pitch_bend(&self, _voice: u32, _channel_id: u8, _value: u16) {}
+
+    fn midi_sysex(&self, _voice: u32, _data: &[u8]) {}
+}
+
 struct CaptureScreen {
-    frames: Arc<Mutex<Vec<(u64, Vec<u8>)>>>,
+    frames: Frames,
     clock: Arc<AtomicU64>,
 }
 
@@ -51,6 +75,7 @@ impl Screen for CaptureScreen {
 
 struct CapturePlatform {
     inner: TestPlatform,
+    notes: Arc<AtomicU64>,
     screen: CaptureScreen,
     clock: Arc<AtomicU64>,
 }
@@ -73,7 +98,7 @@ impl Platform for CapturePlatform {
     }
 
     fn audio_sink(&self) -> Box<dyn AudioSink> {
-        self.inner.audio_sink()
+        Box::new(CountingSink(self.notes.clone()))
     }
 
     fn write_stdout(&self, buf: &[u8]) {
@@ -101,8 +126,10 @@ fn capture() {
 
     let frames = Arc::new(Mutex::new(Vec::new()));
     let clock = Arc::new(AtomicU64::new(1_000_000));
+    let notes = Arc::new(AtomicU64::new(0));
     let platform = CapturePlatform {
         inner: TestPlatform::new(),
+        notes: notes.clone(),
         screen: CaptureScreen {
             frames: frames.clone(),
             clock: clock.clone(),
@@ -128,6 +155,7 @@ fn capture() {
         emulator.tick().unwrap();
     }
 
+    println!("notes played: {}", notes.load(Ordering::SeqCst));
     fs::create_dir_all(&out).unwrap();
     for (at, ppm) in frames.lock().unwrap().iter() {
         fs::write(format!("{out}/frame{:07}.ppm", at - 1_000_000), ppm).unwrap();

@@ -12,17 +12,25 @@ mod vm;
 
 use alloc::{boxed::Box, collections::BTreeMap, string::String, vec::Vec};
 
-use wie_backend::{Emulator, Event, Instant, KeyCode, Platform, extract_zip};
+use wie_backend::{DefaultTaskRunner, Emulator, Event, Instant, KeyCode, Platform, System, extract_zip};
 use wie_util::{Result, WieError};
 
-use crate::{host::Host, program::Program, vm::Vm};
+use crate::{
+    host::{Host, Sound},
+    program::Program,
+    vm::Vm,
+};
 
 /// The longest stretch of guest time one tick catches up on; a host that
 /// stalled does not get a burst of timer callbacks after it.
 const MAX_STEP_MS: u64 = 250;
 
 pub struct GnexEmulator {
-    platform: Box<dyn Platform>,
+    /// The platform, and the sound player that runs on its task loop.
+    system: System,
+    /// Each sound resource loaded into the player, and the one sounding.
+    clips: BTreeMap<i32, u32>,
+    sounding: Option<u32>,
     program: Program,
     vm: Vm,
     host: Host,
@@ -33,14 +41,16 @@ pub struct GnexEmulator {
 
 /// The script and descriptor of a GNEX title among an archive's files.
 fn script(files: &BTreeMap<String, Vec<u8>>) -> Option<&Vec<u8>> {
+    script_entry(files).map(|(_, data)| data)
+}
+
+/// The script's file name and bytes.
+fn script_entry(files: &BTreeMap<String, Vec<u8>>) -> Option<(&String, &Vec<u8>)> {
     let descriptor = files.iter().find(|(name, data)| {
         name.to_ascii_lowercase().ends_with(".mod") && data.windows(22).any(|x| x.eq_ignore_ascii_case(b"application/x-gnex-sgs"))
     })?;
     let stem = descriptor.0[..descriptor.0.len() - 4].to_ascii_lowercase();
-    files
-        .iter()
-        .find(|(name, _)| name.to_ascii_lowercase() == alloc::format!("{stem}.sgs"))
-        .map(|(_, data)| data)
+    files.iter().find(|(name, _)| name.to_ascii_lowercase() == alloc::format!("{stem}.sgs"))
 }
 
 impl GnexEmulator {
@@ -56,8 +66,22 @@ impl GnexEmulator {
     }
 
     pub fn from_archive(platform: Box<dyn Platform>, files: BTreeMap<String, Vec<u8>>) -> Result<Self> {
-        let data = script(&files).ok_or_else(|| WieError::FatalError("GNEX script not found".into()))?;
+        let (name, data) = script_entry(&files).ok_or_else(|| WieError::FatalError("GNEX script not found".into()))?;
         let program = Program::parse(data)?;
+        // The script's file is named for the title's id.
+        let id = name.rsplit('/').next().unwrap_or(name).split('.').next().unwrap_or("gnex");
+        let system = System::new(platform, id, id, DefaultTaskRunner);
+
+        // The sound player runs as tasks on the system's loop. With no task at
+        // all that loop spins out its whole slice every tick; one that only
+        // sleeps keeps it idle between sounds.
+        let keeper = system.clone();
+        system.spawn(async move || {
+            loop {
+                keeper.sleep(60_000).await;
+            }
+        });
+        let platform = system.platform();
         tracing::info!("GNEX title {}", program.title);
 
         let (width, height) = (platform.screen().width() as i32, platform.screen().height() as i32);
@@ -73,7 +97,9 @@ impl GnexEmulator {
 
         let last = platform.now();
         let mut emulator = Self {
-            platform,
+            system,
+            clips: BTreeMap::new(),
+            sounding: None,
             program,
             vm,
             host,
@@ -96,12 +122,43 @@ impl GnexEmulator {
             tracing::error!("GNEX callback {entry} stopped: {error}");
             self.stopped = true;
         }
+        self.sound();
+    }
+
+    /// Carries out what the callback asked of the sound: one sound at a time,
+    /// each played once, as the handset did.
+    fn sound(&mut self) {
+        for sound in core::mem::take(&mut self.host.sounds) {
+            if let Some(handle) = self.sounding.take() {
+                self.system.audio().stop(handle);
+            }
+            let Sound::Play(resource) = sound else { continue };
+            let handle = match self.clips.get(&resource) {
+                Some(&handle) => handle,
+                None => {
+                    // A two-byte wrapper precedes the SMAF file.
+                    let Some(data) = self.vm.resources.get(resource as usize).filter(|x| x.len() > 2) else {
+                        tracing::warn!("GNEX sound resource {resource} is not a sound");
+                        continue;
+                    };
+                    let Ok(handle) = self.system.audio().load_smaf(&data[2..]) else {
+                        continue;
+                    };
+                    self.clips.insert(resource, handle);
+                    handle
+                }
+            };
+            let system = self.system.clone();
+            if self.system.audio().play(&system, handle, false).is_ok() {
+                self.sounding = Some(handle);
+            }
+        }
     }
 
     fn paint(&mut self) {
         if self.host.graphics.presented {
             self.host.graphics.presented = false;
-            self.platform.screen().paint(&self.host.graphics.frame());
+            self.system.platform().screen().paint(&self.host.graphics.frame());
         }
     }
 
@@ -142,13 +199,13 @@ impl Emulator for GnexEmulator {
                     self.paint();
                 }
             }
-            Event::Redraw => self.platform.screen().paint(&self.host.graphics.frame()),
+            Event::Redraw => self.system.platform().screen().paint(&self.host.graphics.frame()),
             _ => {}
         }
     }
 
     fn tick(&mut self) -> Result<()> {
-        let now = self.platform.now();
+        let now = self.system.platform().now();
         let elapsed = (now - self.last).min(MAX_STEP_MS);
         self.last = now;
         let target = self.host.clock + elapsed;
@@ -169,17 +226,20 @@ impl Emulator for GnexEmulator {
         self.host.clock = target;
         self.paint();
 
-        Ok(())
+        // The sound player's own tasks.
+        self.system.tick()
     }
 
     fn is_idle(&self) -> bool {
-        self.stopped || self.vm.exited || self.host.next_due().is_none_or(|x| x > 0)
+        let script = self.stopped || self.vm.exited || self.host.next_due().is_none_or(|x| x > 0);
+        script && self.system.is_idle()
     }
 
     fn sleep_hint(&self) -> Option<u64> {
-        if self.stopped || self.vm.exited {
-            return None;
+        let script = if self.stopped || self.vm.exited { None } else { self.host.next_due() };
+        match (script, self.system.idle_for()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
         }
-        self.host.next_due()
     }
 }

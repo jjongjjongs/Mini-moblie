@@ -7,7 +7,7 @@
 use alloc::{format, string::String, vec::Vec};
 
 use crate::{
-    host::Host,
+    host::{Host, Sound},
     vm::{Vm, VmResult},
 };
 
@@ -159,11 +159,13 @@ pub fn call(service: u16, vm: &mut Vm, host: &mut Host) -> VmResult<()> {
         }
         0x5f => host.graphics.present(),
 
-        // Sound: played and stopped, not yet heard.
+        // Sound: a SMAF resource played once, and stopped.
         0x82 => {
-            vm.pop()?;
+            let resource = vm.pop()?;
+            host.sounds.push(Sound::Play(resource));
         }
-        0x83 | 0x8f => {}
+        0x83 => host.sounds.push(Sound::Stop),
+        0x8f => {}
 
         // Device switches taking one value, whose effect is not modelled.
         0x8e | 0x90 | 0x91 => {

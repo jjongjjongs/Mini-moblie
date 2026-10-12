@@ -2,6 +2,14 @@ use alloc::{collections::BTreeMap, vec::Vec};
 
 use crate::graphics::Graphics;
 
+/// What the script asked of the sound, for the emulator to carry out once
+/// the callback is over.
+pub enum Sound {
+    /// Play a sound resource once.
+    Play(i32),
+    Stop,
+}
+
 #[derive(Clone, Copy)]
 pub struct Timer {
     pub period: u64,
@@ -20,6 +28,7 @@ pub struct Host {
     pub timers: [Option<Timer>; 3],
     random: u64,
     pub saved: Vec<i32>,
+    pub sounds: Vec<Sound>,
 }
 
 impl Host {
@@ -31,6 +40,7 @@ impl Host {
             timers: [None; 3],
             random: 0x2545_f491_4f6c_dd1d,
             saved: Vec::new(),
+            sounds: Vec::new(),
         }
     }
 
