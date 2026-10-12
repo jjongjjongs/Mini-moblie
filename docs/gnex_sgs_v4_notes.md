@@ -88,7 +88,8 @@ Still unknown when this was first written (most of it is answered in the next se
 
 `wie_gnex` runs these titles. The emulator picks it for an archive that holds a
 `.mod` naming `application/x-gnex-sgs` beside a version-4 `.sgs`. It runs
-놈투(GS) through the GAMEVIL logo to its animated title screen.
+놈투(GS) from the GAMEVIL logo, title and menu, through the story, to Stage 1
+being played.
 
 What was worked out beyond the tables above:
 
@@ -105,17 +106,25 @@ What was worked out beyond the tables above:
     0x90/0x91 write it.
   - 0x92 n calls service n.
   - 0x94-0x97 draw a bitmap: (x, y, res), +mirror, +palette, +both.
-  - 0xe8-0xf3 add, sub or mul the top of the stack with a variable.
+  - Address sums: 0xe8 pushes `a + b + imm`, 0xeb pushes `a + b`, 0xee
+    adds variable `a` to the top of the stack, and 0xf1 pushes `a + imm`.
 - **System variables**: 0 is the event parameter, 4/5 are the screen's width
   and height, and 10 is the runtime version (1.1).
 - **Services**: see `wie_gnex/src/services.rs`. They include:
   - text: 0x28 attributes, 0x55 draw;
-  - drawing: 0x22 clip (x, y, w, h), 0x26 colour, 0x46 fill rect,
-    0x3a/0x3b clear white/black, 0x36 palette bank;
+  - drawing:
+    - 0x22 clip (x, y, w, h);
+    - colour: 0x26 a script colour, 0x27 RGB;
+    - lines: 0x42 line, 0x43 horizontal, 0x44 vertical;
+    - boxes: 0x45 outline, 0x46 fill, 0x48 rounded fill, 0x47/0x49 rounded
+      outline;
+    - 0x3a/0x3b clear white/black, 0x36 palette bank;
+    - 0x54 scroll a whole buffer;
   - frames: 0x51/0x52 save/restore the backdrop, 0x5f present;
   - 0x2d pack a palette;
   - timers 0x95-0x9a, save words 0x93/0x94;
-  - strings 0x9d-0xb2, numbers 0xc8-0xd9, vectors 0xdd-0xdf;
+  - strings 0x9d-0xb2, numbers 0xc8-0xd9, vectors 0xdd-0xdf, 0xe0 range
+    test;
   - 0x1d8 system property.
 - **Licence check**: 놈투 checks a licence unless the platform property
   `PLATFORM` is `WIPI`.

@@ -60,7 +60,17 @@ pub fn call(service: u16, vm: &mut Vm, host: &mut Host) -> VmResult<()> {
             let g = &mut host.graphics;
             g.clip = (x.max(0), y.max(0), (x + w).min(g.width), (y + h).min(g.height));
         }
+        0x25 => {
+            // A small setting (1..4) changed around scene changes; its effect
+            // is not known.
+            vm.pop()?;
+        }
         0x26 => host.graphics.color = vm.pop()?.rem_euclid(182),
+        0x27 => {
+            let [r, g, b] = vm.args::<3>()?;
+            let rgb = (((r & 255) * 7 / 255) << 5) | (((g & 255) * 7 / 255) << 2) | ((b & 255) * 3 / 255);
+            host.graphics.color = crate::graphics::RAW_COLOR + rgb;
+        }
         0x28 => {
             // Text style, foreground, background and alignment.
             let [_style, fg, bg, align] = vm.args::<4>()?;
@@ -95,6 +105,21 @@ pub fn call(service: u16, vm: &mut Vm, host: &mut Host) -> VmResult<()> {
         0x36 => host.graphics.bank = vm.pop()?.clamp(0, 6),
         0x3a => host.graphics.fill(255),
         0x3b => host.graphics.fill(0),
+        0x42 => {
+            let [x1, y1, x2, y2] = vm.args::<4>()?;
+            let c = host.graphics.color;
+            host.graphics.line(x1, y1, x2, y2, c);
+        }
+        0x43 => {
+            let [x1, x2, y] = vm.args::<3>()?;
+            let c = host.graphics.color;
+            host.graphics.line(x1, y, x2, y, c);
+        }
+        0x44 => {
+            let [x, y1, y2] = vm.args::<3>()?;
+            let c = host.graphics.color;
+            host.graphics.line(x, y1, x, y2, c);
+        }
         0x45 => {
             let [x1, y1, x2, y2] = vm.args::<4>()?;
             let c = host.graphics.color;
@@ -105,11 +130,14 @@ pub fn call(service: u16, vm: &mut Vm, host: &mut Host) -> VmResult<()> {
             let c = host.graphics.color;
             host.graphics.fill_rect(x1, y1, x2, y2, c);
         }
+        // Rounded boxes: filled, and outlined.
         0x48 => {
-            // A rounded box; drawn square for now.
-            let [x1, y1, x2, y2, _radius] = vm.args::<5>()?;
-            let c = host.graphics.color;
-            host.graphics.fill_rect(x1, y1, x2, y2, c);
+            let [x1, y1, x2, y2, radius] = vm.args::<5>()?;
+            host.graphics.round_rect(x1, y1, x2, y2, radius, true);
+        }
+        0x47 | 0x49 => {
+            let [x1, y1, x2, y2, radius] = vm.args::<5>()?;
+            host.graphics.round_rect(x1, y1, x2, y2, radius, false);
         }
         0x51 => {
             let g = &mut host.graphics;
@@ -118,6 +146,10 @@ pub fn call(service: u16, vm: &mut Vm, host: &mut Host) -> VmResult<()> {
         0x52 => {
             let g = &mut host.graphics;
             g.pixels.copy_from_slice(&g.backup);
+        }
+        0x54 => {
+            let [buffer, dx, dy, mode] = vm.args::<4>()?;
+            host.graphics.scroll(buffer, dx, dy, mode);
         }
         0x55 => {
             let [x, y, resource] = vm.args::<3>()?;
@@ -131,7 +163,7 @@ pub fn call(service: u16, vm: &mut Vm, host: &mut Host) -> VmResult<()> {
         0x82 => {
             vm.pop()?;
         }
-        0x83 => {}
+        0x83 | 0x8f => {}
 
         // Device switches taking one value, whose effect is not modelled.
         0x8e | 0x90 | 0x91 => {
@@ -320,6 +352,11 @@ pub fn call(service: u16, vm: &mut Vm, host: &mut Host) -> VmResult<()> {
         0xd9 => {
             let [a, b, c] = vm.args::<3>()?;
             vm.push(a.min(b).min(c));
+        }
+        0xe0 => {
+            // Whether `value` lies within `radius` of `center`, exclusive.
+            let [center, value, radius] = vm.args::<3>()?;
+            vm.push((center - radius < value && value < center + radius) as i32);
         }
         // Vector arithmetic over word spans: with a scalar, with a second
         // span, and from two spans.

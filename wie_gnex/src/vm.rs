@@ -371,18 +371,29 @@ impl Vm {
                     .bitmap(data, x, y, mirror != 0, palette.as_deref())
                     .map_err(|x| format!("{x} (resource {resource})"))?;
             }
-            // The top of the stack plus a variable: `var[var2[i]]`, `var[var2]`,
-            // `var`, `var[i]`.
-            0xe8..=0xf3 => {
-                let (mode, kind) = ((op - 0xe8) / 3, (op - 0xe8) % 3);
-                let (v, i) = self.location([0, 1, 3, 2][mode as usize])?;
-                let value = self.get(v, i)?;
+            // Sums the scripts use for addresses and offsets: two variables
+            // and an immediate, two variables, the top of the stack and a
+            // variable, a variable and an immediate.
+            0xe8 => {
+                let (a, b, c) = (self.slot()? as usize, self.slot()? as usize, self.slot()? as i16 as i32);
+                let value = self.get(a, 0)?.wrapping_add(self.get(b, 0)?).wrapping_add(c);
+                self.push(value);
+            }
+            0xeb => {
+                let (a, b) = (self.slot()? as usize, self.slot()? as usize);
+                let value = self.get(a, 0)?.wrapping_add(self.get(b, 0)?);
+                self.push(value);
+            }
+            0xee => {
+                let a = self.slot()? as usize;
+                let value = self.get(a, 0)?;
                 let top = self.pop()?;
-                self.push(match kind {
-                    0 => top.wrapping_add(value),
-                    1 => top.wrapping_sub(value),
-                    _ => top.wrapping_mul(value),
-                });
+                self.push(top.wrapping_add(value));
+            }
+            0xf1 => {
+                let (a, c) = (self.slot()? as usize, self.slot()? as i16 as i32);
+                let value = self.get(a, 0)?.wrapping_add(c);
+                self.push(value);
             }
             _ => return Err(format!("unknown opcode {op:#x}")),
         }

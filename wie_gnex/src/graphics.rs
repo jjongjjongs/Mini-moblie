@@ -11,6 +11,10 @@ use wie_backend::canvas::{Canvas, Clip, Color, Image, ImageBufferCanvas, PixelTy
 /// The colour that is not drawn.
 pub const TRANSPARENT: i32 = 4;
 
+/// A drawing colour given as RGB rather than a script colour: this plus the
+/// RGB332 byte.
+pub const RAW_COLOR: i32 = 0x1000;
+
 /// Script colour `c` (0..182) as RGB332.
 pub fn script_color(c: i32) -> u8 {
     let c = c.rem_euclid(182);
@@ -71,6 +75,18 @@ pub fn script_color(c: i32) -> u8 {
 }
 
 /// `c` in one of the seven brightness banks; bank 3 leaves it as it is.
+/// A square root for `no_std`, by Newton's method; enough for corner radii.
+fn sqrt(x: f32) -> f32 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    let mut r = x.max(1.0);
+    for _ in 0..20 {
+        r = 0.5 * (r + x / r);
+    }
+    r
+}
+
 pub fn bank_color(c: u8, bank: i32) -> u8 {
     let channel = |x: i32| match bank {
         0 => ((x + 10) / 2).min(7),
@@ -131,6 +147,9 @@ impl Graphics {
     }
 
     pub fn mapped(&self, c: i32) -> u8 {
+        if c >= RAW_COLOR {
+            return (c - RAW_COLOR) as u8;
+        }
         bank_color(script_color(c), self.bank)
     }
 
@@ -166,6 +185,91 @@ impl Graphics {
         for y in y1.min(y2)..=y1.max(y2) {
             self.point(x1, y, v);
             self.point(x2, y, v);
+        }
+    }
+
+    pub fn line(&mut self, mut x: i32, mut y: i32, x2: i32, y2: i32, c: i32) {
+        if c == TRANSPARENT {
+            return;
+        }
+        let v = self.mapped(c);
+        let (dx, dy) = ((x2 - x).abs(), (y2 - y).abs());
+        let (sx, sy) = (if x2 >= x { 1 } else { -1 }, if y2 >= y { 1 } else { -1 });
+        let mut err = dx - dy;
+        loop {
+            self.point(x, y, v);
+            if x == x2 && y == y2 {
+                break;
+            }
+            let e2 = 2 * err;
+            if e2 > -dy {
+                err -= dy;
+                x += sx;
+            }
+            if e2 < dx {
+                err += dx;
+                y += sy;
+            }
+        }
+    }
+
+    /// A box in the drawing colour with corners rounded to `radius`, filled
+    /// or outlined.
+    pub fn round_rect(&mut self, x1: i32, y1: i32, x2: i32, y2: i32, radius: i32, fill: bool) {
+        let c = self.color;
+        if c == TRANSPARENT {
+            return;
+        }
+        let (x1, x2, y1, y2) = (x1.min(x2), x1.max(x2), y1.min(y2), y1.max(y2));
+        let r = radius.abs().min((x2 - x1) / 2).min((y2 - y1) / 2).max(0);
+        // How far a row `dy` rows in from the top or bottom edge is cut in.
+        let inset = |dy: i32| -> i32 {
+            if dy >= r {
+                return 0;
+            }
+            let d = (r - dy) as f32 - 0.5;
+            let inner = (r * r) as f32 - d * d;
+            (r as f32 - sqrt(inner.max(0.0)) + 0.5) as i32
+        };
+        let v = self.mapped(c);
+        for y in y1..=y2 {
+            let k = inset((y - y1).min(y2 - y));
+            if fill || y == y1 || y == y2 {
+                for x in x1 + k..=x2 - k {
+                    self.point(x, y, v);
+                }
+            } else {
+                let previous = inset((y - 1 - y1).min(y2 - y + 1)).max(k);
+                for x in x1 + k..=x1 + previous {
+                    self.point(x, y, v);
+                }
+                for x in x2 - previous..=x2 - k {
+                    self.point(x, y, v);
+                }
+            }
+        }
+    }
+
+    /// Moves the drawing buffer (0) or the backdrop (1) by `dx`, `dy`,
+    /// filling what is uncovered with white (mode 0) or wrapping (mode 1).
+    pub fn scroll(&mut self, buffer: i32, dx: i32, dy: i32, mode: i32) {
+        if !(0..=1).contains(&buffer) || !(0..=1).contains(&mode) {
+            return;
+        }
+        let (w, h) = (self.width, self.height);
+        let target = if buffer == 0 { &mut self.pixels } else { &mut self.backup };
+        let old = target.clone();
+        for y in 0..h {
+            for x in 0..w {
+                let (sx, sy) = (x - dx, y - dy);
+                target[(y * w + x) as usize] = if mode == 1 {
+                    old[(sy.rem_euclid(h) * w + sx.rem_euclid(w)) as usize]
+                } else if (0..w).contains(&sx) && (0..h).contains(&sy) {
+                    old[(sy * w + sx) as usize]
+                } else {
+                    255
+                };
+            }
         }
     }
 

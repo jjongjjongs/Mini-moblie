@@ -2,7 +2,8 @@
 //! checking a title by eye. The titles are not in the repository: point
 //! `GNEX_ARCHIVE` at one (a zip of its `.mod` and `.sgs`), and `GNEX_FRAMES`
 //! at a directory for the frames (`frameNNNNN.ppm`). Without them the test
-//! does nothing.
+//! does nothing. `GNEX_SECONDS` sets how long it runs, and `GNEX_KEYS` presses
+//! keys on the way, as `ms:KEY` pairs (`3000:OK,5000:OK`).
 
 use std::{
     collections::BTreeMap,
@@ -14,7 +15,7 @@ use std::{
 };
 
 use test_utils::TestPlatform;
-use wie_backend::{AudioSink, DatabaseRepository, Emulator, Filesystem, Instant, Platform, Screen, canvas::Image, extract_zip};
+use wie_backend::{AudioSink, DatabaseRepository, Emulator, Event, Filesystem, Instant, KeyCode, Platform, Screen, canvas::Image, extract_zip};
 use wie_gnex::GnexEmulator;
 use wie_util::Result;
 
@@ -111,8 +112,19 @@ fn capture() {
     let mut emulator = GnexEmulator::from_archive(Box::new(platform), files).unwrap();
 
     let seconds: u64 = env::var("GNEX_SECONDS").ok().and_then(|x| x.parse().ok()).unwrap_or(12);
-    for _ in 0..seconds * 1000 / 16 {
+    let mut keys: Vec<(u64, String)> = env::var("GNEX_KEYS")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|x| x.split_once(':').map(|(at, key)| (at.parse().unwrap(), key.to_owned())))
+        .collect();
+    keys.sort();
+    for step in 0..seconds * 1000 / 16 {
         clock.fetch_add(16, Ordering::SeqCst);
+        while keys.first().is_some_and(|(at, _)| *at <= step * 16) {
+            let (_, key) = keys.remove(0);
+            emulator.handle_event(Event::Keydown(KeyCode::parse(&key)));
+            emulator.handle_event(Event::Keyup(KeyCode::parse(&key)));
+        }
         emulator.tick().unwrap();
     }
 
