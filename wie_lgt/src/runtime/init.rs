@@ -4408,6 +4408,8 @@ pub async fn load_native(
         writable_ranges,
     } = load_executable(core, data)?;
 
+    super::cygnus::install_merchant_save_slots(core, system.aid())?;
+
     // Gamevil's titles draw every sprite through one small routine, and in a
     // 제노니아2 field that routine was more than half of everything the title
     // ran. Where a title carries it, it is answered natively.

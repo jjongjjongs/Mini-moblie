@@ -1,3 +1,4 @@
+mod cygnus;
 pub mod firmware;
 pub mod firmware_jni;
 pub mod firmware_libc;
