@@ -1,6 +1,6 @@
 use alloc::{collections::BTreeMap, vec::Vec};
 
-use crate::{files::Files, graphics::Graphics};
+use crate::{editor::TextRequest, files::Files, graphics::Graphics};
 
 /// What the script asked of the sound, for the emulator to carry out once
 /// the callback is over.
@@ -30,6 +30,9 @@ pub struct Host {
     pub saved: Vec<i32>,
     pub sounds: Vec<Sound>,
     pub files: Files,
+    /// Text entry the script asked for, for the emulator to open once the
+    /// callback is over.
+    pub text_request: Option<TextRequest>,
 }
 
 impl Host {
@@ -43,6 +46,7 @@ impl Host {
             saved: Vec::new(),
             sounds: Vec::new(),
             files,
+            text_request: None,
         }
     }
 

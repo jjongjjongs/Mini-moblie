@@ -4,6 +4,7 @@
 #![no_std]
 extern crate alloc;
 
+mod editor;
 mod files;
 mod graphics;
 mod host;
@@ -17,6 +18,7 @@ use wie_backend::{DefaultTaskRunner, Emulator, Event, Instant, KeyCode, Platform
 use wie_util::{Result, WieError};
 
 use crate::{
+    editor::{Editor, Outcome},
     files::Files,
     host::{Host, Sound},
     program::Program,
@@ -39,6 +41,8 @@ pub struct GnexEmulator {
     last: Instant,
     /// Set once a callback fails; the title is then left on its last frame.
     stopped: bool,
+    /// The handset's text entry, while it is up; the script waits on it.
+    editor: Option<Editor>,
 }
 
 /// The script and descriptor of a GNEX title among an archive's files.
@@ -129,6 +133,7 @@ impl GnexEmulator {
             host,
             last,
             stopped: false,
+            editor: None,
         };
         emulator.run(0, 0);
         emulator.paint();
@@ -147,6 +152,38 @@ impl GnexEmulator {
             self.stopped = true;
         }
         self.sound();
+        self.open_editor();
+    }
+
+    /// Puts up the text entry a callback asked for.
+    fn open_editor(&mut self) {
+        let Some(request) = self.host.text_request.take() else {
+            return;
+        };
+        let initial = self.vm.string(request.destination).unwrap_or_default();
+        let editor = Editor::new(&self.system, request, initial, self.host.graphics.shown.clone());
+        editor.draw(&mut self.host.graphics);
+        self.editor = Some(editor);
+    }
+
+    /// A key while the text entry is up: the text goes where the script asked
+    /// once the player is done, and the screen comes back as it was.
+    fn editor_key(&mut self, code: &KeyCode) {
+        let Some(editor) = self.editor.as_mut() else {
+            return;
+        };
+        match editor.key(&self.system, code) {
+            Outcome::Editing => editor.draw(&mut self.host.graphics),
+            Outcome::Done(text) => {
+                let editor = self.editor.take().unwrap();
+                if let Some(text) = text {
+                    let _ = self.vm.set_string(editor.destination, &text);
+                }
+                self.host.graphics.shown = editor.underneath;
+                self.host.graphics.presented = true;
+            }
+        }
+        self.paint();
     }
 
     /// Carries out what the callback asked of the sound: one sound at a time,
@@ -217,6 +254,7 @@ impl GnexEmulator {
 impl Emulator for GnexEmulator {
     fn handle_event(&mut self, event: Event) {
         match event {
+            Event::Keydown(code) if self.editor.is_some() => self.editor_key(&code),
             Event::Keydown(code) => {
                 if let Some(key) = Self::key(&code) {
                     self.run(3, key);
@@ -233,6 +271,11 @@ impl Emulator for GnexEmulator {
         let elapsed = (now - self.last).min(MAX_STEP_MS);
         self.last = now;
         let target = self.host.clock + elapsed;
+
+        // The script is held while the text entry is up.
+        if self.editor.is_some() {
+            return self.system.tick();
+        }
 
         // Timers fire in order on the guest clock, each at its own due time.
         while !self.stopped && !self.vm.exited {
@@ -255,7 +298,7 @@ impl Emulator for GnexEmulator {
     }
 
     fn is_idle(&self) -> bool {
-        let script = self.stopped || self.vm.exited || self.host.next_due().is_none_or(|x| x > 0);
+        let script = self.stopped || self.vm.exited || self.editor.is_some() || self.host.next_due().is_none_or(|x| x > 0);
         script && self.system.is_idle()
     }
 

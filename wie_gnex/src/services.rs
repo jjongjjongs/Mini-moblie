@@ -15,6 +15,10 @@ use crate::{
 const PHONE_NUMBER: &[u8] = b"01012345678";
 
 pub fn call(service: u16, vm: &mut Vm, host: &mut Host) -> VmResult<()> {
+    tracing::trace!(
+        "service {service:#x} (stack {:?})",
+        vm.stack.iter().rev().take(6).rev().collect::<Vec<_>>()
+    );
     match service {
         // Handset facts: device classes, phone number, user id, date, time.
         0x00 => {
@@ -135,14 +139,17 @@ pub fn call(service: u16, vm: &mut Vm, host: &mut Host) -> VmResult<()> {
             let c = host.graphics.color;
             host.graphics.fill_rect(x1, y1, x2, y2, c);
         }
-        // Rounded boxes: filled, and outlined.
-        0x48 => {
-            let [x1, y1, x2, y2, radius] = vm.args::<5>()?;
-            host.graphics.round_rect(x1, y1, x2, y2, radius, true);
-        }
-        0x47 | 0x49 => {
+        // Rounded boxes: outlined, and filled. 2006프로야구 builds its dialogs
+        // out of nested 0x49 boxes in different colours - a dark frame, a
+        // lighter face inset by two, the rows inset again - and writes the
+        // dialog's text straight onto them, so they are solid.
+        0x47 => {
             let [x1, y1, x2, y2, radius] = vm.args::<5>()?;
             host.graphics.round_rect(x1, y1, x2, y2, radius, false);
+        }
+        0x48 | 0x49 => {
+            let [x1, y1, x2, y2, radius] = vm.args::<5>()?;
+            host.graphics.round_rect(x1, y1, x2, y2, radius, true);
         }
         0x51 => {
             let g = &mut host.graphics;
@@ -487,10 +494,18 @@ pub fn call(service: u16, vm: &mut Vm, host: &mut Host) -> VmResult<()> {
                 vm.write(address + i as i32, value)?;
             }
         }
-        // A number into a resource as decimal text.
+        // The handset's text entry: a prompt, the string resource the text
+        // goes into, the most bytes it may hold, and 1 for digits only.
+        // 2006프로야구 names its player through it (603, 1333, 6, 0) and
+        // 절묘한타이밍 takes a phone number (0x172, 0x171, 11, 1).
         0xb4 => {
-            let [resource, value, _width, _flags] = vm.args::<4>()?;
-            vm.set_string(resource, format!("{value}").as_bytes())?;
+            let [prompt, destination, limit, mode] = vm.args::<4>()?;
+            host.text_request = Some(crate::editor::TextRequest {
+                prompt: vm.string(prompt).unwrap_or_default(),
+                destination,
+                limit: limit.max(0) as usize,
+                numeric: mode == 1,
+            });
         }
         // Sine and cosine of an angle in degrees, times 100; a square root.
         0xcd | 0xce => {

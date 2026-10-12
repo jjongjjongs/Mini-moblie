@@ -143,8 +143,10 @@ What was worked out beyond the tables above:
     - 0x22 clip to two corners, both inside; 0x23 unclip;
     - colour: 0x26 a script colour, 0x27 RGB;
     - 0x3c point; lines: 0x42 line, 0x43 horizontal, 0x44 vertical;
-    - boxes: 0x45 outline, 0x46 fill, 0x48 rounded fill, 0x47/0x49 rounded
-      outline; 0x4b/0x4c ellipse outline and fill;
+    - boxes: 0x45 outline, 0x46 fill, 0x47 rounded outline, 0x49 rounded
+      fill (2006프로야구's dialogs and 놈투's selection bar are nested
+      0x49 boxes with text written on them; 0x48 is taken as a fill too,
+      unseen); 0x4b/0x4c ellipse outline and fill;
     - 0x3a/0x3b clear white/black, 0x36 palette bank;
     - 0x54 scroll a whole buffer;
   - frames: 0x51/0x52 save/restore the backdrop, 0x5f present (0x60 for a
@@ -159,7 +161,11 @@ What was worked out beyond the tables above:
   - 0xc1 reads a signed little-endian number of 1-4 bytes out of a resource
     at an offset into a word: 절묘한타이밍 walks its title and game
     animation data with it;
-  - strings 0x9d-0xb2, 0xb4; numbers 0xc8-0xd9 (0xcd/0xce sine and cosine
+  - 0xb4 the handset's text entry: (prompt, destination string, most
+    bytes, 1 for digits only). The script is held until the player is done;
+    2006프로야구 names a player through it, 절묘한타이밍 takes a phone
+    number;
+  - strings 0x9d-0xb2; numbers 0xc8-0xd9 (0xcd/0xce sine and cosine
     ×100, 0xd3 square root), vectors 0xdd-0xdf, 0xe0 range test;
   - the network 0x101-0x105, which never connects;
   - 0x1d8 system property.

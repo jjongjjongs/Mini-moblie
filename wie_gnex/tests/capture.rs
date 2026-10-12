@@ -164,6 +164,7 @@ fn capture() {
         clock.fetch_add(16, Ordering::SeqCst);
         while keys.first().is_some_and(|(at, _)| *at <= step * 16) {
             let (_, key) = keys.remove(0);
+            tracing::info!("key {key} at {}", step * 16);
             emulator.handle_event(Event::Keydown(KeyCode::parse(&key)));
             emulator.handle_event(Event::Keyup(KeyCode::parse(&key)));
         }
