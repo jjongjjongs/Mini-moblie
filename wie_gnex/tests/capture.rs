@@ -3,7 +3,8 @@
 //! `GNEX_ARCHIVE` at one (a zip of its `.mod` and `.sgs`), and `GNEX_FRAMES`
 //! at a directory for the frames (`frameNNNNN.ppm`). Without them the test
 //! does nothing. `GNEX_SECONDS` sets how long it runs, and `GNEX_KEYS` presses
-//! keys on the way, as `ms:KEY` pairs (`3000:OK,5000:OK`).
+//! keys on the way, as `ms:KEY` pairs (`3000:OK,5000:OK`), and `GNEX_SIZE`
+//! (`176x220`) sets a panel other than the title's own.
 
 use std::{
     collections::BTreeMap,
@@ -46,6 +47,7 @@ impl AudioSink for CountingSink {
 struct CaptureScreen {
     frames: Frames,
     clock: Arc<AtomicU64>,
+    size: (u32, u32),
 }
 
 impl Screen for CaptureScreen {
@@ -65,11 +67,11 @@ impl Screen for CaptureScreen {
     }
 
     fn width(&self) -> u32 {
-        240
+        self.size.0
     }
 
     fn height(&self) -> u32 {
-        320
+        self.size.1
     }
 }
 
@@ -125,9 +127,17 @@ fn capture() {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_writer(std::io::stderr)
         .try_init();
-    let files: BTreeMap<String, Vec<u8>> = extract_zip(&fs::read(archive).unwrap()).unwrap();
+    let archive = fs::read(archive).unwrap();
+    let files: BTreeMap<String, Vec<u8>> = extract_zip(&archive).unwrap();
     assert!(GnexEmulator::loadable_archive(&files));
 
+    // The panel the title was built for, unless `GNEX_SIZE` (`176x220`)
+    // names another.
+    let size = env::var("GNEX_SIZE")
+        .ok()
+        .and_then(|x| x.split_once('x').map(|(w, h)| (w.parse().unwrap(), h.parse().unwrap())))
+        .or_else(|| GnexEmulator::screen_size(&archive))
+        .unwrap_or((240, 320));
     let frames = Arc::new(Mutex::new(Vec::new()));
     let clock = Arc::new(AtomicU64::new(1_000_000));
     let notes = Arc::new(AtomicU64::new(0));
@@ -137,6 +147,7 @@ fn capture() {
         screen: CaptureScreen {
             frames: frames.clone(),
             clock: clock.clone(),
+            size,
         },
         clock: clock.clone(),
     };

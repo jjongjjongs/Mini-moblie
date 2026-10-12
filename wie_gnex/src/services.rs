@@ -452,8 +452,20 @@ pub fn call(service: u16, vm: &mut Vm, host: &mut Host) -> VmResult<()> {
             vm.args::<4>()?;
             host.graphics.present();
         }
+        // A signed little-endian number of `count` bytes, read out of a
+        // resource at `offset` into the word at `address`: how 절묘한타이밍
+        // walks its animation data.
         0xc1 => {
-            vm.args::<4>()?;
+            let [address, resource, offset, count] = vm.args::<4>()?;
+            let data = vm.resource(resource)?;
+            let count = count.clamp(1, 4) as usize;
+            let mut value: u32 = 0;
+            for i in 0..count {
+                let byte = data.get(offset.max(0) as usize + i).copied().unwrap_or(0) as u32;
+                value |= byte << (8 * i);
+            }
+            let shift = 32 - 8 * count as u32;
+            vm.write(address, ((value << shift) as i32) >> shift)?;
         }
         0xe1 => {}
         // A reading by number that 절묘한타이밍 seeds its random numbers

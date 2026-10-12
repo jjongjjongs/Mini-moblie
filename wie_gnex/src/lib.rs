@@ -61,10 +61,23 @@ impl GnexEmulator {
         script(files).is_some_and(|data| program::unwrap(data).first() == Some(&4))
     }
 
-    /// GNEX titles of this generation are drawn for a 240x320 panel.
+    /// The panel a title was built for. Most of these titles were built for
+    /// the 176x220 handsets of their day: on a larger panel they lay their
+    /// fixed-size pictures out at its centre or edges and leave the rest
+    /// bare, while on 176x220 every one of them fills the screen as drawn. A
+    /// title that sizes itself to whatever panel it runs on is listed with
+    /// the larger one it is at its best on.
     pub fn screen_size(archive: &[u8]) -> Option<(u32, u32)> {
+        /// Titles that size themselves to the panel, by script name: 놈투(GS).
+        const SIZES_THEMSELVES: [&str; 1] = ["0051262682"];
+
         let files = extract_zip(archive).ok()?;
-        Self::loadable_archive(&files).then_some((240, 320))
+        let (name, data) = script_entry(&files)?;
+        if program::unwrap(data).first() != Some(&4) {
+            return None;
+        }
+        let id = name.rsplit('/').next().unwrap_or(name).split('.').next().unwrap_or("");
+        Some(if SIZES_THEMSELVES.contains(&id) { (240, 320) } else { (176, 220) })
     }
 
     pub fn from_archive(platform: Box<dyn Platform>, files: BTreeMap<String, Vec<u8>>) -> Result<Self> {

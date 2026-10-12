@@ -87,7 +87,15 @@ Still unknown when this was first written (most of it is answered in the next se
 ## Running it: `wie_gnex`
 
 `wie_gnex` runs these titles. The emulator picks it for an archive that holds a
-`.mod` naming `application/x-gnex-sgs` beside a version-4 `.sgs`. All five
+`.mod` naming `application/x-gnex-sgs` beside a version-4 `.sgs`.
+
+**Panel**: four of the five were built for 176x220 handsets. On a larger panel
+they put their fixed-size pictures at its centre or edges and leave the rest
+bare; on 176x220 each fills the screen as drawn. 놈투 sizes itself to any
+panel and runs on 240x320. Nothing in the package says which a title is, so
+176x220 is the default and titles that size themselves are listed by name.
+
+All five
 reach play: 놈투(GS) through its story to Stage 1, 절묘한타이밍 to its gear
 game, 물가에돌튕기기2 to its beach, 2006프로야구 to its team selection, and
 마구마구 to an inning.
@@ -148,6 +156,9 @@ What was worked out beyond the tables above:
     delete, 0x66 seek, 0x67/0x69 write/read words, 0x68/0x6a write/read
     bytes, 0x62 size, 0x6c-0x6e directories. A package's own data files
     (마구마구's `bb/`, 절묘한타이밍's `f1`/`f2`) are there to read;
+  - 0xc1 reads a signed little-endian number of 1-4 bytes out of a resource
+    at an offset into a word: 절묘한타이밍 walks its title and game
+    animation data with it;
   - strings 0x9d-0xb2, 0xb4; numbers 0xc8-0xd9 (0xcd/0xce sine and cosine
     ×100, 0xd3 square root), vectors 0xdd-0xdf, 0xe0 range test;
   - the network 0x101-0x105, which never connects;
@@ -157,6 +168,8 @@ What was worked out beyond the tables above:
 
 Still to do:
 
-- 마구마구 leaves parts of earlier frames on screen during an inning.
-- 절묘한타이밍's title shows no logo above its globe.
-- Background music plays once rather than looping.
+- 마구마구 leaves parts of earlier frames (a closed dialog, a white block
+  over the infield) on screen during an inning: the batting scene covers
+  only part of the panel, and what should draw the rest is not found yet.
+- Background music plays once. No service asks for a repeat, and the
+  reference player plays these once too.
