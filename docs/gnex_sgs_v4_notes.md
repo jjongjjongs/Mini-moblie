@@ -89,11 +89,16 @@ Still unknown when this was first written (most of it is answered in the next se
 `wie_gnex` runs these titles. The emulator picks it for an archive that holds a
 `.mod` naming `application/x-gnex-sgs` beside a version-4 `.sgs`.
 
-**Panel**: four of the five were built for 176x220 handsets. On a larger panel
+**Panel**: three of the five were built for 176x220 handsets. On a larger panel
 they put their fixed-size pictures at its centre or edges and leave the rest
 bare; on 176x220 each fills the screen as drawn. 놈투 sizes itself to any
-panel and runs on 240x320. Nothing in the package says which a title is, so
-176x220 is the default and titles that size themselves are listed by name.
+panel and runs on 240x320. 마구마구 carries only its small-handset pictures
+(a 130x150 stadium, a 130-wide batting backdrop) and picks the layout they
+belong to only when the panel is no larger than 130x150 (`var94`, set at
+0x21e from the screen's width and height); on anything bigger it places them
+in a 180x220 layout with gaps the previous screen shows through. It runs on
+128x150. Nothing in the package says which a title is, so 176x220 is the
+default and the others are listed by name.
 
 All five
 reach play: 놈투(GS) through its story to Stage 1, 절묘한타이밍 to its gear
@@ -174,8 +179,5 @@ What was worked out beyond the tables above:
 
 Still to do:
 
-- 마구마구 leaves parts of earlier frames (a closed dialog, a white block
-  over the infield) on screen during an inning: the batting scene covers
-  only part of the panel, and what should draw the rest is not found yet.
 - Background music plays once. No service asks for a repeat, and the
   reference player plays these once too.

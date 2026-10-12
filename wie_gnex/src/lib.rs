@@ -71,9 +71,18 @@ impl GnexEmulator {
     /// bare, while on 176x220 every one of them fills the screen as drawn. A
     /// title that sizes itself to whatever panel it runs on is listed with
     /// the larger one it is at its best on.
+    ///
+    /// 마구마구 is the other way: this build carries only the pictures of its
+    /// small-handset layout - its stadium is 130x150, its batting backdrop a
+    /// 130-wide strip over two 65-wide halves of the field - and the script
+    /// picks that layout only on a panel no larger than 130x150. Anything
+    /// bigger and it lays the same pictures out for 180x220, centred, with
+    /// gaps between them where the previous screen shows through.
     pub fn screen_size(archive: &[u8]) -> Option<(u32, u32)> {
         /// Titles that size themselves to the panel, by script name: 놈투(GS).
         const SIZES_THEMSELVES: [&str; 1] = ["0051262682"];
+        /// Titles built for the 128-wide handsets, by script name: 마구마구.
+        const SMALL_HANDSET: [&str; 1] = ["0054520302"];
 
         let files = extract_zip(archive).ok()?;
         let (name, data) = script_entry(&files)?;
@@ -81,7 +90,13 @@ impl GnexEmulator {
             return None;
         }
         let id = name.rsplit('/').next().unwrap_or(name).split('.').next().unwrap_or("");
-        Some(if SIZES_THEMSELVES.contains(&id) { (240, 320) } else { (176, 220) })
+        Some(if SIZES_THEMSELVES.contains(&id) {
+            (240, 320)
+        } else if SMALL_HANDSET.contains(&id) {
+            (128, 150)
+        } else {
+            (176, 220)
+        })
     }
 
     pub fn from_archive(platform: Box<dyn Platform>, files: BTreeMap<String, Vec<u8>>) -> Result<Self> {
