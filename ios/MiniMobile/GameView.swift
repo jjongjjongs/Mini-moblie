@@ -54,6 +54,8 @@ enum SettingKey {
     static let layoutNumbers = "pad.layout.numbers"
     /// 펼친 화면's own positions, the keys either side of the screen.
     static let layoutSides = "pad.layout.sides"
+    /// The phone on its side: its own positions, kept apart from upright's.
+    static let layoutLandscape = "pad.layout.landscape"
     /// 펼친 화면: whether a wide upright window lays the pad out either side
     /// of the screen, for every game.
     static let unfoldedSides = "pad.unfolded.sides"
@@ -65,8 +67,13 @@ enum SettingKey {
 let unfoldedMinWidth: CGFloat = 600
 
 /// Which stored layout and which standard one the pad is drawn from: with
+/// `sideways` (the phone on its side) the keys either side of the screen
+/// whatever the pad's position and shape, as the Android player has it; with
 /// `sides` (펼친 화면 on a wide window) the columns either side of the screen.
-func padArrangement(mode: PadMode, shape: PadShape, sides: Bool = false) -> PadArrangement {
+func padArrangement(mode: PadMode, shape: PadShape, sides: Bool = false, sideways: Bool = false) -> PadArrangement {
+    if sideways {
+        return .landscape
+    }
     if sides && mode == .below {
         return .sides
     }
@@ -82,6 +89,7 @@ private enum MenuWindow {
     case design
     case shape
     case unfolded
+    case orientation
 }
 
 private enum GameSheet: String, Identifiable {
@@ -111,11 +119,17 @@ struct GameView: View {
     @AppStorage(SettingKey.layoutOverlay) private var layoutOverlay = ""
     @AppStorage(SettingKey.layoutNumbers) private var layoutNumbers = ""
     @AppStorage(SettingKey.layoutSides) private var layoutSides = ""
+    @AppStorage(SettingKey.layoutLandscape) private var layoutLandscape = ""
     @AppStorage(SettingKey.unfoldedSides) private var unfoldedSides = true
     @AppStorage(SettingKey.padTheme) private var padTheme = PadTheme.gold
 
     /// Whether the play area is wide enough to be unfolded; see `unfoldedMinWidth`.
     @State private var wide = false
+    /// Whether the window is on its side: the keys go either side of the
+    /// screen and the bar gives way to a button over it.
+    @State private var sideways = false
+    /// 화면 방향, for this game.
+    @State private var orientation = GameOrientation.auto
     @State private var sheet: GameSheet?
     /// This title's pad shape (see `PadShape`).
     @State private var padShape = PadShape.standard
@@ -143,7 +157,7 @@ struct GameView: View {
     }
 
     private var arrangement: PadArrangement {
-        padArrangement(mode: padMode, shape: padShape, sides: sides)
+        padArrangement(mode: padMode, shape: padShape, sides: sides, sideways: sideways)
     }
 
     private var layout: PadLayout {
@@ -152,6 +166,7 @@ struct GameView: View {
         case .numbers: return PadLayout.decode(layoutNumbers, standard: .numbers)
         case .overlay: return PadLayout.decode(layoutOverlay, standard: .overlay)
         case .sides: return PadLayout.decode(layoutSides, standard: .sides)
+        case .landscape: return PadLayout.decode(layoutLandscape, standard: .landscape)
         }
     }
 
@@ -159,6 +174,8 @@ struct GameView: View {
         Group {
             if padHidden && draft == nil {
                 fullScreen
+            } else if sideways {
+                onItsSide
             } else {
                 withPad
             }
@@ -182,6 +199,8 @@ struct GameView: View {
             padHidden = GamePad.hidden(game)
             padShape = GamePad.shape(game)
             PlayHistory.markPlayed(game)
+            OrientationControl.shared.enterGame()
+            orientation = OrientationControl.shared.choice
             emulator.start(game: game)
             let emulator = self.emulator
             Gamepad.shared.send = { [weak emulator] key, pressed in
@@ -192,6 +211,7 @@ struct GameView: View {
             Gamepad.shared.releaseAll()
             Gamepad.shared.send = nil
             emulator.stop()
+            OrientationControl.shared.leaveGame()
         }
         .onChange(of: quality) { value in emulator.setHq2x(value == .hq2x) }
         .sheet(item: $sheet) { sheet in
@@ -201,7 +221,7 @@ struct GameView: View {
             case .quality:
                 QualityView(game: game, emulator: emulator, quality: $quality)
             case .settings:
-                GameSettingsView(game: game, padShape: shapeBinding, wide: wide, onEditPad: beginEditing)
+                GameSettingsView(game: game, padShape: shapeBinding, wide: wide, sideways: sideways, onEditPad: beginEditing)
             case .log:
                 LogView()
             }
@@ -226,6 +246,44 @@ struct GameView: View {
             .padding(8)
         }
         .background(Color.black.ignoresSafeArea())
+        .background(widthReader)
+    }
+
+    /// The phone on its side, as the Android player lays it: no bar, the
+    /// screen filling the height in the middle at its own shape, the keys
+    /// either side, and the menu on a button in the corner. Editing puts the
+    /// edit bar over the top of the screen, so the keys are placed in the
+    /// same area they are played in.
+    private var onItsSide: some View {
+        ZStack(alignment: .top) {
+            GeometryReader { _ in
+                ZStack {
+                    screen(alignment: .center, scale: scale == .fill ? .fit : scale)
+                    pad
+                }
+            }
+            if draft != nil {
+                editBar
+                    .padding(8)
+                    .frame(maxWidth: 300)
+                    .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.black.opacity(0.78)))
+                    .padding(.top, 4)
+            } else {
+                HStack {
+                    Spacer()
+                    Button {
+                        menuWindow = .main
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .font(.headline)
+                            .foregroundColor(.white)
+                            .frame(width: 36, height: 36)
+                            .background(Circle().fill(Color.white.opacity(0.18)))
+                    }
+                }
+            }
+        }
+        .padding(8)
         .background(widthReader)
     }
 
@@ -272,8 +330,20 @@ struct GameView: View {
     private var widthReader: some View {
         GeometryReader { geometry in
             Color.clear
-                .onAppear { wide = geometry.size.width >= unfoldedMinWidth }
-                .onChange(of: geometry.size.width) { wide = $0 >= unfoldedMinWidth }
+                .onAppear { measure(geometry.size) }
+                .onChange(of: geometry.size) { measure($0) }
+        }
+    }
+
+    /// Whether the area is wide enough to be unfolded, and whether it is on
+    /// its side. An edit in progress is for the way the window was.
+    private func measure(_ size: CGSize) {
+        wide = size.width >= unfoldedMinWidth
+        let turned = size.width > size.height
+        if turned != sideways {
+            draft = nil
+            selectedKey = nil
+            sideways = turned
         }
     }
 
@@ -316,6 +386,7 @@ struct GameView: View {
         case .design: designWindow
         case .shape: shapeWindow
         case .unfolded: unfoldedWindow
+        case .orientation: orientationWindow
         }
     }
 
@@ -329,6 +400,9 @@ struct GameView: View {
                 }
                 MenuRow(symbol: "speedometer", label: "게임 속도", value: GameSpeed.format(speed)) { open(.speed) }
                 MenuRow(symbol: "photo", label: "화질", value: quality.label) { open(.quality) }
+                MenuRow(symbol: "rotate.right", label: "화면 방향", value: orientation.label, opens: true) {
+                    menuWindow = .orientation
+                }
                 MenuRow(symbol: "paintpalette", label: "키패드 디자인", value: padTheme.label, opens: true) {
                     menuWindow = .design
                 }
@@ -354,8 +428,8 @@ struct GameView: View {
                     toggleTouch()
                 }
                 MenuRow(symbol: "doc.text.magnifyingglass", label: "로그 보기") { open(.log) }
-                // The bar with 닫기 is put away with the pad.
-                if padHidden {
+                // The bar with 닫기 is put away with the pad, and on its side.
+                if padHidden || sideways {
                     MenuRow(symbol: "xmark", label: "게임 닫기") {
                         menuWindow = nil
                         confirmingExit = true
@@ -452,6 +526,38 @@ struct GameView: View {
         }
     }
 
+    /// 화면 방향: following the phone, or held upright or on its side, for
+    /// this game; a choice applies at once.
+    private var orientationWindow: some View {
+        MenuDialog(title: "화면 방향", onDismiss: { menuWindow = nil }) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("이 게임을 하는 동안 적용됩니다.")
+                    .font(.system(size: 12.5))
+                    .foregroundColor(MenuPalette.muted)
+                ForEach(GameOrientation.allCases) { choice in
+                    MenuOption(label: "\(choice.label) · \(choice.detail)", on: choice == orientation) {
+                        ZStack {
+                            MenuPalette.raised
+                            Image(systemName: choice == .auto ? "arrow.triangle.2.circlepath" : choice == .portrait ? "iphone" : "iphone.landscape")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(MenuPalette.accent)
+                        }
+                    } action: {
+                        orientation = choice
+                        OrientationControl.shared.choose(choice)
+                        menuWindow = nil
+                    }
+                }
+            }
+            .padding(.horizontal, 22)
+            .padding(.bottom, 18)
+        } footer: {
+            Spacer()
+            Button("뒤로") { menuWindow = .main }
+                .buttonStyle(MenuButtonStyle(kind: .secondary))
+        }
+    }
+
     /// Closes the menu for one of the game's sheets.
     private func open(_ next: GameSheet) {
         menuWindow = nil
@@ -462,6 +568,9 @@ struct GameView: View {
         confirmingExit = false
         Gamepad.shared.capture = nil
         emulator.stop()
+        // Upright before the list comes back, rather than the list turning
+        // after it has.
+        OrientationControl.shared.leaveGame()
         dismiss()
     }
 
@@ -508,6 +617,7 @@ struct GameView: View {
                         case .numbers: layoutNumbers = draft.encoded()
                         case .overlay: layoutOverlay = draft.encoded()
                         case .sides: layoutSides = draft.encoded()
+                        case .landscape: layoutLandscape = draft.encoded()
                         }
                     }
                     draft = nil
@@ -541,11 +651,11 @@ struct GameView: View {
 
     // MARK: - Screen and pad
 
-    private func screen(alignment: Alignment) -> some View {
+    private func screen(alignment: Alignment, scale: ScreenScale? = nil) -> some View {
         GeometryReader { geometry in
             ZStack(alignment: alignment) {
                 Color.black
-                GameScreen(feed: emulator.feed, scale: scale, quality: quality, area: geometry.size, touch: touch) { pixels, shown in
+                GameScreen(feed: emulator.feed, scale: scale ?? self.scale, quality: quality, area: geometry.size, touch: touch) { pixels, shown in
                     screenTouch(frame: pixels, shown: shown)
                 }
                 if let message = emulator.message {
@@ -575,7 +685,7 @@ struct GameView: View {
         } else {
             PadView(
                 layout: layout,
-                opacity: padMode == .below ? opacityBelow : opacityOverlay,
+                opacity: padMode == .below || arrangement == .landscape ? opacityBelow : opacityOverlay,
                 labelScale: labelScale,
                 haptics: haptics,
                 palette: padTheme.palette,
@@ -1061,6 +1171,7 @@ private func arrangementName(_ arrangement: PadArrangement, mode: PadMode) -> St
     switch arrangement {
     case .numbers: return "숫자 크게"
     case .sides: return "펼친 화면"
+    case .landscape: return "가로 화면"
     default: return mode.label
     }
 }
@@ -1105,6 +1216,8 @@ private struct GameSettingsView: View {
     @Binding var padShape: PadShape
     /// Whether the play area is wide enough for 펼친 화면 to apply.
     let wide: Bool
+    /// Whether the phone is on its side, which has its own layout.
+    let sideways: Bool
     let onEditPad: () -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -1119,11 +1232,12 @@ private struct GameSettingsView: View {
     @AppStorage(SettingKey.layoutOverlay) private var layoutOverlay = ""
     @AppStorage(SettingKey.layoutNumbers) private var layoutNumbers = ""
     @AppStorage(SettingKey.layoutSides) private var layoutSides = ""
+    @AppStorage(SettingKey.layoutLandscape) private var layoutLandscape = ""
     @AppStorage(SettingKey.unfoldedSides) private var unfoldedSides = true
     @AppStorage(SettingKey.padTheme) private var padTheme = PadTheme.gold
 
     private var arrangement: PadArrangement {
-        padArrangement(mode: padMode, shape: padShape, sides: wide && unfoldedSides)
+        padArrangement(mode: padMode, shape: padShape, sides: wide && unfoldedSides, sideways: sideways)
     }
 
     private var arrangementLabel: String {
@@ -1233,6 +1347,7 @@ private struct GameSettingsView: View {
         case .numbers: layoutNumbers = ""
         case .overlay: layoutOverlay = ""
         case .sides: layoutSides = ""
+        case .landscape: layoutLandscape = ""
         }
     }
 

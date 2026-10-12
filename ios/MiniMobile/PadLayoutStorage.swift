@@ -7,6 +7,8 @@ struct PadLayouts: Codable, Equatable {
     var below: String
     var overlay: String
     var numbers: String
+    /// The phone on its side; nil in what was saved before it had its own.
+    var landscape: String? = nil
 }
 
 /// Layouts saved on this device under a name, at most 32, as the Android
@@ -87,8 +89,10 @@ enum PadLayoutBackup {
     private static func json(_ layouts: PadLayouts) -> [String: Any] {
         [
             "portrait": json(PadLayout.decode(layouts.below, standard: .below)),
-            "landscape": json(PadLayout.decode(layouts.overlay, standard: .overlay)),
+            "landscape": json(PadLayout.decode(layouts.landscape ?? "", standard: .landscape)),
             "numbers": json(PadLayout.decode(layouts.numbers, standard: .numbers)),
+            // The Android app has no 화면 위 layout and leaves this be.
+            "overlay": json(PadLayout.decode(layouts.overlay, standard: .overlay)),
         ]
     }
 
@@ -105,11 +109,15 @@ enum PadLayoutBackup {
             throw Failure.damaged("배치가 들어 있지 않습니다.")
         }
         let numbers = json["numbers"] as? [String: Any]
+        let overlay = json["overlay"] as? [String: Any]
         return PadLayouts(
             below: try layout(portrait, standard: .below).encoded(),
-            overlay: try layout(landscape, standard: .overlay).encoded(),
+            // A backup from the Android app, or from before 화면 위 had a key
+            // of its own, has none.
+            overlay: try overlay.map { try layout($0, standard: .overlay).encoded() } ?? "",
             // A backup from before the arrangement existed has none.
-            numbers: try numbers.map { try layout($0, standard: .numbers).encoded() } ?? ""
+            numbers: try numbers.map { try layout($0, standard: .numbers).encoded() } ?? "",
+            landscape: try layout(landscape, standard: .landscape).encoded()
         )
     }
 
@@ -153,6 +161,7 @@ struct PadLayoutStorageView: View {
     @AppStorage(SettingKey.layoutBelow) private var layoutBelow = ""
     @AppStorage(SettingKey.layoutOverlay) private var layoutOverlay = ""
     @AppStorage(SettingKey.layoutNumbers) private var layoutNumbers = ""
+    @AppStorage(SettingKey.layoutLandscape) private var layoutLandscape = ""
 
     @State private var slots = PadLayoutSlots.all()
     @State private var sheet: StorageSheet?
@@ -162,7 +171,7 @@ struct PadLayoutStorageView: View {
     @State private var notice: String?
 
     private var current: PadLayouts {
-        PadLayouts(below: layoutBelow, overlay: layoutOverlay, numbers: layoutNumbers)
+        PadLayouts(below: layoutBelow, overlay: layoutOverlay, numbers: layoutNumbers, landscape: layoutLandscape)
     }
 
     var body: some View {
@@ -283,6 +292,7 @@ struct PadLayoutStorageView: View {
         layoutBelow = layouts.below
         layoutOverlay = layouts.overlay
         layoutNumbers = layouts.numbers
+        layoutLandscape = layouts.landscape ?? ""
     }
 
     private func export() {

@@ -98,13 +98,15 @@ struct PadKey: Codable, Identifiable, Equatable {
 }
 
 /// Which standard layout a pad starts from: under the screen, under it as
-/// 숫자 크게, over the screen, or in two columns either side of it (펼친 화면,
-/// on a wide upright window).
+/// 숫자 크게, over the screen, in two columns either side of it (펼친 화면,
+/// on a wide upright window), or either side of it with the phone turned on
+/// its side.
 enum PadArrangement {
     case below
     case numbers
     case overlay
     case sides
+    case landscape
 }
 
 /// Every key of the pad, placed.
@@ -137,6 +139,7 @@ struct PadLayout: Codable, Equatable {
         case .numbers: return numbers
         case .overlay: return overlay
         case .sides: return sides
+        case .landscape: return landscape
         }
     }
 
@@ -287,6 +290,53 @@ struct PadLayout: Codable, Equatable {
                                y: numbersTop + Double(position / 3) * (cellH + gapY), w: cellW, h: cellH, hidden: false))
         }
         keys.append(PadKey(index: Int32(WIE_KEY_HANGUP), x: leftX, y: plusTop + 3 * (cellH + gapY), w: functionW, h: funcH, hidden: true))
+        return PadLayout(keys: keys)
+    }()
+
+    /// The phone on its side, as the Android player lays it: the screen fills
+    /// the height in the middle at its own shape, the soft keys over the
+    /// directions in the left band and 저장 and 뒤로 over the number pad in
+    /// the right, each cluster centred in its band and its keys capped at 54
+    /// points so the screen stays the thing on the display. Worked out in
+    /// points for an iPhone's landscape play area, 734 by 353, with a
+    /// handset's 240x320 screen, and kept as fractions of it.
+    private static let landscape: PadLayout = {
+        let width = 734.0, height = 353.0, screenAspect = 240.0 / 320.0
+        let pad = 10.0, gap = 5.0
+        let centerW = height * screenAspect
+        let sideW = (width - centerW) / 2 - pad - gap
+        let usable = height - 2 * pad
+        let cell = min(54, min((sideW - 2 * gap) / 3, (usable - 4 * gap) / 4.8))
+        let funcH = cell * 0.8
+        let clusterW = cell * 3 + gap * 2
+        let functionW = (clusterW - gap) / 2
+        let leftX = pad + (sideW - clusterW) / 2
+        let rightX = width - pad - sideW + (sideW - clusterW) / 2
+        let leftTop = pad + (usable - (funcH + 3 * cell + 3 * gap)) / 2
+        let rightTop = pad + (usable - (funcH + 4 * cell + 4 * gap)) / 2
+
+        func key(_ index: Int32, _ x: Double, _ y: Double, _ w: Double, _ h: Double, hidden: Bool = false) -> PadKey {
+            PadKey(index: index, x: x / width, y: y / height, w: w / width, h: h / height, hidden: hidden)
+        }
+        var keys: [PadKey] = [
+            key(Int32(WIE_KEY_LEFT_SOFT), leftX, leftTop, functionW, funcH),
+            key(Int32(WIE_KEY_RIGHT_SOFT), leftX + functionW + gap, leftTop, functionW, funcH),
+            key(Int32(WIE_KEY_CALL), rightX, rightTop, functionW, funcH),
+            key(Int32(WIE_KEY_CLEAR), rightX + functionW + gap, rightTop, functionW, funcH),
+        ]
+        let plusTop = leftTop + funcH + gap
+        let plus: [(Int32, Double, Double)] = [
+            (Int32(WIE_KEY_UP), 1, 0), (Int32(WIE_KEY_LEFT), 0, 1), (Int32(WIE_KEY_OK), 1, 1),
+            (Int32(WIE_KEY_RIGHT), 2, 1), (Int32(WIE_KEY_DOWN), 1, 2),
+        ]
+        for (index, column, row) in plus {
+            keys.append(key(index, leftX + column * (cell + gap), plusTop + row * (cell + gap), cell, cell))
+        }
+        let numbersTop = rightTop + funcH + gap
+        for (position, index) in PadLayout.numberOrder.enumerated() {
+            keys.append(key(index, rightX + Double(position % 3) * (cell + gap), numbersTop + Double(position / 3) * (cell + gap), cell, cell))
+        }
+        keys.append(key(Int32(WIE_KEY_HANGUP), leftX, plusTop + 3 * (cell + gap), functionW, funcH, hidden: true))
         return PadLayout(keys: keys)
     }()
 
