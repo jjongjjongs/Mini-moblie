@@ -124,28 +124,28 @@ pub fn delete_game(game: &Path, with_saves: bool, trash: bool) -> Result<(), Str
 }
 
 /// Whether what is removed can go to a trash to be got back from: always on
-/// Windows; on Linux on a desktop (not a handheld) with `gio`, which puts
-/// things in the trash the desktop's file manager shows.
+/// Windows and the Mac; on Linux on a desktop (not a handheld) with `gio`,
+/// which puts things in the trash the desktop's file manager shows.
 pub fn trash_available(desktop: bool) -> bool {
-    cfg!(windows) || (desktop && gio().is_some())
+    cfg!(windows) || cfg!(target_os = "macos") || (desktop && gio().is_some())
 }
 
 /// Where `gio` is, if on the path.
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn gio() -> Option<PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH")?)
         .map(|dir| dir.join("gio"))
         .find(|path| path.is_file())
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 fn gio() -> Option<PathBuf> {
     None
 }
 
 /// Removes a file or a folder: to the trash if `trash` and there is one
 /// (see [`trash_available`]), for good otherwise.
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn remove(path: &Path, trash: bool) -> std::io::Result<()> {
     if trash && let Some(gio) = gio() {
         let status = std::process::Command::new(gio).arg("trash").arg(path).status()?;
@@ -155,10 +155,85 @@ fn remove(path: &Path, trash: bool) -> std::io::Result<()> {
             Err(std::io::Error::other("휴지통으로 옮길 수 없습니다"))
         };
     }
+    remove_for_good(path)
+}
+
+#[cfg(not(windows))]
+fn remove_for_good(path: &Path) -> std::io::Result<()> {
     if path.is_dir() {
         std::fs::remove_dir_all(path)
     } else {
         std::fs::remove_file(path)
+    }
+}
+
+/// On the Mac, to the Trash the way the Finder puts things there - with
+/// 되돌려 놓기 to bring them back - through `NSFileManager`.
+#[cfg(target_os = "macos")]
+fn remove(path: &Path, trash: bool) -> std::io::Result<()> {
+    use std::{
+        ffi::{CString, c_char, c_void},
+        os::unix::ffi::OsStrExt,
+    };
+
+    type Id = *mut c_void;
+    type Sel = *mut c_void;
+
+    #[link(name = "Foundation", kind = "framework")]
+    unsafe extern "C" {}
+
+    #[link(name = "objc")]
+    unsafe extern "C" {
+        fn objc_getClass(name: *const c_char) -> Id;
+        fn sel_registerName(name: *const c_char) -> Sel;
+        fn objc_msgSend();
+        fn objc_autoreleasePoolPush() -> *mut c_void;
+        fn objc_autoreleasePoolPop(pool: *mut c_void);
+    }
+
+    if !trash {
+        return remove_for_good(path);
+    }
+    let full = std::path::absolute(path)?;
+    let text = CString::new(full.as_os_str().as_bytes()).map_err(std::io::Error::other)?;
+    // SAFETY: each message is sent through `objc_msgSend` cast to the exact
+    // signature of the method it names, to objects checked for nil first,
+    // inside an autorelease pool that frees what they hand back.
+    let moved = unsafe {
+        let send: unsafe extern "C" fn() = objc_msgSend;
+        let get: unsafe extern "C" fn(Id, Sel) -> Id = std::mem::transmute(send);
+        let with_text: unsafe extern "C" fn(Id, Sel, *const c_char) -> Id = std::mem::transmute(send);
+        let with_object: unsafe extern "C" fn(Id, Sel, Id) -> Id = std::mem::transmute(send);
+        let trash_item: unsafe extern "C" fn(Id, Sel, Id, *mut Id, *mut Id) -> i8 = std::mem::transmute(send);
+
+        let pool = objc_autoreleasePoolPush();
+        let string = with_text(
+            objc_getClass(c"NSString".as_ptr()),
+            sel_registerName(c"stringWithUTF8String:".as_ptr()),
+            text.as_ptr(),
+        );
+        let url = if string.is_null() {
+            std::ptr::null_mut()
+        } else {
+            with_object(objc_getClass(c"NSURL".as_ptr()), sel_registerName(c"fileURLWithPath:".as_ptr()), string)
+        };
+        let manager = get(objc_getClass(c"NSFileManager".as_ptr()), sel_registerName(c"defaultManager".as_ptr()));
+        let moved = !url.is_null()
+            && !manager.is_null()
+            && trash_item(
+                manager,
+                sel_registerName(c"trashItemAtURL:resultingItemURL:error:".as_ptr()),
+                url,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ) != 0;
+        objc_autoreleasePoolPop(pool);
+        moved
+    };
+    if moved {
+        Ok(())
+    } else {
+        Err(std::io::Error::other("휴지통으로 옮길 수 없습니다"))
     }
 }
 

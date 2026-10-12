@@ -144,7 +144,10 @@ jobs:
           (PortMaster, aarch64) - see minimobile/README.txt inside it.
 
           \`MiniMobile-windows.zip\` is the Windows program (64-bit) - see
-          the README.txt inside it."
+          the README.txt inside it.
+
+          \`MiniMobile-mac.dmg\` is the Mac app (Apple silicon and Intel),
+          unsigned - see the 읽어보기.txt inside it."
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --notes "$notes" --prerelease
@@ -349,6 +352,81 @@ jobs:
             || gh release create "$TAG" --title 'WIE Mobile (development build)' --notes 'Development build, replaced by every push.' --prerelease \
             || gh release view "$TAG" >/dev/null
           gh release upload "$TAG" MiniMobile-windows.zip --clobber
+
+  # The same SDL port as a Mac app, published next to the apk: one program
+  # for Apple silicon and Intel (lipo), with SDL2.framework inside the
+  # bundle, ad-hoc signed and in a dmg. The JIT is on, as on Windows: neither
+  # backend touches x18, the register Apple keeps for itself, and the app is
+  # not hardened, so its code buffers may turn executable.
+  mac:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: mac
+
+      - name: Build
+        run: |
+          set -eu
+          cargo build --release -p wie_portmaster --features jit --target aarch64-apple-darwin
+          cargo build --release -p wie_portmaster --features jit --target x86_64-apple-darwin
+
+      - name: Fetch SDL2
+        run: |
+          set -eu
+          curl -sSfL -o sdl.dmg https://github.com/libsdl-org/SDL/releases/download/release-2.30.9/SDL2-2.30.9.dmg
+          hdiutil attach -nobrowse -readonly -mountpoint sdl sdl.dmg >/dev/null
+          ditto sdl/SDL2.framework SDL2.framework
+          hdiutil detach sdl >/dev/null
+
+      - name: Package
+        run: |
+          set -eu
+          app=dmg/MiniMobile.app
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/Frameworks"
+          lipo -create -output "$app/Contents/MacOS/minimobile" \
+            target/aarch64-apple-darwin/release/minimobile \
+            target/x86_64-apple-darwin/release/minimobile
+          lipo -info "$app/Contents/MacOS/minimobile"
+          cp mac/Info.plist "$app/Contents/"
+          cp mac/MiniMobile.icns "$app/Contents/Resources/"
+          ditto SDL2.framework "$app/Contents/Frameworks/SDL2.framework"
+          codesign --force --sign - "$app/Contents/Frameworks/SDL2.framework"
+          codesign --force --sign - "$app"
+          codesign --verify --deep --strict "$app"
+          cp mac/README.txt dmg/읽어보기.txt
+          printf '\n커밋: %s\n' "${{ github.sha }}" >> dmg/읽어보기.txt
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname MiniMobile -srcfolder dmg -ov -format UDZO MiniMobile-mac.dmg
+
+      - name: Upload the Mac build
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: MiniMobile-mac
+          path: MiniMobile-mac.dmg
+
+      - name: Publish the Mac build to the development release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: mobile-dev
+        run: |
+          set -eu
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --title 'WIE Mobile (development build)' --notes 'Development build, replaced by every push.' --prerelease \
+            || gh release view "$TAG" >/dev/null
+          gh release upload "$TAG" MiniMobile-mac.dmg --clobber
 
   # The iPhone app, as an unsigned ipa next to the apk. Whatever installs it -
   # AltStore, SideStore, TrollStore - signs it on the way in. iOS gives an

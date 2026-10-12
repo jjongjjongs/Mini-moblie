@@ -664,7 +664,7 @@ impl App {
                         "화면",
                         &labels,
                         picked,
-                        "창 크기 · F11 전체화면",
+                        &format!("창 크기 · {} 전체화면", crate::FULLSCREEN_KEY),
                     );
                 }
                 _ => {}

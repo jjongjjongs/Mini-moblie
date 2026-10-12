@@ -1,11 +1,12 @@
 //! MiniMobile on SDL2: the PortMaster port for Linux handhelds, and the
-//! Windows build.
+//! Windows, Mac and Linux PC builds.
 //!
 //! The emulator is the one the Android and iOS apps run, driven through
 //! `wie_android::host` the way the iOS app drives it: a tick at a time, the
 //! newest frame taken after each, and the mixer pulled from the audio thread.
 //! The screen, sound, pad and keyboard are SDL2's (see `sdl`): the handheld's
-//! own, or the SDL2.dll the Windows build ships beside it.
+//! own, the SDL2.dll the Windows build ships beside it, or the SDL2.framework
+//! in the Mac app.
 //!
 //! It opens on a list of the games in the folder it is given (see `library`),
 //! their icons in a row to step through sideways, by carrier or by a name
@@ -17,8 +18,8 @@
 //! deletes the game picked. Each game plays at its own speed, which F5 and
 //! F6 change as it runs.
 //!
-//! On a desktop - Windows, or `--windowed` - it is a window: 2x to 4x of
-//! 320x240 or the full screen (F11), with games dropped on it copied into the
+//! On a desktop - Windows, a Mac, or `--windowed` - it is a window: 2x to 4x
+//! of 320x240 or the full screen (F11), with games dropped on it copied into the
 //! games folder. The mouse works the list and the settings as well as the
 //! keys do (see `pointer`), and its right button opens the menu over a game.
 
@@ -92,17 +93,55 @@ fn main() {
         let _ = std::env::set_current_dir(dir);
     }
 
+    // The Mac app keeps them in Application Support: an app is a sealed
+    // bundle, and one opened from Downloads runs from a read-only copy of it.
+    // The program run on its own keeps them beside itself, as on Windows.
+    #[cfg(target_os = "macos")]
+    if let Some(dir) = mac_data_dir() {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::env::set_current_dir(dir);
+    }
+
     let target = target.unwrap_or_else(|| PathBuf::from("games"));
-    if let Err(error) = run(&target, cfg!(windows) || windowed) {
+    if let Err(error) = run(&target, cfg!(windows) || cfg!(target_os = "macos") || windowed) {
         report(&error);
         std::process::exit(1);
     }
 }
 
+/// Where the Mac build keeps its games, saves and settings: the app's own
+/// folder in Application Support, or beside the program run outside an app.
+#[cfg(target_os = "macos")]
+fn mac_data_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    if dir.ends_with("Contents/MacOS") {
+        let home = std::env::var_os("HOME")?;
+        Some(Path::new(&home).join("Library/Application Support/MiniMobile"))
+    } else {
+        Some(dir.to_owned())
+    }
+}
+
 /// A message that stops the program before it has a screen: on stderr, and
-/// in a box on Windows, where nobody sees stderr.
+/// in a box on Windows and the Mac, where nobody sees stderr.
 fn report(message: &str) {
     eprintln!("{message}");
+    #[cfg(target_os = "macos")]
+    {
+        // Passed as an argument, so nothing in it is read as script.
+        let _ = std::process::Command::new("osascript")
+            .args([
+                "-e",
+                "on run argv",
+                "-e",
+                "display alert \"MiniMobile\" message (item 1 of argv) as critical",
+                "-e",
+                "end run",
+                message,
+            ])
+            .status();
+    }
     #[cfg(windows)]
     {
         #[link(name = "user32")]
@@ -119,6 +158,8 @@ fn run(target: &Path, desktop: bool) -> Result<(), String> {
     let sdl = Sdl::load().map_err(|error| {
         if cfg!(windows) {
             format!("{error}\n\nSDL2.dll이 MiniMobile.exe와 같은 폴더에 있어야 합니다.")
+        } else if cfg!(target_os = "macos") {
+            format!("{error}\n\nMiniMobile.app을 다시 받아 주세요.")
         } else {
             error
         }
@@ -234,8 +275,11 @@ impl App {
                 }
             }
 
+            // A Mac's Retina screen draws the window at its real pixels, as
+            // Windows' DPI awareness does; the window keeps its size in points.
+            let high_dpi = if cfg!(target_os = "macos") { sdl::WINDOW_ALLOW_HIGHDPI } else { 0 };
             let window_flags = if desktop {
-                sdl::WINDOW_SHOWN | sdl::WINDOW_RESIZABLE
+                sdl::WINDOW_SHOWN | sdl::WINDOW_RESIZABLE | high_dpi
             } else {
                 sdl::WINDOW_SHOWN | sdl::WINDOW_FULLSCREEN_DESKTOP
             };
@@ -415,12 +459,12 @@ impl App {
                     }
                 }
                 sdl::CONTROLLERAXISMOTION => self.axis(event.control(), event.axis_value(), &mut inputs),
-                sdl::KEYDOWN if event.scancode() == F11 => {
+                sdl::KEYDOWN if event.scancode() == F11 || is_mac_fullscreen_key(&event) => {
                     if self.desktop && !event.key_repeat() {
                         self.toggle_fullscreen();
                     }
                 }
-                sdl::KEYDOWN | sdl::KEYUP => inputs.push(Input::Key(event.scancode(), event.kind() == sdl::KEYDOWN, event.key_repeat())),
+                sdl::KEYDOWN | sdl::KEYUP => inputs.push(Input::Key(mac_scancode(&event), event.kind() == sdl::KEYDOWN, event.key_repeat())),
                 sdl::TEXTINPUT => inputs.push(Input::Text(event.text())),
                 sdl::TEXTEDITING => inputs.push(Input::Editing(event.text())),
                 sdl::MOUSEMOTION => {
@@ -915,7 +959,11 @@ impl App {
         // The newest frame, kept for the menu to show behind it.
         let mut frame: Option<(u32, u32, Vec<u8>)> = None;
         self.clear_hits();
-        let mut toast = if self.desktop { "Esc·우클릭 메뉴 · F11 전체화면" } else { "" }.to_owned();
+        let mut toast = if self.desktop {
+            format!("Esc·우클릭 메뉴 · {FULLSCREEN_KEY} 전체화면")
+        } else {
+            String::new()
+        };
         // When the hint goes, counted from the title's first frame - a title
         // can take a while to draw one.
         let mut toast_until: Option<Instant> = None;
@@ -1074,9 +1122,35 @@ fn game_title(name: &str, speed: f32, paused: bool) -> String {
     title
 }
 
+/// Control-Command-F, the Mac's full screen key: F11 there shows the desktop.
+fn is_mac_fullscreen_key(event: &Event) -> bool {
+    let held = event.key_modifiers();
+    cfg!(target_os = "macos") && event.scancode() == 9 && held & sdl::KMOD_CTRL != 0 && held & sdl::KMOD_GUI != 0
+}
+
+/// A key's scancode, with Command-Delete read as Del on the Mac: its
+/// keyboard's delete key is Backspace, and Command-Delete is how the Finder
+/// deletes.
+fn mac_scancode(event: &Event) -> i32 {
+    if cfg!(target_os = "macos") && event.scancode() == BACKSPACE && event.key_modifiers() & sdl::KMOD_GUI != 0 {
+        DELETE
+    } else {
+        event.scancode()
+    }
+}
+
+/// The full screen key's name on this desktop.
+pub(crate) const FULLSCREEN_KEY: &str = if cfg!(target_os = "macos") { "⌃⌘F" } else { "F11" };
+
 /// Opens `folder` in the desktop's file manager.
 fn open_folder(folder: &Path) {
-    let program = if cfg!(windows) { "explorer" } else { "xdg-open" };
+    let program = if cfg!(windows) {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
     if let Err(error) = std::process::Command::new(program).arg(folder).spawn() {
         eprintln!("폴더를 열 수 없습니다: {error}");
     }

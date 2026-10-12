@@ -23,6 +23,11 @@ pub const WINDOWPOS_CENTERED: c_int = 0x2FFF_0000;
 pub const WINDOW_FULLSCREEN_DESKTOP: u32 = 0x0000_1001;
 pub const WINDOW_SHOWN: u32 = 0x0000_0004;
 pub const WINDOW_RESIZABLE: u32 = 0x0000_0020;
+pub const WINDOW_ALLOW_HIGHDPI: u32 = 0x0000_2000;
+
+/// `SDL_Keymod` bits: either Ctrl, and either Command (GUI).
+pub const KMOD_CTRL: u16 = 0x00C0;
+pub const KMOD_GUI: u16 = 0x0C00;
 
 pub const RENDERER_SOFTWARE: u32 = 0x0000_0001;
 pub const RENDERER_ACCELERATED: u32 = 0x0000_0002;
@@ -97,6 +102,11 @@ impl Event {
     /// `SDL_KeyboardEvent.keysym.scancode`.
     pub fn scancode(&self) -> i32 {
         self.i32_at(16)
+    }
+
+    /// `SDL_KeyboardEvent.keysym.mod`: the modifier keys held.
+    pub fn key_modifiers(&self) -> u16 {
+        u16::from_ne_bytes([self.raw[24], self.raw[25]])
     }
 
     /// `which` of a controller or joystick event: the device index for an
@@ -232,18 +242,43 @@ functions! {
 
 fn open() -> Result<Library, String> {
     let mut failures = Vec::new();
-    // The Windows build ships SDL2.dll beside the program.
-    let names: &[&str] = if cfg!(windows) {
-        &["SDL2.dll"]
-    } else {
-        &["libSDL2-2.0.so.0", "libSDL2-2.0.so", "libSDL2.so"]
-    };
-    for name in names {
+    for name in library_names() {
         // SAFETY: SDL2's initialisers do nothing a process cannot take.
-        match unsafe { Library::new(*name) } {
+        match unsafe { Library::new(&name) } {
             Ok(library) => return Ok(library),
             Err(error) => failures.push(format!("{name}: {error}")),
         }
     }
     Err(format!("SDL2를 찾을 수 없습니다 ({})", failures.join(", ")))
+}
+
+/// Where SDL2 may be, first to last. The Windows build ships SDL2.dll beside
+/// the program, and the Mac app carries SDL2.framework in its bundle; a Mac
+/// program run outside the app also takes a Homebrew SDL2.
+fn library_names() -> Vec<String> {
+    if cfg!(windows) {
+        return vec!["SDL2.dll".to_owned()];
+    }
+    if cfg!(target_os = "macos") {
+        let mut names = Vec::new();
+        if let Some(dir) = std::env::current_exe().ok().as_deref().and_then(std::path::Path::parent) {
+            for path in [
+                dir.join("../Frameworks/SDL2.framework/SDL2"),
+                dir.join("SDL2.framework/SDL2"),
+                dir.join("libSDL2-2.0.0.dylib"),
+            ] {
+                names.push(path.to_string_lossy().into_owned());
+            }
+        }
+        for name in [
+            "/opt/homebrew/lib/libSDL2-2.0.0.dylib",
+            "/usr/local/lib/libSDL2-2.0.0.dylib",
+            "SDL2.framework/SDL2",
+            "libSDL2-2.0.0.dylib",
+        ] {
+            names.push(name.to_owned());
+        }
+        return names;
+    }
+    ["libSDL2-2.0.so.0", "libSDL2-2.0.so", "libSDL2.so"].map(str::to_owned).to_vec()
 }
