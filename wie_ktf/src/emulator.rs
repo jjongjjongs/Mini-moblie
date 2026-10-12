@@ -6,7 +6,7 @@ use bytemuck::pod_collect_to_vec;
 use jvm::{ClassInstance, Result as JvmResult, runtime::JavaLangString};
 
 use wie_backend::{
-    Emulator, Event, Options, Platform, System, TaskRunner, TitlePlatform,
+    Emulator, Event, Instant, Options, Platform, System, TaskRunner, TitlePlatform,
     canvas::{Rgb565Pixel, VecImageBuffer},
     extract_zip, gz, protected_container, title_quirks_for_descriptor, title_quirks_on_panel,
 };
@@ -120,6 +120,9 @@ pub struct KtfEmulator {
     /// one that has gone quiet does not. See [`KtfEmulator::present_lcd`] and
     /// `wie_wipi_c::api::graphics::explicit_present_count`.
     lcd_explicit_presents: u32,
+    /// When the watcher last saw that count move. See
+    /// [`KtfEmulator::present_lcd`].
+    lcd_explicit_present_at: Option<Instant>,
 }
 
 impl KtfEmulator {
@@ -333,6 +336,7 @@ impl KtfEmulator {
             lcd_digest: None,
             lcd_seen: None,
             lcd_explicit_presents: 0,
+            lcd_explicit_present_at: None,
         })
     }
 
@@ -404,6 +408,10 @@ impl KtfEmulator {
     }
 }
 
+/// How long a title must go without presenting a frame itself before
+/// [`KtfEmulator::present_lcd`] takes the LCD over.
+const LCD_WATCH_QUIET_MS: u64 = 1000;
+
 impl KtfEmulator {
     /// Show the LCD frame buffer when the title has drawn into it itself.
     ///
@@ -427,14 +435,28 @@ impl KtfEmulator {
         // whole `240x320` over the top put the bar back to whatever the frame
         // buffer held, which is nothing.
         //
-        // A title that presented since the last look is driving now; one whose
-        // count has stopped moving has handed the buffer back, and the watcher
-        // takes over - 던전앤파이터 격투가 repaints its first frame and from there
-        // composes straight into the buffer, which is the whole game. See
+        // A title that presented within the last `LCD_WATCH_QUIET_MS` is driving
+        // now; one whose count has stopped moving for that long has handed the
+        // buffer back, and the watcher takes over - 던전앤파이터 격투가 repaints
+        // its first frame and from there composes straight into the buffer,
+        // which is the whole game. See
         // `wie_wipi_c::api::graphics::explicit_present_count`.
+        //
+        // It is a while, not a tick. A tick is a few milliseconds and LOA
+        // flushes some twelve frames a second, so most ticks fall between two
+        // of its flushes; standing down only for a tick in which the count
+        // moved let the watcher in on every other one, and the status bar
+        // flickered as it had before the watcher stood down at all.
         let presents = wie_wipi_c::api::graphics::explicit_present_count();
+        let now = self.system.platform().now();
         if presents != self.lcd_explicit_presents {
             self.lcd_explicit_presents = presents;
+            self.lcd_explicit_present_at = Some(now);
+            return;
+        }
+        if let Some(at) = self.lcd_explicit_present_at
+            && now.raw().saturating_sub(at.raw()) < LCD_WATCH_QUIET_MS
+        {
             return;
         }
 
