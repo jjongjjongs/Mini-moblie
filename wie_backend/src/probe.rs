@@ -249,6 +249,9 @@ struct WriteWatch {
     address: u32,
     label: String,
     reports: u32,
+    /// Only a value above this is reported, for a field rewritten all the
+    /// time whose wrong value is the question.
+    above: Option<u32>,
 }
 
 /// Reports the next few writes to `address`, and what the core was executing
@@ -262,6 +265,11 @@ struct WriteWatch {
 /// **Silence is an answer here too**, and often the useful one: a field the
 /// title reads and nothing ever writes is a field whose code path never runs.
 pub fn watch_write(address: u32, label: &str) {
+    watch_write_above(address, label, None);
+}
+
+/// [`watch_write`], reporting only a value above `above` when it is given.
+pub fn watch_write_above(address: u32, label: &str, above: Option<u32>) {
     let mut watches = WRITE_WATCHES.lock();
 
     if watches.iter().any(|watch| watch.address == address) {
@@ -272,6 +280,7 @@ pub fn watch_write(address: u32, label: &str) {
         address,
         label: String::from(label),
         reports: 0,
+        above,
     });
     let live = watches.len();
     drop(watches);
@@ -310,6 +319,9 @@ pub fn wrote(address: u32, width: u32, value: u32) {
     else {
         return;
     };
+    if watch.above.is_some_and(|above| value <= above) {
+        return;
+    }
 
     watch.reports += 1;
     if watch.reports > WRITE_REPORT_LIMIT {
@@ -341,6 +353,7 @@ pub fn wrote(address: u32, width: u32, value: u32) {
 /// pc:3a376/50000  the same, for that many branches
 /// w:1518700       report the next writes to this address
 /// w:1718c0+84     the same for every word of the 0x84 bytes from it
+/// w:171c18>5      writes to this address of a value above 5 only
 /// ```
 ///
 /// Addresses are hexadecimal, with or without `0x`. An empty specification
@@ -352,6 +365,17 @@ pub fn set_watches(spec: &str) -> Result<(), String> {
         let (kind, rest) = entry
             .split_once(':')
             .ok_or_else(|| alloc::format!("{entry:?} is not `pc:<addr>` or `w:<addr>`"))?;
+
+        // Only the writes of a value too big for the field.
+        if kind.trim() == "w"
+            && let Some((address, above)) = rest.split_once('>')
+        {
+            let parse = |text: &str| u32::from_str_radix(text.trim().trim_start_matches("0x"), 16);
+            let address = parse(address).map_err(|_| alloc::format!("{address:?} is not a hexadecimal address"))?;
+            let above = parse(above).map_err(|_| alloc::format!("{above:?} is not a hexadecimal value"))?;
+            watch_write_above(address, entry, Some(above));
+            continue;
+        }
 
         // A run of words, each watched: a table typed on a handset in one
         // entry rather than one per word.
@@ -909,6 +933,20 @@ mod tests {
         assert_eq!(watches(), "w:1718c0,w:1718c4,w:1718c8");
         assert!(set_watches("w:1718c0+0").is_err());
         assert!(set_watches("w:1718c0+zz").is_err());
+
+        disarm();
+    }
+
+    #[test]
+    fn a_watch_with_a_floor_reports_only_what_is_above_it() {
+        let _guard = ONE_AT_A_TIME.lock();
+        disarm();
+
+        set_watches("w:171c18>5").unwrap();
+        wrote(0x171c18, 4, 3);
+        assert_eq!(WRITE_WATCHES.lock()[0].reports, 0);
+        wrote(0x171c18, 4, 0x2000);
+        assert_eq!(WRITE_WATCHES.lock()[0].reports, 1);
 
         disarm();
     }
