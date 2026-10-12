@@ -30,6 +30,7 @@ pub trait Screen: Send + Sync {
 /// frame back is the whole of the correction: the title still lays out for the
 /// panel it was given, and only what the host shows changes.
 pub fn present(system: &System, image: &dyn Image) {
+    crate::system::note_frame_presented();
     let platform = system.platform();
     let screen = platform.screen();
 

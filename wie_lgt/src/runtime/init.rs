@@ -408,10 +408,10 @@ fn try_fast_thread_reschedule(core: &mut ArmCore, count: &Mutex<u32>) -> Result<
 /// getters, the stdlib block and string calls, and init's `vm_thread_reschedule`.
 /// This owns the one `fast_svc` slot, so it also covers what
 /// `register_wipic_svc_handler` used to install.
-fn install_fast_svc(core: &ArmCore, vm_reschedule_count: Arc<Mutex<u32>>) {
+fn install_fast_svc(core: &ArmCore, system: System, vm_reschedule_count: Arc<Mutex<u32>>) {
     core.set_fast_svc_handler(Arc::new(move |core: &mut ArmCore, category: u32, _lr: u32| -> Result<bool> {
         match category {
-            SVC_CATEGORY_WIPIC => crate::runtime::wipi_c::try_fast_wipic_getter(core),
+            SVC_CATEGORY_WIPIC => crate::runtime::wipi_c::try_fast_wipic_getter(core, &system),
             SVC_CATEGORY_STDLIB => crate::runtime::stdlib::try_fast_stdlib(core),
             SVC_CATEGORY_INIT => try_fast_thread_reschedule(core, &vm_reschedule_count),
             _ => Ok(false),
@@ -624,7 +624,7 @@ fn register_init_svc_handler(
     // Owns the single fast_svc slot: routes WIPI-C getters and this category's
     // vm_thread_reschedule to their sync fast paths. Installed here, after both
     // the WIPI-C and init async handlers are registered.
-    install_fast_svc(core, vm_reschedule_count);
+    install_fast_svc(core, system.clone(), vm_reschedule_count);
     Ok(())
 }
 

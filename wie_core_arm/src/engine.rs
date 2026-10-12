@@ -45,6 +45,13 @@ pub enum SvcIntrinsic {
     /// A fixed answer in r0, whatever the arguments: a getter of a value the
     /// platform never changes.
     Constant(u32),
+    /// `r0` as it came: a getter whose answer is its argument, as an image's
+    /// framebuffer is the image itself where the image begins with it.
+    Identity,
+    /// An image's width or height: the word at `r0 + width` when `r1` is 4,
+    /// at `r0 + height` when it is 5, and 0 when `r0` is zero. Any other `r1`
+    /// is left to the handler.
+    ImageSize { width: u32, height: u32 },
     /// Gamevil's run-length sprite blit: `r0` the destination, `r1` the codes,
     /// `r2` the palette and `r3` the row stride in pixels - see
     /// [`crate::sprite_blit`].

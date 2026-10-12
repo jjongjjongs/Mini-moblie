@@ -1912,8 +1912,23 @@ pub async fn get_display_info(context: &mut dyn WIPICContext, reserved: WIPICWor
     // strip, and zero unless the platform reserves one, which leaves the full
     // height reported as before. The colour fields are the driver's direct
     // RGB565 format (matched by Rgb565Pixel), reported here as fixed masks.
-    let strip = annunciator_rows(context, width).min(height);
-    let info = WIPICDisplayInfo {
+    let info = display_info(context, width, height);
+
+    write_generic(context, out_ptr, info)?;
+    Ok(1)
+}
+
+/// What `MC_grpGetDisplayInfo` reports for a `width` by `height` panel, the
+/// status strip `memory` holds taken off the height - see there. Shared with a
+/// runtime's fast path, which has the guest's memory but no context.
+pub fn display_info<R: ByteRead + ?Sized>(memory: &R, width: u32, height: u32) -> WIPICDisplayInfo {
+    let strip = if matches!(width, 240 | 320 | 400) {
+        read_generic::<u32, _>(memory, ANNUNCIATOR_ROWS_PTR).unwrap_or(0)
+    } else {
+        0
+    }
+    .min(height);
+    WIPICDisplayInfo {
         bpp: FRAMEBUFFER_DEPTH,
         depth: 16,
         width,
@@ -1923,10 +1938,7 @@ pub async fn get_display_info(context: &mut dyn WIPICContext, reserved: WIPICWor
         red_mask: 0xf800,
         green_mask: 0x7e0,
         blue_mask: 0x1f,
-    };
-
-    write_generic(context, out_ptr, info)?;
-    Ok(1)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

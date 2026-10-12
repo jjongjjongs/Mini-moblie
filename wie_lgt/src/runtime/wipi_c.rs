@@ -5,7 +5,7 @@ mod context;
 use jvm::{Jvm, Result as JvmResult, runtime::JavaLangString};
 use jvm_rust::ClassDefinitionImpl;
 use wipi_types::lgt::CletFunctions;
-use wipi_types::wipic::{WIPICFramebuffer, WIPICIndirectPtr};
+use wipi_types::wipic::{WIPICFramebuffer, WIPICImage, WIPICIndirectPtr};
 
 use wie_backend::System;
 use wie_core_arm::{ArmCore, EmulatedFunction, EmulatedFunctionParam, ResultWriter, SvcId};
@@ -464,6 +464,19 @@ pub(crate) fn wipic_intrinsic(function_index: u32) -> Option<wie_core_arm::SvcIn
             if_null: NO_FRAMEBUFFER,
         }),
         x if x == WIPICSvcId::GetPixelFromRgb as u32 => Some(SvcIntrinsic::Rgb565),
+        // 일지매영웅전기2 asks for a pixel's colour fifty thousand times a
+        // second as a field fades in, and an image's framebuffer and size some
+        // forty thousand times a second on its menus - one is a shift, the
+        // other the image itself and a field of it, each the answer the
+        // handler gives, and the round trips held the title to seven frames a
+        // second, too slow to see a key tapped between two of them.
+        x if x == WIPICSvcId::GetRgbFromPixel as u32 => Some(SvcIntrinsic::Rgb565Unpack),
+        // An image begins with its framebuffer, so the image is the answer.
+        x if x == WIPICSvcId::GetImageFramebuffer as u32 => Some(SvcIntrinsic::Identity),
+        x if x == WIPICSvcId::GetImageProperty as u32 => Some(SvcIntrinsic::ImageSize {
+            width: (core::mem::offset_of!(WIPICImage, img) + core::mem::offset_of!(WIPICFramebuffer, width)) as u32,
+            height: (core::mem::offset_of!(WIPICImage, img) + core::mem::offset_of!(WIPICFramebuffer, height)) as u32,
+        }),
         // The depth, which the vendor answers from a global whatever it is
         // passed (see `get_framebuffer_bpp`). 제노니아2's own blitter asks for
         // it per span - sixteen to eighteen thousand times a second in a
@@ -474,7 +487,7 @@ pub(crate) fn wipic_intrinsic(function_index: u32) -> Option<wie_core_arm::SvcIn
     }
 }
 
-pub(crate) fn try_fast_wipic_getter(core: &mut ArmCore) -> Result<bool> {
+pub(crate) fn try_fast_wipic_getter(core: &mut ArmCore, system: &System) -> Result<bool> {
     const ID_GET_FRAMEBUFFER_POINTER: u32 = WIPICSvcId::GetFramebufferPointer as u32;
     const ID_GET_IMAGE_FRAMEBUFFER: u32 = WIPICSvcId::GetImageFramebuffer as u32;
     const ID_GET_FRAMEBUFFER_WIDTH: u32 = WIPICSvcId::GetFramebufferWidth as u32;
@@ -484,8 +497,33 @@ pub(crate) fn try_fast_wipic_getter(core: &mut ArmCore) -> Result<bool> {
     const ID_INIT_CONTEXT: u32 = WIPICSvcId::InitContext as u32;
     const ID_SET_CONTEXT: u32 = WIPICSvcId::SetContext as u32;
     const ID_GET_CONTEXT: u32 = WIPICSvcId::GetContext as u32;
+    const ID_GET_DISPLAY_INFO: u32 = WIPICSvcId::GetDisplayInfo as u32;
 
     let id = core.read_svc_id();
+
+    // MC_grpGetDisplayInfo, which 일지매영웅전기2 asks ten thousand times a
+    // second on its menus: the panel's size and fixed masks, written to a
+    // struct - the handler's own answer, without its async round trip. A
+    // reserved word other than zero is left to the handler to refuse.
+    if id == ID_GET_DISPLAY_INFO {
+        if core.read_param(0)? != 0 {
+            return Ok(false);
+        }
+        WIPIC_SVC_COUNT[(id as usize).min(WIPIC_ID_MAX - 1)].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let (_, ret) = core.read_pc_lr()?;
+        let out_ptr = core.read_param(1)?;
+        let (width, height) = {
+            let platform = system.platform();
+            let screen = platform.screen();
+            (screen.width(), screen.height())
+        };
+        let info = graphics::display_info(core, width, height);
+        write_generic(core, out_ptr, info)?;
+        core.write_return_value(&[1])?;
+        core.set_next_pc(ret)?;
+        return Ok(true);
+    }
+
     if !matches!(
         id,
         ID_GET_FRAMEBUFFER_POINTER

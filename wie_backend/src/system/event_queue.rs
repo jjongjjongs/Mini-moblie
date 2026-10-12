@@ -1,10 +1,11 @@
 use alloc::{
     boxed::Box,
     collections::{BTreeMap, VecDeque},
+    vec::Vec,
 };
 use core::{
     pin::Pin,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use wie_util::Result;
@@ -123,6 +124,19 @@ pub fn touch_enabled() -> bool {
     TOUCH_ENABLED.load(Ordering::Relaxed)
 }
 
+/// How many frames have been put on the screen, counted by
+/// [`crate::screen::present`], so a key let go can be held until the title
+/// has drawn a frame with it down - see [`EventQueue::pop_at`].
+static FRAMES_PRESENTED: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn note_frame_presented() {
+    FRAMES_PRESENTED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The longest a release waits for that frame, so a title that draws nothing
+/// while a key is down still hears it let go.
+const RELEASE_HOLD_MAX_MS: u64 = 250;
+
 pub enum Event {
     Redraw,
     Keydown(KeyCode),
@@ -167,6 +181,9 @@ pub struct EventQueue {
     events: VecDeque<Event>,
     timer_generations: BTreeMap<u32, u64>,
     next_timer_generation: u64,
+    /// Each key handed out pressed and not yet released: the frame count and
+    /// the time it went down at.
+    held: Vec<(KeyCode, u64, Instant)>,
 }
 
 impl EventQueue {
@@ -207,6 +224,53 @@ impl EventQueue {
 
     pub fn pop(&mut self) -> Option<Event> {
         self.events.pop_front()
+    }
+
+    /// The next event at `now`, a key's release held back until the title has
+    /// drawn a frame since that key went down, or `RELEASE_HOLD_MAX_MS` has
+    /// passed.
+    ///
+    /// A title that keeps a key's state from its events and reads it once a
+    /// frame sees nothing of a tap that goes down and up between two frames.
+    /// A handset's frames came quicker than a thumb; here they can come
+    /// slower. 일지매영웅전기2 draws its menus at seven frames a second, 140ms
+    /// apart, against a tap of 65 to 90ms, and its 장비 and 스탯 keys took one
+    /// press in two. Everything else behind a held release goes on, the
+    /// timers that draw that frame among them; only what is for the same key
+    /// waits with it, so the key's own events keep their order.
+    pub fn pop_at(&mut self, now: Instant) -> Option<Event> {
+        let frames = FRAMES_PRESENTED.load(Ordering::Relaxed);
+        let mut waiting: Vec<KeyCode> = Vec::new();
+
+        let index = self.events.iter().position(|event| {
+            let key = match event {
+                Event::Keydown(key) | Event::Keyup(key) | Event::Keyrepeat(key) => *key,
+                _ => return true,
+            };
+            if waiting.contains(&key) {
+                return false;
+            }
+            if let Event::Keyup(_) = event
+                && let Some(&(_, down_frames, down_at)) = self.held.iter().find(|x| x.0 == key)
+                && down_frames == frames
+                && now.raw().saturating_sub(down_at.raw()) < RELEASE_HOLD_MAX_MS
+            {
+                waiting.push(key);
+                return false;
+            }
+            true
+        })?;
+
+        let event = self.events.remove(index)?;
+        match &event {
+            Event::Keydown(key) => {
+                self.held.retain(|x| x.0 != *key);
+                self.held.push((*key, frames, now));
+            }
+            Event::Keyup(key) => self.held.retain(|x| x.0 != *key),
+            _ => {}
+        }
+        Some(event)
     }
 
     pub fn push_timer<F, Fut>(&mut self, id: u32, due: Instant, callback: F)
@@ -260,6 +324,35 @@ mod tests {
             Event::Timer { id, generation, .. } => (*id, *generation),
             _ => panic!("expected timer event"),
         }
+    }
+
+    /// A tap that goes down and up before the title draws a frame is let go
+    /// only once it has drawn one - or after the longest hold - and what is
+    /// behind the release, a timer that draws that frame, goes first.
+    #[test]
+    fn a_release_waits_for_a_frame_drawn_with_the_key_down() {
+        use super::{KeyCode, note_frame_presented};
+
+        let at = Instant::from_epoch_millis;
+        let mut queue = EventQueue::new();
+        queue.push(Event::Keydown(KeyCode::NUM1));
+        queue.push(Event::Keyup(KeyCode::NUM1));
+        queue.push(Event::Keydown(KeyCode::NUM1));
+        queue.push_timer(7, at(1000), || async { Ok(()) });
+
+        assert!(matches!(queue.pop_at(at(1000)), Some(Event::Keydown(KeyCode::NUM1))));
+        // The release, and the second press behind it, wait; the timer does not.
+        assert_eq!(timer_identity(&queue.pop_at(at(1010)).unwrap()).0, 7);
+        assert!(queue.pop_at(at(1020)).is_none());
+
+        note_frame_presented();
+        assert!(matches!(queue.pop_at(at(1030)), Some(Event::Keyup(KeyCode::NUM1))));
+        assert!(matches!(queue.pop_at(at(1030)), Some(Event::Keydown(KeyCode::NUM1))));
+
+        // No frame at all: let go after the longest hold.
+        queue.push(Event::Keyup(KeyCode::NUM1));
+        assert!(queue.pop_at(at(1100)).is_none());
+        assert!(matches!(queue.pop_at(at(1300)), Some(Event::Keyup(KeyCode::NUM1))));
     }
 
     /// A redraw asked for while one is waiting leaves one, behind the input

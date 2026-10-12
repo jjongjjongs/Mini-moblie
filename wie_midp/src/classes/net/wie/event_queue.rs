@@ -259,7 +259,7 @@ impl EventQueue {
         let mut pending_timer_events = Vec::new();
         loop {
             let now = context.system().platform().now();
-            let maybe_event = context.system().event_queue().pop();
+            let maybe_event = context.system().event_queue().pop_at(now);
 
             if let Some(x) = maybe_event {
                 let event_data = match x {

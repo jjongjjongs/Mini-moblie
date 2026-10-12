@@ -821,6 +821,13 @@ impl JitEngine {
                 word(&self.mem, dst.wrapping_add(offset))
             }),
             SvcIntrinsic::Constant(value) => Some(Some(value)),
+            SvcIntrinsic::Identity => Some(Some(dst)),
+            SvcIntrinsic::ImageSize { width, height } => Some(match (dst, source) {
+                (0, _) => Some(0),
+                (_, 4) => word(&self.mem, dst.wrapping_add(width)),
+                (_, 5) => word(&self.mem, dst.wrapping_add(height)),
+                _ => None,
+            }),
             SvcIntrinsic::Rgb565 => {
                 let pixel = (((dst as u8 as u32) >> 3) << 11) | (((source as u8 as u32) >> 2) << 5) | ((len as u8 as u32) >> 3);
                 Some(Some(pixel))
@@ -2151,6 +2158,13 @@ mod tests {
 
         // A constant, whatever is in the argument registers.
         assert_eq!(answer(SvcIntrinsic::Constant(16), &[], [0x4100_0000, 320, 7]), 16);
+        assert_eq!(answer(SvcIntrinsic::Identity, &[], [DATA, 320, 7]), DATA);
+
+        // An image's width and height; the null image is 0.
+        let size = SvcIntrinsic::ImageSize { width: 4, height: 8 };
+        assert_eq!(answer(size, &[(DATA + 4, 176), (DATA + 8, 208)], [DATA, 4, 0]), 176);
+        assert_eq!(answer(size, &[(DATA + 4, 176), (DATA + 8, 208)], [DATA, 5, 0]), 208);
+        assert_eq!(answer(size, &[], [0, 4, 0]), 0);
 
         // White, and a colour whose low bits each channel drops.
         assert_eq!(answer(SvcIntrinsic::Rgb565, &[], [0xff, 0xff, 0xff]), 0xffff);
