@@ -6295,6 +6295,12 @@ public final class MainActivity extends Activity {
         GameView(MainActivity activity) {
             super(activity);
             setBackgroundColor(COLOR_SCREEN_BEZEL);
+            // `new Paint()` filters bitmaps by default from Android 9 on, and
+            // the view starts at 도트 - so a title saved at 도트 was handed the
+            // quality the view already had, setQuality returned early, and the
+            // screen stayed filtered: 기본 in all but name. Start the paint
+            // where `quality` says.
+            paint.setFilterBitmap(quality != QUALITY_DOT);
         }
 
         @Override
