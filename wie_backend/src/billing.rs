@@ -1712,10 +1712,11 @@ pub fn lgt_local_big_endian_record_response(request: &[u8]) -> Option<Vec<u8>> {
 /// [`lgt_big_endian_login_names_its_handset`] - and answers through this from
 /// then on.
 pub fn lgt_local_big_endian_record_next_response(request: &[u8]) -> Option<Vec<u8>> {
-    lar_notice_response(request).or_else(|| big_endian_record_response(request, BigEndianRecordAnswer::Next))
+    lar_response(request).or_else(|| big_endian_record_response(request, BigEndianRecordAnswer::Next))
 }
 
-/// 라르-판도라의아이들's login answers that carry something: one notice.
+/// 라르-판도라의아이들's answers that carry something: one notice, and a
+/// purchase that went through.
 ///
 /// The login's second answer, 1007 (`0x14b78`), takes the account off the
 /// body - a ten-byte id, then the gift count and the notice count, a byte
@@ -1729,9 +1730,22 @@ pub fn lgt_local_big_endian_record_next_response(request: &[u8]) -> Option<Vec<u
 /// draws the first notice through line breaks nothing has computed - it read
 /// `0xff030102` as a line start and faulted at `0x19fe4`. The server always
 /// had a notice to give, so one is given.
-fn lar_notice_response(request: &[u8]) -> Option<Vec<u8>> {
+///
+/// A purchase in 유료 상점 is 3000: the item's name in twenty bytes and its
+/// price, a short - 부활포션 at 100, 입장권 at 500. Its answer 3001 (`0x1587a`)
+/// reads one byte, the result, and switches on it (tables at `0x5441c`,
+/// `0x54464`, `0x544ac`, one per way into the shop): 1 builds the item the
+/// player chose into the inventory and shows 물건을 구입하였습니다; 7 to 10
+/// and 18 are refusals; anything else, the zero a bare record carries
+/// included, does nothing at all, which is what pressing 구매 did.
+fn lar_response(request: &[u8]) -> Option<Vec<u8>> {
     const ACCOUNT_REQUEST: u16 = 1006;
     const NOTICE_REQUEST: u16 = 1002;
+    const PURCHASE_REQUEST: u16 = 3000;
+    /// The length, the command, the name and the price.
+    const PURCHASE_SIZE: usize = 4 + 20 + 2;
+    /// What 3001 takes for a purchase made.
+    const PURCHASED: u8 = 1;
     /// The id, then the gift count and the notice count.
     const ID: usize = 10;
     const NOTICE_COUNT: usize = ID + 1;
@@ -1753,6 +1767,11 @@ fn lar_notice_response(request: &[u8]) -> Option<Vec<u8>> {
             let mut body = vec![0u8; 1 + NOTICE_TEXT];
             body[0] = request[4];
             body[1..1 + NOTICE.len()].copy_from_slice(NOTICE);
+            body
+        }
+        PURCHASE_REQUEST if request.len() == PURCHASE_SIZE => {
+            let mut body = vec![0u8; 0x20];
+            body[0] = PURCHASED;
             body
         }
         _ => return None,
@@ -12707,6 +12726,17 @@ mod tests {
         assert_eq!(answer[4], 0);
         assert!(answer[5..].starts_with(b"MiniMobile "));
         assert_eq!(answer.len(), 4 + 1 + 400 + 4);
+
+        // A purchase - 부활포션 at 100 - is answered at 3001 with 1, the result
+        // its handler takes for one made.
+        let mut purchase = [0u8; 26];
+        purchase[0..2].copy_from_slice(&26u16.to_be_bytes());
+        purchase[2..4].copy_from_slice(&3000u16.to_be_bytes());
+        purchase[4..12].copy_from_slice(b"\xba\xce\xc8\xb0\xc6\xf7\xbc\xc7");
+        purchase[24..26].copy_from_slice(&100u16.to_be_bytes());
+        let answer = lgt_local_big_endian_record_next_response(&purchase).unwrap();
+        assert_eq!(u16::from_be_bytes([answer[2], answer[3]]), 3001);
+        assert_eq!(answer[4], 1);
 
         // 레전드오브마스터2's own 1000 is not taken for it, and is still answered
         // at 1002.
