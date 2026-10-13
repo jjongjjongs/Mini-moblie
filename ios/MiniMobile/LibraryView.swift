@@ -23,7 +23,7 @@ private enum CarrierFilter: String, CaseIterable, Identifiable {
     }
 }
 
-/// What the one file importer is open for.
+/// What the file picker is open for.
 private enum ImportTarget {
     case games
     case save
@@ -70,7 +70,6 @@ struct LibraryView: View {
     @State private var confirmingDelete = false
     @State private var erasing: GameFile?
 
-    @State private var importer: ImportTarget?
     @State private var playing: GameFile?
     @State private var sharing: SharedFile?
     @State private var notice: Notice?
@@ -106,15 +105,6 @@ struct LibraryView: View {
                 .environment(\.editMode, $editMode)
         }
         .navigationViewStyle(.stack)
-        .fileImporter(
-            isPresented: Binding(get: { importer != nil }, set: { if !$0 { importer = nil } }),
-            allowedContentTypes: importer?.types ?? [.item],
-            allowsMultipleSelection: importer == .games
-        ) { result in
-            let target = importer
-            importer = nil
-            handleImport(result, target: target)
-        }
         .alert(notice?.title ?? "", isPresented: Binding(get: { notice != nil }, set: { if !$0 { notice = nil } })) {
             Button("확인", role: .cancel) {}
         } message: {
@@ -406,8 +396,8 @@ struct LibraryView: View {
             }
             .accessibilityLabel(dark ? "라이트 모드" : "다크 모드")
             Menu {
-                Button { importer = .games } label: { Label("게임 가져오기", systemImage: "plus") }
-                Button { importer = .save } label: { Label("세이브 가져오기", systemImage: "square.and.arrow.down") }
+                Button { pick(.games) } label: { Label("게임 가져오기", systemImage: "plus") }
+                Button { pick(.save) } label: { Label("세이브 가져오기", systemImage: "square.and.arrow.down") }
             } label: {
                 Image(systemName: "plus")
             }
@@ -505,16 +495,14 @@ struct LibraryView: View {
         reload()
     }
 
-    private func handleImport(_ result: Result<[URL], Error>, target: ImportTarget?) {
-        let urls: [URL]
-        switch result {
-        case .success(let picked):
-            urls = picked
-        case .failure(let error):
-            notice = Notice(title: "가져오기 실패", message: error.localizedDescription)
-            return
+    /// Opens the file picker for games (several at once) or a save zip.
+    private func pick(_ target: ImportTarget) {
+        DocumentPicker.present(types: target.types, multiple: target == .games) { urls in
+            handleImport(urls, target: target)
         }
+    }
 
+    private func handleImport(_ urls: [URL], target: ImportTarget) {
         switch target {
         case .save:
             guard let url = urls.first else { return }
@@ -526,7 +514,7 @@ struct LibraryView: View {
             } catch {
                 notice = Notice(title: "세이브 가져오기 실패", message: error.localizedDescription)
             }
-        case .games, nil:
+        case .games:
             var failures: [String] = []
             for url in urls {
                 do {
@@ -563,7 +551,7 @@ struct LibraryView: View {
         }
         if pickAfterSaves {
             pickAfterSaves = false
-            importer = .save
+            pick(.save)
         }
     }
 

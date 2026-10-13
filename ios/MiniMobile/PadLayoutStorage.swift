@@ -166,7 +166,6 @@ struct PadLayoutStorageView: View {
     @State private var slots = PadLayoutSlots.all()
     @State private var sheet: StorageSheet?
     @State private var overwriting: String?
-    @State private var importing = false
     @State private var confirmingReset = false
     @State private var notice: String?
 
@@ -200,7 +199,9 @@ struct PadLayoutStorageView: View {
                     row("배치 파일로 백업", systemImage: "square.and.arrow.up", tint: .red)
                 }
                 Button {
-                    importing = true
+                    DocumentPicker.present(types: [.json, .item], multiple: false) { urls in
+                        if let url = urls.first { restore(url) }
+                    }
                 } label: {
                     row("배치 파일에서 복원", systemImage: "square.and.arrow.down", tint: .green)
                 }
@@ -236,9 +237,6 @@ struct PadLayoutStorageView: View {
         }
         .alert(notice ?? "", isPresented: Binding(get: { notice != nil }, set: { if !$0 { notice = nil } })) {
             Button("확인", role: .cancel) {}
-        }
-        .fileImporter(isPresented: $importing, allowedContentTypes: [.json, .item]) { result in
-            restore(result)
         }
         .sheet(item: $sheet) { sheet in
             switch sheet {
@@ -306,13 +304,8 @@ struct PadLayoutStorageView: View {
         }
     }
 
-    private func restore(_ result: Result<URL, Error>) {
+    private func restore(_ url: URL) {
         do {
-            let url = try result.get()
-            let scoped = url.startAccessingSecurityScopedResource()
-            defer {
-                if scoped { url.stopAccessingSecurityScopedResource() }
-            }
             let backup = try PadLayoutBackup.decode(try Data(contentsOf: url))
             apply(backup.active)
             // Saved layouts of the same name are replaced; the rest stay.
