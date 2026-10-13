@@ -1712,7 +1712,59 @@ pub fn lgt_local_big_endian_record_response(request: &[u8]) -> Option<Vec<u8>> {
 /// [`lgt_big_endian_login_names_its_handset`] - and answers through this from
 /// then on.
 pub fn lgt_local_big_endian_record_next_response(request: &[u8]) -> Option<Vec<u8>> {
-    big_endian_record_response(request, BigEndianRecordAnswer::Next)
+    lar_notice_response(request).or_else(|| big_endian_record_response(request, BigEndianRecordAnswer::Next))
+}
+
+/// 라르-판도라의아이들's login answers that carry something: one notice.
+///
+/// The login's second answer, 1007 (`0x14b78`), takes the account off the
+/// body - a ten-byte id, then the gift count and the notice count, a byte
+/// each - and with notices to fetch asks for them one at a time as 1002,
+/// carrying the index. Each 1003 (`0x14c54`) is that index and 400 bytes of
+/// text, stored at `0x1508a1a` + index × 400; after the last, the title
+/// records the count at `0x150884e`, breaks the first notice into lines
+/// (`0x186c4`) and opens the screen that shows it.
+///
+/// With no notices it opens the same screen without either, and that screen
+/// draws the first notice through line breaks nothing has computed - it read
+/// `0xff030102` as a line start and faulted at `0x19fe4`. The server always
+/// had a notice to give, so one is given.
+fn lar_notice_response(request: &[u8]) -> Option<Vec<u8>> {
+    const ACCOUNT_REQUEST: u16 = 1006;
+    const NOTICE_REQUEST: u16 = 1002;
+    /// The id, then the gift count and the notice count.
+    const ID: usize = 10;
+    const NOTICE_COUNT: usize = ID + 1;
+    const NOTICE_TEXT: usize = 400;
+    /// MiniMobile 오프라인 서버입니다. in EUC-KR, which the title draws.
+    const NOTICE: &[u8] = b"MiniMobile \xbf\xc0\xc7\xc1\xb6\xf3\xc0\xce \xbc\xad\xb9\xf6\xc0\xd4\xb4\xcf\xb4\xd9.";
+
+    if request.len() < 4 || u16::from_be_bytes([request[0], request[1]]) as usize != request.len() {
+        return None;
+    }
+    let body = match u16::from_be_bytes([request[2], request[3]]) {
+        ACCOUNT_REQUEST => {
+            let mut body = vec![0u8; 0x20];
+            body[NOTICE_COUNT] = 1;
+            body
+        }
+        // The index the title asks for, echoed; it only ever asks for 0.
+        NOTICE_REQUEST if request.len() == 5 => {
+            let mut body = vec![0u8; 1 + NOTICE_TEXT];
+            body[0] = request[4];
+            body[1..1 + NOTICE.len()].copy_from_slice(NOTICE);
+            body
+        }
+        _ => return None,
+    };
+    let answer = u16::from_be_bytes([request[2], request[3]]) + 1;
+
+    let mut response = Vec::with_capacity(body.len() + 8);
+    response.extend_from_slice(&((body.len() + 6) as u16).to_be_bytes());
+    response.extend_from_slice(&answer.to_be_bytes());
+    response.extend_from_slice(&body);
+    response.extend_from_slice(&[0; 4]);
+    Some(response)
 }
 
 /// Whether `request` is the login 라르-판도라의아이들 opens its game server
@@ -12637,12 +12689,24 @@ mod tests {
         let answer = lgt_local_big_endian_record_next_response(&LOGIN).unwrap();
         assert_eq!(u16::from_be_bytes([answer[2], answer[3]]), 1001);
 
-        // Then 1006, an eight-byte record, read back at 1007 with a zero id
-        // and no gifts or notices.
+        // Then 1006, an eight-byte record, read back at 1007 with a zero id,
+        // no gifts and one notice: with none, the screen it opens draws a
+        // notice nothing has laid out, and faults.
         let next = [0x00, 0x08, 0x03, 0xee, 0x00, 0x01, 0x8a, 0x92];
         let answer = lgt_local_big_endian_record_next_response(&next).unwrap();
         assert_eq!(u16::from_be_bytes([answer[2], answer[3]]), 1007);
-        assert!(answer[4..16].iter().all(|&byte| byte == 0));
+        assert!(answer[4..15].iter().all(|&byte| byte == 0));
+        assert_eq!(answer[15], 1);
+
+        // Which it asks for as 1002 with its index, and is given at 1003: the
+        // index, then 400 bytes of NUL-terminated text.
+        let notice = [0x00, 0x05, 0x03, 0xea, 0x00];
+        let answer = lgt_local_big_endian_record_next_response(&notice).unwrap();
+        assert_eq!(u16::from_be_bytes([answer[0], answer[1]]) as usize, answer.len() - 2);
+        assert_eq!(u16::from_be_bytes([answer[2], answer[3]]), 1003);
+        assert_eq!(answer[4], 0);
+        assert!(answer[5..].starts_with(b"MiniMobile "));
+        assert_eq!(answer.len(), 4 + 1 + 400 + 4);
 
         // 레전드오브마스터2's own 1000 is not taken for it, and is still answered
         // at 1002.
