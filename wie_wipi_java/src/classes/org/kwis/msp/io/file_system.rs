@@ -3,9 +3,13 @@ use alloc::vec;
 use java_class_proto::JavaMethodProto;
 use java_constants::MethodAccessFlags;
 use java_runtime::classes::java::{io::File as JavaFile, lang::String, util::Vector};
-use jvm::{Array, ClassInstanceRef, Jvm, Result as JvmResult};
+use jvm::{Array, ClassInstanceRef, Jvm, Result as JvmResult, runtime::JavaLangString};
 
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
+
+/// What every space question answers with. The backend does not report the
+/// host's free space, and a title only ever checks that there is room to save.
+const REPORTED_SPACE: i32 = 0x100_0000;
 
 // class org.kwis.msp.io.FileSystem
 pub struct FileSystem;
@@ -24,6 +28,43 @@ impl FileSystem {
                 JavaMethodProto::new("exists", "(Ljava/lang/String;I)Z", Self::exists_with_flag, MethodAccessFlags::STATIC),
                 JavaMethodProto::new("mkdir", "(Ljava/lang/String;I)V", Self::mkdir, MethodAccessFlags::STATIC),
                 JavaMethodProto::new("available", "()I", Self::available, MethodAccessFlags::STATIC),
+                JavaMethodProto::new("available", "(Ljava/lang/String;I)I", Self::available_on, MethodAccessFlags::STATIC),
+                JavaMethodProto::new(
+                    "availableLsize",
+                    "(Ljava/lang/String;I)D",
+                    Self::available_lsize,
+                    MethodAccessFlags::STATIC,
+                ),
+                JavaMethodProto::new("totalSpace", "()I", Self::total_space, MethodAccessFlags::STATIC),
+                JavaMethodProto::new("totalSpace", "(Ljava/lang/String;)I", Self::total_space_on, MethodAccessFlags::STATIC),
+                JavaMethodProto::new("getCounts", "(Ljava/lang/String;)I", Self::get_counts, MethodAccessFlags::STATIC),
+                JavaMethodProto::new(
+                    "getCounts",
+                    "(Ljava/lang/String;I)I",
+                    Self::get_counts_with_flag,
+                    MethodAccessFlags::STATIC,
+                ),
+                JavaMethodProto::new(
+                    "getMountedNames",
+                    "()[Ljava/lang/String;",
+                    Self::get_mounted_names,
+                    MethodAccessFlags::STATIC,
+                ),
+                JavaMethodProto::new("setMode", "(Ljava/lang/String;I)Z", Self::set_mode, MethodAccessFlags::STATIC),
+                JavaMethodProto::new("setMode", "(Ljava/lang/String;II)Z", Self::set_mode_with_flag, MethodAccessFlags::STATIC),
+                JavaMethodProto::new(
+                    "addFileSystemListener",
+                    "(Lorg/kwis/msp/io/FileSystemListener;)Z",
+                    Self::add_file_system_listener,
+                    MethodAccessFlags::STATIC,
+                ),
+                JavaMethodProto::new(
+                    "removeFileSystemListener",
+                    "(Lorg/kwis/msp/io/FileSystemListener;)Z",
+                    Self::remove_file_system_listener,
+                    MethodAccessFlags::STATIC,
+                ),
+                JavaMethodProto::new("handleEvent", "(III)Z", Self::handle_event, MethodAccessFlags::STATIC),
                 JavaMethodProto::new("getMaxFilenameLength", "()I", Self::get_max_filename_length, MethodAccessFlags::STATIC),
                 JavaMethodProto::new("list", "(Ljava/lang/String;)Ljava/util/Vector;", Self::list, MethodAccessFlags::STATIC),
                 JavaMethodProto::new(
@@ -81,11 +122,31 @@ impl FileSystem {
         jvm.invoke_special(&this, "java/lang/Object", "<init>", "()V", ()).await
     }
 
-    async fn is_file(jvm: &Jvm, _: &mut WieJvmContext, name: ClassInstanceRef<String>) -> JvmResult<bool> {
-        tracing::debug!("org.kwis.msp.io.FileSystem::is_file({name:?})");
+    async fn is_file(jvm: &Jvm, context: &mut WieJvmContext, name: ClassInstanceRef<String>) -> JvmResult<bool> {
+        // A null path is not a file. The reference returns false rather than
+        // dereferencing it; `new File(null)` would otherwise reach a proxy that
+        // panics on the null argument. Iljimae (일지매) probes isFile(null).
+        if name.is_null() {
+            tracing::debug!("org.kwis.msp.io.FileSystem::isFile(null) -> false");
+            return Ok(false);
+        }
+
+        // The path, not the handle. A title that answers this question and then
+        // walks off is telling us which file it wanted, and `ClassInstance(java
+        // /lang/String)` said nothing about which one that was.
+        let path = JavaLangString::to_rust_string(jvm, &name).await?;
 
         let file = jvm.new_class("java/io/File", "(Ljava/lang/String;)V", (name,)).await?;
-        let is_file = jvm.invoke_virtual(&file, "isFile", "()Z", ()).await?;
+        let mut is_file: bool = jvm.invoke_virtual(&file, "isFile", "()Z", ()).await?;
+
+        // The backing file of a database that holds a record reads as a file,
+        // the same as `exists` does - a title checking for its save by
+        // `NAME.db`/`NAME.idx` either way. See `database_backing_record_exists`.
+        if !is_file && Self::database_backing_record_exists(context, &path).await {
+            is_file = true;
+        }
+
+        tracing::debug!("org.kwis.msp.io.FileSystem::isFile({path:?}) -> {is_file}");
 
         Ok(is_file)
     }
@@ -106,13 +167,49 @@ impl FileSystem {
             .await
     }
 
-    async fn exists_with_flag(jvm: &Jvm, _context: &mut WieJvmContext, name: ClassInstanceRef<String>, flag: i32) -> JvmResult<bool> {
-        tracing::debug!("org.kwis.msp.io.FileSystem::exists({name:?}, {flag:?})");
+    async fn exists_with_flag(jvm: &Jvm, context: &mut WieJvmContext, name: ClassInstanceRef<String>, flag: i32) -> JvmResult<bool> {
+        // The path and the answer, not the handle: a title that asks whether
+        // its data is installed and then goes to a download server is telling
+        // us which directory it looked for. 파랜드택틱스 asks for `D`.
+        let path = JavaLangString::to_rust_string(jvm, &name).await?;
 
         let file = jvm.new_class("java/io/File", "(Ljava/lang/String;)V", (name,)).await?;
-        let exists = jvm.invoke_virtual(&file, "exists", "()Z", ()).await?;
+        let mut exists: bool = jvm.invoke_virtual(&file, "exists", "()Z", ()).await?;
+
+        // A KTF `org.kwis.msp.db.DataBase` is a pair of files on the handset,
+        // `NAME.db` beside `NAME.idx`, and a title checks whether its save is
+        // there by asking the filesystem for one of them. This runtime keeps
+        // the database in its own store rather than as those files, so the
+        // probe would always answer no over a save that is really there:
+        // 초밥의달인3 saves under the database `file/data`, then looks for
+        // `file/data.db` on the load screen and finds nothing. Answer for the
+        // database the file would back.
+        if !exists && Self::database_backing_record_exists(context, &path).await {
+            exists = true;
+        }
+
+        tracing::debug!("org.kwis.msp.io.FileSystem::exists({path:?}, {flag:?}) -> {exists}");
 
         Ok(exists)
+    }
+
+    /// Whether `path` names the backing file of a database that holds a record.
+    ///
+    /// A database `NAME` is stored as `NAME.db` and `NAME.idx`; both are taken
+    /// to be there when the database has a record, and neither when it does
+    /// not, so a title telling a written save from a first run by the file's
+    /// presence gets the same answer the database gives.
+    async fn database_backing_record_exists(context: &mut WieJvmContext, path: &str) -> bool {
+        let Some(name) = path.strip_suffix(".db").or_else(|| path.strip_suffix(".idx")) else {
+            return false;
+        };
+        if name.is_empty() {
+            return false;
+        }
+
+        let pid = alloc::string::String::from(context.system().pid());
+
+        context.system().platform().database_repository().has_records(name, &pid).await
     }
 
     async fn mkdir(_jvm: &Jvm, _context: &mut WieJvmContext, name: ClassInstanceRef<String>, flag: i32) -> JvmResult<()> {
@@ -124,7 +221,94 @@ impl FileSystem {
     async fn available(_: &Jvm, _: &mut WieJvmContext) -> JvmResult<i32> {
         tracing::warn!("stub org.kwis.msp.io.FileSystem::available()");
 
-        Ok(0x1000000) // TODO temp
+        Ok(REPORTED_SPACE)
+    }
+
+    /// Free and total space. The one storage a title has is the directory the
+    /// platform gives it, and the backend does not report how much of the host
+    /// is left, so every volume answers with the same figure `available` has
+    /// always reported - room to write.
+    async fn available_on(_: &Jvm, _: &mut WieJvmContext, name: ClassInstanceRef<String>, flag: i32) -> JvmResult<i32> {
+        tracing::warn!("stub org.kwis.msp.io.FileSystem::available({name:?}, {flag})");
+
+        Ok(REPORTED_SPACE)
+    }
+
+    async fn available_lsize(_: &Jvm, _: &mut WieJvmContext, name: ClassInstanceRef<String>, flag: i32) -> JvmResult<f64> {
+        tracing::warn!("stub org.kwis.msp.io.FileSystem::availableLsize({name:?}, {flag})");
+
+        Ok(REPORTED_SPACE as f64)
+    }
+
+    async fn total_space(_: &Jvm, _: &mut WieJvmContext) -> JvmResult<i32> {
+        tracing::warn!("stub org.kwis.msp.io.FileSystem::totalSpace()");
+
+        Ok(REPORTED_SPACE)
+    }
+
+    async fn total_space_on(_: &Jvm, _: &mut WieJvmContext, name: ClassInstanceRef<String>) -> JvmResult<i32> {
+        tracing::warn!("stub org.kwis.msp.io.FileSystem::totalSpace({name:?})");
+
+        Ok(REPORTED_SPACE)
+    }
+
+    /// How many entries a directory holds. `list` does not enumerate one yet,
+    /// so neither does this; both say empty rather than disagree.
+    async fn get_counts(_: &Jvm, _: &mut WieJvmContext, dirname: ClassInstanceRef<String>) -> JvmResult<i32> {
+        tracing::warn!("stub org.kwis.msp.io.FileSystem::getCounts({dirname:?})");
+
+        Ok(0)
+    }
+
+    async fn get_counts_with_flag(_: &Jvm, _: &mut WieJvmContext, dirname: ClassInstanceRef<String>, flag: i32) -> JvmResult<i32> {
+        tracing::warn!("stub org.kwis.msp.io.FileSystem::getCounts({dirname:?}, {flag})");
+
+        Ok(0)
+    }
+
+    /// The volumes a title can write to. There is one and it is the title's own
+    /// directory, which it reaches without naming a volume, so the list is
+    /// empty.
+    async fn get_mounted_names(jvm: &Jvm, _: &mut WieJvmContext) -> JvmResult<ClassInstanceRef<Array<String>>> {
+        tracing::warn!("stub org.kwis.msp.io.FileSystem::getMountedNames()");
+
+        Ok(jvm.instantiate_array("Ljava/lang/String;", 0).await?.into())
+    }
+
+    /// File attributes - read-only, hidden and so on. The backend keeps none,
+    /// so a title setting them is told it could not rather than believing they
+    /// took.
+    async fn set_mode(_: &Jvm, _: &mut WieJvmContext, name: ClassInstanceRef<String>, mode: i32) -> JvmResult<bool> {
+        tracing::warn!("stub org.kwis.msp.io.FileSystem::setMode({name:?}, {mode})");
+
+        Ok(false)
+    }
+
+    async fn set_mode_with_flag(_: &Jvm, _: &mut WieJvmContext, name: ClassInstanceRef<String>, mode: i32, flag: i32) -> JvmResult<bool> {
+        tracing::warn!("stub org.kwis.msp.io.FileSystem::setMode({name:?}, {mode}, {flag})");
+
+        Ok(false)
+    }
+
+    /// Storage being inserted or removed, which cannot happen to the one
+    /// directory a title has: a listener would never be called, so registering
+    /// one reports that it was not taken.
+    async fn add_file_system_listener(_: &Jvm, _: &mut WieJvmContext, listener: ClassInstanceRef<()>) -> JvmResult<bool> {
+        tracing::warn!("stub org.kwis.msp.io.FileSystem::addFileSystemListener({listener:?})");
+
+        Ok(false)
+    }
+
+    async fn remove_file_system_listener(_: &Jvm, _: &mut WieJvmContext, listener: ClassInstanceRef<()>) -> JvmResult<bool> {
+        tracing::warn!("stub org.kwis.msp.io.FileSystem::removeFileSystemListener({listener:?})");
+
+        Ok(false)
+    }
+
+    async fn handle_event(_: &Jvm, _: &mut WieJvmContext, event: i32, param1: i32, param2: i32) -> JvmResult<bool> {
+        tracing::warn!("stub org.kwis.msp.io.FileSystem::handleEvent({event}, {param1}, {param2})");
+
+        Ok(false)
     }
 
     async fn get_max_filename_length(_: &Jvm, _: &mut WieJvmContext) -> JvmResult<i32> {
@@ -145,14 +329,23 @@ impl FileSystem {
         Ok(ClassInstanceRef::new(None))
     }
 
-    async fn remove(_: &Jvm, _: &mut WieJvmContext, filename: ClassInstanceRef<String>) -> JvmResult<()> {
-        tracing::warn!("stub org.kwis.msp.io.FileSystem::remove({filename:?})");
+    async fn remove(jvm: &Jvm, _: &mut WieJvmContext, filename: ClassInstanceRef<String>) -> JvmResult<()> {
+        tracing::debug!("org.kwis.msp.io.FileSystem::remove({filename:?})");
 
-        Ok(())
+        jvm.invoke_static("org/kwis/msp/io/FileSystem", "remove", "(Ljava/lang/String;I)V", (filename, 1))
+            .await
     }
 
-    async fn remove_with_flag(_: &Jvm, _: &mut WieJvmContext, filename: ClassInstanceRef<String>, flag: i32) -> JvmResult<()> {
-        tracing::warn!("stub org.kwis.msp.io.FileSystem::remove({filename:?}, {flag})");
+    async fn remove_with_flag(jvm: &Jvm, _: &mut WieJvmContext, filename: ClassInstanceRef<String>, flag: i32) -> JvmResult<()> {
+        tracing::debug!("org.kwis.msp.io.FileSystem::remove({filename:?}, {flag})");
+
+        let file = jvm.new_class("java/io/File", "(Ljava/lang/String;)V", (filename,)).await?;
+
+        let removed: bool = jvm.invoke_virtual(&file, "delete", "()Z", ()).await?;
+
+        if !removed {
+            return Err(jvm.exception("java/io/IOException", "file isn't exist").await);
+        }
 
         Ok(())
     }
@@ -230,13 +423,54 @@ mod test {
     use alloc::boxed::Box;
 
     use java_runtime::classes::java::{lang::String, util::Vector};
-    use jvm::{Array, ClassInstanceRef, runtime::JavaLangString};
+    use jvm::{Array, ClassInstanceRef, JavaError, Result as JvmResult, runtime::JavaLangString};
     use test_utils::run_jvm_test;
     use wie_util::Result;
 
     use crate::get_protos;
 
     use super::FileSystem;
+
+    /// A title checks for its `org.kwis.msp.db.DataBase` save by asking the
+    /// filesystem for the file that would back it, `NAME.db` or `NAME.idx`.
+    /// The database lives in its own store, not as those files, so the probe is
+    /// answered from the database - present once it holds a record, absent
+    /// before. 초밥의달인3 looks for `file/data.db` on its load screen.
+    #[test]
+    fn a_database_backing_file_reads_as_present_once_the_database_has_a_record() -> Result<()> {
+        async fn exists(jvm: &jvm::Jvm, path: &str) -> JvmResult<bool> {
+            let name = JavaLangString::from_rust_string(jvm, path).await?;
+            jvm.invoke_static("org/kwis/msp/io/FileSystem", "exists", "(Ljava/lang/String;)Z", (name,))
+                .await
+        }
+
+        run_jvm_test(Box::new([wie_midp::get_protos().into(), get_protos().into()]), |jvm| async move {
+            // Nothing is there before the database is written.
+            assert!(!exists(&jvm, "file/data.db").await?);
+
+            let name = JavaLangString::from_rust_string(&jvm, "file/data").await?;
+            let database = jvm
+                .invoke_static(
+                    "org/kwis/msp/db/DataBase",
+                    "openDataBase",
+                    "(Ljava/lang/String;IZ)Lorg/kwis/msp/db/DataBase;",
+                    (name, 8i32, true),
+                )
+                .await?;
+            let mut record = jvm.instantiate_array("B", 2).await?;
+            jvm.store_array(&mut record, 0, [1i8, 2]).await?;
+            let _: i32 = jvm.invoke_virtual(&database, "insertRecord", "([B)I", (record,)).await?;
+
+            // Both backing files now read as present; the bare name and an
+            // unrelated one do not.
+            assert!(exists(&jvm, "file/data.db").await?, "the .db backing file is there");
+            assert!(exists(&jvm, "file/data.idx").await?, "the .idx backing file is there");
+            assert!(!exists(&jvm, "file/data").await?, "the bare name is not a file");
+            assert!(!exists(&jvm, "file/other.db").await?, "an unrelated database is not there");
+
+            Ok(())
+        })
+    }
 
     #[test]
     fn test_filesystem_overloads_and_neutral_stubs() -> Result<()> {
@@ -295,12 +529,6 @@ mod test {
             assert_eq!(creation_time_with_flag, 0);
 
             let _: () = jvm
-                .invoke_static("org/kwis/msp/io/FileSystem", "remove", "(Ljava/lang/String;)V", (name.clone(),))
-                .await?;
-            let _: () = jvm
-                .invoke_static("org/kwis/msp/io/FileSystem", "remove", "(Ljava/lang/String;I)V", (name.clone(), 1))
-                .await?;
-            let _: () = jvm
                 .invoke_static("org/kwis/msp/io/FileSystem", "mkdir", "(Ljava/lang/String;)V", (name.clone(),))
                 .await?;
             let _: () = jvm
@@ -325,6 +553,42 @@ mod test {
                     (name, new_name, 1),
                 )
                 .await?;
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_filesystem_remove_deletes_file_and_reports_missing_file() -> Result<()> {
+        run_jvm_test(Box::new([get_protos().into()]), |jvm| async move {
+            let name: ClassInstanceRef<String> = JavaLangString::from_rust_string(&jvm, "remove-test.dat").await?.into();
+
+            let file = jvm.new_class("java/io/File", "(Ljava/lang/String;)V", (name.clone(),)).await?;
+
+            let output = jvm.new_class("java/io/FileOutputStream", "(Ljava/io/File;)V", (file.clone(),)).await?;
+
+            let _: () = jvm.invoke_virtual(&output, "write", "(I)V", (0x41,)).await?;
+            let _: () = jvm.invoke_virtual(&output, "close", "()V", ()).await?;
+
+            let exists_before: bool = jvm.invoke_virtual(&file, "exists", "()Z", ()).await?;
+            assert!(exists_before);
+
+            let _: () = jvm
+                .invoke_static("org/kwis/msp/io/FileSystem", "remove", "(Ljava/lang/String;)V", (name.clone(),))
+                .await?;
+
+            let exists_after: bool = jvm.invoke_virtual(&file, "exists", "()Z", ()).await?;
+            assert!(!exists_after);
+
+            let second: JvmResult<()> = jvm
+                .invoke_static("org/kwis/msp/io/FileSystem", "remove", "(Ljava/lang/String;)V", (name,))
+                .await;
+
+            let Err(JavaError::JavaException(exception)) = second else {
+                panic!("second remove unexpectedly succeeded");
+            };
+
+            assert!(jvm.is_instance(&*exception, "java/io/IOException"));
 
             Ok(())
         })

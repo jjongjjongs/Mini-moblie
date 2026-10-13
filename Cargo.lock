@@ -165,7 +165,6 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 [[package]]
 name = "arm32_cpu"
 version = "0.1.0"
-source = "git+https://github.com/dlunch/arm32_cpu.git#a98b447314de8abd28a59996f497eb72aaeaa89b"
 dependencies = [
  "log",
 ]
@@ -201,13 +200,13 @@ dependencies = [
 
 [[package]]
 name = "async-trait"
-version = "0.1.89"
+version = "0.1.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
+checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -277,6 +276,12 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "byteorder"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "byteorder-lite"
@@ -409,7 +414,6 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 [[package]]
 name = "classfile"
 version = "0.0.1"
-source = "git+https://github.com/dlunch/RustJava.git#258cd4ee0e91d60804b602596583746162057e94"
 dependencies = [
  "java_constants",
  "nom 8.0.0",
@@ -802,10 +806,51 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5fdab65db9274e0168143841eb8f864a0a21f8b1b8d2ba6812bbe6024346e99e"
 
 [[package]]
+name = "dynasm"
+version = "5.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd358e74d2f8d71a11b7a2c51c67ad5df3de06003b0596875e47bc09126c894e"
+dependencies = [
+ "bitflags 2.13.1",
+ "byteorder",
+ "lazy_static",
+ "proc-macro-error3",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "dynasmrt"
+version = "5.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6efe03f6bd356ae85eeea7ee14c2bf54e664a949d089d238364b5a99afbc4116"
+dependencies = [
+ "byteorder",
+ "dynasm",
+ "fnv",
+ "memmap2",
+]
+
+[[package]]
 name = "elf"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55dd888a213fc57e957abf2aa305ee3e8a28dbe05687a251f33b637cd46b0070"
+
+[[package]]
+name = "embed-resource"
+version = "3.0.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6168487b5e7eb2673e6efe1200b1848016e436a6ca0b8031bf04bd9d493a249f"
+dependencies = [
+ "cc",
+ "memchr",
+ "rustc_version",
+ "toml",
+ "vswhom",
+ "winreg",
+]
 
 [[package]]
 name = "encoding_rs"
@@ -891,6 +936,12 @@ dependencies = [
  "miniz_oxide",
  "zlib-rs",
 ]
+
+[[package]]
+name = "fnv"
+version = "1.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "foldhash"
@@ -1301,7 +1352,6 @@ dependencies = [
 [[package]]
 name = "java_class_proto"
 version = "0.0.1"
-source = "git+https://github.com/dlunch/RustJava.git#258cd4ee0e91d60804b602596583746162057e94"
 dependencies = [
  "async-trait",
  "dyn-clone",
@@ -1312,7 +1362,6 @@ dependencies = [
 [[package]]
 name = "java_constants"
 version = "0.0.1"
-source = "git+https://github.com/dlunch/RustJava.git#258cd4ee0e91d60804b602596583746162057e94"
 dependencies = [
  "bitflags 2.13.1",
 ]
@@ -1320,7 +1369,6 @@ dependencies = [
 [[package]]
 name = "java_runtime"
 version = "0.0.1"
-source = "git+https://github.com/dlunch/RustJava.git#258cd4ee0e91d60804b602596583746162057e94"
 dependencies = [
  "async-trait",
  "bytemuck",
@@ -1449,7 +1497,6 @@ dependencies = [
 [[package]]
 name = "jvm"
 version = "0.0.1"
-source = "git+https://github.com/dlunch/RustJava.git#258cd4ee0e91d60804b602596583746162057e94"
 dependencies = [
  "anyhow",
  "async-recursion",
@@ -1468,7 +1515,6 @@ dependencies = [
 [[package]]
 name = "jvm_rust"
 version = "0.0.1"
-source = "git+https://github.com/dlunch/RustJava.git#258cd4ee0e91d60804b602596583746162057e94"
 dependencies = [
  "async-recursion",
  "async-trait",
@@ -2300,6 +2346,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "proc-macro-error-attr3"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0084e6206a967a2dad822180626b2f6b07a3b379325e8f1ec0438e33a469ba7"
+dependencies = [
+ "proc-macro2",
+ "quote",
+]
+
+[[package]]
+name = "proc-macro-error3"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0cf066225f2373bc711684792b69bdeac0356019b007e721090c24d92d5d5a50"
+dependencies = [
+ "proc-macro-error-attr3",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.4",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2496,6 +2564,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
+name = "rustysynth"
+version = "1.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3ca93af923df5fc03beddbf464242620fd24daa9e10f9ecd56eb9571eb7ba38"
+
+[[package]]
 name = "same-file"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2531,9 +2605,9 @@ dependencies = [
 
 [[package]]
 name = "semver"
-version = "1.0.28"
+version = "1.0.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
+checksum = "56e6fa9c48d24d85fb3de5ad847117517440f6beceb7798af16b4a87d616b8d0"
 
 [[package]]
 name = "serde"
@@ -2620,7 +2694,6 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 [[package]]
 name = "smaf"
 version = "0.1.0"
-source = "git+https://github.com/dlunch/smaf.git#4c3853eaf626fb37055d8c11d705384f776de552"
 dependencies = [
  "anyhow",
  "nom 7.1.3",
@@ -2630,9 +2703,9 @@ dependencies = [
 [[package]]
 name = "smaf_player"
 version = "0.1.0"
-source = "git+https://github.com/dlunch/smaf.git#4c3853eaf626fb37055d8c11d705384f776de552"
 dependencies = [
  "smaf",
+ "tracing",
 ]
 
 [[package]]
@@ -2901,6 +2974,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "syn"
+version = "3.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6275cddf4610d1775e6d1fe9469b2e77d0f39fd98fb7450901b821e0c53649f"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
+
+[[package]]
 name = "synstructure"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3032,10 +3116,12 @@ version = "1.1.3+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "53c96ecdfa941c8fc4fcaed14f99ada8ebed502eef533015095a07e3301d4c3c"
 dependencies = [
+ "indexmap",
  "serde_core",
  "serde_spanned",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 
@@ -3068,6 +3154,12 @@ checksum = "a2abe9b86193656635d2411dc43050282ca48aa31c2451210f4202550afb7526"
 dependencies = [
  "winnow",
 ]
+
+[[package]]
+name = "toml_writer"
+version = "1.1.3+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06bdbd8cfc056b8d2e2e85f29b56a3bdbecb527cef81eb39e3e7b98af4652770"
 
 [[package]]
 name = "tracing"
@@ -3191,6 +3283,26 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vswhom"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be979b7f07507105799e854203b470ff7c78a1639e330a58f183b5fea574608b"
+dependencies = [
+ "libc",
+ "vswhom-sys",
+]
+
+[[package]]
+name = "vswhom-sys"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb067e4cbd1ff067d1df46c9194b5de0e98efd2810bbc95c5d5e5f25a3231150"
+dependencies = [
+ "cc",
+ "libc",
+]
 
 [[package]]
 name = "walkdir"
@@ -3412,16 +3524,45 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 
 [[package]]
+name = "wie_android"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures-test",
+ "jni 0.21.1",
+ "libc",
+ "md5",
+ "polling",
+ "smaf_player",
+ "tracing",
+ "tracing-subscriber",
+ "wie_backend",
+ "wie_brew",
+ "wie_core_arm",
+ "wie_gnex",
+ "wie_j2me",
+ "wie_ktf",
+ "wie_lgt",
+ "wie_skt",
+ "wie_util",
+ "wie_wipi_c",
+ "zip",
+]
+
+[[package]]
 name = "wie_backend"
 version = "0.0.1"
 dependencies = [
  "ab_glyph",
  "async-trait",
  "bytemuck",
+ "crc32fast",
+ "encoding_rs",
  "futures-test",
  "hashbrown",
  "image",
  "lazy_static",
+ "miniz_oxide",
  "num-traits",
  "smaf",
  "smaf_player",
@@ -3429,6 +3570,22 @@ dependencies = [
  "tracing",
  "wie_util",
  "zip",
+]
+
+[[package]]
+name = "wie_brew"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "encoding_rs",
+ "spin",
+ "test_utils",
+ "tracing",
+ "tracing-subscriber",
+ "wie_backend",
+ "wie_core_arm",
+ "wie_util",
+ "wie_wipi_c",
 ]
 
 [[package]]
@@ -3448,11 +3605,9 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "web-sys",
+ "wie_android",
  "wie_backend",
  "wie_j2me",
- "wie_ktf",
- "wie_lgt",
- "wie_skt",
  "wie_util",
  "winit",
 ]
@@ -3465,6 +3620,7 @@ dependencies = [
  "async-trait",
  "bytemuck",
  "crossbeam",
+ "dynasmrt",
  "futures",
  "futures-test",
  "gdbstub",
@@ -3480,13 +3636,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "wie_gnex"
+version = "0.0.1"
+dependencies = [
+ "encoding_rs",
+ "futures",
+ "test_utils",
+ "tracing",
+ "tracing-subscriber",
+ "wie_backend",
+ "wie_util",
+]
+
+[[package]]
+name = "wie_ios"
+version = "0.0.1"
+dependencies = [
+ "wie_android",
+]
+
+[[package]]
 name = "wie_j2me"
 version = "0.0.1"
 dependencies = [
  "async-trait",
  "bytemuck",
  "jvm",
+ "test_utils",
  "tracing",
+ "tracing-subscriber",
  "wie_backend",
  "wie_jvm_support",
  "wie_midp",
@@ -3499,8 +3677,10 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "bytemuck",
+ "encoding_rs",
  "futures-test",
  "java_class_proto",
+ "java_constants",
  "java_runtime",
  "jvm",
  "jvm_rust",
@@ -3521,6 +3701,7 @@ dependencies = [
  "bytemuck",
  "encoding_rs",
  "futures",
+ "hashbrown",
  "java_class_proto",
  "java_constants",
  "java_runtime",
@@ -3528,6 +3709,7 @@ dependencies = [
  "spin",
  "test_utils",
  "tracing",
+ "tracing-subscriber",
  "wie_backend",
  "wie_core_arm",
  "wie_jvm_support",
@@ -3556,6 +3738,7 @@ dependencies = [
  "bytemuck",
  "chrono",
  "elf",
+ "encoding_rs",
  "futures",
  "java_class_proto",
  "java_constants",
@@ -3565,6 +3748,7 @@ dependencies = [
  "spin",
  "test_utils",
  "tracing",
+ "tracing-subscriber",
  "wie_backend",
  "wie_core_arm",
  "wie_jvm_support",
@@ -3576,6 +3760,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wie_midi"
+version = "0.0.1"
+dependencies = [
+ "jni 0.21.1",
+ "rustysynth",
+]
+
+[[package]]
 name = "wie_midp"
 version = "0.0.1"
 dependencies = [
@@ -3583,6 +3775,7 @@ dependencies = [
  "bitflags 2.13.1",
  "bytemuck",
  "dyn-clone",
+ "encoding_rs",
  "futures",
  "java_class_proto",
  "java_constants",
@@ -3597,13 +3790,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "wie_portmaster"
+version = "0.0.1"
+dependencies = [
+ "ab_glyph",
+ "embed-resource",
+ "libc",
+ "libloading 0.8.9",
+ "wie_android",
+ "wie_backend",
+]
+
+[[package]]
 name = "wie_skt"
 version = "0.0.1"
 dependencies = [
  "async-trait",
  "bytemuck",
+ "encoding_rs",
  "jvm",
+ "test_utils",
  "tracing",
+ "tracing-subscriber",
  "wie_backend",
  "wie_jvm_support",
  "wie_midp",
@@ -3620,16 +3828,19 @@ dependencies = [
  "bitflags 2.13.1",
  "bytemuck",
  "dyn-clone",
+ "encoding_rs",
  "java_class_proto",
  "java_constants",
  "java_runtime",
  "jvm",
  "jvm_rust",
+ "libm",
  "test_utils",
  "tracing",
  "wie_backend",
  "wie_jvm_support",
  "wie_midp",
+ "wie_util",
 ]
 
 [[package]]
@@ -3649,6 +3860,8 @@ dependencies = [
  "bytemuck",
  "encoding_rs",
  "futures-test",
+ "libm",
+ "spin",
  "test_utils",
  "tracing",
  "wie_backend",
@@ -3668,6 +3881,7 @@ dependencies = [
  "java_runtime",
  "jvm",
  "jvm_rust",
+ "spin",
  "test_utils",
  "tracing",
  "wie_backend",
@@ -4033,6 +4247,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "winreg"
+version = "0.56.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d6f32a0ff4a9f6f01231eb2059cc85479330739333e0e58cadf03b6af2cca10"
+dependencies = [
+ "cfg-if",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

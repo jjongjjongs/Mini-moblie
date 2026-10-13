@@ -36,9 +36,16 @@ impl JavaArrayClassDefinition {
 
         let ptr_raw = Allocator::alloc(core, size_of::<RawJavaClass>() as u32)?;
 
+        // What an array is an array of, where that is a class: a title reads it
+        // back out of the record - a relocated module does, before it stores
+        // into one - and an array of primitives has no class to name.
         let element_type_name = &name[1..];
-        let element_type_raw = if element_type_name.starts_with('L') {
-            let class = jvm.resolve_class(&element_type_name[1..element_type_name.len() - 1]).await.unwrap();
+        let element_type_raw = if let Some(object) = element_type_name.strip_prefix('L') {
+            let class = jvm.resolve_class(object.trim_end_matches(';')).await.unwrap();
+
+            Some(KtfJvmSupport::class_definition_raw(&*class.definition)?)
+        } else if element_type_name.starts_with('[') {
+            let class = jvm.resolve_class(element_type_name).await.unwrap();
 
             Some(KtfJvmSupport::class_definition_raw(&*class.definition)?)
         } else {

@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 async-trait = { workspace = true }
 bytemuck = { workspace = true }
+crc32fast = { version = "^1.5", default-features = false }
+encoding_rs = { version = "^0.8", default-features = false, features = ["alloc"] }
 spin = { workspace = true }
 tracing = { workspace = true }
 
@@ -14,13 +16,18 @@ ab_glyph = { version = "^0.2", features = ["libm"], default-features = false }
 hashbrown = { version = "^0.17", features = ["default-hasher"], default-features = false }
 image = { version = "^0.25", features = ["bmp", "gif", "jpeg", "png"], default-features = false }
 lazy_static = { version = "^1.5", default-features = false }
+# Reads the gzip members a WIPI package ships some of its data as; see `gz`.
+miniz_oxide = { version = "^0.8", default-features = false, features = ["with-alloc"] }
 num-traits = { version = "^0.2", default-features = false }
 zip = { version = "^8.6", features = ["deflate"], default-features = false }
 
 wie_util = { workspace = true }
 
-smaf = { git = "https://github.com/dlunch/smaf.git" }
-smaf_player = { git = "https://github.com/dlunch/smaf.git" }
+smaf = { path = "../third_party/smaf" }
+# Vendored from https://github.com/dlunch/smaf.git with a fix to the wave
+# trigger (see third_party/smaf_player), so a note 0 on any channel can fire a
+# single-wave track's clip - some titles trigger it from the percussion channel.
+smaf_player = { path = "../third_party/smaf_player" }
 
 [dev-dependencies]
 futures-test = { workspace = true }

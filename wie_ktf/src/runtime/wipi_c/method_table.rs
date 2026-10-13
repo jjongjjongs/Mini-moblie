@@ -5,11 +5,11 @@ use wipi_types::{
     wipic::WIPICWord,
 };
 
-use wie_core_arm::ArmCore;
+use wie_core_arm::{ArmCore, SvcIntrinsic};
 use wie_util::{Result, WieError};
 use wie_wipi_c::{
     MethodImpl, WIPICContext, WIPICMethodBody,
-    api::{database, graphics, kernel, media, misc, net, uic, util},
+    api::{database, fastrelay, filesystem, graphics, im, kernel, m3d, media, misc, mxusermem, net, record_database, shared_buf, uic, util},
 };
 
 use crate::runtime::{
@@ -19,6 +19,48 @@ use crate::runtime::{
 
 fn gen_stub(id: WIPICWord, name: &'static str) -> WIPICMethodBody {
     let body = move |_: &mut dyn WIPICContext| async move { Err::<(), _>(WieError::Unimplemented(format!("{id}: {name}"))) };
+
+    body.into_body()
+}
+
+/// How many functions every WIPI C interface table holds.
+///
+/// A table is an array of function pointers in guest memory and the guest
+/// indexes it directly, so a table written only as long as the functions we
+/// serve is a table a title can index past: it reads a word that was never a
+/// function, branches to it, and the run ends on whatever that word happened to
+/// be. 데몬헌터 does exactly that - it asks the net table for slot 30, one past
+/// `MC_netHttpClose`, and read a zero there, so the authentication attempt
+/// faulted at `pc = 0` with nothing in the log to say which call it was.
+///
+/// So every table is this long whatever we have written for it, and the slots
+/// past the end answer [`gen_missing`]. The number is the reference's, whose
+/// largest original interface is the graphics table, well under it.
+pub const WIPIC_TABLE_FUNCTIONS: u16 = 64;
+
+/// The answer a table slot gives when the original interface had a function
+/// there and this runtime has none.
+///
+/// It is a refusal rather than a fault, because a WIPI C call that cannot be
+/// served has a documented way to say so and a game's own error path is written
+/// for it. The line it logs names the table and the slot, which is the only
+/// place either number is ever written down: the guest reaches a function
+/// through an array index, so no name for it appears in its own code.
+/// The answer a slot no function stands behind gives: -1, the error a WIPI C
+/// function reports for anything it cannot do.
+///
+/// The call is named where it is dispatched rather than here - see
+/// `describe_unserved_call`, which has the registers and the memory they point
+/// at, and this has neither.
+fn gen_missing(table_id: WIPICTableId, function_id: u16) -> WIPICMethodBody {
+    let body = move |_: &mut dyn WIPICContext| async move {
+        // Named, because a slot that answers in silence is a slot a title can
+        // call six hundred times with nothing in the log to say so. 마스터오브
+        // 소드4 draws no text and the run records no text call at all - the
+        // only place the number it reached is ever written down is here.
+        tracing::warn!("unserved {table_id:?}-{function_id}");
+        Ok::<i32, WieError>(-1)
+    };
 
     body.into_body()
 }
@@ -127,8 +169,19 @@ pub fn get_graphics_interface(core: &mut ArmCore) -> Result<WIPICGraphicsInterfa
         get_rgb_pixels: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::GetRgbPixels))?,
         set_rgb_pixels: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::SetRgbPixels))?,
         flush_lcd: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::FlushLcd))?,
-        get_pixel_from_rgb: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::GetPixelFromRgb))?,
-        get_rgb_from_pixel: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::GetRgbFromPixel))?,
+        // Both are arithmetic, and the calls a title makes per pixel, so an
+        // engine that can answer them without leaving compiled code does - with
+        // what `try_fast_wipic_call` answers.
+        get_pixel_from_rgb: core.make_intrinsic_svc_stub(
+            SVC_CATEGORY_WIPIC,
+            table_id.function_id(WIPICGraphicsMethodId::GetPixelFromRgb),
+            SvcIntrinsic::Rgb565,
+        )?,
+        get_rgb_from_pixel: core.make_intrinsic_svc_stub(
+            SVC_CATEGORY_WIPIC,
+            table_id.function_id(WIPICGraphicsMethodId::GetRgbFromPixel),
+            SvcIntrinsic::Rgb565Unpack,
+        )?,
         get_display_info: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::GetDisplayInfo))?,
         repaint: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::Repaint))?,
         get_font: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICGraphicsMethodId::GetFont))?,
@@ -171,12 +224,12 @@ pub fn get_graphics_interface(core: &mut ArmCore) -> Result<WIPICGraphicsInterfa
 
 pub fn get_util_method_table() -> Vec<WIPICMethodBody> {
     vec![
-        gen_stub(0, "MC_utilHtonl"),
+        util::htonl.into_body(),
         util::htons.into_body(),
-        gen_stub(2, "MC_utilNtohl"),
-        gen_stub(3, "MC_utilNtohs"),
-        gen_stub(4, "MC_utilInetAddrInt"),
-        gen_stub(5, "MC_utilInetAddrStr"),
+        util::ntohl.into_body(),
+        util::ntohs.into_body(),
+        util::inet_addr_int.into_body(),
+        util::inet_addr_str.into_body(),
         gen_stub(6, "OEMC_utilHashbySHA1"),
     ]
 }
@@ -184,9 +237,9 @@ pub fn get_util_method_table() -> Vec<WIPICMethodBody> {
 pub fn get_misc_method_table() -> Vec<WIPICMethodBody> {
     vec![
         misc::back_light.into_body(),
-        gen_stub(1, "MC_miscSetLed"),
-        gen_stub(2, "MC_miscGetLed"),
-        gen_stub(3, "MC_miscGetLedCount"),
+        misc::set_led.into_body(),
+        misc::get_led.into_body(),
+        misc::get_led_count.into_body(),
         gen_stub(4, "OEMC_miscGetCompassData"),
     ]
 }
@@ -203,11 +256,13 @@ pub fn get_database_interface(core: &mut ArmCore) -> Result<WIPICDatabaseInterfa
         update_record: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICDatabaseMethodId::UpdateRecord))?,
         delete_record: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICDatabaseMethodId::DeleteRecord))?,
         list_record: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICDatabaseMethodId::ListRecord))?,
-        sort_records: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICDatabaseMethodId::SortRecords))?,
+        // The interface struct's field names are the database reading of this
+        // table; slots 8 and 12 are the filesystem's - see `WIPICDatabaseMethodId`.
+        sort_records: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICDatabaseMethodId::MakeDirectory))?,
         get_access_mode: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICDatabaseMethodId::GetAccessMode))?,
         get_number_of_records: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICDatabaseMethodId::GetNumberOfRecords))?,
         get_record_size: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICDatabaseMethodId::GetRecordSize))?,
-        list_databases: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICDatabaseMethodId::ListDatabases))?,
+        list_databases: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICDatabaseMethodId::Available))?,
         unk13: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICDatabaseMethodId::Unk13))?,
         unk14: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICDatabaseMethodId::Unk14))?,
         unk15: core.make_svc_stub(SVC_CATEGORY_WIPIC, table_id.function_id(WIPICDatabaseMethodId::Unk15))?,
@@ -215,53 +270,85 @@ pub fn get_database_interface(core: &mut ArmCore) -> Result<WIPICDatabaseInterfa
     })
 }
 
+/// The two uic slots KTF has and LGT does not, placed by [`get_uic_method_table`].
+const KTF_UIC_UNKNOWN_SLOTS: [u16; 2] = [12, 25];
+
+/// KTF's uic table.
+///
+/// It is not LGT's. The two agree up to `MC_uicSetEnable` at 11, but KTF has
+/// two slots LGT does not, and everything after them sits further along:
+///
+/// - 미니게임천국2 and 3 set a text box's font through slot 15 - the call
+///   passes a font and drops the answer - which LGT numbers 14. One slot more
+///   lies somewhere in 12-14.
+/// - 010100D5 and 이타루스전기 read the date through slot 26 - create a
+///   DateTimeComponent, hand slot 26 a `struct tm`, read year, month and day
+///   back - which LGT numbers 24. The second extra slot lies in 16-25.
+/// - The name-entry box fills, clears, sizes and reads back through 32
+///   `(c, 0, text, strlen)`, 33 `(c, 0, -1)`, 35 `(c, 13)`, 36 `(c)` and
+///   37 `(c, 0, buf, size + 1)`: LGT's insert, delete, set-max-size,
+///   text-size and get-text, each two along.
+///
+/// Read as LGT's order, the box was never given the default name, never
+/// cleared and never sized, and the name the player typed was asked for
+/// through `MC_uicAddListItem`: the game got nothing back and registered
+/// either nothing or the name it already had.
+///
+/// Where in 12-14 and 16-25 the two extra slots sit, and what they are, no
+/// title we have says. They are placed right after `MC_uicSetEnable` and
+/// right before `MC_uicGetTime`, and are not served: they answer
+/// [`gen_missing`], and a title reaching one is named in the log. KTF has no counterpart to LGT's
+/// own `LGTC_uicSetCursorPos`/`GetCursorPos`; they stay after the list
+/// calls only so nothing that served before stops serving.
 pub fn get_uic_method_table() -> Vec<WIPICMethodBody> {
     vec![
         uic::create_application_context.into_body(),
         uic::get_class.into_body(),
         uic::create.into_body(),
         uic::destroy.into_body(),
-        gen_stub(4, "MC_uicRepaint"),
-        gen_stub(5, "MC_uicPaint"),
-        gen_stub(6, "MC_uicGetClassName"),
-        gen_stub(7, "MC_uicIsInstance"),
-        gen_stub(8, "MC_uicHandleEvent"),
-        gen_stub(9, "MC_uicConfigure"),
-        gen_stub(10, "MC_uicGetGeometry"),
-        gen_stub(11, "MC_uicSetEnable"),
-        gen_stub(12, "MC_uicSetCallback"),
-        gen_stub(13, "MC_uicSetEventHandler"),
-        gen_stub(14, "MC_uicSetFont"),
-        gen_stub(15, "MC_uicGetFont"),
-        gen_stub(16, "MC_uicSetFgColor"),
-        gen_stub(17, "MC_uicSetBgColor"),
-        gen_stub(18, "MC_uicSetLabel"),
-        gen_stub(19, "MC_uicGetLabel"),
-        gen_stub(20, "MC_uicSetLabelAlignment"),
-        gen_stub(21, "MC_uicSetTimeMask"),
-        gen_stub(22, "MC_uicSetTime"),
-        gen_stub(23, "MC_uicSetTimeLong"),
-        gen_stub(24, "MC_uicGetTime"),
-        gen_stub(25, "MC_uicAddMenuItem"),
+        uic::repaint.into_body(),
+        uic::paint.into_body(),
+        uic::get_class_name.into_body(),
+        uic::is_instance.into_body(),
+        uic::handle_event.into_body(),
+        uic::configure.into_body(),
+        uic::get_geometry.into_body(),
+        uic::set_enable.into_body(),
+        gen_missing(WIPICTableId::Uic, 12),
+        uic::set_callback.into_body(),
+        uic::set_event_handler.into_body(),
+        uic::set_font.into_body(),
+        uic::get_font.into_body(),
+        uic::set_fg_color.into_body(),
+        uic::set_bg_color.into_body(),
+        uic::set_label.into_body(),
+        uic::get_label.into_body(),
+        uic::set_label_alignment.into_body(),
+        uic::set_time_mask.into_body(),
+        uic::set_time.into_body(),
+        uic::set_time_long.into_body(),
+        gen_missing(WIPICTableId::Uic, 25),
+        uic::get_time.into_body(),
+        uic::add_menu_item.into_body(),
         uic::get_menu_item.into_body(),
-        gen_stub(27, "MC_uicRemoveMenuItem"),
-        gen_stub(28, "MC_uicSetActiveMenuItem"),
-        gen_stub(29, "MC_uicGetActiveMenuItem"),
-        gen_stub(30, "MC_uicInsertText"),
-        gen_stub(31, "MC_uicDeleteText"),
-        gen_stub(32, "MC_uicGetMaxTextSize"),
-        gen_stub(33, "MC_uicSetMaxTextSize"),
-        gen_stub(34, "MC_uicGetTextSize"),
-        gen_stub(35, "MC_uicGetText"),
-        gen_stub(36, "MC_uicAddListItem"),
-        gen_stub(37, "MC_uicGetListItem"),
-        gen_stub(38, "MC_uicRemoveListItem"),
-        gen_stub(39, "MC_uicSetActiveListItem"),
-        gen_stub(40, "MC_uicGetActiveListItem"),
-        gen_stub(41, "OEMC_uicGetCursorPosition"),
-        gen_stub(42, "OEMC_uicSetCursorPosition"),
-        gen_stub(43, "OEMC_uicSetLineGap"),
-        gen_stub(44, "OEMC_uicGetLineGap"),
+        uic::remove_menu_item.into_body(),
+        uic::set_active_menu_item.into_body(),
+        uic::get_active_menu_item.into_body(),
+        uic::insert_text.into_body(),
+        uic::delete_text.into_body(),
+        uic::get_max_text_size.into_body(),
+        uic::set_max_text_size.into_body(),
+        uic::get_text_size.into_body(),
+        uic::get_text.into_body(),
+        uic::add_list_item.into_body(),
+        uic::get_list_item.into_body(),
+        uic::remove_list_item.into_body(),
+        uic::set_active_list_item.into_body(),
+        uic::get_active_list_item.into_body(),
+        uic::get_cursor_pos.into_body(),
+        uic::set_cursor_pos.into_body(),
+        gen_stub(45, "OEMC_uicSetLineGap"),
+        gen_stub(46, "OEMC_uicGetLineGap"),
     ]
 }
 
@@ -282,7 +369,7 @@ pub fn get_media_method_table() -> Vec<WIPICMethodBody> {
         gen_stub(12, "MC_mdaUnk12"),
         gen_stub(13, "MC_mdaUnk13"),
         media::get_volume.into_body(),
-        gen_stub(15, "MC_mdaUnk15"),
+        media::set_volume.into_body(),
         media::vibrator.into_body(),
         media::unk17.into_body(),
         media::unk18.into_body(),
@@ -299,89 +386,459 @@ pub fn get_media_method_table() -> Vec<WIPICMethodBody> {
 
 pub fn get_net_method_table() -> Vec<WIPICMethodBody> {
     vec![
+        // The same three the other vendor already serves for real. KTF was left
+        // on stubs that refuse: `MC_netConnect` reported failure through the
+        // caller's callback and nothing opened a socket afterwards, which is
+        // where 데몬헌터 stops - one connect in a whole capture and then only
+        // its own event loop. The refusal is the reference's deliberate answer
+        // to having no network; this runtime answers protocols in process
+        // instead, and a title that is never connected never reaches the
+        // endpoint that would answer it.
         net::connect.into_body(),
         net::close.into_body(),
-        gen_stub(2, "MC_netSocket"),
-        gen_stub(3, "MC_netSocketConnect"),
-        gen_stub(4, "MC_netSocketWrite"),
-        gen_stub(5, "MC_netSocketRead"),
+        net::socket.into_body(),
+        net::socket_connect.into_body(),
+        net::socket_write.into_body(),
+        net::socket_read.into_body(),
         net::socket_close.into_body(),
-        gen_stub(7, "MC_netSocketBind"),
-        gen_stub(8, "MC_netGetMaxPacketLength"),
-        gen_stub(9, "MC_netSocketSendTo"),
-        gen_stub(10, "MC_netSocketRcvFrom"),
-        gen_stub(11, "MC_netGetHostAddr"),
-        gen_stub(12, "MC_netSocketAccept"),
-        gen_stub(13, "MC_netSetReadCB"),
-        gen_stub(14, "MC_netSetWriteCB"),
-        gen_stub(15, "MC_netHttpOpen"),
-        gen_stub(16, "MC_netHttpConnect"),
-        gen_stub(17, "MC_netHttpSetRequestMethod"),
-        gen_stub(18, "MC_netHttpGetRequestMethod"),
-        gen_stub(19, "MC_netHttpSetRequestProperty"),
-        gen_stub(20, "MC_netHttpGetRequestProperty"),
-        gen_stub(21, "MC_netHttpSetProxy"),
-        gen_stub(22, "MC_netHttpGetProxy"),
-        gen_stub(23, "MC_netHttpGetResponseCode"),
-        gen_stub(24, "MC_netHttpGetResponseMessage"),
-        gen_stub(25, "MC_netHttpGetHeaderField"),
-        gen_stub(26, "MC_netHttpGetLength"),
-        gen_stub(27, "MC_netHttpGetType"),
-        gen_stub(28, "MC_netHttpGetEncoding"),
-        gen_stub(29, "MC_netHttpClose"),
+        net::socket_bind.into_body(),
+        net::get_max_packet_length.into_body(),
+        net::socket_send_to.into_body(),
+        net::socket_recv_from.into_body(),
+        net::get_host_addr.into_body(),
+        net::socket_accept.into_body(),
+        net::set_read_callback.into_body(),
+        net::set_write_callback.into_body(),
+        net::http_open.into_body(),
+        net::http_connect.into_body(),
+        net::http_set_request_method.into_body(),
+        net::http_get_request_method.into_body(),
+        net::http_set_request_property.into_body(),
+        net::http_get_request_property.into_body(),
+        net::http_set_proxy.into_body(),
+        net::http_get_proxy.into_body(),
+        net::http_get_response_code.into_body(),
+        net::http_get_response_message.into_body(),
+        net::http_get_header_field.into_body(),
+        net::http_get_length.into_body(),
+        net::http_get_type.into_body(),
+        net::http_get_encoding.into_body(),
+        net::http_close.into_body(),
+        // The carrier's own additions to the table start here; see
+        // `net::socket_connect_by_name`.
+        net::socket_connect_by_name.into_body(),
+        // Slot 31 is the write on that connection, and 데몬헌터's own request is
+        // what says so. Refused, it called this fourteen times in three seconds
+        // with `(1, 0x1796a0, 0x30)` - its descriptor, a buffer, and 48 bytes -
+        // and those 48 bytes are its authentication, already built:
+        //
+        //   00 00 00 2c  IR \t 01046119269 \t demon \t 1.0.2 \t 5080091 \t WIPIC \t yes
+        //
+        // A four-byte length ahead of the record the title's own format string
+        // spells, `IR\t%s\t%s\t%s\t%s\tWIPIC\t%s`. A buffer a title has filled
+        // is one it means to send, so the arguments are `MC_netSocketWrite`'s
+        // and the framing is the title's own.
+        net::socket_write.into_body(),
+        // Slot 32 is the read that carries the answer back, and the title's own
+        // loop says so: once its request went out it called this with
+        // `(1, 0x179694, 0x10)` and then `(1, 0x179695, 0xf)`, `(1, 0x179696,
+        // 0xe)` - one buffer, advanced by what it has taken, shortened by the
+        // same. That is a transfer resuming where it left off, into a buffer
+        // holding nothing, which is the direction the write is not.
+        net::socket_read.into_body(),
+        // Slot 33 is not known. No title here reaches it, and a slot nothing
+        // has asked for is not one to invent - it refuses the way every
+        // unwritten slot does, and says so.
+        gen_missing(WIPICTableId::Net, 33),
+        // Slot 34 is the question a title asks before it opens anything; see
+        // `net::check_server`. 드래곤로드's data download stops dead without
+        // it.
+        net::check_server.into_body(),
     ]
 }
 
-fn gen_unk_stub(id: u32, index: u32) -> WIPICMethodBody {
-    let body = move |_: &mut dyn WIPICContext| async move {
-        tracing::warn!("stub unk{id}-{index}");
-        Ok::<u32, _>(0)
-    };
+/// Writes down what an argument points at, for a slot whose meaning is unknown.
+///
+/// A slot like this is identified by what a title hands it and nothing else -
+/// there is no name for it anywhere in the title's own code, which reaches it
+/// by index. The address alone rarely settles anything; what is behind it
+/// usually does. Table 12 slot 0 turned out to take a buffer and its length,
+/// which is only visible once the buffer is read: the length argument is 8 and
+/// the eight bytes at the pointer are `00 01 02 03 04 03 02 01`.
+///
+/// An argument under `PROBE_MIN_POINTER` is a small number rather than an
+/// address and is left alone, and one that cannot be read is said to be
+/// unreadable rather than skipped - LOA-혼돈의 서곡 hands slot 1 the value
+/// 0x1cd4e, which looks like an address until it is tried.
+///
+/// Compiled in only under the `wipic-probe` feature, because it reads guest
+/// memory on every call to a stub and writes a line per argument.
+#[cfg(feature = "wipic-probe")]
+fn probe_args(context: &dyn WIPICContext, name: &str, args: &[(&str, WIPICWord)]) {
+    use alloc::string::String;
 
-    body.into_body()
+    /// Below this an argument is a number, not an address.
+    const PROBE_MIN_POINTER: WIPICWord = 0x1000;
+    /// How much of what an argument points at to write down.
+    const PROBE_BYTES: usize = 64;
+
+    let mut line = format!("probe {name}");
+    for &(label, address) in args {
+        if address < PROBE_MIN_POINTER {
+            continue;
+        }
+
+        let mut buf = [0u8; PROBE_BYTES];
+        match context.read_bytes(address, &mut buf) {
+            Ok(_) => {
+                let hex: String = buf.iter().map(|byte| format!("{byte:02x}")).collect();
+                let ascii: String = buf
+                    .iter()
+                    .map(|&byte| if (0x20..0x7f).contains(&byte) { byte as char } else { '.' })
+                    .collect();
+                line.push_str(&format!("\n    {label}@{address:#x} {hex} |{ascii}|"));
+            }
+            Err(_) => line.push_str(&format!("\n    {label}@{address:#x} unreadable")),
+        }
+    }
+
+    tracing::warn!("{line}");
 }
 
+#[cfg(not(feature = "wipic-probe"))]
+fn probe_args(_: &dyn WIPICContext, _: &str, _: &[(&str, WIPICWord)]) {}
+
+/// Table 3 - the input method, the same five calls this runtime already serves
+/// at graphics slots 37 to 41 and in the same order.
+///
+/// A title can reach typing through either door. LOA-혼돈의 서곡 uses this one,
+/// and with all five stubbed its name-entry screen took every keypress and
+/// showed nothing: the keys arrive, `CardCanvas::keyPressed` hands them on, the
+/// title asks slot 0 what they spell and is told nothing.
+///
+/// What the slots are is settled by what the title hands them. Slot 0 is given
+/// the typed character - NUM0 arrives as 0x30, NUM8 as 0x38 - and then 157 a
+/// second time, which is the key native's own composition flush uses
+/// (`MC_imHandleInput(157, 502)`, and `provider_key` takes 157 to the -99 this
+/// runtime's UIC text path already flushes with). Slot 1 is given 3, which is
+/// KO in `SUPPORTED_MODES` and what a screen asking for a Korean name would
+/// select. Slots 2, 3 and 4 are called with nothing - their registers still
+/// hold the leftovers of the call before, 0xffffffff and a method address -
+/// which is the shape of the three getters.
 pub fn get_unk3_method_table() -> Vec<WIPICMethodBody> {
     vec![
-        gen_unk_stub(3, 0),
-        gen_unk_stub(3, 1),
-        gen_unk_stub(3, 2),
-        gen_unk_stub(3, 3),
-        gen_unk_stub(3, 4),
+        im::handle_input.into_body(),
+        im::set_current_mode.into_body(),
+        im::get_current_mode.into_body(),
+        im::get_support_mode_count.into_body(),
+        im::get_supported_modes.into_body(),
     ]
+}
+
+/// Table 12's slots, which answer nothing and write down what they were given.
+///
+/// The words they write down are not arguments, whatever they look like. A
+/// title reaches these slots through a veneer - LOA-혼돈의 서곡's is at
+/// `0x121630` - that loads the slot's address into `r0` and branches through
+/// it, so `r0` is this runtime's own SVC stub and `r1`, `r2` and `r3` hold
+/// whatever the caller last left there. The callers settle the arity: the one
+/// at `0x1227e0` moves all four of its own arguments into `r4`, `r5`, `r6` and
+/// `r8` *before* the call and reads them back after, which is what a compiler
+/// writes around a call that takes nothing and clobbers everything. Neither
+/// caller reads the result either.
+///
+/// So a capture of these lines is evidence about the caller, not about the
+/// call, and answering something other than zero changes nothing: answering
+/// slot 1 with `1` eighty-eight times left LOA's frame byte-identical. An
+/// earlier reading here had slot 0 being handed the handset's phone number and
+/// both slots being handed this table's own function pointers - that was the
+/// leftovers, read as arguments.
+///
+/// These are separate functions rather than one generated stub so the probe can
+/// reach guest memory: a closure that hands its `&mut dyn WIPICContext` to the
+/// future it returns cannot be written without naming the lifetime, which a
+/// closure cannot do.
+async fn unk12_slot(index: u32, context: &mut dyn WIPICContext, a0: WIPICWord, a1: WIPICWord, a2: WIPICWord, a3: WIPICWord) -> Result<u32> {
+    tracing::warn!("stub unk12-{index}({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})");
+    probe_args(context, &format!("unk12-{index}"), &[("a0", a0), ("a1", a1), ("a2", a2), ("a3", a3)]);
+
+    Ok(0)
+}
+
+async fn unk12_slot_0(context: &mut dyn WIPICContext, a0: WIPICWord, a1: WIPICWord, a2: WIPICWord, a3: WIPICWord) -> Result<u32> {
+    unk12_slot(0, context, a0, a1, a2, a3).await
+}
+
+async fn unk12_slot_1(context: &mut dyn WIPICContext, a0: WIPICWord, a1: WIPICWord, a2: WIPICWord, a3: WIPICWord) -> Result<u32> {
+    unk12_slot(1, context, a0, a1, a2, a3).await
+}
+
+async fn unk12_slot_2(context: &mut dyn WIPICContext, a0: WIPICWord, a1: WIPICWord, a2: WIPICWord, a3: WIPICWord) -> Result<u32> {
+    unk12_slot(2, context, a0, a1, a2, a3).await
 }
 
 pub fn get_unk12_method_table() -> Vec<WIPICMethodBody> {
-    vec![gen_unk_stub(12, 0), gen_unk_stub(12, 1), gen_unk_stub(12, 2)]
+    vec![unk12_slot_0.into_body(), unk12_slot_1.into_body(), unk12_slot_2.into_body()]
 }
 
-pub fn get_stub_method_table(interface: WIPICWord) -> Vec<WIPICMethodBody> {
-    (0..64).map(|_| gen_stub(interface, "stub")).collect::<Vec<_>>()
+/// One function per `m3dInterf` slot, each handing its number on to
+/// [`m3d::call`]: a body cannot be a closure that keeps the context (see
+/// [`unk12_slot`]), so the number has to be in the function.
+macro_rules! m3d_slot {
+    ($name:ident, $slot:expr) => {
+        #[allow(clippy::too_many_arguments)]
+        async fn $name(
+            context: &mut dyn WIPICContext,
+            a0: WIPICWord,
+            a1: WIPICWord,
+            a2: WIPICWord,
+            a3: WIPICWord,
+            a4: WIPICWord,
+            a5: WIPICWord,
+            a6: WIPICWord,
+            a7: WIPICWord,
+            a8: WIPICWord,
+            a9: WIPICWord,
+            a10: WIPICWord,
+            a11: WIPICWord,
+            a12: WIPICWord,
+        ) -> Result<u32> {
+            m3d::call(context, $slot, [a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12]).await
+        }
+    };
+}
+
+m3d_slot!(m3d_slot_0, 0);
+m3d_slot!(m3d_slot_1, 1);
+m3d_slot!(m3d_slot_2, 2);
+m3d_slot!(m3d_slot_3, 3);
+m3d_slot!(m3d_slot_4, 4);
+m3d_slot!(m3d_slot_5, 5);
+m3d_slot!(m3d_slot_6, 6);
+m3d_slot!(m3d_slot_7, 7);
+m3d_slot!(m3d_slot_8, 8);
+m3d_slot!(m3d_slot_9, 9);
+m3d_slot!(m3d_slot_10, 10);
+m3d_slot!(m3d_slot_11, 11);
+m3d_slot!(m3d_slot_12, 12);
+m3d_slot!(m3d_slot_13, 13);
+m3d_slot!(m3d_slot_14, 14);
+m3d_slot!(m3d_slot_15, 15);
+m3d_slot!(m3d_slot_16, 16);
+m3d_slot!(m3d_slot_17, 17);
+m3d_slot!(m3d_slot_18, 18);
+m3d_slot!(m3d_slot_19, 19);
+m3d_slot!(m3d_slot_20, 20);
+m3d_slot!(m3d_slot_21, 21);
+m3d_slot!(m3d_slot_22, 22);
+m3d_slot!(m3d_slot_23, 23);
+m3d_slot!(m3d_slot_24, 24);
+m3d_slot!(m3d_slot_25, 25);
+m3d_slot!(m3d_slot_26, 26);
+m3d_slot!(m3d_slot_27, 27);
+m3d_slot!(m3d_slot_28, 28);
+m3d_slot!(m3d_slot_29, 29);
+m3d_slot!(m3d_slot_30, 30);
+m3d_slot!(m3d_slot_31, 31);
+m3d_slot!(m3d_slot_32, 32);
+m3d_slot!(m3d_slot_33, 33);
+m3d_slot!(m3d_slot_34, 34);
+m3d_slot!(m3d_slot_35, 35);
+m3d_slot!(m3d_slot_36, 36);
+m3d_slot!(m3d_slot_37, 37);
+m3d_slot!(m3d_slot_38, 38);
+m3d_slot!(m3d_slot_39, 39);
+m3d_slot!(m3d_slot_40, 40);
+m3d_slot!(m3d_slot_41, 41);
+m3d_slot!(m3d_slot_42, 42);
+m3d_slot!(m3d_slot_43, 43);
+m3d_slot!(m3d_slot_44, 44);
+m3d_slot!(m3d_slot_45, 45);
+m3d_slot!(m3d_slot_46, 46);
+m3d_slot!(m3d_slot_47, 47);
+m3d_slot!(m3d_slot_48, 48);
+m3d_slot!(m3d_slot_49, 49);
+m3d_slot!(m3d_slot_50, 50);
+m3d_slot!(m3d_slot_51, 51);
+m3d_slot!(m3d_slot_52, 52);
+m3d_slot!(m3d_slot_53, 53);
+m3d_slot!(m3d_slot_54, 54);
+m3d_slot!(m3d_slot_55, 55);
+m3d_slot!(m3d_slot_56, 56);
+m3d_slot!(m3d_slot_57, 57);
+m3d_slot!(m3d_slot_58, 58);
+m3d_slot!(m3d_slot_59, 59);
+m3d_slot!(m3d_slot_60, 60);
+m3d_slot!(m3d_slot_61, 61);
+m3d_slot!(m3d_slot_62, 62);
+m3d_slot!(m3d_slot_63, 63);
+m3d_slot!(m3d_slot_64, 64);
+m3d_slot!(m3d_slot_65, 65);
+m3d_slot!(m3d_slot_66, 66);
+m3d_slot!(m3d_slot_67, 67);
+m3d_slot!(m3d_slot_68, 68);
+m3d_slot!(m3d_slot_69, 69);
+m3d_slot!(m3d_slot_70, 70);
+m3d_slot!(m3d_slot_71, 71);
+m3d_slot!(m3d_slot_72, 72);
+m3d_slot!(m3d_slot_73, 73);
+m3d_slot!(m3d_slot_74, 74);
+m3d_slot!(m3d_slot_75, 75);
+m3d_slot!(m3d_slot_76, 76);
+m3d_slot!(m3d_slot_77, 77);
+m3d_slot!(m3d_slot_78, 78);
+m3d_slot!(m3d_slot_79, 79);
+m3d_slot!(m3d_slot_80, 80);
+m3d_slot!(m3d_slot_81, 81);
+m3d_slot!(m3d_slot_82, 82);
+m3d_slot!(m3d_slot_83, 83);
+m3d_slot!(m3d_slot_84, 84);
+m3d_slot!(m3d_slot_85, 85);
+m3d_slot!(m3d_slot_86, 86);
+m3d_slot!(m3d_slot_87, 87);
+m3d_slot!(m3d_slot_88, 88);
+m3d_slot!(m3d_slot_89, 89);
+m3d_slot!(m3d_slot_90, 90);
+m3d_slot!(m3d_slot_91, 91);
+m3d_slot!(m3d_slot_92, 92);
+m3d_slot!(m3d_slot_93, 93);
+m3d_slot!(m3d_slot_94, 94);
+m3d_slot!(m3d_slot_95, 95);
+m3d_slot!(m3d_slot_96, 96);
+m3d_slot!(m3d_slot_97, 97);
+
+fn get_m3d_method_body(function_id: u16) -> Option<WIPICMethodBody> {
+    Some(match function_id {
+        0 => m3d_slot_0.into_body(),
+        1 => m3d_slot_1.into_body(),
+        2 => m3d_slot_2.into_body(),
+        3 => m3d_slot_3.into_body(),
+        4 => m3d_slot_4.into_body(),
+        5 => m3d_slot_5.into_body(),
+        6 => m3d_slot_6.into_body(),
+        7 => m3d_slot_7.into_body(),
+        8 => m3d_slot_8.into_body(),
+        9 => m3d_slot_9.into_body(),
+        10 => m3d_slot_10.into_body(),
+        11 => m3d_slot_11.into_body(),
+        12 => m3d_slot_12.into_body(),
+        13 => m3d_slot_13.into_body(),
+        14 => m3d_slot_14.into_body(),
+        15 => m3d_slot_15.into_body(),
+        16 => m3d_slot_16.into_body(),
+        17 => m3d_slot_17.into_body(),
+        18 => m3d_slot_18.into_body(),
+        19 => m3d_slot_19.into_body(),
+        20 => m3d_slot_20.into_body(),
+        21 => m3d_slot_21.into_body(),
+        22 => m3d_slot_22.into_body(),
+        23 => m3d_slot_23.into_body(),
+        24 => m3d_slot_24.into_body(),
+        25 => m3d_slot_25.into_body(),
+        26 => m3d_slot_26.into_body(),
+        27 => m3d_slot_27.into_body(),
+        28 => m3d_slot_28.into_body(),
+        29 => m3d_slot_29.into_body(),
+        30 => m3d_slot_30.into_body(),
+        31 => m3d_slot_31.into_body(),
+        32 => m3d_slot_32.into_body(),
+        33 => m3d_slot_33.into_body(),
+        34 => m3d_slot_34.into_body(),
+        35 => m3d_slot_35.into_body(),
+        36 => m3d_slot_36.into_body(),
+        37 => m3d_slot_37.into_body(),
+        38 => m3d_slot_38.into_body(),
+        39 => m3d_slot_39.into_body(),
+        40 => m3d_slot_40.into_body(),
+        41 => m3d_slot_41.into_body(),
+        42 => m3d_slot_42.into_body(),
+        43 => m3d_slot_43.into_body(),
+        44 => m3d_slot_44.into_body(),
+        45 => m3d_slot_45.into_body(),
+        46 => m3d_slot_46.into_body(),
+        47 => m3d_slot_47.into_body(),
+        48 => m3d_slot_48.into_body(),
+        49 => m3d_slot_49.into_body(),
+        50 => m3d_slot_50.into_body(),
+        51 => m3d_slot_51.into_body(),
+        52 => m3d_slot_52.into_body(),
+        53 => m3d_slot_53.into_body(),
+        54 => m3d_slot_54.into_body(),
+        55 => m3d_slot_55.into_body(),
+        56 => m3d_slot_56.into_body(),
+        57 => m3d_slot_57.into_body(),
+        58 => m3d_slot_58.into_body(),
+        59 => m3d_slot_59.into_body(),
+        60 => m3d_slot_60.into_body(),
+        61 => m3d_slot_61.into_body(),
+        62 => m3d_slot_62.into_body(),
+        63 => m3d_slot_63.into_body(),
+        64 => m3d_slot_64.into_body(),
+        65 => m3d_slot_65.into_body(),
+        66 => m3d_slot_66.into_body(),
+        67 => m3d_slot_67.into_body(),
+        68 => m3d_slot_68.into_body(),
+        69 => m3d_slot_69.into_body(),
+        70 => m3d_slot_70.into_body(),
+        71 => m3d_slot_71.into_body(),
+        72 => m3d_slot_72.into_body(),
+        73 => m3d_slot_73.into_body(),
+        74 => m3d_slot_74.into_body(),
+        75 => m3d_slot_75.into_body(),
+        76 => m3d_slot_76.into_body(),
+        77 => m3d_slot_77.into_body(),
+        78 => m3d_slot_78.into_body(),
+        79 => m3d_slot_79.into_body(),
+        80 => m3d_slot_80.into_body(),
+        81 => m3d_slot_81.into_body(),
+        82 => m3d_slot_82.into_body(),
+        83 => m3d_slot_83.into_body(),
+        84 => m3d_slot_84.into_body(),
+        85 => m3d_slot_85.into_body(),
+        86 => m3d_slot_86.into_body(),
+        87 => m3d_slot_87.into_body(),
+        88 => m3d_slot_88.into_body(),
+        89 => m3d_slot_89.into_body(),
+        90 => m3d_slot_90.into_body(),
+        91 => m3d_slot_91.into_body(),
+        92 => m3d_slot_92.into_body(),
+        93 => m3d_slot_93.into_body(),
+        94 => m3d_slot_94.into_body(),
+        95 => m3d_slot_95.into_body(),
+        96 => m3d_slot_96.into_body(),
+        97 => m3d_slot_97.into_body(),
+        _ => return None,
+    })
 }
 
 pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPICMethodBody> {
+    get_served_method_body(table_id, function_id).or_else(|| (function_id < WIPIC_TABLE_FUNCTIONS).then(|| gen_missing(table_id, function_id)))
+}
+
+/// The body this runtime has written for a slot, if it has written one.
+pub fn get_served_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPICMethodBody> {
     match table_id {
         WIPICTableId::Kernel => match WIPICKernelMethodId::try_from(function_id).ok()? {
             WIPICKernelMethodId::Printk => Some(kernel::printk.into_body()),
             WIPICKernelMethodId::Sprintk => Some(kernel::sprintk.into_body()),
-            WIPICKernelMethodId::GetExecNames => Some(gen_stub(2, "MC_knlGetExecNames")),
-            WIPICKernelMethodId::Execute => Some(gen_stub(3, "MC_knlExecute")),
-            WIPICKernelMethodId::Mexecute => Some(gen_stub(4, "MC_knlMExecute")),
-            WIPICKernelMethodId::Load => Some(gen_stub(5, "MC_knlLoad")),
-            WIPICKernelMethodId::Mload => Some(gen_stub(6, "MC_knlMLoad")),
+            WIPICKernelMethodId::GetExecNames => Some(kernel::get_exec_names.into_body()),
+            WIPICKernelMethodId::Execute => Some(kernel::execute.into_body()),
+            WIPICKernelMethodId::Mexecute => Some(kernel::mexecute.into_body()),
+            WIPICKernelMethodId::Load => Some(kernel::load.into_body()),
+            WIPICKernelMethodId::Mload => Some(kernel::mload.into_body()),
             WIPICKernelMethodId::Exit => Some(kernel::exit.into_body()),
-            WIPICKernelMethodId::ProgramStop => Some(gen_stub(8, "MC_knlProgramStop")),
+            WIPICKernelMethodId::ProgramStop => Some(kernel::program_stop.into_body()),
             WIPICKernelMethodId::GetCurProgramId => Some(kernel::get_cur_program_id.into_body()),
-            WIPICKernelMethodId::GetParentProgramId => Some(gen_stub(10, "MC_knlGetParentProgramID")),
-            WIPICKernelMethodId::GetAppManagerId => Some(gen_stub(11, "MC_knlGetAppManagerID")),
-            WIPICKernelMethodId::GetProgramInfo => Some(gen_stub(12, "MC_knlGetProgramInfo")),
-            WIPICKernelMethodId::GetAccessLevel => Some(gen_stub(13, "MC_knlGetAccessLevel")),
+            WIPICKernelMethodId::GetParentProgramId => Some(kernel::get_parent_program_id.into_body()),
+            WIPICKernelMethodId::GetAppManagerId => Some(kernel::get_app_manager_id.into_body()),
+            WIPICKernelMethodId::GetProgramInfo => Some(kernel::get_program_info.into_body()),
+            WIPICKernelMethodId::GetAccessLevel => Some(kernel::get_access_level.into_body()),
             WIPICKernelMethodId::GetProgramName => Some(kernel::get_program_name.into_body()),
-            WIPICKernelMethodId::CreateSharedBuf => Some(gen_stub(15, "MC_knlCreateSharedBuf")),
-            WIPICKernelMethodId::DestroySharedBuf => Some(gen_stub(16, "MC_knlDestroySharedBuf")),
-            WIPICKernelMethodId::GetSharedBuf => Some(gen_stub(17, "MC_knlGetSharedBuf")),
-            WIPICKernelMethodId::GetSharedBufSize => Some(gen_stub(18, "MC_knlGetSharedBufSize")),
-            WIPICKernelMethodId::ResizeSharedBuf => Some(gen_stub(19, "MC_knlResizeSharedBuf")),
+            WIPICKernelMethodId::CreateSharedBuf => Some(shared_buf::create_shared_buf.into_body()),
+            WIPICKernelMethodId::DestroySharedBuf => Some(shared_buf::destroy_shared_buf.into_body()),
+            WIPICKernelMethodId::GetSharedBuf => Some(shared_buf::get_shared_buf.into_body()),
+            WIPICKernelMethodId::GetSharedBufSize => Some(shared_buf::get_shared_buf_size.into_body()),
+            WIPICKernelMethodId::ResizeSharedBuf => Some(shared_buf::resize_shared_buf.into_body()),
             WIPICKernelMethodId::Alloc => Some(kernel::alloc.into_body()),
             WIPICKernelMethodId::Calloc => Some(kernel::calloc.into_body()),
             WIPICKernelMethodId::Free => Some(kernel::free.into_body()),
@@ -398,7 +855,7 @@ pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPIC
             WIPICKernelMethodId::Reserved1 => None,
             WIPICKernelMethodId::Reserved2 => Some(gen_stub(34, "MC_knlReserved2")),
             WIPICKernelMethodId::Reserved3 => Some(gen_stub(35, "MC_knlReserved3")),
-            WIPICKernelMethodId::Reserved4 => Some(gen_stub(36, "MC_knlReserved4")),
+            WIPICKernelMethodId::Reserved4 => Some(kernel::get_dll_interface.into_body()),
             WIPICKernelMethodId::Reserved5 => Some(gen_stub(37, "MC_knlReserved5")),
             WIPICKernelMethodId::Reserved6 => Some(gen_stub(38, "MC_knlReserved6")),
             WIPICKernelMethodId::Reserved7 => Some(gen_stub(39, "MC_knlReserved7")),
@@ -438,7 +895,7 @@ pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPIC
             WIPICGraphicsMethodId::CreateOffscreenFramebuffer => Some(graphics::create_offscreen_framebuffer.into_body()),
             WIPICGraphicsMethodId::InitContext => Some(graphics::init_context.into_body()),
             WIPICGraphicsMethodId::SetContext => Some(graphics::set_context.into_body()),
-            WIPICGraphicsMethodId::GetContext => Some(gen_stub(7, "MC_grpGetContext")),
+            WIPICGraphicsMethodId::GetContext => Some(graphics::get_context.into_body()),
             WIPICGraphicsMethodId::PutPixel => Some(graphics::put_pixel.into_body()),
             WIPICGraphicsMethodId::DrawLine => Some(graphics::draw_line.into_body()),
             WIPICGraphicsMethodId::DrawRect => Some(graphics::draw_rect.into_body()),
@@ -449,7 +906,7 @@ pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPIC
             WIPICGraphicsMethodId::DrawArc => Some(graphics::draw_arc.into_body()),
             WIPICGraphicsMethodId::FillArc => Some(graphics::fill_arc.into_body()),
             WIPICGraphicsMethodId::DrawString => Some(graphics::draw_string.into_body()),
-            WIPICGraphicsMethodId::DrawUnicodeString => Some(gen_stub(18, "MC_grpDrawUnicodeString")),
+            WIPICGraphicsMethodId::DrawUnicodeString => Some(graphics::draw_unicode_string.into_body()),
             WIPICGraphicsMethodId::GetRgbPixels => Some(graphics::get_rgb_pixels.into_body()),
             WIPICGraphicsMethodId::SetRgbPixels => Some(graphics::set_rgb_pixels.into_body()),
             WIPICGraphicsMethodId::FlushLcd => Some(graphics::flush_lcd.into_body()),
@@ -462,19 +919,19 @@ pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPIC
             WIPICGraphicsMethodId::GetFontAscent => Some(graphics::get_font_ascent.into_body()),
             WIPICGraphicsMethodId::GetFontDescent => Some(graphics::get_font_descent.into_body()),
             WIPICGraphicsMethodId::GetStringWidth => Some(graphics::get_string_width.into_body()),
-            WIPICGraphicsMethodId::GetUnicodeStringWidth => Some(gen_stub(31, "MC_grpGetUnicodeStringWidth")),
+            WIPICGraphicsMethodId::GetUnicodeStringWidth => Some(graphics::get_unicode_string_width.into_body()),
             WIPICGraphicsMethodId::CreateImage => Some(graphics::create_image.into_body()),
             WIPICGraphicsMethodId::DestroyImage => Some(graphics::destroy_image.into_body()),
-            WIPICGraphicsMethodId::DecodeNextImage => Some(gen_stub(34, "MC_grpDecodeNextImage")),
-            WIPICGraphicsMethodId::EncodeImage => Some(gen_stub(35, "MC_grpEncodeImage")),
+            WIPICGraphicsMethodId::DecodeNextImage => Some(graphics::decode_next_image.into_body()),
+            WIPICGraphicsMethodId::EncodeImage => Some(graphics::encode_image.into_body()),
             WIPICGraphicsMethodId::PostEvent => Some(graphics::post_event.into_body()),
-            WIPICGraphicsMethodId::HandleInput => Some(gen_stub(37, "MC_imHandleInput")),
-            WIPICGraphicsMethodId::SetCurrentMode => Some(gen_stub(38, "MC_imSetCurrentMode")),
-            WIPICGraphicsMethodId::GetCurrentMode => Some(gen_stub(39, "MC_imGetCurrentMode")),
-            WIPICGraphicsMethodId::GetSupportModeCount => Some(gen_stub(40, "MC_imGetSupportModeCount")),
-            WIPICGraphicsMethodId::GetSupportedModes => Some(gen_stub(41, "MC_imGetSupportedModes")),
-            WIPICGraphicsMethodId::FillPolygon => Some(gen_stub(42, "MC_grpFillPolygon")),
-            WIPICGraphicsMethodId::DrawPolygon => Some(gen_stub(43, "MC_grpDrawPolygon")),
+            WIPICGraphicsMethodId::HandleInput => Some(im::handle_input.into_body()),
+            WIPICGraphicsMethodId::SetCurrentMode => Some(im::set_current_mode.into_body()),
+            WIPICGraphicsMethodId::GetCurrentMode => Some(im::get_current_mode.into_body()),
+            WIPICGraphicsMethodId::GetSupportModeCount => Some(im::get_support_mode_count.into_body()),
+            WIPICGraphicsMethodId::GetSupportedModes => Some(im::get_supported_modes.into_body()),
+            WIPICGraphicsMethodId::FillPolygon => Some(graphics::fill_polygon.into_body()),
+            WIPICGraphicsMethodId::DrawPolygon => Some(graphics::draw_polygon.into_body()),
             WIPICGraphicsMethodId::ShowAnnunciator => Some(gen_stub(44, "OEMC_grpShowAnnunciator")),
             WIPICGraphicsMethodId::GetAnnunciatorInfo => Some(gen_stub(45, "OEMC_grpGetAnnunciatorInfo")),
             WIPICGraphicsMethodId::SetAnnunciatorIcon => Some(gen_stub(46, "OEMC_grp  SetAnnunciatorIcon")),
@@ -493,20 +950,88 @@ pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPIC
             WIPICGraphicsMethodId::GetImageInfo => Some(gen_stub(59, "OEMC_grpGetImageInfo")),
         },
         WIPICTableId::Interface3 => get_unk3_method_table().into_iter().nth(function_id as usize),
-        WIPICTableId::Interface4 => {
-            if function_id < 64 {
-                Some(gen_stub(4, "stub"))
-            } else {
-                None
-            }
-        }
-        WIPICTableId::Interface5 => {
-            if function_id < 64 {
-                Some(gen_stub(5, "stub"))
-            } else {
-                None
-            }
-        }
+        // Table 5 is the record database - KTF's other storage API. See
+        // `wie_wipi_c::api::record_database` for what each slot is and how the
+        // numbers were settled.
+        WIPICTableId::Interface4 => match function_id {
+            0 => Some(record_database::open.into_body()),
+            1 => Some(record_database::close.into_body()),
+            2 => Some(record_database::delete_database.into_body()),
+            3 => Some(record_database::insert_record.into_body()),
+            4 => Some(record_database::select_record.into_body()),
+            5 => Some(record_database::update_record.into_body()),
+            6 => Some(record_database::delete_record.into_body()),
+            7 => Some(record_database::list_records.into_body()),
+            10 => Some(record_database::number_of_records.into_body()),
+            11 => Some(record_database::record_size.into_body()),
+            12 => Some(database::available_storage_ktf.into_body()),
+            // A slot nothing has shown the meaning of. Name the number rather
+            // than the table: it is the only thing that says which call it was,
+            // and one label for sixty-four functions says nothing at all.
+            _ => (function_id < WIPIC_TABLE_FUNCTIONS).then(|| gen_stub(function_id as _, "table 5 (record database)")),
+        },
+        WIPICTableId::Interface5 => (function_id < WIPIC_TABLE_FUNCTIONS).then(|| gen_stub(function_id as _, "table 6")),
+        // The extension library's four calls, in the order the reference
+        // writes them and the order 마스터오브소드4 indexes them.
+        WIPICTableId::MxUserMem => match function_id {
+            0 => Some(mxusermem::add.into_body()),
+            1 => Some(mxusermem::alloc.into_body()),
+            2 => Some(mxusermem::realloc.into_body()),
+            3 => Some(mxusermem::free.into_body()),
+            _ => (function_id < WIPIC_TABLE_FUNCTIONS).then(|| gen_missing(WIPICTableId::MxUserMem, function_id)),
+        },
+        // The slots 템페스트 calls; the rest of the table is unknown.
+        WIPICTableId::FastRelay => match function_id {
+            2 => Some(fastrelay::init.into_body()),
+            3 => Some(fastrelay::connect.into_body()),
+            4 => Some(fastrelay::send.into_body()),
+            5 => Some(fastrelay::recv.into_body()),
+            6 => Some(fastrelay::close.into_body()),
+            7 => Some(fastrelay::connected.into_body()),
+            _ => (function_id < WIPIC_TABLE_FUNCTIONS).then(|| gen_missing(WIPICTableId::FastRelay, function_id)),
+        },
+        // A native module's file calls, in the order LGT numbers them from
+        // `MC_fsOpen`. O2JAM's own wrappers settle it: 160 is handed a name, a
+        // mode and a one; 163 closes what 160 opened; 161 and 162 move bytes;
+        // 164 is handed its origin as 0, 1 or 2; 165 a name and a buffer it
+        // reads the attributes and the size back from; 166, 168 and 169 a name
+        // and a one, which is remove, make and remove a directory.
+        WIPICTableId::NativeModule => match function_id {
+            160 => Some(filesystem::open.into_body()),
+            161 => Some(filesystem::read.into_body()),
+            162 => Some(filesystem::write.into_body()),
+            163 => Some(filesystem::close.into_body()),
+            164 => Some(filesystem::seek.into_body()),
+            165 => Some(filesystem::file_attribute.into_body()),
+            166 => Some(filesystem::remove.into_body()),
+            167 => Some(filesystem::rename.into_body()),
+            168 => Some(filesystem::mkdir.into_body()),
+            169 => Some(filesystem::rmdir.into_body()),
+            170 => Some(filesystem::list.into_body()),
+            // Its sound, in the order LGT numbers it from `MC_mdaClipCreate`
+            // as far as O2JAM's calls show. 173 is handed a type, a size and
+            // its own callback, and the clip it answers is what the rest are
+            // handed; 174 frees it; 177 is given the clip, the data and its
+            // length and checked for an answer above zero; 183 is given the
+            // clip and whether to repeat; 184 and 185 are what its
+            // `pauseClet` and `resumeClet` call with each clip; and 186 is
+            // called on each clip before it is freed. 182 comes on a fresh
+            // clip before its data does, and is taken for a clear. 228 and 229
+            // stand apart from the rest: the clip's volume, read back on a
+            // scale of a hundred and set on the same one.
+            173 => Some(media::clip_create.into_body()),
+            174 => Some(media::clip_free.into_body()),
+            177 => Some(media::clip_put_data.into_body()),
+            182 => Some(media::clip_clear_data.into_body()),
+            183 => Some(media::play.into_body()),
+            184 => Some(media::pause.into_body()),
+            185 => Some(media::resume.into_body()),
+            186 => Some(media::stop.into_body()),
+            228 => Some(media::clip_get_volume.into_body()),
+            229 => Some(media::clip_set_volume.into_body()),
+            _ => None,
+        },
+        WIPICTableId::M3d => get_m3d_method_body(function_id),
         WIPICTableId::Database => match WIPICDatabaseMethodId::try_from(function_id).ok()? {
             WIPICDatabaseMethodId::OpenDatabase => Some(database::open_database.into_body()),
             WIPICDatabaseMethodId::StreamRead => Some(database::stream_read.into_body()),
@@ -516,14 +1041,19 @@ pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPIC
             WIPICDatabaseMethodId::UpdateRecord => Some(database::stat_by_name_ktf.into_body()),
             WIPICDatabaseMethodId::DeleteRecord => Some(database::delete_record_ktf.into_body()),
             WIPICDatabaseMethodId::ListRecord => Some(database::list_record.into_body()),
-            WIPICDatabaseMethodId::SortRecords => Some(gen_stub(8, "MC_dbSortRecords")),
-            WIPICDatabaseMethodId::GetAccessMode => Some(gen_stub(9, "MC_dbGetAccessMode")),
-            WIPICDatabaseMethodId::GetNumberOfRecords => Some(gen_stub(10, "MC_dbGetNumberOfRecords")),
-            WIPICDatabaseMethodId::GetRecordSize => Some(gen_stub(11, "MC_dbGetRecordSize")),
-            WIPICDatabaseMethodId::ListDatabases => Some(gen_stub(12, "MC_dbListDataBase")),
+            WIPICDatabaseMethodId::MakeDirectory => Some(filesystem::mkdir.into_body()),
+            WIPICDatabaseMethodId::GetAccessMode => Some(database::get_access_mode_ktf.into_body()),
+            WIPICDatabaseMethodId::GetNumberOfRecords => Some(database::get_number_of_records_ktf.into_body()),
+            WIPICDatabaseMethodId::GetRecordSize => Some(database::get_record_size_ktf.into_body()),
+            WIPICDatabaseMethodId::Available => Some(database::available_storage_ktf.into_body()),
             WIPICDatabaseMethodId::Unk13 => Some(gen_stub(13, "MC_dbUnk13")),
             WIPICDatabaseMethodId::Unk14 => Some(gen_stub(14, "MC_dbUnk14")),
-            WIPICDatabaseMethodId::Unk15 => Some(gen_stub(15, "MC_dbUnk15")),
+            // The same question slot 11 answers, asked at another slot. 리얼싸커
+            // 2009 will not read a save until it has been told how big it is:
+            // it opens the record, seeks to the front, asks here twice, and
+            // with a zero for an answer closes the record unread and writes a
+            // fresh header over it. Answered the size, it reads the save back.
+            WIPICDatabaseMethodId::Unk15 => Some(database::get_record_size_ktf.into_body()),
             WIPICDatabaseMethodId::Exists => Some(database::exists_database_ktf.into_body()),
         },
         WIPICTableId::Interface7 => {
@@ -533,6 +1063,7 @@ pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPIC
                 None
             }
         }
+        WIPICTableId::Uic if KTF_UIC_UNKNOWN_SLOTS.contains(&function_id) => None,
         WIPICTableId::Uic => get_uic_method_table().into_iter().nth(function_id as usize),
         WIPICTableId::Media => get_media_method_table().into_iter().nth(function_id as usize),
         WIPICTableId::Net => get_net_method_table().into_iter().nth(function_id as usize),
@@ -572,5 +1103,118 @@ pub fn get_method_body(table_id: WIPICTableId, function_id: u16) -> Option<WIPIC
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TABLES: [WIPICTableId; 18] = [
+        WIPICTableId::Kernel,
+        WIPICTableId::Util,
+        WIPICTableId::Misc,
+        WIPICTableId::Graphics,
+        WIPICTableId::Interface3,
+        WIPICTableId::Interface4,
+        WIPICTableId::Interface5,
+        WIPICTableId::Database,
+        WIPICTableId::Interface7,
+        WIPICTableId::Uic,
+        WIPICTableId::Media,
+        WIPICTableId::Net,
+        WIPICTableId::Interface11,
+        WIPICTableId::Interface12,
+        WIPICTableId::Interface13,
+        WIPICTableId::Interface14,
+        WIPICTableId::Interface15,
+        WIPICTableId::Interface16,
+    ];
+
+    #[test]
+    fn every_slot_a_table_hands_out_has_something_behind_it() {
+        for table_id in TABLES {
+            for function_id in 0..WIPIC_TABLE_FUNCTIONS {
+                assert!(
+                    get_method_body(table_id, function_id).is_some(),
+                    "table {} function {function_id} has no body, so its slot would be a zero to branch to",
+                    table_id as u32
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_slots_the_demon_hunter_authenticates_through_are_served() {
+        // Net slot 30 is the named connect its authentication calls, 31 the
+        // write that carries the request and 32 the read that brings the answer
+        // back. A refusal at 30 is a title waiting for a callback it will never
+        // get; at 31 it is one asking to send the same 48 bytes until it gives
+        // up; at 32 it is one that asked and is never answered.
+        assert!(get_served_method_body(WIPICTableId::Net, 30).is_some());
+        assert!(get_served_method_body(WIPICTableId::Net, 31).is_some());
+        assert!(get_served_method_body(WIPICTableId::Net, 32).is_some());
+    }
+
+    #[test]
+    fn an_interface_longer_than_a_table_keeps_its_last_function() {
+        // The kernel interface has 65 of them, so a table length applied as a
+        // cap would take one away that this runtime serves.
+        assert!(get_served_method_body(WIPICTableId::Kernel, WIPIC_TABLE_FUNCTIONS).is_some());
+        assert!(get_method_body(WIPICTableId::Kernel, WIPIC_TABLE_FUNCTIONS).is_some());
+    }
+
+    /// What each entry of [`get_uic_method_table`] calls, read from this file:
+    /// the bodies are closures and cannot say which function they are.
+    fn uic_table_entries() -> Vec<&'static str> {
+        let source = include_str!("method_table.rs");
+        let start = source.find("pub fn get_uic_method_table()").unwrap();
+        let body = &source[start..];
+        let body = &body[body.find("vec![").unwrap() + 5..body.find("\n    ]\n").unwrap()];
+
+        body.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| line.trim_end_matches(','))
+            .collect()
+    }
+
+    #[test]
+    fn the_uic_slots_the_minigame_titles_call_are_the_ones_they_mean() {
+        // Read from 미니게임천국2/3's name entry and from the date reads of
+        // 010100D5 and 이타루스전기 - what each call passes and what it does
+        // with the answer. See `get_uic_method_table`.
+        let entries = uic_table_entries();
+        for (slot, entry) in [
+            (2, "uic::create.into_body()"),
+            (5, "uic::paint.into_body()"),
+            (8, "uic::handle_event.into_body()"),
+            (9, "uic::configure.into_body()"),
+            (11, "uic::set_enable.into_body()"),
+            (15, "uic::set_font.into_body()"),
+            (26, "uic::get_time.into_body()"),
+            (32, "uic::insert_text.into_body()"),
+            (33, "uic::delete_text.into_body()"),
+            (35, "uic::set_max_text_size.into_body()"),
+            (36, "uic::get_text_size.into_body()"),
+            (37, "uic::get_text.into_body()"),
+        ] {
+            assert_eq!(entries[slot], entry, "uic slot {slot}");
+        }
+    }
+
+    #[test]
+    fn the_uic_slots_no_title_has_named_are_not_served() {
+        let entries = uic_table_entries();
+        for slot in KTF_UIC_UNKNOWN_SLOTS {
+            assert_eq!(entries[slot as usize], format!("gen_missing(WIPICTableId::Uic, {slot})"));
+            assert!(get_served_method_body(WIPICTableId::Uic, slot).is_none());
+            assert!(get_method_body(WIPICTableId::Uic, slot).is_some());
+        }
+    }
+
+    #[test]
+    fn nothing_answers_past_the_end_of_a_table() {
+        assert!(get_method_body(WIPICTableId::Net, WIPIC_TABLE_FUNCTIONS).is_none());
     }
 }
