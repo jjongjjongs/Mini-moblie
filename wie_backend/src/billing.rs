@@ -1738,10 +1738,19 @@ pub fn lgt_local_big_endian_record_next_response(request: &[u8]) -> Option<Vec<u
 /// player chose into the inventory and shows 물건을 구입하였습니다; 7 to 10
 /// and 18 are refusals; anything else, the zero a bare record carries
 /// included, does nothing at all, which is what pressing 구매 did.
+///
+/// Every request also puts the connection's state (`0x1508361`) at 4,
+/// awaiting, and the shop takes no keys until a reply - any reply - comes in
+/// and the read callback (`0x17250`) puts it back at 2. That includes 800, a
+/// bare four bytes the title sends now and then without timing it, which no
+/// handler answers and below the thousand the record answer keeps to - so a
+/// few purchases in, the shop stopped answering keys. It is answered at 801,
+/// which the dispatcher has no arm for and returns from as it does for any.
 fn lar_response(request: &[u8]) -> Option<Vec<u8>> {
     const ACCOUNT_REQUEST: u16 = 1006;
     const NOTICE_REQUEST: u16 = 1002;
     const PURCHASE_REQUEST: u16 = 3000;
+    const CHECK_REQUEST: u16 = 800;
     /// The length, the command, the name and the price.
     const PURCHASE_SIZE: usize = 4 + 20 + 2;
     /// What 3001 takes for a purchase made.
@@ -1769,6 +1778,7 @@ fn lar_response(request: &[u8]) -> Option<Vec<u8>> {
             body[1..1 + NOTICE.len()].copy_from_slice(NOTICE);
             body
         }
+        CHECK_REQUEST if request.len() == 4 => vec![0u8; 0x20],
         PURCHASE_REQUEST if request.len() == PURCHASE_SIZE => {
             let mut body = vec![0u8; 0x20];
             body[0] = PURCHASED;
@@ -12737,6 +12747,12 @@ mod tests {
         let answer = lgt_local_big_endian_record_next_response(&purchase).unwrap();
         assert_eq!(u16::from_be_bytes([answer[2], answer[3]]), 3001);
         assert_eq!(answer[4], 1);
+
+        // And the bare 800 is answered too, or the shop waits on it for good.
+        let check = [0x00, 0x04, 0x03, 0x20];
+        let answer = lgt_local_big_endian_record_next_response(&check).unwrap();
+        assert_eq!(u16::from_be_bytes([answer[0], answer[1]]) as usize, answer.len() - 2);
+        assert_eq!(u16::from_be_bytes([answer[2], answer[3]]), 801);
 
         // 레전드오브마스터2's own 1000 is not taken for it, and is still answered
         // at 1002.
