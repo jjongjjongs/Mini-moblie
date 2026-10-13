@@ -976,6 +976,10 @@ struct LgtBillingGateway {
     /// Whether an answer has been queued that no read has been turned away
     /// from yet. See [`LgtBillingGateway::read`].
     settling: bool,
+    /// Whether this connection opened with 라르-판도라의아이들's login, so its
+    /// records are answered at the request plus one throughout. See
+    /// `wie_backend::billing::lgt_local_big_endian_record_next_response`.
+    answers_next: bool,
 }
 
 impl LgtBillingGateway {
@@ -983,6 +987,7 @@ impl LgtBillingGateway {
         Self {
             pending: Vec::new(),
             settling: false,
+            answers_next: false,
         }
     }
 }
@@ -996,7 +1001,15 @@ impl wie_backend::LocalConnection for LgtBillingGateway {
             return;
         };
 
-        let Some(response) = wie_backend::billing::response(request) else {
+        if wie_backend::billing::lgt_big_endian_login_names_its_handset(request) {
+            self.answers_next = true;
+        }
+        let response = if self.answers_next {
+            wie_backend::billing::lgt_local_big_endian_record_next_response(request).or_else(|| wie_backend::billing::response(request))
+        } else {
+            wie_backend::billing::response(request)
+        };
+        let Some(response) = response else {
             // Trace the frame itself, not just its length. An unanswered
             // request is the one worth seeing: it is how a title's protocol
             // gets read off a device log in the first place, and a bare length

@@ -1692,6 +1692,67 @@ pub fn lgt_local_ens_record_response(request: &[u8]) -> Option<Vec<u8>> {
 /// to be the record in hand, and the command has to be one a title sends - the
 /// even ones - rather than one it is sent.
 pub fn lgt_local_big_endian_record_response(request: &[u8]) -> Option<Vec<u8>> {
+    big_endian_record_response(request, BigEndianRecordAnswer::ByShape)
+}
+
+/// [`lgt_local_big_endian_record_response`] for a peer known to read every
+/// answer at the request plus one - round hundreds included.
+///
+/// 라르-판도라의아이들 (`0002E733`) reaches the same `211.189.18.116:9423` and
+/// opens its shop with the same command, a thousand, so the shape rule that
+/// answers 레전드오브마스터2 at 1002 answered it there too. Its dispatcher at
+/// `0x147a0` compares against 1001, 1003, 1005, 1007, 2001 ... 7001 - every
+/// one odd, none of them 1002 - so the answer went unread, the title printed
+/// `받은값 1002` and sat on the socket. 1001 is its login handler (`0x1497c`):
+/// it reads nothing of the reply and asks 1006, whose answer 1007 (`0x14b78`)
+/// takes a ten-byte id, the gift count and the notice count off the body.
+///
+/// The two titles cannot be told apart by any one later request, so the
+/// gateway tells them apart by the login that opens each connection - see
+/// [`lgt_big_endian_login_names_its_handset`] - and answers through this from
+/// then on.
+pub fn lgt_local_big_endian_record_next_response(request: &[u8]) -> Option<Vec<u8>> {
+    big_endian_record_response(request, BigEndianRecordAnswer::Next)
+}
+
+/// Whether `request` is the login 라르-판도라의아이들 opens its game server
+/// connection with: a 52-byte record under command 1000 whose body starts with
+/// the handset's number as ASCII digits in an eleven-byte field.
+///
+/// Its builder (`0xf926`) writes the length, the command, the number from
+/// `0x151005a`, a ten-byte id, the client version 20000 and the login kind.
+/// 레전드오브마스터2's own 1000 is 45 bytes with zeros where the number would
+/// be, so this does not take it.
+pub fn lgt_big_endian_login_names_its_handset(request: &[u8]) -> bool {
+    const LENGTH: usize = 52;
+    const LOGIN: u16 = 1000;
+    /// The number's field, NUL-padded.
+    const NUMBER: core::ops::Range<usize> = 4..15;
+    /// Fewer digits than any handset number has.
+    const LEAST_DIGITS: usize = 7;
+
+    if request.len() != LENGTH
+        || u16::from_be_bytes([request[0], request[1]]) as usize != LENGTH
+        || u16::from_be_bytes([request[2], request[3]]) != LOGIN
+    {
+        return false;
+    }
+    let field = &request[NUMBER];
+    let digits = field.iter().take_while(|byte| byte.is_ascii_digit()).count();
+    digits >= LEAST_DIGITS && field[digits..].iter().all(|&byte| byte == 0)
+}
+
+/// Which command a big-endian record is answered under.
+#[derive(Clone, Copy)]
+enum BigEndianRecordAnswer {
+    /// Two past a round hundred, one past anything else: what each title seen
+    /// on this framing so far reads, before a connection has said which it is.
+    ByShape,
+    /// Always one past.
+    Next,
+}
+
+fn big_endian_record_response(request: &[u8], rule: BigEndianRecordAnswer) -> Option<Vec<u8>> {
     /// A length and a command, which is what the title reads before anything
     /// else.
     const HEADER: usize = 4;
@@ -1753,10 +1814,9 @@ pub fn lgt_local_big_endian_record_response(request: &[u8]) -> Option<Vec<u8>> {
     // differ rather than off a list of commands seen so far.
     const LOM2_REQUEST_STEP: u16 = 100;
 
-    let answer = if command.is_multiple_of(LOM2_REQUEST_STEP) {
-        command + 2
-    } else {
-        command + 1
+    let answer = match rule {
+        BigEndianRecordAnswer::ByShape if command.is_multiple_of(LOM2_REQUEST_STEP) => command + 2,
+        BigEndianRecordAnswer::ByShape | BigEndianRecordAnswer::Next => command + 1,
     };
 
     let mut response = vec![0u8; HEADER + BODY + TAIL];
@@ -12558,6 +12618,45 @@ mod tests {
         let mut below = request;
         below[2..4].copy_from_slice(&998u16.to_be_bytes());
         assert_eq!(lgt_local_big_endian_record_response(&below), None);
+    }
+
+    /// 라르-판도라의아이들's shop login, byte for byte off a device log, and
+    /// what it is answered with once the connection is known to be its own.
+    #[test]
+    fn lar_is_answered_at_the_request_plus_one() {
+        use super::{lgt_big_endian_login_names_its_handset, lgt_local_big_endian_record_next_response, lgt_local_big_endian_record_response};
+
+        const LOGIN: [u8; 52] = [
+            0x00, 0x34, 0x03, 0xe8, 0x31, 0x30, 0x38, 0x35, 0x33, 0x30, 0x30, 0x38, 0x34, 0x38, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x4e, 0x20, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x2c, 0x00, 0x00,
+            0x00, 0x04, 0x00, 0x00, 0x00, 0x02,
+        ];
+        assert!(lgt_big_endian_login_names_its_handset(&LOGIN));
+
+        // 1001, the login handler at 0x1497c; 1002 is nowhere in its chain.
+        let answer = lgt_local_big_endian_record_next_response(&LOGIN).unwrap();
+        assert_eq!(u16::from_be_bytes([answer[2], answer[3]]), 1001);
+
+        // Then 1006, an eight-byte record, read back at 1007 with a zero id
+        // and no gifts or notices.
+        let next = [0x00, 0x08, 0x03, 0xee, 0x00, 0x01, 0x8a, 0x92];
+        let answer = lgt_local_big_endian_record_next_response(&next).unwrap();
+        assert_eq!(u16::from_be_bytes([answer[2], answer[3]]), 1007);
+        assert!(answer[4..16].iter().all(|&byte| byte == 0));
+
+        // 레전드오브마스터2's own 1000 is not taken for it, and is still answered
+        // at 1002.
+        let mut lom2 = [0u8; 45];
+        lom2[0..2].copy_from_slice(&45u16.to_be_bytes());
+        lom2[2..4].copy_from_slice(&1000u16.to_be_bytes());
+        assert!(!lgt_big_endian_login_names_its_handset(&lom2));
+        let answer = lgt_local_big_endian_record_response(&lom2).unwrap();
+        assert_eq!(u16::from_be_bytes([answer[2], answer[3]]), 1002);
+
+        // Nor is a login whose number field is not a number.
+        let mut garbled = LOGIN;
+        garbled[6] = b'x';
+        assert!(!lgt_big_endian_login_names_its_handset(&garbled));
     }
 
     #[test]
