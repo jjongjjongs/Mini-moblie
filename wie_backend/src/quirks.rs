@@ -433,6 +433,12 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // (a black band above it) and those bottom rows - the targets, the counts,
     // the `#:SKIP`/key bar - fall off the panel. Reserving the strip puts the
     // scene back at the top and brings its bottom back onto the screen.
+    // 미니파이터 (LGT, CJ/MOBICLE): its field is 310 rows, centred in whatever
+    // height the screen reports, with the HP/MP bar pinned to the bottom. On a
+    // 240x320 panel that leaves five rows above the field that nothing paints -
+    // black at first, then whatever an earlier screen left there. Its title and
+    // menus centre the same way, so at 240x310 every screen fills the panel.
+    (TitlePlatform::Lgt, "0002BDA5", panel(240, 310)),
     (TitlePlatform::Lgt, "00029F79", annunciator()),
     // KBO 프로야구 2009 (LGT, ZIO interactive): the same - it lays its screens out
     // below the 24-row strip (the batter view's `*:게임메뉴`/`#:작전메뉴` bar, the
