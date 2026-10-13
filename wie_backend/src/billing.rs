@@ -262,9 +262,35 @@ pub fn lgt_local_seotda_response(request: &[u8]) -> Option<Vec<u8>> {
 /// the safest first shaping for this second stage; a device capture says whether
 /// the title wants game data behind it.
 ///
+/// 미니파이터 (`0002BDA5`) logs in at the same `211.239.165.14:7205` with the
+/// same `"@A"` frame, but writes its length as ASCII digits - `"@A56      "`,
+/// the whole 56-byte frame - and reads a reply's eight digits the same way: as
+/// the whole frame, header included. Its receiver (`0x2249c`) takes that many
+/// bytes off the socket and `0x222f0` moves the body down by ten, so the
+/// eight-digit 1 미니게임히어로즈2 reads as a body length took one byte, read
+/// the length again out of what it had (0), and moved -10 bytes - a fault at
+/// `0x50000000`. Its login (`0x22600`) and the `B_LGT_` exchange beside it
+/// (`0x225a0`) read nothing of the body; a whole reply is all they wait for.
+/// So a request framed with ASCII digits is answered with the whole length,
+/// and either marker.
+///
 /// `None` for anything that is neither stage: the `"@A"`/`A_LGT_` marker of the
 /// login, or the `"MH"` and six ASCII digits of the second stage's frame.
 pub fn lgt_local_miniheroes2_response(request: &[u8]) -> Option<Vec<u8>> {
+    // 미니파이터: "@A", the whole frame's length in ASCII digits, and an A_LGT_
+    // or B_LGT_ string; answered with the whole reply's length, which is what
+    // it reads back.
+    if request.get(..2) == Some(b"@A".as_slice())
+        && request.get(2).is_some_and(u8::is_ascii_digit)
+        && request.windows(6).any(|window| window == b"A_LGT_" || window == b"B_LGT_")
+    {
+        let mut frame = Vec::new();
+        frame.extend_from_slice(b"@A");
+        frame.extend_from_slice(b"00000011"); // 2 + 8 + 1
+        frame.push(b'A');
+        return Some(frame);
+    }
+
     // Stage one: the A_LGT_ login at 211.239.165.14.
     if request.get(..2) == Some(b"@A".as_slice()) && request.windows(6).any(|window| window == b"A_LGT_") {
         // '@', a byte the reader steps over, eight ASCII digits of body length,
@@ -11127,6 +11153,26 @@ mod tests {
     }
 
     /// 미니게임히어로즈2's login, off the wire: "@A", a little-endian length and
+    /// 미니파이터's login, off a device log: the same server and frame as
+    /// 미니게임히어로즈2's, with its length in ASCII digits.
+    #[test]
+    fn minifighter_is_answered_with_the_whole_length() {
+        use super::lgt_local_miniheroes2_response;
+
+        const LOGIN: &[u8] = b"@A56      1111111111A_LGT_\xb9\xcc\xb4\xcf\xc6\xc4\xc0\xcc\xc5\xcd_1.0.0_Emulator_WIPI";
+        assert_eq!(LOGIN.len(), 56);
+        let reply = lgt_local_miniheroes2_response(LOGIN).unwrap();
+        // The eight digits are the whole reply, which its receiver takes off the
+        // socket before moving the body down by ten.
+        let length: usize = core::str::from_utf8(&reply[2..10]).unwrap().parse().unwrap();
+        assert_eq!(length, reply.len());
+        assert_eq!(&reply[10..], b"A");
+
+        let mut second = LOGIN.to_vec();
+        second[20] = b'B';
+        assert_eq!(lgt_local_miniheroes2_response(&second), Some(reply));
+    }
+
     /// the `A_LGT_` string that names it.
     const MINIHEROES2_LOGIN: &[u8] = b"@A\x3f\x00\x00\x00            A_LGT_MiniHeroes2_1.0.0_SPH-9600_WIPI";
 
