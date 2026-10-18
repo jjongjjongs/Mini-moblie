@@ -121,7 +121,7 @@ fn kernel_body(slot: u32) -> Option<WIPICMethodBody> {
         26 => kernel::set_timer.into_body(),
         27 => kernel::unset_timer.into_body(),
         28 => kernel::current_time.into_body(),
-        29 => kernel::get_system_property.into_body(),
+        29 => get_system_property.into_body(),
         30 => kernel::set_system_property.into_body(),
         31 => kernel::get_resource_id.into_body(),
         32 => kernel::get_resource.into_body(),
@@ -129,6 +129,32 @@ fn kernel_body(slot: u32) -> Option<WIPICMethodBody> {
         63 => get_platform_version.into_body(),
         _ => return None,
     })
+}
+
+/// `MC_knlGetSystemProperty`, with an SKT handset's model where the other
+/// carriers answer `Emulator`.
+///
+/// 메이플스토리 시그너스기사단 and 메이플스토리 Live key their saves on the
+/// model: `cygnusk` / `maplelivek` is `(Σ bytes × 123456789) mod 10⁸` over a
+/// record of the subscriber number, the model, the title's name and two sums
+/// over the save files, and a key that does not match is "데이터 오류로 게임을
+/// 종료합니다". The saves those two arrived with were made on a handset whose
+/// model's bytes add up to 509 - both keys solve to it - where `Emulator`'s
+/// add up to 841. Only that sum reaches the key, so the model itself cannot be
+/// read back; `SCH-W830` is an SKT handset of the period whose name has it.
+async fn get_system_property(context: &mut dyn WIPICContext, id: WIPICWord, out: WIPICWord, out_size: WIPICWord) -> Result<i32> {
+    const PHONE_MODEL: &[u8] = b"SCH-W830";
+
+    if read_null_terminated_string_bytes(context, id)? == b"PHONEMODEL" {
+        if PHONE_MODEL.len() + 1 > out_size as usize {
+            return Ok(-18); // M_E_SHORTBUF
+        }
+        write_null_terminated_string_bytes(context, out, PHONE_MODEL)?;
+
+        return Ok(0);
+    }
+
+    kernel::get_system_property(context, id, out, out_size).await
 }
 
 /// `MC_knlSetTimer` with a 32-bit timeout: `(timer, ms, param, flags)`.
