@@ -90,6 +90,7 @@ impl SktCletCard {
                 JavaMethodProto::new("<init>", "(II)V", Self::init, Default::default()),
                 JavaMethodProto::new("paint", "(Lorg/kwis/msp/lcdui/Graphics;)V", Self::paint, Default::default()),
                 JavaMethodProto::new("keyNotify", "(II)Z", Self::key_notify, Default::default()),
+                JavaMethodProto::new("notifyEvent", "(III)V", Self::notify_event, Default::default()),
             ],
             fields: vec![
                 JavaFieldProto::new("paintClet", "I", Default::default()),
@@ -134,5 +135,26 @@ impl SktCletCard {
             .await?;
 
         Ok(true)
+    }
+
+    /// An event the title posted itself through `MC_grpPostEvent`, handed
+    /// back as it was posted: 슈퍼액션히어로4 (0087472568) posts them to itself
+    /// on its way to the title screen. Only keys carry the platform's offset.
+    async fn notify_event(
+        jvm: &Jvm,
+        context: &mut CletContext,
+        this: ClassInstanceRef<Self>,
+        r#type: i32,
+        param1: i32,
+        param2: i32,
+    ) -> JvmResult<()> {
+        tracing::debug!("net.wie.SktCletCard::notifyEvent({this:?}, {type}, {param1}, {param2})");
+
+        let handle_clet_event: i32 = jvm.get_field(&this, "handleCletEvent", "I").await?;
+        context
+            .core
+            .run_function(handle_clet_event as _, &[r#type as _, param1 as _, param2 as _])
+            .or_else(async move |x| Err(jvm.exception("net/wie/WieError", &x.to_string()).await))
+            .await
     }
 }

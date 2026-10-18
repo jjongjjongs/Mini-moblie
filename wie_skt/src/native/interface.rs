@@ -12,7 +12,7 @@
 //! 메이플스토리 해적편 passes it and does with the answer; each table below
 //! says which.
 
-use alloc::{boxed::Box, string::String, sync::Arc, vec, vec::Vec};
+use alloc::{borrow::ToOwned, boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 
 use jvm::Jvm;
 use wipi_types::wipic::WIPICWord;
@@ -132,7 +132,8 @@ fn kernel_body(slot: u32) -> Option<WIPICMethodBody> {
 }
 
 /// `MC_knlGetSystemProperty`, with an SKT handset's model where the other
-/// carriers answer `Emulator`.
+/// carriers answer `Emulator`, and its subscriber number where the archive
+/// names it only in the title's `.mod`.
 ///
 /// 메이플스토리 시그너스기사단 and 메이플스토리 Live key their saves on the
 /// model: `cygnusk` / `maplelivek` is `(Σ bytes × 123456789) mod 10⁸` over a
@@ -142,19 +143,66 @@ fn kernel_body(slot: u32) -> Option<WIPICMethodBody> {
 /// model's bytes add up to 509 - both keys solve to it - where `Emulator`'s
 /// add up to 841. Only that sum reaches the key, so the model itself cannot be
 /// read back; `SCH-W830` is an SKT handset of the period whose name has it.
+///
+/// 슈퍼액션히어로4 (0087472568) keeps the subscriber number in its save and stops at "세이브
+/// 파일이 저장한 단말기 번호와 다릅니다" when the handset reports another. Its
+/// archive has no `certification` to recover the number from, but every
+/// `.mod` does - see [`mod_subscriber_number`].
 async fn get_system_property(context: &mut dyn WIPICContext, id: WIPICWord, out: WIPICWord, out_size: WIPICWord) -> Result<i32> {
-    const PHONE_MODEL: &[u8] = b"SCH-W830";
+    const PHONE_MODEL: &str = "SCH-W830";
 
-    if read_null_terminated_string_bytes(context, id)? == b"PHONEMODEL" {
-        if PHONE_MODEL.len() + 1 > out_size as usize {
-            return Ok(-18); // M_E_SHORTBUF
-        }
-        write_null_terminated_string_bytes(context, out, PHONE_MODEL)?;
+    let name = read_null_terminated_string_bytes(context, id)?;
+    let value = match name.as_slice() {
+        b"PHONEMODEL" => PHONE_MODEL.into(),
+        b"PHONENUMBER" | b"MIN" if !archive_names_subscriber(context, &name).await => match mod_subscriber_number(context).await {
+            Some(number) => number,
+            None => return kernel::get_system_property(context, id, out, out_size).await,
+        },
+        _ => return kernel::get_system_property(context, id, out, out_size).await,
+    };
 
-        return Ok(0);
+    tracing::info!("SKT MC_knlGetSystemProperty({:?}) -> {value:?}", String::from_utf8_lossy(&name));
+    if value.len() + 1 > out_size as usize {
+        return Ok(-18); // M_E_SHORTBUF
+    }
+    write_null_terminated_string_bytes(context, out, value.as_bytes())?;
+
+    Ok(0)
+}
+
+/// Whether the shared answer already comes from the archive: a
+/// `certification` names the number, and a title's own `cert.c2s` the `MIN`
+/// it was issued for - 슈퍼액션히어로4 stops at error 5001 unless `MIN` is
+/// that one, written without its leading zero.
+async fn archive_names_subscriber(context: &mut dyn WIPICContext, property: &[u8]) -> bool {
+    if context.read_resource("certification").await.is_ok() {
+        return true;
     }
 
-    kernel::get_system_property(context, id, out, out_size).await
+    property == b"MIN"
+        && context
+            .read_resource("cert.c2s")
+            .await
+            .is_ok_and(|cert| wie_backend::subscriber::identity_from_cert(&cert).is_some())
+}
+
+/// The subscriber number a title was bought on, from the key in its `.mod`.
+///
+/// The `.mod` names its download URLs with `KEY_<2 digits><11 digits>
+/// <8 digits><2 digits>`; the 8 are the subscriber number after its `010`.
+/// The eight archives seen so far all carry `89483847` there, and the ones
+/// with a `certification` name `01089483847` in it.
+async fn mod_subscriber_number(context: &mut dyn WIPICContext) -> Option<String> {
+    let id = context.system().pid().to_owned();
+    let module = context.read_resource(&format!("{id}.mod")).await.ok()?;
+
+    let start = module.windows(4).position(|x| x == b"KEY_")? + 4;
+    let digits = module.get(start..start + 23)?;
+    if !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+
+    Some(format!("010{}", core::str::from_utf8(&digits[13..21]).ok()?))
 }
 
 /// `MC_knlSetTimer` with a 32-bit timeout: `(timer, ms, param, flags)`.

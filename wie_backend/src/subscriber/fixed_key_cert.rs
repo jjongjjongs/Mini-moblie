@@ -6,7 +6,9 @@
 //! check the handset against the fields inside it before they will start:
 //! 액션퍼즐패밀리4 GS2 (AID 000315C6) reads
 //! `MC_knlGetSystemProperty("MIN")`, compares it with the certificate's first
-//! field, and stops at error 5001 when the two differ.
+//! field, and stops at error 5001 when the two differ. SKT's 슈퍼액션히어로4
+//! (0087472568) does the same with the same record, IV and error, sealed under
+//! a key of its own.
 //!
 //! The record is four AES-128-CBC blocks whose plaintext is
 //! `<0><MIN, 12 bytes><serial, 20 bytes><four-character title tag><zero fill>`,
@@ -22,8 +24,10 @@ use alloc::{
     vec::Vec,
 };
 
-/// The key the titles that use this certificate build in.
-const KEY: &[u8; 16] = b"32184a2de4tj6ffc";
+/// The keys the titles that use this certificate build in: 액션퍼즐패밀리4
+/// GS2's, then 슈퍼액션히어로4's. A key that does not fit a blob decrypts it to
+/// noise the structural checks refuse, so each is tried in turn.
+const KEYS: [&[u8; 16]; 2] = [b"32184a2de4tj6ffc", b"Cocoonprojectkey"];
 /// The CBC initialisation vector they build in alongside it.
 const IV: [u8; 16] = [
     0x3d, 0xaf, 0xba, 0x42, 0x9d, 0x9e, 0xb4, 0x30, 0xb4, 0x22, 0xda, 0x80, 0x2c, 0x9f, 0xac, 0x41,
@@ -56,8 +60,11 @@ pub fn recover_identity(cert: &[u8]) -> Option<HandsetIdentity> {
         return None;
     }
 
-    let plain = decrypt_cbc(&cert[..RECORD_LEN]);
+    KEYS.iter().find_map(|key| read_record(&decrypt_cbc(&cert[..RECORD_LEN], key)))
+}
 
+/// The identity in one decrypted record, or `None` when it is not one.
+fn read_record(plain: &[u8]) -> Option<HandsetIdentity> {
     // Structure the title itself relies on: a zero lead byte, two NUL-terminated
     // ASCII fields, a printable four-character tag, and nothing but zeroes after
     // it. Enough to tell this record apart from a blob that merely decrypts.
@@ -86,9 +93,9 @@ fn field(bytes: &[u8]) -> Option<String> {
     Some(core::str::from_utf8(&bytes[..end]).ok()?.to_string())
 }
 
-/// AES-128-CBC decryption of a whole number of blocks under [`KEY`]/[`IV`].
-fn decrypt_cbc(cipher: &[u8]) -> Vec<u8> {
-    let round_keys = expand_key(KEY);
+/// AES-128-CBC decryption of a whole number of blocks under `key` and [`IV`].
+fn decrypt_cbc(cipher: &[u8], key: &[u8; 16]) -> Vec<u8> {
+    let round_keys = expand_key(key);
 
     let mut plain = Vec::with_capacity(cipher.len());
     let mut chain = IV;
@@ -240,7 +247,7 @@ fn inv_mix_columns(state: &mut [u8; 16]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{HandsetIdentity, decrypt_cbc, recover_identity};
+    use super::{HandsetIdentity, KEYS, decrypt_cbc, recover_identity};
     use alloc::string::ToString;
 
     /// The real `cert.c2s` shipped with 액션퍼즐패밀리4 GS2 (AID 000315C6).
@@ -257,7 +264,7 @@ mod tests {
     /// lead byte, an empty `MIN`, the serial, and the `APF4` tag it checks.
     #[test]
     fn the_record_decrypts_to_the_layout_the_title_reads() {
-        let plain = decrypt_cbc(&APF4[..64]);
+        let plain = decrypt_cbc(&APF4[..64], KEYS[0]);
 
         assert_eq!(plain[0], 0);
         assert_eq!(&plain[1..13], &[0u8; 12]);
@@ -273,6 +280,31 @@ mod tests {
             Some(HandsetIdentity {
                 min: "".to_string(),
                 serial: "01042875".to_string()
+            })
+        );
+    }
+
+    /// The real `cert.c2s` shipped with 슈퍼액션히어로4 (SKT 0087472568).
+    #[rustfmt::skip]
+    const SAH4: [u8; 76] = [
+        0x05, 0xf7, 0xe4, 0xd0, 0x49, 0xe1, 0xe7, 0x47, 0x45, 0x5f, 0x99, 0xd1, 0xd6, 0x70, 0x6c, 0x9c,
+        0xd3, 0xef, 0x2d, 0xd7, 0xf8, 0xcb, 0x3f, 0x5b, 0xa7, 0x6f, 0x64, 0xc3, 0x86, 0xb9, 0xcc, 0x79,
+        0xad, 0xd8, 0x40, 0xe8, 0xf2, 0xd6, 0x6b, 0x43, 0x7c, 0x3b, 0x42, 0x75, 0xa5, 0x5e, 0x9c, 0x1a,
+        0x70, 0x81, 0x07, 0x24, 0xcc, 0x08, 0x7a, 0xf2, 0xef, 0x50, 0x25, 0x4c, 0x5e, 0x09, 0x4a, 0xd0,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+
+    /// The same record under the second key, naming the `MIN` the title checks.
+    #[test]
+    fn a_certificate_under_the_second_key_is_read_too() {
+        let plain = decrypt_cbc(&SAH4[..64], KEYS[1]);
+        assert_eq!(&plain[33..37], b"SAH4");
+
+        assert_eq!(
+            recover_identity(&SAH4),
+            Some(HandsetIdentity {
+                min: "1089483847".to_string(),
+                serial: "0031015638".to_string()
             })
         );
     }
