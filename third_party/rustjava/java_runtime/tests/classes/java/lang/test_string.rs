@@ -523,3 +523,17 @@ async fn test_constructors_reject_null() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_to_char_array_is_a_copy() -> Result<()> {
+    let jvm = test_jvm().await?;
+
+    let string = JavaLangString::from_rust_string(&jvm, "가나").await?;
+
+    let mut chars = jvm.invoke_virtual(&string, "toCharArray", "()[C", ()).await?;
+    jvm.store_array(&mut chars, 0, [0u16]).await?;
+
+    assert_eq!(JavaLangString::to_rust_string(&jvm, &string).await?, "가나");
+
+    Ok(())
+}

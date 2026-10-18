@@ -96,6 +96,13 @@ impl TextComponentHandler {
                     Self::get_text_component_handler,
                     MethodAccessFlags::STATIC,
                 ),
+                JavaMethodProto::new("isLoaded", "()Z", Self::is_loaded, MethodAccessFlags::STATIC),
+                JavaMethodProto::new(
+                    "getTextComponent",
+                    "()Lcom/xce/lcdui/TextComponent;",
+                    Self::get_text_component,
+                    Default::default(),
+                ),
                 JavaMethodProto::new(
                     "setTextComponent",
                     "(Lcom/xce/lcdui/TextComponent;)V",
@@ -170,6 +177,29 @@ impl TextComponentHandler {
         .await?;
 
         Ok(handler)
+    }
+
+    /// Whether the input method is up - which is to say, whether a title has
+    /// asked for the handler yet. 매지컬프린세스 asks every paint before
+    /// drawing the mode indicator beside its name field (`n.b4`), and threw
+    /// NoSuchMethodError on 새로하기 without it.
+    async fn is_loaded(jvm: &Jvm, _context: &mut WieJvmContext) -> JvmResult<bool> {
+        let existing: ClassInstanceRef<Self> = jvm
+            .get_static_field(
+                "com/xce/lcdui/TextComponentHandler",
+                "__wieInstance",
+                "Lcom/xce/lcdui/TextComponentHandler;",
+            )
+            .await?;
+
+        Ok(!existing.is_null())
+    }
+
+    /// The component the input method edits, or null when none is attached.
+    async fn get_text_component(jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<ClassInstanceRef<TextComponent>> {
+        tracing::debug!("com.xce.lcdui.TextComponentHandler::getTextComponent({this:?})");
+
+        jvm.get_field(&this, "__wieComponent", "Ljava/lang/Object;").await
     }
 
     /// Attaches the component the input method edits, or detaches it when a

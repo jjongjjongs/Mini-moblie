@@ -340,9 +340,18 @@ impl String {
     async fn to_char_array(jvm: &Jvm, _: &mut RuntimeContext, this: ClassInstanceRef<Self>) -> Result<ClassInstanceRef<Array<JavaChar>>> {
         tracing::debug!("java.lang.String::toCharArray({this:?})");
 
+        // A copy, as Java's is: handing out `value` itself let a caller that
+        // edits the array in place edit the string too. 매지컬프린세스 checks a
+        // name by subtracting 0xAC00 from each char of `toCharArray()`, and the
+        // name it then showed had been turned into those offsets.
         let value = jvm.get_field(&this, "value", "[C").await?;
+        let length = jvm.array_length(&value).await?;
+        let chars: Vec<JavaChar> = jvm.load_array(&value, 0, length).await?;
 
-        Ok(value)
+        let mut copy = jvm.instantiate_array("C", length).await?;
+        jvm.store_array(&mut copy, 0, chars).await?;
+
+        Ok(copy.into())
     }
 
     async fn length(jvm: &Jvm, _: &mut RuntimeContext, this: ClassInstanceRef<Self>) -> Result<i32> {

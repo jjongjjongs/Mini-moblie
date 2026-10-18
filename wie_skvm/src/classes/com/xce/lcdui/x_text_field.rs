@@ -399,7 +399,7 @@ impl XTextField {
 
     /// Replaces the text outright, which also ends any syllable in progress -
     /// what was being composed is not part of the text the title just set.
-    async fn set_text(jvm: &Jvm, _context: &mut WieJvmContext, mut this: ClassInstanceRef<Self>, text: ClassInstanceRef<String>) -> JvmResult<()> {
+    async fn set_text(jvm: &Jvm, context: &mut WieJvmContext, mut this: ClassInstanceRef<Self>, text: ClassInstanceRef<String>) -> JvmResult<()> {
         tracing::debug!("com.xce.lcdui.XTextField::setText({this:?}, {text:?})");
 
         let text = if text.is_null() {
@@ -410,6 +410,12 @@ impl XTextField {
 
         jvm.put_field(&mut this, "text", "Ljava/lang/String;", text).await?;
         jvm.put_field(&mut this, "__wieXTextFieldComposition", "I", 0).await?;
+
+        // The input method has to let go of it too. Holding on, it finished
+        // the old syllable into the text on the next key: 매지컬프린세스
+        // empties a name it refuses, and the half-typed 기 of that name came
+        // back in front of the next one.
+        context.system().reset_input_method_composition();
 
         Ok(())
     }
