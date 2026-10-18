@@ -22,13 +22,16 @@ use wie_wipi_c::{
 
 use super::daf::Resources;
 
-/// The words in front of the data of an `MC_knlAlloc` block: the data pointer
-/// the handle points at, then the size.
+/// The word in front of the data of an `MC_knlAlloc` block: the data pointer
+/// the handle points at, and nothing else.
 ///
 /// A title takes the data from the handle with a single load - 해적편's file
 /// buffer is `*MC_knlAlloc(size)`, straight into `memset` - so the handle's
-/// first word is the data's address and nothing is added to it.
-const ALLOC_HEADER_SIZE: WIPICWord = 8;
+/// first word is the data's address and nothing is added to it. 메이플스토리
+/// 도적편 goes the other way too: its `operator delete` hands `MC_knlFree` the
+/// data less four, so the data starts right after that word. The block's size
+/// is the allocator's to know.
+const ALLOC_HEADER_SIZE: WIPICWord = 4;
 
 #[derive(Clone)]
 pub struct SktWIPICContext {
@@ -64,7 +67,6 @@ impl WIPICContext for SktWIPICContext {
     fn alloc(&mut self, size: WIPICWord) -> Result<WIPICIndirectPtr> {
         let block = Allocator::alloc(&mut self.core, size + ALLOC_HEADER_SIZE)?;
         write_generic(&mut self.core, block, block + ALLOC_HEADER_SIZE)?;
-        write_generic(&mut self.core, block + 4, size)?;
 
         Ok(WIPICIndirectPtr(block))
     }
@@ -77,8 +79,7 @@ impl WIPICContext for SktWIPICContext {
             return Ok(());
         }
 
-        let size: WIPICWord = read_generic(&self.core, memory.0 + 4)?;
-        Allocator::free(&mut self.core, memory.0, size + ALLOC_HEADER_SIZE)
+        Allocator::free_unsized(&mut self.core, memory.0)
     }
 
     fn free_raw(&mut self, address: WIPICWord, size: WIPICWord) -> Result<()> {

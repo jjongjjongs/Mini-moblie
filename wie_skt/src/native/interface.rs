@@ -25,7 +25,7 @@ use wie_wipi_c::{
     api::{filesystem, graphics, im, kernel, media, misc, net, serial, shared_buf, util},
 };
 
-use super::{context::SktWIPICContext, daf::DATA_BASE, daf::Resources, libc};
+use super::{context::SktWIPICContext, daf::DATA_BASE, daf::Resources, libc, object};
 
 pub const SVC_CATEGORY_WIPIC: u32 = 1;
 
@@ -53,6 +53,10 @@ mod table {
     pub const MEDIA: u32 = 7;
     pub const SERIAL: u32 = 9;
     pub const C_LIBRARY: u32 = 14;
+    pub const LIFECYCLE: u32 = 15;
+    pub const INTEGER: u32 = 37;
+    pub const OBJECT: u32 = 45;
+    pub const VECTOR: u32 = 59;
 }
 
 /// Writes the tables, each slot an SVC stub naming its table and slot, and
@@ -83,6 +87,10 @@ fn body(table: u32, slot: u32) -> Option<WIPICMethodBody> {
         (table::MEDIA, _) => media_body(slot)?,
         (table::SERIAL, _) => serial_body(slot)?,
         (table::C_LIBRARY, _) => libc::body(slot)?,
+        (table::LIFECYCLE, _) => object::lifecycle_body(slot)?,
+        (table::INTEGER, _) => object::integer_body(slot)?,
+        (table::OBJECT, _) => object::object_body(slot)?,
+        (table::VECTOR, _) => object::vector_body(slot)?,
         _ => return None,
     })
 }
@@ -651,6 +659,25 @@ mod tests {
             (7, 14),
             (14, 18),
             (14, 20),
+        ] {
+            assert!(body(table, slot).is_some(), "table {table} slot {slot}");
+        }
+    }
+
+    /// And those 도적편 reaches in the older SDK's object tables.
+    #[test]
+    fn the_older_sdk_object_slots_are_served() {
+        for (table, slot) in [
+            (15, 2),
+            (37, 0),
+            (37, 4),
+            (37, 8),
+            (45, 9),
+            (59, 2),
+            (59, 7),
+            (59, 13),
+            (59, 18),
+            (59, 20),
         ] {
             assert!(body(table, slot).is_some(), "table {table} slot {slot}");
         }

@@ -194,7 +194,7 @@ async fn atoi(context: &mut dyn WIPICContext, string: WIPICWord) -> Result<i32> 
     Ok(c_atoi(&read_string(context, string)?))
 }
 
-fn c_atoi(bytes: &[u8]) -> i32 {
+pub(super) fn c_atoi(bytes: &[u8]) -> i32 {
     let mut digits = bytes.iter().skip_while(|x| x.is_ascii_whitespace()).peekable();
     let negative = match digits.peek() {
         Some(b'-') => {

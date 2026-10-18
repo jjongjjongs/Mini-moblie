@@ -11,6 +11,7 @@ pub mod daf;
 mod interface;
 mod lcd;
 mod libc;
+mod object;
 
 use core::pin::Pin;
 
