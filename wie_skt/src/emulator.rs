@@ -11,15 +11,32 @@ use alloc::{
 use jvm::{Result as JvmResult, runtime::JavaLangString};
 
 use wie_backend::{DefaultTaskRunner, Emulator, Event, Platform, System, TitlePlatform, extract_zip, title_quirks};
+use wie_core_arm::ArmCore;
 use wie_jvm_support::{JvmSupport, RustJavaJvmImplementation};
 use wie_util::{Result, WieError};
 
+use crate::native;
+
 pub struct SktEmulator {
     system: System,
+    /// The CPU a native title runs on - see [`native`]. SK-VM titles run on the
+    /// JVM alone and have none.
+    core: Option<ArmCore>,
 }
 
 impl SktEmulator {
     pub fn from_archive(platform: Box<dyn Platform>, files: BTreeMap<String, Vec<u8>>) -> Result<Self> {
+        // A native title has an executable and no descriptor; an SK-VM one
+        // is the other way round.
+        if !files.iter().any(|x| x.0.ends_with(".msd")) && native::loadable_archive(&files) {
+            let loaded = native::load(platform, files)?;
+
+            return Ok(Self {
+                system: loaded.system,
+                core: Some(loaded.core),
+            });
+        }
+
         let msd_file = files.iter().find(|x| x.0.ends_with(".msd")).unwrap();
         let msd = SktMsd::parse(msd_file.0, msd_file.1);
 
@@ -42,7 +59,7 @@ impl SktEmulator {
     }
 
     pub fn loadable_archive(files: &BTreeMap<String, Vec<u8>>) -> bool {
-        files.iter().any(|x| x.0.ends_with(".msd"))
+        files.iter().any(|x| x.0.ends_with(".msd")) || native::loadable_archive(files)
     }
 
     pub fn loadable_jar(jar: &[u8]) -> bool {
@@ -105,7 +122,7 @@ impl SktEmulator {
 
         system.spawn(async move || Self::do_start(&mut system_clone, jar_filename_clone, properties, main_class_name).await);
 
-        Ok(Self { system })
+        Ok(Self { system, core: None })
     }
 
     #[tracing::instrument(name = "start", skip_all)]
@@ -194,8 +211,23 @@ impl Emulator for SktEmulator {
         self.system.is_idle()
     }
 
+    fn sleep_hint(&self) -> Option<u64> {
+        self.system.idle_for()
+    }
+
     fn tick(&mut self) -> Result<()> {
-        self.system.tick()
+        self.system.tick().map_err(|x| match &self.core {
+            // Where a native title was when it stopped is the first thing
+            // anyone needs to read the error.
+            Some(core) => {
+                let registers = core.dump_reg_stack(0x10_0000);
+                match x {
+                    WieError::FatalError(message) => WieError::FatalError(format!("{message}\n{registers}")),
+                    _ => WieError::FatalError(format!("{x}\n{registers}")),
+                }
+            }
+            None => x,
+        })
     }
 }
 

@@ -9,7 +9,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 # Enable the machine-code JIT engine (see wie_core_arm).
-jit = ["wie_brew/jit", "wie_ktf/jit", "wie_lgt/jit"]
+jit = ["wie_brew/jit", "wie_ktf/jit", "wie_lgt/jit", "wie_skt/jit"]
 
 [dependencies]
 async-trait = { workspace = true }
