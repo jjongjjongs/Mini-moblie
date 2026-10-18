@@ -19,9 +19,10 @@
 //! its first extra word, at `+0x50`, is how many bytes of zlib stream stand
 //! in for the text, and everything after is as it is in the shorter one.
 //!
-//! The image is linked with text at zero and data at `0x0100_0000`, bss
-//! straight after data. A title reaches the platform through a pointer it
-//! expects the loader to have written at `0x0100_1000` - see the runtime.
+//! The image is linked with text at zero and data at `0x0100_1000`, bss
+//! straight after data. Data opens with the word `0xcafecafe`, which the
+//! loader overwrites with the pointer a title reaches the platform through -
+//! see the runtime.
 //!
 //! The six entry points are text offsets, Thumb functions with the low bit set:
 //! `startClet`, a clean-up the title runs before it goes away, the two halves
@@ -38,7 +39,7 @@ use alloc::{
 use wie_util::{Result, WieError};
 
 /// Where the image's data is linked, and so where it has to be loaded.
-pub const DATA_BASE: u32 = 0x0100_0000;
+pub const DATA_BASE: u32 = 0x0100_1000;
 
 const FILE_HEADER_SIZE_FIELD: usize = 0x00;
 const IMAGE_HEADER_SIZE_FIELD: usize = 0x08;
@@ -408,8 +409,8 @@ mod tests {
     #[test]
     fn relocation_adds_the_right_base_to_each_kind() {
         let mut image = DafImage {
-            text: [0x40u32, 0x0100_0010, 0xffff_fff0].iter().flat_map(|x| x.to_le_bytes()).collect(),
-            data: [0x0100_0020u32].iter().flat_map(|x| x.to_le_bytes()).collect(),
+            text: [0x40u32, 0x0100_1010, 0xffff_fff0].iter().flat_map(|x| x.to_le_bytes()).collect(),
+            data: [0x0100_1020u32].iter().flat_map(|x| x.to_le_bytes()).collect(),
             bss_size: 0,
             relocations: vec![
                 Relocation {
@@ -433,14 +434,14 @@ mod tests {
             resources: Resources::default(),
         };
 
-        image.relocate(0x10_0000, 0x0100_0000).unwrap();
+        image.relocate(0x10_0000, 0x0200_0000).unwrap();
 
         let word = |bytes: &[u8], at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
         assert_eq!(word(&image.text, 0), 0x10_0040);
-        assert_eq!(word(&image.text, 4), 0x0100_0010);
+        assert_eq!(word(&image.text, 4), 0x0200_0010);
         // Sixteen bytes back from the word at text + 8.
         assert_eq!(word(&image.text, 8), 0x10_0008 - 0x10);
-        assert_eq!(word(&image.data, 0), 0x0100_0020);
+        assert_eq!(word(&image.data, 0), 0x0200_0020);
     }
 
     #[test]

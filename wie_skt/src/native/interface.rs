@@ -19,7 +19,7 @@ use wipi_types::wipic::WIPICWord;
 
 use wie_backend::System;
 use wie_core_arm::{Allocator, ArmCore, EmulatedFunction, EmulatedFunctionParam, ResultWriter, SvcId};
-use wie_util::{Result, read_null_terminated_string_bytes, write_generic, write_null_terminated_string_bytes};
+use wie_util::{Result, read_generic, read_null_terminated_string_bytes, write_generic, write_null_terminated_string_bytes};
 use wie_wipi_c::{
     MethodImpl, WIPICContext, WIPICMethodBody, WIPICResult,
     api::{filesystem, graphics, im, kernel, media, misc, net, serial, shared_buf, util},
@@ -29,12 +29,15 @@ use super::{context::SktWIPICContext, daf::DATA_BASE, daf::Resources, libc};
 
 pub const SVC_CATEGORY_WIPIC: u32 = 1;
 
-/// Where the title reads the interface from: the word at `0x1000` into its
-/// data, zero in the file, which every call it makes into the platform
+/// Where the title reads the interface from: the first word of its data,
+/// `0xcafecafe` in the file, which every call it makes into the platform
 /// dereferences.
-pub const INTERFACE_POINTER: u32 = DATA_BASE + 0x1000;
+pub const INTERFACE_POINTER: u32 = DATA_BASE;
 
-const TABLE_COUNT: u32 = 32;
+/// How many tables the interface holds. The titles seen so far reach 0 to 15,
+/// and 메이플스토리 도적편 - built against an older SDK - 37, 45 and 59 as
+/// well; past the ones served, a table is all stubs that name the slot.
+const TABLE_COUNT: u32 = 64;
 
 /// Every table is this long whatever is written for it, so a slot past the
 /// last one served still answers - see `WIPIC_TABLE_FUNCTIONS` on KTF.
@@ -122,8 +125,22 @@ fn kernel_body(slot: u32) -> Option<WIPICMethodBody> {
         30 => kernel::set_system_property.into_body(),
         31 => kernel::get_resource_id.into_body(),
         32 => kernel::get_resource.into_body(),
+        63 => get_platform_version.into_body(),
         _ => return None,
     })
+}
+
+/// The platform's version, `major.minor.patch`, written as a string into the
+/// caller's buffer. 0083070426 reads the three numbers out of it at start.
+async fn get_platform_version(context: &mut dyn WIPICContext, out: WIPICWord, out_size: WIPICWord) -> Result<i32> {
+    const VERSION: &[u8] = b"2.0.1";
+
+    if out_size as usize <= VERSION.len() {
+        return Ok(-1);
+    }
+    write_null_terminated_string_bytes(context, out, VERSION)?;
+
+    Ok(0)
 }
 
 /// KTF's order, which is the one the WIPI-C header lists.
@@ -334,8 +351,49 @@ fn util_body(slot: u32) -> Option<WIPICMethodBody> {
         3 => util::ntohs.into_body(),
         4 => util::inet_addr_int.into_body(),
         5 => util::inet_addr_str.into_body(),
+        14 => uncompress.into_body(),
         _ => return None,
     })
+}
+
+/// Inflates a buffer: `(method, dst, &dst_len, src, src_len)`, answering 0
+/// with `dst_len` set to what was written. 크레이지아케이드 BnB 2011 keeps its
+/// data deflated and asks for `"ZLIB"` on every file it opens.
+async fn uncompress(
+    context: &mut dyn WIPICContext,
+    method: WIPICWord,
+    dst: WIPICWord,
+    dst_len: WIPICWord,
+    src: WIPICWord,
+    src_len: WIPICWord,
+) -> Result<i32> {
+    let method = read_null_terminated_string_bytes(context, method)?;
+    if !method.eq_ignore_ascii_case(b"ZLIB") {
+        tracing::warn!("SKT utilUncompress: unknown method {:?}", String::from_utf8_lossy(&method));
+        return Ok(-1);
+    }
+
+    let mut compressed = vec![0; src_len as usize];
+    context.read_bytes(src, &mut compressed)?;
+
+    // A zlib stream as the name says, though a raw deflate stream is what
+    // some packers write under the same name.
+    let Ok(inflated) = miniz_oxide::inflate::decompress_to_vec_zlib(&compressed).or_else(|_| miniz_oxide::inflate::decompress_to_vec(&compressed))
+    else {
+        tracing::warn!("SKT utilUncompress: {src_len:#x} bytes at {src:#x} did not inflate");
+        return Ok(-1);
+    };
+
+    let capacity: WIPICWord = read_generic(context, dst_len)?;
+    if inflated.len() > capacity as usize {
+        tracing::warn!("SKT utilUncompress: {:#x} bytes do not fit in {capacity:#x}", inflated.len());
+        return Ok(-1);
+    }
+
+    context.write_bytes(dst, &inflated)?;
+    write_generic(context, dst_len, inflated.len() as WIPICWord)?;
+
+    Ok(0)
 }
 
 /// The WIPI-C order LGT's ids follow, with one more slot before
@@ -514,7 +572,7 @@ mod tests {
 
     #[test]
     fn a_slot_past_the_table_is_not() {
-        assert!(body(0, 63).is_none());
+        assert!(body(0, 62).is_none());
         assert!(body(20, 0).is_none());
     }
 }
