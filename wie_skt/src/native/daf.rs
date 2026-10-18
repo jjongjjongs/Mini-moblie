@@ -131,7 +131,7 @@ impl DafImage {
             take(text_size, "text")?.to_vec()
         };
         let data = take(data_size, "data")?.to_vec();
-        let relocations = decode_relocations(take(relocation_size, "relocations")?)?;
+        let relocations = decode_relocations(take(relocation_size, "relocations")?, text_size as u32)?;
         // A file cut short after its code still runs; it simply has no
         // resources to hand out.
         let resources = take(resource_size, "resources")
@@ -163,9 +163,13 @@ impl DafImage {
             };
 
             let offset = offset as usize;
-            let word = segment
-                .get(offset..offset + 4)
-                .ok_or_else(|| WieError::FatalError(format!("daf: relocation at {:#x} is past the image", relocation.offset)))?;
+            // 도적편's data stream ends one word past its data, on the first
+            // word of bss: a word that is zero until the title writes it, so
+            // there is nothing there to fix up.
+            let Some(word) = segment.get(offset..offset + 4) else {
+                tracing::debug!("daf: relocation at {:#x} is past the image; skipped", relocation.offset);
+                continue;
+            };
             let value = u32::from_le_bytes(word.try_into().unwrap());
 
             let value = match relocation.kind {
@@ -181,8 +185,9 @@ impl DafImage {
     }
 }
 
-/// Decodes the relocation block: a byte count and a reserved word, then that
-/// many bytes of a big-endian bit stream, one record per relocated word.
+/// Decodes the relocation block: two lengths, then a bit stream that many
+/// bytes long for the words in text and, straight after it, one for the words
+/// in data. Each is big-endian, one record per relocated word:
 ///
 /// ```text
 /// [2 bits kind][4 bits k][delta bits, if any][2 bits, always 0]
@@ -196,18 +201,33 @@ impl DafImage {
 /// kind 2     self-relative
 /// ```
 ///
-/// The first record counts from the start of text, and the count runs on
-/// through text into data without a break.
-pub fn decode_relocations(block: &[u8]) -> Result<Vec<Relocation>> {
+/// Each stream counts from the start of its own segment. 해적편 keeps no
+/// pointers in its data and has an empty second stream; 0087472568 keeps a
+/// table of function pointers there, and with the stream unread it called
+/// one at its unrelocated address.
+///
+/// The offsets answered are from the start of text, data following text.
+pub fn decode_relocations(block: &[u8], text_size: u32) -> Result<Vec<Relocation>> {
     if block.len() < 8 {
         return Ok(Vec::new());
     }
 
-    let length = read_u32(block, 0)? as usize;
-    let stream = block
-        .get(8..8 + length)
-        .ok_or_else(|| WieError::FatalError("daf: relocation stream runs past its block".into()))?;
+    let text_length = read_u32(block, 0)? as usize;
+    let data_length = read_u32(block, 4)? as usize;
+    let text_stream = block
+        .get(8..8 + text_length)
+        .ok_or_else(|| WieError::FatalError("daf: text relocations run past their block".into()))?;
+    let data_stream = block
+        .get(8 + text_length..8 + text_length + data_length)
+        .ok_or_else(|| WieError::FatalError("daf: data relocations run past their block".into()))?;
 
+    let mut relocations = decode_stream(text_stream, 0)?;
+    relocations.extend(decode_stream(data_stream, text_size)?);
+
+    Ok(relocations)
+}
+
+fn decode_stream(stream: &[u8], base: u32) -> Result<Vec<Relocation>> {
     let mut reader = BitReader { bytes: stream, position: 0 };
     let mut offset = 0u32;
     let mut relocations = Vec::new();
@@ -234,7 +254,7 @@ pub fn decode_relocations(block: &[u8]) -> Result<Vec<Relocation>> {
             _ => return Err(WieError::FatalError(format!("daf: relocation of kind {kind} at {offset:#x}"))),
         };
 
-        relocations.push(Relocation { offset, kind });
+        relocations.push(Relocation { offset: base + offset, kind });
     }
 
     Ok(relocations)
@@ -343,10 +363,11 @@ mod tests {
 
     use super::{DafImage, Relocation, RelocationKind, Resources, decode_relocations};
 
-    fn block(stream: &[u8]) -> Vec<u8> {
-        let mut block = (stream.len() as u32).to_le_bytes().to_vec();
-        block.extend_from_slice(&[0; 4]);
-        block.extend_from_slice(stream);
+    fn block(text: &[u8], data: &[u8]) -> Vec<u8> {
+        let mut block = (text.len() as u32).to_le_bytes().to_vec();
+        block.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        block.extend_from_slice(text);
+        block.extend_from_slice(data);
         block
     }
 
@@ -355,7 +376,7 @@ mod tests {
     /// at `0x41c` and `0x420`, then a text address `0x208` bytes on.
     #[test]
     fn short_and_long_records_count_on_from_the_last() {
-        let relocations = decode_relocations(&block(&[0x64, 0x14, 0x44, 0x04, 0x04, 0x22, 0x08])).unwrap();
+        let relocations = decode_relocations(&block(&[0x64, 0x14, 0x44, 0x04, 0x04, 0x22, 0x08], &[]), 0x1000).unwrap();
 
         assert_eq!(
             relocations,
@@ -389,7 +410,7 @@ mod tests {
     /// literals with, byte for byte.
     #[test]
     fn wide_records_carry_sixteen_and_twenty_four_bits() {
-        let relocations = decode_relocations(&block(&[0x70, 0x1d, 0x48, 0x80, 0x00, 0x0b, 0xd8])).unwrap();
+        let relocations = decode_relocations(&block(&[0x70, 0x1d, 0x48, 0x80, 0x00, 0x0b, 0xd8], &[]), 0x10_0000).unwrap();
 
         assert_eq!(
             relocations,
@@ -401,6 +422,31 @@ mod tests {
                 Relocation {
                     offset: (0x0752 + 0x2f6) * 4,
                     kind: RelocationKind::SelfRelative
+                },
+            ]
+        );
+    }
+
+    /// The second stream counts from the start of data: 0087472568's opens with
+    /// two text addresses at data `+0x1518` and `+0x151c`.
+    #[test]
+    fn the_data_stream_counts_from_the_start_of_data() {
+        let relocations = decode_relocations(&block(&[0x04], &[0x30, 0x15, 0x18, 0x04]), 0x2000).unwrap();
+
+        assert_eq!(
+            relocations,
+            vec![
+                Relocation {
+                    offset: 4,
+                    kind: RelocationKind::Text
+                },
+                Relocation {
+                    offset: 0x2000 + 0x1518,
+                    kind: RelocationKind::Text
+                },
+                Relocation {
+                    offset: 0x2000 + 0x151c,
+                    kind: RelocationKind::Text
                 },
             ]
         );

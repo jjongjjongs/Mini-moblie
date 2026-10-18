@@ -22,6 +22,7 @@ pub struct SktEmulator {
     /// The CPU a native title runs on - see [`native`]. SK-VM titles run on the
     /// JVM alone and have none.
     core: Option<ArmCore>,
+    lcd: native::LcdWatcher,
 }
 
 impl SktEmulator {
@@ -34,6 +35,7 @@ impl SktEmulator {
             return Ok(Self {
                 system: loaded.system,
                 core: Some(loaded.core),
+                lcd: native::LcdWatcher::default(),
             });
         }
 
@@ -122,7 +124,11 @@ impl SktEmulator {
 
         system.spawn(async move || Self::do_start(&mut system_clone, jar_filename_clone, properties, main_class_name).await);
 
-        Ok(Self { system, core: None })
+        Ok(Self {
+            system,
+            core: None,
+            lcd: native::LcdWatcher::default(),
+        })
     }
 
     #[tracing::instrument(name = "start", skip_all)]
@@ -227,7 +233,13 @@ impl Emulator for SktEmulator {
                 }
             }
             None => x,
-        })
+        })?;
+
+        if let Some(core) = &self.core {
+            self.lcd.tick(core, &self.system);
+        }
+
+        Ok(())
     }
 }
 

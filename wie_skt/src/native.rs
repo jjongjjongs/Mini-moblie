@@ -9,6 +9,7 @@ mod clet;
 mod context;
 pub mod daf;
 mod interface;
+mod lcd;
 mod libc;
 
 use core::pin::Pin;
@@ -37,6 +38,8 @@ use self::{
     daf::{DATA_BASE, DafImage, Resources},
     interface::SvcState,
 };
+
+pub use self::lcd::LcdWatcher;
 
 /// Where text is loaded. The image is linked with text at zero, so anywhere
 /// clear of data and the platform's own regions will do; this is where KTF

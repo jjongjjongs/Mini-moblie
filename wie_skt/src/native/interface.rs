@@ -125,9 +125,21 @@ fn kernel_body(slot: u32) -> Option<WIPICMethodBody> {
         30 => kernel::set_system_property.into_body(),
         31 => kernel::get_resource_id.into_body(),
         32 => kernel::get_resource.into_body(),
+        45 => set_timer_ex.into_body(),
         63 => get_platform_version.into_body(),
         _ => return None,
     })
+}
+
+/// `MC_knlSetTimer` with a 32-bit timeout: `(timer, ms, param, flags)`.
+/// 던전앤파이터 runs its whole frame loop on it - `(timer, 20, 0, 0)` after
+/// `MC_knlDefTimer` - and sat on its first frame for as long as it was refused.
+async fn set_timer_ex(context: &mut dyn WIPICContext, timer: WIPICWord, timeout: WIPICWord, param: WIPICWord, flags: WIPICWord) -> Result<()> {
+    if flags != 0 {
+        tracing::debug!("SKT knlSetTimerEx({timer:#x}, {timeout}, {param:#x}, {flags:#x}): flags not understood");
+    }
+
+    kernel::set_timer(context, timer, timeout, 0, param).await
 }
 
 /// The platform's version, `major.minor.patch`, written as a string into the
