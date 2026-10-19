@@ -183,9 +183,9 @@ impl System {
         // 미니게임히어로즈2's KTF build logs in where its LGT build does, over a
         // plain socket named "BILLSOCK" rather than a billing socket, and sat
         // on `인증 중` while the connect to the dead server never completed.
-        // Both stages are answered the way the LGT build's are
-        // (`crate::billing::ktf_local_miniheroes2_response`). Host-gated, so no
-        // other title is touched.
+        // Both stages are answered in process
+        // (`crate::billing::ktf_local_miniheroes2_response`) and it says
+        // `인증에 성공했습니다`. Host-gated, so no other title is touched.
         for (name, host, port) in [
             ("miniheroes2(211.239.165.14:7205)", "211.239.165.14", 7205),
             ("miniheroes2(211.239.165.13:8036)", "211.239.165.13", 8036),

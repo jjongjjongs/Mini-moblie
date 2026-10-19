@@ -429,7 +429,7 @@ mod tests {
         };
 
         connection.write(b"@A\x3f\x00\x00\x00            A_KTF_MiniHeroes2_1.0.0_Emulator_WIPI");
-        assert_eq!(read_all(&mut connection), b"@A00000001A");
+        assert_eq!(read_all(&mut connection), b"@A00000011A");
 
         // Something that is neither stage is left unanswered, and leaves nothing
         // in front of the next frame.

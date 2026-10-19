@@ -319,44 +319,43 @@ pub fn lgt_local_miniheroes2_response(request: &[u8]) -> Option<Vec<u8>> {
 /// What answers 미니게임히어로즈2's KTF build at the servers its LGT build
 /// logs in at.
 ///
-/// The KTF build carries no `MC_netBillSocket`: it opens a plain socket to the
-/// same `211.239.165.14:7205`, naming the connection `"BILLSOCK"` through KTF
-/// net slot 30, and sat on its `인증 중` box for as long as it was left there -
-/// the server is long gone and the connect never completed.
+/// The KTF build (`010427AF`) carries no `MC_netBillSocket`: once its
+/// `인증을 하시겠습니까?` box is answered 예 it opens a plain socket to the same
+/// `211.239.165.14:7205`, naming the connection `"BILLSOCK"` through KTF net
+/// slot 30, and writes the LGT build's 63-byte login under its own tag:
+/// `"@A"`, the frame's length as a little-endian word, the subscriber number,
+/// then `A_KTF_미니게임히어로즈2_1.0.0_SPH-9600_WIPI`.
 ///
-/// What it writes has not been seen yet, since no connect it made ever
-/// finished. The address and the label are the LGT build's, so it is answered
-/// the way [`lgt_local_miniheroes2_response`] answers that build: an `"@A"`
-/// login gets the `'A'` its handler closes the first stage on, an `"MH"` frame
-/// the `ZZ` the second stage reads no field out of. The LGT build names itself
-/// `A_LGT_`, which this one would not, so the tag is not looked for here -
-/// the endpoint this answers for is gated on the two servers alone, and
-/// anything that is neither marker is left unanswered and traced.
+/// Its reader frames a reply the way 미니파이터's does rather than the LGT
+/// build's: `0x135064` takes the eight ASCII digits at `[2..10]` as the length
+/// of the whole frame, header included, waits for that much, and hands the
+/// body at `[0xa]` to `0x14a1e4`. Told `1` - the LGT build's body length - it
+/// took one byte and was left reading the rest as a frame with no `'@'`, and
+/// the title said `접속이 지연되고 있습니다`. `0x14a1e4` dispatches the body on
+/// its first byte as the LGT build does, and `'A'` (`0x14a28e`) closes the
+/// billing socket and clears the pending flag. So the login is answered with
+/// one `'@'` frame of eleven bytes and an `'A'` body; the second stage's `"MH"`
+/// frame, which this build reads at `[2..8]` as the LGT build does, is answered
+/// as the LGT build's is.
 ///
 /// `None` for anything that is neither stage's frame.
 pub fn ktf_local_miniheroes2_response(request: &[u8]) -> Option<Vec<u8>> {
-    if let Some(reply) = lgt_local_miniheroes2_response(request) {
-        return Some(reply);
+    if request.get(..2) == Some(b"@A".as_slice()) {
+        let mut frame = Vec::new();
+        frame.extend_from_slice(b"@A");
+        frame.extend_from_slice(b"00000011"); // 2 + 8 + 1, the whole frame
+        frame.push(b'A');
+        return Some(frame);
     }
 
-    if request.get(..2) != Some(b"@A".as_slice()) {
-        return None;
+    // The second stage's frame carries its length as a word too - "MH",
+    // `16 00 00 00`, the subscriber number and a command - where the LGT
+    // build's carries six digits; the reply is read the LGT build's way.
+    if request.get(..2) == Some(b"MH".as_slice()) {
+        return Some(b"MH000010ZZ".to_vec());
     }
 
-    // As 미니파이터 frames it, the length in ASCII digits, which reads a reply's
-    // eight digits as the whole frame; otherwise as the LGT build frames it,
-    // whose eight digits are the body's.
-    let length: &[u8] = if request.get(2).is_some_and(u8::is_ascii_digit) {
-        b"00000011"
-    } else {
-        b"00000001"
-    };
-
-    let mut frame = Vec::new();
-    frame.extend_from_slice(b"@A");
-    frame.extend_from_slice(length);
-    frame.push(b'A');
-    Some(frame)
+    None
 }
 
 /// What answers 액션퍼즐패밀리2's handshake.
@@ -11344,26 +11343,26 @@ mod tests {
         assert_eq!(lgt_local_miniheroes2_response(b"MHnotdigit"), None);
     }
 
-    /// The KTF build's login is answered whatever its tag, in the framing its
-    /// length says it reads.
+    /// The KTF build's login is answered with a frame whose eight digits are its
+    /// whole length, which is how that build's reader takes them.
     #[test]
-    fn a_ktf_miniheroes2_login_is_answered_a_without_its_tag() {
-        // The LGT build's own frames are answered exactly as they are there.
-        assert_eq!(
-            ktf_local_miniheroes2_response(MINIHEROES2_LOGIN),
-            lgt_local_miniheroes2_response(MINIHEROES2_LOGIN)
-        );
+    fn a_ktf_miniheroes2_login_is_answered_with_the_whole_length() {
+        // What the title wrote in the probe: "@A", 63 as a little-endian word,
+        // the subscriber number and its A_KTF_ string.
+        let login: &[u8] =
+            b"@A\x3f\x00\x00\x0010461046119269A_KTF_\xb9\xcc\xb4\xcf\xb0\xd4\xc0\xd3\xc8\xf7\xbe\xee\xb7\xce\xc1\xee2_1.0.0_SPH-9600_WIPI";
+        assert_eq!(login.len(), 63);
 
-        // A binary length: an eight-digit body length of one.
-        let reply = ktf_local_miniheroes2_response(b"@A\x3f\x00\x00\x00            A_KTF_MiniHeroes2_1.0.0_Emulator_WIPI").unwrap();
-        assert_eq!(reply, b"@A00000001A");
-
-        // ASCII digits: the eight digits are the whole reply.
-        let reply = ktf_local_miniheroes2_response(b"@A56      1111111111A_KTF_x").unwrap();
+        let reply = ktf_local_miniheroes2_response(login).unwrap();
         assert_eq!(reply, b"@A00000011A");
+        let length: usize = core::str::from_utf8(&reply[2..10]).unwrap().parse().unwrap();
+        assert_eq!(length, reply.len());
 
-        // The second stage is the LGT build's.
-        assert_eq!(ktf_local_miniheroes2_response(b"MH000022          1TDZ").unwrap(), b"MH000010ZZ");
+        // The second stage, off the probe, gets the ZZ the LGT build's does.
+        assert_eq!(
+            ktf_local_miniheroes2_response(b"MH\x16\x00\x00\x0010104611926910DZ").unwrap(),
+            b"MH000010ZZ"
+        );
 
         // Anything without either marker is not answered.
         assert_eq!(ktf_local_miniheroes2_response(b"WM\x3c\x00A_KTF_x"), None);
