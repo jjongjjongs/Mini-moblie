@@ -32,6 +32,7 @@ mod gxg;
 mod levelup;
 mod pigmy;
 mod relay;
+mod sdw;
 mod snowboard;
 mod tera;
 
@@ -45,6 +46,7 @@ pub use self::{
     gxg::GxgEndpoint,
     levelup::LevelUpEndpoint,
     relay::RelayEndpoint,
+    sdw::SdwEndpoint,
     snowboard::SnowBoardEndpoint,
     tera::TeraEndpoint,
 };

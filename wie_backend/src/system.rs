@@ -137,6 +137,10 @@ impl System {
         // for years. See `crate::local_network::tera`.
         local_network.register(Box::new(crate::local_network::TeraEndpoint));
 
+        // SD세계대전's patch server, gone for years. See
+        // `crate::local_network::sdw`.
+        local_network.register(Box::new(crate::local_network::SdwEndpoint));
+
         // 질주쾌감 스케쳐2's shop/billing server (222.231.31.45:28013), gone for
         // years. The title opens a plain socket to it and writes the carrier
         // billing frame `ff ff 12 00 68 00 <subscriber> 03` - the `0x68`
