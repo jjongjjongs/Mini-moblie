@@ -27,6 +27,7 @@ mod capture;
 mod dragoneyes;
 mod funter;
 mod gpang;
+mod gxg;
 mod levelup;
 mod relay;
 mod snowboard;
@@ -38,6 +39,7 @@ pub use self::{
     dragoneyes::DragonEyesEndpoint,
     funter::FunterEndpoint,
     gpang::GpangEndpoint,
+    gxg::GxgEndpoint,
     levelup::LevelUpEndpoint,
     relay::RelayEndpoint,
     snowboard::SnowBoardEndpoint,
@@ -98,6 +100,13 @@ pub trait LocalEndpoint: Send + Sync {
     /// connections a WIPI-C title opens, which carry no scheme of their own.
     fn accepts(&self, scheme: &str, host: &str, port: u16) -> bool;
 
+    /// The address a host name this endpoint answers for resolves to, so a
+    /// title that looks its server up by name - and gets nothing, the name
+    /// having lapsed with the server - is handed one it will then connect to.
+    fn resolve(&self, _host: &str) -> Option<[u8; 4]> {
+        None
+    }
+
     /// Opens one connection. Called once per `connect`, so an endpoint that
     /// keeps per-connection state puts it in the returned value.
     fn open(&self, scheme: &str, host: &str, port: u16) -> Box<dyn LocalConnection>;
@@ -146,6 +155,11 @@ impl LocalNetwork {
     /// entirely on the ordinary run where none is.
     pub fn is_empty(&self) -> bool {
         self.endpoints.is_empty()
+    }
+
+    /// The address an endpoint gives `host`, if one answers for it by name.
+    pub fn resolve(&self, host: &str) -> Option<[u8; 4]> {
+        self.endpoints.iter().find_map(|endpoint| endpoint.resolve(host))
     }
 
     /// Opens a connection to whichever endpoint answers for this address, or

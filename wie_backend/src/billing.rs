@@ -3060,7 +3060,11 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
     /// 액션퍼즐패밀리3's (`0002CB6A`), 1042, which opens its 명품샵 with this
     /// session: `00 6c 00 00 00 04 12 00 00 02 05 "1.0.2" ...`, the handset
     /// model behind the subscriber's number.
-    const SERVICES: [u16; 4] = [1006, 1017, 1036, 1042];
+    ///
+    /// 슈퍼액션히어로4's SKT build, 1045, which reaches the shop through Nexon's
+    /// GXG gateway (`crate::local_network::GxgEndpoint`):
+    /// `00 67 00 00 00 04 15 00 00 00 07 "1.0.5" ...`.
+    const SERVICES: [u16; 5] = [1006, 1017, 1036, 1042, 1045];
 
     /// 미니게임천국4 (KTF `01040357`) opens this session too, with
     /// `MINIGAMEHEAVEN4` where 엘피스 writes the handset model. Its reader is
@@ -3207,6 +3211,34 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
     /// the title carries on from.
     const LICENCED: u8 = 0;
 
+    /// What 슈퍼액션히어로4's SKT build asks once its shop's session is open.
+    /// Its dispatcher (`0x6833c`, through the table at `0x9dd3c`) sends each
+    /// answer's opcode to a handler of its own.
+    ///
+    /// `0x34` asks for the shop's notice (`00 09 00 34 00` and four bytes), and
+    /// `0x66ae8` reads it: a `u32` id, a `u16` length and that much text. An id
+    /// of `-1` is the title's own word for none - it shows nothing and goes on,
+    /// where an id of 0 brings the notice up again for every OK it is closed
+    /// with.
+    const HERO_NOTICE_OPCODE: u8 = 0x34;
+    const HERO_NOTICE_BODY: usize = 4;
+    /// `0x39` asks for the gifts waiting (`00 05 00 39 00`), and `0x66e38` reads
+    /// a `u32` count. It shows nothing for `-1`; zero, like the notice's id,
+    /// sends it round again.
+    const HERO_GIFT_OPCODE: u8 = 0x39;
+    const NONE_WAITING: u32 = u32::MAX;
+    /// `0x5a` reports where the title stands, its stars among it at `[0..4]`
+    /// of the body (`crate::local_network::GxgEndpoint` keeps those). The
+    /// table sends its answer straight to the end of the dispatcher, so the
+    /// answer carries nothing.
+    const HERO_REPORT_OPCODE: u8 = 0x5a;
+    const HERO_REPORT_BODY_MIN: usize = 32;
+    /// `0x5c` sends the two `u32` masks of what the subscriber owns, and
+    /// `0x670d0` reads two back and adds whatever bits they set. The server's
+    /// own record is the one the title just sent, so the answer is that.
+    const HERO_OWNED_OPCODE: u8 = 0x5c;
+    const HERO_OWNED_BODY: usize = 8;
+
     /// `0x474a4`'s product code and quantity.
     const ORDER_OPCODE: u8 = 0x43;
     /// `0x47604`'s amount, and `0x47fea` reads the answer.
@@ -3289,6 +3321,14 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
             answer.extend_from_slice(&0u16.to_be_bytes());
             (LICENCE_OPCODE, answer)
         }
+        HERO_NOTICE_OPCODE if body.len() == HERO_NOTICE_BODY => {
+            let mut answer = Vec::from(NONE_WAITING.to_be_bytes());
+            answer.extend_from_slice(&0u16.to_be_bytes());
+            (HERO_NOTICE_OPCODE, answer)
+        }
+        HERO_GIFT_OPCODE if body.is_empty() => (HERO_GIFT_OPCODE, Vec::from(NONE_WAITING.to_be_bytes())),
+        HERO_REPORT_OPCODE if body.len() >= HERO_REPORT_BODY_MIN => (HERO_REPORT_OPCODE, Vec::new()),
+        HERO_OWNED_OPCODE if body.len() == HERO_OWNED_BODY => (HERO_OWNED_OPCODE, Vec::from(body)),
         // The product code and the quantity, and a `u32` back.
         ORDER_OPCODE if body.len() == 4 => (ORDER_OPCODE, Vec::from(ORDER.to_be_bytes())),
         // The `u16` `0x14` `0x47604` opens with, the amount, and the quantity.
@@ -3702,6 +3742,15 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
 
             (SESSION_ANSWER, payload)
         }
+        // The SKT builds, which reach this server through Nexon's GXG gateway,
+        // send the subscriber's number with its leading zero dropped and
+        // nothing behind it - `1089483847` from 크아비엔비2011. Answered the same.
+        SESSION_REQUEST if body.len() == 10 && body.iter().all(u8::is_ascii_digit) => {
+            let mut payload = vec![0u8; 1 + 2 + SESSION_TRAILER];
+            payload[0] = SESSION_GRANTED;
+
+            (SESSION_ANSWER, payload)
+        }
         // A `u32` code and the byte behind it, which is what says the frame is
         // `0x7390`'s rather than five other bytes under this command.
         ERRAND_REQUEST if body.len() == ERRAND_BODY && body[4] == ERRAND_TAIL => (ERRAND_ANSWER, vec![AUTH_GRANTED, 0, 0]),
@@ -3718,6 +3767,9 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
         // large slot body so no shorter frame under this command is taken for
         // it. Answered with the family's granted result as a first shaping.
         CASH_SHOP_REQUEST if body.len() >= 64 => (CASH_SHOP_ANSWER, vec![AUTH_GRANTED, 0, 0]),
+        // 크아비엔비2011's purchase, through the GXG gateway: a `u32` item code
+        // and a one-byte count.
+        CASH_SHOP_REQUEST if body.len() == 5 => (CASH_SHOP_ANSWER, vec![AUTH_GRANTED, 0, 0]),
         // The header-only query it sends after the slot sync is granted.
         CASH_QUERY_REQUEST if body.is_empty() => (CASH_QUERY_ANSWER, vec![AUTH_GRANTED, 0, 0]),
         // The one-byte category/page query after that.

@@ -173,6 +173,9 @@ pub struct NetworkState {
     /// game's `(callback, context)` until the `HostResolved` event delivers.
     dns_queries: BTreeMap<u32, (WIPICWord, WIPICWord)>,
     next_query_id: u32,
+    /// Resolutions a local endpoint answered, waiting for the dispatcher to
+    /// deliver them the way the platform's are.
+    local_resolutions: alloc::collections::VecDeque<(u32, WIPICWord)>,
     /// Live `MC_netHttpOpen` connection objects, keyed by the opaque handle the
     /// API hands back to the game.
     http_objects: BTreeMap<i32, HttpObject>,
@@ -2433,6 +2436,22 @@ pub async fn get_host_addr(
 
     let query_id = context.network_state().lock().begin_dns_query(callback, callback_context);
 
+    // A name a local endpoint answers for resolves to that endpoint, whatever
+    // the platform's resolver would say - which for a server long gone is
+    // nothing.
+    let local = context.system().local_network().resolve(&host);
+    if let Some(octets) = local {
+        tracing::info!("MC_netGetHostAddr({host:?}) answered in process: {octets:?}");
+        context
+            .network_state()
+            .lock()
+            .local_resolutions
+            .push_back((query_id, u32::from_le_bytes(octets) as WIPICWord));
+        ensure_event_dispatcher(context)?;
+        return Ok(0);
+    }
+    tracing::info!("MC_netGetHostAddr({host:?})");
+
     {
         let Some(network) = context.system().platform().network() else {
             context.network_state().lock().take_dns_query(query_id);
@@ -2504,6 +2523,15 @@ fn ensure_event_dispatcher(context: &mut dyn WIPICContext) -> Result<()> {
                         .lock()
                         .socket_with_pending_billing_response()
                         .map(wie_backend::NetworkEvent::Readable),
+                };
+
+                let local_event = match local_event {
+                    Some(event) => Some(event),
+                    None => state
+                        .lock()
+                        .local_resolutions
+                        .pop_front()
+                        .map(|(query_id, address)| wie_backend::NetworkEvent::HostResolved { query_id, address }),
                 };
 
                 let local_event = match local_event {

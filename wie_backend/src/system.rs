@@ -108,6 +108,11 @@ impl System {
         // see the exchange rather than to have it answered.
         local_network.register(Box::new(crate::local_network::GpangEndpoint::new()));
 
+        // Nexon Mobile's GXG gateway, `ngw.gxg.com:7300`, which the SKT builds of
+        // its titles buy through. Answered by name as well as by address, the
+        // name no longer resolving.
+        local_network.register(Box::new(crate::local_network::GxgEndpoint::new()));
+
         // 엑스피드스노보드's ranking/map server, gone for years. Answering it in
         // process lets the title past the `네트워크 접속 에러` its title screen
         // shows the moment it dials out. Host-gated, so no other title is

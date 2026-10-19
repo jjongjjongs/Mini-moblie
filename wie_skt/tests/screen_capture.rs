@@ -205,7 +205,19 @@ impl Network for CaptureNetwork {
         Ok(())
     }
 
-    fn resolve_host(&self, _host: &str, _query_id: u32) {}
+    /// Every name resolves, to `10.0.0.1`, so a title that looks its server
+    /// up goes on to connect and a capture or local endpoint sees what it sends.
+    /// The name is written down, being the one thing the trace would not show.
+    fn resolve_host(&self, host: &str, query_id: u32) {
+        eprintln!("[probe] resolve {host:?}");
+        self.events
+            .lock()
+            .unwrap_or_else(|x| x.into_inner())
+            .push_back(wie_backend::NetworkEvent::HostResolved {
+                query_id,
+                address: u32::from_le_bytes([10, 0, 0, 1]),
+            });
+    }
 
     fn poll_event(&self) -> Option<wie_backend::NetworkEvent> {
         self.events.lock().unwrap_or_else(|x| x.into_inner()).pop_front()
