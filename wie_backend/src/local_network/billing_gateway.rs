@@ -48,6 +48,12 @@ enum Framing {
     /// `[u32be length counting the whole frame][body]` - 크로노스윙's game
     /// server.
     BigEndianLength32,
+    /// One write, one frame - 미니게임히어로즈2's KTF build. Its two stages frame
+    /// their length three ways between them (a binary word, eight ASCII digits,
+    /// six), and a write to a local connection is always taken whole, so the
+    /// title never has a reason to split one. See
+    /// [`crate::billing::ktf_local_miniheroes2_response`].
+    MiniHeroes,
 }
 
 /// Answers the carrier billing frames a title writes over a plain socket to one
@@ -109,6 +115,18 @@ impl BillingGatewayEndpoint {
         }
     }
 
+    /// Answers `host:port` for the `"@A"` login and the `"MH"` frame
+    /// 미니게임히어로즈2's KTF build writes over a plain socket to the servers its
+    /// LGT build reaches through the billing gateway.
+    pub const fn new_miniheroes(name: &'static str, host: &'static str, port: u16) -> Self {
+        Self {
+            name,
+            host,
+            port,
+            framing: Framing::MiniHeroes,
+        }
+    }
+
     /// Answers `host:port` for a title that reaches its server through the
     /// `FastRelay` carrier library - 템페스트's 정품인증.
     pub const fn new_relay(name: &'static str, host: &'static str, port: u16) -> Self {
@@ -158,7 +176,17 @@ impl BillingGatewayConnection {
             Framing::BigEndianLength | Framing::Relay => self.take_length_prefixed_frame(),
             Framing::KpTagged => self.take_kp_tagged_frame(),
             Framing::BigEndianLength32 => self.take_u32_length_prefixed_frame(),
+            Framing::MiniHeroes => self.take_write(),
         }
+    }
+
+    /// Everything written so far, as the one frame a write is.
+    fn take_write(&mut self) -> Option<Vec<u8>> {
+        if self.pending.is_empty() {
+            return None;
+        }
+
+        Some(core::mem::take(&mut self.pending))
     }
 
     /// `[u32be length][body]`, the length counting the whole frame. A length
@@ -272,6 +300,7 @@ impl LocalConnection for BillingGatewayConnection {
         while let Some(frame) = self.take_frame() {
             let reply = match self.framing {
                 Framing::Relay => crate::billing::ktf_local_tempest_response(&frame),
+                Framing::MiniHeroes => crate::billing::ktf_local_miniheroes2_response(&frame),
                 _ => crate::billing::response(&frame),
             };
             match reply {
@@ -386,6 +415,28 @@ mod tests {
             read_all(&mut connection),
             [0x4b, 0x50, 0x0c, 0x00, 0x08, 0x00, 0x02, 0x00, 0x01, 0x00, 0x00, 0x00]
         );
+    }
+
+    /// 미니게임히어로즈2's KTF login is answered with the `'A'` that closes its
+    /// first stage, each write on its own.
+    #[test]
+    fn a_miniheroes_login_is_answered_per_write() {
+        let mut connection = BillingGatewayConnection {
+            peer: "211.239.165.14:7205".into(),
+            framing: Framing::MiniHeroes,
+            pending: Vec::new(),
+            outgoing: Vec::new(),
+        };
+
+        connection.write(b"@A\x3f\x00\x00\x00            A_KTF_MiniHeroes2_1.0.0_Emulator_WIPI");
+        assert_eq!(read_all(&mut connection), b"@A00000001A");
+
+        // Something that is neither stage is left unanswered, and leaves nothing
+        // in front of the next frame.
+        connection.write(b"\x00");
+        assert!(!connection.readable());
+        connection.write(b"MH000022          1TDZ");
+        assert_eq!(read_all(&mut connection), b"MH000010ZZ");
     }
 
     fn read_all(connection: &mut BillingGatewayConnection) -> Vec<u8> {

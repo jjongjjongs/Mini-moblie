@@ -81,12 +81,11 @@ pub async fn get_system_property(context: &mut dyn WIPICContext, ptr_id: WIPICWo
         // of its own whose first field is the MIN it was issued for, reads MIN
         // here, and stops at error 5001 when the two differ; the certificate
         // names an empty one, and that is what the handset it was issued for
-        // reported.
+        // reported. See `wie_backend::subscriber::min` for one no key opens.
         "MIN" => {
-            recovered = match handset_identity(context).await {
-                Some(identity) => identity.min,
-                None => subscriber_number(context).await,
-            };
+            let subscriber = subscriber_number(context).await;
+            let cert = context.read_resource("cert.c2s").await.ok();
+            recovered = wie_backend::subscriber::min(cert.as_deref(), subscriber);
             recovered.as_str()
         }
         // The media types the handset can play, which a title reads to decide
@@ -135,14 +134,6 @@ pub(crate) async fn subscriber_number(context: &mut dyn WIPICContext) -> String 
     let app_info = context.read_resource("app_info").await.ok();
 
     wie_backend::subscriber::subscriber_number(cert.as_deref(), certification.as_deref(), app_info.as_deref())
-}
-
-/// The handset identity a title's own-key `cert.c2s` was issued for, or `None`
-/// when the archive has no such certificate.
-async fn handset_identity(context: &mut dyn WIPICContext) -> Option<wie_backend::subscriber::HandsetIdentity> {
-    let cert = context.read_resource("cert.c2s").await.ok()?;
-
-    wie_backend::subscriber::identity_from_cert(&cert)
 }
 
 pub async fn set_system_property(context: &mut dyn WIPICContext, ptr_id: WIPICWord, ptr_value: WIPICWord) -> Result<()> {

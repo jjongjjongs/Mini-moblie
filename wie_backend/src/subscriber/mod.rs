@@ -14,7 +14,7 @@ mod shifted_cert;
 
 pub use self::{
     cert_c2s::recover_phone_number as from_cert,
-    fixed_key_cert::{HandsetIdentity, recover_identity as identity_from_cert},
+    fixed_key_cert::{HandsetIdentity, is_unread_record as is_unread_own_key_cert, recover_identity as identity_from_cert},
     shifted_cert::recover_phone_number as from_shifted_cert,
 };
 
@@ -99,6 +99,38 @@ pub fn from_certification(data: &[u8]) -> Option<String> {
     }
 }
 
+/// The `MIN` to report beside `subscriber`, the number [`subscriber_number`]
+/// settled on.
+///
+/// A certificate of a title's own that names a `MIN` outranks everything -
+/// see [`identity_from_cert`]. One laid out that way under a key nothing here
+/// knows - 미니게임천국5's KTF build ships one, reads `MIN` and stops at error
+/// 5001, the mismatch the others stop at - cannot be read, so it is answered
+/// the way the one that could be read from a CDMA handset was answered: the
+/// ten digits of the number behind its leading `0`. 슈퍼액션히어로4's names
+/// `1089483847` for `01089483847`, which is a `MIN` as the carriers' handsets
+/// report it. Anything else is told the subscriber number itself, so a title
+/// that cross-checks the two agrees with itself.
+pub fn min(cert: Option<&[u8]>, subscriber: String) -> String {
+    let Some(cert) = cert else {
+        return subscriber;
+    };
+
+    if let Some(identity) = identity_from_cert(cert) {
+        return identity.min;
+    }
+
+    if is_unread_own_key_cert(cert)
+        && subscriber.len() == 11
+        && let Some(min) = subscriber.strip_prefix('0')
+    {
+        tracing::info!("cert.c2s is a sealed record no known key opens; MIN answered as {min:?}");
+        return min.to_string();
+    }
+
+    subscriber
+}
+
 /// The number to report, from whichever of the archive's files names it.
 ///
 /// The order is the order of authority: a certificate the number was issued
@@ -136,7 +168,7 @@ pub fn subscriber_number(cert: Option<&[u8]>, certification: Option<&[u8]>, app_
 
 #[cfg(test)]
 mod tests {
-    use super::{FALLBACK, from_certification, from_descriptor, subscriber_number};
+    use super::{FALLBACK, from_certification, from_descriptor, min, subscriber_number};
 
     #[test]
     fn a_certification_that_is_just_the_number_is_read_as_one() {
@@ -232,5 +264,26 @@ mod tests {
 
         assert_eq!(subscriber_number(Some(shifted), None, None), "01096589565");
         assert_eq!(subscriber_number(Some(shifted), Some(b"01011112222"), None), "01096589565");
+    }
+
+    /// `MIN` is the subscriber number, except where a sealed certificate says
+    /// otherwise: the one it names when it can be read, the number's ten digits
+    /// when it is laid out as one but cannot.
+    #[test]
+    fn min_follows_the_certificate_when_there_is_one() {
+        use alloc::string::ToString;
+
+        assert_eq!(min(None, FALLBACK.to_string()), FALLBACK);
+        assert_eq!(min(Some(b"not a certificate"), FALLBACK.to_string()), FALLBACK);
+
+        let mut sealed = [0u8; 76];
+        sealed[..64]
+            .iter_mut()
+            .enumerate()
+            .for_each(|(i, b)| *b = (i as u8).wrapping_mul(37).wrapping_add(11));
+        assert_eq!(min(Some(&sealed), FALLBACK.to_string()), "1046119269");
+
+        // Only an eleven-digit number has a leading digit to lose.
+        assert_eq!(min(Some(&sealed), "0101234567".to_string()), "0101234567");
     }
 }

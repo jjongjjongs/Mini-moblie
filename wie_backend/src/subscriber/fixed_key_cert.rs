@@ -35,6 +35,8 @@ const IV: [u8; 16] = [
 
 /// Bytes of the certificate that are encrypted; a longer file is zero padding.
 const RECORD_LEN: usize = 64;
+/// The size every one of these files has been: the record and its padding.
+const FILE_LEN: usize = 76;
 /// Field offsets and lengths in the decrypted record.
 const MIN_AT: usize = 1;
 const MIN_LEN: usize = 12;
@@ -61,6 +63,16 @@ pub fn recover_identity(cert: &[u8]) -> Option<HandsetIdentity> {
     }
 
     KEYS.iter().find_map(|key| read_record(&decrypt_cbc(&cert[..RECORD_LEN], key)))
+}
+
+/// Whether `cert` is laid out as this certificate is - the four sealed blocks
+/// and the twelve zero bytes every one seen carries after them - while none of
+/// the keys here opens it: one more title's record under a key of its own.
+pub fn is_unread_record(cert: &[u8]) -> bool {
+    cert.len() == FILE_LEN
+        && cert[RECORD_LEN..].iter().all(|&b| b == 0)
+        && cert[..RECORD_LEN].iter().any(|&b| b != 0)
+        && recover_identity(cert).is_none()
 }
 
 /// The identity in one decrypted record, or `None` when it is not one.
@@ -247,7 +259,7 @@ fn inv_mix_columns(state: &mut [u8; 16]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{HandsetIdentity, KEYS, decrypt_cbc, recover_identity};
+    use super::{HandsetIdentity, KEYS, decrypt_cbc, is_unread_record, recover_identity};
     use alloc::string::ToString;
 
     /// The real `cert.c2s` shipped with 액션퍼즐패밀리4 GS2 (AID 000315C6).
@@ -307,6 +319,24 @@ mod tests {
                 serial: "0031015638".to_string()
             })
         );
+    }
+
+    /// A record no key here opens is still told apart by its layout, and one
+    /// that is read, or is not laid out this way, is not taken for it.
+    #[test]
+    fn a_record_under_another_key_is_recognised_by_its_layout() {
+        let mut other = APF4;
+        other[..64].iter_mut().for_each(|b| *b = b.wrapping_mul(7).wrapping_add(3));
+        assert!(is_unread_record(&other));
+
+        assert!(!is_unread_record(&APF4));
+        assert!(!is_unread_record(&SAH4));
+        assert!(!is_unread_record(&[0u8; 76]));
+        assert!(!is_unread_record(&other[..64]));
+
+        let mut unpadded = other;
+        unpadded[70] = 1;
+        assert!(!is_unread_record(&unpadded));
     }
 
     /// A blob that is not this certificate decrypts to noise, which the

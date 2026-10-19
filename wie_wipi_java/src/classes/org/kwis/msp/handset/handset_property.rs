@@ -104,10 +104,9 @@ impl HandsetProperty {
             // certificate names one - the WIPI-C side answers from the same
             // certificate, so the two paths still agree.
             "MIN" => {
-                recovered = match Self::handset_identity(jvm, context).await {
-                    Some(identity) => identity.min,
-                    None => Self::subscriber_number(jvm, context).await,
-                };
+                let subscriber = Self::subscriber_number(jvm, context).await;
+                let cert = Self::resource(jvm, context, "cert.c2s").await;
+                recovered = subscriber::min(cert.as_deref(), subscriber);
                 recovered.as_str()
             }
             _ => {
@@ -129,12 +128,6 @@ impl HandsetProperty {
         let app_info = Self::resource(jvm, context, "app_info").await;
 
         subscriber::subscriber_number(cert.as_deref(), certification.as_deref(), app_info.as_deref())
-    }
-
-    /// The handset identity the archive's own-key `cert.c2s` was issued for, or
-    /// `None` when it has no such certificate.
-    async fn handset_identity(jvm: &Jvm, context: &mut WieJvmContext) -> Option<subscriber::HandsetIdentity> {
-        subscriber::identity_from_cert(&Self::resource(jvm, context, "cert.c2s").await?)
     }
 
     /// One of the archive's own files, or `None` when it has no such file.
