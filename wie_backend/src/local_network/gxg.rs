@@ -31,7 +31,7 @@
 
 use alloc::{boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 
-use super::{LocalConnection, LocalEndpoint, LocalRead};
+use super::{LocalConnection, LocalEndpoint, LocalRead, candy_shop::CandyShop};
 
 /// The names the gateway went by. Both resolve to [`ADDRESS`].
 const HOSTS: [&str; 2] = ["ngw.gxg.com", "ngph.gxg.com"];
@@ -55,6 +55,9 @@ pub struct GxgEndpoint {
     /// Kept across connections: the shop reports and buys on whichever one it
     /// has open at the time.
     stars: Arc<spin::Mutex<Stars>>,
+    /// The 캔디샵 of the 메이플스토리 titles, which learns which of them it
+    /// serves from one frame and sells to it on others.
+    shop: Arc<spin::Mutex<CandyShop>>,
 }
 
 impl GxgEndpoint {
@@ -81,6 +84,7 @@ impl LocalEndpoint for GxgEndpoint {
     fn open(&self, _scheme: &str, _host: &str, _port: u16) -> Box<dyn LocalConnection> {
         Box::new(GxgConnection {
             stars: self.stars.clone(),
+            shop: self.shop.clone(),
             ..Default::default()
         })
     }
@@ -105,6 +109,7 @@ struct GxgConnection {
     /// the title then sets.
     held: bool,
     stars: Arc<spin::Mutex<Stars>>,
+    shop: Arc<spin::Mutex<CandyShop>>,
 }
 
 /// One frame of the gateway's, as the title reads them.
@@ -169,8 +174,7 @@ fn open_target(body: &[u8]) -> Option<(String, u16)> {
 /// [command]` frames, which 크아비엔비2011 and the 메이플/던파 builds send, and
 /// 컴투스's five-byte-header messages, which 슈퍼액션히어로4 does.
 fn answer_data(data: &[u8]) -> Option<Vec<u8>> {
-    super::candy_shop::answer(data)
-        .or_else(|| crate::billing::lgt_local_marked_command_response(data))
+    crate::billing::lgt_local_marked_command_response(data)
         .or_else(|| crate::billing::lgt_local_opcode_header_response(data))
         .or_else(|| crate::billing::lgt_local_scrambled_opcode_header_response(data))
         .or_else(|| marked_granted(data))
@@ -309,7 +313,7 @@ impl LocalConnection for GxgConnection {
                 // `[u32 length][0xffff][command]` frames - the ones the LGT
                 // builds send that server straight - and answered the same way,
                 // carried back as data.
-                b"DP" => match answer_data(&body) {
+                b"DP" => match self.shop.lock().answer(&body).or_else(|| answer_data(&body)) {
                     Some(mut answer) => {
                         let mut stars = self.stars.lock();
                         stars.observe(&body);

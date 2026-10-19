@@ -3703,6 +3703,14 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
         u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
     }
 
+    /// Whether a body is the subscriber's number with at least `tail` bytes
+    /// behind it: eleven digits from the LGT builds, or ten - the leading zero
+    /// dropped - from the SKT ones, which then send exactly the `tail`.
+    fn subscriber_led(body: &[u8], tail: usize) -> bool {
+        let digits = |n: usize| body.get(..n).is_some_and(|x| x.iter().all(u8::is_ascii_digit));
+        (body.len() >= 11 + tail && digits(11)) || (body.len() == 10 + tail && digits(10))
+    }
+
     /// One length-prefixed string off the front of a body.
     fn string_at(body: &[u8]) -> Option<(&[u8], &[u8])> {
         if body.len() < 2 {
@@ -3797,10 +3805,13 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
         // 도적편's egg-hatch charge, told from a bare command by the subscriber
         // digits leading its body. Granted with a zero status and zeroed fields,
         // the whole of what its reader takes.
-        HATCH_REQUEST if body.len() >= 13 && body[..11].iter().all(u8::is_ascii_digit) => (HATCH_ANSWER, vec![0u8; HATCH_BODY]),
+        // The SKT build, through the GXG gateway, drops the number's leading
+        // zero (`1089483847 0006`); answered alike, where the bare result it
+        // got before left the hatch drawing a picture from past its end.
+        HATCH_REQUEST if subscriber_led(body, 2) => (HATCH_ANSWER, vec![0u8; HATCH_BODY]),
         // 해적편's egg-hatch charge, told apart the same way. Its reader takes
         // only the status, so the granted result is that single zero byte.
-        PIRATE_HATCH_REQUEST if body.len() >= 12 && body[..11].iter().all(u8::is_ascii_digit) => (PIRATE_HATCH_ANSWER, vec![AUTH_GRANTED]),
+        PIRATE_HATCH_REQUEST if subscriber_led(body, 1) => (PIRATE_HATCH_ANSWER, vec![AUTH_GRANTED]),
         // 해적편's egg-hatch confirmation step, its short category body telling it
         // from the subscriber-led charge frames. Its reader takes the 도적편-style
         // confirmation body and none of it gates the hatch, so the granted result
@@ -14555,6 +14566,19 @@ mod tests {
         assert_eq!(response[8], 0x00);
         // The body past the marker is the command and every field its reader
         // walks: 0x3e bytes in all (the two-byte command and the 0x3c payload).
+        assert_eq!(response.len() - 6, 0x3e);
+    }
+
+    /// The SKT 도적편's hatch, through the GXG gateway, with the subscriber's
+    /// number ten digits long - the frame its log showed before it crashed.
+    #[test]
+    fn the_skt_egg_hatch_charge_is_granted() {
+        let request = [
+            0x14, 0x00, 0x00, 0x00, 0xff, 0xff, 0x0e, 0x00, b'1', b'0', b'8', b'9', b'4', b'8', b'3', b'8', b'4', b'7', 0x00, 0x06,
+        ];
+
+        let response = lgt_local_marked_command_response(&request).unwrap();
+        assert_eq!(u16::from_le_bytes(response[6..8].try_into().unwrap()), 0x000f);
         assert_eq!(response.len() - 6, 0x3e);
     }
 
