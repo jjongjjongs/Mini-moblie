@@ -64,8 +64,6 @@ const FRAME: Duration = Duration::from_micros(16_667);
 /// back it has to come to count as let go.
 const AXIS_PRESS: i16 = 16_000;
 const AXIS_RELEASE: i16 = 12_000;
-/// How long the hint over a desktop game stays up as it starts.
-const TOAST: Duration = Duration::from_secs(3);
 /// How long the speed stays up after F5 or F6.
 const SPEED_TOAST: Duration = Duration::from_millis(1500);
 
@@ -959,16 +957,12 @@ impl App {
         // The newest frame, kept for the menu to show behind it.
         let mut frame: Option<(u32, u32, Vec<u8>)> = None;
         self.clear_hits();
-        let mut toast = if self.desktop {
-            format!("Esc·우클릭 메뉴 · {FULLSCREEN_KEY} 전체화면")
-        } else {
-            String::new()
-        };
-        // When the hint goes, counted from the title's first frame - a title
-        // can take a while to draw one.
+        // What F5 to F8 last changed, shown over the game for a moment.
+        let mut toast = String::new();
+        // When that goes.
         let mut toast_until: Option<Instant> = None;
-        // Whether the frame on screen carries the hint, to draw it again
-        // without once the hint's time is up.
+        // Whether the frame on screen carries it, to draw it again without
+        // once its time is up.
         let mut toast_up = false;
 
         loop {
@@ -1067,7 +1061,6 @@ impl App {
             if let Some(new_frame) = taken {
                 frame = Some(new_frame);
                 self.redraw = true;
-                toast_until.get_or_insert_with(|| Instant::now() + TOAST);
             }
             let toast_time = toast_until.is_some_and(|until| Instant::now() < until);
             if toast_up && !toast_time {
@@ -1078,7 +1071,7 @@ impl App {
                 && let Some((width, height, rgba)) = &frame
             {
                 let (width, height) = (*width, *height);
-                // The hint over the first seconds of a desktop game.
+                // What F5 to F8 last changed, while it is up.
                 toast_up = !toast.is_empty() && toast_time;
                 let rgba = if toast_up {
                     ui::with_toast(rgba, width, height, &toast)
