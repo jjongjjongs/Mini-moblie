@@ -13,6 +13,7 @@ mod comtus_save;
 mod ea_store;
 mod fixed_key_cert;
 mod gamevil_record;
+mod seeded_save;
 mod shifted_cert;
 
 pub use self::{
@@ -21,6 +22,7 @@ pub use self::{
     ea_store::recover_phone_number as from_ea_store,
     fixed_key_cert::{HandsetIdentity, recover_identity as identity_from_cert},
     gamevil_record::recover_phone_number as from_gamevil_record,
+    seeded_save::recover_phone_number as from_seeded_save,
     shifted_cert::recover_phone_number as from_shifted_cert,
 };
 
@@ -106,10 +108,11 @@ pub fn from_certification(data: &[u8]) -> Option<String> {
 }
 
 /// The files a title keeps its own 인증 record in, which name the subscriber
-/// it was registered to: GAMEVIL's `audio.adt` (see [`from_gamevil_record`])
-/// and EA Mobile Korea's `kickass` store (see [`from_ea_store`]). Each reader
-/// answers only for its own format, so every file is offered to both.
-pub const RECORD_FILES: [&str; 2] = ["audio.adt", "kickass"];
+/// it was registered to: GAMEVIL's `audio.adt` (see [`from_gamevil_record`]),
+/// EA Mobile Korea's `kickass` store (see [`from_ea_store`]) and 2011슈퍼사커's
+/// `SC_option.dat` (see [`from_seeded_save`]). Each reader answers only for its
+/// own format, so every file is offered to all of them.
+pub const RECORD_FILES: [&str; 3] = ["audio.adt", "kickass", "SC_option.dat"];
 
 /// The number to report, from whichever of the archive's files names it.
 ///
@@ -134,10 +137,11 @@ pub fn subscriber_number(cert: Option<&[u8]>, records: &[&[u8]], certification: 
         return number;
     }
 
-    if let Some(number) = records
-        .iter()
-        .find_map(|record| from_gamevil_record(record).or_else(|| from_ea_store(record)))
-    {
+    if let Some(number) = records.iter().find_map(|record| {
+        from_gamevil_record(record)
+            .or_else(|| from_ea_store(record))
+            .or_else(|| from_seeded_save(record))
+    }) {
         tracing::info!("recovered subscriber number from the title's own 인증 record: {number:?}");
         return number;
     }
