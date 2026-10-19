@@ -606,10 +606,12 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // title logo stayed in the corner while the pictures it centres and
     // bottom-anchors drifted apart from it.
     (TitlePlatform::Ktf, "01036C16", panel(128, 160)),
-    // 신암행어사 (엠포마): drawn for a 128x160 handset. On any larger panel it
-    // centres its 120x144 scene, so on 240x320 the game filled a quarter of
-    // the screen inside a black frame.
-    (TitlePlatform::Ktf, "01033269", panel(128, 160)),
+    // 신암행어사 (엠포마): drawn for a 128x176 handset - its own repaint asks
+    // for (0, 0, 128, 176). It centres its 120x144 scene on whatever panel it
+    // is given and writes the soft keys' labels (`CLR 상위`, `OK 확인`) in the
+    // rows under it, so on 240x320 the game filled a quarter of the screen
+    // inside a black frame, and on 128x160 the labels ran off the bottom.
+    (TitlePlatform::Ktf, "01033269", panel(128, 176)),
     // 초밥의달인3 (KTF PD004152): a Java title whose screens draw inside a
     // 240x296 clip - the bottom 24 rows are the handset's soft-key strip, which
     // it never touches - while some earlier screen fills the whole 240x320 with
@@ -1222,10 +1224,10 @@ mod tests {
         assert_eq!(title_quirks(TitlePlatform::Ktf, "01036C16").screen_size, Some((128, 160)));
     }
 
-    /// 신암행어사 fills the 128x160 panel it centres its scene in.
+    /// 신암행어사 fills the 128x176 panel it centres its scene in.
     #[test]
     fn secret_royal_inspector_gets_its_panel() {
-        assert_eq!(title_quirks(TitlePlatform::Ktf, "01033269").screen_size, Some((128, 160)));
+        assert_eq!(title_quirks(TitlePlatform::Ktf, "01033269").screen_size, Some((128, 176)));
     }
 
     /// 프린스메이커 온달편 fills the 128x128 panel its art was drawn for.

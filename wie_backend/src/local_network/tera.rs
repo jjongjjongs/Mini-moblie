@@ -1,4 +1,5 @@
-//! The server 테라-영원의혼돈's KTF build fetches its 인증서 from.
+//! The server 테라-영원의혼돈's KTF build fetches its 인증서 from and buys
+//! through.
 //!
 //! The title (KTF `0104050F`) has no 인증서 on its first run and asks
 //! `인증서가 없습니다. 최초 1회에 한하여 서버에 접속한 뒤 인증서를 받아옵니다.`
@@ -7,30 +8,37 @@
 //! the server is long gone, so it sits on `전송 중입니다..` until it gives up
 //! with `네트워크 상태가 원활하지 않습니다`.
 //!
-//! What it writes is the record its LGT build buys with (see
-//! [`crate::billing::lgt_local_tera_response`]) under its own carrier's tag,
-//! with no length in front:
+//! Every request is a record with no length in front of it: the tag, the
+//! message, and fixed-width fields the message decides. Three are known:
 //!
 //! ```text
-//! [0..3]    "KTF"
-//! [3]       1, the message
-//! [4..54]   "테라(인증)" in EUC-KR, zero filled
-//! [54..60]  "41000" and its terminator
+//! 0x01  60 bytes   the 인증서: "테라(인증)" in 50 bytes, then "41000"
+//! 0x0d  50 bytes   a shop request: the shop, "41001" and "테라" in 46 bytes
+//! 0x14  111 bytes  a purchase: a header with the price, the item (the code
+//!                  "00490DT0B" and its name), then the shop the same 46 bytes
 //! ```
 //!
-//! and it reads the answer the LGT build reads: a little-endian `u32` length,
-//! then the body - the message come back, and a status. Tried against the
-//! title, the status picks the notice it draws:
+//! The purchase is the record the LGT build buys with (see
+//! [`crate::billing::lgt_local_tera_response`]) under this carrier's tag.
 //!
-//! | status | notice |
-//! |--------|--------|
-//! | 1 | 인증이 완료되었습니다. |
-//! | 2 | 인증이 확인되었습니다. |
-//! | 3 | 인증에 실패하였습니다. |
+//! The answer is what the LGT build reads too: a little-endian `u32` length,
+//! then the body. When it is whole the receive loop at `0x11f110` marks it
+//! done (state 6) and `0x1a7f60` hands it to the transaction that asked,
+//! through the table at `0x204958` indexed by the transaction less 0x64. Each
+//! handler compares the body's first byte with the message it sent and takes
+//! the second as its status, and reads nothing behind them:
 //!
-//! On 1 the title keeps the 인증서 and goes on to its menu, and a later run
-//! starts there without dialling at all. After the record it writes one zero
-//! byte, which asks for nothing.
+//! - `0x12c`, the 인증서, at `0x1aba7e`. Tried against the title, the status
+//!   picks the notice: 1 `인증이 완료되었습니다.`, 2 `인증이 확인되었습니다.`,
+//!   3 `인증에 실패하였습니다.` On 1 it keeps the 인증서 and goes on to its
+//!   menu, and a later run starts there without dialling at all.
+//! - `0xbe`, message 0x0d, at `0x1aae68`: 1 goes on (`0x1aaea6`), anything
+//!   else is a failure notice at `0x1ab05a`.
+//! - `0xd3`, the purchase, at `0x1aa260`: 1 hands the item over, as in the
+//!   LGT build.
+//!
+//! So each is answered with its message come back and 1. After a record the
+//! title writes one zero byte, which asks for nothing.
 
 use alloc::{boxed::Box, vec::Vec};
 
@@ -40,11 +48,13 @@ const HOST: &str = "222.122.160.61";
 const PORTS: core::ops::RangeInclusive<u16> = 11001..=11003;
 
 const TAG: &[u8] = b"KTF";
-const AUTHENTICATION: u8 = 0x01;
-const AUTHENTICATION_SIZE: usize = 60;
 
-/// The status the title reads as a new 인증서 issued.
-const ISSUED: u8 = 1;
+/// The messages answered, and the size of each one's record.
+const RECORDS: [(u8, usize); 3] = [(0x01, 60), (0x0d, 50), (0x14, 111)];
+
+/// The status every handler goes on from: the 인증서 issued, the shop's
+/// request granted, the item handed over.
+const GRANTED: u8 = 1;
 
 /// Answers 테라-영원의혼돈's 인증 server.
 pub struct TeraEndpoint;
@@ -86,19 +96,20 @@ impl LocalConnection for TeraConnection {
             return;
         }
 
-        if self.pending[TAG.len()] != AUTHENTICATION {
+        let message = self.pending[TAG.len()];
+        let Some(&(_, size)) = RECORDS.iter().find(|(known, _)| *known == message) else {
             tracing::info!("tera: no reply shaped for {} bytes {:02x?}", self.pending.len(), self.pending);
             self.pending.clear();
             return;
-        }
+        };
 
-        if self.pending.len() < AUTHENTICATION_SIZE {
+        if self.pending.len() < size {
             return;
         }
 
-        self.pending.drain(..AUTHENTICATION_SIZE);
+        self.pending.drain(..size);
 
-        let body = [AUTHENTICATION, ISSUED];
+        let body = [message, GRANTED];
         self.outgoing.extend_from_slice(&(body.len() as u32).to_le_bytes());
         self.outgoing.extend_from_slice(&body);
     }
@@ -172,10 +183,31 @@ mod tests {
     }
 
     #[test]
+    fn the_shop_is_granted() {
+        let mut connection = TeraConnection::default();
+
+        // As the title wrote them buying from its shop.
+        let mut request = vec![0u8; 50];
+        request[..9].copy_from_slice(b"KTF\x0d41001");
+        request[9..13].copy_from_slice(&[0xc5, 0xd7, 0xb6, 0xf3]);
+        connection.write(&request);
+        assert_eq!(read_all(&mut connection), [2, 0, 0, 0, 0x0d, 1]);
+
+        let mut purchase = vec![0u8; 111];
+        purchase[..14].copy_from_slice(&[0x4b, 0x54, 0x46, 0x14, 0x01, 0x1d, 0, 0, 0, 0x01, 0x84, 0x03, 0, 0]);
+        purchase[14..23].copy_from_slice(b"00490DT0B");
+        purchase[65..70].copy_from_slice(b"41001");
+        connection.write(&purchase[..60]);
+        assert!(!connection.readable());
+        connection.write(&purchase[60..]);
+        assert_eq!(read_all(&mut connection), [2, 0, 0, 0, 0x14, 1]);
+    }
+
+    #[test]
     fn other_messages_are_left_unanswered() {
         let mut connection = TeraConnection::default();
         let mut record = authentication();
-        record[3] = 0x14;
+        record[3] = 0x0e;
         connection.write(&record);
         assert!(!connection.readable());
     }
