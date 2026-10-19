@@ -2136,6 +2136,11 @@ async fn read_packaged_database(context: &mut dyn WIPICContext, name: &str) -> R
     Ok(Some(context.read_resource(name).await?))
 }
 
+/// The names 메이플스토리 Live keeps its saves and their checksum under:
+/// `mapleliveuser`, `maplelive0`..`maplelive5`, their `r` records and
+/// `maplelivek`. See [`packaged_store_bytes`].
+const MAPLE_LIVE_SAVE_PREFIX: &str = "maplelive";
+
 /// What the archive itself ships under this name, wherever it ships it.
 ///
 /// KTF's storage table is the handset's filesystem as much as it is its
@@ -2153,7 +2158,21 @@ async fn read_packaged_database(context: &mut dyn WIPICContext, name: &str) -> R
 /// with nothing loaded instead of starting a new game - no character and none
 /// of the stars it opens its games with. See
 /// [`wie_backend::subscriber::comtus_save_opens_under`].
+///
+/// 메이플스토리 Live's saves are sealed to the handset's model as well as its
+/// number: the checksum it keeps in `maplelivek` (`0x111704`) sums the bytes
+/// of `PHONENUMBER`, `PHONEMODEL` and the saves themselves, and on the first
+/// key at the title it refuses saves whose checksum differs with `데이터 오류로
+/// 게임을 종료합니다`. The model the dumped handset reported is not recorded
+/// anywhere - only its byte sum can be worked back out of the checksum - so the
+/// saves it shipped cannot be opened on this one, and are left out for the
+/// title to make a new player as it does on a fresh install.
 pub(crate) async fn packaged_store_bytes(context: &mut dyn WIPICContext, name: &str) -> Result<Option<Vec<u8>>> {
+    if name.starts_with(MAPLE_LIVE_SAVE_PREFIX) {
+        tracing::info!("{name:?} is a save sealed to another handset's model; leaving it out");
+        return Ok(None);
+    }
+
     let data = if let Some(packaged) = read_packaged_database(context, name).await? {
         packaged
     } else {
