@@ -169,7 +169,8 @@ fn open_target(body: &[u8]) -> Option<(String, u16)> {
 /// [command]` frames, which 크아비엔비2011 and the 메이플/던파 builds send, and
 /// 컴투스's five-byte-header messages, which 슈퍼액션히어로4 does.
 fn answer_data(data: &[u8]) -> Option<Vec<u8>> {
-    crate::billing::lgt_local_marked_command_response(data)
+    super::candy_shop::answer(data)
+        .or_else(|| crate::billing::lgt_local_marked_command_response(data))
         .or_else(|| crate::billing::lgt_local_opcode_header_response(data))
         .or_else(|| crate::billing::lgt_local_scrambled_opcode_header_response(data))
         .or_else(|| marked_granted(data))
