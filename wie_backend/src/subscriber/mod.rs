@@ -9,6 +9,7 @@
 //! title that reads it through both disagrees with itself.
 
 mod cert_c2s;
+mod comtus_save;
 mod ea_store;
 mod fixed_key_cert;
 mod gamevil_record;
@@ -16,6 +17,7 @@ mod shifted_cert;
 
 pub use self::{
     cert_c2s::recover_phone_number as from_cert,
+    comtus_save::opens_under as comtus_save_opens_under,
     ea_store::recover_phone_number as from_ea_store,
     fixed_key_cert::{HandsetIdentity, recover_identity as identity_from_cert},
     gamevil_record::recover_phone_number as from_gamevil_record,

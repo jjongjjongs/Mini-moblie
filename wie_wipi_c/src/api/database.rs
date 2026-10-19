@@ -2146,20 +2146,37 @@ async fn read_packaged_database(context: &mut dyn WIPICContext, name: &str) -> R
 /// its 980KB that way, `patch.dat` recording that it arrived, and looked for
 /// `patch.dat` at start-up through this table. Reading only the jar answered
 /// "no such store", so the title asked to download what it already had.
+///
+/// A save the handset that was dumped wrote, sealed to its number, is not
+/// shipped as far as this handset is concerned: 미니게임천국5 cannot open its
+/// `gamedata.dat` under any number but that one, and having found it, plays on
+/// with nothing loaded instead of starting a new game - no character and none
+/// of the stars it opens its games with. See
+/// [`wie_backend::subscriber::comtus_save_opens_under`].
 pub(crate) async fn packaged_store_bytes(context: &mut dyn WIPICContext, name: &str) -> Result<Option<Vec<u8>>> {
-    if let Some(packaged) = read_packaged_database(context, name).await? {
-        return Ok(Some(packaged));
-    }
+    let data = if let Some(packaged) = read_packaged_database(context, name).await? {
+        packaged
+    } else {
+        let filesystem = context.system().filesystem().clone();
+        let Some(size) = filesystem.size(name).await else {
+            return Ok(None);
+        };
 
-    let filesystem = context.system().filesystem().clone();
-    let Some(size) = filesystem.size(name).await else {
-        return Ok(None);
+        let mut data = vec![0; size];
+        filesystem.read(name, 0, size, &mut data).await;
+
+        tracing::debug!("{name:?} is a file the archive shipped, {size} bytes");
+        data
     };
 
-    let mut data = vec![0; size];
-    filesystem.read(name, 0, size, &mut data).await;
-
-    tracing::debug!("{name:?} is a file the archive shipped, {size} bytes");
+    // Whether it is such a save at all does not depend on the number, so the
+    // number is only looked up for one that is.
+    if wie_backend::subscriber::comtus_save_opens_under(&data, "").is_some()
+        && wie_backend::subscriber::comtus_save_opens_under(&data, &crate::api::kernel::subscriber_number(context).await) == Some(false)
+    {
+        tracing::info!("{name:?} is a save sealed to another handset's number; leaving it out");
+        return Ok(None);
+    }
 
     Ok(Some(data))
 }

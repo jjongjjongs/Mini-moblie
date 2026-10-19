@@ -3562,6 +3562,7 @@ dependencies = [
  "hashbrown",
  "image",
  "lazy_static",
+ "md5",
  "miniz_oxide",
  "num-traits",
  "smaf",

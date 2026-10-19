@@ -103,7 +103,7 @@ fn field(bytes: &[u8]) -> Option<String> {
 }
 
 /// AES-128-CBC decryption of a whole number of blocks under `key` and [`IV`].
-fn decrypt_cbc(cipher: &[u8], key: &[u8; 16]) -> Vec<u8> {
+pub(super) fn decrypt_cbc(cipher: &[u8], key: &[u8; 16]) -> Vec<u8> {
     let round_keys = expand_key(key);
 
     let mut plain = Vec::with_capacity(cipher.len());
