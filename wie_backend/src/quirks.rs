@@ -606,6 +606,10 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // title logo stayed in the corner while the pictures it centres and
     // bottom-anchors drifted apart from it.
     (TitlePlatform::Ktf, "01036C16", panel(128, 160)),
+    // 신암행어사 (엠포마): drawn for a 128x160 handset. On any larger panel it
+    // centres its 120x144 scene, so on 240x320 the game filled a quarter of
+    // the screen inside a black frame.
+    (TitlePlatform::Ktf, "01033269", panel(128, 160)),
     // 초밥의달인3 (KTF PD004152): a Java title whose screens draw inside a
     // 240x296 clip - the bottom 24 rows are the handset's soft-key strip, which
     // it never touches - while some earlier screen fills the whole 240x320 with
@@ -1216,6 +1220,12 @@ mod tests {
     fn pharmacy_tycoon_and_alice_get_their_panels() {
         assert_eq!(title_quirks(TitlePlatform::Ktf, "0102884A").screen_size, Some((176, 220)));
         assert_eq!(title_quirks(TitlePlatform::Ktf, "01036C16").screen_size, Some((128, 160)));
+    }
+
+    /// 신암행어사 fills the 128x160 panel it centres its scene in.
+    #[test]
+    fn secret_royal_inspector_gets_its_panel() {
+        assert_eq!(title_quirks(TitlePlatform::Ktf, "01033269").screen_size, Some((128, 160)));
     }
 
     /// 프린스메이커 온달편 fills the 128x128 panel its art was drawn for.
