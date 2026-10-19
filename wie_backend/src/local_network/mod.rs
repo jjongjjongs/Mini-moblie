@@ -33,6 +33,7 @@ mod levelup;
 mod pigmy;
 mod relay;
 mod snowboard;
+mod tera;
 
 pub use self::{
     ack::{AckEndpoint, Framing},
@@ -45,6 +46,7 @@ pub use self::{
     levelup::LevelUpEndpoint,
     relay::RelayEndpoint,
     snowboard::SnowBoardEndpoint,
+    tera::TeraEndpoint,
 };
 
 use alloc::{boxed::Box, collections::BTreeMap, string::String, vec::Vec};
