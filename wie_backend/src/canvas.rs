@@ -1201,6 +1201,7 @@ pub fn decode_image_with(data: &[u8], conventions: DecodeConventions) -> Result<
         Ok(image) => image,
         Err(error) => {
             let repaired = png_with_repaired_crcs(data)
+                .or_else(|| png_with_end_restored(data))
                 .or_else(|| bmp_with_palette_ending_at_offbits(data))
                 .ok_or_else(|| WieError::FatalError(error.to_string()))?;
 
@@ -1340,6 +1341,57 @@ fn png_with_repaired_crcs(data: &[u8]) -> Option<Vec<u8>> {
     }
 
     repaired_any.then_some(repaired)
+}
+
+/// The same PNG cut back to its last whole chunk with an `IEND` put after it,
+/// or `None` if it is not a PNG that stops short of its `IEND` after its image
+/// data.
+///
+/// A handset's decoder stopped once it had the image data, so a title could
+/// hand it a length that leaves the end marker off. 스페셜포스 디펜스 creates
+/// its images from a resource with a length five bytes short: `0/_[001].png` is
+/// 214 bytes and goes to `MC_grpCreateImage` as 209, which keeps all of `IDAT`
+/// and seven bytes of `IEND`. A strict decoder reads past the end looking for
+/// the rest and fails, and the failure ended the game a moment after its title
+/// screen.
+///
+/// Only reached once a strict decode has already refused the bytes, and only a
+/// file that has a whole `IDAT` and no whole `IEND` is changed, so image data
+/// that is itself cut short still fails.
+fn png_with_end_restored(data: &[u8]) -> Option<Vec<u8>> {
+    /// `\x89PNG\r\n\x1a\n`.
+    const SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    /// An empty `IEND` chunk: no length, the type, and the type's CRC.
+    const IEND: [u8; 12] = [0, 0, 0, 0, b'I', b'E', b'N', b'D', 0xae, 0x42, 0x60, 0x82];
+
+    if !data.starts_with(&SIGNATURE) {
+        return None;
+    }
+
+    let mut at = SIGNATURE.len();
+    let mut has_image_data = false;
+    while let Some(header) = data.get(at..at + 8) {
+        let length = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
+        let Some(end) = (at + 12).checked_add(length).filter(|&end| end <= data.len()) else {
+            break;
+        };
+
+        match &header[4..8] {
+            b"IEND" => return None,
+            b"IDAT" => has_image_data = true,
+            _ => {}
+        }
+        at = end;
+    }
+
+    if !has_image_data {
+        return None;
+    }
+
+    let mut restored = data[..at].to_vec();
+    restored.extend_from_slice(&IEND);
+
+    Some(restored)
 }
 
 /// The colour a paletted BMP that says it is keyed reserves as transparent,
@@ -1494,7 +1546,7 @@ mod tests {
 
     use super::{
         ArgbPixel, Canvas, Color, Font, Rgb332Pixel, ScaleFont, TextAlignment, VecImageBuffer, baseline_px, bmp_with_palette_ending_at_offbits,
-        decode_image, pixel_face, png_with_repaired_crcs, scaled_face,
+        decode_image, pixel_face, png_with_end_restored, png_with_repaired_crcs, scaled_face,
     };
 
     /// A 1x1 indexed PNG, which is the smallest thing that has a palette to
@@ -1558,6 +1610,20 @@ mod tests {
 
         // Repaired back to exactly the bytes a correct encoder would have written.
         assert_eq!(png_with_repaired_crcs(&patched).as_deref(), Some(sound.as_slice()));
+    }
+
+    /// 스페셜포스 디펜스 creates its images with a length that stops five bytes
+    /// into `IEND`. The handset's decoder had what it needed by then.
+    #[test]
+    fn a_png_handed_over_short_of_its_end_marker_still_decodes() {
+        let sound = indexed_png();
+        let short = &sound[..sound.len() - 5];
+
+        assert!(decode_image(short).is_ok(), "a missing IEND must not lose the image");
+        assert_eq!(png_with_end_restored(short).as_deref(), Some(sound.as_slice()));
+
+        // A sound file is left alone.
+        assert_eq!(png_with_end_restored(&sound), None);
     }
 
     /// A 1x1 indexed PNG whose one palette entry carries `alpha` in `tRNS`.
@@ -1729,9 +1795,11 @@ mod tests {
     #[test]
     fn a_truncated_png_is_still_refused() {
         // The walk stops at a chunk that does not fit rather than reaching past
-        // it, so a genuinely damaged file fails as it should.
+        // it, so a file cut inside its image data fails as it should. One cut
+        // only inside `IEND` is the one that is restored - see
+        // `a_png_handed_over_short_of_its_end_marker_still_decodes`.
         let sound = indexed_png();
-        let truncated = &sound[..sound.len() - 6];
+        let truncated = &sound[..sound.len() - 12 - 6];
 
         assert!(decode_image(truncated).is_err());
     }
