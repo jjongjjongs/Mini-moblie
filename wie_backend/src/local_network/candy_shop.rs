@@ -1,5 +1,8 @@
 //! The 캔디샵 of 메이플스토리 Live and 메이플스토리 시그너스기사단, which their SKT
-//! builds reach through Nexon's GXG gateway ([`super::GxgEndpoint`]).
+//! builds reach through Nexon's GXG gateway ([`super::GxgEndpoint`]), and
+//! 시그너스's LGT build through its billing socket
+//! ([`crate::billing::lgt_local_marked_command_response`]), built by the same
+//! code (`0xc208` to `0xc29a` there).
 //!
 //! The shop's shelves were the server's: it sent the goods, their names and
 //! their prices, and the title only draws them. What the server sold, though,
@@ -33,7 +36,7 @@ use alloc::vec::Vec;
 /// The candy the subscriber holds. A purchase never spends it: the candy was
 /// bought with money the emulator does not take, the same way every other
 /// shop here grants what it is asked for.
-const CANDY: u32 = 1_000_000;
+pub(crate) const CANDY: u32 = 1_000_000;
 
 const HEADER: usize = 8;
 const MARKER: [u8; 2] = [0xff, 0xff];
@@ -284,24 +287,40 @@ impl CandyShop {
             return Some(frame(command + 1, &answer));
         }
 
-        let title = self.title?;
-        let commands = title.commands();
+        self.title?.answer(data)
+    }
+}
+
+impl Title {
+    /// What this title's shop is answered for one of its four commands, or
+    /// `None` for anything else.
+    pub(crate) fn answer(self, data: &[u8]) -> Option<Vec<u8>> {
+        let length = u32::from_le_bytes(data.get(..4)?.try_into().ok()?) as usize;
+        if data.len() < HEADER || length != data.len() || data[4..6] != MARKER {
+            return None;
+        }
+
+        let command = u16::from_le_bytes([data[6], data[7]]);
+        let body = &data[HEADER..];
+        let commands = self.commands();
+        let mut answer = alloc::vec![GRANTED];
+
         if command == commands.tabs && body.is_empty() {
             for tab in 1..=TABS {
                 answer.push(tab);
-                answer.extend_from_slice(&(title.shelf(tab).len() as u32).to_le_bytes());
+                answer.extend_from_slice(&(self.shelf(tab).len() as u32).to_le_bytes());
                 answer.extend_from_slice(&0u32.to_le_bytes());
             }
         } else if command == commands.goods && body.len() == 1 {
             // The tab, and that tab's goods behind their count.
-            let goods = title.shelf(body[0]);
+            let goods = self.shelf(body[0]);
             answer.push(goods.len() as u8);
             for (slot, good) in goods.iter().enumerate() {
                 shelf_record(&mut answer, slot as u8, good);
             }
         } else if command == commands.buy && body.len() == 2 {
             // The tab and the slot of what was chosen, and what it gives.
-            let good = title.shelf(body[0]).get(body[1] as usize)?;
+            let good = self.shelf(body[0]).get(body[1] as usize)?;
             answer.push(1);
             grant_record(&mut answer, good);
         } else if command == commands.confirm && body.len() == 2 {

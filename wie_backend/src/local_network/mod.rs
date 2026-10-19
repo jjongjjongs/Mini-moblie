@@ -23,7 +23,7 @@
 
 mod ack;
 mod billing_gateway;
-mod candy_shop;
+pub(crate) mod candy_shop;
 mod capture;
 mod dragoneyes;
 mod funter;

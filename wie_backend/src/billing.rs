@@ -3570,6 +3570,10 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
     /// The four bytes `0xe084` takes past the message, and only for a granted
     /// result.
     const SESSION_TRAILER: usize = 4;
+    /// 메이플 시그너스's and Live's session body, and the bytes their reader
+    /// takes between the result and the candy.
+    const MAPLE_SESSION_BODY: usize = 11 + 14;
+    const MAPLE_SESSION_UNREAD: usize = 10;
 
     /// What `0x7390` sends for the screen's own errand, and `0xc098` reads the
     /// answer of.
@@ -3599,19 +3603,15 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
     const CASH_SHOP_REQUEST: u16 = 0x0004;
     const CASH_SHOP_ANSWER: u16 = 0x0005;
 
-    /// What 메이플 시그너스's shop sends next, once its slot sync is granted: a
-    /// header-only query (no body). Answered with the family's granted result
-    /// the same way, command one past it.
-    const CASH_QUERY_REQUEST: u16 = 0x002a;
-    const CASH_QUERY_ANSWER: u16 = 0x002b;
-
-    /// And the one-byte query it sends after that (a category or page). Granted
-    /// the same way; its one byte is not read here.
-    const CASH_PAGE_REQUEST: u16 = 0x002e;
-    const CASH_PAGE_ANSWER: u16 = 0x002f;
-
-    /// The one-byte command the shop sends on buying an item (candy and the
-    /// rest). Granted the same way so the purchase goes through.
+    /// What 메이플 시그너스's 캔디샵 sends once its slot sync is granted - the
+    /// tabs (`0x2a`), each tab's goods (`0x2e`), a purchase (`0x30`) and its
+    /// confirmation (`0x32`) - is the same shop the SKT build reaches through
+    /// the GXG gateway, built by the same code (`0xc208` to `0xc29a`); see
+    /// [`crate::local_network::candy_shop`], which stocks it from the title's
+    /// own item table.
+    ///
+    /// The one-byte command the shop also knows (`0x2c`, read by its `0x2d`
+    /// case) is granted with the family's bare result.
     const CASH_BUY_REQUEST: u16 = 0x002c;
     const CASH_BUY_ANSWER: u16 = 0x002d;
 
@@ -3729,6 +3729,10 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
+    if let Some(answer) = crate::local_network::candy_shop::Title::Cygnus.answer(request) {
+        return Some(answer);
+    }
+
     let body = &request[HEADER..];
     let (answer, payload): (u16, Vec<u8>) = match u16_at(request, 6) {
         // Two strings, ending where the frame does. The first is the title's
@@ -3760,6 +3764,17 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
         // carries after them. Digits leading the body are what say the frame
         // is that request rather than some other title's bytes under a command
         // as plain as zero.
+        //
+        // 메이플 시그너스 and Live send fourteen bytes behind the number, and
+        // read ten past the result and then the candy their 캔디샵 shows
+        // (Live's `0x36b58`), so theirs carries that.
+        SESSION_REQUEST if body.len() == MAPLE_SESSION_BODY && body[..11].iter().all(u8::is_ascii_digit) => {
+            let mut payload = vec![0u8; 1 + MAPLE_SESSION_UNREAD];
+            payload[0] = SESSION_GRANTED;
+            payload.extend_from_slice(&crate::local_network::candy_shop::CANDY.to_le_bytes());
+
+            (SESSION_ANSWER, payload)
+        }
         SESSION_REQUEST if body.len() >= SESSION_BODY && body[..11].iter().all(u8::is_ascii_digit) => {
             let mut payload = vec![0u8; 1 + 2 + SESSION_TRAILER];
             payload[0] = SESSION_GRANTED;
@@ -3796,11 +3811,6 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
         // 크아비엔비2011's purchase, through the GXG gateway: a `u32` item code
         // and a one-byte count.
         CASH_SHOP_REQUEST if body.len() == 5 => (CASH_SHOP_ANSWER, vec![AUTH_GRANTED, 0, 0]),
-        // The header-only query it sends after the slot sync is granted.
-        CASH_QUERY_REQUEST if body.is_empty() => (CASH_QUERY_ANSWER, vec![AUTH_GRANTED, 0, 0]),
-        // The one-byte category/page query after that.
-        CASH_PAGE_REQUEST if body.len() == 1 => (CASH_PAGE_ANSWER, vec![AUTH_GRANTED, 0, 0]),
-        // The one-byte buy command (candy and the rest).
         CASH_BUY_REQUEST if body.len() == 1 => (CASH_BUY_ANSWER, vec![AUTH_GRANTED, 0, 0]),
         // 도적편's egg-hatch charge, told from a bare command by the subscriber
         // digits leading its body. Granted with a zero status and zeroed fields,
@@ -14567,6 +14577,27 @@ mod tests {
         // The body past the marker is the command and every field its reader
         // walks: 0x3e bytes in all (the two-byte command and the 0x3c payload).
         assert_eq!(response.len() - 6, 0x3e);
+    }
+
+    /// LGT 메이플 시그너스's 캔디샵, through the whole of [`response`]: the
+    /// frames its log showed (`2a`, `2e 01`), and a purchase from the 기타 tab.
+    #[test]
+    fn the_lgt_cygnus_candy_shop_is_stocked() {
+        let tabs = response(&[0x08, 0, 0, 0, 0xff, 0xff, 0x2a, 0x00]).unwrap();
+        assert_eq!(&tabs[6..8], &0x2bu16.to_le_bytes());
+        assert_eq!(tabs.len(), 8 + 1 + 6 * 9);
+
+        let shelf = response(&[0x09, 0, 0, 0, 0xff, 0xff, 0x2e, 0x00, 0x01]).unwrap();
+        assert_eq!(&shelf[6..8], &0x2fu16.to_le_bytes());
+        assert_eq!(shelf[8], 0);
+        assert!(shelf[9] > 0);
+
+        // 창고인벤늘리기, 219.
+        let bought = response(&[0x0a, 0, 0, 0, 0xff, 0xff, 0x30, 0x00, 0x04, 0x00]).unwrap();
+        assert_eq!(&bought[6..], &[0x31, 0, 0, 1, 1, 219, 0, 1, 0, 0, 0, 0, 0]);
+
+        let confirmed = response(&[0x0a, 0, 0, 0, 0xff, 0xff, 0x32, 0x00, 0x04, 0x00]).unwrap();
+        assert_eq!(&confirmed[6..8], &0x33u16.to_le_bytes());
     }
 
     /// The SKT 도적편's hatch, through the GXG gateway, with the subscriber's
