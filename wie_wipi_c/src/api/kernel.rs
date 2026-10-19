@@ -128,7 +128,9 @@ pub async fn get_system_property(context: &mut dyn WIPICContext, ptr_id: WIPICWo
 /// The subscriber number to report for PHONENUMBER / MIN.
 ///
 /// Recovered from the archive by [`wie_backend::subscriber`], which the
-/// WIPI-Java `HandsetProperty` path uses too so the two always agree.
+/// WIPI-Java `HandsetProperty` path uses too so the two always agree - or the
+/// one another archive named on this handset, where this one's sealed saves
+/// prove it; see [`wie_backend::subscriber::subscriber_number_on_handset`].
 pub(crate) async fn subscriber_number(context: &mut dyn WIPICContext) -> String {
     let cert = context.read_resource("cert.c2s").await.ok();
     let mut records = Vec::new();
@@ -140,8 +142,24 @@ pub(crate) async fn subscriber_number(context: &mut dyn WIPICContext) -> String 
     let records: Vec<&[u8]> = records.iter().map(Vec::as_slice).collect();
     let certification = context.read_resource("certification").await.ok();
     let app_info = context.read_resource("app_info").await.ok();
+    let mut sealed = Vec::new();
+    for name in wie_backend::subscriber::SEALED_SAVE_FILES {
+        if let Ok(save) = context.read_resource(name).await {
+            sealed.push(save);
+        }
+    }
+    let sealed: Vec<&[u8]> = sealed.iter().map(Vec::as_slice).collect();
 
-    wie_backend::subscriber::subscriber_number(cert.as_deref(), &records, certification.as_deref(), app_info.as_deref())
+    let system = context.system();
+    wie_backend::subscriber::subscriber_number_on_handset(
+        system.platform().database_repository(),
+        cert.as_deref(),
+        &records,
+        certification.as_deref(),
+        app_info.as_deref(),
+        &sealed,
+    )
+    .await
 }
 
 /// The handset identity a title's own-key `cert.c2s` was issued for, or `None`
@@ -1102,6 +1120,69 @@ mod test {
         get_program_name, get_resource, get_resource_id, get_system_property, load, mexecute, mload, program_stop, register_dll_interface, sprintk,
     };
 
+    /// A save sealed to `01012345678` the way 미니게임천국5 seals its
+    /// `gamedata.dat` - the vector `wie_backend::subscriber`'s own tests use.
+    #[rustfmt::skip]
+    const SEALED: [u8; 148] = [
+        0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf,
+        0xd7, 0x4b, 0x6a, 0xbc, 0xb9, 0xde, 0x02, 0x74, 0x65, 0x20, 0xef, 0x8b, 0x67, 0x47, 0xd1, 0x33,
+        0xe5, 0x8f, 0x9a, 0xa5, 0x3e, 0x08, 0x4a, 0x9f, 0x0a, 0xe6, 0x28, 0x6d, 0xb0, 0xe1, 0xbb, 0xc3,
+        0x06, 0xfa, 0x49, 0x1e, 0xf2, 0x04, 0xaa, 0x86, 0x53, 0xb9, 0x7d, 0x9a, 0x74, 0x73, 0x27, 0x6c,
+        0xb8, 0x85, 0x34, 0x51, 0xcb, 0xd3, 0x79, 0x48, 0x7a, 0xb4, 0x58, 0x7e, 0xac, 0x0a, 0x49, 0xd1,
+        0x0c, 0x3a, 0x76, 0x52, 0xdd, 0x52, 0x31, 0x3e, 0x8c, 0x69, 0x76, 0xbc, 0x1e, 0xaa, 0x42, 0xe2,
+        0x35, 0xef, 0x5e, 0x63, 0x6d, 0x23, 0x56, 0xf6, 0x2e, 0x2c, 0xb7, 0x6b, 0x0e, 0x40, 0xe5, 0xf5,
+        0x26, 0xb1, 0xea, 0x7c, 0xa0, 0xaf, 0xbb, 0xf7, 0xdc, 0x7f, 0xdb, 0x92, 0x21, 0x01, 0xed, 0x8a,
+        0xa8, 0x57, 0xcc, 0xa5, 0x21, 0x2f, 0xcf, 0x89, 0x66, 0x3a, 0x17, 0xe9, 0x2a, 0x6b, 0x6e, 0x8d,
+        0x00, 0x00, 0x00, 0x00,
+    ];
+
+    /// A number one archive names is remembered for the handset, and given to
+    /// an archive that names none only where that archive's sealed save opens
+    /// under it: 2011프로야구 names the collection's number, 미니게임천국5
+    /// carries only a save sealed to it, and a title that proves nothing keeps
+    /// the fallback its own saves were written under.
+    #[futures_test::test]
+    async fn a_number_another_archive_named_is_reported_where_the_sealed_save_proves_it() {
+        use wie_backend::{
+            Platform,
+            subscriber::{FALLBACK, subscriber_number_on_handset},
+        };
+
+        let platform = TestPlatform::new();
+        let repository = platform.database_repository();
+
+        // Nothing named yet: the save proves nothing on its own.
+        assert_eq!(
+            subscriber_number_on_handset(repository, None, &[], None, None, &[&SEALED]).await,
+            FALLBACK
+        );
+
+        // An archive that names the number.
+        assert_eq!(
+            subscriber_number_on_handset(repository, None, &[], Some(b"01012345678"), None, &[]).await,
+            "01012345678"
+        );
+
+        // Then one that names none but whose save was sealed to it, and one
+        // whose save proves nothing.
+        assert_eq!(
+            subscriber_number_on_handset(repository, None, &[], None, None, &[&SEALED]).await,
+            "01012345678"
+        );
+        assert_eq!(subscriber_number_on_handset(repository, None, &[], None, None, &[]).await, FALLBACK);
+
+        // A number named later replaces the one remembered, and the save no
+        // longer opens under it.
+        assert_eq!(
+            subscriber_number_on_handset(repository, None, &[], Some(b"01099998888"), None, &[]).await,
+            "01099998888"
+        );
+        assert_eq!(
+            subscriber_number_on_handset(repository, None, &[], None, None, &[&SEALED]).await,
+            FALLBACK
+        );
+    }
+
     /// `MC_knlGetProgramName` answers the name the title's own binary was built
     /// to be called, which for all but one archive is its AID.
     ///
@@ -1209,7 +1290,7 @@ mod test {
 
     #[futures_test::test]
     async fn test_get_system_property_min() -> Result<()> {
-        let mut context = TestContext::new();
+        let mut context = TestContext::with_system(System::new(Box::new(TestPlatform::new()), "pid", "aid", DefaultTaskRunner));
         let id = context.alloc_raw(16).unwrap();
         let out = context.alloc_raw(16).unwrap();
 
@@ -1245,7 +1326,8 @@ mod test {
         // A title whose `certification` file is the subscriber number as ASCII
         // digits should see PHONENUMBER report exactly that, so its own
         // strcmp(certification, PHONENUMBER) authentication passes.
-        let mut context = TestContext::new().with_resource("certification", b"01000000000\0");
+        let mut context = TestContext::with_system(System::new(Box::new(TestPlatform::new()), "pid", "aid", DefaultTaskRunner))
+            .with_resource("certification", b"01000000000\0");
         let id = context.alloc_raw(16).unwrap();
         let out = context.alloc_raw(16).unwrap();
 

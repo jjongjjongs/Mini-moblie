@@ -122,7 +122,9 @@ impl HandsetProperty {
         Ok(result.into())
     }
 
-    /// The subscriber number the archive names, or the shared fallback.
+    /// The subscriber number the archive names - or one another archive named
+    /// on this handset, where this one's sealed saves prove it - or the shared
+    /// fallback.
     async fn subscriber_number(jvm: &Jvm, context: &mut WieJvmContext) -> RustString {
         let cert = Self::resource(jvm, context, "cert.c2s").await;
         let mut records = Vec::new();
@@ -134,8 +136,24 @@ impl HandsetProperty {
         let records: Vec<&[u8]> = records.iter().map(Vec::as_slice).collect();
         let certification = Self::resource(jvm, context, "certification").await;
         let app_info = Self::resource(jvm, context, "app_info").await;
+        let mut sealed = Vec::new();
+        for name in subscriber::SEALED_SAVE_FILES {
+            if let Some(save) = Self::resource(jvm, context, name).await {
+                sealed.push(save);
+            }
+        }
+        let sealed: Vec<&[u8]> = sealed.iter().map(Vec::as_slice).collect();
 
-        subscriber::subscriber_number(cert.as_deref(), &records, certification.as_deref(), app_info.as_deref())
+        let system = context.system();
+        subscriber::subscriber_number_on_handset(
+            system.platform().database_repository(),
+            cert.as_deref(),
+            &records,
+            certification.as_deref(),
+            app_info.as_deref(),
+            &sealed,
+        )
+        .await
     }
 
     /// The handset identity the archive's own-key `cert.c2s` was issued for, or

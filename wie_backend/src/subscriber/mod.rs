@@ -13,6 +13,7 @@ mod comtus_save;
 mod ea_store;
 mod fixed_key_cert;
 mod gamevil_record;
+pub mod memory;
 mod seeded_save;
 mod shifted_cert;
 
@@ -114,6 +115,45 @@ pub fn from_certification(data: &[u8]) -> Option<String> {
 /// own format, so every file is offered to all of them.
 pub const RECORD_FILES: [&str; 3] = ["audio.adt", "kickass", "SC_option.dat"];
 
+/// The saves a title seals to the number it was written on, which can say
+/// whether a number is the one their handset reported: 미니게임천국5's
+/// `gamedata.dat` (see [`comtus_save_opens_under`]).
+pub const SEALED_SAVE_FILES: [&str; 1] = ["gamedata.dat"];
+
+/// The number to report on this handset: the one the archive names, or else
+/// the one another archive named before, if this archive's own sealed saves
+/// prove it is theirs - or [`FALLBACK`].
+///
+/// A collection dumped from one handset shares its number, but only some of
+/// its archives say what it is: 2011프로야구's `audio.adt` names it, and
+/// 미니게임천국5 carries nothing that does, only a `gamedata.dat` sealed to
+/// it. So every number an archive names is remembered for the handset - see
+/// [`memory`] - and offered to an archive that names none. It is taken only
+/// where one of [`SEALED_SAVE_FILES`] opens under it, so a title whose saves
+/// this handset wrote under [`FALLBACK`] keeps getting the number they need.
+pub async fn subscriber_number_on_handset(
+    repository: &dyn crate::DatabaseRepository,
+    cert: Option<&[u8]>,
+    records: &[&[u8]],
+    certification: Option<&[u8]>,
+    app_info: Option<&[u8]>,
+    sealed: &[&[u8]],
+) -> String {
+    if let Some(number) = recover(cert, records, certification, app_info) {
+        memory::remember(repository, &number).await;
+        return number;
+    }
+
+    if let Some(number) = memory::remembered(repository).await
+        && sealed.iter().any(|save| comtus_save_opens_under(save, &number) == Some(true))
+    {
+        tracing::info!("reporting the subscriber number another archive named, which this one's saves were sealed to: {number:?}");
+        return number;
+    }
+
+    FALLBACK.to_string()
+}
+
 /// The number to report, from whichever of the archive's files names it.
 ///
 /// The order is the order of authority: a certificate the number was issued
@@ -127,14 +167,20 @@ pub const RECORD_FILES: [&str; 3] = ["audio.adt", "kickass", "SC_option.dat"];
 /// matter, because a certificate one of them reads is not a record another
 /// recognises.
 pub fn subscriber_number(cert: Option<&[u8]>, records: &[&[u8]], certification: Option<&[u8]>, app_info: Option<&[u8]>) -> String {
+    recover(cert, records, certification, app_info).unwrap_or_else(|| FALLBACK.to_string())
+}
+
+/// The number one of the archive's files names, in the order
+/// [`subscriber_number`] gives, or `None` when none of them names one.
+pub fn recover(cert: Option<&[u8]>, records: &[&[u8]], certification: Option<&[u8]>, app_info: Option<&[u8]>) -> Option<String> {
     if let Some(number) = cert.and_then(from_cert) {
         tracing::info!("recovered subscriber number from cert.c2s: {number:?}");
-        return number;
+        return Some(number);
     }
 
     if let Some(number) = cert.and_then(from_shifted_cert) {
         tracing::info!("recovered subscriber number from shifted cert.c2s: {number:?}");
-        return number;
+        return Some(number);
     }
 
     if let Some(number) = records.iter().find_map(|record| {
@@ -143,20 +189,20 @@ pub fn subscriber_number(cert: Option<&[u8]>, records: &[&[u8]], certification: 
             .or_else(|| from_seeded_save(record))
     }) {
         tracing::info!("recovered subscriber number from the title's own 인증 record: {number:?}");
-        return number;
+        return Some(number);
     }
 
     if let Some(number) = certification.and_then(from_certification) {
         tracing::info!("recovered subscriber number from certification: {number:?}");
-        return number;
+        return Some(number);
     }
 
     if let Some(number) = app_info.and_then(from_descriptor) {
         tracing::info!("recovered subscriber number from app_info: {number:?}");
-        return number;
+        return Some(number);
     }
 
-    FALLBACK.to_string()
+    None
 }
 
 #[cfg(test)]

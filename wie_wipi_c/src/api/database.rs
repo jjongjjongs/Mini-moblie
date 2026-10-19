@@ -2177,7 +2177,8 @@ const MAPLE_LIVE_SAVE_PREFIX: &str = "maplelive";
 /// `gamedata.dat` under any number but that one, and having found it, plays on
 /// with nothing loaded instead of starting a new game - no character and none
 /// of the stars it opens its games with. See
-/// [`wie_backend::subscriber::comtus_save_opens_under`].
+/// [`wie_backend::subscriber::comtus_save_opens_under`]. Where the shipped save
+/// does open, a repository copy that no longer does gives way to it.
 ///
 /// 메이플스토리 Live's saves are sealed to the handset's model as well as its
 /// number: the checksum it keeps in `maplelivek` (`0x111704`) sums the bytes
@@ -2211,11 +2212,28 @@ pub(crate) async fn packaged_store_bytes(context: &mut dyn WIPICContext, name: &
 
     // Whether it is such a save at all does not depend on the number, so the
     // number is only looked up for one that is.
-    if wie_backend::subscriber::comtus_save_opens_under(&data, "").is_some()
-        && wie_backend::subscriber::comtus_save_opens_under(&data, &crate::api::kernel::subscriber_number(context).await) == Some(false)
-    {
-        tracing::info!("{name:?} is a save sealed to another handset's number; leaving it out");
-        return Ok(None);
+    if wie_backend::subscriber::comtus_save_opens_under(&data, "").is_some() {
+        let number = crate::api::kernel::subscriber_number(context).await;
+        if wie_backend::subscriber::comtus_save_opens_under(&data, &number) == Some(false) {
+            tracing::info!("{name:?} is a save sealed to another handset's number; leaving it out");
+            return Ok(None);
+        }
+
+        // The shipped save opens here, so a copy in the repository that does
+        // not was written under a number this handset no longer reports - the
+        // fallback, before another archive named the collection's number - and
+        // the title can only load nothing from it and write that back. The
+        // shipped one takes its place.
+        let system = context.system();
+        let pid = system.pid().to_owned();
+        let repository = system.platform().database_repository();
+        if repository.exists(name, &pid).await
+            && let Some(stored) = repository.open(name, &pid).await.get(1).await
+            && wie_backend::subscriber::comtus_save_opens_under(&stored, &number) == Some(false)
+        {
+            tracing::info!("{name:?} in the repository is sealed to a number this handset no longer reports; the shipped save replaces it");
+            repository.delete(name, &pid).await;
+        }
     }
 
     Ok(Some(data))
@@ -3647,6 +3665,56 @@ mod tests {
 
         assert_eq!(exists_database_ktf(&mut context, 0x1000, 1, 0).await.unwrap(), -12);
         assert_eq!(exists_database_ktf(&mut context, 0x1100, 1, 0).await.unwrap(), 0);
+    }
+
+    /// Two saves of 미니게임천국5's `gamedata.dat` shape, sealed to
+    /// `01012345678` and to the fallback number.
+    #[rustfmt::skip]
+    const SEALED_TO_NAMED: [u8; 148] = [
+        0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf,
+        0xd7, 0x4b, 0x6a, 0xbc, 0xb9, 0xde, 0x02, 0x74, 0x65, 0x20, 0xef, 0x8b, 0x67, 0x47, 0xd1, 0x33,
+        0xe5, 0x8f, 0x9a, 0xa5, 0x3e, 0x08, 0x4a, 0x9f, 0x0a, 0xe6, 0x28, 0x6d, 0xb0, 0xe1, 0xbb, 0xc3,
+        0x06, 0xfa, 0x49, 0x1e, 0xf2, 0x04, 0xaa, 0x86, 0x53, 0xb9, 0x7d, 0x9a, 0x74, 0x73, 0x27, 0x6c,
+        0xb8, 0x85, 0x34, 0x51, 0xcb, 0xd3, 0x79, 0x48, 0x7a, 0xb4, 0x58, 0x7e, 0xac, 0x0a, 0x49, 0xd1,
+        0x0c, 0x3a, 0x76, 0x52, 0xdd, 0x52, 0x31, 0x3e, 0x8c, 0x69, 0x76, 0xbc, 0x1e, 0xaa, 0x42, 0xe2,
+        0x35, 0xef, 0x5e, 0x63, 0x6d, 0x23, 0x56, 0xf6, 0x2e, 0x2c, 0xb7, 0x6b, 0x0e, 0x40, 0xe5, 0xf5,
+        0x26, 0xb1, 0xea, 0x7c, 0xa0, 0xaf, 0xbb, 0xf7, 0xdc, 0x7f, 0xdb, 0x92, 0x21, 0x01, 0xed, 0x8a,
+        0xa8, 0x57, 0xcc, 0xa5, 0x21, 0x2f, 0xcf, 0x89, 0x66, 0x3a, 0x17, 0xe9, 0x2a, 0x6b, 0x6e, 0x8d,
+        0x00, 0x00, 0x00, 0x00,
+    ];
+    #[rustfmt::skip]
+    const SEALED_TO_FALLBACK: [u8; 148] = [
+        0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf,
+        0x30, 0xf0, 0x5f, 0x47, 0xb2, 0xcd, 0xe2, 0x97, 0x30, 0xbb, 0xcb, 0x17, 0xb2, 0x97, 0x00, 0x16,
+        0x17, 0xac, 0x4b, 0x58, 0x5f, 0xd1, 0x21, 0x81, 0x1d, 0x3a, 0xc2, 0x1c, 0xca, 0x6d, 0x61, 0xc4,
+        0xbd, 0xf7, 0x49, 0x17, 0x89, 0x9c, 0x3a, 0x66, 0x46, 0x5d, 0x3a, 0xe5, 0x9e, 0x85, 0xd6, 0xd4,
+        0xc3, 0x42, 0x56, 0x46, 0xd3, 0xb4, 0x50, 0x64, 0x01, 0x7f, 0xfa, 0x13, 0x2d, 0xa6, 0x65, 0x70,
+        0x48, 0xcb, 0xf4, 0xae, 0xdd, 0x08, 0x52, 0x62, 0x36, 0x95, 0xdb, 0xba, 0xd5, 0xfe, 0xa4, 0x5c,
+        0x2e, 0xf8, 0x69, 0xfe, 0xee, 0xd0, 0xcc, 0x82, 0xfd, 0x38, 0x4a, 0x1d, 0xa1, 0x25, 0xde, 0x16,
+        0x18, 0xb3, 0x82, 0x81, 0xf4, 0x74, 0x9a, 0x3e, 0xb1, 0xaa, 0x24, 0x0c, 0x71, 0xc4, 0x09, 0x2a,
+        0x1d, 0x46, 0xf5, 0x99, 0x24, 0xcb, 0xa7, 0xd4, 0xd3, 0x01, 0xe6, 0xe4, 0x03, 0xdd, 0xad, 0xb4,
+        0x00, 0x00, 0x00, 0x00,
+    ];
+
+    /// Once another archive has named the number the shipped save was sealed
+    /// to, a copy in the repository written under the fallback - which can no
+    /// longer be opened - gives way to the shipped one.
+    #[futures_test::test]
+    async fn a_shipped_save_that_opens_replaces_a_copy_that_no_longer_does() {
+        let system = System::new(Box::new(TestPlatform::new()), "test-pid", "test-aid", DefaultTaskRunner);
+        let repository = system.platform().database_repository();
+        wie_backend::subscriber::memory::remember(repository, "01012345678").await;
+        repository.open("gamedata.dat", "test-pid").await.set(1, &SEALED_TO_FALLBACK).await;
+
+        let mut context = TestContext::with_system(system).with_resource("gamedata.dat", &SEALED_TO_NAMED);
+        context.write_bytes(0x1000, b"gamedata.dat\0").unwrap();
+
+        let db_id = open_database(&mut context, 0x1000, MODE_OPEN_EXISTING, 1).await.unwrap();
+        assert!(db_id > 0);
+        assert_eq!(stream_read(&mut context, db_id, 0x2000, 148).await.unwrap(), 148);
+        let mut read_back = [0u8; 148];
+        context.read_bytes(0x2000, &mut read_back).unwrap();
+        assert_eq!(read_back, SEALED_TO_NAMED);
     }
 
     fn database_test_context() -> TestContext {
