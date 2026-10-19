@@ -9,12 +9,14 @@
 //! title that reads it through both disagrees with itself.
 
 mod cert_c2s;
+mod ea_store;
 mod fixed_key_cert;
 mod gamevil_record;
 mod shifted_cert;
 
 pub use self::{
     cert_c2s::recover_phone_number as from_cert,
+    ea_store::recover_phone_number as from_ea_store,
     fixed_key_cert::{HandsetIdentity, recover_identity as identity_from_cert},
     gamevil_record::recover_phone_number as from_gamevil_record,
     shifted_cert::recover_phone_number as from_shifted_cert,
@@ -101,19 +103,25 @@ pub fn from_certification(data: &[u8]) -> Option<String> {
     }
 }
 
+/// The files a title keeps its own 인증 record in, which name the subscriber
+/// it was registered to: GAMEVIL's `audio.adt` (see [`from_gamevil_record`])
+/// and EA Mobile Korea's `kickass` store (see [`from_ea_store`]). Each reader
+/// answers only for its own format, so every file is offered to both.
+pub const RECORD_FILES: [&str; 2] = ["audio.adt", "kickass"];
+
 /// The number to report, from whichever of the archive's files names it.
 ///
 /// The order is the order of authority: a certificate the number was issued
-/// for, then the record a GAMEVIL title keeps its 인증 in (`audio.adt`), then a
-/// plain `certification` holding it, then the descriptor's own download URL.
-/// Each argument is the file's bytes, or `None` where the archive has no such
-/// file.
+/// for, then the record a title keeps its own 인증 in - the files
+/// [`RECORD_FILES`] names, whichever of them the archive has - then a plain
+/// `certification` holding it, then the descriptor's own download URL. Each
+/// argument is the file's bytes, or `None` where the archive has no such file.
 ///
 /// A `cert.c2s` comes in more than one form and each reader answers only for
 /// its own, so they are tried in turn; between themselves the order does not
 /// matter, because a certificate one of them reads is not a record another
 /// recognises.
-pub fn subscriber_number(cert: Option<&[u8]>, gamevil_record: Option<&[u8]>, certification: Option<&[u8]>, app_info: Option<&[u8]>) -> String {
+pub fn subscriber_number(cert: Option<&[u8]>, records: &[&[u8]], certification: Option<&[u8]>, app_info: Option<&[u8]>) -> String {
     if let Some(number) = cert.and_then(from_cert) {
         tracing::info!("recovered subscriber number from cert.c2s: {number:?}");
         return number;
@@ -124,8 +132,11 @@ pub fn subscriber_number(cert: Option<&[u8]>, gamevil_record: Option<&[u8]>, cer
         return number;
     }
 
-    if let Some(number) = gamevil_record.and_then(from_gamevil_record) {
-        tracing::info!("recovered subscriber number from audio.adt: {number:?}");
+    if let Some(number) = records
+        .iter()
+        .find_map(|record| from_gamevil_record(record).or_else(|| from_ea_store(record)))
+    {
+        tracing::info!("recovered subscriber number from the title's own 인증 record: {number:?}");
         return number;
     }
 
@@ -224,11 +235,11 @@ mod tests {
         // The certificate outranks both, but a `cert.c2s` this cannot recover
         // steps aside rather than blocking them.
         assert_eq!(
-            subscriber_number(Some(b"not a certificate"), None, Some(certification), Some(app_info)),
+            subscriber_number(Some(b"not a certificate"), &[], Some(certification), Some(app_info)),
             "01011112222"
         );
-        assert_eq!(subscriber_number(None, None, None, Some(app_info)), "01085300848");
-        assert_eq!(subscriber_number(None, None, None, None), FALLBACK);
+        assert_eq!(subscriber_number(None, &[], None, Some(app_info)), "01085300848");
+        assert_eq!(subscriber_number(None, &[], None, None), FALLBACK);
     }
 
     /// A `cert.c2s` the keyed reader does not recognise still answers when it is
@@ -238,7 +249,7 @@ mod tests {
         // 록맨X's, which is shifted rather than encrypted.
         let shifted = b"          \x60\x61\x60\x63\x86\x69\x86\x61  \x72\x8f\x83\x8b\x8d\x81\x8e\x78PPPPPPPP\x60\x61\x60\x69\x66\x65\x68\x69\x65\x66\x65 \x3b\x9a\x12\xff";
 
-        assert_eq!(subscriber_number(Some(shifted), None, None, None), "01096589565");
-        assert_eq!(subscriber_number(Some(shifted), None, Some(b"01011112222"), None), "01096589565");
+        assert_eq!(subscriber_number(Some(shifted), &[], None, None), "01096589565");
+        assert_eq!(subscriber_number(Some(shifted), &[], Some(b"01011112222"), None), "01096589565");
     }
 }

@@ -234,7 +234,10 @@ impl KtfEmulator {
         };
         let subscriber = wie_backend::subscriber::subscriber_number(
             packaged_file("cert.c2s"),
-            packaged_file("audio.adt"),
+            &wie_backend::subscriber::RECORD_FILES
+                .iter()
+                .filter_map(|name| packaged_file(name))
+                .collect::<Vec<_>>(),
             packaged_file("certification"),
             packaged_file("app_info"),
         );
