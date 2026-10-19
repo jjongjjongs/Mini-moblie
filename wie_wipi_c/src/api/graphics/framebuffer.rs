@@ -311,6 +311,9 @@ impl FrameBuffer {
     /// - otherwise: an image carrying alpha draws from its 32bpp mask plane,
     ///   composed onto the destination the way `blend_pixel` composes it.
     ///
+    /// `key`, for a keyed image, is the 565 pixel to leave out instead of the
+    /// magenta - the context's transparent pixel where the handset honours it.
+    ///
     /// `false` for any other combination of depths, or geometry this cannot
     /// address; the caller should take the canvas path. Nothing has been
     /// written when it returns `false`.
@@ -326,6 +329,7 @@ impl FrameBuffer {
         sx: i32,
         sy: i32,
         keyed: bool,
+        key: Option<u16>,
     ) -> Result<bool> {
         if self.0.bpp != 16 || (keyed && src.0.bpp != 16) || (!keyed && src.0.bpp != 32) {
             return Ok(false);
@@ -381,7 +385,11 @@ impl FrameBuffer {
                     // `is_transparent_key` in 565 terms: red and blue at full
                     // scale, green no higher than the 7 it lets through - which
                     // is the bottom two of its six bits.
-                    if (raw >> 11) == 0x1f && (raw & 0x1f) == 0x1f && ((raw >> 5) & 0x3f) <= 1 {
+                    let is_key = match key {
+                        Some(key) => raw == key,
+                        None => (raw >> 11) == 0x1f && (raw & 0x1f) == 0x1f && ((raw >> 5) & 0x3f) <= 1,
+                    };
+                    if is_key {
                         continue;
                     }
                     dst_row[i * 2] = src_row[i * 2];
@@ -770,7 +778,7 @@ mod test {
                     direct.write_bytes(sb + 2, &key.to_le_bytes()).unwrap();
                 }
                 assert!(
-                    dst.draw_image_direct(&mut direct, dx, dy, w, h, &src, sx, sy, keyed).unwrap(),
+                    dst.draw_image_direct(&mut direct, dx, dy, w, h, &src, sx, sy, keyed, None).unwrap(),
                     "direct blit refused ({dx}, {dy}, {w}, {h}) keyed={keyed}"
                 );
 
@@ -820,13 +828,13 @@ mod test {
         let mut context = TestContext::new();
         let dst32 = FrameBuffer::new(&mut context, 4, 4, 32).unwrap();
         let src16 = FrameBuffer::new(&mut context, 4, 4, 16).unwrap();
-        assert!(!dst32.draw_image_direct(&mut context, 0, 0, 4, 4, &src16, 0, 0, true).unwrap());
+        assert!(!dst32.draw_image_direct(&mut context, 0, 0, 4, 4, &src16, 0, 0, true, None).unwrap());
 
         // Keyed wants a 16bpp colour plane, composed wants a 32bpp mask plane;
         // neither takes the other's.
         let dst16 = FrameBuffer::new(&mut context, 4, 4, 16).unwrap();
-        assert!(!dst16.draw_image_direct(&mut context, 0, 0, 4, 4, &src16, 0, 0, false).unwrap());
-        assert!(!dst16.draw_image_direct(&mut context, 0, 0, 4, 4, &dst32, 0, 0, true).unwrap());
+        assert!(!dst16.draw_image_direct(&mut context, 0, 0, 4, 4, &src16, 0, 0, false, None).unwrap());
+        assert!(!dst16.draw_image_direct(&mut context, 0, 0, 4, 4, &dst32, 0, 0, true, None).unwrap());
     }
 
     /// One pixel, written as one pixel, has to land exactly where the canvas

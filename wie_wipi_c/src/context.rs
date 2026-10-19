@@ -70,6 +70,18 @@ pub trait WIPICContext: ByteRead + ByteWrite + Send + Sync {
         false
     }
 
+    /// Whether `MC_grpDrawImage` and `MC_grpCopyFrameBuffer` key an image
+    /// without alpha on the context's transparent pixel once a title has set
+    /// one, rather than on magenta.
+    ///
+    /// SKT's handset does: 더팜3 sets `0x2484`, the green its sprites are cut
+    /// out of, before every blit, and drew each one in a green box where it was
+    /// keyed on magenta. KTF and LGT titles have run on the magenta key and keep
+    /// it.
+    fn draw_image_keys_transparent_pixel(&self) -> bool {
+        false
+    }
+
     /// The order this handset keeps a graphics context's two colour words in.
     ///
     /// See `ContextLayout`. LGT's is the one the API is usually written down

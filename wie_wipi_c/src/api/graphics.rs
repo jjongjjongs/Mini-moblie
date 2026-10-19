@@ -209,6 +209,23 @@ where
     Ok(grp_ctx)
 }
 
+/// Whether a title has set the context's transparent pixel, by its bit in the
+/// handset's mask. A layout without a mask, or without the word, never has.
+fn transparent_pixel_set<M>(memory: &M, layout: ContextLayout, p_grp_ctx: WIPICWord) -> Result<bool>
+where
+    M: ByteRead + ?Sized,
+{
+    let offsets = layout.offsets();
+    let (Some(at), Some(bit)) = (offsets.mask, WIPICGraphicsContextIdx::TransPixelIdx.mask_bit()) else {
+        return Ok(false);
+    };
+    if !offsets.keeps_transparent {
+        return Ok(false);
+    }
+
+    Ok(read_generic::<WIPICWord, _>(memory, p_grp_ctx + at)? & bit != 0)
+}
+
 /// A context written back into the handset's own words - see [`read_context`].
 ///
 /// Only the words the layout names are written. A word the handset keeps for
@@ -1299,6 +1316,13 @@ pub async fn draw_image(
     // A title's own pixel operation decides what every pixel becomes, and it is
     // read before the canvas takes the context.
     let grp_ctx = read_drawing_context(context, context.graphics_context_layout(), graphics_context)?;
+    // The key a keyed image is cut out with, where the handset reads it from
+    // the context - see `draw_image_keys_transparent_pixel`. `None` is magenta.
+    let key = if keyed && context.draw_image_keys_transparent_pixel() {
+        transparent_pixel_set(context, context.graphics_context_layout(), graphics_context)?.then_some(grp_ctx.transparent as u16)
+    } else {
+        None
+    };
 
     // DIAGNOSTIC(anymom): 아무이유없어 draws all text - black and coloured - by
     // blitting per-glyph sprites, yet its coloured glyphs land as solid blocks.
@@ -1393,14 +1417,19 @@ pub async fn draw_image(
         // whole for every blit. Refused for a depth or geometry it cannot
         // address, and the canvas takes it then.
         let src_fb = FrameBuffer(source);
-        if framebuffer.draw_image_direct(context, dx, dy, w, h, &src_fb, sx, sy, keyed)? {
+        if framebuffer.draw_image_direct(context, dx, dy, w, h, &src_fb, sx, sy, keyed, key)? {
             return Ok(());
         }
 
         let src_image = src_fb.image(context)?;
         let mut canvas = framebuffer.canvas(context)?;
 
-        if keyed {
+        if let Some(key) = key {
+            let key = Rgb565Pixel::to_color(key);
+            blit_keyed(&mut **canvas, dx, dy, w, h, &*src_image, sx, sy, &|color| {
+                (color.r, color.g, color.b) == (key.r, key.g, key.b)
+            });
+        } else if keyed {
             blit_magenta_keyed(&mut **canvas, dx, dy, w, h, &*src_image, sx, sy);
         } else {
             canvas.draw(dx as _, dy as _, w as _, h as _, &*src_image, sx as _, sy as _, clip);
@@ -2428,12 +2457,26 @@ pub async fn copy_frame_buffer(
 
     // A frame buffer has no mask plane and no transparent colour of its own, so
     // nothing is keyed before the operation - it decides every pixel. Without
-    // one, the magenta convention is honoured, the same as before.
+    // one, the magenta convention is honoured, the same as before - or the
+    // context's transparent pixel, where the handset keys on it: 더팜3 writes
+    // its menu words onto a `0x2484` green offscreen and copies them out
+    // through a context with that pixel set.
     let Some((kind, function)) = operation else {
+        let key = if context.draw_image_keys_transparent_pixel() && transparent_pixel_set(context, context.graphics_context_layout(), pgc)? {
+            Some(Rgb565Pixel::to_color(gctx.transparent as u16))
+        } else {
+            None
+        };
+
         let src_image = src_framebuffer.image(context)?;
         let mut dst_canvas = dst_framebuffer.canvas(context)?;
 
-        blit_magenta_keyed(&mut **dst_canvas, dx, dy, w, h, &*src_image, sx, sy);
+        match key {
+            Some(key) => blit_keyed(&mut **dst_canvas, dx, dy, w, h, &*src_image, sx, sy, &|color| {
+                (color.r, color.g, color.b) == (key.r, key.g, key.b)
+            }),
+            None => blit_magenta_keyed(&mut **dst_canvas, dx, dy, w, h, &*src_image, sx, sy),
+        }
         dst_canvas.flush()?;
 
         return Ok(());
