@@ -51,7 +51,7 @@ fn report_subscriber_number() {
     let certification = file("certification");
     let app_info = file("app_info");
 
-    let number = subscriber::subscriber_number(cert.as_deref(), certification.as_deref(), app_info.as_deref());
+    let number = subscriber::subscriber_number(cert.as_deref(), None, certification.as_deref(), app_info.as_deref());
 
     let source = if cert.as_deref().and_then(subscriber::from_cert).is_some() {
         "cert.c2s"

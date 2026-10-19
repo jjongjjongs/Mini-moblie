@@ -131,10 +131,11 @@ pub async fn get_system_property(context: &mut dyn WIPICContext, ptr_id: WIPICWo
 /// WIPI-Java `HandsetProperty` path uses too so the two always agree.
 pub(crate) async fn subscriber_number(context: &mut dyn WIPICContext) -> String {
     let cert = context.read_resource("cert.c2s").await.ok();
+    let gamevil_record = context.read_resource("audio.adt").await.ok();
     let certification = context.read_resource("certification").await.ok();
     let app_info = context.read_resource("app_info").await.ok();
 
-    wie_backend::subscriber::subscriber_number(cert.as_deref(), certification.as_deref(), app_info.as_deref())
+    wie_backend::subscriber::subscriber_number(cert.as_deref(), gamevil_record.as_deref(), certification.as_deref(), app_info.as_deref())
 }
 
 /// The handset identity a title's own-key `cert.c2s` was issued for, or `None`

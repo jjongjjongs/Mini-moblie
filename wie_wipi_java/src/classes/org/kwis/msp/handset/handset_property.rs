@@ -125,10 +125,11 @@ impl HandsetProperty {
     /// The subscriber number the archive names, or the shared fallback.
     async fn subscriber_number(jvm: &Jvm, context: &mut WieJvmContext) -> RustString {
         let cert = Self::resource(jvm, context, "cert.c2s").await;
+        let gamevil_record = Self::resource(jvm, context, "audio.adt").await;
         let certification = Self::resource(jvm, context, "certification").await;
         let app_info = Self::resource(jvm, context, "app_info").await;
 
-        subscriber::subscriber_number(cert.as_deref(), certification.as_deref(), app_info.as_deref())
+        subscriber::subscriber_number(cert.as_deref(), gamevil_record.as_deref(), certification.as_deref(), app_info.as_deref())
     }
 
     /// The handset identity the archive's own-key `cert.c2s` was issued for, or

@@ -232,8 +232,12 @@ impl KtfEmulator {
                 .find(|(path, _)| packaged_name(path).unwrap_or(path) == name)
                 .map(|(_, data)| data.as_slice())
         };
-        let subscriber =
-            wie_backend::subscriber::subscriber_number(packaged_file("cert.c2s"), packaged_file("certification"), packaged_file("app_info"));
+        let subscriber = wie_backend::subscriber::subscriber_number(
+            packaged_file("cert.c2s"),
+            packaged_file("audio.adt"),
+            packaged_file("certification"),
+            packaged_file("app_info"),
+        );
 
         for (path, data) in files {
             let path = packaged_name(path).unwrap_or(path);
