@@ -248,6 +248,11 @@ fn grant_record(answer: &mut Vec<u8>, good: &Good) {
 #[derive(Default)]
 pub struct CandyShop {
     title: Option<Title>,
+    /// The frames seen and the 피그미 hatched so far, which pick what the
+    /// next 피그미 hatches into: the emulator has no clock to draw by, but how
+    /// a session has gone before its hatching differs from one to the next.
+    frames: u32,
+    hatched: u32,
 }
 
 impl CandyShop {
@@ -261,6 +266,7 @@ impl CandyShop {
 
         let command = u16::from_le_bytes([data[6], data[7]]);
         let body = &data[HEADER..];
+        self.frames = self.frames.wrapping_add(1);
 
         // The title's name, the first of the two strings its authentication
         // carries. The authentication itself is answered elsewhere.
@@ -284,6 +290,13 @@ impl CandyShop {
             }
             answer.extend_from_slice(&[0; 10]);
             answer.extend_from_slice(&CANDY.to_le_bytes());
+            return Some(frame(command + 1, &answer));
+        }
+
+        if self.title == Some(Title::Live) && command == super::pigmy::REQUEST {
+            let draw = self.frames.wrapping_mul(0x9e37_79b9).wrapping_add(self.hatched);
+            let answer = super::pigmy::answer(body, draw)?;
+            self.hatched = self.hatched.wrapping_add(1);
             return Some(frame(command + 1, &answer));
         }
 
@@ -398,6 +411,20 @@ mod tests {
 
         let confirmed = shop.answer(&request(0x32, &[4, 1])).unwrap();
         assert_eq!(&confirmed[HEADER + 1..], &CANDY.to_le_bytes());
+    }
+
+    #[test]
+    fn live_s_pigmy_hatches_into_equipment() {
+        let mut shop = shop(b"MapleLive");
+
+        let hatched = shop.answer(&request(0x58, &[2, 0])).unwrap();
+        assert_eq!(&hatched[6..8], &0x59u16.to_le_bytes());
+        assert_eq!(hatched[HEADER], GRANTED);
+        assert_eq!(&hatched[HEADER + 5..HEADER + 13], &[0, 0, 0, 0, 1, 0, 0, 0]);
+        assert_eq!(hatched.len(), HEADER + 60);
+
+        // 시그너스 numbers its commands otherwise.
+        assert_eq!(self::shop(b"MapleCygnus").answer(&request(0x58, &[2, 0])), None);
     }
 
     #[test]

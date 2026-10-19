@@ -30,6 +30,7 @@ mod funter;
 mod gpang;
 mod gxg;
 mod levelup;
+mod pigmy;
 mod relay;
 mod snowboard;
 
