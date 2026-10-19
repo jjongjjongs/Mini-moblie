@@ -49,6 +49,13 @@ struct DatabaseHandle {
     /// The mode `MC_dbOpenDataBase` was called with, kept so
     /// `MC_dbGetAccessMode` can report what the title itself asked for.
     mode: u32,
+    /// Nonzero until the first read, seek or select on this handle. A write
+    /// that comes first and starts at offset 0 is a whole-file rewrite, and
+    /// replaces what was there instead of overlaying it: 미니게임히어로즈2
+    /// saves `HeroFile1` as an RLE stream written from the start in one open,
+    /// and a shorter stream that kept the old tail decoded past its buffer on
+    /// the next launch.
+    untouched: u32,
 }
 
 const MIN_BUFFER_CAPACITY: u32 = 64;
@@ -253,6 +260,7 @@ async fn open_database_named(context: &mut dyn WIPICContext, name: &str, create:
         buffer_len: 0,
         buffer_capacity: 0,
         mode: access as u32,
+        untouched: 1,
     };
     handle.name[..name_bytes.len()].copy_from_slice(name_bytes);
 
@@ -1404,6 +1412,7 @@ pub async fn seek_record_single(context: &mut dyn WIPICContext, db_id: i32, offs
     let position = (base + offset as i64).clamp(0, handle.buffer_len as i64) as u32;
     handle.read_cursor = position;
     handle.write_cursor = position;
+    handle.untouched = 0;
     write_generic(context, db_id as _, handle)?;
 
     Ok(position as i32)
@@ -1485,6 +1494,11 @@ pub async fn stream_write(context: &mut dyn WIPICContext, db_id: i32, buf_ptr: W
     let Some(new_end) = handle.write_cursor.checked_add(buf_len) else {
         return Ok(-22); // M_E_BADRECID — closest "bad parameter" code
     };
+
+    if handle.untouched != 0 && handle.write_cursor == 0 {
+        handle.buffer_len = 0;
+    }
+    handle.untouched = 0;
 
     let old_len = handle.buffer_len;
 
@@ -1704,6 +1718,10 @@ pub async fn stream_read(context: &mut dyn WIPICContext, db_id: i32, buf_ptr: WI
     let Some(mut handle) = load_handle(context, db_id)? else {
         return Ok(-25); // M_E_INVALIDHANDLE
     };
+    if handle.untouched != 0 {
+        handle.untouched = 0;
+        write_generic(context, db_id as _, handle)?;
+    }
 
     if handle.read_cursor >= handle.buffer_len {
         // Don't touch buf — caller may have passed a sentinel (NULL) that
@@ -1795,6 +1813,7 @@ pub async fn select_record_ktf(context: &mut dyn WIPICContext, db_id: i32, rec_i
 
     handle.read_cursor = offset;
     handle.write_cursor = offset;
+    handle.untouched = 0;
     write_generic(context, db_id as _, handle)?;
 
     Ok(offset as i32)
@@ -2162,8 +2181,8 @@ mod tests {
         LgtDatabaseMetadata, available_storage_ktf, close_database, close_database_lgt, delete_database, delete_database_lgt, delete_record_lgt,
         exists_database, exists_database_ktf, get_access_mode_ktf, get_access_mode_lgt, get_number_of_records_ktf, get_number_of_records_lgt,
         get_record_size_ktf, get_record_size_lgt, insert_record_lgt, list_databases_lgt, list_record, list_record_info, list_records_lgt,
-        load_handle, load_lgt_metadata, open_database, open_database_lgt, open_db_for_handle, select_record, select_record_ktf, select_record_lgt,
-        sort_records_lgt, stat_by_name_ktf, store_lgt_metadata, stream_read, stream_write, update_record, update_record_lgt,
+        load_handle, load_lgt_metadata, open_database, open_database_lgt, open_db_for_handle, seek_record_single, select_record, select_record_ktf,
+        select_record_lgt, sort_records_lgt, stat_by_name_ktf, store_lgt_metadata, stream_read, stream_write, update_record, update_record_lgt,
     };
 
     #[futures_test::test]
@@ -3191,6 +3210,66 @@ mod tests {
         let mut read_back = [0u8; 5];
         context.read_bytes(0x3000, &mut read_back).unwrap();
         assert_eq!(&read_back, b"saved");
+    }
+
+    /// A write that is the first thing done on a handle and starts at offset 0
+    /// replaces the database rather than overlaying it, so a save written
+    /// shorter than the one before it does not keep the old one's tail.
+    ///
+    /// 미니게임히어로즈2 rewrites `HeroFile1` as an RLE stream in one open; with
+    /// the stale tail behind it, its decoder ran past the end of its buffer on
+    /// the next launch and the title crashed before its menu.
+    #[futures_test::test]
+    async fn ktf_a_rewrite_from_the_start_replaces_a_longer_database() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"HeroFile1\0").unwrap();
+        context.write_bytes(0x2000, b"0123456789").unwrap();
+
+        let db_id = open_database(&mut context, 0x1000, 4, 1).await.unwrap();
+        assert_eq!(stream_write(&mut context, db_id, 0x2000, 10).await.unwrap(), 10);
+        assert_eq!(close_database(&mut context, db_id).await.unwrap(), 0);
+
+        let db_id = open_database(&mut context, 0x1000, 4, 1).await.unwrap();
+        assert_eq!(stream_write(&mut context, db_id, 0x2000, 4).await.unwrap(), 4);
+        assert_eq!(stream_write(&mut context, db_id, 0x2000, 2).await.unwrap(), 2);
+        assert_eq!(close_database(&mut context, db_id).await.unwrap(), 0);
+
+        let db_id = open_database(&mut context, 0x1000, 1, 1).await.unwrap();
+        assert_eq!(stream_read(&mut context, db_id, 0x3000, 16).await.unwrap(), 6);
+        let mut read_back = [0u8; 6];
+        context.read_bytes(0x3000, &mut read_back).unwrap();
+        assert_eq!(&read_back, b"012301");
+    }
+
+    /// A write placed with a seek, or after a read, still overlays: a
+    /// multi-slot save writes one slot inside the bytes the others hold.
+    #[futures_test::test]
+    async fn ktf_a_write_after_a_seek_keeps_the_rest_of_the_database() {
+        let mut context = database_test_context();
+        context.write_bytes(0x1000, b"slots\0").unwrap();
+        context.write_bytes(0x2000, b"0123456789").unwrap();
+
+        let db_id = open_database(&mut context, 0x1000, 8, 1).await.unwrap();
+        assert_eq!(stream_write(&mut context, db_id, 0x2000, 10).await.unwrap(), 10);
+        assert_eq!(close_database(&mut context, db_id).await.unwrap(), 0);
+
+        context.write_bytes(0x2000, b"ab").unwrap();
+        let db_id = open_database(&mut context, 0x1000, 8, 1).await.unwrap();
+        assert_eq!(seek_record_single(&mut context, db_id, 0, 0).await.unwrap(), 0);
+        assert_eq!(stream_write(&mut context, db_id, 0x2000, 2).await.unwrap(), 2);
+        assert_eq!(close_database(&mut context, db_id).await.unwrap(), 0);
+
+        let db_id = open_database(&mut context, 0x1000, 8, 1).await.unwrap();
+        assert_eq!(stream_read(&mut context, db_id, 0x3000, 1).await.unwrap(), 1);
+        assert_eq!(seek_record_single(&mut context, db_id, 0, 0).await.unwrap(), 0);
+        assert_eq!(stream_write(&mut context, db_id, 0x2000, 1).await.unwrap(), 1);
+        assert_eq!(close_database(&mut context, db_id).await.unwrap(), 0);
+
+        let db_id = open_database(&mut context, 0x1000, 1, 1).await.unwrap();
+        assert_eq!(stream_read(&mut context, db_id, 0x3000, 16).await.unwrap(), 10);
+        let mut read_back = [0u8; 10];
+        context.read_bytes(0x3000, &mut read_back).unwrap();
+        assert_eq!(&read_back, b"ab23456789");
     }
 
     /// The third argument is a type, not a create flag: it is a constant 1 in
