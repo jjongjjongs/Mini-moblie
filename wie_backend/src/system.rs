@@ -193,15 +193,9 @@ impl System {
             local_network.register(Box::new(crate::local_network::BillingGatewayEndpoint::new_miniheroes(name, host, port)));
         }
 
-        // SBS포트리스4's KTF build dials `211.200.30.157:5600` at its first
-        // screen and sat on its connecting box, the server gone and the connect
-        // never completing - so what it would have said there has never been
-        // seen. Taken in process and written to the trace, so the next capture
-        // carries the request its answer has to be shaped for. Nothing is
-        // answered yet. Host-gated, so no other title is touched.
-        local_network.register(Box::new(crate::local_network::CaptureEndpoint::new(
-            crate::local_network::CaptureAddress::HostPort("211.200.30.157".into(), 5600),
-        )));
+        // SBS포트리스4's KTF build logs in at this server, gone for years, and
+        // sat on its connecting box. See `crate::local_network::fortress`.
+        local_network.register(Box::new(crate::local_network::FortressEndpoint));
 
         // 템페스트's 정품인증 servers, gone for years, which it reaches through the
         // `FastRelay` carrier library rather than a socket of its own: the

@@ -26,6 +26,7 @@ mod billing_gateway;
 pub(crate) mod candy_shop;
 mod capture;
 mod dragoneyes;
+mod fortress;
 mod funter;
 mod gpang;
 mod gxg;
@@ -41,6 +42,7 @@ pub use self::{
     billing_gateway::BillingGatewayEndpoint,
     capture::{CaptureAddress, CaptureEndpoint},
     dragoneyes::DragonEyesEndpoint,
+    fortress::FortressEndpoint,
     funter::FunterEndpoint,
     gpang::GpangEndpoint,
     gxg::GxgEndpoint,
