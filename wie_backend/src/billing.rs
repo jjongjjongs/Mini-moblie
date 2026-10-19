@@ -3238,6 +3238,17 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
     /// own record is the one the title just sent, so the answer is that.
     const HERO_OWNED_OPCODE: u8 = 0x5c;
     const HERO_OWNED_BODY: usize = 8;
+    /// `0x47` asks for a page of the 가면상점's list (`0x66168`): a `u32`
+    /// offset, the page size (5), the category, a flag, a `u32` and twenty
+    /// bytes of name. `0x66758` reads back an unread `u32`, the total as a
+    /// `u32`, a count and that many pairs of `u32`s, and `0x68876` then asks
+    /// `0x42` for each entry by its first `u32`. Every entry is the server's,
+    /// so the page is answered empty: the shop asks again at most four times
+    /// and then lets go of its busy flags (`0x75a64`), where an unanswered
+    /// page leaves it waiting.
+    const HERO_LIST_OPCODE: u8 = 0x47;
+    const HERO_LIST_BODY: usize = 4 + 1 + 1 + 1 + 4 + 20;
+    const HERO_LIST_EMPTY: usize = 4 + 4 + 1;
 
     /// `0x474a4`'s product code and quantity.
     const ORDER_OPCODE: u8 = 0x43;
@@ -3329,6 +3340,7 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
         HERO_GIFT_OPCODE if body.is_empty() => (HERO_GIFT_OPCODE, Vec::from(NONE_WAITING.to_be_bytes())),
         HERO_REPORT_OPCODE if body.len() >= HERO_REPORT_BODY_MIN => (HERO_REPORT_OPCODE, Vec::new()),
         HERO_OWNED_OPCODE if body.len() == HERO_OWNED_BODY => (HERO_OWNED_OPCODE, Vec::from(body)),
+        HERO_LIST_OPCODE if body.len() == HERO_LIST_BODY => (HERO_LIST_OPCODE, alloc::vec![0; HERO_LIST_EMPTY]),
         // The product code and the quantity, and a `u32` back.
         ORDER_OPCODE if body.len() == 4 => (ORDER_OPCODE, Vec::from(ORDER.to_be_bytes())),
         // The `u16` `0x14` `0x47604` opens with, the amount, and the quantity.
@@ -3566,6 +3578,10 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
     /// A `u32` code and the byte `0x7390` always writes behind it.
     const ERRAND_BODY: usize = 5;
     const ERRAND_TAIL: u8 = 0x1e;
+    /// The byte 던파 귀검사편's SKT build writes there instead, from `0x5a978`,
+    /// for its purchase through the GXG gateway. Its reader (the `0x21` case
+    /// at `0x5c0d8`) goes on from a zero result the same way.
+    const ERRAND_TAIL_SKT: u8 = 0x0b;
 
     /// What 테일즈위버 루시안칼츠편's shop sends for its errand instead, and
     /// what the readers behind `0x2312c` read the answer of.
@@ -3753,7 +3769,9 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
         }
         // A `u32` code and the byte behind it, which is what says the frame is
         // `0x7390`'s rather than five other bytes under this command.
-        ERRAND_REQUEST if body.len() == ERRAND_BODY && body[4] == ERRAND_TAIL => (ERRAND_ANSWER, vec![AUTH_GRANTED, 0, 0]),
+        ERRAND_REQUEST if body.len() == ERRAND_BODY && (body[4] == ERRAND_TAIL || body[4] == ERRAND_TAIL_SKT) => {
+            (ERRAND_ANSWER, vec![AUTH_GRANTED, 0, 0])
+        }
         // A `u32` and nothing else, which is the whole of what `0x225d6`
         // builds. The result and an empty message is all its reader takes.
         SHOP_REQUEST if body.len() == SHOP_BODY => (SHOP_ANSWER, vec![AUTH_GRANTED, 0, 0]),

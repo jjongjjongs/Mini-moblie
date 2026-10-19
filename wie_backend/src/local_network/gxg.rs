@@ -172,6 +172,39 @@ fn answer_data(data: &[u8]) -> Option<Vec<u8>> {
     crate::billing::lgt_local_marked_command_response(data)
         .or_else(|| crate::billing::lgt_local_opcode_header_response(data))
         .or_else(|| crate::billing::lgt_local_scrambled_opcode_header_response(data))
+        .or_else(|| marked_granted(data))
+}
+
+/// The marker Nexon's `[u32 length][0xffff][command]` frames carry.
+const MARKED_HEADER: usize = 8;
+const MARKER: [u8; 2] = [0xff, 0xff];
+
+/// Any other of Nexon's frames, granted under the command one past it: a zero
+/// result and an empty message.
+///
+/// 메이플스토리 Live's 캔디샵 uploads the character before it opens - `0x0004`,
+/// up to four sections under `0x0006`, two under `0x0008`, then `0x000a` and
+/// on - and the readers behind its dispatcher (`0x36cfe`: `0x36b24` for the
+/// commands up to 9, `0x36aec` for 10 to 19) each take the result byte and go
+/// on from zero, where anything else is an error screen. Nothing past the
+/// result is read on that path, so this answers every step of it the same
+/// way, and whatever the titles behind this gateway send that the frames above
+/// do not know.
+fn marked_granted(data: &[u8]) -> Option<Vec<u8>> {
+    let length = u32::from_le_bytes(data.get(..4)?.try_into().ok()?) as usize;
+    if data.len() < MARKED_HEADER || length != data.len() || data[4..6] != MARKER {
+        return None;
+    }
+
+    let command = u16::from_le_bytes([data[6], data[7]]).wrapping_add(1);
+    let mut answer = Vec::with_capacity(MARKED_HEADER + 3);
+    answer.extend_from_slice(&((MARKED_HEADER + 3) as u32).to_le_bytes());
+    answer.extend_from_slice(&MARKER);
+    answer.extend_from_slice(&command.to_le_bytes());
+    answer.extend_from_slice(&[0, 0, 0]);
+
+    tracing::info!("gxg: granting Nexon command {:#06x} by default", command.wrapping_sub(1));
+    Some(answer)
 }
 
 /// 슈퍼액션히어로4's stars, as far as its own frames have said.
@@ -381,6 +414,28 @@ mod tests {
         assert_eq!(&kind, b"ICS");
         assert_eq!(answer.len(), 1 + 1 + 1 + 7 + 2 + 100);
         assert_eq!(answer[0], 0);
+    }
+
+    #[test]
+    fn the_logged_requests_are_answered() {
+        // 메이플스토리 Live's 캔디샵 upload.
+        let live =
+            "42000000ffff0400007a00020648422800711600000000d1c51f1700000020000000000003050a0a030a0005011414140008140a1412040003000e01020204000003";
+        // 던파 귀검사편's purchase.
+        let dnf = "0d000000ffff2000000000000b";
+        // 슈퍼액션히어로4's 가면상점 page.
+        let hero = "002400470000000000050000000000000000000000000000000000000000000000000000";
+
+        let decode = |hex: &str| {
+            (0..hex.len())
+                .step_by(2)
+                .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+                .collect::<Vec<u8>>()
+        };
+
+        assert_eq!(answer_data(&decode(live)).unwrap(), [11, 0, 0, 0, 0xff, 0xff, 5, 0, 0, 0, 0]);
+        assert_eq!(answer_data(&decode(dnf)).unwrap(), [11, 0, 0, 0, 0xff, 0xff, 0x21, 0, 0, 0, 0]);
+        assert_eq!(answer_data(&decode(hero)).unwrap(), [0, 14, 0, 0x47, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     }
 
     #[test]
