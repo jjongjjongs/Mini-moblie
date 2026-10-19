@@ -233,27 +233,28 @@ impl Network for CaptureNetwork {
 /// time it asked for rather than the time its spinning buys, and a measurement
 /// of how long a start takes means what it says. It costs the run real
 /// seconds, so it is for measuring a start and not for a sweep.
+/// Here the real clock counts from the start of the run, as the guest clock
+/// does, so a script still reads in milliseconds from the start; the title
+/// sees it from `WIE_EPOCH_MS` - see `CapturePlatform::now`.
 #[derive(Default)]
 struct ProbeClock {
     base_ms: AtomicU64,
     anchor: AtomicU64,
     reads: AtomicU64,
-    real: bool,
+    real: Option<std::time::Instant>,
 }
 
 impl ProbeClock {
     fn from_env() -> Self {
         Self {
-            real: std::env::var("WIE_REAL_CLOCK").is_ok(),
+            real: std::env::var("WIE_REAL_CLOCK").is_ok().then(std::time::Instant::now),
             ..Self::default()
         }
     }
 
     fn now_ms(&self) -> u64 {
-        if self.real {
-            return std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |since| since.as_millis() as u64);
+        if let Some(start) = self.real {
+            return start.elapsed().as_millis() as u64;
         }
 
         let executed = wie_core_arm::EXECUTED_INSTRUCTIONS.load(Ordering::Relaxed);
@@ -274,7 +275,7 @@ impl ProbeClock {
     /// Ends a tick: what the guest executed becomes time, and an idle tick still
     /// costs one.
     fn advance(&self) {
-        if self.real {
+        if self.real.is_some() {
             return;
         }
 
@@ -746,6 +747,11 @@ fn run_once(
             );
         }
         tick_clock.advance();
+        // On the real clock a tick is the frontend's: the time passes whether
+        // or not the guest spends it.
+        if tick_clock.real.is_some() {
+            std::thread::sleep(Duration::from_millis(MS_PER_TICK));
+        }
         ticks += 1;
     }
 

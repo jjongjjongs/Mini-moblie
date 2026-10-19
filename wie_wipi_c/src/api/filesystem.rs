@@ -298,6 +298,13 @@ pub async fn read(context: &mut dyn WIPICContext, fd: i32, buffer: WIPICWord, si
     // start-up check reading a small license/cert record - e.g. cert.c2s - shows
     // exactly what the title inspects.
     tracing::debug!("MC_fsRead({:?}) -> {read} bytes: {}", entry.path, byte_preview(&data[..read]));
+    // And the whole of a save-sized record, which the preview cuts off: a
+    // title that dies only on one handset's save - 크아비엔비2011's first slot
+    // - has its difference past the first 48 bytes, and the log is the only
+    // copy of that save anyone else sees.
+    if read > 48 && read <= 4096 {
+        tracing::debug!("MC_fsRead({:?}) full: {}", entry.path, hex(&data[..read]));
+    }
 
     let state = context.filesystem_state();
     let mut state = state.lock();
@@ -306,6 +313,17 @@ pub async fn read(context: &mut dyn WIPICContext, fd: i32, buffer: WIPICWord, si
     }
 
     Ok(read as i32)
+}
+
+/// `data` as bare hex, for a record logged whole.
+fn hex(data: &[u8]) -> alloc::string::String {
+    use core::fmt::Write as _;
+
+    let mut out = alloc::string::String::with_capacity(data.len() * 2);
+    for byte in data {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
 /// Formats up to the first 48 bytes of `data` as hex plus a printable-ASCII
