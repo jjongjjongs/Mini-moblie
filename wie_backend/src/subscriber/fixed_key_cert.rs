@@ -8,10 +8,10 @@
 //! `MC_knlGetSystemProperty("MIN")`, compares it with the certificate's first
 //! field, and stops at error 5001 when the two differ. SKT's 슈퍼액션히어로4
 //! (0087472568) does the same with the same record, IV and error, sealed under
-//! a key of its own.
+//! a key of its own, and so does 미니게임천국5's KTF build (0104261C).
 //!
 //! The record is four AES-128-CBC blocks whose plaintext is
-//! `<0><MIN, 12 bytes><serial, 20 bytes><four-character title tag><zero fill>`,
+//! `<0><MIN, 12 bytes><serial, 20 bytes><title tag><zero fill>`,
 //! so the identity the certificate was issued for can be read straight out of
 //! it. That is what the handset must be told it is: reporting the emulator's
 //! usual subscriber number here is what the title sees as someone else's
@@ -25,9 +25,10 @@ use alloc::{
 };
 
 /// The keys the titles that use this certificate build in: 액션퍼즐패밀리4
-/// GS2's, then 슈퍼액션히어로4's. A key that does not fit a blob decrypts it to
-/// noise the structural checks refuse, so each is tried in turn.
-const KEYS: [&[u8; 16]; 2] = [b"32184a2de4tj6ffc", b"Cocoonprojectkey"];
+/// GS2's, 슈퍼액션히어로4's, then 미니게임천국5's - which sits in its binary
+/// at `0x1d71a8`, the IV at `0x1b7460`. A key that does not fit a blob decrypts
+/// it to noise the structural checks refuse, so each is tried in turn.
+const KEYS: [&[u8; 16]; 3] = [b"32184a2de4tj6ffc", b"Cocoonprojectkey", b"MinigameGP5ctkey"];
 /// The CBC initialisation vector they build in alongside it.
 const IV: [u8; 16] = [
     0x3d, 0xaf, 0xba, 0x42, 0x9d, 0x9e, 0xb4, 0x30, 0xb4, 0x22, 0xda, 0x80, 0x2c, 0x9f, 0xac, 0x41,
@@ -35,15 +36,15 @@ const IV: [u8; 16] = [
 
 /// Bytes of the certificate that are encrypted; a longer file is zero padding.
 const RECORD_LEN: usize = 64;
-/// The size every one of these files has been: the record and its padding.
-const FILE_LEN: usize = 76;
 /// Field offsets and lengths in the decrypted record.
 const MIN_AT: usize = 1;
 const MIN_LEN: usize = 12;
 const SERIAL_AT: usize = 13;
 const SERIAL_LEN: usize = 20;
 const TAG_AT: usize = 33;
-const TAG_LEN: usize = 4;
+/// The record's last byte, which 미니게임천국5's sets to 1 and the others leave
+/// zero.
+const FLAG_AT: usize = RECORD_LEN - 1;
 
 /// The handset identity a certificate names.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,25 +66,21 @@ pub fn recover_identity(cert: &[u8]) -> Option<HandsetIdentity> {
     KEYS.iter().find_map(|key| read_record(&decrypt_cbc(&cert[..RECORD_LEN], key)))
 }
 
-/// Whether `cert` is laid out as this certificate is - the four sealed blocks
-/// and the twelve zero bytes every one seen carries after them - while none of
-/// the keys here opens it: one more title's record under a key of its own.
-pub fn is_unread_record(cert: &[u8]) -> bool {
-    cert.len() == FILE_LEN
-        && cert[RECORD_LEN..].iter().all(|&b| b == 0)
-        && cert[..RECORD_LEN].iter().any(|&b| b != 0)
-        && recover_identity(cert).is_none()
-}
-
 /// The identity in one decrypted record, or `None` when it is not one.
 fn read_record(plain: &[u8]) -> Option<HandsetIdentity> {
     // Structure the title itself relies on: a zero lead byte, two NUL-terminated
-    // ASCII fields, a printable four-character tag, and nothing but zeroes after
-    // it. Enough to tell this record apart from a blob that merely decrypts.
-    if plain[0] != 0 || plain[TAG_AT + TAG_LEN..].iter().any(|&b| b != 0) {
+    // ASCII fields, a NUL-terminated tag with nothing but zeroes after it, and a
+    // last byte of 0 or 1. Enough to tell this record apart from a blob that
+    // merely decrypts.
+    //
+    // The tag is the title's: `APF4` and `SAH4` for two of them, the name
+    // itself in EUC-KR - `미니게임천국5` - for the third.
+    if plain[0] != 0 || plain[FLAG_AT] > 1 {
         return None;
     }
-    if !plain[TAG_AT..TAG_AT + TAG_LEN].iter().all(u8::is_ascii_graphic) {
+    let tag = &plain[TAG_AT..FLAG_AT];
+    let end = tag.iter().position(|&b| b == 0)?;
+    if end == 0 || tag[end..].iter().any(|&b| b != 0) || !tag[..end].iter().all(|&b| b.is_ascii_graphic() || b >= 0x80) {
         return None;
     }
 
@@ -259,7 +256,7 @@ fn inv_mix_columns(state: &mut [u8; 16]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{HandsetIdentity, KEYS, decrypt_cbc, is_unread_record, recover_identity};
+    use super::{HandsetIdentity, KEYS, decrypt_cbc, recover_identity};
     use alloc::string::ToString;
 
     /// The real `cert.c2s` shipped with 액션퍼즐패밀리4 GS2 (AID 000315C6).
@@ -321,22 +318,32 @@ mod tests {
         );
     }
 
-    /// A record no key here opens is still told apart by its layout, and one
-    /// that is read, or is not laid out this way, is not taken for it.
+    /// The real `cert.c2s` shipped with 미니게임천국5 (KTF 0104261C): the record,
+    /// then three words the reader does not look at (2010, 11, 2).
+    #[rustfmt::skip]
+    const MGH5: [u8; 76] = [
+        0xf8, 0x5d, 0x9f, 0x36, 0x1e, 0x8d, 0x06, 0xe6, 0xdb, 0xbe, 0xaa, 0xaf, 0x18, 0xe8, 0xa8, 0x2f,
+        0x08, 0x0c, 0xa5, 0x3a, 0xc2, 0xb4, 0x64, 0x55, 0x80, 0x6c, 0xad, 0x68, 0xcd, 0x73, 0x5a, 0x1d,
+        0x47, 0x91, 0x0a, 0xe7, 0x4e, 0x22, 0xb7, 0xa4, 0x00, 0x76, 0xc8, 0x53, 0x6f, 0x3c, 0x2c, 0xab,
+        0x22, 0xc0, 0xdf, 0xd7, 0xab, 0xac, 0x95, 0x4c, 0x30, 0x5d, 0xf4, 0xba, 0x70, 0xeb, 0x84, 0x5d,
+        0xda, 0x07, 0x00, 0x00, 0x0b, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
+    ];
+
+    /// Its record names no `MIN` - which is what the title stops at 5001 over
+    /// when it is told the subscriber number instead - and its tag is its name.
     #[test]
-    fn a_record_under_another_key_is_recognised_by_its_layout() {
-        let mut other = APF4;
-        other[..64].iter_mut().for_each(|b| *b = b.wrapping_mul(7).wrapping_add(3));
-        assert!(is_unread_record(&other));
+    fn a_certificate_under_the_third_key_names_an_empty_min() {
+        let plain = decrypt_cbc(&MGH5[..64], KEYS[2]);
+        assert_eq!(&plain[33..46], b"\xb9\xcc\xb4\xcf\xb0\xd4\xc0\xd3\xc3\xb5\xb1\xb95");
+        assert_eq!(plain[63], 1);
 
-        assert!(!is_unread_record(&APF4));
-        assert!(!is_unread_record(&SAH4));
-        assert!(!is_unread_record(&[0u8; 76]));
-        assert!(!is_unread_record(&other[..64]));
-
-        let mut unpadded = other;
-        unpadded[70] = 1;
-        assert!(!is_unread_record(&unpadded));
+        assert_eq!(
+            recover_identity(&MGH5),
+            Some(HandsetIdentity {
+                min: "".to_string(),
+                serial: "0104261C".to_string()
+            })
+        );
     }
 
     /// A blob that is not this certificate decrypts to noise, which the
