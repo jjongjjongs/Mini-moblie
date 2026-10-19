@@ -494,8 +494,8 @@ fn exec_thumb(ctx: &mut JitCtx, op: FastOp, pc: u32) -> Option<u32> {
             }
             return Some(exit::CONTINUE);
         }
-        FastOp::MovPc { rm } => {
-            ctx.regs[15] = ctx.regs[rm as usize] & !1;
+        FastOp::MovPc { rm, add } => {
+            ctx.regs[15] = ctx.regs[rm as usize].wrapping_add(add) & !1;
             return Some(exit::CONTINUE);
         }
         FastOp::BranchLink { exchange, target, ret } => {

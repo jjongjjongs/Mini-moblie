@@ -17,7 +17,10 @@ use alloc::{borrow::ToOwned, boxed::Box, format, string::String, sync::Arc, vec,
 use jvm::Jvm;
 use wipi_types::wipic::WIPICWord;
 
-use wie_backend::System;
+use wie_backend::{
+    System,
+    canvas::{Color, PixelType, Rgb565Pixel},
+};
 use wie_core_arm::{Allocator, ArmCore, EmulatedFunction, EmulatedFunctionParam, ResultWriter, SvcId};
 use wie_util::{Result, read_generic, read_null_terminated_string_bytes, write_generic, write_null_terminated_string_bytes};
 use wie_wipi_c::{
@@ -634,8 +637,80 @@ async fn handle_svc(core: &mut ArmCore, state: &mut SvcState, id: SvcId) -> Resu
     EmulatedFunction::call(&proxy, core, &mut ()).await?.write(core, lr)
 }
 
+/// The graphics calls a title makes per sprite and per pixel, answered in the
+/// run loop with the bodies the generic path runs: the context getters and
+/// setters, and packing a colour into a pixel and back. 메이플스토리 Live sets
+/// a context and packs a colour around every line it draws, 9,000 of them a
+/// second in town, as KTF's titles do - see `wie_ktf`'s `try_fast_wipic_call`.
+fn try_fast_graphics(core: &mut ArmCore, slot: u32) -> Result<Option<WIPICWord>> {
+    use graphics::{ContextLayout, WIPICGraphicsContextIdx};
+    const LAYOUT: ContextLayout = ContextLayout::Ktf;
+
+    Ok(Some(match slot {
+        5 => {
+            graphics::init_context_in(core, LAYOUT, core.read_param(0)?)?;
+            0
+        }
+        6 => {
+            let (p_grp_ctx, op, pv) = (core.read_param(0)?, core.read_param(1)?, core.read_param(2)?);
+            graphics::set_context_in(core, LAYOUT, p_grp_ctx, WIPICGraphicsContextIdx::from_raw(op), pv)?;
+            0
+        }
+        7 => {
+            let (p_grp_ctx, op, out) = (core.read_param(0)?, core.read_param(1)?, core.read_param(2)?);
+            graphics::get_context_in(core, LAYOUT, p_grp_ctx, WIPICGraphicsContextIdx::from_raw(op), out)?;
+            0
+        }
+        22 => {
+            let (r, g, b) = (core.read_param(0)?, core.read_param(1)?, core.read_param(2)?);
+            let color = Color {
+                a: 0xff,
+                r: r as u8,
+                g: g as u8,
+                b: b as u8,
+            };
+            Rgb565Pixel::from_color(color) as WIPICWord
+        }
+        23 => {
+            let pixel = core.read_param(0)?;
+            let color = Rgb565Pixel::to_color(pixel as u16);
+            for (index, component) in [color.r, color.g, color.b].into_iter().enumerate() {
+                write_generic(core, core.read_param(index + 1)?, component as i32)?;
+            }
+            pixel
+        }
+        _ => return Ok(None),
+    }))
+}
+
 pub fn register_svc_handler(core: &mut ArmCore, state: SvcState) -> Result<()> {
-    core.register_svc_handler(SVC_CATEGORY_WIPIC, handle_svc, &state)
+    core.register_svc_handler(SVC_CATEGORY_WIPIC, handle_svc, &state)?;
+
+    // The C library's memory and string calls, answered in the run loop - see
+    // `libc::try_fast`. Everything else takes `handle_svc`.
+    core.set_fast_svc_handler(Arc::new(|core: &mut ArmCore, category: u32, _lr: u32| -> Result<bool> {
+        if category != SVC_CATEGORY_WIPIC {
+            return Ok(false);
+        }
+
+        let id = core.read_svc_id();
+        let result = match id >> 8 {
+            table::C_LIBRARY => libc::try_fast(core, id & 0xff)?,
+            table::GRAPHICS => try_fast_graphics(core, id & 0xff)?,
+            _ => None,
+        };
+        let Some(result) = result else {
+            return Ok(false);
+        };
+
+        core.write_return_value(&[result])?;
+        let (_, lr) = core.read_pc_lr()?;
+        core.set_next_pc(lr)?;
+
+        Ok(true)
+    }));
+
+    Ok(())
 }
 
 #[cfg(test)]

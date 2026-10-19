@@ -72,13 +72,15 @@ pub(crate) enum FastOp {
     /// straight-line. Produced only by the JIT frontend.
     #[allow(dead_code)]
     BlockXfer { load: bool, rb: u8, rlist: u8 },
-    /// `mov pc, rm` (`HiRegBx` op 2 with destination PC). A computed branch that,
-    /// unlike `bx`, does *not* interwork: the target is `rm & !1` and execution
-    /// stays in Thumb. Dynamic PC, so it ends the trace. `rm` is never PC (that
-    /// degenerate form is left to the interpreter). Produced only by the JIT
-    /// frontend.
+    /// `mov pc, rm` and `add pc, rm` (`HiRegBx` op 2 and op 0 with destination
+    /// PC). A computed branch that, unlike `bx`, does *not* interwork: the
+    /// target is `(rm + add) & !1` and execution stays in Thumb. `add` is zero
+    /// for the move and the PC the add reads - its own address plus four - for
+    /// the add, which is how a switch's jump table is entered. Dynamic PC, so it
+    /// ends the trace. `rm` is never PC (that degenerate form is left to the
+    /// interpreter). Produced only by the JIT frontend.
     #[allow(dead_code)]
-    MovPc { rm: u8 },
+    MovPc { rm: u8, add: u32 },
 }
 
 /// Whether a decoded op continues the block or ends it (a branch).

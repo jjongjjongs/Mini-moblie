@@ -13,7 +13,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use wipi_types::wipic::WIPICWord;
 
-use wie_util::{Result, read_null_terminated_string_bytes, write_generic};
+use wie_core_arm::ArmCore;
+use wie_util::{ByteRead, ByteWrite, Result, read_null_terminated_string_bytes, write_generic};
 use wie_wipi_c::{MethodImpl, WIPICContext, WIPICMethodBody};
 
 /// The body for a C library slot, or `None` for one nothing has shown the
@@ -40,6 +41,54 @@ pub fn body(slot: u32) -> Option<WIPICMethodBody> {
         29 => localtime.into_body(),
         _ => return None,
     })
+}
+
+/// The slots answered without leaving the run loop - see [`try_fast`].
+///
+/// A title's own blitter and text code call these per row and per glyph:
+/// 던전앤파이터 in town makes 100,000 supervisor calls a second, four in five
+/// of them `memcpy` and nearly all the rest `memset`, and the async dispatch
+/// each one pays for - a context of a dozen shared states cloned, a body
+/// boxed, two futures allocated - was most of what a frame cost.
+pub fn try_fast(core: &mut ArmCore, slot: u32) -> Result<Option<WIPICWord>> {
+    let param = |core: &ArmCore, index| core.read_param(index);
+
+    Ok(Some(match slot {
+        0 => {
+            let (dst, src) = (param(core, 0)?, param(core, 1)?);
+            let mut bytes = read_null_terminated_string_bytes(core, src)?;
+            bytes.push(0);
+            core.write_bytes(dst, &bytes)?;
+            dst
+        }
+        4 => {
+            let left = read_null_terminated_string_bytes(core, param(core, 0)?)?;
+            let right = read_null_terminated_string_bytes(core, param(core, 1)?)?;
+            compare(&left, &right) as WIPICWord
+        }
+        12 => read_null_terminated_string_bytes(core, param(core, 0)?)?.len() as WIPICWord,
+        14 | 15 => {
+            let (dst, src, size) = (param(core, 0)?, param(core, 1)?, param(core, 2)?);
+            let mut bytes = alloc::vec![0; size as usize];
+            core.read_bytes(src, &mut bytes)?;
+            core.write_bytes(dst, &bytes)?;
+            dst
+        }
+        16 => {
+            let (left, right, size) = (param(core, 0)?, param(core, 1)?, param(core, 2)?);
+            let mut left_bytes = alloc::vec![0; size as usize];
+            let mut right_bytes = alloc::vec![0; size as usize];
+            core.read_bytes(left, &mut left_bytes)?;
+            core.read_bytes(right, &mut right_bytes)?;
+            compare(&left_bytes, &right_bytes) as WIPICWord
+        }
+        18 => {
+            let (dst, value, size) = (param(core, 0)?, param(core, 1)?, param(core, 2)?);
+            core.write_bytes(dst, &alloc::vec![value as u8; size as usize])?;
+            dst
+        }
+        _ => return Ok(None),
+    }))
 }
 
 fn read_string(context: &dyn WIPICContext, address: WIPICWord) -> Result<Vec<u8>> {

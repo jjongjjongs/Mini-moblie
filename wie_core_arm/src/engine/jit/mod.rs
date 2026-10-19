@@ -619,7 +619,20 @@ impl JitEngine {
             let rm = ((i.get_bit(6) * 8) + i.extract(3, 3)) as u8;
             let crd = ((i.get_bit(7) * 8) + i.extract(0, 3)) as u8;
             if crd == 15 && rm != 15 {
-                return Some((FastOp::MovPc { rm }, 2));
+                return Some((FastOp::MovPc { rm, add: 0 }, 2));
+            }
+            return None;
+        }
+        // ADD PC, Rm (HiRegBx op 0 with destination PC): the same computed
+        // branch, from the PC the instruction reads. A `switch` compiled to a
+        // jump table enters it this way - 메이플스토리 Live runs one in its
+        // frame loop, and it was most of the instructions the JIT gave back to
+        // the interpreter.
+        if i & 0xff00 == 0x4400 {
+            let rm = ((i.get_bit(6) * 8) + i.extract(3, 3)) as u8;
+            let crd = ((i.get_bit(7) * 8) + i.extract(0, 3)) as u8;
+            if crd == 15 && rm != 15 {
+                return Some((FastOp::MovPc { rm, add: pc.wrapping_add(4) }, 2));
             }
             return None;
         }
@@ -2235,6 +2248,22 @@ mod tests {
         ]);
         let mut regs = [0u32; 15];
         regs[2] = CODE + 8; // even target: mov pc masks bit 0 and keeps Thumb
+        regs[13] = DATA + 0x8000;
+        assert_same(&code, &regs, CODE + 12);
+    }
+
+    #[test]
+    fn jit_add_pc_register() {
+        // add pc, r2 (HiRegBx op 0, dest PC): a jump table's entry, from the PC
+        // the add reads (its own address plus four). r2 = 4 lands on CODE+8.
+        let code = thumb(&[
+            0x4497, // CODE+0: add pc, r2
+            0x0000, 0x0000, 0x0000, // padding to CODE+8
+            0x2011, // CODE+8: movs r0, #0x11
+            B_NEXT, // CODE+10 -> CODE+12
+        ]);
+        let mut regs = [0u32; 15];
+        regs[2] = 4;
         regs[13] = DATA + 0x8000;
         assert_same(&code, &regs, CODE + 12);
     }

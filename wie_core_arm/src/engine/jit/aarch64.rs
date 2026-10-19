@@ -1052,7 +1052,7 @@ fn emit_op(a: &mut Asm, op: FastOp, pc: u32) {
         FastOp::PushPop { load, extra, rlist } => emit_push_pop(a, load, extra, rlist, pc),
         FastOp::BlockXfer { load, rb, rlist } => emit_block_xfer(a, load, rb, rlist, pc),
         FastOp::BranchExchange { link, rm } => emit_bx(a, link, rm, pc),
-        FastOp::MovPc { rm } => emit_mov_pc(a, rm),
+        FastOp::MovPc { rm, add } => emit_mov_pc(a, rm, add),
         FastOp::BranchLink { exchange, target, ret } => emit_bl(a, exchange, target, ret),
         FastOp::CondBranch { .. } | FastOp::Branch { .. } => {
             unreachable!("handled by compile_block")
@@ -1195,9 +1195,13 @@ fn emit_bx(a: &mut Asm, link: bool, rm: u8, pc: u32) {
 
 /// Emit `mov pc, rm` (`rm != PC`). Unlike `bx`, this does not interwork: the
 /// target is `rm & !1` and the Thumb state is unchanged, so no CPSR write.
-fn emit_mov_pc(a: &mut Asm, rm: u8) {
+fn emit_mov_pc(a: &mut Asm, rm: u8, add: u32) {
+    a64!(a ; ldr w0, [x19, #ro(rm)]);
+    if add != 0 {
+        mov_imm32!(a, w10, add);
+        a64!(a ; add w0, w0, w10);
+    }
     a64!(a
-        ; ldr w0, [x19, #ro(rm)]
         ; movz w9, #1
         ; bic w0, w0, w9
         ; str w0, [x19, #PC]
