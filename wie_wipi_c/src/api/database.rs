@@ -2136,6 +2136,26 @@ async fn read_packaged_database(context: &mut dyn WIPICContext, name: &str) -> R
     Ok(Some(context.read_resource(name).await?))
 }
 
+/// What the archive ships under this name - a jar entry or a file in its `P/`
+/// directory - before [`packaged_store_bytes`] decides whether it counts.
+async fn shipped_bytes(context: &mut dyn WIPICContext, name: &str) -> Result<Option<Vec<u8>>> {
+    if let Some(packaged) = read_packaged_database(context, name).await? {
+        return Ok(Some(packaged));
+    }
+
+    let filesystem = context.system().filesystem().clone();
+    let Some(size) = filesystem.size(name).await else {
+        return Ok(None);
+    };
+
+    let mut data = vec![0; size];
+    filesystem.read(name, 0, size, &mut data).await;
+
+    tracing::debug!("{name:?} is a file the archive shipped, {size} bytes");
+
+    Ok(Some(data))
+}
+
 /// The names 메이플스토리 Live keeps its saves and their checksum under:
 /// `mapleliveuser`, `maplelive0`..`maplelive5`, their `r` records and
 /// `maplelivek`. See [`packaged_store_bytes`].
@@ -2166,26 +2186,27 @@ const MAPLE_LIVE_SAVE_PREFIX: &str = "maplelive";
 /// 게임을 종료합니다`. The model the dumped handset reported is not recorded
 /// anywhere - only its byte sum can be worked back out of the checksum - so the
 /// saves it shipped cannot be opened on this one, and are left out for the
-/// title to make a new player as it does on a fresh install.
+/// title to make a new player as it does on a fresh install. Opening a packaged
+/// store copies it into the repository, so a copy an earlier run made - still
+/// byte for byte the one shipped, which this handset never wrote - goes too;
+/// otherwise the repository would go on handing the title the same saves.
 pub(crate) async fn packaged_store_bytes(context: &mut dyn WIPICContext, name: &str) -> Result<Option<Vec<u8>>> {
     if name.starts_with(MAPLE_LIVE_SAVE_PREFIX) {
-        tracing::info!("{name:?} is a save sealed to another handset's model; leaving it out");
+        if let Some(shipped) = shipped_bytes(context, name).await? {
+            let system = context.system();
+            let pid = system.pid().to_owned();
+            let repository = system.platform().database_repository();
+            if repository.exists(name, &pid).await && repository.open(name, &pid).await.get(1).await.as_deref() == Some(shipped.as_slice()) {
+                tracing::info!("{name:?} is a copy of a save sealed to another handset's model; removing it");
+                repository.delete(name, &pid).await;
+            }
+            tracing::info!("{name:?} is a save sealed to another handset's model; leaving it out");
+        }
         return Ok(None);
     }
 
-    let data = if let Some(packaged) = read_packaged_database(context, name).await? {
-        packaged
-    } else {
-        let filesystem = context.system().filesystem().clone();
-        let Some(size) = filesystem.size(name).await else {
-            return Ok(None);
-        };
-
-        let mut data = vec![0; size];
-        filesystem.read(name, 0, size, &mut data).await;
-
-        tracing::debug!("{name:?} is a file the archive shipped, {size} bytes");
-        data
+    let Some(data) = shipped_bytes(context, name).await? else {
+        return Ok(None);
     };
 
     // Whether it is such a save at all does not depend on the number, so the
@@ -3602,6 +3623,30 @@ mod tests {
         // A null buffer and a count of nothing are parameter errors.
         assert_eq!(list_record(&mut context, db_id, 0, 3).await.unwrap(), -22);
         assert_eq!(list_record(&mut context, db_id, 0x3000, 0).await.unwrap(), -22);
+    }
+
+    /// 메이플스토리 Live's shipped saves are sealed to the dumped handset's
+    /// model, so they are left out - and so is the copy an earlier run made of
+    /// one in the repository, which would otherwise keep handing them back.
+    /// A save the title wrote itself stays.
+    #[futures_test::test]
+    async fn maple_live_saves_a_dump_shipped_are_left_out_with_their_copies() {
+        let mut context = database_test_context();
+        let system = crate::context::WIPICContext::system(&mut context).clone();
+        system.filesystem().add_virtual("maplelivek", vec![0x3c, 0xae, 0x22, 0x04]);
+        system.filesystem().add_virtual("maplelive0", vec![1, 2, 3]);
+        context.write_bytes(0x1000, b"maplelivek\0").unwrap();
+        context.write_bytes(0x1100, b"maplelive0\0").unwrap();
+
+        // What an earlier run left: a copy of the shipped key, and a save the
+        // title wrote over the shipped one.
+        let pid = system.pid().to_owned();
+        let repository = system.platform().database_repository();
+        repository.open("maplelivek", &pid).await.set(1, &[0x3c, 0xae, 0x22, 0x04]).await;
+        repository.open("maplelive0", &pid).await.set(1, &[9, 9]).await;
+
+        assert_eq!(exists_database_ktf(&mut context, 0x1000, 1, 0).await.unwrap(), -12);
+        assert_eq!(exists_database_ktf(&mut context, 0x1100, 1, 0).await.unwrap(), 0);
     }
 
     fn database_test_context() -> TestContext {
