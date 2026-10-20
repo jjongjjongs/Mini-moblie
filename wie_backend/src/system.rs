@@ -150,6 +150,11 @@ impl System {
         // the gift go through. Host-gated, so no other title is touched.
         local_network.register(Box::new(crate::local_network::LevelUpEndpoint));
 
+        // 파워풀프로야구2009's trial server (121.254.169.55:15022), gone for
+        // years, which `정식판 전환` dials. See
+        // `crate::local_network::pawapro`.
+        local_network.register(Box::new(crate::local_network::PawaproEndpoint));
+
         // 테라-영원의혼돈's KTF build fetches its 인증서 from this server, gone
         // for years. See `crate::local_network::tera`.
         local_network.register(Box::new(crate::local_network::TeraEndpoint));

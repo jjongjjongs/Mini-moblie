@@ -33,6 +33,7 @@ mod gpang;
 mod gxg;
 mod levelup;
 mod noreason;
+mod pawapro;
 mod pigmy;
 mod relay;
 mod sdw;
@@ -51,6 +52,7 @@ pub use self::{
     gxg::{GxgEndpoint, NexonRelayEndpoint},
     levelup::LevelUpEndpoint,
     noreason::NoReasonEndpoint,
+    pawapro::PawaproEndpoint,
     relay::RelayEndpoint,
     sdw::SdwEndpoint,
     snowboard::SnowBoardEndpoint,
