@@ -28,8 +28,8 @@ use self::{
     framebuffer::FrameBuffer,
     grp_context::{BUILT_IN_XOR, WIPICGraphicsContext},
     image::{
-        alloc_image, create_wipi_image, forget_trailer, free_image_struct, has_trailer, image_framebuffer_handle, read_image, register_trailer,
-        transparency_bits,
+        MAGENTA_565, alloc_image, create_wipi_image, forget_trailer, free_image_struct, has_trailer, image_framebuffer_handle,
+        is_registered_magenta_keyed, read_image, register_magenta_keyed, register_trailer, transparency_bits,
     },
 };
 
@@ -1133,6 +1133,9 @@ pub async fn create_sub_image(context: &mut dyn WIPICContext, parent: WIPICIndir
         context.write_bytes(context.data_ptr(sub_img.0.buf)? + trailer_at, &trailer)?;
         register_trailer(sub_img.0.buf.0);
     }
+    if is_registered_magenta_keyed(parent_image.img.buf.0) {
+        register_magenta_keyed(sub_img.0.buf.0);
+    }
 
     let image = WIPICImage {
         img: sub_img.0,
@@ -1203,7 +1206,8 @@ fn carry_img_colour_into_mask(context: &mut dyn WIPICContext, image: &WIPICImage
 
     // The one-bit mask after the pixels, where this runtime put one: a title that
     // turns an image round rewrites it along with the colour. See below.
-    let trailer = has_trailer(image.img.buf.0).then(|| {
+    let magenta_keyed = is_registered_magenta_keyed(image.img.buf.0);
+    let trailer = (!magenta_keyed && has_trailer(image.img.buf.0)).then(|| {
         let pixels = (iw * ih) as u32;
         img_ptr + (pixels + (pixels & 1)) * 2
     });
@@ -1224,11 +1228,23 @@ fn carry_img_colour_into_mask(context: &mut dyn WIPICContext, image: &WIPICImage
         }
 
         for i in 0..cols {
-            let colour = Rgb565Pixel::to_color(u16::from_le_bytes([img_row[i * 2], img_row[i * 2 + 1]]));
+            let pixel = u16::from_le_bytes([img_row[i * 2], img_row[i * 2 + 1]]);
+            let colour = Rgb565Pixel::to_color(pixel);
             // ArgbPixel bytes are [b, g, r, a]; keep the alpha, replace colour.
             mask_row[i * 4] = colour.b;
             mask_row[i * 4 + 1] = colour.g;
             mask_row[i * 4 + 2] = colour.r;
+
+            // An image whose clear pixels are its magenta takes its shape from
+            // the colour plane too. 파워풀프로야구2009 turns batters and
+            // pitchers round by reversing the colour plane's rows and nothing
+            // else; the mask plane kept the unturned shape, so each turned
+            // figure came down as a magenta blot wherever the two shapes
+            // disagreed, and was missing wherever the turned one reached past.
+            if magenta_keyed {
+                mask_row[i * 4 + 3] = if pixel == MAGENTA_565 { 0 } else { 0xff };
+                continue;
+            }
 
             // And the shape, where the one-bit mask says otherwise. 아무이유없어
             // turns half its characters round when it loads them (`0xb718`): it
@@ -4890,6 +4906,66 @@ mod tests {
             c.g,
             c.b
         );
+    }
+
+    /// 파워풀프로야구2009 turns a magenta-keyed image round by reversing the
+    /// rows of its colour plane and nothing else (`0x166888`). The turned image
+    /// is drawn in the turned shape: clear where the colour plane is now
+    /// magenta, opaque where it now holds a colour.
+    #[futures_test::test]
+    async fn a_magenta_keyed_image_turned_round_on_its_colour_plane_draws_turned() {
+        // A four-by-one ECNX: red, then three clear magenta pixels.
+        let mut source = alloc::vec::Vec::new();
+        source.extend_from_slice(b"ECNX");
+        source.extend_from_slice(&0x1900u16.to_le_bytes());
+        source.extend_from_slice(&4u16.to_le_bytes());
+        source.extend_from_slice(&1u16.to_le_bytes());
+        source.extend_from_slice(&0u32.to_le_bytes()); // clear index
+        source.extend_from_slice(&[0, 0]);
+        source.extend_from_slice(&4u32.to_le_bytes());
+        source.extend_from_slice(&[1, 0, 0, 0]);
+        source.extend_from_slice(&2u32.to_le_bytes());
+        source.extend_from_slice(&0xf81fu16.to_le_bytes());
+        source.extend_from_slice(&0xf800u16.to_le_bytes());
+
+        let mut context = test_context();
+        let pgc_handle = context.alloc(core::mem::size_of::<super::WIPICGraphicsContext>() as u32).unwrap();
+        let pgc = context.data_ptr(pgc_handle).unwrap();
+        init_context(&mut context, pgc).await.unwrap();
+
+        let data = context.alloc(source.len() as u32).unwrap();
+        let data_addr = context.data_ptr(data).unwrap();
+        context.write_bytes(data_addr, &source).unwrap();
+        let ptr_image = context.alloc_raw(4).unwrap();
+        create_image(&mut context, ptr_image, data, 0, source.len() as u32).await.unwrap();
+        let image_handle = super::WIPICIndirectPtr(read_generic(&context, ptr_image).unwrap());
+
+        // Turn the colour plane round, as the title does.
+        let fetched = super::get_image_framebuffer(&mut context, image_handle).await.unwrap();
+        let img_fb: wipi_types::wipic::WIPICFramebuffer = read_generic(&context, context.data_ptr(fetched).unwrap()).unwrap();
+        let img_ptr = context.data_ptr(img_fb.buf).unwrap();
+        let mut row = [0u8; 8];
+        wie_util::ByteRead::read_bytes(&context, img_ptr, &mut row).unwrap();
+        let turned: alloc::vec::Vec<u8> = row.chunks(2).rev().flatten().copied().collect();
+        context.write_bytes(img_ptr, &turned).unwrap();
+
+        let dest_fb = super::FrameBuffer::new(&mut context, 4, 1, 16).unwrap();
+        let blue = 0x001fu16.to_le_bytes().repeat(4);
+        context.write_bytes(context.data_ptr(dest_fb.0.buf).unwrap(), &blue).unwrap();
+        let destination = context.alloc(core::mem::size_of::<wipi_types::wipic::WIPICFramebuffer>() as u32).unwrap();
+        let dest_addr = context.data_ptr(destination).unwrap();
+        write_generic(&mut context, dest_addr, dest_fb.0).unwrap();
+
+        draw_image(&mut context, destination, 0, 0, 4, 1, image_handle, 0, 0, pgc).await.unwrap();
+
+        let handle = read_generic(&context, dest_addr).unwrap();
+        let drawn = super::FrameBuffer(handle).image(&mut context).unwrap();
+        let rgb = |x| {
+            let c = drawn.get_pixel(x, 0);
+            (c.r, c.g, c.b)
+        };
+        assert_eq!(rgb(0), (0, 0, 0xff), "where the red was is clear now, not magenta");
+        assert_eq!(rgb(3), (0xff, 0, 0), "the red is drawn where it was turned to");
     }
 
     /// 아무이유없어's `mainmenu_sub0`, a 28x23 palette PNG with a transparent

@@ -35,6 +35,9 @@ pub fn create_wipi_image(context: &mut dyn WIPICContext, buf: WIPICIndirectPtr, 
     let (mask_at, mask_bits) = transparency_bits(&colors);
     let img_framebuffer = FrameBuffer::from_image_with_trailer(context, &rgb565, mask_at, &mask_bits)?;
     register_trailer(img_framebuffer.0.buf.0);
+    if has_alpha && is_magenta_keyed(&colors) {
+        register_magenta_keyed(img_framebuffer.0.buf.0);
+    }
     // Only an image that carries alpha needs the full ARGB kept in the mask
     // plane for MC_grpDrawImage to composite; a fully opaque image composites
     // straight from the 16bpp colour plane and is spared the second copy.
@@ -149,10 +152,45 @@ pub(crate) fn register_trailer(buf: WIPICWord) {
 
 pub(crate) fn forget_trailer(buf: WIPICWord) {
     TRAILERED.lock().remove(&buf);
+    MAGENTA_KEYED.lock().remove(&buf);
 }
 
 pub(crate) fn has_trailer(buf: WIPICWord) -> bool {
     TRAILERED.lock().contains(&buf)
+}
+
+/// The colour a magenta-keyed image's clear pixels carry, in RGB565.
+pub(crate) const MAGENTA_565: u16 = 0xf81f;
+
+/// Whether an image's transparency is exactly its magenta: every pixel either
+/// clear and magenta or opaque and some other colour.
+///
+/// Such an image says on its colour plane alone where it is clear, the way the
+/// handset kept it. 파워풀프로야구2009 relies on that: it builds the
+/// left-handed batter and half the pitcher's frames by turning an image round
+/// in place (`0x166888`), reversing each row of the colour plane and nothing
+/// else, and its darkened variant at `0x1668fa` steps round `0xf81f` the same
+/// way.
+fn is_magenta_keyed(colors: &[Color]) -> bool {
+    colors.iter().all(|color| {
+        let magenta = Rgb565Pixel::from_color(*color) == MAGENTA_565;
+        match color.a {
+            0 => magenta,
+            0xff => !magenta,
+            _ => false,
+        }
+    })
+}
+
+/// The colour planes of images [`is_magenta_keyed`], by buffer address.
+static MAGENTA_KEYED: spin::Mutex<BTreeSet<WIPICWord>> = spin::Mutex::new(BTreeSet::new());
+
+pub(crate) fn register_magenta_keyed(buf: WIPICWord) {
+    MAGENTA_KEYED.lock().insert(buf);
+}
+
+pub(crate) fn is_registered_magenta_keyed(buf: WIPICWord) -> bool {
+    MAGENTA_KEYED.lock().contains(&buf)
 }
 
 #[cfg(test)]
