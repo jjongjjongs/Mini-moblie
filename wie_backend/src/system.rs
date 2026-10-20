@@ -141,6 +141,10 @@ impl System {
         // `crate::local_network::sdw`.
         local_network.register(Box::new(crate::local_network::SdwEndpoint));
 
+        // The game server EA프로야구2010's SKT builds ask for the subscriber's
+        // saves, gone for years. See `crate::local_network::dsp`.
+        local_network.register(Box::new(crate::local_network::DspEndpoint));
+
         // 질주쾌감 스케쳐2's shop/billing server (222.231.31.45:28013), gone for
         // years. The title opens a plain socket to it and writes the carrier
         // billing frame `ff ff 12 00 68 00 <subscriber> 03` - the `0x68`
