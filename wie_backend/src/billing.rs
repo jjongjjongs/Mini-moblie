@@ -358,6 +358,77 @@ pub fn ktf_local_miniheroes2_response(request: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
+/// What answers the 2010-11 GAMEVIL KTF titles' shop server.
+///
+/// 2011프로야구 (KTF `01042598`) opens `218.145.70.36:23205` for its shop and
+/// 2011슈퍼사커 and 놈5 open `29505`; all three write the `tagNetHeader`
+/// record 제노니아 does - a `u16le` length counting the record and a `u16le`
+/// command - and open with a 21-byte one: the command, a `u32` and the
+/// subscriber number.
+///
+/// ```text
+/// 15 00 00 99 c3 3c 00 00 "01068488891" 00 00    2011프로야구, 0x9900
+/// 15 00 06 01 7f 72 00 00 "01068488891" 00 00    놈5, 0x0106
+/// ```
+///
+/// 2011프로야구's reader (`0x20bfa8`) is not 제노니아's. It takes the four-byte
+/// header and then a **signed status byte**, and only a status above zero
+/// reaches the dispatch on the command; zero or below goes to the error
+/// handler, and -21 or below closes the session. The dispatch answers each
+/// command with the command plus one - `0x9901`'s handler (`0x208264`) copies
+/// 21 bytes from the status on, closes the socket and moves the shop on to its
+/// next step.
+///
+/// So a command is answered with itself plus one, a status of one and zeros
+/// behind it - enough of them for the longest of those copies, which only the
+/// server ever filled in.
+///
+/// `None` for anything that is not one of these records: the length has to be
+/// the record's own and the command one a title sends, which is the even ones.
+pub fn ktf_local_gamevil_2011_response(request: &[u8]) -> Option<Vec<u8>> {
+    const HEADER: usize = 4;
+    /// Above zero, so the reader reaches the command's handler.
+    const SUCCEEDED: u8 = 1;
+    /// The status and what the handlers read behind it.
+    const BODY: usize = 0x20;
+
+    if request.len() < HEADER || u16::from_le_bytes([request[0], request[1]]) as usize != request.len() {
+        return None;
+    }
+    let command = u16::from_le_bytes([request[2], request[3]]);
+    if command == 0 || !command.is_multiple_of(2) {
+        return None;
+    }
+
+    let mut response = vec![0u8; HEADER + BODY];
+    response[0..2].copy_from_slice(&((HEADER + BODY) as u16).to_le_bytes());
+    response[2..4].copy_from_slice(&(command + 1).to_le_bytes());
+    response[HEADER] = SUCCEEDED;
+
+    Some(response)
+}
+
+#[cfg(test)]
+mod gamevil_2011_tests {
+    use super::*;
+
+    #[test]
+    fn a_command_is_answered_with_the_next_and_a_positive_status() {
+        let mut request = vec![0x15, 0x00, 0x00, 0x99, 0xc3, 0x3c, 0x00, 0x00];
+        request.extend_from_slice(b"01068488891\0\0");
+        assert_eq!(request.len(), 0x15);
+
+        let reply = ktf_local_gamevil_2011_response(&request).expect("the record is answered");
+        assert_eq!(&reply[..5], &[0x24, 0x00, 0x01, 0x99, 0x01]);
+        assert_eq!(reply.len(), 0x24);
+
+        // An answer is not answered.
+        let mut answer = request.clone();
+        answer[2] = 0x01;
+        assert_eq!(ktf_local_gamevil_2011_response(&answer), None);
+    }
+}
+
 /// What answers 액션퍼즐패밀리2's handshake.
 ///
 /// 액션퍼즐패밀리2 (`00027D2D`, 컴투스) opens a billing socket to

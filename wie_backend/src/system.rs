@@ -179,8 +179,8 @@ impl System {
         // 2011프로야구 dials 23205, 2011슈퍼사커 and 놈5 29505, and a purchase
         // sat on a connect that never completed. Their records are the
         // `tagNetHeader` ones 제노니아 writes - a `u16le` length and a `u16le`
-        // command - and are answered through the same chain
-        // (`crate::billing::lgt_local_gamevil_packet_response`). Host-gated, so
+        // command - read the way their own reader reads them
+        // (`crate::billing::ktf_local_gamevil_2011_response`). Host-gated, so
         // no other title is touched.
         for (name, port) in [("gamevil(218.145.70.36:23205)", 23205), ("gamevil(218.145.70.36:29505)", 29505)] {
             local_network.register(Box::new(crate::local_network::BillingGatewayEndpoint::new_gamevil(

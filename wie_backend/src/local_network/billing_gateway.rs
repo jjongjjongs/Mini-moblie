@@ -56,7 +56,7 @@ enum Framing {
     MiniHeroes,
     /// `[u16le length counting the whole frame][u16le command][body]` - the
     /// GAMEVIL titles' `tagNetHeader`. See
-    /// [`crate::billing::lgt_local_gamevil_packet_response`].
+    /// [`crate::billing::ktf_local_gamevil_2011_response`].
     LittleEndianLength,
 }
 
@@ -338,6 +338,7 @@ impl LocalConnection for BillingGatewayConnection {
             let reply = match self.framing {
                 Framing::Relay => crate::billing::ktf_local_tempest_response(&frame),
                 Framing::MiniHeroes => crate::billing::ktf_local_miniheroes2_response(&frame),
+                Framing::LittleEndianLength => crate::billing::ktf_local_gamevil_2011_response(&frame),
                 _ => crate::billing::response(&frame),
             };
             match reply {
@@ -411,7 +412,8 @@ mod tests {
     }
 
     /// A GAMEVIL record, split across two writes, is taken whole by its
-    /// little-endian length and answered with its command plus one.
+    /// little-endian length and answered with its command plus one and a
+    /// positive status.
     #[test]
     fn a_gamevil_record_is_taken_by_its_little_endian_length() {
         let mut record = vec![0u8; 72];
@@ -433,8 +435,8 @@ mod tests {
         let LocalRead::Data(read) = connection.read(&mut out) else {
             panic!("the record is answered");
         };
-        assert_eq!(&out[..5], &[0x20, 0x00, 0x01, 0x07, 0x00]);
-        assert_eq!(read, 0x20);
+        assert_eq!(&out[..5], &[0x24, 0x00, 0x01, 0x07, 0x01]);
+        assert_eq!(read, 0x24);
     }
 
     /// 크로노스윙's KTF login, split across two writes, is taken whole and
