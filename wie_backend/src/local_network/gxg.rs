@@ -167,7 +167,7 @@ impl LocalConnection for NexonRelayConnection {
         // Nexon's frames lead with a `u32le` length counting the whole frame.
         while self.pending.len() >= MARKED_HEADER {
             let length = u32::from_le_bytes(self.pending[..4].try_into().unwrap()) as usize;
-            if length < MARKED_HEADER || length > 0x10000 {
+            if !(MARKED_HEADER..=0x10000).contains(&length) {
                 tracing::warn!("nexon relay: dropping {} bytes that are not a frame", self.pending.len());
                 self.pending.clear();
                 break;
@@ -458,7 +458,7 @@ mod tests {
     /// 캔디샵 session, which is answered with its command plus one.
     #[test]
     fn a_relayed_frame_is_answered_without_the_gateway() {
-        use super::{LocalConnection, LocalEndpoint, LocalRead, NexonRelayEndpoint};
+        use super::{LocalEndpoint, LocalRead, NexonRelayEndpoint};
 
         let endpoint = NexonRelayEndpoint::new();
         assert!(endpoint.accepts("socket", "211.115.203.30", 10018));
