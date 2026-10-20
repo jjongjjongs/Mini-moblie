@@ -2944,6 +2944,16 @@ mod minigame_heaven_5_star_purchase_tests {
         session.resize(0x67, 0);
         assert_eq!(response(&session), Some(frame("00 05 00 c8 00")));
 
+        // 액션퍼즐패밀리4's, off the device log, is answered the same way.
+        let mut apf4 = frame("00 67 00 00 00 03 ee 00 00 01 03");
+        apf4.extend_from_slice(b"1.0.4");
+        apf4.resize(5 + 26, 0);
+        apf4.extend_from_slice(b"01046119269");
+        apf4.resize(5 + 68, 0);
+        apf4.extend_from_slice(b"APF4_ITEM");
+        apf4.resize(0x67, 0);
+        assert_eq!(response(&apf4), Some(frame("00 05 00 c8 00")));
+
         let approval = frame("00 0d 00 c9 00 00 14 00 00 0f a0 00 04");
         let approved = response(&approval).expect("the approval is answered");
         assert_eq!(approved, frame("00 11 00 ca 00 00 00 0f a0 30 30 30 30 30 30 30 31"));
@@ -3176,6 +3186,13 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
     /// `00 67 00 00 00 03 ee 00 00 01 03 "KT_WIPIC_1.0.0" ... "GP5_ITEM"`.
     /// Answered under opcode 0, it sat on `별을 구매 중입니다` and sent it again.
     const GP5_ITEM: &[u8] = b"GP5_ITEM";
+    /// 액션퍼즐패밀리4 (KTF `01042875`) opens its shop the same way, on the same
+    /// server, with `APF4_ITEM` there:
+    /// `00 67 00 00 00 03 ee 00 00 01 03 "1.0.4" ... "APF4_ITEM"`. Answered
+    /// under opcode 0, its next frame was an empty one (`00 0d 00 00 00 ...`)
+    /// that nothing could answer, where 미니게임천국5 under `0xc8` goes on to its
+    /// approval.
+    const APF4_ITEM: &[u8] = b"APF4_ITEM";
 
     /// The library's type `5`, which carries nothing and is answered in kind.
     const SIGNAL_OPCODE: u8 = 0x01;
@@ -3365,6 +3382,7 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
             if body.get(KTF_TITLE_AT..KTF_TITLE_AT + MINIGAME_HEAVEN.len()) == Some(MINIGAME_HEAVEN)
                 || body.get(KTF_TITLE_AT..KTF_TITLE_AT + APF3.len()) == Some(APF3)
                 || body.get(KTF_TITLE_AT..KTF_TITLE_AT + GP5_ITEM.len()) == Some(GP5_ITEM)
+                || body.get(KTF_TITLE_AT..KTF_TITLE_AT + APF4_ITEM.len()) == Some(APF4_ITEM)
             {
                 (KTF_SESSION_ANSWER_OPCODE, Vec::new())
             } else {
