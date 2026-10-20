@@ -112,15 +112,35 @@ const INTERFACE_SOUND: u32 = 0x100_2000;
 const INTERFACE_GRAPHICS: u32 = 0x100_2001;
 const INTERFACE_CERTIFICATE: u32 = 0x103_028a;
 const INTERFACE_HANDSET: u32 = 0x180_00fe;
-/// An interface nothing here has named yet. 한쿠아 큰화 creates it while it
-/// starts, asks its slot `0x14` for an object, and gives up its start-up
-/// when that answer is null; it only ever sets that object up and releases
-/// it, so an object whose every slot answers zero carries it through.
-const INTERFACE_UNNAMED_1105: u32 = 0x100_1105;
-const UNNAMED_1105_CHILD: u32 = 0x14;
-/// The number the child object is kept under: no interface the shell is
-/// asked for has the top bit set.
-const UNNAMED_1105_CHILD_INTERFACE: u32 = 0x8100_1105;
+/// `INetMgr`. 한쿠아 큰화 creates it while it starts, opens a socket and
+/// gives up its start-up when that answer is null; it only ever sets the
+/// socket up and releases it.
+const INTERFACE_NETWORK: u32 = 0x100_1105;
+/// KTF's connection over a socket `INetMgr` opened: the one 카트라이더레이싱
+/// connects and writes through, reading off the socket itself.
+const INTERFACE_CONNECTION: u32 = 0x180_00fc;
+/// The number the socket is kept under: no interface the shell is asked for
+/// has the top bit set.
+const INTERFACE_SOCKET: u32 = 0x8100_1105;
+
+const NETWORK_RESOLVE: u32 = 0x0c;
+const NETWORK_OPEN_SOCKET: u32 = 0x14;
+const NETWORK_SET_LINGER: u32 = 0x20;
+const CONNECTION_ATTACH: u32 = 0x08;
+const CONNECTION_CONNECT: u32 = 0x0c;
+const CONNECTION_WRITE: u32 = 0x14;
+const SOCKET_READABLE: u32 = 0x08;
+const SOCKET_READ: u32 = 0x0c;
+const SOCKET_CANCEL: u32 = 0x10;
+/// `AEECallback`'s function and its argument.
+const CALLBACK_FUNCTION: u32 = 0x10;
+const CALLBACK_CONTEXT: u32 = 0x14;
+/// What a name resolves to: no title here looks at the address.
+const RESOLVED_ADDRESS: [u8; 4] = [127, 0, 0, 1];
+/// `AEE_NET_WOULDBLOCK`.
+const NET_WOULD_BLOCK: u32 = u32::MAX;
+/// The entaz servers' domain; see [`wie_backend::billing::ktf_brew_entaz_response`].
+const ENTAZ_DOMAIN: &str = ".entaz.com";
 
 const DISPLAY_FONT_METRICS: u32 = 0x08;
 // `DrawText`'s placement flags, `IDF_ALIGN_*`. 카샨 centres its messages with
@@ -247,6 +267,16 @@ struct Schedule {
     due: u64,
 }
 
+/// The one connection a title makes, to a server that lives here: what it
+/// asked for by name, what the server has said that the title has not read,
+/// and the callback waiting for that.
+#[derive(Default)]
+struct Connection {
+    host: String,
+    inbox: Vec<u8>,
+    readable: Option<(u32, u32)>,
+}
+
 struct KeptImage {
     data: u32,
     bytes: Vec<u8>,
@@ -279,6 +309,10 @@ struct State {
 
     listeners: Vec<Listener>,
     timers: Vec<Schedule>,
+    /// Callbacks owed to the title - a name resolved, a connection made,
+    /// data arrived - with the argument each is called with.
+    calls: Vec<(u32, u32, u32)>,
+    connection: Connection,
     timed_due: Option<u64>,
     posted: Vec<(u32, u32, u32)>,
 
@@ -340,6 +374,8 @@ impl Brew {
                 graphics_filled: false,
                 listeners: Vec::new(),
                 timers: Vec::new(),
+                calls: Vec::new(),
+                connection: Connection::default(),
                 timed_due: None,
                 posted: Vec::new(),
                 files: BTreeMap::new(),
@@ -463,6 +499,11 @@ impl Brew {
 
         self.advance_sound(core).await?;
         self.advance_timed(core).await?;
+
+        let calls = core::mem::take(&mut self.state.lock().calls);
+        for (function, context, argument) in calls {
+            core.run_function::<u32>(function, &[context, argument]).await?;
+        }
 
         let now = self.now();
         let due = {
@@ -801,7 +842,33 @@ async fn handle_trap(core: &mut ArmCore, brew: &mut Brew, id: SvcId) -> Result<u
             Ok(1)
         }
 
-        (Surface::Interface(INTERFACE_UNNAMED_1105), UNNAMED_1105_CHILD) => brew.interface_object(core, UNNAMED_1105_CHILD_INTERFACE),
+        (Surface::Interface(INTERFACE_NETWORK), NETWORK_OPEN_SOCKET) => brew.interface_object(core, INTERFACE_SOCKET),
+        (Surface::Interface(INTERFACE_NETWORK), NETWORK_SET_LINGER) => Ok(0),
+        (Surface::Interface(INTERFACE_NETWORK), NETWORK_RESOLVE) => brew.resolve(core),
+        (Surface::Interface(INTERFACE_CONNECTION), CONNECTION_ATTACH) => Ok(0),
+        // `(callback, context, flag)`: the connection is made, and the
+        // callback told so with no error.
+        (Surface::Interface(INTERFACE_CONNECTION), CONNECTION_CONNECT) => {
+            let [_, function, context] = params(core)?;
+            brew.state.lock().calls.push((function, context, 0));
+            Ok(0)
+        }
+        (Surface::Interface(INTERFACE_CONNECTION), CONNECTION_WRITE) => brew.write_connection(core),
+        (Surface::Interface(INTERFACE_SOCKET), SOCKET_READABLE) => {
+            let [_, function, context] = params(core)?;
+            let mut state = brew.state.lock();
+            if state.connection.inbox.is_empty() {
+                state.connection.readable = Some((function, context));
+            } else {
+                state.calls.push((function, context, 0));
+            }
+            Ok(0)
+        }
+        (Surface::Interface(INTERFACE_SOCKET), SOCKET_READ) => brew.read_connection(core),
+        (Surface::Interface(INTERFACE_SOCKET), SOCKET_CANCEL) => {
+            brew.state.lock().connection.readable = None;
+            Ok(0)
+        }
 
         (Surface::Interface(INTERFACE_CERTIFICATE), CERTIFICATE_CHECK) => Ok(0),
         (Surface::Interface(INTERFACE_HANDSET), HANDSET_RECORD) => {
@@ -1203,6 +1270,70 @@ impl Brew {
         };
 
         Ok(object)
+    }
+
+    /// `GetHostByName(result, name, callback)`: every name resolves, and the
+    /// callback is called once the title is back from asking.
+    fn resolve(&self, core: &mut ArmCore) -> Result<u32> {
+        let [_, result, name, callback] = params(core)?;
+        let host = String::from_utf8_lossy(&read_string(core, name)?).to_string();
+        tracing::info!("BREW resolving {host}");
+
+        let mut record = [0u8; 8];
+        record[0] = 1;
+        record[4..].copy_from_slice(&RESOLVED_ADDRESS);
+        core.write_bytes(result, &record)?;
+
+        let function = read_generic(core, callback + CALLBACK_FUNCTION)?;
+        let context = read_generic(core, callback + CALLBACK_CONTEXT)?;
+        let mut state = self.state.lock();
+        state.connection = Connection { host, ..Default::default() };
+        state.calls.push((function, context, 0));
+
+        Ok(0)
+    }
+
+    /// `(buffer, length)`: the whole of it goes, and the server's answer is
+    /// there to read straight away. A server nothing here stands in for says
+    /// nothing, and the title gives up on its own time.
+    fn write_connection(&self, core: &mut ArmCore) -> Result<u32> {
+        let [_, buffer, length] = params(core)?;
+        let request = read_bytes(core, buffer, length.min(MAX_TRANSFER))?;
+
+        let mut state = self.state.lock();
+        let answer = if state.connection.host.ends_with(ENTAZ_DOMAIN) {
+            wie_backend::billing::ktf_brew_entaz_response(&request)
+        } else {
+            None
+        };
+        match answer {
+            Some(answer) => {
+                state.connection.inbox.extend_from_slice(&answer);
+                if let Some((function, context)) = state.connection.readable.take() {
+                    state.calls.push((function, context, 0));
+                }
+            }
+            None => tracing::warn!("BREW {} wrote {request:02x?}, which nothing answers", state.connection.host),
+        }
+
+        Ok(length)
+    }
+
+    /// `ISOCKET_Read(buffer, length)`.
+    fn read_connection(&self, core: &mut ArmCore) -> Result<u32> {
+        let [_, buffer, length] = params(core)?;
+        let data = {
+            let mut state = self.state.lock();
+            let inbox = &mut state.connection.inbox;
+            if inbox.is_empty() {
+                return Ok(NET_WOULD_BLOCK);
+            }
+            let count = (length as usize).min(inbox.len());
+            inbox.drain(..count).collect::<Vec<_>>()
+        };
+        core.write_bytes(buffer, &data)?;
+
+        Ok(data.len() as u32)
     }
 
     fn display_info(&self, core: &mut ArmCore) -> Result<u32> {

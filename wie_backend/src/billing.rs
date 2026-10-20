@@ -701,6 +701,54 @@ pub fn ktf_local_entaz_response(request: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
+/// What a reply from the entaz server BREW titles reach (`brew12.entaz.com`)
+/// is preceded by. The title reads it, and looks only at whether its last
+/// four bytes say `BCEN`.
+const ENTAZ_BREW_GREETING: usize = 0x30;
+/// A reply's command is the request's, plus this.
+const ENTAZ_BREW_REPLY: u32 = 1000;
+/// Where a reply's head keeps its result: zero is done, one refused.
+const ENTAZ_BREW_RESULT_AT: usize = 0x10;
+const ENTAZ_BREW_SIGN_IN: u32 = 1;
+const ENTAZ_BREW_ITEMS: u32 = 0xb;
+const ENTAZ_BREW_CHARGE: u32 = 0xc;
+
+/// What answers 카트라이더레이싱's 상점 (KTF BREW `26735`, 넥슨), the 정보이용료
+/// charge for a pack of boosters.
+///
+/// The title opens a socket to `brew12.entaz.com` and sends the records
+/// [`ktf_local_entaz_response`] reads - the twenty-byte head of five `u32`s,
+/// then the body. Every reply comes after a 48-byte greeting; its head is
+/// read back the same way, and the dispatch (`0x110418`) goes by the command,
+/// which is the request's plus 1000.
+///
+/// | request | reply | what the title does |
+/// |---------|-------|---------------------|
+/// | 1, the subscriber number | `1001`, the body handed back | keeps the number, asks for the charge |
+/// | `0xc`, the charge | `1012`, a result byte of zero at `0x10` | adds the pack to the boosters it has (`0x110842`) and shows `아이템을 충전 하셨습니다`; a one there is `일일 최대 구매량 초과` |
+/// | `0xb`, the item list | `1011`, no body | finds no list to take - the handset is asked how much room it has and none is too little - and goes back to the shop |
+///
+/// `None` for anything else.
+pub fn ktf_brew_entaz_response(request: &[u8]) -> Option<Vec<u8>> {
+    if request.len() < ENTAZ_HEAD {
+        return None;
+    }
+
+    let command = u32::from_le_bytes(request[ENTAZ_COMMAND_AT..ENTAZ_COMMAND_AT + 4].try_into().unwrap());
+    let body_length = u32::from_le_bytes(request[ENTAZ_BODY_LENGTH_AT..ENTAZ_BODY_LENGTH_AT + 4].try_into().unwrap()) as usize;
+    if ENTAZ_HEAD + body_length != request.len() || !matches!(command, ENTAZ_BREW_SIGN_IN | ENTAZ_BREW_ITEMS | ENTAZ_BREW_CHARGE) {
+        return None;
+    }
+
+    let mut reply = vec![0; ENTAZ_BREW_GREETING];
+    reply.extend_from_slice(request);
+    let head = &mut reply[ENTAZ_BREW_GREETING..];
+    head[ENTAZ_COMMAND_AT..ENTAZ_COMMAND_AT + 4].copy_from_slice(&(command + ENTAZ_BREW_REPLY).to_le_bytes());
+    head[ENTAZ_BREW_RESULT_AT] = 0;
+
+    Some(reply)
+}
+
 /// What answers 학교가는길's cash purchase (현금 구매).
 ///
 /// 학교가는길 (KTF `01033848`, 픽토소프트) talks to `BillSocket://` through
@@ -11739,6 +11787,29 @@ mod tests {
         assert_eq!(ktf_local_school_purchase_response(&[0x02, 0x01, 0x00, 0x00, 0x00, 0x31]), None);
         assert_eq!(ktf_local_school_purchase_response(&[0x03, 0x02, 0x00, 0x00, 0x00, 0x31]), None);
         assert_eq!(ktf_local_school_purchase_response(&[0x03, 0x01, 0x00, 0x00, 0x00, b'a']), None);
+    }
+
+    #[test]
+    fn kart_rider_charge_is_granted() {
+        // The charge as the title sent it.
+        let charge = [0x0c, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x64, 0, 0, 0, 1, 0, 0, 1];
+        let reply = ktf_brew_entaz_response(&charge).unwrap();
+        assert_eq!(reply[..0x30], [0; 0x30]);
+        assert_eq!(reply[0x30..], [0xf4, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x64, 0, 0, 0, 0, 0, 0, 1]);
+
+        let mut sign_in = [1, 0, 0, 0, 0x0e, 0, 0, 0, 1, 0, 0, 0, 0x64, 0, 0, 0, 0, 0, 0, 0].to_vec();
+        sign_in.extend_from_slice(&[0, 0]);
+        sign_in.extend_from_slice(b"00000000000\0");
+        let reply = ktf_brew_entaz_response(&sign_in).unwrap();
+        assert_eq!(reply[0x30..0x34], [0xe9, 3, 0, 0]);
+        assert_eq!(reply[0x34..], sign_in[4..]);
+
+        // Another command, and a length that is not the record's.
+        assert_eq!(
+            ktf_brew_entaz_response(&[9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x64, 0, 0, 0, 0, 0, 0, 0]),
+            None
+        );
+        assert_eq!(ktf_brew_entaz_response(&charge[..19]), None);
     }
 
     /// A record whose length field does not match what was written, or a
