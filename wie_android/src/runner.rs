@@ -910,6 +910,9 @@ pub struct SaveIds {
 ///
 /// This has to agree with what the emulators pass to `System::new`, or an
 /// export would quietly come back empty.
+/// The directory record stores whose title names no product id are kept in.
+const EMPTY_RECORDS_ID: &str = "_";
+
 pub fn save_ids(data: &[u8]) -> Option<SaveIds> {
     let files = extract_zip(data).ok()?;
 
@@ -934,8 +937,17 @@ pub fn save_ids(data: &[u8]) -> Option<SaveIds> {
         }
 
         if !product.is_empty() || !application.is_empty() {
+            // A descriptor with no product id leaves the title's record stores
+            // under the one the database layer files an empty id under (see
+            // `AndroidDatabaseRepository`): 윈즈테일 큰화 names only its AID,
+            // and its saves were there while the export refused to look.
+            let records = if product.is_empty() {
+                EMPTY_RECORDS_ID.to_owned()
+            } else {
+                product.clone()
+            };
             return Some(SaveIds {
-                records: product.clone(),
+                records,
                 files: if application.is_empty() { product } else { application },
             });
         }
@@ -1315,6 +1327,17 @@ mod tests {
     /// A file that cannot be opened has nowhere to have saved to either, and
     /// saying so is what lets the export report it rather than write an empty
     /// zip.
+    /// 윈즈테일 큰화's descriptor names its AID and leaves `PID:` empty; its
+    /// record stores are where the database layer files an empty id.
+    #[test]
+    fn a_descriptor_without_a_product_id_still_has_saves() {
+        let archive = zip_of(&[("__adf__", b"PID:\nAID:01040DAD\nMClass:Clet\n"), ("01040DAD.jar", b"")]);
+        let ids = save_ids(&archive).expect("the descriptor names an application");
+
+        assert_eq!(ids.records, "_");
+        assert_eq!(ids.files, "01040DAD");
+    }
+
     #[test]
     fn save_ids_reject_what_cannot_be_loaded() {
         assert!(save_ids(b"not a zip at all").is_none());
