@@ -740,6 +740,16 @@ pub async fn unk17(_context: &mut dyn WIPICContext, clip: WIPICWord) -> Result<W
     Ok(0)
 }
 
+/// Media slot 19, `(category, level)`: 윈즈테일 calls it with `(7, 20)`
+/// after each sound it loads, the shape of the specification's per-category
+/// default-volume setter. Accepted and not acted on; unanswered, the title
+/// stopped on its first sound.
+pub async fn unk19(_context: &mut dyn WIPICContext, category: WIPICWord, level: WIPICWord) -> Result<WIPICWord> {
+    tracing::debug!("MC_mdaUnk19({category:#x}, {level:#x})");
+
+    Ok(0)
+}
+
 pub async fn unk18(_context: &mut dyn WIPICContext, clip: WIPICWord) -> Result<WIPICWord> {
     tracing::warn!("stub MC_mdaUnk18({clip:#x})");
 
