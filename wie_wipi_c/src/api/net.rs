@@ -1796,8 +1796,23 @@ pub async fn socket_write(context: &mut dyn WIPICContext, socket: i32, buffer: W
     if billing_mode == 0
         && let Some(descriptor) = state.lock().local_descriptor(socket)
     {
-        let system = context.system();
-        let written = system.local_network().write(descriptor, &data);
+        // 영웅서기5's KTF build reaches the 창고 the LGT build reaches through
+        // its billing socket over a plain one, through `FastRelay`, and the
+        // 창고 has to outlive the run the same way - see the billing path
+        // below.
+        if wie_backend::billing::hero5_warehouse_needs_loading(&data) {
+            let kept = read_billing_store(context, wie_backend::billing::HERO5_WAREHOUSE_STORE).await;
+            wie_backend::billing::load_hero5_warehouse(&kept);
+        }
+
+        let written = {
+            let system = context.system();
+            system.local_network().write(descriptor, &data)
+        };
+
+        if let Some(kept) = wie_backend::billing::hero5_warehouse_to_keep() {
+            write_billing_store(context, wie_backend::billing::HERO5_WAREHOUSE_STORE, &kept).await;
+        }
 
         return Ok(match written {
             Some(_) => length,

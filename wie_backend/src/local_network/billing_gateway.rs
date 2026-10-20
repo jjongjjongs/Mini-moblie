@@ -411,6 +411,43 @@ mod tests {
         }
     }
 
+    /// 영웅서기5's KTF build sends its LGT build's frames to `18183`, a
+    /// big-endian `u32` length in front; the shop's opening 1/1 is answered
+    /// under its own command with the service code it carried.
+    #[test]
+    fn hero5_s_ktf_shop_opening_is_answered() {
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&80u32.to_be_bytes());
+        frame.extend_from_slice(b"G1000157");
+        frame.extend_from_slice(&1u32.to_be_bytes());
+        frame.extend_from_slice(&1u32.to_be_bytes());
+        frame.extend_from_slice(&16u32.to_be_bytes());
+        frame.extend_from_slice(b"01068488891\0\0\0\0\0");
+        frame.extend_from_slice(&8u32.to_be_bytes());
+        frame.extend_from_slice(b"Emulator");
+        frame.extend_from_slice(&300u32.to_be_bytes());
+        frame.extend_from_slice(&101u32.to_be_bytes());
+        frame.extend_from_slice(&16u32.to_be_bytes());
+        frame.extend_from_slice(b"HERO5.ALL.SS.000");
+        assert_eq!(frame.len(), 80);
+
+        let mut connection = BillingGatewayConnection {
+            peer: "210.222.18.28:18183".into(),
+            framing: Framing::BigEndianLength32,
+            pending: Vec::new(),
+            outgoing: Vec::new(),
+        };
+        connection.write(&frame);
+
+        let mut out = [0u8; 64];
+        let LocalRead::Data(read) = connection.read(&mut out) else {
+            panic!("the opening is answered");
+        };
+        assert_eq!(u32::from_be_bytes(out[..4].try_into().unwrap()) as usize, read);
+        assert_eq!(&out[4..12], b"G1000157");
+        assert_eq!(&out[12..20], &[0, 0, 0, 1, 0, 0, 0, 1]);
+    }
+
     /// A GAMEVIL record, split across two writes, is taken whole by its
     /// little-endian length and answered with its command plus one and a
     /// positive status.

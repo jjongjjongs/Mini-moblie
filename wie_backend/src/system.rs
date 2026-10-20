@@ -201,6 +201,17 @@ impl System {
             )));
         }
 
+        // 영웅서기5's shop and 창고 server for its KTF build, which it reaches
+        // through `FastRelay` at the port after its LGT build's, gone for
+        // years. The frames are the LGT build's, service code and all
+        // (`crate::billing::lgt_local_hero5_response`). Host-gated, so no
+        // other title is touched.
+        local_network.register(Box::new(crate::local_network::BillingGatewayEndpoint::new_u32_length_prefixed(
+            "billing(210.222.18.28:18183)",
+            "210.222.18.28",
+            18183,
+        )));
+
         // 크로이센's shop server for its KTF build (222.231.57.145:56000), gone
         // for years. A purchase dials it and waits on a connect that never
         // completes. Answered in process with the record its LGT build is
