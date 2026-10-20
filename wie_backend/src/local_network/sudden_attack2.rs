@@ -23,6 +23,15 @@
 //!
 //! So a granted purchase is a header carrying the frame's length, and a body of
 //! the type, two bytes, a zero verdict and an empty message.
+//!
+//! It has to arrive a round trip late, as it would have on the air. The send
+//! (`0x12d15c`) reads straight away, inside state 2, and state 2 steps the
+//! machine on by one once the send returns (`0x11b888`). An answer already
+//! waiting is read and dispatched inside that send, moving the machine to 10,
+//! and the step then takes it to 11, a state that does nothing - the title sat
+//! on 서버로 부터 데이터를 받는 중입니다 for good. So the first read after a
+//! purchase finds nothing, and the answer goes to the read callback the title
+//! sets on finding nothing.
 
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 
@@ -60,6 +69,9 @@ struct SuddenAttack2Connection {
     request: Vec<u8>,
     /// What is left to hand back.
     reply: Vec<u8>,
+    /// Whether the next read is the one straight after a request, which finds
+    /// nothing however much is waiting.
+    held: bool,
 }
 
 impl LocalConnection for SuddenAttack2Connection {
@@ -81,11 +93,12 @@ impl LocalConnection for SuddenAttack2Connection {
 
             tracing::info!("sudden_attack2: purchase granted");
             self.reply.extend_from_slice(&frame(&purchase_granted()));
+            self.held = true;
         }
     }
 
     fn read(&mut self, out: &mut [u8]) -> LocalRead {
-        if self.reply.is_empty() {
+        if self.reply.is_empty() || core::mem::take(&mut self.held) {
             return LocalRead::Pending;
         }
 
@@ -138,6 +151,8 @@ mod tests {
         assert!(connection.readable());
 
         let mut out = [0u8; 128];
+        assert!(matches!(connection.read(&mut out), LocalRead::Pending));
+        assert!(connection.readable());
         let LocalRead::Data(read) = connection.read(&mut out) else {
             panic!("the purchase is answered");
         };
