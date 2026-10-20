@@ -187,6 +187,8 @@ const MODE_WRITE_TRUNCATE: u32 = 4;
 
 /// The class `createObject` is asked for when it is handed a bitmap.
 const CLASS_IMAGE: u32 = 0x100_4001;
+/// `AEEImageInfo`: `cx`, `cy`, `nColors`, `bAnimated` and `cxFrame`.
+const IMAGE_INFO_SIZE: usize = 10;
 
 /// What the title's own object takes as events.
 pub const EVENT_START: u32 = 0;
@@ -1287,24 +1289,7 @@ impl Brew {
             image.bytes = current;
         }
 
-        // A zero size is the whole picture: 어둠의전설 blits its title art,
-        // the GOScube logo, its banner and the speakers' portraits that way,
-        // and none of them were drawn. It sends its sheet of letter pieces -
-        // wider than the screen - the same way, and that one drawn whole is
-        // a strip of fragments over the menu, so a picture that could not
-        // fit the screen is still left out.
         let (width, height) = (width as i32, height as i32);
-        let whole = (width == 0 || height == 0) && image.decoded.width() <= screen_width && image.decoded.height() <= screen_height;
-        let width = if whole && width == 0 {
-            image.decoded.width() as i32 - source_x as i32
-        } else {
-            width
-        };
-        let height = if whole && height == 0 {
-            image.decoded.height() as i32 - source_y as i32
-        } else {
-            height
-        };
         if width > 0 && height > 0 {
             screen.draw_with_color_key(
                 x as i32,
@@ -1408,11 +1393,17 @@ impl Brew {
         Ok(1)
     }
 
-    /// `createObject(class, data)`. The one class answered is the image: the
-    /// title hands over a pointer into a bitmap it loaded, and gets an object
-    /// whose first word is a copy of it.
+    /// `createObject(class, data, info, reallocated)`. The one class answered
+    /// is the image: the title hands over a pointer into a bitmap it loaded,
+    /// and gets an object whose first word is a copy of it.
+    ///
+    /// The picture's size goes back through `info`, an `AEEImageInfo` - width,
+    /// height, colours, animated, frame width - and `reallocated` is told no.
+    /// 어둠의전설 keeps that size beside each sprite and blits it at that size,
+    /// centring on it too; left unwritten, every sprite was zero by zero and
+    /// its letters, menus and dialogue never reached the screen.
     fn create_object(&self, core: &mut ArmCore) -> Result<u32> {
-        let [class, data] = params(core)?;
+        let [class, data, info, reallocated] = params(core)?;
         if class != CLASS_IMAGE {
             tracing::warn!("BREW createObject of class {class:#x} is not answered");
             return Ok(0);
@@ -1428,6 +1419,20 @@ impl Brew {
 
         let object = self.allocate(core, 8)?;
         write_generic(core, object, kept)?;
+
+        if info != 0 {
+            let (width, height) = (decoded.width() as u16, decoded.height() as u16);
+            let mut record = [0u8; IMAGE_INFO_SIZE];
+            record[0..2].copy_from_slice(&width.to_le_bytes());
+            record[2..4].copy_from_slice(&height.to_le_bytes());
+            record[4..6].copy_from_slice(&256u16.to_le_bytes());
+            record[8..10].copy_from_slice(&width.to_le_bytes());
+            core.write_bytes(info, &record)?;
+        }
+        if reallocated != 0 {
+            core.write_bytes(reallocated, &[0])?;
+        }
+
         self.state.lock().images.insert(object, KeptImage { data: kept, bytes, decoded });
 
         Ok(object)
