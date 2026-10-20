@@ -58,6 +58,11 @@ enum Framing {
     /// GAMEVIL titles' `tagNetHeader`. See
     /// [`crate::billing::ktf_local_gamevil_2011_response`].
     LittleEndianLength,
+    /// `["ENS"][carrier][0x11][u16le version][u16le exchange][u16le length]
+    /// [body]`, the length counting what follows its thirteen-byte header -
+    /// the record 윈즈테일 buys 하트 with. See
+    /// [`crate::billing::lgt_local_ens_record_response`].
+    Ens,
 }
 
 /// Answers the carrier billing frames a title writes over a plain socket to one
@@ -143,6 +148,18 @@ impl BillingGatewayEndpoint {
         }
     }
 
+    /// Answers `host:port` for the `"ENS"` record - 윈즈테일, which opens a
+    /// plain socket to its billing server and writes the record the LGT titles
+    /// hand the billing gateway.
+    pub const fn new_ens(name: &'static str, host: &'static str, port: u16) -> Self {
+        Self {
+            name,
+            host,
+            port,
+            framing: Framing::Ens,
+        }
+    }
+
     /// Answers `host:port` for a title that reaches its server through the
     /// `FastRelay` carrier library - 템페스트's 정품인증.
     pub const fn new_relay(name: &'static str, host: &'static str, port: u16) -> Self {
@@ -194,7 +211,36 @@ impl BillingGatewayConnection {
             Framing::BigEndianLength32 => self.take_u32_length_prefixed_frame(),
             Framing::MiniHeroes => self.take_write(),
             Framing::LittleEndianLength => self.take_little_endian_frame(),
+            Framing::Ens => self.take_ens_frame(),
         }
+    }
+
+    /// `["ENS"]...[u16le length at 11][body]`, the length counting what follows
+    /// the thirteen-byte header. Bytes in front of the magic are dropped, and so
+    /// is a magic whose length could not be a record.
+    fn take_ens_frame(&mut self) -> Option<Vec<u8>> {
+        const TAG: &[u8] = b"ENS";
+        const HEADER: usize = 13;
+
+        while self.pending.len() >= TAG.len() && !self.pending.starts_with(TAG) {
+            self.pending.remove(0);
+        }
+
+        if self.pending.len() < HEADER {
+            return None;
+        }
+
+        let length = HEADER + u16::from_le_bytes([self.pending[11], self.pending[12]]) as usize;
+        if length > MAX_FRAME {
+            self.pending.drain(..TAG.len());
+            return None;
+        }
+
+        if self.pending.len() < length {
+            return None;
+        }
+
+        Some(self.pending.drain(..length).collect())
     }
 
     /// Everything written so far, as the one frame a write is.
@@ -610,5 +656,36 @@ mod tests {
 
         connection.write(&frame[3..]);
         assert_eq!(read_all(&mut connection), vec![0x00, 0x08, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    /// 윈즈테일's `ENSKTF` record, written in two pieces, is answered once the
+    /// length its header names has arrived - and not before.
+    #[test]
+    fn an_ens_record_is_answered_once_it_is_whole() {
+        let mut connection = BillingGatewayConnection {
+            peer: "218.50.3.88:5018".into(),
+            framing: Framing::Ens,
+            pending: Vec::new(),
+            outgoing: Vec::new(),
+        };
+
+        let mut record = Vec::from(&b"ENSKTF"[..]);
+        record.push(0x11);
+        record.extend_from_slice(&0x7du16.to_le_bytes());
+        record.extend_from_slice(&0x31u16.to_le_bytes());
+        record.extend_from_slice(&0x36u16.to_le_bytes());
+        record.extend_from_slice(&[0; 31]);
+        record.extend_from_slice(b"10000646D902");
+        record.extend_from_slice(&[0; 7]);
+        record.extend_from_slice(&100u32.to_le_bytes());
+        assert_eq!(record.len(), 67);
+
+        connection.write(&record[..20]);
+        assert!(!connection.readable());
+
+        connection.write(&record[20..]);
+        let mut out = [0u8; 64];
+        assert!(matches!(connection.read(&mut out), LocalRead::Data(9)));
+        assert_eq!(&out[..9], &[0x45, 0x4e, 0x53, 0x31, 0x00, 0x02, 0x00, 0x00, 0x00]);
     }
 }

@@ -251,6 +251,17 @@ impl System {
             local_network.register(Box::new(crate::local_network::BillingGatewayEndpoint::new_miniheroes(name, host, port)));
         }
 
+        // 윈즈테일's billing server, gone for years. A 하트 purchase opens a
+        // plain socket it names "TEST_BILLSOCK", writes the `ENSKTF` record and
+        // sat on `연결중...` waiting for the answer. Answered in process
+        // (`crate::billing::lgt_local_ens_record_response`), the 하트 are given.
+        // Host-gated, so no other title is touched.
+        local_network.register(Box::new(crate::local_network::BillingGatewayEndpoint::new_ens(
+            "billing(218.50.3.88:5018)",
+            "218.50.3.88",
+            5018,
+        )));
+
         // SBS포트리스4's KTF build logs in at this server, gone for years, and
         // sat on its connecting box. See `crate::local_network::fortress`.
         local_network.register(Box::new(crate::local_network::FortressEndpoint));

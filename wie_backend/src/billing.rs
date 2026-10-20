@@ -1844,13 +1844,23 @@ fn adler32(bytes: &[u8]) -> u32 {
 /// magic. Only 블레이드마스터4's `0x33` is known to read past the result, so only
 /// that one, at that version, gets a word behind it.
 ///
+/// 윈즈테일 (`01040DAD`), on KTF, writes the same record to buy 하트 - the
+/// carrier spelled `"KTF"` where the LGT titles spell theirs, version `0x7d`,
+/// and the subscriber number left empty where the handset gives it none - over a
+/// plain socket it names `TEST_BILLSOCK` and dials at `218.50.3.88:5018`:
+///
+/// ```text
+/// "ENSKTF" 11 7d 00 31 00 36 00 00 x21 00 x10 "100" "00646D902" 00 x7 64 00 00 00
+/// ```
+///
 /// `None` for anything that is not one of these records: it has to open with the
-/// magic, carry the byte the builder fixes, say its own length where the builder
-/// puts it, and have the subscriber number in digits behind that.
+/// magic and a carrier, carry the byte the builder fixes, say its own length
+/// where the builder puts it, and have the subscriber number - in digits, or not
+/// at all - behind that.
 pub fn lgt_local_ens_record_response(request: &[u8]) -> Option<Vec<u8>> {
     /// What the reply is framed by, and what the request opens with.
     const REPLY_TAG: &[u8] = b"ENS";
-    const REQUEST_TAG: &[u8] = b"ENSLGT";
+    const REQUEST_TAGS: [&[u8]; 2] = [b"ENSLGT", b"ENSKTF"];
     /// The byte the builder fixes at `[6]`.
     const MARK: u8 = 0x11;
     /// Where the subscriber number is written, as a fixed twenty-one bytes -
@@ -1862,7 +1872,7 @@ pub fn lgt_local_ens_record_response(request: &[u8]) -> Option<Vec<u8>> {
     const WORD_EXCHANGE: u16 = 0x33;
     const GRANTED_RESULT: u16 = 0;
 
-    if !request.starts_with(REQUEST_TAG) || request.len() < SUBSCRIBER + 2 {
+    if !REQUEST_TAGS.iter().any(|tag| request.starts_with(tag)) || request.len() < SUBSCRIBER + 2 {
         return None;
     }
 
@@ -1874,9 +1884,10 @@ pub fn lgt_local_ens_record_response(request: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    // The subscriber number, NUL-padded to twenty-one bytes.
+    // The subscriber number, NUL-padded to twenty-one bytes - and empty on a
+    // handset that has none to give.
     let digits = request[SUBSCRIBER..].iter().position(|&byte| byte == 0)?;
-    if digits == 0 || !request[SUBSCRIBER..SUBSCRIBER + digits].iter().all(u8::is_ascii_digit) {
+    if !request[SUBSCRIBER..SUBSCRIBER + digits].iter().all(u8::is_ascii_digit) {
         return None;
     }
 
@@ -14422,6 +14433,55 @@ mod tests {
         let mut unmarked = blade_master_4_purchase_record();
         unmarked[6] = 0x12;
         assert_eq!(lgt_local_ens_record_response(&unmarked), None);
+    }
+
+    /// The 67 bytes 윈즈테일 writes to buy 100하트 for 100원, as the capture
+    /// shows them: `"KTF"` for the carrier, version `0x7d`, and no subscriber
+    /// number.
+    fn winds_tale_purchase_record(exchange: u16) -> Vec<u8> {
+        let mut record = Vec::from(*b"ENSKTF");
+        record.push(0x11);
+        record.extend_from_slice(&0x7du16.to_le_bytes());
+        record.extend_from_slice(&exchange.to_le_bytes());
+        record.extend_from_slice(&0x36u16.to_le_bytes());
+        record.extend_from_slice(&[0; 21]);
+        record.extend_from_slice(&[0; 10]);
+        record.extend_from_slice(b"100");
+        let mut product = [0u8; 20];
+        product[..9].copy_from_slice(b"00646D902");
+        product[16..].copy_from_slice(&100u32.to_le_bytes());
+        record.extend_from_slice(&product);
+
+        record
+    }
+
+    /// 윈즈테일 sat on `연결중...` with nothing to answer this; granted, it walks
+    /// `0x31` and `0x32` and says `하트 구입이 완료되었습니다`.
+    #[test]
+    fn winds_tale_buys_hearts_with_the_ktf_record() {
+        use super::lgt_local_ens_record_response;
+
+        let request = winds_tale_purchase_record(0x31);
+        assert_eq!(request.len(), 67);
+        assert_eq!(
+            &request[..13],
+            &[0x45, 0x4e, 0x53, 0x4b, 0x54, 0x46, 0x11, 0x7d, 0x00, 0x31, 0x00, 0x36, 0x00]
+        );
+        assert_eq!(&request[44..56], b"10000646D902");
+
+        assert_eq!(
+            lgt_local_ens_record_response(&request).unwrap(),
+            vec![0x45, 0x4e, 0x53, 0x31, 0x00, 0x02, 0x00, 0x00, 0x00]
+        );
+        assert_eq!(
+            response(&winds_tale_purchase_record(0x32)).unwrap(),
+            vec![0x45, 0x4e, 0x53, 0x32, 0x00, 0x02, 0x00, 0x00, 0x00]
+        );
+
+        // Another carrier's spelling is not one of these.
+        let mut other = winds_tale_purchase_record(0x31);
+        other[3..6].copy_from_slice(b"SKT");
+        assert_eq!(lgt_local_ens_record_response(&other), None);
     }
 
     /// 드래곤하트2 writes the same record on starting up, and stalls on
