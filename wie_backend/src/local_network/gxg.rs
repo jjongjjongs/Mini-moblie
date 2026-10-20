@@ -33,7 +33,7 @@
 
 use alloc::{boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 
-use super::{LocalConnection, LocalEndpoint, LocalRead, candy_shop::CandyShop, com2us, levelup};
+use super::{LocalConnection, LocalEndpoint, LocalRead, candy_shop::CandyShop, com2us, levelup, stadium};
 
 /// The names the gateway went by. Both resolve to [`ADDRESS`].
 const HOSTS: [&str; 2] = ["ngw.gxg.com", "ngph.gxg.com"];
@@ -458,6 +458,13 @@ impl LocalConnection for GxgConnection {
                             tracing::info!("gxg -> DPS {}", answer.iter().map(|x| format!("{x:02x}")).collect::<String>());
                             self.outgoing.extend_from_slice(&frame(&version, b"DPS", &answer));
                         }
+                        None => tracing::warn!("gxg: no answer for data to {:?}", self.target),
+                    }
+                }
+                // 스타디움2011 아시아's point shop; see [`stadium`].
+                b"DP" if self.target.as_ref().is_some_and(|(host, port)| (host.as_str(), *port) == stadium::TARGET) => {
+                    match stadium::point_answer(&body) {
+                        Some(answer) => self.outgoing.extend_from_slice(&frame(&version, b"DPS", &answer)),
                         None => tracing::warn!("gxg: no answer for data to {:?}", self.target),
                     }
                 }

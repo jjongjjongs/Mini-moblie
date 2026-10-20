@@ -39,6 +39,7 @@ mod pigmy;
 mod relay;
 mod sdw;
 mod snowboard;
+mod stadium;
 mod sudden_attack2;
 mod tera;
 
