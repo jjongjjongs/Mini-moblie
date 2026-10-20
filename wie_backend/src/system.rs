@@ -108,9 +108,21 @@ impl System {
         // see the exchange rather than to have it answered.
         local_network.register(Box::new(crate::local_network::GpangEndpoint::new()));
 
-        // The server 아무이유없어2 checks for a save on before it starts, gone
+        // The server 아무이유없어2 checks for a save on and buys through, gone
         // for years. Host-gated.
         local_network.register(Box::new(crate::local_network::NoReasonEndpoint::new()));
+
+        // 서든어택포켓2's KTF build buys through `121.78.119.73:45351` over
+        // `FastRelay`, and nothing answered it, so the connect failed before a
+        // byte was sent and the title reported 수신상태불량. Its frames are not
+        // its LGT predecessor's: a reply opens with a 45-byte header whose
+        // `[1..5]` is the frame's big-endian length (`0x12d524`), dispatched on
+        // one of a hundred message types (`0x11b450`). Until what it sends is
+        // known, the connection is taken and written down, so a run shows the
+        // purchase's request.
+        local_network.register(Box::new(crate::local_network::CaptureEndpoint::new(
+            crate::local_network::CaptureAddress::HostPort("121.78.119.73".into(), 45351),
+        )));
 
         // Nexon Mobile's GXG gateway, `ngw.gxg.com:7300`, which the SKT builds of
         // its titles buy through. Answered by name as well as by address, the

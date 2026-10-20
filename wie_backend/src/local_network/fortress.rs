@@ -29,6 +29,16 @@
 //! (`0x123244`) and raises box 2, `게임인증이 완료 되었습니다`, whose `OK` goes
 //! to the title screen. Four bytes long, the fourth read by nothing.
 //!
+//! The title starts as its free trial, and a cash item in the shop asks first
+//! to turn it into the full version (`정식판 버전으로 전환`). That is code 115,
+//! eighteen bytes - the code, the subscriber number and a big-endian `u32` -
+//! built at `0x12ae4e`. Whatever code the answer carries, the receiver reads it
+//! as 215 while 115 is outstanding (`0x123ce6`), four bytes long, and its
+//! handler (`0x1249e0`) goes by the fourth: `'2'` to `'7'` are refusals, each a
+//! box of its own, and `'0'` clears the trial flag in `portriss4.sav`'s header,
+//! writes the save and shows `이전에 구입기록이 있어 재과금 되지 않았습니다` -
+//! the full version, with nothing charged.
+//!
 //! Not 242, `RES_NGC_LOGIN`: its zero reloads the save and leaves the consent
 //! box up for good, anything else raises an empty box 100. Nor 241,
 //! `RES_ALIAS`, which registers a nickname and jumps to a state whose pictures
@@ -44,6 +54,10 @@ const PORT: u16 = 5600;
 /// The login's code, and the code of the answer that completes the 인증.
 const LOGIN: &[u8; 3] = b"136";
 const AUTHENTICATED: &[u8; 4] = b"236\x00";
+
+/// The full-version conversion's code, and the answer that converts it.
+const CONVERSION: &[u8; 3] = b"115";
+const CONVERTED: &[u8; 4] = b"2150";
 
 /// Answers SBS포트리스4's login server.
 pub struct FortressEndpoint;
@@ -74,6 +88,12 @@ impl LocalConnection for FortressConnection {
     fn write(&mut self, bytes: &[u8]) {
         if bytes.starts_with(LOGIN) {
             self.outgoing.extend_from_slice(AUTHENTICATED);
+            return;
+        }
+
+        if bytes.starts_with(CONVERSION) {
+            tracing::info!("fortress4: converting to the full version");
+            self.outgoing.extend_from_slice(CONVERTED);
             return;
         }
 
@@ -124,13 +144,16 @@ mod tests {
     }
 
     #[test]
-    fn the_login_is_answered_236() {
+    fn the_login_and_the_conversion_are_answered() {
         assert_eq!(LOGIN.len(), 49);
 
         let mut connection = FortressConnection::default();
         connection.write(LOGIN);
         assert!(connection.readable());
         assert_eq!(read_all(&mut connection), b"236\x00");
+
+        connection.write(b"11501046119269\x00\x00\x0a\x26");
+        assert_eq!(read_all(&mut connection), b"2150");
 
         connection.write(b"999");
         assert!(!connection.readable());

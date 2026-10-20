@@ -24,6 +24,14 @@
 //! failure (`0x25`). Nothing else in the header is read, so the answer is the
 //! request's own header with the command and the length changed, and a zero.
 //!
+//! A purchase is command `0x15` (`0x125ca4`), its body a `u32` naming the item
+//! and `[0x2c]` the item's code. Its answer comes back under command `0x78`,
+//! whose reader (`0x118ad8`) takes twelve bytes of body: a verdict and two
+//! `u32`s it keeps. The purchase screen (`0x13a814`) waits for the verdict's
+//! state - `0` is 50, the purchase made, `1` is 51 and `2` is 54 - so a granted
+//! purchase is the request's header under `0x78` with twelve zero bytes behind
+//! it.
+//!
 //! The same server and the same state machine carry the title's other
 //! exchanges, under commands of their own. Those wait on bodies nothing here has
 //! read, so they are written down and the connection is ended, which the title
@@ -51,6 +59,13 @@ const SAVE_CHECK_ANSWER: i16 = 0x6e;
 
 /// The save check's verdict: there is no save on the server.
 const NO_SAVE: u32 = 0;
+
+/// A purchase, and the command its answer comes back under.
+const PURCHASE: i16 = 0x15;
+const PURCHASE_ANSWER: i16 = 0x78;
+
+/// A granted purchase's body: a zero verdict and the two values kept with it.
+const PURCHASE_GRANTED: [u8; 12] = [0; 12];
 
 /// The server 아무이유없어2 checks for a save on, answered in process.
 pub struct NoReasonEndpoint {
@@ -126,18 +141,24 @@ impl LocalConnection for NoReasonConnection {
 
         while let Some(frame) = self.take_frame() {
             let command = i16::from_le_bytes([frame[0], frame[1]]);
-            if command != SAVE_CHECK {
-                tracing::info!(
-                    "noreason: no answer for command {command:#x}, {} bytes: {}",
-                    frame.len(),
-                    frame.iter().map(|x| format!("{x:02x}")).collect::<String>()
-                );
-                self.unanswerable = true;
-                continue;
+            match command {
+                SAVE_CHECK => {
+                    tracing::info!("noreason: no save on the server");
+                    self.reply.extend_from_slice(&answer(&frame, SAVE_CHECK_ANSWER, &NO_SAVE.to_le_bytes()));
+                }
+                PURCHASE => {
+                    tracing::info!("noreason: purchase granted");
+                    self.reply.extend_from_slice(&answer(&frame, PURCHASE_ANSWER, &PURCHASE_GRANTED));
+                }
+                _ => {
+                    tracing::info!(
+                        "noreason: no answer for command {command:#x}, {} bytes: {}",
+                        frame.len(),
+                        frame.iter().map(|x| format!("{x:02x}")).collect::<String>()
+                    );
+                    self.unanswerable = true;
+                }
             }
-
-            tracing::info!("noreason: no save on the server");
-            self.reply.extend_from_slice(&save_check_answer(&frame));
         }
     }
 
@@ -158,13 +179,13 @@ impl LocalConnection for NoReasonConnection {
     }
 }
 
-/// The answer to a save check: its own header under the answer's command, and
-/// the verdict behind it.
-fn save_check_answer(request: &[u8]) -> Vec<u8> {
+/// An answer: the request's own header under the answer's command, and the
+/// body behind it.
+fn answer(request: &[u8], command: i16, body: &[u8]) -> Vec<u8> {
     let mut answer = request[..HEADER].to_vec();
-    answer[..2].copy_from_slice(&SAVE_CHECK_ANSWER.to_le_bytes());
-    answer[BODY_LENGTH_AT..BODY_LENGTH_AT + 4].copy_from_slice(&4i32.to_le_bytes());
-    answer.extend_from_slice(&NO_SAVE.to_le_bytes());
+    answer[..2].copy_from_slice(&command.to_le_bytes());
+    answer[BODY_LENGTH_AT..BODY_LENGTH_AT + 4].copy_from_slice(&(body.len() as i32).to_le_bytes());
+    answer.extend_from_slice(body);
 
     answer
 }
@@ -208,6 +229,29 @@ mod tests {
         assert_eq!(&out[2..11], b"NOREASON2");
         assert_eq!(i32::from_le_bytes(out[BODY_LENGTH_AT..BODY_LENGTH_AT + 4].try_into().unwrap()), 4);
         assert_eq!(&out[HEADER..HEADER + 4], &[0, 0, 0, 0]);
+    }
+
+    /// A purchase, as the title wrote it, is granted: command `0x78`, a body
+    /// of twelve, and a zero verdict.
+    #[test]
+    fn a_purchase_is_granted() {
+        let mut request = save_check();
+        request[..2].copy_from_slice(&PURCHASE.to_le_bytes());
+        request[BODY_LENGTH_AT] = 4;
+        request[0x2c..0x35].copy_from_slice(b"202412I04");
+        request.extend_from_slice(&0x57u32.to_le_bytes());
+
+        let mut connection = NoReasonEndpoint::new().open("socket", HOST, PORT);
+        connection.write(&request);
+
+        let mut out = [0u8; 128];
+        let LocalRead::Data(read) = connection.read(&mut out) else {
+            panic!("the purchase is answered");
+        };
+        assert_eq!(read, HEADER + 12);
+        assert_eq!(i16::from_le_bytes([out[0], out[1]]), PURCHASE_ANSWER);
+        assert_eq!(i32::from_le_bytes(out[BODY_LENGTH_AT..BODY_LENGTH_AT + 4].try_into().unwrap()), 12);
+        assert_eq!(&out[HEADER..HEADER + 12], &[0u8; 12]);
     }
 
     /// Any other command ends the connection.
