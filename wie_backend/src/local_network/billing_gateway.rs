@@ -416,7 +416,7 @@ mod tests {
     /// positive status.
     #[test]
     fn a_gamevil_record_is_taken_by_its_little_endian_length() {
-        let mut record = vec![0u8; 72];
+        let mut record = [0u8; 72];
         record[0..2].copy_from_slice(&72u16.to_le_bytes());
         record[2..4].copy_from_slice(&0x0700u16.to_le_bytes());
         record[4..15].copy_from_slice(b"01068488891");
