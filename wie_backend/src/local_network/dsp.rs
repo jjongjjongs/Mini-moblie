@@ -6,6 +6,13 @@
 //! there. The server has been gone for years, and the title gives up with
 //! `서버와의 접속이 원활하지 않습니다`.
 //!
+//! FIFA10 (`0087278938`) carries an older build of the same library and dials
+//! the same place. Left to the network it never connects - the name resolves
+//! to an address nothing answers - and the title sits on `기존에 저장되어 있는
+//! 데이터가 있는지 확인 중입니다` for good. Taken here, its library reports the
+//! connect to the title, which says `서버 접속에 실패하였습니다` and goes on to
+//! its menu.
+//!
 //! Every message either way is a 26-byte header, a body, and `0x17`:
 //!
 //! ```text

@@ -820,6 +820,16 @@ pub fn build_emulator(platform: Box<dyn Platform>, data: &[u8], options: Options
             .map_err(|x| format!("GNEX 게임을 실행할 수 없습니다: {x}"));
     }
     if SktEmulator::loadable_archive(&files) {
+        // But not for SKT. The faces are an LGT handset's, a pixel wider a
+        // syllable and twice as wide a space as the SKT handsets' own, and an
+        // SKT title cuts its text to a byte count fitted to theirs, not to a
+        // measurement: 파워풀프로야구2009 puts forty bytes on a line of a box
+        // about 210 pixels wide, which the LGT face draws 240 wide, over the
+        // edge. The outline font is narrow enough.
+        // Only WIPI-C draws with these faces, so this reaches the native titles
+        // and leaves the Java ones as they were.
+        wie_wipi_c::api::graphics::clear_bios_font();
+
         return SktEmulator::from_archive(platform, files)
             .map(|x| Box::new(x) as Box<dyn Emulator + Send>)
             .map_err(|x| format!("SKT 아카이브를 실행할 수 없습니다: {x}"));
