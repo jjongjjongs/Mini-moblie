@@ -30,7 +30,9 @@ use spin::Mutex;
 
 use wie_backend::{
     System,
-    canvas::{ArgbPixel, Canvas, Clip, Color, Image, ImageBufferCanvas, TextAlignment, VecImageBuffer, baseline_px, string_width_px},
+    canvas::{
+        ArgbPixel, Canvas, Clip, Color, Image, ImageBufferCanvas, PixelType, Rgb565Pixel, TextAlignment, VecImageBuffer, baseline_px, string_width_px,
+    },
 };
 use wie_core_arm::{Allocator, ArmCore, SvcId};
 use wie_util::{ByteRead, ByteWrite, Result, WieError, read_generic, read_null_terminated_string_bytes, write_generic};
@@ -190,6 +192,20 @@ const CLASS_IMAGE: u32 = 0x100_4001;
 /// `AEEImageInfo`: `cx`, `cy`, `nColors`, `bAnimated` and `cxFrame`.
 const IMAGE_INFO_SIZE: usize = 10;
 
+/// The handset's own picture, which `createObject` makes of a bitmap: the
+/// bitmap it was made from, the width and the height as `u16`s, where its
+/// pixels are, and then the pixels - RGB565, a row after another.
+///
+/// Titles look inside it. 카트라이더레이싱 converts a small picture of known
+/// colours and reads back where the size and the pixels sit and how a pixel
+/// is packed, then makes pictures of its own in that shape - the race's
+/// track is one, its tiles copied in - and hands them to `BitBlt`.
+const IMAGE_HEADER: u32 = 0x10;
+const IMAGE_WIDTH_FIELD: usize = 4;
+const IMAGE_HEIGHT_FIELD: usize = 6;
+const IMAGE_PIXELS_FIELD: usize = 8;
+const MAX_IMAGE_SIDE: u32 = 4096;
+
 /// What the title's own object takes as events.
 pub const EVENT_START: u32 = 0;
 const EVENT_KEY_TYPED: u32 = 0x100;
@@ -234,7 +250,6 @@ struct Schedule {
 struct KeptImage {
     data: u32,
     bytes: Vec<u8>,
-    decoded: VecImageBuffer<ArgbPixel>,
 }
 
 struct OpenFile {
@@ -525,6 +540,15 @@ impl Brew {
 
 const BLACK: Color = Color { a: 0xff, r: 0, g: 0, b: 0 };
 
+/// An image's pixels as the handset keeps them, RGB565.
+fn native_pixels(image: &VecImageBuffer<ArgbPixel>) -> Vec<u8> {
+    image
+        .colors()
+        .into_iter()
+        .flat_map(|x| Rgb565Pixel::from_color(x).to_le_bytes())
+        .collect()
+}
+
 fn full_clip(width: u32, height: u32) -> Clip {
     Clip { x: 0, y: 0, width, height }
 }
@@ -636,7 +660,10 @@ async fn handle_trap(core: &mut ArmCore, brew: &mut Brew, id: SvcId) -> Result<u
             if object == 0 {
                 Ok(0)
             } else {
-                brew.state.lock().images.remove(&object);
+                let image = brew.state.lock().images.remove(&object);
+                if let Some(image) = image {
+                    brew.free(core, image.data)?;
+                }
                 brew.free(core, object)?;
                 Ok(1)
             }
@@ -1265,46 +1292,99 @@ impl Brew {
     /// Draws part of an image: `r1`-`r3` are x, y and width, and the stack
     /// carries the height, the image object, the source x and y and a mode.
     /// Magenta is never drawn.
+    ///
+    /// The pixels are read where the image keeps them, so what a title wrote
+    /// into a picture - or into one it made itself - is what is drawn.
     fn blit(&self, core: &mut ArmCore) -> Result<u32> {
         let [_, x, y, width, height, object, source_x, source_y] = params(core)?;
-
-        let data = {
-            let state = self.state.lock();
-            match state.images.get(&object) {
-                Some(image) => (image.data, image.bytes.len() as u32),
-                None => return Ok(0),
-            }
-        };
-
-        // The title can write into its bitmap after handing it over, and draws
-        // what it wrote; the copy is decoded again when the bytes differ.
-        let current = read_bytes(core, data.0, data.1)?;
-
-        let mut state = self.state.lock();
-        let (screen_width, screen_height) = (state.width, state.height);
-        let State { images, screen, .. } = &mut *state;
-        let image = images.get_mut(&object).unwrap();
-        if image.bytes != current {
-            image.decoded = bitmap::decode(&current)?;
-            image.bytes = current;
+        let (x, y, width, height, source_x, source_y) = (x as i32, y as i32, width as i32, height as i32, source_x as i32, source_y as i32);
+        if object == 0 {
+            return Ok(0);
         }
 
-        let (width, height) = (width as i32, height as i32);
-        if width > 0 && height > 0 {
-            screen.draw_with_color_key(
-                x as i32,
-                y as i32,
-                width as u32,
-                height as u32,
-                &image.decoded,
-                source_x as i32,
-                source_y as i32,
-                full_clip(screen_width, screen_height),
-                TRANSPARENT_565,
+        self.follow_bitmap(core, object)?;
+
+        let Ok(header) = read_bytes(core, object, IMAGE_HEADER) else {
+            return Ok(0);
+        };
+        let field = |offset: usize| u16::from_le_bytes([header[offset], header[offset + 1]]) as u32;
+        let (image_width, image_height) = (field(IMAGE_WIDTH_FIELD), field(IMAGE_HEIGHT_FIELD));
+        let pixels = u32::from_le_bytes(header[IMAGE_PIXELS_FIELD..IMAGE_PIXELS_FIELD + 4].try_into().unwrap());
+        if pixels == 0 || image_width == 0 || image_height == 0 || image_width > MAX_IMAGE_SIDE || image_height > MAX_IMAGE_SIDE {
+            return Ok(0);
+        }
+
+        let left = source_x.max(0);
+        let top = source_y.max(0);
+        let right = source_x.saturating_add(width).min(image_width as i32);
+        let bottom = source_y.saturating_add(height).min(image_height as i32);
+        if right <= left || bottom <= top {
+            return Ok(1);
+        }
+
+        let (part_width, part_height) = ((right - left) as u32, (bottom - top) as u32);
+        let span = (part_height - 1) * image_width + part_width;
+        let Ok(raw) = read_bytes(core, pixels + (top as u32 * image_width + left as u32) * 2, span * 2) else {
+            return Ok(0);
+        };
+        let mut part = Vec::with_capacity((part_width * part_height) as usize);
+        for row in 0..part_height {
+            let start = (row * image_width * 2) as usize;
+            part.extend(
+                raw[start..start + part_width as usize * 2]
+                    .chunks_exact(2)
+                    .map(|x| u16::from_le_bytes([x[0], x[1]])),
             );
         }
+        let part = VecImageBuffer::<Rgb565Pixel>::from_raw(part_width, part_height, part);
+
+        let mut state = self.state.lock();
+        let clip = full_clip(state.width, state.height);
+        state.screen.draw_with_color_key(
+            x + (left - source_x),
+            y + (top - source_y),
+            part_width,
+            part_height,
+            &part,
+            0,
+            0,
+            clip,
+            TRANSPARENT_565,
+        );
 
         Ok(1)
+    }
+
+    /// The bitmap an image was made from stays the title's to reach through
+    /// the image's first word; what it writes there is converted again.
+    fn follow_bitmap(&self, core: &mut ArmCore, object: u32) -> Result<()> {
+        let Some((data, length)) = self.state.lock().images.get(&object).map(|x| (x.data, x.bytes.len() as u32)) else {
+            return Ok(());
+        };
+
+        let current = read_bytes(core, data, length)?;
+        {
+            let mut state = self.state.lock();
+            let Some(image) = state.images.get_mut(&object) else {
+                return Ok(());
+            };
+            if image.bytes == current {
+                return Ok(());
+            }
+            image.bytes = current.clone();
+        }
+
+        let Ok(decoded) = bitmap::decode(&current) else {
+            return Ok(());
+        };
+        let header = read_bytes(core, object, IMAGE_HEADER)?;
+        let same_size = u16::from_le_bytes([header[IMAGE_WIDTH_FIELD], header[IMAGE_WIDTH_FIELD + 1]]) as u32 == decoded.width()
+            && u16::from_le_bytes([header[IMAGE_HEIGHT_FIELD], header[IMAGE_HEIGHT_FIELD + 1]]) as u32 == decoded.height();
+        if same_size {
+            core.write_bytes(object + IMAGE_HEADER, &native_pixels(&decoded))?;
+        }
+
+        Ok(())
     }
 
     /// `DrawText(font, text, count, x, y, rectangle, flags)`: the handset's
@@ -1395,7 +1475,8 @@ impl Brew {
 
     /// `createObject(class, data, info, reallocated)`. The one class answered
     /// is the image: the title hands over a pointer into a bitmap it loaded,
-    /// and gets an object whose first word is a copy of it.
+    /// and gets the handset's picture of it - see [`IMAGE_HEADER`] - whose
+    /// first word is a copy of the bitmap.
     ///
     /// The picture's size goes back through `info`, an `AEEImageInfo` - width,
     /// height, colours, animated, frame width - and `reallocated` is told no.
@@ -1413,12 +1494,19 @@ impl Brew {
         let length = bitmap::bitmap_length(&header).ok_or_else(|| WieError::FatalError(format!("BREW image at {data:#x} is not a bitmap")))?;
         let bytes = read_bytes(core, data, length as u32)?;
 
+        let decoded = bitmap::decode(&bytes)?;
         let kept = self.allocate(core, length as u32)?;
         core.write_bytes(kept, &bytes)?;
-        let decoded = bitmap::decode(&bytes)?;
 
-        let object = self.allocate(core, 8)?;
-        write_generic(core, object, kept)?;
+        let pixels = native_pixels(&decoded);
+        let object = self.allocate(core, IMAGE_HEADER + pixels.len() as u32)?;
+        let mut header = [0u8; IMAGE_HEADER as usize];
+        header[..4].copy_from_slice(&kept.to_le_bytes());
+        header[IMAGE_WIDTH_FIELD..IMAGE_WIDTH_FIELD + 2].copy_from_slice(&(decoded.width() as u16).to_le_bytes());
+        header[IMAGE_HEIGHT_FIELD..IMAGE_HEIGHT_FIELD + 2].copy_from_slice(&(decoded.height() as u16).to_le_bytes());
+        header[IMAGE_PIXELS_FIELD..IMAGE_PIXELS_FIELD + 4].copy_from_slice(&(object + IMAGE_HEADER).to_le_bytes());
+        core.write_bytes(object, &header)?;
+        core.write_bytes(object + IMAGE_HEADER, &pixels)?;
 
         if info != 0 {
             let (width, height) = (decoded.width() as u16, decoded.height() as u16);
@@ -1433,7 +1521,7 @@ impl Brew {
             core.write_bytes(reallocated, &[0])?;
         }
 
-        self.state.lock().images.insert(object, KeptImage { data: kept, bytes, decoded });
+        self.state.lock().images.insert(object, KeptImage { data: kept, bytes });
 
         Ok(object)
     }

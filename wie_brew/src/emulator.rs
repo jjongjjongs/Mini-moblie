@@ -12,6 +12,15 @@ use crate::{
 
 const PANEL: (u32, u32) = (176, 220);
 
+/// Titles drawn for a smaller handset than [`PANEL`], by the application id
+/// their information file is named after. They draw their screens at a fixed
+/// size from the top-left corner whatever the device information says.
+const SMALLER_PANELS: &[(u32, (u32, u32))] = &[
+    // 카트라이더레이싱: its title picture is 120x146, and its menus and race
+    // fill that much of the panel and leave the rest black.
+    (26735, (120, 146)),
+];
+
 /// The licence file a title binds to the handset it was bought on.
 const HANDSET_LICENCE: &str = "kenviron.cfg";
 
@@ -40,12 +49,22 @@ impl BrewEmulator {
         is_brew_package(files)
     }
 
-    /// The panel the title was drawn for. The KTF handsets these titles were
-    /// sold on were 176x220, and 카샨 lays every screen out in that.
+    /// The panel the title was drawn for. Most KTF handsets these titles were
+    /// sold on were 176x220, and 카샨 lays every screen out in that; a title
+    /// drawn for a smaller one is listed in [`SMALLER_PANELS`].
     pub fn screen_size(archive: &[u8]) -> Option<(u32, u32)> {
         let files = wie_backend::extract_zip(archive).ok()?;
+        if !is_brew_package(&files) {
+            return None;
+        }
 
-        is_brew_package(&files).then_some(PANEL)
+        let id = BrewArchive::open(files).ok().map(|x| x.info.application_id);
+        Some(
+            SMALLER_PANELS
+                .iter()
+                .find(|(title, _)| Some(*title) == id)
+                .map_or(PANEL, |(_, panel)| *panel),
+        )
     }
 
     /// The name the title's own writes are kept under: its ClassID.
