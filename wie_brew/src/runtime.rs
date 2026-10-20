@@ -30,7 +30,7 @@ use spin::Mutex;
 
 use wie_backend::{
     System,
-    canvas::{ArgbPixel, Canvas, Clip, Color, Image, ImageBufferCanvas, TextAlignment, VecImageBuffer, baseline_px},
+    canvas::{ArgbPixel, Canvas, Clip, Color, Image, ImageBufferCanvas, TextAlignment, VecImageBuffer, baseline_px, string_width_px},
 };
 use wie_core_arm::{Allocator, ArmCore, SvcId};
 use wie_util::{ByteRead, ByteWrite, Result, WieError, read_generic, read_null_terminated_string_bytes, write_generic};
@@ -67,6 +67,7 @@ const SLOT_MEMORY_COPY: u32 = 0x00;
 const SLOT_MEMORY_SET: u32 = 0x04;
 const SLOT_STRING_COPY: u32 = 0x08;
 const SLOT_STRING_JOIN: u32 = 0x0c;
+const SLOT_STRING_COMPARE: u32 = 0x10;
 const SLOT_STRING_SIZE: u32 = 0x14;
 const SLOT_FORMAT: u32 = 0x20;
 const SLOT_CREATE_OBJECT: u32 = 0x64;
@@ -79,6 +80,7 @@ const SLOT_ELAPSED: u32 = 0xb0;
 const SLOT_DESTROY_OBJECT: u32 = 0xbc;
 const SLOT_CURRENT_APPLICATION: u32 = 0xc0;
 const SLOT_BOUNDED_COPY: u32 = 0xc8;
+const SLOT_TEXT_TO_WIDE: u32 = 0xe4;
 const SLOT_COMPARE: u32 = 0xcc;
 
 // Every object's first three methods.
@@ -101,16 +103,36 @@ const INTERFACE_MEMORY: u32 = 0x100_1002;
 const INTERFACE_FILE: u32 = 0x100_1003;
 const INTERFACE_TIMED: u32 = 0x100_100b;
 const INTERFACE_SOUND: u32 = 0x100_2000;
+const INTERFACE_GRAPHICS: u32 = 0x100_2001;
 const INTERFACE_CERTIFICATE: u32 = 0x103_028a;
 const INTERFACE_HANDSET: u32 = 0x180_00fe;
+/// An interface nothing here has named yet. 한쿠아 큰화 creates it while it
+/// starts, asks its slot `0x14` for an object, and gives up its start-up
+/// when that answer is null; it only ever sets that object up and releases
+/// it, so an object whose every slot answers zero carries it through.
+const INTERFACE_UNNAMED_1105: u32 = 0x100_1105;
+const UNNAMED_1105_CHILD: u32 = 0x14;
+/// The number the child object is kept under: no interface the shell is
+/// asked for has the top bit set.
+const UNNAMED_1105_CHILD_INTERFACE: u32 = 0x8100_1105;
 
 const DISPLAY_FONT_METRICS: u32 = 0x08;
+const DISPLAY_MEASURE_TEXT: u32 = 0x0c;
 const DISPLAY_TEXT: u32 = 0x10;
 const DISPLAY_RECTANGLE: u32 = 0x14;
 const DISPLAY_BLIT: u32 = 0x18;
 const DISPLAY_PRESENT: u32 = 0x1c;
 const DISPLAY_KEEP_AWAKE: u32 = 0x24;
 const DISPLAY_COLOUR: u32 = 0x28;
+
+// `IGraphics`, which draws on the same screen the display does. 어둠의전설
+// draws its dialog boxes and bars with it, a line at a time, and 한쿠아 큰화
+// the bars along the top and bottom of its screens, a filled rectangle each.
+const GRAPHICS_SET_COLOUR: u32 = 0x10;
+const GRAPHICS_SET_FILL_MODE: u32 = 0x18;
+const GRAPHICS_SET_FILL_COLOUR: u32 = 0x20;
+const GRAPHICS_LINE: u32 = 0x54;
+const GRAPHICS_RECTANGLE: u32 = 0x58;
 
 const MEMORY_FITS: u32 = 0x18;
 const MEMORY_FREE: u32 = 0x1c;
@@ -219,6 +241,9 @@ struct State {
     dirty: bool,
     images: BTreeMap<u32, KeptImage>,
     colours: BTreeMap<u32, u32>,
+    graphics_colour: Color,
+    graphics_fill: Color,
+    graphics_filled: bool,
 
     listeners: Vec<Listener>,
     frame: Option<Schedule>,
@@ -273,6 +298,14 @@ impl Brew {
                 dirty: true,
                 images: BTreeMap::new(),
                 colours: BTreeMap::new(),
+                graphics_colour: Color { a: 0xff, r: 0, g: 0, b: 0 },
+                graphics_fill: Color {
+                    a: 0xff,
+                    r: 0xff,
+                    g: 0xff,
+                    b: 0xff,
+                },
+                graphics_filled: false,
                 listeners: Vec::new(),
                 frame: None,
                 timed_due: None,
@@ -557,9 +590,11 @@ async fn handle_trap(core: &mut ArmCore, brew: &mut Brew, id: SvcId) -> Result<u
         (Surface::Platform, SLOT_MEMORY_SET) => memory_set(core),
         (Surface::Platform, SLOT_STRING_COPY) => string_copy(core),
         (Surface::Platform, SLOT_STRING_JOIN) => string_join(core),
+        (Surface::Platform, SLOT_STRING_COMPARE) => string_compare(core),
         (Surface::Platform, SLOT_STRING_SIZE) => Ok(read_string(core, core.read_param(0)?)?.len() as u32),
         (Surface::Platform, SLOT_FORMAT) => format(core),
         (Surface::Platform, SLOT_COMPARE) => memory_compare(core),
+        (Surface::Platform, SLOT_TEXT_TO_WIDE) => text_to_wide(core),
         (Surface::Platform, SLOT_ALLOCATE) => brew.allocate(core, core.read_param(0)?),
         (Surface::Platform, SLOT_FREE) => {
             brew.free(core, core.read_param(0)?)?;
@@ -637,6 +672,7 @@ async fn handle_trap(core: &mut ArmCore, brew: &mut Brew, id: SvcId) -> Result<u
         }
 
         (Surface::Interface(INTERFACE_DISPLAY), DISPLAY_FONT_METRICS) => font_metrics(core),
+        (Surface::Interface(INTERFACE_DISPLAY), DISPLAY_MEASURE_TEXT) => measure_text(core),
         (Surface::Interface(INTERFACE_DISPLAY), DISPLAY_TEXT) => brew.draw_text(core),
         (Surface::Interface(INTERFACE_DISPLAY), DISPLAY_RECTANGLE) => brew.draw_rectangle(core),
         (Surface::Interface(INTERFACE_DISPLAY), DISPLAY_BLIT) => brew.blit(core),
@@ -650,6 +686,30 @@ async fn handle_trap(core: &mut ArmCore, brew: &mut Brew, id: SvcId) -> Result<u
             brew.state.lock().colours.insert(item, value);
             Ok(0)
         }
+
+        (Surface::Interface(INTERFACE_GRAPHICS), GRAPHICS_SET_COLOUR | GRAPHICS_SET_FILL_COLOUR) => {
+            let [_, r, g, b] = params(core)?;
+            let colour = Color {
+                a: 0xff,
+                r: r as u8,
+                g: g as u8,
+                b: b as u8,
+            };
+            let mut state = brew.state.lock();
+            if offset == GRAPHICS_SET_COLOUR {
+                state.graphics_colour = colour;
+            } else {
+                state.graphics_fill = colour;
+            }
+            Ok(0)
+        }
+        (Surface::Interface(INTERFACE_GRAPHICS), GRAPHICS_SET_FILL_MODE) => {
+            let filled = core.read_param(1)? != 0;
+            let previous = core::mem::replace(&mut brew.state.lock().graphics_filled, filled);
+            Ok(previous as u32)
+        }
+        (Surface::Interface(INTERFACE_GRAPHICS), GRAPHICS_LINE) => brew.draw_line(core),
+        (Surface::Interface(INTERFACE_GRAPHICS), GRAPHICS_RECTANGLE) => brew.draw_graphics_rectangle(core),
 
         // The module walks its request up until this says no, and keeps the
         // largest block both this and the allocator will give.
@@ -687,6 +747,8 @@ async fn handle_trap(core: &mut ArmCore, brew: &mut Brew, id: SvcId) -> Result<u
             brew.state.lock().sounding = false;
             Ok(1)
         }
+
+        (Surface::Interface(INTERFACE_UNNAMED_1105), UNNAMED_1105_CHILD) => brew.interface_object(core, UNNAMED_1105_CHILD_INTERFACE),
 
         (Surface::Interface(INTERFACE_CERTIFICATE), CERTIFICATE_CHECK) => Ok(0),
         (Surface::Interface(INTERFACE_HANDSET), HANDSET_RECORD) => {
@@ -784,6 +846,75 @@ fn memory_compare(core: &mut ArmCore) -> Result<u32> {
     })
 }
 
+/// `STRCMP`: 어둠의전설 looks its resources up by name with it ("ascii",
+/// "item", "logo"), and an unanswered slot said every pair matched.
+fn string_compare(core: &mut ArmCore) -> Result<u32> {
+    let [first, second] = params(core)?;
+    let left = read_string(core, first)?;
+    let right = read_string(core, second)?;
+
+    Ok(match left.cmp(&right) {
+        core::cmp::Ordering::Less => u32::MAX,
+        core::cmp::Ordering::Equal => 0,
+        core::cmp::Ordering::Greater => 1,
+    })
+}
+
+/// `(source, length, destination, size)`: a title's KS X 1001 text turned
+/// into the wide text the display draws, the destination answered. 한쿠아 큰화
+/// passes every line it shows through this - `현재 랭킹을 확인하시겠습니까?`,
+/// `1 : 확인` - and drew empty boxes while it went unanswered.
+///
+/// Each character becomes one 16-bit unit, as the title counts them: it
+/// steps through a line by the units `MeasureTextEx` says fit. A syllable's
+/// two bytes are kept as they are and a single-byte character gets a zero
+/// beside it, so dropping the zeros gives the handset's bytes back - which is
+/// what the display reads, here and in [`padded_text`].
+fn text_to_wide(core: &mut ArmCore) -> Result<u32> {
+    let [source, length, destination, size] = params(core)?;
+    if source == 0 || destination == 0 || size < 2 {
+        return Ok(destination);
+    }
+
+    let mut text = read_string(core, source)?;
+    text.truncate(length as usize);
+
+    let room = (size as usize - 2) & !1;
+    let mut wide = Vec::with_capacity(text.len() * 2 + 2);
+    let mut bytes = text.iter().copied();
+    while let Some(byte) = bytes.next() {
+        let unit = match (byte >= 0x80).then(|| bytes.next()).flatten() {
+            Some(trail) => [byte, trail],
+            None => [byte, 0],
+        };
+        if wide.len() + 2 > room {
+            break;
+        }
+        wide.extend_from_slice(&unit);
+    }
+    wide.extend_from_slice(&[0, 0]);
+    core.write_bytes(destination, &wide)?;
+
+    Ok(destination)
+}
+
+/// Up to `count` 16-bit units of wide text, or up to its wide null when
+/// `count` is negative, each as the handset's bytes with the zeros dropped.
+fn wide_units(core: &ArmCore, address: u32, count: i32) -> Result<Vec<Vec<u8>>> {
+    let limit = if count < 0 { MAX_TEXT } else { count.min(MAX_TEXT) };
+
+    let mut units = Vec::new();
+    for index in 0..limit as u32 {
+        let unit = read_bytes(core, address + index * 2, 2)?;
+        if count < 0 && unit == [0, 0] {
+            break;
+        }
+        units.push(unit.into_iter().filter(|x| *x != 0).collect());
+    }
+
+    Ok(units)
+}
+
 fn string_copy(core: &mut ArmCore) -> Result<u32> {
     let [destination, source] = params(core)?;
     let mut text = read_string(core, source)?;
@@ -822,6 +953,38 @@ fn format(core: &mut ArmCore) -> Result<u32> {
     Ok(length)
 }
 
+/// `MeasureTextEx(font, text, count, max_width, fits)`: how wide the text is,
+/// and through `fits` how many of its units fit in `max_width` (a negative
+/// width takes them all). 한쿠아 큰화 wraps its messages with it, a line of
+/// as many units as fit at a time; answered zero, no unit ever fit and the
+/// title went round the same line for good.
+fn measure_text(core: &mut ArmCore) -> Result<u32> {
+    let [_, _, address, count, max_width, fits_out] = params(core)?;
+    if address == 0 {
+        return Ok(0);
+    }
+
+    let units = wide_units(core, address, count as i32)?;
+    let max_width = max_width as i32;
+    let (mut width, mut fits) = (0f32, 0u32);
+    for unit in &units {
+        let next = width + string_width_px(&decode_euc_kr(unit), FONT_HEIGHT);
+        // A unit wider than the line still goes on it, or the title would
+        // never get past it.
+        if max_width >= 0 && next > max_width as f32 && fits > 0 {
+            break;
+        }
+        width = next;
+        fits += 1;
+    }
+
+    if fits_out != 0 {
+        write_generic(core, fits_out, fits)?;
+    }
+
+    Ok(width.ceil() as u32)
+}
+
 /// The handset face's height, with its ascent and descent written through the
 /// two pointers given.
 fn font_metrics(core: &mut ArmCore) -> Result<u32> {
@@ -849,12 +1012,17 @@ impl Brew {
         ARENA_SIZE.saturating_sub(used)
     }
 
+    /// `MALLOC`. Nothing is zero bytes long here: 스쿨해저드 and 카트라이더레이싱
+    /// read their packed files an entry at a time, allocating each entry's
+    /// length before reading it, and the last entry is empty. A request no
+    /// handset could meet answers null, which the title checks for.
     fn allocate(&self, core: &mut ArmCore, size: u32) -> Result<u32> {
-        if size == 0 || size > MAX_TRANSFER {
-            return Err(WieError::FatalError(format!("BREW allocation of {size} bytes")));
+        if size > MAX_TRANSFER {
+            tracing::warn!("BREW allocation of {size} bytes refused");
+            return Ok(0);
         }
 
-        let size = size.next_multiple_of(8);
+        let size = size.max(1).next_multiple_of(8);
         let address = Allocator::alloc(core, size)?;
         core.write_bytes(address, &vec![0; size as usize])?;
         self.state.lock().blocks.insert(address, size);
@@ -896,6 +1064,14 @@ impl Brew {
     fn query_interface(&self, core: &mut ArmCore) -> Result<u32> {
         let [_, identifier, out] = params(core)?;
 
+        let object = self.interface_object(core, identifier)?;
+        write_generic(core, out, object)?;
+
+        Ok(0)
+    }
+
+    /// The one object answering for `identifier`, made on the first ask.
+    fn interface_object(&self, core: &mut ArmCore, identifier: u32) -> Result<u32> {
         let existing = self.state.lock().interfaces.get(&identifier).copied();
         let object = match existing {
             Some(object) => object,
@@ -911,9 +1087,7 @@ impl Brew {
             }
         };
 
-        write_generic(core, out, object)?;
-
-        Ok(0)
+        Ok(object)
     }
 
     fn display_info(&self, core: &mut ArmCore) -> Result<u32> {
@@ -952,6 +1126,50 @@ impl Brew {
         if w > 0 && h > 0 {
             state.screen.fill_rect(x, y, w as u32, h as u32, packed_colour(colour), clip);
         }
+
+        Ok(1)
+    }
+
+    /// `IGRAPHICS_DrawLine`: `r1` points at the line, its start and end as
+    /// four 16-bit fields, drawn in the colour `SetColor` last gave.
+    fn draw_line(&self, core: &mut ArmCore) -> Result<u32> {
+        let line = core.read_param(1)?;
+        if line == 0 {
+            return Ok(0);
+        }
+        let record = read_bytes(core, line, 8)?;
+        let field = |offset: usize| i16::from_le_bytes([record[offset], record[offset + 1]]) as i32;
+
+        let mut state = self.state.lock();
+        let clip = full_clip(state.width, state.height);
+        let colour = state.graphics_colour;
+        state.screen.draw_line(field(0), field(2), field(4), field(6), colour, clip);
+
+        Ok(1)
+    }
+
+    /// `IGRAPHICS_DrawRect`: `r1` points at x, y, width and height as 16-bit
+    /// fields. Filled in the fill colour when the fill mode is on, and
+    /// outlined in the colour `SetColor` last gave.
+    fn draw_graphics_rectangle(&self, core: &mut ArmCore) -> Result<u32> {
+        let rectangle = core.read_param(1)?;
+        if rectangle == 0 {
+            return Ok(0);
+        }
+        let record = read_bytes(core, rectangle, 8)?;
+        let field = |offset: usize| i16::from_le_bytes([record[offset], record[offset + 1]]) as i32;
+        let (x, y, w, h) = (field(0), field(2), field(4), field(6));
+        if w <= 0 || h <= 0 {
+            return Ok(1);
+        }
+
+        let mut state = self.state.lock();
+        let clip = full_clip(state.width, state.height);
+        let (colour, fill, filled) = (state.graphics_colour, state.graphics_fill, state.graphics_filled);
+        if filled {
+            state.screen.fill_rect(x, y, w as u32, h as u32, fill, clip);
+        }
+        state.screen.draw_rect(x, y, w as u32, h as u32, colour, clip);
 
         Ok(1)
     }
@@ -1017,7 +1235,9 @@ impl Brew {
         } else if count == 0 || count > MAX_TEXT {
             return Ok(1);
         } else {
-            read_bytes(core, address, count as u32)?
+            // A count is of 16-bit units: 한쿠아 큰화 draws a line at a time,
+            // as many as `MeasureTextEx` said fit.
+            wide_units(core, address, count)?.concat()
         };
         let text = decode_euc_kr(&raw);
 
@@ -1288,8 +1508,8 @@ impl Brew {
         Ok(length)
     }
 
-    /// `seek(file, whence, offset)`: 0 from the start, 1 back from the last
-    /// byte, 2 from where it is. A result of zero is success.
+    /// `seek(file, whence, offset)`: 0 from the start, 1 from the end, 2 from
+    /// where it is. A result of zero is success.
     fn seek_file(&self, core: &mut ArmCore) -> Result<u32> {
         let [object, whence, offset] = params(core)?;
         let mut state = self.state.lock();
@@ -1301,7 +1521,10 @@ impl Brew {
         let offset = offset as i32 as i64;
         let position = match whence {
             0 => offset,
-            1 => file.data.len() as i64 - 1 - offset,
+            // `_SEEK_END`, the offset counted from the end: 한쿠아 큰화 seeks
+            // `-1` there to read `mileage.nhn`'s last byte, and fails its
+            // start-up when that read comes back empty.
+            1 => file.data.len() as i64 + offset,
             2 => file.position as i64 + offset,
             _ => return Ok(1),
         };
