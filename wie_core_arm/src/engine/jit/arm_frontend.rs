@@ -149,6 +149,12 @@ pub(crate) fn decode_arm(inst: u32, pc: u32) -> Option<ArmOp> {
             rm: (inst & 0xf) as u8,
         });
     }
+    // BLX (register): the interpreter's BranchEx too, which links as well.
+    // Left to it rather than read as the data-processing word it would
+    // otherwise fall through to - 리듬스타2 calls its platform this way.
+    if m(0x0fff_fff0, 0x012f_ff30) {
+        return None;
+    }
     // Branch / BL / BLX(imm)
     if m(0x0e00_0000, 0x0a00_0000) {
         let offset = bits(inst, 0, 24);

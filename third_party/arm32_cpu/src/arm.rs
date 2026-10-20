@@ -10,7 +10,7 @@ use crate::{Cpu, Memory};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Instruction {
-    BranchEx, // Branch and exchange (i.e. switch to THUMB)
+    BranchEx, // Branch (and link, for BLX) and exchange (i.e. switch to THUMB)
     Branch,
     Clz,
     DataProc0,
@@ -59,7 +59,7 @@ impl Instruction {
     fn pattern(self) -> (u32, u32) {
         use self::Instruction::*;
         match self {
-            BranchEx    => (0x0fff_fff0, 0x012f_ff10),
+            BranchEx    => (0x0fff_ffd0, 0x012f_ff10),
             Branch      => (0x0e00_0000, 0x0a00_0000),
             Clz         => (0x0fff_0ff0, 0x016f_0f10),
             DataProc0   => (0x0e00_0010, 0x0000_0000),
@@ -128,7 +128,13 @@ impl Cpu {
             BranchEx => {
                 let rn = inst.extract(0, 4) as Reg;
                 let new_pc = self.reg[rn];
-                self.reg[reg::PC] = self.reg[rn] & !1u32;
+                // BLX (register) is BX with bit 5 set: it also links, to the
+                // word after itself. The target is read first, so `blx lr`
+                // still goes where lr pointed.
+                if inst.get_bit(5) != 0 {
+                    self.reg[reg::LR] = pc.wrapping_add(4);
+                }
+                self.reg[reg::PC] = new_pc & !1u32;
                 // maybe switch to thumb mode
                 self.reg[reg::CPSR] |= new_pc.get_bit(0) << cpsr::T;
             }
@@ -647,6 +653,7 @@ mod test {
             }
         );
         check!(BranchEx,    0xE12F_FF1C);
+        check!(BranchEx,    0xE12F_FF32);
         check!(Branch,      0xEB00_00F8);
         check!(Clz,         0xE16F_6F12);
         check!(DataProc0,   0xE1A0_816C);
