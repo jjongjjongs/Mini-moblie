@@ -38,6 +38,7 @@ mod pigmy;
 mod relay;
 mod sdw;
 mod snowboard;
+mod sudden_attack2;
 mod tera;
 
 pub use self::{
@@ -56,6 +57,7 @@ pub use self::{
     relay::RelayEndpoint,
     sdw::SdwEndpoint,
     snowboard::SnowBoardEndpoint,
+    sudden_attack2::SuddenAttack2Endpoint,
     tera::TeraEndpoint,
 };
 

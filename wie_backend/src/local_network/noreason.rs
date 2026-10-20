@@ -32,6 +32,13 @@
 //! purchase is the request's header under `0x78` with twelve zero bytes behind
 //! it.
 //!
+//! A granted purchase is followed on a fresh connection by command `0x16`
+//! (`0x125e24`), the same shape with the item's code and number, which the
+//! screen behind it (`0x13ac74`) sends once the purchase is made. Its answer
+//! comes back under `0x79`, whose reader (`0x118b78`) takes a `u32` verdict:
+//! `0` is state 52, which that screen goes on from, and `1` and `2` are 53 and
+//! 54, which it reports as failures.
+//!
 //! The same server and the same state machine carry the title's other
 //! exchanges, under commands of their own. Those wait on bodies nothing here has
 //! read, so they are written down and the connection is ended, which the title
@@ -66,6 +73,14 @@ const PURCHASE_ANSWER: i16 = 0x78;
 
 /// A granted purchase's body: a zero verdict and the two values kept with it.
 const PURCHASE_GRANTED: [u8; 12] = [0; 12];
+
+/// What follows a granted purchase, and the command its answer comes back
+/// under.
+const DELIVERY: i16 = 0x16;
+const DELIVERY_ANSWER: i16 = 0x79;
+
+/// The delivery's verdict: delivered.
+const DELIVERED: u32 = 0;
 
 /// The server 아무이유없어2 checks for a save on, answered in process.
 pub struct NoReasonEndpoint {
@@ -149,6 +164,10 @@ impl LocalConnection for NoReasonConnection {
                 PURCHASE => {
                     tracing::info!("noreason: purchase granted");
                     self.reply.extend_from_slice(&answer(&frame, PURCHASE_ANSWER, &PURCHASE_GRANTED));
+                }
+                DELIVERY => {
+                    tracing::info!("noreason: purchase delivered");
+                    self.reply.extend_from_slice(&answer(&frame, DELIVERY_ANSWER, &DELIVERED.to_le_bytes()));
                 }
                 _ => {
                     tracing::info!(
@@ -252,6 +271,27 @@ mod tests {
         assert_eq!(i16::from_le_bytes([out[0], out[1]]), PURCHASE_ANSWER);
         assert_eq!(i32::from_le_bytes(out[BODY_LENGTH_AT..BODY_LENGTH_AT + 4].try_into().unwrap()), 12);
         assert_eq!(&out[HEADER..HEADER + 12], &[0u8; 12]);
+    }
+
+    /// What follows a purchase is answered delivered: command `0x79` and a
+    /// zero verdict.
+    #[test]
+    fn the_delivery_is_answered() {
+        let mut request = save_check();
+        request[..2].copy_from_slice(&DELIVERY.to_le_bytes());
+        request[BODY_LENGTH_AT] = 4;
+        request.extend_from_slice(&0x5au32.to_le_bytes());
+
+        let mut connection = NoReasonEndpoint::new().open("socket", HOST, PORT);
+        connection.write(&request);
+
+        let mut out = [0u8; 128];
+        let LocalRead::Data(read) = connection.read(&mut out) else {
+            panic!("the delivery is answered");
+        };
+        assert_eq!(read, HEADER + 4);
+        assert_eq!(i16::from_le_bytes([out[0], out[1]]), DELIVERY_ANSWER);
+        assert_eq!(&out[HEADER..HEADER + 4], &[0, 0, 0, 0]);
     }
 
     /// Any other command ends the connection.
