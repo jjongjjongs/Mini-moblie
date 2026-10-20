@@ -54,6 +54,10 @@ enum Framing {
     /// title never has a reason to split one. See
     /// [`crate::billing::ktf_local_miniheroes2_response`].
     MiniHeroes,
+    /// `[u16le length counting the whole frame][u16le command][body]` - the
+    /// GAMEVIL titles' `tagNetHeader`. See
+    /// [`crate::billing::lgt_local_gamevil_packet_response`].
+    LittleEndianLength,
 }
 
 /// Answers the carrier billing frames a title writes over a plain socket to one
@@ -127,6 +131,18 @@ impl BillingGatewayEndpoint {
         }
     }
 
+    /// Answers `host:port` for the GAMEVIL titles' little-endian
+    /// length-prefixed records - the shop servers their KTF builds open a
+    /// plain socket to.
+    pub const fn new_gamevil(name: &'static str, host: &'static str, port: u16) -> Self {
+        Self {
+            name,
+            host,
+            port,
+            framing: Framing::LittleEndianLength,
+        }
+    }
+
     /// Answers `host:port` for a title that reaches its server through the
     /// `FastRelay` carrier library - 템페스트's 정품인증.
     pub const fn new_relay(name: &'static str, host: &'static str, port: u16) -> Self {
@@ -177,6 +193,7 @@ impl BillingGatewayConnection {
             Framing::KpTagged => self.take_kp_tagged_frame(),
             Framing::BigEndianLength32 => self.take_u32_length_prefixed_frame(),
             Framing::MiniHeroes => self.take_write(),
+            Framing::LittleEndianLength => self.take_little_endian_frame(),
         }
     }
 
@@ -271,6 +288,25 @@ impl BillingGatewayConnection {
     /// `[u16be length][body]`, the length the first field and counting the whole
     /// frame - the GP4 login family's shape. There is no marker to resync on, so
     /// a length too small to be a frame steps over one byte and tries again.
+    fn take_little_endian_frame(&mut self) -> Option<Vec<u8>> {
+        if self.pending.len() < 2 {
+            return None;
+        }
+
+        // At least the four-byte header: its length and its command.
+        let length = u16::from_le_bytes([self.pending[0], self.pending[1]]) as usize;
+        if !(4..=MAX_FRAME).contains(&length) {
+            self.pending.remove(0);
+            return None;
+        }
+
+        if self.pending.len() < length {
+            return None;
+        }
+
+        Some(self.pending.drain(..length).collect())
+    }
+
     fn take_length_prefixed_frame(&mut self) -> Option<Vec<u8>> {
         if self.pending.len() < 2 {
             return None;
@@ -372,6 +408,33 @@ mod tests {
             pending: Vec::new(),
             outgoing: Vec::new(),
         }
+    }
+
+    /// A GAMEVIL record, split across two writes, is taken whole by its
+    /// little-endian length and answered with its command plus one.
+    #[test]
+    fn a_gamevil_record_is_taken_by_its_little_endian_length() {
+        let mut record = vec![0u8; 72];
+        record[0..2].copy_from_slice(&72u16.to_le_bytes());
+        record[2..4].copy_from_slice(&0x0700u16.to_le_bytes());
+        record[4..15].copy_from_slice(b"01068488891");
+
+        let mut connection = BillingGatewayConnection {
+            peer: "218.145.70.36:23205".into(),
+            framing: Framing::LittleEndianLength,
+            pending: Vec::new(),
+            outgoing: Vec::new(),
+        };
+        connection.write(&record[..30]);
+        let mut out = [0u8; 64];
+        assert!(matches!(connection.read(&mut out), LocalRead::Pending));
+
+        connection.write(&record[30..]);
+        let LocalRead::Data(read) = connection.read(&mut out) else {
+            panic!("the record is answered");
+        };
+        assert_eq!(&out[..5], &[0x20, 0x00, 0x01, 0x07, 0x00]);
+        assert_eq!(read, 0x20);
     }
 
     /// 크로노스윙's KTF login, split across two writes, is taken whole and
