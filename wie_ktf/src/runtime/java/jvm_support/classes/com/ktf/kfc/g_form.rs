@@ -18,7 +18,7 @@ impl GForm {
     pub fn as_proto() -> WieJavaClassProto {
         WieJavaClassProto {
             name: "com/ktf/kfc/GForm",
-            parent_class: Some("org/kwis/msp/lwc/ShellComponent"),
+            parent_class: Some("com/ktf/kfc/GFormBase"),
             interfaces: vec![],
             methods: vec![JavaMethodProto::new("<init>", "()V", Self::init, Default::default())],
             fields: vec![],
@@ -29,7 +29,7 @@ impl GForm {
     async fn init(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<()> {
         tracing::debug!("com.ktf.kfc.GForm::<init>()");
 
-        let _: () = jvm.invoke_special(&this, "org/kwis/msp/lwc/ShellComponent", "<init>", "()V", ()).await?;
+        let _: () = jvm.invoke_special(&this, "com/ktf/kfc/GFormBase", "<init>", "()V", ()).await?;
 
         Ok(())
     }

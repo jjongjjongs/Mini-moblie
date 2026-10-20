@@ -31,7 +31,7 @@ use wipi_types::ktf::java::{JavaClass as RawJavaClass, JavaClassDescriptor as Ra
 use self::{
     array_class_instance::JavaArrayClassInstance,
     classes::{
-        com::ktf::kfc::{GForm, GFormComponent, GMenubarForm, GMsgBox, GProgressBar, GTextField, GTextListener},
+        com::ktf::kfc::{GForm, GFormBase, GFormComponent, GMenubarForm, GMsgBox, GProgressBar, GTextField, GTextListener},
         net::wie::{ClassLoaderContext, KtfClassLoader},
         wec::{DMInfo, GatewayIP, OEMDevice, SYSTheme},
     },
@@ -208,6 +208,7 @@ impl KtfJvmSupport {
             GatewayIP::as_proto(),
             SYSTheme::as_proto(),
             GForm::as_proto(),
+            GFormBase::as_proto(),
             GFormComponent::as_proto(),
             GMenubarForm::as_proto(),
             GMsgBox::as_proto(),

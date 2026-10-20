@@ -119,8 +119,36 @@ fn j2me_panel(data: &[u8]) -> Option<(u32, u32)> {
         // out from getWidth/getHeight, so the default 240x320 panel puts every
         // screen in the wrong place. Give it the panel it asks for.
         "297b53452f8f2ee2a811b7961939b310" => Some((176, 200)),
-        _ => None,
+        // Anything else that names its handset's screen gets it: 문명3 (COM2US,
+        // LGT ez-java) asks for 176x200 in its DESC.jad and draws its dialogue
+        // boxes and map for it, so on 240x320 they sat in a corner of the
+        // panel with its HUD pulled out to the edges.
+        _ => descriptor_lcd_size(&files, &jar),
     }
+}
+
+/// The `MIDletX-LCD-Size` a package's descriptor or its jar's manifest names.
+fn descriptor_lcd_size(files: &BTreeMap<String, Vec<u8>>, jar: &[u8]) -> Option<(u32, u32)> {
+    let manifest = extract_zip(jar).ok().and_then(|jar| {
+        jar.into_iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("META-INF/MANIFEST.MF"))
+            .map(|(_, x)| x)
+    });
+    let descriptors = files.iter().filter(|(name, _)| has_extension(name, ".jad")).map(|(_, x)| x.as_slice());
+
+    descriptors.chain(manifest.as_deref()).find_map(lcd_size)
+}
+
+fn lcd_size(descriptor: &[u8]) -> Option<(u32, u32)> {
+    let text = String::from_utf8_lossy(descriptor);
+    let value = text.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.trim().eq_ignore_ascii_case("MIDletX-LCD-Size").then_some(value)
+    })?;
+    let (width, height) = value.split_once(',')?;
+    let size = (width.trim().parse().ok()?, height.trim().parse().ok()?);
+
+    ((64..=480).contains(&size.0) && (64..=640).contains(&size.1)).then_some(size)
 }
 
 /// The jar a download package carries, when the package is only a wrapper.
@@ -1075,7 +1103,7 @@ pub fn inspect(data: &[u8]) -> String {
 mod tests {
     use wie_backend::KeyCode;
 
-    use super::{content_id, could_be_jar, extract_zip, inspect, key_code, packaged_jar, save_ids};
+    use super::{content_id, could_be_jar, extract_zip, inspect, j2me_panel, key_code, packaged_jar, save_ids};
 
     /// A stored zip of the given entries, which is all these tests need.
     fn zip_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
@@ -1089,6 +1117,20 @@ mod tests {
         }
 
         writer.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn a_midlet_gets_the_screen_its_descriptor_names() {
+        // 문명3's shape: the jar, and a descriptor beside it naming 176x200.
+        let jar = zip_of(&[
+            ("META-INF/MANIFEST.MF", b"MIDlet-1: Civ, /small.png, Midlet\n" as &[u8]),
+            ("Midlet.class", b"\xca\xfe"),
+        ]);
+        let package = zip_of(&[("8.jar", &jar), ("DESC.jad", b"MIDlet-Name: Civ\r\nMIDletX-LCD-Size: 176,200\r\n")]);
+        assert_eq!(j2me_panel(&package), Some((176, 200)));
+
+        let bare = zip_of(&[("8.jar", &jar)]);
+        assert_eq!(j2me_panel(&bare), None);
     }
 
     /// 액션퍼즐패밀리1's shape: one jar and its icons, and no descriptor at all.

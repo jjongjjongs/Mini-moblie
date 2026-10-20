@@ -75,6 +75,8 @@ const SLOT_ALLOCATE: u32 = 0x68;
 const SLOT_FREE: u32 = 0x6c;
 const SLOT_REALLOCATE: u32 = 0x74;
 const SLOT_INITIAL: u32 = 0x8c;
+const SLOT_ATOI: u32 = 0x90;
+const SLOT_FLOAT_OPERATION: u32 = 0x94;
 const SLOT_MILLISECONDS: u32 = 0xac;
 const SLOT_ELAPSED: u32 = 0xb0;
 const SLOT_DESTROY_OBJECT: u32 = 0xbc;
@@ -82,6 +84,7 @@ const SLOT_CURRENT_APPLICATION: u32 = 0xc0;
 const SLOT_BOUNDED_COPY: u32 = 0xc8;
 const SLOT_TEXT_TO_WIDE: u32 = 0xe4;
 const SLOT_COMPARE: u32 = 0xcc;
+const SLOT_BOUNDED_STRING_COMPARE: u32 = 0xdc;
 
 // Every object's first three methods.
 const OBJECT_ADD_REF: u32 = 0x00;
@@ -91,8 +94,9 @@ const OBJECT_QUERY_INTERFACE: u32 = 0x08;
 // The shell.
 const SHELL_DISPLAY_INFO: u32 = 0x10;
 const SHELL_CLOSE_APPLET: u32 = 0x18;
+const SHELL_ACTIVE_APPLET: u32 = 0x20;
 const SHELL_SCHEDULE: u32 = 0x2c;
-const SHELL_RESUME: u32 = 0x30;
+const SHELL_CANCEL_TIMER: u32 = 0x30;
 const SHELL_LOAD_RESOURCE: u32 = 0x48;
 const SHELL_FREE_RESOURCE: u32 = 0x50;
 const SHELL_POST_EVENT: u32 = 0x54;
@@ -117,6 +121,15 @@ const UNNAMED_1105_CHILD: u32 = 0x14;
 const UNNAMED_1105_CHILD_INTERFACE: u32 = 0x8100_1105;
 
 const DISPLAY_FONT_METRICS: u32 = 0x08;
+// `DrawText`'s placement flags, `IDF_ALIGN_*`. 카샨 centres its messages with
+// `0x8220` and the screen's middle as `x` and `y`; 한쿠아 큰화 its choices with
+// `0x8020`, `x` zero and the line's own `y`.
+const TEXT_ALIGN_LEFT: u32 = 0x10;
+const TEXT_ALIGN_CENTRE: u32 = 0x20;
+const TEXT_ALIGN_RIGHT: u32 = 0x40;
+const TEXT_ALIGN_TOP: u32 = 0x100;
+const TEXT_ALIGN_MIDDLE: u32 = 0x200;
+const TEXT_ALIGN_BOTTOM: u32 = 0x400;
 const DISPLAY_MEASURE_TEXT: u32 = 0x0c;
 const DISPLAY_TEXT: u32 = 0x10;
 const DISPLAY_RECTANGLE: u32 = 0x14;
@@ -208,8 +221,9 @@ struct Listener {
     context: u32,
 }
 
+/// A timer `ISHELL_SetTimer` armed: it fires once, and a title that wants
+/// another arms it again from the callback.
 struct Schedule {
-    interval: u64,
     function: u32,
     context: u32,
     due: u64,
@@ -233,6 +247,7 @@ struct State {
     interfaces: BTreeMap<u32, u32>,
     blocks: BTreeMap<u32, u32>,
     application: u32,
+    class: u32,
     started: u64,
 
     width: u32,
@@ -246,10 +261,9 @@ struct State {
     graphics_filled: bool,
 
     listeners: Vec<Listener>,
-    frame: Option<Schedule>,
+    timers: Vec<Schedule>,
     timed_due: Option<u64>,
     posted: Vec<(u32, u32, u32)>,
-    resumes: Vec<(u32, u32)>,
 
     files: BTreeMap<u32, OpenFile>,
     file_table: u32,
@@ -291,6 +305,7 @@ impl Brew {
                 interfaces: BTreeMap::new(),
                 blocks: BTreeMap::new(),
                 application: 0,
+                class: 0,
                 started: system.platform().now().raw(),
                 width,
                 height,
@@ -307,10 +322,9 @@ impl Brew {
                 },
                 graphics_filled: false,
                 listeners: Vec::new(),
-                frame: None,
+                timers: Vec::new(),
                 timed_due: None,
                 posted: Vec::new(),
-                resumes: Vec::new(),
                 files: BTreeMap::new(),
                 file_table: 0,
                 file_failure: 0,
@@ -379,7 +393,11 @@ impl Brew {
         if application == 0 {
             return Err(WieError::FatalError(format!("BREW module refused to create application {identifier:#x}")));
         }
-        self.state.lock().application = application;
+        {
+            let mut state = self.state.lock();
+            state.application = application;
+            state.class = identifier;
+        }
 
         tracing::info!("BREW application {identifier} created at {application:#x}");
 
@@ -426,28 +444,21 @@ impl Brew {
             self.send_event(core, event, first, second).await?;
         }
 
-        let resumes = core::mem::take(&mut self.state.lock().resumes);
-        for (function, context) in resumes {
-            core.run_function::<u32>(function, &[context]).await?;
-        }
-
         self.advance_sound(core).await?;
         self.advance_timed(core).await?;
 
         let now = self.now();
-        let frame = self.state.lock().frame.as_ref().map(|x| (x.due, x.interval, x.function, x.context));
-        let Some((due, interval, function, context)) = frame else {
-            return Ok(None);
+        let due = {
+            let mut state = self.state.lock();
+            let Some(index) = (0..state.timers.len()).min_by_key(|x| state.timers[*x].due) else {
+                return Ok(None);
+            };
+            if now < state.timers[index].due {
+                return Ok(Some(state.timers[index].due - now));
+            }
+            state.timers.remove(index)
         };
-
-        if now < due {
-            return Ok(Some(due - now));
-        }
-
-        if let Some(frame) = self.state.lock().frame.as_mut() {
-            frame.due = now + interval;
-        }
-        core.run_function::<u32>(function, &[context]).await?;
+        core.run_function::<u32>(due.function, &[due.context]).await?;
 
         Ok(Some(0))
     }
@@ -591,6 +602,7 @@ async fn handle_trap(core: &mut ArmCore, brew: &mut Brew, id: SvcId) -> Result<u
         (Surface::Platform, SLOT_STRING_COPY) => string_copy(core),
         (Surface::Platform, SLOT_STRING_JOIN) => string_join(core),
         (Surface::Platform, SLOT_STRING_COMPARE) => string_compare(core),
+        (Surface::Platform, SLOT_BOUNDED_STRING_COMPARE) => bounded_string_compare(core),
         (Surface::Platform, SLOT_STRING_SIZE) => Ok(read_string(core, core.read_param(0)?)?.len() as u32),
         (Surface::Platform, SLOT_FORMAT) => format(core),
         (Surface::Platform, SLOT_COMPARE) => memory_compare(core),
@@ -605,6 +617,8 @@ async fn handle_trap(core: &mut ArmCore, brew: &mut Brew, id: SvcId) -> Result<u
             brew.reallocate(core, address, size)
         }
         (Surface::Platform, SLOT_INITIAL) => Ok(0),
+        (Surface::Platform, SLOT_ATOI) => atoi(core),
+        (Surface::Platform, SLOT_FLOAT_OPERATION) => float_operation(core),
         (Surface::Platform, SLOT_MILLISECONDS | SLOT_ELAPSED) => Ok((brew.now() - brew.state.lock().started) as u32),
         (Surface::Platform, SLOT_CURRENT_APPLICATION) => {
             let application = brew.state.lock().application;
@@ -634,28 +648,38 @@ async fn handle_trap(core: &mut ArmCore, brew: &mut Brew, id: SvcId) -> Result<u
         // back to its menu.
         (Surface::Shell, SHELL_CLOSE_APPLET) => {
             tracing::info!("BREW application closed itself");
-            brew.state.lock().frame = None;
+            brew.state.lock().timers.clear();
             brew.system.platform().exit();
             Ok(0)
         }
+        // `ISHELL_ActiveApplet`: the class of the application in front, which
+        // is this one. 카트라이더레이싱 checks it against its own before it
+        // reads its files, and went on with buffers it never filled.
+        (Surface::Shell, SHELL_ACTIVE_APPLET) => Ok(brew.state.lock().class),
+        // `ISHELL_SetTimer(milliseconds, callback, context)`. A title can
+        // have more than one running: 카트라이더레이싱 arms a 4-second one to
+        // end its loading screen alongside its 200 ms frame timer, and with
+        // one slot the frame timer took its place and the loading screen
+        // never ended. Arming a callback and context again moves its timer.
         (Surface::Shell, SHELL_SCHEDULE) => {
             let [_, interval, function, context] = params(core)?;
-            let interval = interval.max(1) as u64;
-            brew.state.lock().frame = Some(Schedule {
-                interval,
-                function,
-                context,
-                due: brew.now() + interval,
-            });
-            Ok(1)
-        }
-        (Surface::Shell, SHELL_RESUME) => {
-            let [_, function, context] = params(core)?;
+            let due = brew.now() + interval.max(1) as u64;
             let mut state = brew.state.lock();
-            if function != 0 && state.resumes.len() < MAX_QUEUED {
-                state.resumes.push((function, context));
+            state.timers.retain(|x| (x.function, x.context) != (function, context));
+            if state.timers.len() < MAX_QUEUED {
+                state.timers.push(Schedule { function, context, due });
             }
-            Ok(1)
+            Ok(0)
+        }
+        // `ISHELL_CancelTimer(callback, context)`; a null callback cancels
+        // every timer of the context.
+        (Surface::Shell, SHELL_CANCEL_TIMER) => {
+            let [_, function, context] = params(core)?;
+            brew.state
+                .lock()
+                .timers
+                .retain(|x| x.context != context || (function != 0 && x.function != function));
+            Ok(0)
         }
         (Surface::Shell, SHELL_POST_EVENT) => {
             let [_, _, _, event, first, second] = params(core)?;
@@ -913,6 +937,68 @@ fn wide_units(core: &ArmCore, address: u32, count: i32) -> Result<Vec<Vec<u8>>> 
     }
 
     Ok(units)
+}
+
+/// `ATOI`: 카트라이더레이싱 reads the numbers its tracks are set up with -
+/// lap times like `14000`, counts like `6` - as text out of its resource
+/// archive. Every one read as zero, and the race never finished loading.
+fn atoi(core: &mut ArmCore) -> Result<u32> {
+    let text = read_string(core, core.read_param(0)?)?;
+    let text = text.trim_ascii_start();
+    let (negative, digits) = match text.first() {
+        Some(b'-') => (true, &text[1..]),
+        Some(b'+') => (false, &text[1..]),
+        _ => (false, text),
+    };
+    let value = digits
+        .iter()
+        .take_while(|x| x.is_ascii_digit())
+        .fold(0i32, |value, digit| value.wrapping_mul(10).wrapping_add((digit - b'0') as i32));
+
+    Ok(if negative { value.wrapping_neg() } else { value } as u32)
+}
+
+/// `STRNCMP`: 카트라이더레이싱 matches two-letter codes in its data with it.
+fn bounded_string_compare(core: &mut ArmCore) -> Result<u32> {
+    let [first, second, length] = params(core)?;
+    let length = length.min(MAX_TRANSFER) as usize;
+    let mut left = read_string(core, first)?;
+    let mut right = read_string(core, second)?;
+    left.truncate(length);
+    right.truncate(length);
+
+    Ok(match left.cmp(&right) {
+        core::cmp::Ordering::Less => u32::MAX,
+        core::cmp::Ordering::Equal => 0,
+        core::cmp::Ordering::Greater => 1,
+    })
+}
+
+/// `f_op(first, second, operation)`, the helper behind `FADD`, `FSUB`,
+/// `FMUL` and `FDIV`: two doubles in `r0`-`r1` and `r2`-`r3`, the operation
+/// on the stack, and the double answered in `r0`-`r1`. 카트라이더레이싱 works
+/// its karts' speeds and its lap clock out this way - milliseconds over
+/// `1000.0` - and with every answer zero its karts never moved.
+fn float_operation(core: &mut ArmCore) -> Result<u32> {
+    let [first_low, first_high, second_low, second_high, operation] = params(core)?;
+    let first = f64::from_bits(((first_high as u64) << 32) | first_low as u64);
+    let second = f64::from_bits(((second_high as u64) << 32) | second_low as u64);
+
+    let result = match operation {
+        0 => first + second,
+        1 => first - second,
+        2 => first * second,
+        3 => first / second,
+        _ => {
+            tracing::warn!("BREW floating operation {operation} on {first} and {second} is not answered");
+            0.0
+        }
+    };
+
+    let bits = result.to_bits();
+    core.write_return_value(&[bits as u32, (bits >> 32) as u32])?;
+
+    Ok(bits as u32)
 }
 
 fn string_copy(core: &mut ArmCore) -> Result<u32> {
@@ -1201,7 +1287,24 @@ impl Brew {
             image.bytes = current;
         }
 
+        // A zero size is the whole picture: 어둠의전설 blits its title art,
+        // the GOScube logo, its banner and the speakers' portraits that way,
+        // and none of them were drawn. It sends its sheet of letter pieces -
+        // wider than the screen - the same way, and that one drawn whole is
+        // a strip of fragments over the menu, so a picture that could not
+        // fit the screen is still left out.
         let (width, height) = (width as i32, height as i32);
+        let whole = (width == 0 || height == 0) && image.decoded.width() <= screen_width && image.decoded.height() <= screen_height;
+        let width = if whole && width == 0 {
+            image.decoded.width() as i32 - source_x as i32
+        } else {
+            width
+        };
+        let height = if whole && height == 0 {
+            image.decoded.height() as i32 - source_y as i32
+        } else {
+            height
+        };
         if width > 0 && height > 0 {
             screen.draw_with_color_key(
                 x as i32,
@@ -1219,11 +1322,16 @@ impl Brew {
         Ok(1)
     }
 
-    /// Draws EUC-KR text: `r2` is the text and `r3` its length in bytes, or
-    /// negative for a terminated string, and the stack carries x and y - the
-    /// top of the line.
+    /// `DrawText(font, text, count, x, y, rectangle, flags)`: the handset's
+    /// EUC-KR text, terminated when `count` is negative, its line's top at
+    /// `y`.
+    ///
+    /// The flags place the text in the rectangle, or the screen without one,
+    /// and the text is clipped to it: 한쿠아 큰화 centres its menus, its
+    /// `1 : 확인` choices and its screen titles that way and gives `x` as
+    /// zero, so drawn at `x` they ran off the left edge.
     fn draw_text(&self, core: &mut ArmCore) -> Result<u32> {
-        let [_, _, address, count, x, y] = params(core)?;
+        let [_, _, address, count, x, y, rectangle, flags] = params(core)?;
         if address == 0 {
             return Ok(1);
         }
@@ -1241,19 +1349,61 @@ impl Brew {
         };
         let text = decode_euc_kr(&raw);
 
+        let bounds = if rectangle != 0 {
+            let record = read_bytes(core, rectangle, 8)?;
+            let field = |offset: usize| i16::from_le_bytes([record[offset], record[offset + 1]]) as i32;
+            Some((field(0), field(2), field(4), field(6)))
+        } else {
+            None
+        };
+
         let mut state = self.state.lock();
         let ink = state.colours.get(&TEXT_COLOUR_ITEM).map_or(BLACK, |x| packed_colour(*x));
-        let clip = full_clip(state.width, state.height);
-        state.screen.draw_text(
-            &text,
-            x as i32,
-            y as i32,
-            FONT_HEIGHT,
-            baseline_px(FONT_HEIGHT),
-            TextAlignment::Left,
-            ink,
-            clip,
-        );
+        let (bx, by, bw, bh) = bounds.unwrap_or((0, 0, state.width as i32, state.height as i32));
+
+        let width = string_width_px(&text, FONT_HEIGHT).ceil() as i32;
+        let x = if flags & TEXT_ALIGN_CENTRE != 0 {
+            bx + (bw - width) / 2
+        } else if flags & TEXT_ALIGN_RIGHT != 0 {
+            bx + bw - width
+        } else if flags & TEXT_ALIGN_LEFT != 0 {
+            bx
+        } else {
+            x as i32
+        };
+        let line = FONT_HEIGHT as i32;
+        let y = if flags & TEXT_ALIGN_MIDDLE != 0 {
+            by + (bh - line) / 2
+        } else if flags & TEXT_ALIGN_BOTTOM != 0 {
+            by + bh - line
+        } else if flags & TEXT_ALIGN_TOP != 0 {
+            by
+        } else {
+            y as i32
+        };
+
+        let screen = full_clip(state.width, state.height);
+        let clip = match bounds {
+            Some((bx, by, bw, bh)) if bw > 0 && bh > 0 => {
+                let (left, top) = (bx.max(0), by.max(0));
+                let right = (bx + bw).min(screen.width as i32);
+                let bottom = (by + bh).min(screen.height as i32);
+                if right <= left || bottom <= top {
+                    return Ok(1);
+                }
+                Clip {
+                    x: left,
+                    y: top,
+                    width: (right - left) as u32,
+                    height: (bottom - top) as u32,
+                }
+            }
+            _ => screen,
+        };
+
+        state
+            .screen
+            .draw_text(&text, x, y, FONT_HEIGHT, baseline_px(FONT_HEIGHT), TextAlignment::Left, ink, clip);
 
         Ok(1)
     }

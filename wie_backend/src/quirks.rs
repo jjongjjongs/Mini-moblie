@@ -504,6 +504,9 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // 하이킥 screens 24 rows short over a white band, and its title's PRESS ANY
     // KEY under the panel. Told 296 it lays every screen out to the edge.
     (TitlePlatform::Ktf, "01039F5A", panel(240, 296)),
+    // 마이애미 나이츠: every screen - the title, the menu, character select -
+    // stops at row 296 of its 240x320 panel, over a white strip.
+    (TitlePlatform::Ktf, "01038150", panel(240, 320).with_bottom_cropped(24)),
     // 2006현영맞고: its pictures are 300 rows tall, and the 20 under them kept
     // the title's logo under the menu.
     (TitlePlatform::Ktf, "01033511", panel(240, 320).with_bottom_cropped(20)),
