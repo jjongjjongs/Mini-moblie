@@ -879,15 +879,21 @@ fn served_library(context: &dyn WIPICContext, matches: impl Fn(&str) -> bool) ->
 /// Loading is how a title reaches a shared library sitting beside it on the
 /// handset. Nothing sits beside this one, except the libraries this runtime
 /// serves itself (see [`SERVED_LIBRARIES`]).
+///
+/// A load that took answers the loaded program's id, which is above zero.
+/// 영웅서기5 keeps what it gets for `FastRelay` and goes on to the library's
+/// table only when it is (`0x19022e`); answered zero, its shop gave up there
+/// with -12 before it had asked for the table at all.
 pub async fn load(context: &mut dyn WIPICContext, ptr_name: WIPICWord) -> Result<i32> {
     let name = program_name_for_log(context, ptr_name);
 
     // A library that is here: what `MC_knlGetExecNames` listed for it is what
     // the title hands back, so the id anywhere in the name is that.
     if let Some((_, interface)) = served_library(context, |id| name.contains(id)) {
-        tracing::info!("MC_knlLoad({name:?}) -> 0, the {interface} library");
+        let id = SERVED_LIBRARIES.iter().position(|(_, served)| *served == interface).unwrap_or(0) as i32 + 1;
+        tracing::info!("MC_knlLoad({name:?}) -> {id}, the {interface} library");
 
-        return Ok(0);
+        return Ok(id);
     }
 
     tracing::info!("MC_knlLoad({name:?}) -> -12, nothing else is installed");
@@ -1569,7 +1575,7 @@ mod test {
         register_dll_interface(&context.kernel_state(), fastrelay::INTERFACE_NAME, 0x1000);
 
         assert_eq!(get_exec_names(&mut context, name, 0, 0, out, 64).await.unwrap(), 1);
-        assert_eq!(load(&mut context, out).await.unwrap(), 0);
+        assert!(load(&mut context, out).await.unwrap() > 0, "a load that took answers an id above zero");
     }
 
     /// A buffer the listing does not fit in is refused rather than filled part
