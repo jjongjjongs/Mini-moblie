@@ -293,6 +293,7 @@ impl BillingGatewayConnection {
 
 impl LocalConnection for BillingGatewayConnection {
     fn write(&mut self, bytes: &[u8]) {
+        tracing::debug!("billing gateway {}: wrote {}", self.peer, crate::billing::bill_frame_trace(bytes));
         self.pending.extend_from_slice(bytes);
 
         // One write is not always one frame, so take whole frames only and

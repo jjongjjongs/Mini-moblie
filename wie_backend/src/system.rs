@@ -167,6 +167,13 @@ impl System {
             "211.115.66.250",
             15133,
         )));
+        // The same server's other address, which the 2010 GP titles -
+        // 미니게임천국5 and 액션퍼즐패밀리4 - dial for their shops.
+        local_network.register(Box::new(crate::local_network::BillingGatewayEndpoint::new_length_prefixed(
+            "billing(211.115.66.252:15133)",
+            "211.115.66.252",
+            15133,
+        )));
 
         // 크로이센's shop server for its KTF build (222.231.57.145:56000), gone
         // for years. A purchase dials it and waits on a connect that never
