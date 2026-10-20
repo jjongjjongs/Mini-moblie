@@ -103,7 +103,21 @@ pub async fn get_system_property(context: &mut dyn WIPICContext, ptr_id: WIPICWo
         "ANNUN_SILENT" => "0",
         "ANNUN_ALARM" => "0",
         "ANNUN_SECURITY" => "0",
-        "CURRENTCH" => "0",
+        // The network the handset is on. A KTF handset names it by its first
+        // letter, and its titles check for it before they go online: the
+        // purchase in 서든어택포켓2 (`0x12d758`) wants `W`, `E` or `C`, and the
+        // shop in SBS포트리스4 (`0x125698`) wants exactly `W`, and anything
+        // else is a WiFi or 네스팟 connection they refuse ("WCDMA전용 어플입니다").
+        // 메이플스토리 Live, 2011프로야구 and others take `W` as the ordinary
+        // WCDMA case too, so a KTF archive is told it is on WCDMA. Other
+        // platforms keep the `0` they always had.
+        "CURRENTCH" => {
+            if is_ktf_archive(context).await {
+                "W"
+            } else {
+                "0"
+            }
+        }
         "AIRPLANE_MODE" => "0",
         "ROAMING_AREA" => "0",
         "DS_LOCK" => "0",
@@ -1061,6 +1075,12 @@ pub async fn get_app_manager_id(_context: &mut dyn WIPICContext) -> Result<WIPIC
     Ok(0)
 }
 
+/// Whether the title came in a KTF archive, which is the one kind that carries
+/// an `__adf__` descriptor beside the jar.
+async fn is_ktf_archive(context: &mut dyn WIPICContext) -> bool {
+    context.system().filesystem().size("__adf__").await.is_some()
+}
+
 /// The security level the title's own descriptor declares, if it declares one.
 ///
 /// KTF archives carry `__adf__`, and its `SLvl` line is the level the handset
@@ -1333,6 +1353,27 @@ mod test {
         assert_eq!(get_system_property(&mut context, id, out, 128).await.unwrap(), 0);
         let result = String::from_utf8(read_null_terminated_string_bytes(&context, out).unwrap()).unwrap();
         assert!(result.contains("Yamaha_MA3"), "{result}");
+
+        Ok(())
+    }
+
+    /// A KTF archive is on WCDMA, which its titles check before going online;
+    /// anything else keeps reporting `0`.
+    #[futures_test::test]
+    async fn the_current_channel_is_wcdma_for_a_ktf_archive() -> Result<()> {
+        async fn current_channel(context: &mut TestContext) -> String {
+            let id = context.alloc_raw(16).unwrap();
+            let out = context.alloc_raw(16).unwrap();
+            write_null_terminated_string_bytes(context, id, b"CURRENTCH").unwrap();
+            assert_eq!(get_system_property(context, id, out, 16).await.unwrap(), 0);
+            String::from_utf8(read_null_terminated_string_bytes(context, out).unwrap()).unwrap()
+        }
+
+        let mut context = TestContext::with_system(System::new(Box::new(TestPlatform::new()), "pid", "aid", DefaultTaskRunner));
+        assert_eq!(current_channel(&mut context).await, "0");
+
+        context.system().filesystem().add_virtual("__adf__", b"AID:01041FB9\n".to_vec());
+        assert_eq!(current_channel(&mut context).await, "W");
 
         Ok(())
     }
