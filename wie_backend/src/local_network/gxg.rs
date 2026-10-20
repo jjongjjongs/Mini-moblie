@@ -118,6 +118,21 @@ struct GxgConnection {
 /// `211.115.203.30:10018` for their shops, and the relay found nothing
 /// answering it. The frames are the ones the gateway carries as data, so they
 /// are answered the same way.
+///
+/// What comes back down the relay is not quite what went up: each frame the
+/// server sends arrives behind a header of the relay's own, which the title
+/// reads and throws away before the frame (`0x12fbc8` in Live, and the same
+/// reads in 크아비엔비2011):
+///
+/// ```text
+/// u8, u32, u16be length, that many bytes      the relay's, discarded
+/// u32le length, 0xffff, ...                    Nexon's frame
+/// ```
+///
+/// Nothing in the header is looked at, but every one of its reads has to
+/// return something, so the length cannot be zero. Sent bare, the frame's own
+/// bytes were read as the header: 크아 took `ff 12` for a length of -238, and
+/// Live went on waiting for the rest of a frame that never came.
 #[derive(Default)]
 pub struct NexonRelayEndpoint {
     stars: Arc<spin::Mutex<Stars>>,
@@ -133,6 +148,10 @@ impl NexonRelayEndpoint {
 /// The address the KTF builds dial, and the ports of it they reach.
 const RELAY_HOST: &str = "211.115.203.30";
 const RELAY_PORTS: [u16; 2] = [10013, 10018];
+
+/// The relay's header in front of each frame it delivers: a byte, four bytes,
+/// a big-endian length of one, and that one byte.
+const RELAY_HEADER: [u8; 8] = [0, 0, 0, 0, 0, 0, 1, 0];
 
 impl LocalEndpoint for NexonRelayEndpoint {
     fn name(&self) -> &str {
@@ -186,6 +205,7 @@ impl LocalConnection for NexonRelayConnection {
                     drop(stars);
 
                     tracing::info!("nexon relay -> {}", answer.iter().map(|x| format!("{x:02x}")).collect::<String>());
+                    self.outgoing.extend_from_slice(&RELAY_HEADER);
                     self.outgoing.extend_from_slice(&answer);
                 }
                 None => tracing::warn!("nexon relay: no answer"),
@@ -455,7 +475,8 @@ impl LocalConnection for GxgConnection {
 mod tests {
     /// The KTF builds' frames come straight, with no gateway frame around
     /// them, and are answered the same way the gateway's data is: here a
-    /// 캔디샵 session, which is answered with its command plus one.
+    /// 캔디샵 session, which is answered with its command plus one, behind the
+    /// relay's own header.
     #[test]
     fn a_relayed_frame_is_answered_without_the_gateway() {
         use super::{LocalEndpoint, LocalRead, NexonRelayEndpoint};
@@ -480,8 +501,10 @@ mod tests {
         let LocalRead::Data(read) = connection.read(&mut out) else {
             panic!("the session is answered");
         };
-        assert_eq!(&out[4..8], &[0xff, 0xff, 0x01, 0x00]);
-        assert_eq!(u32::from_le_bytes(out[..4].try_into().unwrap()) as usize, read);
+        let (header, frame) = out[..read].split_at(super::RELAY_HEADER.len());
+        assert_eq!(header, &super::RELAY_HEADER);
+        assert_eq!(&frame[4..8], &[0xff, 0xff, 0x01, 0x00]);
+        assert_eq!(u32::from_le_bytes(frame[..4].try_into().unwrap()) as usize, frame.len());
     }
 
     use super::*;
