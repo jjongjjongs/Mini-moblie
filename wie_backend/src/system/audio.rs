@@ -381,7 +381,19 @@ impl Audio {
             if active.pending_stop_polls.is_none() {
                 active.pending_stop_polls = Some(0);
             }
-            self.playing.remove(&audio_handle);
+
+            // The handle may also be sounding once over the loop: 파워풀프로야구
+            // 2009's name entry plays its looping clip, then the same clip once,
+            // then stops it - every frame. The once-over playback is not the
+            // loop and is not deferred; it is stopped here, or its watcher waits
+            // out the whole 28-second track. Left waiting, one piled up per
+            // frame, each a thread with its stack, and the heap ran out within
+            // two seconds of the screen opening.
+            if let Some(stop_flag) = self.playing.remove(&audio_handle)
+                && !Arc::ptr_eq(&stop_flag, &active.stop_flag)
+            {
+                stop_flag.store(true, Ordering::Relaxed);
+            }
             return;
         }
 
@@ -973,6 +985,21 @@ mod tests {
             h1 as usize,
             "the stop must target the stream the sink played (h1), not a later handle"
         );
+    }
+
+    /// A clip played once over its own looping playback, then stopped, stops
+    /// the once-over playback at once: only the loop's stop is deferred.
+    #[test]
+    fn a_stop_ends_a_one_shot_played_over_the_loop() {
+        let (system, _) = new_system_with_smaf_counters();
+
+        let handle = system.audio().load_smaf(b"BGM-DATA").unwrap();
+        let looping = system.audio().play_with_completion(&system, handle, true).unwrap();
+        let once = system.audio().play_with_completion(&system, handle, false).unwrap();
+        system.audio().stop(handle);
+
+        assert!(once.stopped.load(Ordering::Relaxed), "the one-shot's watcher is released");
+        assert!(!looping.stopped.load(Ordering::Relaxed), "the loop's stop is still deferred");
     }
 
     #[futures_test::test]
