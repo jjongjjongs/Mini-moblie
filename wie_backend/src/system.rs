@@ -177,12 +177,18 @@ impl System {
 
         // GAMEVIL's shop servers for its 2010-11 KTF builds, gone for years:
         // 2011프로야구 dials 23205, 2011슈퍼사커 and 놈5 29505, and a purchase
-        // sat on a connect that never completed. Their records are the
+        // sat on a connect that never completed. The answer to their opening
+        // question sends them on to 31105, the shop proper, answered here too.
+        // Their records are the
         // `tagNetHeader` ones 제노니아 writes - a `u16le` length and a `u16le`
         // command - read the way their own reader reads them
         // (`crate::billing::ktf_local_gamevil_2011_response`). Host-gated, so
         // no other title is touched.
-        for (name, port) in [("gamevil(218.145.70.36:23205)", 23205), ("gamevil(218.145.70.36:29505)", 29505)] {
+        for (name, port) in [
+            ("gamevil(218.145.70.36:23205)", 23205),
+            ("gamevil(218.145.70.36:29505)", 29505),
+            ("gamevil(218.145.70.36:31105)", crate::billing::GAMEVIL_SHOP_PORT),
+        ] {
             local_network.register(Box::new(crate::local_network::BillingGatewayEndpoint::new_gamevil(
                 name,
                 "218.145.70.36",

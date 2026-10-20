@@ -379,9 +379,17 @@ pub fn ktf_local_miniheroes2_response(request: &[u8]) -> Option<Vec<u8>> {
 /// 21 bytes from the status on, closes the socket and moves the shop on to its
 /// next step.
 ///
-/// So a command is answered with itself plus one, a status of one and zeros
-/// behind it - enough of them for the longest of those copies, which only the
-/// server ever filled in.
+/// Those 21 bytes are where the shop goes next: the status, the server's
+/// address as sixteen bytes of dotted quad, and its port as a `u16le` - the
+/// fields `0x207d12` fills in with `218.145.70.36` and `0x7981` when it skips
+/// the question, and 2011슈퍼사커's `0x103bc6` dials from `+0xdc` and `+0xec`.
+/// Left at zero, all three dialled `255.255.255.255:0` and gave up
+/// (`연결실패`, `오류`, or `연결중` for ever). So the opening question is
+/// answered with that same server: `218.145.70.36:31105`, which these
+/// endpoints answer too.
+///
+/// Anything else is answered with the command plus one, a status of one and
+/// zeros behind it - enough of them for the longest of those copies.
 ///
 /// `None` for anything that is not one of these records: the length has to be
 /// the record's own and the command one a title sends, which is the even ones.
@@ -391,6 +399,14 @@ pub fn ktf_local_gamevil_2011_response(request: &[u8]) -> Option<Vec<u8>> {
     const SUCCEEDED: u8 = 1;
     /// The status and what the handlers read behind it.
     const BODY: usize = 0x20;
+    /// The opening question - 2011프로야구's `0x9900`, 2011슈퍼사커's and 놈5's
+    /// `0x0106` - and its length.
+    const OPENINGS: [u16; 2] = [0x9900, 0x0106];
+    const OPENING_LEN: usize = 21;
+    /// Where the shop is sent: the address as the dotted quad the title
+    /// copies, in sixteen bytes.
+    const SHOP_HOST: &str = "218.145.70.36";
+    const ADDRESS_LEN: usize = 16;
 
     if request.len() < HEADER || u16::from_le_bytes([request[0], request[1]]) as usize != request.len() {
         return None;
@@ -405,8 +421,19 @@ pub fn ktf_local_gamevil_2011_response(request: &[u8]) -> Option<Vec<u8>> {
     response[2..4].copy_from_slice(&(command + 1).to_le_bytes());
     response[HEADER] = SUCCEEDED;
 
+    if request.len() == OPENING_LEN && OPENINGS.contains(&command) {
+        let address = &mut response[HEADER + 1..HEADER + 1 + ADDRESS_LEN];
+        address[..SHOP_HOST.len()].copy_from_slice(SHOP_HOST.as_bytes());
+        let port = HEADER + 1 + ADDRESS_LEN;
+        response[port..port + 2].copy_from_slice(&GAMEVIL_SHOP_PORT.to_le_bytes());
+    }
+
     Some(response)
 }
+
+/// The shop server GAMEVIL's KTF titles fall back on, and are sent on to - see
+/// [`ktf_local_gamevil_2011_response`].
+pub const GAMEVIL_SHOP_PORT: u16 = 31105;
 
 #[cfg(test)]
 mod gamevil_2011_tests {
@@ -421,6 +448,10 @@ mod gamevil_2011_tests {
         let reply = ktf_local_gamevil_2011_response(&request).expect("the record is answered");
         assert_eq!(&reply[..5], &[0x24, 0x00, 0x01, 0x99, 0x01]);
         assert_eq!(reply.len(), 0x24);
+        // The opening question sends the shop on to the server that answers it.
+        assert_eq!(&reply[5..18], b"218.145.70.36");
+        assert!(reply[18..21].iter().all(|&b| b == 0));
+        assert_eq!(&reply[21..23], &GAMEVIL_SHOP_PORT.to_le_bytes());
 
         // An answer is not answered.
         let mut answer = request.clone();
