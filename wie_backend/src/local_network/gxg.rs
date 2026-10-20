@@ -112,6 +112,103 @@ struct GxgConnection {
     shop: Arc<spin::Mutex<CandyShop>>,
 }
 
+/// The servers behind the gateway, as the KTF builds reach them: straight,
+/// through the `FastRelay` carrier library, with no gateway frame around
+/// Nexon's own. 메이플스토리 Live and 크아비엔비2011 dial
+/// `211.115.203.30:10018` for their shops, and the relay found nothing
+/// answering it. The frames are the ones the gateway carries as data, so they
+/// are answered the same way.
+#[derive(Default)]
+pub struct NexonRelayEndpoint {
+    stars: Arc<spin::Mutex<Stars>>,
+    shop: Arc<spin::Mutex<CandyShop>>,
+}
+
+impl NexonRelayEndpoint {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// The address the KTF builds dial, and the ports of it they reach.
+const RELAY_HOST: &str = "211.115.203.30";
+const RELAY_PORTS: [u16; 2] = [10013, 10018];
+
+impl LocalEndpoint for NexonRelayEndpoint {
+    fn name(&self) -> &str {
+        "nexon(211.115.203.30)"
+    }
+
+    fn accepts(&self, scheme: &str, host: &str, port: u16) -> bool {
+        scheme == "socket" && host == RELAY_HOST && RELAY_PORTS.contains(&port)
+    }
+
+    fn open(&self, _scheme: &str, _host: &str, _port: u16) -> Box<dyn LocalConnection> {
+        Box::new(NexonRelayConnection {
+            stars: self.stars.clone(),
+            shop: self.shop.clone(),
+            ..Default::default()
+        })
+    }
+}
+
+#[derive(Default)]
+struct NexonRelayConnection {
+    pending: Vec<u8>,
+    outgoing: Vec<u8>,
+    stars: Arc<spin::Mutex<Stars>>,
+    shop: Arc<spin::Mutex<CandyShop>>,
+}
+
+impl LocalConnection for NexonRelayConnection {
+    fn write(&mut self, bytes: &[u8]) {
+        self.pending.extend_from_slice(bytes);
+
+        // Nexon's frames lead with a `u32le` length counting the whole frame.
+        while self.pending.len() >= MARKED_HEADER {
+            let length = u32::from_le_bytes(self.pending[..4].try_into().unwrap()) as usize;
+            if length < MARKED_HEADER || length > 0x10000 {
+                tracing::warn!("nexon relay: dropping {} bytes that are not a frame", self.pending.len());
+                self.pending.clear();
+                break;
+            }
+            if self.pending.len() < length {
+                break;
+            }
+
+            let data: Vec<u8> = self.pending.drain(..length).collect();
+            tracing::info!("nexon relay <- {}", data.iter().map(|x| format!("{x:02x}")).collect::<String>());
+            match self.shop.lock().answer(&data).or_else(|| answer_data(&data)) {
+                Some(mut answer) => {
+                    let mut stars = self.stars.lock();
+                    stars.observe(&data);
+                    stars.settle(&mut answer);
+                    drop(stars);
+
+                    tracing::info!("nexon relay -> {}", answer.iter().map(|x| format!("{x:02x}")).collect::<String>());
+                    self.outgoing.extend_from_slice(&answer);
+                }
+                None => tracing::warn!("nexon relay: no answer"),
+            }
+        }
+    }
+
+    fn read(&mut self, out: &mut [u8]) -> LocalRead {
+        if self.outgoing.is_empty() {
+            return LocalRead::Pending;
+        }
+
+        let take = out.len().min(self.outgoing.len());
+        out[..take].copy_from_slice(&self.outgoing[..take]);
+        self.outgoing.drain(..take);
+        LocalRead::Data(take)
+    }
+
+    fn readable(&self) -> bool {
+        !self.outgoing.is_empty()
+    }
+}
+
 /// One frame of the gateway's, as the title reads them.
 pub fn frame(version: &[u8; 12], kind: &[u8; 3], body: &[u8]) -> Vec<u8> {
     let mut frame = Vec::with_capacity(HEADER_LEN + body.len() + 1);
@@ -356,6 +453,37 @@ impl LocalConnection for GxgConnection {
 
 #[cfg(test)]
 mod tests {
+    /// The KTF builds' frames come straight, with no gateway frame around
+    /// them, and are answered the same way the gateway's data is: here a
+    /// 캔디샵 session, which is answered with its command plus one.
+    #[test]
+    fn a_relayed_frame_is_answered_without_the_gateway() {
+        use super::{LocalConnection, LocalEndpoint, LocalRead, NexonRelayEndpoint};
+
+        let endpoint = NexonRelayEndpoint::new();
+        assert!(endpoint.accepts("socket", "211.115.203.30", 10018));
+        assert!(!endpoint.accepts("socket", "211.115.203.31", 10018));
+
+        let mut session = alloc::vec::Vec::new();
+        session.extend_from_slice(&(8u32 + 25).to_le_bytes());
+        session.extend_from_slice(&[0xff, 0xff, 0x00, 0x00]);
+        session.extend_from_slice(b"01068488891");
+        session.extend_from_slice(&[0u8; 14]);
+
+        let mut connection = endpoint.open("socket", "211.115.203.30", 10018);
+        connection.write(&session[..10]);
+        assert!(!connection.readable());
+        connection.write(&session[10..]);
+        assert!(connection.readable());
+
+        let mut out = [0u8; 64];
+        let LocalRead::Data(read) = connection.read(&mut out) else {
+            panic!("the session is answered");
+        };
+        assert_eq!(&out[4..8], &[0xff, 0xff, 0x01, 0x00]);
+        assert_eq!(u32::from_le_bytes(out[..4].try_into().unwrap()) as usize, read);
+    }
+
     use super::*;
 
     const VERSION: &[u8; 12] = b"GXG.01.00.07";

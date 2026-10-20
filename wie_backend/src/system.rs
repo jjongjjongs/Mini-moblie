@@ -112,6 +112,7 @@ impl System {
         // its titles buy through. Answered by name as well as by address, the
         // name no longer resolving.
         local_network.register(Box::new(crate::local_network::GxgEndpoint::new()));
+        local_network.register(Box::new(crate::local_network::NexonRelayEndpoint::new()));
 
         // 엑스피드스노보드's ranking/map server, gone for years. Answering it in
         // process lets the title past the `네트워크 접속 에러` its title screen

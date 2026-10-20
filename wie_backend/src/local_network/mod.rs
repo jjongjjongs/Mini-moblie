@@ -47,7 +47,7 @@ pub use self::{
     fortress::FortressEndpoint,
     funter::FunterEndpoint,
     gpang::GpangEndpoint,
-    gxg::GxgEndpoint,
+    gxg::{GxgEndpoint, NexonRelayEndpoint},
     levelup::LevelUpEndpoint,
     relay::RelayEndpoint,
     sdw::SdwEndpoint,
