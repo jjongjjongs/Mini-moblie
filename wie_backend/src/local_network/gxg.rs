@@ -171,12 +171,16 @@ fn open_target(body: &[u8]) -> Option<(String, u16)> {
 
 /// What the server behind the gateway says to `data`: whichever of the
 /// protocols its titles speak the data is in. Nexon's own `[u32 length][0xffff]
-/// [command]` frames, which 크아비엔비2011 and the 메이플/던파 builds send, and
-/// 컴투스's five-byte-header messages, which 슈퍼액션히어로4 does.
+/// [command]` frames, which 크아비엔비2011 and the 메이플/던파 builds send,
+/// 컴투스's five-byte-header messages, which 슈퍼액션히어로4 does, and EA's
+/// `[u32be length][command]` ones: EA프로야구2010's SKT builds carry the SMS
+/// question its LGT build sends `210.222.18.28:20102` straight to `:20100`
+/// through here, and left unanswered wait a long while on `네트워크 연결중`.
 fn answer_data(data: &[u8]) -> Option<Vec<u8>> {
     crate::billing::lgt_local_marked_command_response(data)
         .or_else(|| crate::billing::lgt_local_opcode_header_response(data))
         .or_else(|| crate::billing::lgt_local_scrambled_opcode_header_response(data))
+        .or_else(|| crate::billing::lgt_local_ea_baseball_response(data))
         .or_else(|| marked_granted(data))
 }
 

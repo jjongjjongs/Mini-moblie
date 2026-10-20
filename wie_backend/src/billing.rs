@@ -912,18 +912,21 @@ pub fn lgt_local_ea_baseball_response(request: &[u8]) -> Option<Vec<u8>> {
         // `wie_lgt::runtime::firmware_link`) hands out zeroed.
         0x10 if request.len() >= 9 => Some(vec![0x00, 0x00, 0x00, 0x09, 0x11, 0x00, 0x00, 0x00, 0x00]),
 
-        // Once the login is granted the title sends the session/account request
-        // `00 00 00 09 d0 00 00 00 01`, and with no reply it fell back to 접속
-        // 실패. Its reply is command 0xd1 (handler 0x96884): that handler reads a
-        // single u16 status and stores the connected flag when it is zero,
-        // failing on anything else. Answer with 0xd1 and an all-zero status.
-        0xd0 => {
-            // DIAGNOSTIC(ea-connect): trace what the title does the moment it
-            // finishes reading this reply, to see whether the 0xd1 grant lets it
-            // leave 접속 실패 or whether it sends a further request.
-            crate::probe::arm_when_drained("ea-connect", 40000);
-            Some(vec![0x00, 0x00, 0x00, 0x09, 0xd1, 0x00, 0x00, 0x00, 0x00])
-        }
+        // Once the login is granted the title sends `00 00 00 09 d0 00 00 00 01`:
+        // the subscriber's answer to the SMS question it asks on the way in
+        // (`SMS 수신동의를 하시면 …`), the last word 1 for no. Its reply is
+        // command 0xd1 (handler 0x96884), a u16 status, zero for registered.
+        //
+        // Registered, the title says `SMS 수신거부를 성공했습니다`, keeps the answer
+        // and never asks again. That one time it goes straight to the
+        // mode-select menu without passing its title screen, which is where
+        // the menu's art is loaded (`m_mainmenu.mgr`, the logo, the button
+        // faces - the SKT build reaches its loader at 0x1358e8 only from the
+        // title's key handler), so the menu has blank buttons and no logo until
+        // a match loads them. Every launch after is whole. Refused instead, the
+        // menu is whole the first time too, but the question and a
+        // `서버 접속에 실패했습니다` come back on every launch.
+        0xd0 => Some(vec![0x00, 0x00, 0x00, 0x09, 0xd1, 0x00, 0x00, 0x00, 0x00]),
 
         _ => None,
     }
@@ -11792,7 +11795,7 @@ mod tests {
     /// command 0xd0, which is answered with command 0xd1 and an all-zero status -
     /// the success path in handler 0x96884.
     #[test]
-    fn the_ea_baseball_session_is_granted() {
+    fn the_ea_baseball_sms_registration_is_granted() {
         let request = [0x00, 0x00, 0x00, 0x09, 0xd0, 0x00, 0x00, 0x00, 0x01];
         assert_eq!(
             lgt_local_ea_baseball_response(&request),
