@@ -2925,6 +2925,37 @@ pub fn lgt_local_scrambled_opcode_header_response(request: &[u8]) -> Option<Vec<
 }
 
 #[cfg(test)]
+mod minigame_heaven_5_star_purchase_tests {
+    use super::*;
+
+    fn frame(hex: &str) -> Vec<u8> {
+        hex.split_whitespace().map(|byte| u8::from_str_radix(byte, 16).unwrap()).collect()
+    }
+
+    /// 미니게임천국5's 별구매 of 4000 stars, frame by frame as it went over
+    /// `211.115.66.252:15133`: the session under `GP5_ITEM`, the approval,
+    /// and the confirmation, whose answer is the number of stars it adds.
+    #[test]
+    fn the_star_purchase_walks_through_to_the_amount_asked_for() {
+        let mut session = frame("00 67 00 00 00 03 ee 00 00 01 03 4b 54 5f 57 49 50 49 43 5f 31 2e 30 2e 30 00 00 00 00 00 00");
+        session.extend_from_slice(b"01068488891");
+        session.resize(5 + 68, 0);
+        session.extend_from_slice(b"GP5_ITEM");
+        session.resize(0x67, 0);
+        assert_eq!(response(&session), Some(frame("00 05 00 c8 00")));
+
+        let approval = frame("00 0d 00 c9 00 00 14 00 00 0f a0 00 04");
+        let approved = response(&approval).expect("the approval is answered");
+        assert_eq!(approved, frame("00 11 00 ca 00 00 00 0f a0 30 30 30 30 30 30 30 31"));
+
+        // The title sends the approval's order and code back under 0xcb.
+        let mut confirm = approved.clone();
+        confirm[3] = 0xcb;
+        assert_eq!(response(&confirm), Some(frame("00 09 00 cc 00 00 00 0f a0")));
+    }
+}
+
+#[cfg(test)]
 mod scrambled_opcode_header_tests {
     use super::*;
 
@@ -3140,6 +3171,11 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
     /// opcodes up to `0x4a` through a table and calls anything past that a
     /// failed connection - so that session is answered under opcode 0.
     const APF3: &[u8] = b"APF3";
+    /// 미니게임천국5 (KTF `0104261C`) opens its 별구매 with this session on
+    /// `211.115.66.252:15133`, `GP5_ITEM` in the same place:
+    /// `00 67 00 00 00 03 ee 00 00 01 03 "KT_WIPIC_1.0.0" ... "GP5_ITEM"`.
+    /// Answered under opcode 0, it sat on `별을 구매 중입니다` and sent it again.
+    const GP5_ITEM: &[u8] = b"GP5_ITEM";
 
     /// The library's type `5`, which carries nothing and is answered in kind.
     const SIGNAL_OPCODE: u8 = 0x01;
@@ -3328,6 +3364,7 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
         SESSION_OPCODE if body.len() >= SESSION_BODY_MIN && SERVICES.contains(&u16::from_be_bytes([body[0], body[1]])) => {
             if body.get(KTF_TITLE_AT..KTF_TITLE_AT + MINIGAME_HEAVEN.len()) == Some(MINIGAME_HEAVEN)
                 || body.get(KTF_TITLE_AT..KTF_TITLE_AT + APF3.len()) == Some(APF3)
+                || body.get(KTF_TITLE_AT..KTF_TITLE_AT + GP5_ITEM.len()) == Some(GP5_ITEM)
             {
                 (KTF_SESSION_ANSWER_OPCODE, Vec::new())
             } else {
@@ -3386,8 +3423,14 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
         // The product code and the quantity, and a `u32` back.
         ORDER_OPCODE if body.len() == 4 => (ORDER_OPCODE, Vec::from(ORDER.to_be_bytes())),
         // The `u16` `0x14` `0x47604` opens with, the amount, and the quantity.
+        // The `u16` `0x14`, a `u32` amount and a `u16` quantity. 미니게임천국5
+        // asks this way (`00 14 00 00 0f a0 00 04` for 4000 stars, four of a
+        // thousand) and, like 3, adds the order the confirmation hands back to
+        // its stars - with the order fixed at one, 4000 bought one star. So the
+        // amount goes out as the order, the way the short form's does; 엘피스
+        // keeps the order without comparing it, so it is no worse off.
         APPROVAL_OPCODE if body.len() == 8 && u16::from_be_bytes([body[0], body[1]]) == 0x14 => {
-            let mut answer = Vec::from(ORDER.to_be_bytes());
+            let mut answer = Vec::from(&body[2..6]);
             answer.extend_from_slice(ORDER_CODE);
             (APPROVAL_ANSWER_OPCODE, answer)
         }
