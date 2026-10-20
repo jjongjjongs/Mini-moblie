@@ -48,6 +48,16 @@ pub trait WIPICContext: ByteRead + ByteWrite + Send + Sync {
     fn spawn(&mut self, callback: WIPICMethodBody) -> Result<()>;
     async fn get_resource_size(&self, name: &str) -> Result<Option<usize>>;
     async fn read_resource(&self, name: &str) -> Result<Vec<u8>>;
+    /// The id `MC_knlGetResourceID` answers for `name`, where the platform
+    /// numbers its resources itself; `None` lets the kernel issue one.
+    ///
+    /// An SKT handset numbers the files a `.daf` carries by their place in its
+    /// directory, and titles lean on it: FIFA10 and EA프로야구2010 look the id
+    /// up in a table of their own (`killbert`, one word per other file, in
+    /// directory order), and an id that is an address indexes far past it.
+    fn resource_index(&self, _name: &str) -> Option<WIPICWord> {
+        None
+    }
     fn set_timer(&mut self, id: WIPICWord, due: Instant, callback: WIPICMethodBody);
     fn unset_timer(&mut self, id: WIPICWord);
 

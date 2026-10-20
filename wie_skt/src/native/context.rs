@@ -56,8 +56,13 @@ impl WIPICContext for SktWIPICContext {
         ContextLayout::Ktf
     }
 
+    /// The planes behind frame buffer handles of their own, as on KTF.
+    /// 삼국지천2009 blits its sprites itself (`0x147eae`), reaching the
+    /// pixels through image, colour-plane handle, frame buffer and the pixel
+    /// handle at `+0x10`; given the inline layout it took a logo's width, 148,
+    /// for the frame buffer and stopped reading `0xa4`.
     fn image_layout(&self) -> ImageLayout {
-        ImageLayout::Inline
+        ImageLayout::Handles
     }
 
     fn draw_image_keys_transparent_pixel(&self) -> bool {
@@ -190,6 +195,13 @@ impl WIPICContext for SktWIPICContext {
         data.truncate(read);
 
         Ok(data)
+    }
+
+    /// A file the executable carries is numbered by its place in the
+    /// executable's directory, as the handset numbers it; a file from the
+    /// filesystem gets the kernel's own id.
+    fn resource_index(&self, name: &str) -> Option<WIPICWord> {
+        self.resources.index(name).map(|x| x as WIPICWord)
     }
 
     fn set_timer(&mut self, id: WIPICWord, due: Instant, callback: WIPICMethodBody) {

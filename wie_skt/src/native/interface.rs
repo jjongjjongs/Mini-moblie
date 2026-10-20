@@ -165,6 +165,10 @@ async fn get_system_property(context: &mut dyn WIPICContext, id: WIPICWord, out:
     let name = read_null_terminated_string_bytes(context, id)?;
     let value = match name.as_slice() {
         b"PHONEMODEL" => PHONE_MODEL.into(),
+        // The handset's optional features, comma-separated - 아이뮤지션 looks
+        // for `Touchscreen` among them. This one has none, and an answer that
+        // is refused leaves the title cutting up whatever its stack held.
+        b"TERMSVCOPT" => String::new(),
         b"PHONENUMBER" | b"MIN" if !archive_names_subscriber(context, &name).await => match mod_subscriber_number(context).await {
             Some(number) => number,
             None => return kernel::get_system_property(context, id, out, out_size).await,
@@ -216,15 +220,27 @@ async fn mod_subscriber_number(context: &mut dyn WIPICContext) -> Option<String>
     Some(format!("010{}", core::str::from_utf8(&digits[13..21]).ok()?))
 }
 
-/// `MC_knlSetTimer` with a 32-bit timeout: `(timer, ms, param, flags)`.
-/// 던전앤파이터 runs its whole frame loop on it - `(timer, 20, 0, 0)` after
-/// `MC_knlDefTimer` - and sat on its first frame for as long as it was refused.
-async fn set_timer_ex(context: &mut dyn WIPICContext, timer: WIPICWord, timeout: WIPICWord, param: WIPICWord, flags: WIPICWord) -> Result<()> {
+/// `MC_knlSetTimer` with a word of its own after it: `(timer, ms as a 64-bit
+/// pair, param, flags)`, `flags` on the stack. 던전앤파이터 runs its whole
+/// frame loop on it - `(timer, 20, 0, 0)` after `MC_knlDefTimer` - and sat on
+/// its first frame for as long as it was refused.
+///
+/// The param is the fourth word, not the third: 리듬스타2 hands its timer
+/// object there (`(timer, 20, 0, timer)`) and its callback dereferences it, so
+/// read as the third it arrived as the high half of the timeout, zero.
+async fn set_timer_ex(
+    context: &mut dyn WIPICContext,
+    timer: WIPICWord,
+    timeout_low: WIPICWord,
+    timeout_high: WIPICWord,
+    param: WIPICWord,
+    flags: WIPICWord,
+) -> Result<()> {
     if flags != 0 {
-        tracing::debug!("SKT knlSetTimerEx({timer:#x}, {timeout}, {param:#x}, {flags:#x}): flags not understood");
+        tracing::debug!("SKT knlSetTimerEx({timer:#x}, {timeout_low}, {param:#x}, {flags:#x}): flags not understood");
     }
 
-    kernel::set_timer(context, timer, timeout, 0, param).await
+    kernel::set_timer(context, timer, timeout_low, timeout_high, param).await
 }
 
 /// The platform's version, `major.minor.patch`, written as a string into the

@@ -385,8 +385,10 @@ pub async fn free(context: &mut dyn WIPICContext, memory: WIPICIndirectPtr) -> R
 
 /// What this platform has handed out as resource ids.
 ///
-/// The id `MC_knlGetResourceID` answers is a pointer to a copy of the name, and
-/// a title stores it as the resource's identity, so it has to stay a pointer.
+/// The id `MC_knlGetResourceID` answers is a pointer to a copy of the name -
+/// unless the platform numbers its resources itself, see
+/// `WIPICContext::resource_index` - and a title stores it as the resource's
+/// identity, so it has to stay a pointer.
 /// What it must not be is where this platform reads the name back from. A
 /// title's drawing is not bounded by the surface it was given - a clear loop
 /// that runs off the end of a framebuffer lands in whatever the arena handed out
@@ -585,9 +587,17 @@ pub async fn get_resource_id(context: &mut dyn WIPICContext, ptr_name: WIPICWord
     // One name, one id, for the life of the run - see `KernelState`.
     let existing = context.kernel_state().lock().resource_ids.get(name.as_ref()).copied();
 
-    let ptr_handle = match existing {
-        Some(ptr_handle) => ptr_handle,
-        None => {
+    let ptr_handle = match (existing, context.resource_index(&name)) {
+        (Some(ptr_handle), _) => ptr_handle,
+        (None, Some(index)) => {
+            let state = context.kernel_state();
+            let mut state = state.lock();
+            state.resource_names.insert(index, name.to_string());
+            state.resource_ids.insert(name.to_string(), index);
+
+            index
+        }
+        (None, None) => {
             let name_bytes = name.as_bytes();
             let handle_size = name_bytes
                 .len()

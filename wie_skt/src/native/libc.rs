@@ -31,6 +31,7 @@ pub fn body(slot: u32) -> Option<WIPICMethodBody> {
         7 => strrchr.into_body(),
         11 => strstr.into_body(),
         12 => strlen.into_body(),
+        13 => strtok.into_body(),
         14 => memcpy.into_body(),
         15 => memmove.into_body(),
         16 => memcmp.into_body(),
@@ -201,6 +202,39 @@ async fn strstr(context: &mut dyn WIPICContext, haystack: WIPICWord, needle: WIP
 
 async fn strlen(context: &mut dyn WIPICContext, string: WIPICWord) -> Result<WIPICWord> {
     Ok(read_string(context, string)?.len() as WIPICWord)
+}
+
+/// Where the string `strtok` was cutting stops, kept for the run as the C
+/// library's own static pointer is; zero once it has run out.
+static STRTOK_NEXT: AtomicU32 = AtomicU32::new(0);
+
+/// 아이뮤지션 cuts its `TERMSVCOPT` property at commas with `(buffer, ",")`
+/// and then `(NULL, ",")` - the second call is what places the slot.
+async fn strtok(context: &mut dyn WIPICContext, string: WIPICWord, delimiters: WIPICWord) -> Result<WIPICWord> {
+    let start = if string != 0 { string } else { STRTOK_NEXT.load(Ordering::Relaxed) };
+    if start == 0 {
+        return Ok(0);
+    }
+
+    let delimiters = read_string(context, delimiters)?;
+    let bytes = read_string(context, start)?;
+
+    let Some(skip) = bytes.iter().position(|x| !delimiters.contains(x)) else {
+        STRTOK_NEXT.store(0, Ordering::Relaxed);
+        return Ok(0);
+    };
+    let token = start + skip as WIPICWord;
+
+    match bytes[skip..].iter().position(|x| delimiters.contains(x)) {
+        Some(length) => {
+            let end = token + length as WIPICWord;
+            context.write_bytes(end, &[0])?;
+            STRTOK_NEXT.store(end + 1, Ordering::Relaxed);
+        }
+        None => STRTOK_NEXT.store(0, Ordering::Relaxed),
+    }
+
+    Ok(token)
 }
 
 async fn memcpy(context: &mut dyn WIPICContext, dst: WIPICWord, src: WIPICWord, size: WIPICWord) -> Result<WIPICWord> {

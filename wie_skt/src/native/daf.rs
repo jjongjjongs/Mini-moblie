@@ -30,7 +30,6 @@
 //! `handleCletEvent`.
 
 use alloc::{
-    collections::BTreeMap,
     format,
     string::{String, ToString},
     vec::Vec,
@@ -300,7 +299,9 @@ impl BitReader<'_> {
 /// ```
 #[derive(Default)]
 pub struct Resources {
-    files: BTreeMap<String, (usize, usize)>,
+    /// Name, offset and size, in directory order: a file's place here is the
+    /// id the handset hands out for it - see [`Resources::index`].
+    files: Vec<(String, usize, usize)>,
     data: Vec<u8>,
 }
 
@@ -316,7 +317,7 @@ impl Resources {
         let data_start = header_size + directory_size;
 
         let mut names = block.get(0x1c + count * 8..).unwrap_or_default().split(|x| *x == 0);
-        let mut files = BTreeMap::new();
+        let mut files = Vec::new();
         for index in 0..count {
             let offset = read_u32(block, 0x1c + index * 8)? as usize;
             let size = read_u32(block, 0x1c + index * 8 + 4)? as usize;
@@ -325,7 +326,7 @@ impl Resources {
             };
 
             let name = String::from_utf8_lossy(name).to_string();
-            files.insert(name, (data_start + offset, size));
+            files.push((name, data_start + offset, size));
         }
 
         Ok(Self { files, data: block.to_vec() })
@@ -335,14 +336,19 @@ impl Resources {
     /// `MC_knlGetResourceID` matched: with or without the leading `/` the
     /// directory keeps, and without regard to case.
     pub fn get(&self, name: &str) -> Option<&[u8]> {
-        let wanted = name.trim_start_matches('/');
-        let (offset, size) = self
-            .files
-            .iter()
-            .find(|(file, _)| file.trim_start_matches('/').eq_ignore_ascii_case(wanted))
-            .map(|(_, location)| *location)?;
+        let (_, offset, size) = &self.files[self.index(name)?];
 
-        self.data.get(offset..offset + size)
+        self.data.get(*offset..*offset + *size)
+    }
+
+    /// The named file's place in the directory, which is the id the handset's
+    /// `MC_knlGetResourceID` answers - matched as [`Resources::get`] matches.
+    pub fn index(&self, name: &str) -> Option<usize> {
+        let wanted = name.trim_start_matches('/');
+
+        self.files
+            .iter()
+            .position(|(file, _, _)| file.trim_start_matches('/').eq_ignore_ascii_case(wanted))
     }
 
     pub fn len(&self) -> usize {
