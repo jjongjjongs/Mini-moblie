@@ -18,9 +18,17 @@
 //! ```text
 //! [0..12]   "DSP.01.00.01"
 //! [12..15]  the type: a request ends in `R`, its answer in `C`
-//! [15]      'C' from the title
-//! [16..26]  the body's length in ASCII digits, NUL-padded
+//! [15]      'C', either way
+//! [16..26]  the body's length in ASCII digits, NUL-padded - or all NUL for
+//!           an empty body, from 초코초코타이쿤2's build
 //! ```
+//!
+//! 초코초코타이쿤2 (`9000516933`) carries a later build that dials
+//! `ngph.gxg.com`'s old address, `211.234.231.177`, straight, and reads the
+//! header more strictly: its reader (`0x133d6`) drops an answer whose `[15]` is
+//! not `'C'`, and the title then offers to start over without checking. With
+//! it `'C'`, the title hears there is nothing kept and says
+//! `서버에 저장된 세이브데이터가 없습니다`.
 //!
 //! The addresses here are 1.0.2's; 1.0.3 is the same library a few bytes on.
 //! The title builds that at `0x1b4078`. Its receive (`0x1b4404`) reads the 26
@@ -48,6 +56,9 @@ use super::{LocalConnection, LocalEndpoint, LocalRead};
 /// Where [`super::gxg`] resolves `ngph.gxg.com`.
 const ADDRESS: &str = "10.71.88.71";
 const HOST: &str = "ngph.gxg.com";
+/// The address `ngph.gxg.com` had, which 초코초코타이쿤2 (`9000516933`) dials
+/// without looking the name up.
+const FIXED_ADDRESS: &str = "211.234.231.177";
 const PORT: u16 = 7110;
 
 const VERSION: &[u8; 12] = b"DSP.01.00.01";
@@ -64,7 +75,7 @@ impl LocalEndpoint for DspEndpoint {
     }
 
     fn accepts(&self, scheme: &str, host: &str, port: u16) -> bool {
-        scheme == "socket" && port == PORT && (host == ADDRESS || host.eq_ignore_ascii_case(HOST))
+        scheme == "socket" && port == PORT && (host == ADDRESS || host == FIXED_ADDRESS || host.eq_ignore_ascii_case(HOST))
     }
 
     fn open(&self, _scheme: &str, _host: &str, _port: u16) -> Box<dyn LocalConnection> {
@@ -93,7 +104,7 @@ fn message(kind: &[u8; 3], body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(HEADER_LEN + body.len() + 1);
     out.extend_from_slice(VERSION);
     out.extend_from_slice(kind);
-    out.push(b'S');
+    out.push(b'C');
 
     let mut length = [0u8; 10];
     let digits = format!("{}", body.len());
@@ -116,8 +127,14 @@ fn take_message(pending: &mut Vec<u8>) -> Option<([u8; 3], Vec<u8>)> {
         return None;
     }
 
+    // An empty body's length is `0` from EA's build and no digits at all from
+    // 초코초코타이쿤2's, which leaves the field NUL.
     let digits: Vec<u8> = pending[16..26].iter().copied().take_while(u8::is_ascii_digit).collect();
-    let length: usize = core::str::from_utf8(&digits).ok()?.parse().ok()?;
+    let length: usize = if digits.is_empty() {
+        0
+    } else {
+        core::str::from_utf8(&digits).ok()?.parse().ok()?
+    };
     if pending.len() < HEADER_LEN + length + 1 {
         return None;
     }
@@ -203,6 +220,7 @@ mod tests {
     fn only_the_save_server_is_answered() {
         assert!(DspEndpoint.accepts("socket", "10.71.88.71", 7110));
         assert!(DspEndpoint.accepts("socket", "ngph.gxg.com", 7110));
+        assert!(DspEndpoint.accepts("socket", "211.234.231.177", 7110));
         assert!(!DspEndpoint.accepts("socket", "10.71.88.71", 7300));
     }
 
@@ -218,5 +236,19 @@ mod tests {
 
         connection.write(b"DSP.01.00.01FPRC0\0\0\0\0\0\0\0\0\0\x17");
         assert_eq!(read_answer(&mut connection), (*b"FPC", vec![0]));
+    }
+
+    #[test]
+    fn an_empty_body_may_have_no_length_digits() {
+        let mut connection = DspConnection::default();
+
+        // 초코초코타이쿤2's, its length field left NUL.
+        connection.write(b"DSP.01.00.01SLRC\0\0\0\0\0\0\0\0\0\0\x17");
+        assert_eq!(read_answer(&mut connection), (*b"SLC", vec![0, 0, 0]));
+    }
+
+    #[test]
+    fn answers_are_marked_c_like_requests() {
+        assert_eq!(super::message(b"IPC", &[0])[15], b'C');
     }
 }
