@@ -108,6 +108,10 @@ impl System {
         // see the exchange rather than to have it answered.
         local_network.register(Box::new(crate::local_network::GpangEndpoint::new()));
 
+        // The server 아무이유없어2 checks for a save on before it starts, gone
+        // for years. Host-gated.
+        local_network.register(Box::new(crate::local_network::NoReasonEndpoint::new()));
+
         // Nexon Mobile's GXG gateway, `ngw.gxg.com:7300`, which the SKT builds of
         // its titles buy through. Answered by name as well as by address, the
         // name no longer resolving.

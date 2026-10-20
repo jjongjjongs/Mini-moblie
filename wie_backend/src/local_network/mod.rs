@@ -32,6 +32,7 @@ mod funter;
 mod gpang;
 mod gxg;
 mod levelup;
+mod noreason;
 mod pigmy;
 mod relay;
 mod sdw;
@@ -49,6 +50,7 @@ pub use self::{
     gpang::GpangEndpoint,
     gxg::{GxgEndpoint, NexonRelayEndpoint},
     levelup::LevelUpEndpoint,
+    noreason::NoReasonEndpoint,
     relay::RelayEndpoint,
     sdw::SdwEndpoint,
     snowboard::SnowBoardEndpoint,
