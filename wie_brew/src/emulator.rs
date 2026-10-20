@@ -26,6 +26,11 @@ const HANDSET_LICENCE: &str = "kenviron.cfg";
 
 /// How long the run loop waits when the title has handed over no frame yet.
 const IDLE_POLL_MS: u64 = 10;
+/// The longest the run loop waits before looking for keys again. A title
+/// can leave nothing but a far timer: 카트라이더레이싱's 아이템을 충전
+/// 하셨습니다 stops its frames and waits for a key with only its fifty-second
+/// time-out armed, and the loop slept through every key pressed.
+const KEY_POLL_MS: u64 = 16;
 
 struct BrewTaskRunner {
     core: ArmCore,
@@ -145,7 +150,7 @@ impl BrewEmulator {
 
             match brew.step(core).await? {
                 Some(0) => system.yield_now().await,
-                Some(wait) => system.sleep(wait).await,
+                Some(wait) => system.sleep(wait.min(KEY_POLL_MS)).await,
                 None => system.sleep(IDLE_POLL_MS).await,
             }
         }
