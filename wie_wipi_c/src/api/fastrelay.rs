@@ -19,6 +19,7 @@
 //! | 5 | `recv(socket, buffer, length)` | what arrived, or -19 when nothing has yet |
 //! | 6 | `close(socket)` | |
 //! | 7 | `connected()` | polled on a timer after `connect`; above zero moves the title on to its request |
+//! | 12 | `socket(index)` | 메이플스토리 Live and 크아비엔비2011 (`0x12f492`) call it with 0 straight after `connect` and write and read on what it answers |
 //!
 //! `send` and `recv` are a socket's write and read, so that is all a relay
 //! connection is here: a socket, answered in process by whatever endpoint this
@@ -79,6 +80,19 @@ pub async fn close(context: &mut dyn WIPICContext, socket: i32) -> Result<i32> {
     }
 
     net::socket_close(context, socket).await
+}
+
+/// `socket(index)`: the descriptor of the relay's connection.
+///
+/// 메이플스토리 Live and 크아비엔비2011 keep what `connect` answers only to see
+/// whether it failed, and take the socket they then write and read on from
+/// this, with 0 (`0x12f492` in Live). Unserved, it answered -1, and both wrote
+/// their first request to socket -1 and waited on it for ever.
+pub async fn socket(context: &mut dyn WIPICContext, index: i32) -> Result<i32> {
+    let socket = context.kernel_state().lock().relay_socket.unwrap_or(-1);
+    tracing::debug!("FastRelay socket({index}) -> {socket}");
+
+    Ok(socket)
 }
 
 /// `connected()`: whether the relay's connection is up. A connection answered

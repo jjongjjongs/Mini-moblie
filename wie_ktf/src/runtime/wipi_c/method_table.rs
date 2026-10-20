@@ -980,7 +980,8 @@ pub fn get_served_method_body(table_id: WIPICTableId, function_id: u16) -> Optio
             3 => Some(mxusermem::free.into_body()),
             _ => (function_id < WIPIC_TABLE_FUNCTIONS).then(|| gen_missing(WIPICTableId::MxUserMem, function_id)),
         },
-        // The slots 템페스트 calls; the rest of the table is unknown.
+        // The slots 템페스트 and the Nexon titles call; the rest of the table is
+        // unknown.
         WIPICTableId::FastRelay => match function_id {
             2 => Some(fastrelay::init.into_body()),
             3 => Some(fastrelay::connect.into_body()),
@@ -988,6 +989,7 @@ pub fn get_served_method_body(table_id: WIPICTableId, function_id: u16) -> Optio
             5 => Some(fastrelay::recv.into_body()),
             6 => Some(fastrelay::close.into_body()),
             7 => Some(fastrelay::connected.into_body()),
+            12 => Some(fastrelay::socket.into_body()),
             _ => (function_id < WIPIC_TABLE_FUNCTIONS).then(|| gen_missing(WIPICTableId::FastRelay, function_id)),
         },
         // A native module's file calls, in the order LGT numbers them from
