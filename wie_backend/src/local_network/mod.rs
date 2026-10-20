@@ -25,6 +25,7 @@ mod ack;
 mod billing_gateway;
 pub(crate) mod candy_shop;
 mod capture;
+mod com2us;
 mod dragoneyes;
 mod dsp;
 mod fortress;

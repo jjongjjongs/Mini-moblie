@@ -33,7 +33,7 @@
 
 use alloc::{boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 
-use super::{LocalConnection, LocalEndpoint, LocalRead, candy_shop::CandyShop, levelup};
+use super::{LocalConnection, LocalEndpoint, LocalRead, candy_shop::CandyShop, com2us, levelup};
 
 /// The names the gateway went by. Both resolve to [`ADDRESS`].
 const HOSTS: [&str; 2] = ["ngw.gxg.com", "ngph.gxg.com"];
@@ -403,6 +403,9 @@ impl Stars {
     }
 }
 
+/// The gateway's answer to a charge: a zero result and an empty message.
+const CHARGED: [u8; 2] = [0, 0];
+
 /// The gateway's answer to an open, as `0x2e4a8` reads it.
 fn open_answer(version: &[u8; 12]) -> Vec<u8> {
     let mut body = vec![0u8]; // result
@@ -448,6 +451,16 @@ impl LocalConnection for GxgConnection {
                         None => tracing::warn!("gxg: no answer for data to {:?}", self.target),
                     }
                 }
+                // 초코초코타이쿤2's star shop; see [`com2us`].
+                b"DP" if self.target.as_ref().is_some_and(|(host, port)| (host.as_str(), *port) == com2us::TARGET) => {
+                    match com2us::star_answer(&body).or_else(|| answer_data(&body)) {
+                        Some(answer) => {
+                            tracing::info!("gxg -> DPS {}", answer.iter().map(|x| format!("{x:02x}")).collect::<String>());
+                            self.outgoing.extend_from_slice(&frame(&version, b"DPS", &answer));
+                        }
+                        None => tracing::warn!("gxg: no answer for data to {:?}", self.target),
+                    }
+                }
                 b"DP" => match self.shop.lock().answer(&body).or_else(|| answer_data(&body)) {
                     Some(mut answer) => {
                         let mut stars = self.stars.lock();
@@ -460,6 +473,17 @@ impl LocalConnection for GxgConnection {
                     }
                     None => tracing::warn!("gxg: no answer for data to {:?}", self.target),
                 },
+                // The gateway's own charge, which a title asks for once its
+                // server has said what to sell: EA프로야구2010's SKT builds send
+                // `'Y'` and the purchase's key after `SC_CHARGE_BUYABLE`. The
+                // reader (`0xb3434` in 1.0.2) takes a result byte and a
+                // length-prefixed message from `CC` and hands them to the
+                // title's callback as event 2, and a zero result goes on to
+                // `CS_BUYABLE_ITEM_APPLY_RESULT` (`0xbcaa8`).
+                b"CP" => {
+                    tracing::info!("gxg: granting the charge");
+                    self.outgoing.extend_from_slice(&frame(&version, b"CCS", &CHARGED));
+                }
                 _ => tracing::warn!("gxg: no answer for {}", String::from_utf8_lossy(&kind)),
             }
         }
@@ -645,6 +669,17 @@ mod tests {
         let mut pending = buffer[..length].to_vec();
         let (_, kind, body) = take_frame(&mut pending).unwrap();
         assert_eq!((&kind, body.as_slice()), (b"DPS", &[0u8][..]));
+    }
+
+    #[test]
+    fn a_charge_is_granted() {
+        let endpoint = GxgEndpoint::new();
+        let mut connection = connection(&endpoint);
+        let mut charge = vec![b'Y'];
+        charge.extend_from_slice(b"0000000001");
+        connection.write(&frame(VERSION, b"CPC", &charge));
+        let (kind, body) = read_answer(connection.as_mut());
+        assert_eq!((&kind, body.as_slice()), (b"CCS", &[0u8, 0][..]));
     }
 
     #[test]

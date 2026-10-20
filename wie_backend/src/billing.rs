@@ -846,6 +846,13 @@ pub fn lgt_local_apf1_star_purchase_response(request: &[u8]) -> Option<Vec<u8>> 
     Some(vec![0x00, 0x08, 0x00, PURCHASE_RESULT, 0x00, GRANTED, 0x00, 0x00])
 }
 
+/// The key `SC_CHARGE_BUYABLE` hands EA프로야구2010 for its charge: ten
+/// digits, the length the title copies into the gateway's request.
+const EA_CHARGE_KEY: &[u8] = b"0000000001";
+
+/// `CS_BUYABLE_ITEM_APPLY_RESULT` carries a byte or two behind its command.
+const EA_APPLY_RESULT_MAX: usize = 8;
+
 /// What answers EA프로야구2010's login.
 ///
 /// EA프로야구2010 (`0002E1D2`) opens a billing socket to `210.222.18.28:20102`
@@ -927,6 +934,28 @@ pub fn lgt_local_ea_baseball_response(request: &[u8]) -> Option<Vec<u8>> {
         // menu is whole the first time too, but the question and a
         // `서버 접속에 실패했습니다` come back on every launch.
         0xd0 => Some(vec![0x00, 0x00, 0x00, 0x09, 0xd1, 0x00, 0x00, 0x00, 0x00]),
+
+        // A purchase in the SKT builds' shop, `CS_CHARGE_BUYABLE`: the item's
+        // code as a `[u32be length][bytes]` field (`C2001003`). Its reply,
+        // `SC_CHARGE_BUYABLE` (1.0.2's handler `0xd1f64`), is a signed status and
+        // a `[u32be length][bytes]` key. A zero status hands the key to
+        // `0xb3d6c`, which asks the gateway to charge for it (`CPC`, answered in
+        // [`crate::local_network`]'s GXG endpoint), and the charge granted
+        // sends the next request.
+        0x90 if request.len() >= 9 && 9 + u32::from_be_bytes([request[5], request[6], request[7], request[8]]) as usize == request.len() => {
+            let mut answer = vec![0, 0, 0, 0, 0x91, 0, 0];
+            answer.extend_from_slice(&(EA_CHARGE_KEY.len() as u32).to_be_bytes());
+            answer.extend_from_slice(EA_CHARGE_KEY);
+            let length = answer.len() as u32;
+            answer[..4].copy_from_slice(&length.to_be_bytes());
+            Some(answer)
+        }
+
+        // `CS_BUYABLE_ITEM_APPLY_RESULT`, sent once the charge went through.
+        // Its reply's handler (`0xd1b80`) reads a signed status and, at zero,
+        // hands over what the title remembered selling - 100 of its points,
+        // a booster, a slot - before it says so.
+        0x92 if request.len() <= EA_APPLY_RESULT_MAX => Some(vec![0x00, 0x00, 0x00, 0x07, 0x93, 0x00, 0x00]),
 
         _ => None,
     }
@@ -11815,6 +11844,24 @@ mod tests {
 
     /// Otherwise only its command-0x10 login is: not a wrong command, not a
     /// length that disagrees with the frame.
+    /// The SKT builds' shop: `CS_CHARGE_BUYABLE` for `C2001003` as 1.0.2 sent
+    /// it, then `CS_BUYABLE_ITEM_APPLY_RESULT`.
+    #[test]
+    fn the_ea_baseball_purchase_is_granted() {
+        let buy = [0, 0, 0, 0x11, 0x90, 0, 0, 0, 8, b'C', b'2', b'0', b'0', b'1', b'0', b'0', b'3'];
+        let reply = lgt_local_ea_baseball_response(&buy).expect("the purchase is answered");
+        assert_eq!(u32::from_be_bytes(reply[..4].try_into().unwrap()) as usize, reply.len());
+        assert_eq!(&reply[4..11], &[0x91, 0, 0, 0, 0, 0, 10]);
+        assert_eq!(&reply[11..], b"0000000001");
+
+        assert_eq!(lgt_local_ea_baseball_response(&[0, 0, 0, 6, 0x92, 0]), Some(vec![0, 0, 0, 7, 0x93, 0, 0]));
+
+        let mut short = buy.to_vec();
+        short.pop();
+        short[3] = 0x10;
+        assert_eq!(lgt_local_ea_baseball_response(&short), None, "the code runs past the frame");
+    }
+
     #[test]
     fn only_the_ea_baseball_login_is_answered() {
         let mut wrong_command = EA_BASEBALL_LOGIN.to_vec();
