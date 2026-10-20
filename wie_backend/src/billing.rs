@@ -713,11 +713,12 @@ const ENTAZ_BREW_RESULT_AT: usize = 0x10;
 /// again (`0x1105d0`).
 const ENTAZ_BREW_LIST_CHANGED_AT: usize = 0x0f;
 const ENTAZ_BREW_SIGN_IN: u32 = 1;
+const ENTAZ_BREW_KART: u32 = 0xa;
 const ENTAZ_BREW_ITEMS: u32 = 0xb;
 const ENTAZ_BREW_CHARGE: u32 = 0xc;
 
-/// What answers 카트라이더레이싱's 상점 (KTF BREW `26735`, 넥슨), the 정보이용료
-/// charge for a pack of boosters.
+/// What answers 카트라이더레이싱's 상점 (KTF BREW `26735`, 넥슨): the 정보이용료
+/// charge for a pack of boosters, and a kart.
 ///
 /// The title opens a socket to `brew12.entaz.com` and sends the records
 /// [`ktf_local_entaz_response`] reads - the twenty-byte head of five `u32`s,
@@ -729,6 +730,7 @@ const ENTAZ_BREW_CHARGE: u32 = 0xc;
 /// |---------|-------|---------------------|
 /// | 1, the subscriber number | `1001`, the body handed back | keeps the number, asks for the charge |
 /// | `0xc`, the charge | `1012`, a result byte of zero at `0x10` and the list unchanged at `0x0f` | adds the pack to the boosters it has (`0x110842`), shows `아이템을 충전 하셨습니다` and goes back to the shop; a one at `0x10` is `일일 최대 구매량 초과` |
+/// | `0xa`, a kart | `1010`, the same | marks the kart the player chose as theirs and keeps it (`0x110852`) |
 /// | `0xb`, the item list | `1011`, no body | not asked for once the charge says the list is unchanged |
 ///
 /// The charge's request says the list changed, and handed back as it came
@@ -744,7 +746,7 @@ pub fn ktf_brew_entaz_response(request: &[u8]) -> Option<Vec<u8>> {
 
     let command = u32::from_le_bytes(request[ENTAZ_COMMAND_AT..ENTAZ_COMMAND_AT + 4].try_into().unwrap());
     let body_length = u32::from_le_bytes(request[ENTAZ_BODY_LENGTH_AT..ENTAZ_BODY_LENGTH_AT + 4].try_into().unwrap()) as usize;
-    if ENTAZ_HEAD + body_length != request.len() || !matches!(command, ENTAZ_BREW_SIGN_IN | ENTAZ_BREW_ITEMS | ENTAZ_BREW_CHARGE) {
+    if ENTAZ_HEAD + body_length != request.len() || !matches!(command, ENTAZ_BREW_SIGN_IN | ENTAZ_BREW_KART | ENTAZ_BREW_ITEMS | ENTAZ_BREW_CHARGE) {
         return None;
     }
 
@@ -753,7 +755,7 @@ pub fn ktf_brew_entaz_response(request: &[u8]) -> Option<Vec<u8>> {
     let head = &mut reply[ENTAZ_BREW_GREETING..];
     head[ENTAZ_COMMAND_AT..ENTAZ_COMMAND_AT + 4].copy_from_slice(&(command + ENTAZ_BREW_REPLY).to_le_bytes());
     head[ENTAZ_BREW_RESULT_AT] = 0;
-    if command == ENTAZ_BREW_CHARGE {
+    if command == ENTAZ_BREW_CHARGE || command == ENTAZ_BREW_KART {
         head[ENTAZ_BREW_LIST_CHANGED_AT] = 0;
     }
 
@@ -11817,6 +11819,13 @@ mod tests {
         let reply = ktf_brew_entaz_response(&sign_in).unwrap();
         assert_eq!(reply[0x30..0x34], [0xe9, 3, 0, 0]);
         assert_eq!(reply[0x34..], sign_in[4..]);
+
+        // A kart, as the title asked for one.
+        let kart = [0x0a, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x64, 0, 0, 3, 1, 0, 0, 0];
+        assert_eq!(
+            ktf_brew_entaz_response(&kart).unwrap()[0x30..],
+            [0xf2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x64, 0, 0, 0, 0, 0, 0, 0]
+        );
 
         // Another command, and a length that is not the record's.
         assert_eq!(
