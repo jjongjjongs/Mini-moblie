@@ -168,4 +168,27 @@ impl Files {
         open.position += written;
         Some(written)
     }
+
+    /// The whole of a file, if it is there.
+    pub fn load(&self, name: &[u8]) -> Option<Vec<u8>> {
+        let system = self.system.as_ref()?;
+        let path = Self::path(name);
+        let filesystem = system.filesystem();
+        let size = filesystem.size(&path).now_or_never().flatten()?;
+        let mut data = vec![0; size];
+        filesystem.read(&path, 0, size, &mut data).now_or_never().flatten()?;
+        Some(data)
+    }
+
+    /// Makes a file hold `data`, and nothing more.
+    pub fn store(&self, name: &[u8], data: &[u8]) -> bool {
+        let Some(system) = &self.system else { return false };
+        let path = Self::path(name);
+        let filesystem = system.filesystem();
+        if filesystem.write(&path, 0, data).now_or_never().is_none() {
+            return false;
+        }
+        filesystem.truncate(&path, data.len()).now_or_never();
+        true
+    }
 }

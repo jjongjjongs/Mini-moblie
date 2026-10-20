@@ -1,9 +1,11 @@
 //! SKT GNEX titles: a `.sgs` script beside a `.mod` descriptor, run by a
-//! script interpreter rather than a JVM or an ARM core. This is the newer
-//! (version 4) script layout; see `docs/gnex_sgs_v4_notes.md`.
+//! script interpreter rather than a JVM or an ARM core. The newer (version
+//! 4) script layout is `vm`, see `docs/gnex_sgs_v4_notes.md`; the earlier
+//! ones, versions 1 and 2, are `classic`.
 #![no_std]
 extern crate alloc;
 
+mod classic;
 mod editor;
 mod files;
 mod graphics;
@@ -12,7 +14,7 @@ mod program;
 mod services;
 mod vm;
 
-use alloc::{boxed::Box, collections::BTreeMap, string::String, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, format, string::String, vec::Vec};
 
 use wie_backend::{DefaultTaskRunner, Emulator, Event, Instant, KeyCode, Platform, System, extract_zip};
 use wie_util::{Result, WieError};
@@ -35,14 +37,65 @@ pub struct GnexEmulator {
     /// Each sound resource loaded into the player, and the one sounding.
     clips: BTreeMap<i32, u32>,
     sounding: Option<u32>,
-    program: Program,
-    vm: Vm,
+    engine: Engine,
     host: Host,
     last: Instant,
     /// Set once a callback fails; the title is then left on its last frame.
     stopped: bool,
     /// The handset's text entry, while it is up; the script waits on it.
     editor: Option<Editor>,
+}
+
+/// The interpreter a script's version needs.
+enum Engine {
+    Modern { program: Program, vm: Vm },
+    Classic(classic::Vm),
+}
+
+impl Engine {
+    fn exited(&self) -> bool {
+        match self {
+            Self::Modern { vm, .. } => vm.exited,
+            Self::Classic(vm) => vm.exited,
+        }
+    }
+
+    /// Runs callback `entry` with `parameter` in variable 0.
+    fn run(&mut self, entry: usize, parameter: i32, host: &mut Host) -> core::result::Result<(), String> {
+        match self {
+            Self::Modern { program, vm } => {
+                let _ = vm.set(0, 0, parameter);
+                vm.run(program.entries[entry], host)
+            }
+            Self::Classic(vm) => {
+                if vm.has_variable(0) {
+                    vm.set(0, 0, parameter as i16)?;
+                }
+                // The first timer keeps a tick count, and it modulo 2, 3 and
+                // 6, in variables 3 to 6.
+                if entry == 2 && parameter == 0 && vm.has_variable(6) {
+                    let tick = (vm.value(3, 0)? as i32 + 1) % 5040;
+                    for (variable, value) in [(3, tick), (4, tick % 2), (5, tick % 3), (6, tick % 6)] {
+                        vm.set(variable, 0, value as i16)?;
+                    }
+                }
+                vm.run(entry, host)
+            }
+        }
+    }
+
+    /// A sound resource's SMAF file, after its two-byte wrapper.
+    fn sound(&self, resource: i32) -> Option<&[u8]> {
+        match self {
+            Self::Modern { vm, .. } => vm.resources.get(resource as usize).filter(|x| x.len() > 2).map(|x| &x[2..]),
+            Self::Classic(vm) => vm.sound(resource),
+        }
+    }
+}
+
+/// Whether a script is in a layout this runs.
+fn runnable(data: &[u8]) -> bool {
+    program::unwrap(data).first() == Some(&4) || classic::is_classic(data)
 }
 
 /// The script and descriptor of a GNEX title among an archive's files.
@@ -62,7 +115,7 @@ fn script_entry(files: &BTreeMap<String, Vec<u8>>) -> Option<(&String, &Vec<u8>)
 impl GnexEmulator {
     /// Whether the archive is a GNEX title in the layout this runs.
     pub fn loadable_archive(files: &BTreeMap<String, Vec<u8>>) -> bool {
-        script(files).is_some_and(|data| program::unwrap(data).first() == Some(&4))
+        script(files).is_some_and(|data| runnable(data))
     }
 
     /// The panel a title was built for. Most of these titles were built for
@@ -86,6 +139,9 @@ impl GnexEmulator {
 
         let files = extract_zip(archive).ok()?;
         let (name, data) = script_entry(&files)?;
+        if classic::is_classic(data) {
+            return Some(classic::panel(data));
+        }
         if program::unwrap(data).first() != Some(&4) {
             return None;
         }
@@ -101,7 +157,12 @@ impl GnexEmulator {
 
     pub fn from_archive(platform: Box<dyn Platform>, files: BTreeMap<String, Vec<u8>>) -> Result<Self> {
         let (name, data) = script_entry(&files).ok_or_else(|| WieError::FatalError("GNEX script not found".into()))?;
-        let program = Program::parse(data)?;
+        let classic = if classic::is_classic(data) {
+            Some(classic::Vm::parse(data).map_err(|x| WieError::FatalError(format!("GNEX: {x}")))?)
+        } else {
+            None
+        };
+        let program = if classic.is_none() { Some(Program::parse(data)?) } else { None };
         // The script's file is named for the title's id.
         let id = name.rsplit('/').next().unwrap_or(name).split('.').next().unwrap_or("gnex");
         let system = System::new(platform, id, id, DefaultTaskRunner);
@@ -125,26 +186,43 @@ impl GnexEmulator {
             }
         }
         let platform = system.platform();
-        tracing::info!("GNEX title {}", program.title);
-
         let (width, height) = (platform.screen().width() as i32, platform.screen().height() as i32);
-        let mut vm = Vm::new(&program);
-        let host = Host::new(width, height, Files::new(Some(system.clone())));
+        let mut host = Host::new(width, height, Files::new(Some(system.clone())));
 
-        // System variables: the screen's size in 4 and 5, the runtime's version
-        // (1.1) in 10.
-        let _ = vm.set(4, 0, width);
-        let _ = vm.set(5, 0, height);
-        let _ = vm.set(10, 0, 1);
-        let _ = vm.set(10, 1, 1);
+        let engine = match (program, classic) {
+            (Some(program), _) => {
+                tracing::info!("GNEX title {}", program.title);
+                let mut vm = Vm::new(&program);
+                // System variables: the screen's size in 4 and 5, the
+                // runtime's version (1.1) in 10.
+                let _ = vm.set(4, 0, width);
+                let _ = vm.set(5, 0, height);
+                let _ = vm.set(10, 0, 1);
+                let _ = vm.set(10, 1, 1);
+                Engine::Modern { program, vm }
+            }
+            (None, Some(mut vm)) => {
+                tracing::info!("GNEX title {} (an earlier script)", vm.title);
+                // System variables: the screen's size in 1 and 2, the
+                // runtime in 15.
+                let values = [(1, width as i16), (2, height as i16), (15, 0x3009)];
+                for (variable, value) in values {
+                    if vm.has_variable(variable) {
+                        let _ = vm.set(variable, 0, value);
+                    }
+                }
+                host.graphics.text_bg = 0;
+                Engine::Classic(vm)
+            }
+            (None, None) => unreachable!(),
+        };
 
         let last = platform.now();
         let mut emulator = Self {
             system,
             clips: BTreeMap::new(),
             sounding: None,
-            program,
-            vm,
+            engine,
             host,
             last,
             stopped: false,
@@ -161,8 +239,7 @@ impl GnexEmulator {
         if self.stopped {
             return;
         }
-        let _ = self.vm.set(0, 0, parameter);
-        if let Err(error) = self.vm.run(self.program.entries[entry], &mut self.host) {
+        if let Err(error) = self.engine.run(entry, parameter, &mut self.host) {
             tracing::error!("GNEX callback {entry} stopped: {error}");
             self.stopped = true;
         }
@@ -175,7 +252,8 @@ impl GnexEmulator {
         let Some(request) = self.host.text_request.take() else {
             return;
         };
-        let initial = self.vm.string(request.destination).unwrap_or_default();
+        let Engine::Modern { vm, .. } = &self.engine else { return };
+        let initial = vm.string(request.destination).unwrap_or_default();
         let editor = Editor::new(&self.system, request, initial, self.host.graphics.shown.clone());
         editor.draw(&mut self.host.graphics);
         self.editor = Some(editor);
@@ -191,8 +269,8 @@ impl GnexEmulator {
             Outcome::Editing => editor.draw(&mut self.host.graphics),
             Outcome::Done(text) => {
                 let editor = self.editor.take().unwrap();
-                if let Some(text) = text {
-                    let _ = self.vm.set_string(editor.destination, &text);
+                if let (Some(text), Engine::Modern { vm, .. }) = (text, &mut self.engine) {
+                    let _ = vm.set_string(editor.destination, &text);
                 }
                 self.host.graphics.shown = editor.underneath;
                 self.host.graphics.presented = true;
@@ -212,12 +290,11 @@ impl GnexEmulator {
             let handle = match self.clips.get(&resource) {
                 Some(&handle) => handle,
                 None => {
-                    // A two-byte wrapper precedes the SMAF file.
-                    let Some(data) = self.vm.resources.get(resource as usize).filter(|x| x.len() > 2) else {
+                    let Some(data) = self.engine.sound(resource) else {
                         tracing::warn!("GNEX sound resource {resource} is not a sound");
                         continue;
                     };
-                    let Ok(handle) = self.system.audio().load_smaf(&data[2..]) else {
+                    let Ok(handle) = self.system.audio().load_smaf(data) else {
                         continue;
                     };
                     self.clips.insert(resource, handle);
@@ -293,7 +370,7 @@ impl Emulator for GnexEmulator {
         }
 
         // Timers fire in order on the guest clock, each at its own due time.
-        while !self.stopped && !self.vm.exited {
+        while !self.stopped && !self.engine.exited() {
             let next = self.host.timers.iter().flatten().map(|t| t.due).min();
             match next {
                 Some(due) if due <= target => {
@@ -313,12 +390,16 @@ impl Emulator for GnexEmulator {
     }
 
     fn is_idle(&self) -> bool {
-        let script = self.stopped || self.vm.exited || self.editor.is_some() || self.host.next_due().is_none_or(|x| x > 0);
+        let script = self.stopped || self.engine.exited() || self.editor.is_some() || self.host.next_due().is_none_or(|x| x > 0);
         script && self.system.is_idle()
     }
 
     fn sleep_hint(&self) -> Option<u64> {
-        let script = if self.stopped || self.vm.exited { None } else { self.host.next_due() };
+        let script = if self.stopped || self.engine.exited() {
+            None
+        } else {
+            self.host.next_due()
+        };
         match (script, self.system.idle_for()) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),

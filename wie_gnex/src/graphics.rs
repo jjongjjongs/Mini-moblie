@@ -437,6 +437,23 @@ impl Graphics {
         self.pixels = canvas.into_inner().raw().into_owned();
     }
 
+    /// `text` with its top left at `x`, `y`, `height` pixels tall, in script
+    /// colour `c`.
+    pub fn draw_string(&mut self, x: i32, y: i32, text: &str, height: f32, c: i32) {
+        let (x0, y0, x1, y1) = self.clip;
+        let clip = Clip {
+            x: x0,
+            y: y0,
+            width: (x1 - x0).max(0) as u32,
+            height: (y1 - y0).max(0) as u32,
+        };
+        let colour: Color = Rgb332Pixel::to_color(self.mapped(c));
+        let pixels = core::mem::take(&mut self.pixels);
+        let mut canvas = ImageBufferCanvas::new(VecImageBuffer::<Rgb332Pixel>::from_raw(self.width as u32, self.height as u32, pixels));
+        canvas.draw_text(text, x, y, height, height * 10.0 / 12.0, TextAlignment::Left, colour, clip);
+        self.pixels = canvas.into_inner().raw().into_owned();
+    }
+
     pub fn present(&mut self) {
         self.shown.copy_from_slice(&self.pixels);
         self.presented = true;

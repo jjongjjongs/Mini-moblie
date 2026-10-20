@@ -181,3 +181,16 @@ Still to do:
 
 - Background music plays once. No service asks for a repeat, and the
   reference player plays these once too.
+
+## Versions 1 and 2: `wie_gnex::classic`
+
+The earlier layouts run in a separate interpreter, `wie_gnex/src/classic`,
+ported from wfeature's `internal/sgsvm` and the services in
+`internal/platform/skt/script*.go` (MIT). They keep v1's one-byte slots and
+16-bit values, address variables through a mutable and a constant bank
+(`0x4000` marks the constant one), and call the platform by opcode (0x51 and
+up) rather than through `0x92 n`. The drawing buffer, palette, bitmaps,
+timers, sound and files are this crate's, shared with version 4. The panel
+follows the header's LCD class mask: 128x160, or 176x176 for a script that
+leaves out class 4 but takes class 8. 샤이닝스톤 (`0014478632`, version 2)
+runs from its logo through the story into Act 1's fights.

@@ -33,6 +33,8 @@ pub struct Host {
     /// Text entry the script asked for, for the emulator to open once the
     /// callback is over.
     pub text_request: Option<TextRequest>,
+    /// The earlier versions' text style: tiny, small, normal or large.
+    pub text_style: i32,
 }
 
 impl Host {
@@ -47,6 +49,7 @@ impl Host {
             sounds: Vec::new(),
             files,
             text_request: None,
+            text_style: 2,
         }
     }
 
