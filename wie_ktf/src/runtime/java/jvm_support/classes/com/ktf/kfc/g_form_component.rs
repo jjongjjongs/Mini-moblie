@@ -49,6 +49,12 @@ impl GFormComponent {
     /// Adds `component` and places it at the bounds given, answering its
     /// index as the one-argument add does. The bounds go through
     /// `Component.configure` with both its position and size bits.
+    ///
+    /// A component already on another container is taken off it first.
+    /// `GTextField`'s constructor puts the field on the `GMenubarForm` it is
+    /// given, and 마이애미 나이츠 (`GLoftMMN`) then places that field in a
+    /// `GFormComponent` of its own; the LWC add refuses a component with a
+    /// parent, and the title stopped on the `IllegalArgumentException`.
     #[allow(clippy::too_many_arguments)]
     async fn add_component_at(
         jvm: &Jvm,
@@ -61,6 +67,13 @@ impl GFormComponent {
         height: i32,
     ) -> JvmResult<i32> {
         tracing::debug!("com.ktf.kfc.GFormComponent::addComponent({component:?}, {x}, {y}, {width}, {height})");
+
+        let parent: ClassInstanceRef<()> = jvm.get_field(&component, "parent", "Lorg/kwis/msp/lwc/ContainerComponent;").await?;
+        if !parent.is_null() {
+            let _: () = jvm
+                .invoke_virtual(&parent, "removeComponent", "(Lorg/kwis/msp/lwc/Component;)V", (component.clone(),))
+                .await?;
+        }
 
         let index: i32 = jvm
             .invoke_virtual(&this, "addComponent", "(Lorg/kwis/msp/lwc/Component;)I", (component.clone(),))
