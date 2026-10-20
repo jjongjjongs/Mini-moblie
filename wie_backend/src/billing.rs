@@ -709,6 +709,9 @@ const ENTAZ_BREW_GREETING: usize = 0x30;
 const ENTAZ_BREW_REPLY: u32 = 1000;
 /// Where a reply's head keeps its result: zero is done, one refused.
 const ENTAZ_BREW_RESULT_AT: usize = 0x10;
+/// Where a charge's reply says the shop's list changed and is to be fetched
+/// again (`0x1105d0`).
+const ENTAZ_BREW_LIST_CHANGED_AT: usize = 0x0f;
 const ENTAZ_BREW_SIGN_IN: u32 = 1;
 const ENTAZ_BREW_ITEMS: u32 = 0xb;
 const ENTAZ_BREW_CHARGE: u32 = 0xc;
@@ -725,8 +728,13 @@ const ENTAZ_BREW_CHARGE: u32 = 0xc;
 /// | request | reply | what the title does |
 /// |---------|-------|---------------------|
 /// | 1, the subscriber number | `1001`, the body handed back | keeps the number, asks for the charge |
-/// | `0xc`, the charge | `1012`, a result byte of zero at `0x10` | adds the pack to the boosters it has (`0x110842`) and shows `아이템을 충전 하셨습니다`; a one there is `일일 최대 구매량 초과` |
-/// | `0xb`, the item list | `1011`, no body | finds no list to take - the handset is asked how much room it has and none is too little - and goes back to the shop |
+/// | `0xc`, the charge | `1012`, a result byte of zero at `0x10` and the list unchanged at `0x0f` | adds the pack to the boosters it has (`0x110842`), shows `아이템을 충전 하셨습니다` and goes back to the shop; a one at `0x10` is `일일 최대 구매량 초과` |
+/// | `0xb`, the item list | `1011`, no body | not asked for once the charge says the list is unchanged |
+///
+/// The charge's request says the list changed, and handed back as it came
+/// the title asked for the list next and wrote the reply's body over its
+/// `item.etz` (`0x110a84`): an empty one left it with no shop, and it fell
+/// over on the next key.
 ///
 /// `None` for anything else.
 pub fn ktf_brew_entaz_response(request: &[u8]) -> Option<Vec<u8>> {
@@ -745,6 +753,9 @@ pub fn ktf_brew_entaz_response(request: &[u8]) -> Option<Vec<u8>> {
     let head = &mut reply[ENTAZ_BREW_GREETING..];
     head[ENTAZ_COMMAND_AT..ENTAZ_COMMAND_AT + 4].copy_from_slice(&(command + ENTAZ_BREW_REPLY).to_le_bytes());
     head[ENTAZ_BREW_RESULT_AT] = 0;
+    if command == ENTAZ_BREW_CHARGE {
+        head[ENTAZ_BREW_LIST_CHANGED_AT] = 0;
+    }
 
     Some(reply)
 }
@@ -11796,6 +11807,9 @@ mod tests {
         let reply = ktf_brew_entaz_response(&charge).unwrap();
         assert_eq!(reply[..0x30], [0; 0x30]);
         assert_eq!(reply[0x30..], [0xf4, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x64, 0, 0, 0, 0, 0, 0, 1]);
+        let mut changed = charge;
+        changed[0xf] = 1;
+        assert_eq!(ktf_brew_entaz_response(&changed).unwrap()[0x30..], reply[0x30..]);
 
         let mut sign_in = [1, 0, 0, 0, 0x0e, 0, 0, 0, 1, 0, 0, 0, 0x64, 0, 0, 0, 0, 0, 0, 0].to_vec();
         sign_in.extend_from_slice(&[0, 0]);

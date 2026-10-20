@@ -166,7 +166,12 @@ const DISPLAY_COLOUR: u32 = 0x28;
 const GRAPHICS_SET_COLOUR: u32 = 0x10;
 const GRAPHICS_SET_FILL_MODE: u32 = 0x18;
 const GRAPHICS_SET_FILL_COLOUR: u32 = 0x20;
+const GRAPHICS_SET_POINT_SIZE: u32 = 0x28;
+const GRAPHICS_SET_CLIP: u32 = 0x30;
+const GRAPHICS_POINT: u32 = 0x50;
 const GRAPHICS_LINE: u32 = 0x54;
+/// `AEEClip`'s shape: a rectangle, its x, y, width and height from byte 4.
+const CLIP_RECTANGLE: u8 = 1;
 const GRAPHICS_RECTANGLE: u32 = 0x58;
 
 const MEMORY_FITS: u32 = 0x18;
@@ -195,6 +200,7 @@ const FILES_OPEN: u32 = 0x08;
 const FILES_INFORMATION: u32 = 0x0c;
 const FILES_CREATE: u32 = 0x10;
 const FILES_EXISTS: u32 = 0x1c;
+const FILES_FREE_SPACE: u32 = 0x20;
 const FILES_LAST_ERROR: u32 = 0x24;
 const FILE_CLOSE: u32 = 0x04;
 const FILE_READ: u32 = 0x0c;
@@ -204,8 +210,11 @@ const FILE_SEEK: u32 = 0x1c;
 const FILE_RECORD_SIZE: usize = 0x0c;
 const FILE_LENGTH_OFFSET: usize = 0x08;
 const FILE_FAILED: u32 = 1;
+/// The handset's storage, as `GetFreeSpace` reports it.
+const STORAGE_TOTAL: u32 = 16 << 20;
+const STORAGE_FREE: u32 = 8 << 20;
 const MODE_READ: u32 = 1;
-const MODE_WRITE_TRUNCATE: u32 = 4;
+const MODE_CREATE: u32 = 4;
 
 /// The class `createObject` is asked for when it is handed a bitmap.
 const CLASS_IMAGE: u32 = 0x100_4001;
@@ -244,6 +253,11 @@ const FONT_HEIGHT: f32 = 12.0;
 const TRANSPARENT_565: u16 = 0xf81f;
 
 const TEXT_COLOUR_ITEM: u32 = 1;
+/// `CLR_USER_BACKGROUND`, what a fill of `RGB_NONE` - `IDISPLAY_EraseRect`,
+/// `ClearScreen` - paints with.
+const BACKGROUND_COLOUR_ITEM: u32 = 2;
+/// `RGB_NONE`.
+const NO_COLOUR: u32 = u32::MAX;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Surface {
@@ -306,6 +320,8 @@ struct State {
     graphics_colour: Color,
     graphics_fill: Color,
     graphics_filled: bool,
+    graphics_point: u32,
+    graphics_clip: Option<Clip>,
 
     listeners: Vec<Listener>,
     timers: Vec<Schedule>,
@@ -372,6 +388,8 @@ impl Brew {
                     b: 0xff,
                 },
                 graphics_filled: false,
+                graphics_point: 1,
+                graphics_clip: None,
                 listeners: Vec::new(),
                 timers: Vec::new(),
                 calls: Vec::new(),
@@ -594,13 +612,15 @@ fn full_clip(width: u32, height: u32) -> Clip {
     Clip { x: 0, y: 0, width, height }
 }
 
-/// Colours arrive packed as `0xRRGGBBxx`.
+/// Colours arrive as BREW's `RGBVAL`, `MAKE_RGB(r, g, b)` packing them as
+/// `0xBBGGRRxx`. Read the other way round, 한쿠아 큰화's sea - `0xf2975000`,
+/// a blue - came out orange, and its light blue message boxes peach.
 fn packed_colour(packed: u32) -> Color {
     Color {
         a: 0xff,
-        r: (packed >> 24) as u8,
+        r: (packed >> 8) as u8,
         g: (packed >> 16) as u8,
-        b: (packed >> 8) as u8,
+        b: (packed >> 24) as u8,
     }
 }
 
@@ -802,6 +822,12 @@ async fn handle_trap(core: &mut ArmCore, brew: &mut Brew, id: SvcId) -> Result<u
             let previous = core::mem::replace(&mut brew.state.lock().graphics_filled, filled);
             Ok(previous as u32)
         }
+        (Surface::Interface(INTERFACE_GRAPHICS), GRAPHICS_SET_POINT_SIZE) => {
+            let size = core.read_param(1)? & 0xff;
+            Ok(core::mem::replace(&mut brew.state.lock().graphics_point, size.max(1)))
+        }
+        (Surface::Interface(INTERFACE_GRAPHICS), GRAPHICS_SET_CLIP) => brew.set_graphics_clip(core),
+        (Surface::Interface(INTERFACE_GRAPHICS), GRAPHICS_POINT) => brew.draw_point(core),
         (Surface::Interface(INTERFACE_GRAPHICS), GRAPHICS_LINE) => brew.draw_line(core),
         (Surface::Interface(INTERFACE_GRAPHICS), GRAPHICS_RECTANGLE) => brew.draw_graphics_rectangle(core),
 
@@ -888,6 +914,15 @@ async fn handle_trap(core: &mut ArmCore, brew: &mut Brew, id: SvcId) -> Result<u
         (Surface::Interface(INTERFACE_FILE), FILES_INFORMATION) => brew.file_information(core).await,
         (Surface::Interface(INTERFACE_FILE), FILES_EXISTS) => brew.file_exists(core).await,
         (Surface::Interface(INTERFACE_FILE), FILES_CREATE) => brew.create_file(core).await,
+        // `GetFreeSpace(total)`. 열혈춘향 wants 600 bytes free before it starts
+        // and stopped on 여유 공간이 부족합니다 when told none.
+        (Surface::Interface(INTERFACE_FILE), FILES_FREE_SPACE) => {
+            let total = core.read_param(1)?;
+            if total != 0 {
+                write_generic(core, total, STORAGE_TOTAL)?;
+            }
+            Ok(STORAGE_FREE)
+        }
         (Surface::Interface(INTERFACE_FILE), FILES_LAST_ERROR) => Ok(brew.state.lock().file_failure),
 
         (Surface::File, FILE_CLOSE) => brew.close_file(core).await,
@@ -1299,6 +1334,7 @@ impl Brew {
     fn write_connection(&self, core: &mut ArmCore) -> Result<u32> {
         let [_, buffer, length] = params(core)?;
         let request = read_bytes(core, buffer, length.min(MAX_TRANSFER))?;
+        tracing::debug!("BREW {} write {request:02x?}", self.state.lock().connection.host);
 
         let mut state = self.state.lock();
         let answer = if state.connection.host.ends_with(ENTAZ_DOMAIN) {
@@ -1353,11 +1389,18 @@ impl Brew {
     }
 
     /// Fills the rectangle at `r1` (four 16-bit fields), or the whole screen
-    /// when that is null, with the packed colour in `r3`.
+    /// when that is null, with the packed colour in `r3`. `RGB_NONE` there is
+    /// an erase, in the background colour: 불꽃놀이XG sets that to black and
+    /// clears its night sky so, which came out white.
     fn draw_rectangle(&self, core: &mut ArmCore) -> Result<u32> {
         let [_, rectangle, _, colour] = params(core)?;
 
         let mut state = self.state.lock();
+        let colour = if colour == NO_COLOUR {
+            state.colours.get(&BACKGROUND_COLOUR_ITEM).copied().unwrap_or(NO_COLOUR)
+        } else {
+            colour
+        };
         let (width, height) = (state.width, state.height);
         let clip = full_clip(width, height);
 
@@ -1376,6 +1419,58 @@ impl Brew {
         Ok(1)
     }
 
+    /// `IGRAPHICS_SetClip(clip, flags)`: a rectangle keeps what the graphics
+    /// draw inside it, any other shape - or none - lets them reach the whole
+    /// screen.
+    fn set_graphics_clip(&self, core: &mut ArmCore) -> Result<u32> {
+        let record = core.read_param(1)?;
+        let clip = if record == 0 {
+            None
+        } else {
+            let record = read_bytes(core, record, 12)?;
+            let field = |offset: usize| i16::from_le_bytes([record[offset], record[offset + 1]]) as i32;
+            (record[0] == CLIP_RECTANGLE).then(|| (field(4), field(6), field(8), field(10)))
+        };
+
+        let mut state = self.state.lock();
+        let screen = full_clip(state.width, state.height);
+        state.graphics_clip = clip.map(|(x, y, w, h)| {
+            let (left, top) = (x.max(0), y.max(0));
+            let right = (x + w).clamp(left, screen.width as i32);
+            let bottom = (y + h).clamp(top, screen.height as i32);
+            Clip {
+                x: left,
+                y: top,
+                width: (right - left) as u32,
+                height: (bottom - top) as u32,
+            }
+        });
+
+        Ok(1)
+    }
+
+    /// `IGRAPHICS_DrawPoint`: `r1` points at x and y as 16-bit fields; the
+    /// point is as wide as `SetPointSize` last said. 불꽃놀이XG draws its
+    /// fireworks a spark at a time with it.
+    fn draw_point(&self, core: &mut ArmCore) -> Result<u32> {
+        let point = core.read_param(1)?;
+        if point == 0 {
+            return Ok(0);
+        }
+        let record = read_bytes(core, point, 4)?;
+        let (x, y) = (
+            i16::from_le_bytes([record[0], record[1]]) as i32,
+            i16::from_le_bytes([record[2], record[3]]) as i32,
+        );
+
+        let mut state = self.state.lock();
+        let clip = state.graphics_clip.unwrap_or(full_clip(state.width, state.height));
+        let (colour, size) = (state.graphics_colour, state.graphics_point);
+        state.screen.fill_rect(x, y, size, size, colour, clip);
+
+        Ok(1)
+    }
+
     /// `IGRAPHICS_DrawLine`: `r1` points at the line, its start and end as
     /// four 16-bit fields, drawn in the colour `SetColor` last gave.
     fn draw_line(&self, core: &mut ArmCore) -> Result<u32> {
@@ -1387,7 +1482,7 @@ impl Brew {
         let field = |offset: usize| i16::from_le_bytes([record[offset], record[offset + 1]]) as i32;
 
         let mut state = self.state.lock();
-        let clip = full_clip(state.width, state.height);
+        let clip = state.graphics_clip.unwrap_or(full_clip(state.width, state.height));
         let colour = state.graphics_colour;
         state.screen.draw_line(field(0), field(2), field(4), field(6), colour, clip);
 
@@ -1410,7 +1505,7 @@ impl Brew {
         }
 
         let mut state = self.state.lock();
-        let clip = full_clip(state.width, state.height);
+        let clip = state.graphics_clip.unwrap_or(full_clip(state.width, state.height));
         let (colour, fill, filled) = (state.graphics_colour, state.graphics_fill, state.graphics_filled);
         if filled {
             state.screen.fill_rect(x, y, w as u32, h as u32, fill, clip);
@@ -1722,8 +1817,15 @@ impl Brew {
         failure
     }
 
-    /// `open(files, name, mode)`: a file object, or null when a file to read
-    /// is not there. Writing to a missing file makes it; mode 4 truncates.
+    /// `open(files, name, mode)`: a file object, or null when the file is not
+    /// there. Only `_OFM_CREATE` (mode 4) makes a missing file, and here it
+    /// truncates one that is there.
+    ///
+    /// 불꽃놀이XG opens its `option.dat` to read and write (mode 2) and keeps
+    /// its own settings when that fails. Made empty instead, the file read as
+    /// nothing, the settings were whatever the stack held, and the frame
+    /// interval among them came out at weeks: its music played, and not one
+    /// frame was drawn.
     async fn open_file(&self, core: &mut ArmCore) -> Result<u32> {
         let [_, name, mode] = params(core)?;
         let name = String::from_utf8_lossy(&read_string(core, name)?).to_string();
@@ -1733,17 +1835,20 @@ impl Brew {
         let mut data = self.contents(&name).await;
         tracing::debug!("BREW open {name} mode {mode}: {}", if data.is_some() { "found" } else { "missing" });
 
-        if data.is_some() && mode == MODE_WRITE_TRUNCATE {
+        if data.is_some() && mode == MODE_CREATE {
             self.keep(&key, &[]).await;
             data = Some(Vec::new());
         }
         let data = match data {
             Some(data) => data,
-            None if writable => {
+            None if mode == MODE_CREATE => {
                 self.keep(&key, &[]).await;
                 Vec::new()
             }
-            None => return Ok(0),
+            None => {
+                self.file_result(false);
+                return Ok(0);
+            }
         };
 
         let object = self.allocate(core, 4)?;
