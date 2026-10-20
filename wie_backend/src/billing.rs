@@ -850,8 +850,11 @@ pub fn lgt_local_apf1_star_purchase_response(request: &[u8]) -> Option<Vec<u8>> 
 /// digits, the length the title copies into the gateway's request.
 const EA_CHARGE_KEY: &[u8] = b"0000000001";
 
-/// `CS_BUYABLE_ITEM_APPLY_RESULT` carries a byte or two behind its command.
-const EA_APPLY_RESULT_MAX: usize = 8;
+/// Whether an EA프로야구2010 request is its command and one
+/// `[u32be length][bytes]` field, the item code the shop's requests carry.
+fn ea_carries_one_field(request: &[u8]) -> bool {
+    request.len() >= 9 && 9 + u32::from_be_bytes([request[5], request[6], request[7], request[8]]) as usize == request.len()
+}
 
 /// What answers EA프로야구2010's login.
 ///
@@ -942,7 +945,7 @@ pub fn lgt_local_ea_baseball_response(request: &[u8]) -> Option<Vec<u8>> {
         // `0xb3d6c`, which asks the gateway to charge for it (`CPC`, answered in
         // [`crate::local_network`]'s GXG endpoint), and the charge granted
         // sends the next request.
-        0x90 if request.len() >= 9 && 9 + u32::from_be_bytes([request[5], request[6], request[7], request[8]]) as usize == request.len() => {
+        0x90 if ea_carries_one_field(request) => {
             let mut answer = vec![0, 0, 0, 0, 0x91, 0, 0];
             answer.extend_from_slice(&(EA_CHARGE_KEY.len() as u32).to_be_bytes());
             answer.extend_from_slice(EA_CHARGE_KEY);
@@ -951,11 +954,13 @@ pub fn lgt_local_ea_baseball_response(request: &[u8]) -> Option<Vec<u8>> {
             Some(answer)
         }
 
-        // `CS_BUYABLE_ITEM_APPLY_RESULT`, sent once the charge went through.
-        // Its reply's handler (`0xd1b80`) reads a signed status and, at zero,
-        // hands over what the title remembered selling - 100 of its points,
-        // a booster, a slot - before it says so.
-        0x92 if request.len() <= EA_APPLY_RESULT_MAX => Some(vec![0x00, 0x00, 0x00, 0x07, 0x93, 0x00, 0x00]),
+        // `CS_BUYABLE_ITEM_APPLY_RESULT`, sent once the charge went through,
+        // with the same item code as `CS_CHARGE_BUYABLE`. Its reply's handler
+        // (`0xd1b80`) reads a signed `u16` status (`0xbd634`, the reader
+        // `0xd1f64` takes `SC_CHARGE_BUYABLE`'s with) and, at zero, hands over
+        // what the title remembered selling - 100 of its points, a booster, a
+        // slot - before it says so.
+        0x92 if ea_carries_one_field(request) => Some(vec![0x00, 0x00, 0x00, 0x07, 0x93, 0x00, 0x00]),
 
         _ => None,
     }
@@ -11854,7 +11859,10 @@ mod tests {
         assert_eq!(&reply[4..11], &[0x91, 0, 0, 0, 0, 0, 10]);
         assert_eq!(&reply[11..], b"0000000001");
 
-        assert_eq!(lgt_local_ea_baseball_response(&[0, 0, 0, 6, 0x92, 0]), Some(vec![0, 0, 0, 7, 0x93, 0, 0]));
+        // As 1.0.2 and 1.0.3 sent it on the device: the item code again.
+        let mut apply = vec![0, 0, 0, 0x11, 0x92, 0, 0, 0, 8];
+        apply.extend_from_slice(b"C2000866");
+        assert_eq!(lgt_local_ea_baseball_response(&apply), Some(vec![0, 0, 0, 7, 0x93, 0, 0]));
 
         let mut short = buy.to_vec();
         short.pop();
