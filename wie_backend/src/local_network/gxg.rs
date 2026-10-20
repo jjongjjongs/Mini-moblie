@@ -23,7 +23,9 @@
 //! carries data, `CC`, `SC` and `QC` are the gateway's own notices.
 //!
 //! The open names the server the title wants, as a length-prefixed dotted
-//! quad and five ASCII digits of port - `0e "211.115.203.30" "10013"`.
+//! quad and five ASCII digits of port - `0e "211.115.203.30" "10013"`, or
+//! with a dash between them - `0d "121.78.119.73" "-20535"` from
+//! 렙업만이살길2's older build of the library.
 //!
 //! The answer to an open, `IC`, is read by `0x2e4a8`: a result byte, two
 //! length-prefixed strings, seven ASCII digits, two bytes and a hundred more.
@@ -31,7 +33,7 @@
 
 use alloc::{boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 
-use super::{LocalConnection, LocalEndpoint, LocalRead, candy_shop::CandyShop};
+use super::{LocalConnection, LocalEndpoint, LocalRead, candy_shop::CandyShop, levelup};
 
 /// The names the gateway went by. Both resolve to [`ADDRESS`].
 const HOSTS: [&str; 2] = ["ngw.gxg.com", "ngph.gxg.com"];
@@ -280,7 +282,8 @@ fn open_target(body: &[u8]) -> Option<(String, u16)> {
             return None;
         }
 
-        let port = body.get(at + 1 + length..at + 6 + length)?;
+        let port = body.get(at + 1 + length..)?;
+        let port = port.strip_prefix(b"-").unwrap_or(port).get(..5)?;
         let port = core::str::from_utf8(port).ok()?.parse().ok()?;
         Some((String::from_utf8_lossy(address).into_owned(), port))
     })
@@ -434,6 +437,17 @@ impl LocalConnection for GxgConnection {
                 // `[u32 length][0xffff][command]` frames - the ones the LGT
                 // builds send that server straight - and answered the same way,
                 // carried back as data.
+                b"DP"
+                    if self
+                        .target
+                        .as_ref()
+                        .is_some_and(|(host, port)| (host.as_str(), *port) == levelup::SEQUEL_TARGET) =>
+                {
+                    match levelup::sequel_answer(&body) {
+                        Some(answer) => self.outgoing.extend_from_slice(&frame(&version, b"DPS", &answer)),
+                        None => tracing::warn!("gxg: no answer for data to {:?}", self.target),
+                    }
+                }
                 b"DP" => match self.shop.lock().answer(&body).or_else(|| answer_data(&body)) {
                     Some(mut answer) => {
                         let mut stars = self.stars.lock();
@@ -566,6 +580,13 @@ mod tests {
         body.extend_from_slice(b"211.115.203.30");
         body.extend_from_slice(b"10013");
         assert_eq!(open_target(&body), Some((String::from("211.115.203.30"), 10013)));
+        // 렙업만이살길2's, as it sent it.
+        let mut dashed = b"00870685381046119269".to_vec();
+        dashed.extend_from_slice(&[0; 11]);
+        dashed.push(13);
+        dashed.extend_from_slice(b"121.78.119.73-20535");
+        dashed.extend_from_slice(&[0, 1, 0, 0]);
+        assert_eq!(open_target(&dashed), Some((String::from("121.78.119.73"), 20535)));
 
         let endpoint = GxgEndpoint::new();
         let mut connection = connection(&endpoint);
@@ -596,6 +617,34 @@ mod tests {
         assert_eq!(answer_data(&decode(live)).unwrap(), [11, 0, 0, 0, 0xff, 0xff, 5, 0, 0, 0, 0]);
         assert_eq!(answer_data(&decode(dnf)).unwrap(), [11, 0, 0, 0, 0xff, 0xff, 0x21, 0, 0, 0, 0]);
         assert_eq!(answer_data(&decode(hero)).unwrap(), [0, 14, 0, 0x47, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn the_sequels_purchase_is_carried_and_granted() {
+        let mut open = vec![13];
+        open.extend_from_slice(b"121.78.119.73-20535");
+        let purchase = [
+            0x00, 0x00, 0x1b, 0x0a, b'1', b'0', b'4', b'6', b'1', b'1', b'9', b'2', b'6', b'9', 0, 0, 0, 5, 0, 0, 0, 0xf0, 0, 0, 1, 0x40, 0, 0, 2,
+            0x30,
+        ];
+
+        let endpoint = GxgEndpoint::new();
+        let mut connection = connection(&endpoint);
+        connection.write(&frame(b"GXG.01.00.05", b"IPC", &open));
+        assert!(matches!(connection.read(&mut [0; 16]), LocalRead::Pending));
+        let mut buffer = [0u8; 256];
+        let LocalRead::Data(_) = connection.read(&mut buffer) else {
+            panic!("the open is answered");
+        };
+
+        connection.write(&frame(b"GXG.01.00.05", b"DPC", &purchase));
+        assert!(matches!(connection.read(&mut [0; 16]), LocalRead::Pending));
+        let LocalRead::Data(length) = connection.read(&mut buffer) else {
+            panic!("the purchase is answered");
+        };
+        let mut pending = buffer[..length].to_vec();
+        let (_, kind, body) = take_frame(&mut pending).unwrap();
+        assert_eq!((&kind, body.as_slice()), (b"DPS", &[0u8][..]));
     }
 
     #[test]

@@ -46,8 +46,31 @@
 //! character data and gifts waiting. None of that is knowable now, so the
 //! ranking is not answered: its bytes are written to the trace and nothing is
 //! read back, which is where the title was before.
+//!
+//! # 렙업만이살길2
+//!
+//! The sequel (SKT `0087068538`) sells its 펫 through Nexon's GXG gateway
+//! instead: it asks [`super::gxg`] to carry it to `121.78.119.73`, port
+//! `20535`, and sends its requests as the gateway's data. Each is a type byte,
+//! a big-endian `u16` count of what follows, the handset's number behind a
+//! length byte, and big-endian `u32`s. The builder at `0x4345c` picks the type
+//! from the step the title is on; a purchase is step `0x60`, type 0, thirty
+//! bytes:
+//!
+//! ```text
+//!   +0x00  u8     0
+//!   +0x01  u16be  27
+//!   +0x03  u8     10, and the number's ten digits
+//!   +0x0e  u32be  5, and the screen's width and height
+//!   +0x1a  u32be  what is bought (0x230)
+//! ```
+//!
+//! The answer comes back as the gateway's data, which `0x43d08` reads by the
+//! step it last sent. For a purchase (`0x444f8`) that is one byte: zero calls
+//! `0x1be18`, which hands over what was bought, and shows `펫이 지급되었습니다`;
+//! 1, 2, 3, 8 and 10 are its failures.
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, vec, vec::Vec};
 
 use super::{LocalConnection, LocalEndpoint, LocalRead};
 
@@ -65,6 +88,32 @@ const RANKING_SIZE: usize = 56;
 /// from.
 const RESULT_AT: usize = 0x1c;
 const GRANTED: u32 = 0;
+
+/// Where 렙업만이살길2 asks the gateway to carry it.
+pub const SEQUEL_TARGET: (&str, u16) = ("121.78.119.73", 20535);
+
+const SEQUEL_PURCHASE: u8 = 0;
+const SEQUEL_PURCHASE_SIZE: usize = 30;
+const SEQUEL_HEADER: usize = 3;
+const SEQUEL_NUMBER_LENGTH: u8 = 10;
+
+/// 렙업만이살길2's answer to a purchase sent through the gateway: granted.
+pub fn sequel_answer(data: &[u8]) -> Option<Vec<u8>> {
+    let whole = data.len() == SEQUEL_PURCHASE_SIZE
+        && data[0] == SEQUEL_PURCHASE
+        && u16::from_be_bytes([data[1], data[2]]) as usize == data.len() - SEQUEL_HEADER
+        && data[SEQUEL_HEADER] == SEQUEL_NUMBER_LENGTH;
+    if !whole {
+        tracing::info!("levelup2: no reply shaped for {} bytes {:02x?}", data.len(), data);
+        return None;
+    }
+
+    tracing::info!(
+        "levelup2: granting purchase {:#x}",
+        u32::from_be_bytes(data[0x1a..0x1e].try_into().unwrap())
+    );
+    Some(vec![GRANTED as u8])
+}
 
 /// Answers 렙업만이살길1's shop server.
 pub struct LevelUpEndpoint;
@@ -210,6 +259,21 @@ mod tests {
         let answer = read_all(&mut connection);
         assert_eq!(answer.len(), 56);
         assert_eq!(u32::from_le_bytes(answer[4 + 0x1c..4 + 0x20].try_into().unwrap()), 0);
+    }
+
+    #[test]
+    fn the_sequels_purchase_is_granted() {
+        // As 렙업만이살길2 sent it.
+        let purchase = [
+            0x00, 0x00, 0x1b, 0x0a, b'1', b'0', b'4', b'6', b'1', b'1', b'9', b'2', b'6', b'9', 0, 0, 0, 5, 0, 0, 0, 0xf0, 0, 0, 1, 0x40, 0, 0, 2,
+            0x30,
+        ];
+        assert_eq!(super::sequel_answer(&purchase), Some(vec![0]));
+
+        let mut other = purchase;
+        other[0] = 0x11;
+        assert_eq!(super::sequel_answer(&other), None);
+        assert_eq!(super::sequel_answer(&purchase[..20]), None);
     }
 
     #[test]
