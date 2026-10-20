@@ -25,7 +25,7 @@ use wie_core_arm::{Allocator, ArmCore, EmulatedFunction, EmulatedFunctionParam, 
 use wie_util::{Result, read_generic, read_null_terminated_string_bytes, write_generic, write_null_terminated_string_bytes};
 use wie_wipi_c::{
     MethodImpl, WIPICContext, WIPICMethodBody, WIPICResult,
-    api::{filesystem, graphics, im, kernel, media, misc, net, serial, shared_buf, util},
+    api::{filesystem, graphics, im, kernel, media, misc, net, serial, shared_buf, uic, util},
 };
 
 use super::{context::SktWIPICContext, daf::DATA_BASE, daf::Resources, libc, object};
@@ -54,6 +54,7 @@ mod table {
     pub const NET: u32 = 5;
     pub const UTIL: u32 = 6;
     pub const MEDIA: u32 = 7;
+    pub const UIC: u32 = 8;
     pub const SERIAL: u32 = 9;
     pub const C_LIBRARY: u32 = 14;
     pub const LIFECYCLE: u32 = 15;
@@ -88,6 +89,7 @@ fn body(table: u32, slot: u32) -> Option<WIPICMethodBody> {
         (table::NET, _) => net_body(slot)?,
         (table::UTIL, _) => util_body(slot)?,
         (table::MEDIA, _) => media_body(slot)?,
+        (table::UIC, _) => uic_body(slot)?,
         (table::SERIAL, _) => serial_body(slot)?,
         (table::C_LIBRARY, _) => libc::body(slot)?,
         (table::LIFECYCLE, _) => object::lifecycle_body(slot)?,
@@ -529,6 +531,61 @@ fn media_body(slot: u32) -> Option<WIPICMethodBody> {
         17 => media::stop.into_body(),
         20 => media::set_volume.into_body(),
         21 => media::vibrator.into_body(),
+        _ => return None,
+    })
+}
+
+/// KTF's order less the two slots KTF has that no title has named (its 12,
+/// after `MC_uicSetEnable`, and its 25, before `MC_uicGetTime`), read off
+/// 파워풀프로야구2009's team-name box: `GetClass("TextComponent")` at 1 and
+/// `Create` at 2, `Configure(box, 70, 200, 100, …)` at 9, the box's colours
+/// `(box, 0)` and `(box, 0xaaaaaa)` at 16 and 17, `InsertText(box, 0, name,
+/// 11)` at 30, `SetMaxTextSize(box, 16)` at 33, the box painted at 5 every
+/// frame and handed its keys at 8. Unserved, the box was never made and
+/// nothing typed reached it.
+fn uic_body(slot: u32) -> Option<WIPICMethodBody> {
+    Some(match slot {
+        0 => uic::create_application_context.into_body(),
+        1 => uic::get_class.into_body(),
+        2 => uic::create.into_body(),
+        3 => uic::destroy.into_body(),
+        4 => uic::repaint.into_body(),
+        5 => uic::paint.into_body(),
+        6 => uic::get_class_name.into_body(),
+        7 => uic::is_instance.into_body(),
+        8 => uic::handle_event.into_body(),
+        9 => uic::configure.into_body(),
+        10 => uic::get_geometry.into_body(),
+        11 => uic::set_enable.into_body(),
+        12 => uic::set_callback.into_body(),
+        13 => uic::set_event_handler.into_body(),
+        14 => uic::set_font.into_body(),
+        15 => uic::get_font.into_body(),
+        16 => uic::set_fg_color.into_body(),
+        17 => uic::set_bg_color.into_body(),
+        18 => uic::set_label.into_body(),
+        19 => uic::get_label.into_body(),
+        20 => uic::set_label_alignment.into_body(),
+        21 => uic::set_time_mask.into_body(),
+        22 => uic::set_time.into_body(),
+        23 => uic::set_time_long.into_body(),
+        24 => uic::get_time.into_body(),
+        25 => uic::add_menu_item.into_body(),
+        26 => uic::get_menu_item.into_body(),
+        27 => uic::remove_menu_item.into_body(),
+        28 => uic::set_active_menu_item.into_body(),
+        29 => uic::get_active_menu_item.into_body(),
+        30 => uic::insert_text.into_body(),
+        31 => uic::delete_text.into_body(),
+        32 => uic::get_max_text_size.into_body(),
+        33 => uic::set_max_text_size.into_body(),
+        34 => uic::get_text_size.into_body(),
+        35 => uic::get_text.into_body(),
+        36 => uic::add_list_item.into_body(),
+        37 => uic::get_list_item.into_body(),
+        38 => uic::remove_list_item.into_body(),
+        39 => uic::set_active_list_item.into_body(),
+        40 => uic::get_active_list_item.into_body(),
         _ => return None,
     })
 }

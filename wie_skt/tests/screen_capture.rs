@@ -51,6 +51,8 @@
 //! - `WIE_WATCH` - branch traces and write watches, spelled as the handset's
 //!   probe setting is (`pc:3a376/500,w:1518700`) - see
 //!   `wie_backend::probe::set_watches`.
+//! - `WIE_BIOS` - a firmware image whose bitmap faces text is drawn with, as
+//!   the Android frontend draws it; see the KTF probe.
 //! - `WIE_REDRAW_ON_REQUEST` - feed a host paint only when the title asks for
 //!   one, which is what the Android frontend does. Off, a paint arrives every
 //!   forty ticks regardless, and a repaint the runtime loses is covered up.
@@ -537,6 +539,17 @@ fn skt_archive_probe() {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_writer(std::io::stderr)
         .try_init();
+
+    // The handset's bitmap faces, which the Android frontend installs from the
+    // firmware it bundles; without one, text is drawn from the outline font,
+    // which is not the same width. As on KTF.
+    if let Ok(bios) = std::env::var("WIE_BIOS") {
+        let image = std::fs::read(&bios).expect("bios image");
+        let installed = wie_wipi_c::api::graphics::install_bios_font(&image);
+        eprintln!("[probe] bios {bios}: bitmap face installed={installed}");
+    } else {
+        wie_wipi_c::api::graphics::clear_bios_font();
+    }
 
     // The handset's own bitmap faces, which the Android frontend installs from
     // the firmware it bundles. A capture has no frontend, so text is drawn from
