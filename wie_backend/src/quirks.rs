@@ -615,6 +615,13 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // rows under it, so on 240x320 the game filled a quarter of the screen
     // inside a black frame, and on 128x160 the labels ran off the bottom.
     (TitlePlatform::Ktf, "01033269", panel(128, 176)),
+    // 건즈더듀얼 (그래텍): the same 176x204 build again. Its title is a
+    // 176x204 picture - on 176x220 it left eight black rows above and below,
+    // on 240x320 it sat at (32, 30) in a black field - and its play field and
+    // talk box are laid out for 204 rows. On 240x320 they floated in the
+    // middle with a stage name above them that was drawn over and never
+    // cleared, so the names of successive stages piled up into one smear.
+    (TitlePlatform::Ktf, "01035471", panel(176, 204)),
     // 초밥의달인3 (KTF PD004152): a Java title whose screens draw inside a
     // 240x296 clip - the bottom 24 rows are the handset's soft-key strip, which
     // it never touches - while some earlier screen fills the whole 240x320 with
@@ -1231,6 +1238,12 @@ mod tests {
     #[test]
     fn secret_royal_inspector_gets_its_panel() {
         assert_eq!(title_quirks(TitlePlatform::Ktf, "01033269").screen_size, Some((128, 176)));
+    }
+
+    /// 건즈더듀얼 is the 176x204 build its title and play field are drawn for.
+    #[test]
+    fn gunz_the_duel_gets_its_panel() {
+        assert_eq!(title_quirks(TitlePlatform::Ktf, "01035471").screen_size, Some((176, 204)));
     }
 
     /// 프린스메이커 온달편 fills the 128x128 panel its art was drawn for.
