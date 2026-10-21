@@ -7,6 +7,11 @@ struct GameFile: Identifiable, Hashable {
     /// The file name, which is what favorites and per-title settings key on.
     var name: String { url.lastPathComponent }
     var title: String { url.deletingPathExtension().lastPathComponent }
+    /// The file's size as the list shows it, `510 KB`.
+    var sizeText: String {
+        let bytes = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        return ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+    }
 }
 
 /// A failure the emulator or the file system reported, in the words the

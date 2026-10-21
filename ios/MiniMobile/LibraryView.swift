@@ -48,6 +48,15 @@ private struct Notice {
     let message: String
 }
 
+/// A question asked on a card before something that cannot be taken back.
+private struct PendingConfirm {
+    let title: String
+    let message: String
+    let action: String
+    let danger: Bool
+    let run: () -> Void
+}
+
 struct LibraryView: View {
     @State private var games: [GameFile] = []
     @State private var carriers: [String: String] = [:]
@@ -67,8 +76,9 @@ struct LibraryView: View {
 
     @State private var editMode = EditMode.inactive
     @State private var selection = Set<String>()
-    @State private var confirmingDelete = false
-    @State private var erasing: GameFile?
+    /// The game whose action card is up, and the question a card is asking.
+    @State private var menuFor: GameFile?
+    @State private var pending: PendingConfirm?
 
     @State private var playing: GameFile?
     @State private var sharing: SharedFile?
@@ -110,26 +120,6 @@ struct LibraryView: View {
         } message: {
             Text(notice?.message ?? "")
         }
-        .confirmationDialog(
-            "선택한 게임 \(selection.count)개를 지울까요?",
-            isPresented: $confirmingDelete,
-            titleVisibility: .visible
-        ) {
-            Button("게임 삭제", role: .destructive, action: deleteSelection)
-        } message: {
-            Text("세이브는 남습니다. 같은 게임을 다시 넣으면 이어서 할 수 있습니다.")
-        }
-        .confirmationDialog(
-            "\(erasing?.title ?? "") 세이브를 지울까요?",
-            isPresented: Binding(get: { erasing != nil }, set: { if !$0 { erasing = nil } }),
-            titleVisibility: .visible
-        ) {
-            Button("세이브 삭제", role: .destructive) {
-                if let game = erasing { eraseSave(game) }
-            }
-        } message: {
-            Text("되돌릴 수 없습니다. 먼저 내보내기로 백업해 두세요.")
-        }
         .sheet(item: $sharing) { file in
             ShareSheet(items: [file.url])
                 .preferredColorScheme(dark ? .dark : .light)
@@ -145,11 +135,105 @@ struct LibraryView: View {
         .fullScreenCover(item: $playing, onDismiss: reload) { game in
             GameView(game: game)
         }
+        .overlay(cards)
         .preferredColorScheme(dark ? .dark : .light)
         .onAppear {
             PlayHistory.dropOldCovers()
             reload()
         }
+    }
+
+    // MARK: - Cards
+
+    /// The action card of a long-pressed game, or the question one asked.
+    @ViewBuilder
+    private var cards: some View {
+        let palette = LibraryPalette.of(dark: dark)
+        if let ask = pending {
+            LibraryCardOverlay(onDismiss: closeCards) {
+                ConfirmCard(
+                    title: ask.title, message: ask.message, action: ask.action, danger: ask.danger,
+                    palette: palette, dark: dark,
+                    onConfirm: {
+                        closeCards()
+                        ask.run()
+                    },
+                    onCancel: closeCards
+                )
+            }
+            .transition(.opacity)
+        } else if let game = menuFor {
+            LibraryCardOverlay(onDismiss: closeCards) {
+                TileMenuCard(
+                    title: game.title, tiles: tiles(for: game), dangers: dangers(for: game), palette: palette, onClose: closeCards
+                ) {
+                    GameCover(game: game, icon: icons[game.name])
+                } meta: {
+                    HStack(spacing: 6) {
+                        CarrierBadge(carrier: carriers[game.name])
+                            .scaleEffect(0.85, anchor: .leading)
+                            .frame(width: 34, alignment: .leading)
+                        Text(game.sizeText)
+                            .font(.system(size: 11.5))
+                            .foregroundColor(palette.muted)
+                    }
+                }
+            }
+            .transition(.opacity)
+        }
+    }
+
+    private func tiles(for game: GameFile) -> [TileAction] {
+        let favorite = favorites.contains(game.name)
+        return [
+            TileAction(icon: "play.fill", title: "실행", note: "바로 시작") { choose { playing = game } },
+            TileAction(icon: favorite ? "star.slash" : "star", title: favorite ? "즐겨찾기 해제" : "즐겨찾기", note: "목록 맨 위에") {
+                choose { toggleFavorite(game) }
+            },
+            TileAction(icon: "square.and.arrow.up", title: "세이브 꺼내기", note: ".zip 으로 보내기") { choose { exportSave(game) } },
+            TileAction(icon: "square.and.arrow.down", title: "세이브 불러오기", note: "목록에서 고르기") { choose { savesFor = game } },
+        ]
+    }
+
+    private func dangers(for game: GameFile) -> [TileAction] {
+        [
+            TileAction(icon: "arrow.counterclockwise", title: "데이터 초기화", note: "") {
+                pending = PendingConfirm(
+                    title: "\(game.title.withObject) 초기화할까요?",
+                    message: "이 게임이 저장한 세이브를 모두 지워요. 되돌릴 수 없어요.\n남겨두려면 먼저 \"세이브 꺼내기\"로 백업하세요.",
+                    action: "초기화", danger: true
+                ) { eraseSave(game) }
+            },
+            TileAction(icon: "trash", title: "목록에서 삭제", note: "") {
+                pending = PendingConfirm(
+                    title: "\(game.title.withObject) 목록에서 삭제할까요?",
+                    message: "저장한 세이브는 그대로 남아요. 같은 게임을 다시 넣으면 이어서 할 수 있어요.",
+                    action: "삭제", danger: true
+                ) {
+                    Library.delete(game)
+                    reload()
+                }
+            },
+        ]
+    }
+
+    /// Closes the card, then does what was chosen on it - a sheet or the game
+    /// opens over the list once the card is gone.
+    private func choose(_ action: () -> Void) {
+        closeCards()
+        action()
+    }
+
+    private func closeCards() {
+        withAnimation(.easeOut(duration: 0.15)) {
+            menuFor = nil
+            pending = nil
+        }
+    }
+
+    private func openMenu(_ game: GameFile) {
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        withAnimation(.easeOut(duration: 0.15)) { menuFor = game }
     }
 
     // MARK: - List
@@ -249,7 +333,10 @@ struct LibraryView: View {
             if editMode.isEditing {
                 label
             } else {
-                Button { playing = game } label: { label }
+                label
+                    .contentShape(Rectangle())
+                    .onTapGesture { playing = game }
+                    .onLongPressGesture(minimumDuration: 0.45) { openMenu(game) }
             }
         }
         .swipeActions(edge: .leading) {
@@ -265,28 +352,6 @@ struct LibraryView: View {
             } label: {
                 Label("삭제", systemImage: "trash")
             }
-        }
-        .contextMenu { gameMenu(game) }
-    }
-
-    /// What a long press on a game offers, in the list and the grid alike.
-    @ViewBuilder
-    private func gameMenu(_ game: GameFile) -> some View {
-        let favorite = favorites.contains(game.name)
-        Button { playing = game } label: { Label("실행", systemImage: "play.fill") }
-        Button { toggleFavorite(game) } label: {
-            Label(favorite ? "즐겨찾기 해제" : "즐겨찾기", systemImage: favorite ? "star.slash" : "star")
-        }
-        Divider()
-        Button { exportSave(game) } label: { Label("세이브 내보내기", systemImage: "square.and.arrow.up") }
-        Button { savesFor = game } label: { Label("세이브 불러오기", systemImage: "square.and.arrow.down") }
-        Button(role: .destructive) { erasing = game } label: { Label("세이브 삭제", systemImage: "clock.arrow.circlepath") }
-        Divider()
-        Button(role: .destructive) {
-            Library.delete(game)
-            reload()
-        } label: {
-            Label("게임 삭제", systemImage: "trash")
         }
     }
 
@@ -336,36 +401,35 @@ struct LibraryView: View {
     private func tile(_ game: GameFile) -> some View {
         let favorite = favorites.contains(game.name)
         let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
-        return Button { playing = game } label: {
-            VStack(alignment: .leading, spacing: 3) {
-                Color.clear
-                    .aspectRatio(1, contentMode: .fit)
-                    .overlay(GameCover(game: game, icon: icons[game.name]))
-                    .clipShape(shape)
-                    .overlay(alignment: .topLeading) {
-                        CarrierBadge(carrier: carriers[game.name])
-                            .scaleEffect(0.85, anchor: .topLeading)
-                            .background(RoundedRectangle(cornerRadius: 5).fill(Color(.systemBackground).opacity(0.85)))
+        return VStack(alignment: .leading, spacing: 3) {
+            Color.clear
+                .aspectRatio(1, contentMode: .fit)
+                .overlay(GameCover(game: game, icon: icons[game.name]))
+                .clipShape(shape)
+                .overlay(alignment: .topLeading) {
+                    CarrierBadge(carrier: carriers[game.name])
+                        .scaleEffect(0.85, anchor: .topLeading)
+                        .background(RoundedRectangle(cornerRadius: 5).fill(Color(.systemBackground).opacity(0.85)))
+                        .padding(6)
+                }
+                .overlay(alignment: .topTrailing) {
+                    if favorite {
+                        Image(systemName: "star.fill")
+                            .foregroundColor(.yellow)
+                            .shadow(color: .black.opacity(0.5), radius: 2, y: 1)
                             .padding(6)
                     }
-                    .overlay(alignment: .topTrailing) {
-                        if favorite {
-                            Image(systemName: "star.fill")
-                                .foregroundColor(.yellow)
-                                .shadow(color: .black.opacity(0.5), radius: 2, y: 1)
-                                .padding(6)
-                        }
-                    }
-                    .shadow(color: .black.opacity(0.18), radius: 4, y: 2)
-                Text(game.title)
-                    .font(.footnote.weight(.semibold))
-                    .foregroundColor(.primary)
-                    .lineLimit(1)
-                    .padding(.top, 3)
-            }
+                }
+                .shadow(color: .black.opacity(0.18), radius: 4, y: 2)
+            Text(game.title)
+                .font(.footnote.weight(.semibold))
+                .foregroundColor(.primary)
+                .lineLimit(1)
+                .padding(.top, 3)
         }
-        .buttonStyle(.plain)
-        .contextMenu { gameMenu(game) }
+        .contentShape(Rectangle())
+        .onTapGesture { playing = game }
+        .onLongPressGesture(minimumDuration: 0.45) { openMenu(game) }
     }
 
     // MARK: - Toolbar
@@ -428,7 +492,14 @@ struct LibraryView: View {
             .disabled(selection.isEmpty)
             Spacer()
             Button(role: .destructive) {
-                confirmingDelete = true
+                let count = selection.count
+                withAnimation(.easeOut(duration: 0.15)) {
+                    pending = PendingConfirm(
+                        title: "\(count)개 게임을 삭제할까요?",
+                        message: "목록에서만 빠지고, 저장한 세이브는 그대로 남아요.\n같은 게임을 다시 넣으면 이어서 할 수 있어요.",
+                        action: "삭제", danger: true, run: deleteSelection
+                    )
+                }
             } label: {
                 Label("삭제 \(selection.count)", systemImage: "trash")
             }
@@ -556,7 +627,6 @@ struct LibraryView: View {
     }
 
     private func eraseSave(_ game: GameFile) {
-        erasing = nil
         do {
             let removed = try Library.eraseSave(game)
             notice = Notice(title: "세이브 삭제", message: removed > 0 ? "파일 \(removed)개를 지웠습니다." : "지울 세이브가 없습니다.")
