@@ -329,6 +329,7 @@ struct State {
     /// data arrived - with the argument each is called with.
     calls: Vec<(u32, u32, u32)>,
     connection: Connection,
+    /// When the timed service ends, on the clock [`Brew::now`] reads.
     timed_due: Option<u64>,
     posted: Vec<(u32, u32, u32)>,
 
@@ -526,13 +527,18 @@ impl Brew {
         let now = self.now();
         let due = {
             let mut state = self.state.lock();
-            let Some(index) = (0..state.timers.len()).min_by_key(|x| state.timers[*x].due) else {
-                return Ok(None);
-            };
-            if now < state.timers[index].due {
-                return Ok(Some(state.timers[index].due - now));
+            let index = (0..state.timers.len()).min_by_key(|x| state.timers[*x].due);
+            match index {
+                Some(index) if state.timers[index].due <= now => state.timers.remove(index),
+                // Nothing due: the wait runs to the nearer of the shell's
+                // timers and the timed service. Leaving the timed service
+                // out slept a title past it for as long as the loop's poll
+                // whenever it was the nearer, or the only one running.
+                _ => {
+                    let next = state.timers.iter().map(|x| x.due).chain(state.timed_due).min();
+                    return Ok(next.map(|due| due.saturating_sub(now)));
+                }
             }
-            state.timers.remove(index)
         };
         core.run_function::<u32>(due.function, &[due.context]).await?;
 
