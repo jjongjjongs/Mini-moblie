@@ -63,6 +63,14 @@ const MAX_BLOCK_LEN: usize = 256;
 const CACHE_SLOTS: usize = 1 << 13;
 const CACHE_MASK: u32 = (CACHE_SLOTS - 1) as u32;
 
+/// Most blocks kept aside per instruction set once pushed out of their slot.
+/// Each compiled block holds an executable mapping of its own, at least a
+/// page, so this bounds what a title with more hot code than this can pin:
+/// past it, a block pushed out is dropped and compiled again when next
+/// reached, as before. 제노니아2's whole field, every block it ever runs, is
+/// some seven thousand.
+const SPILL_MAX: usize = CACHE_SLOTS;
+
 /// Granularity of self-modifying-code tracking, as `log2(bytes)`. A store into a
 /// region that holds compiled code invalidates every block, so this must be fine
 /// enough that a title's data/stack writes do not alias its code: at the guest's
@@ -236,6 +244,37 @@ fn fallback_category(inst: u16) -> usize {
     }
 }
 
+/// Puts `block` in `slot` as the block at `pc`, spilling the one there into
+/// `spilled` when it is still of this generation rather than dropping it.
+fn install(slot: &mut Slot, spilled: &mut BTreeMap<u32, CompiledBlock>, generation: u32, pc: u32, block: CompiledBlock) {
+    if let Some(old) = slot.block.take()
+        && slot.gen_tag == generation
+        && slot.pc != pc
+        && spilled.len() < SPILL_MAX
+    {
+        spilled.insert(slot.pc, old);
+    }
+
+    slot.gen_tag = generation;
+    slot.pc = pc;
+    slot.block = Some(block);
+}
+
+/// Drops the spilled blocks starting in `[lo, hi)` that reach past `from`.
+/// Returns whether any was dropped.
+fn drop_spilled(spilled: &mut BTreeMap<u32, CompiledBlock>, lo: u32, hi: u32, from: u32) -> bool {
+    let stale: alloc::vec::Vec<u32> = spilled
+        .range(lo..hi)
+        .filter(|(_, block)| from < block.end_pc)
+        .map(|(&pc, _)| pc)
+        .collect();
+    for pc in &stale {
+        spilled.remove(pc);
+    }
+
+    !stale.is_empty()
+}
+
 pub struct JitEngine {
     cpu: Cpu,
     mem: Box<EmulatedMemory>,
@@ -244,6 +283,17 @@ pub struct JitEngine {
     /// Compiled ARM (A32) blocks, kept apart from the Thumb `cache` so a PC that
     /// is only ever one ISA never aliases the other.
     arm_cache: Box<[Slot; CACHE_SLOTS]>,
+    /// Compiled blocks pushed out of their slot by another block that hashes
+    /// to it, by start PC, so the next visit takes the block back rather than
+    /// compiling it again. A title's hot code is spread wider than the cache's
+    /// reach, so blocks a fixed distance apart share a slot and take turns in it
+    /// every frame: 제노니아2's field ran 15-20 thousand compiles a second this
+    /// way - each one an executable mapping made and unmade - and spent most of
+    /// its time on them. Everything here is of the current generation; a flush
+    /// empties it, and an invalidation takes out what it covers.
+    spilled: BTreeMap<u32, CompiledBlock>,
+    /// The same for `arm_cache`.
+    arm_spilled: BTreeMap<u32, CompiledBlock>,
     generation: u32,
     code_pages: Box<[bool]>,
     /// Per-category count of interpreter fallbacks, and the running total, for
@@ -340,6 +390,8 @@ impl JitEngine {
             ctx: Box::new(JitCtx::new()),
             cache: empty_cache(),
             arm_cache: empty_cache(),
+            spilled: BTreeMap::new(),
+            arm_spilled: BTreeMap::new(),
             generation: 1,
             // Heap-built (a 1 MiB array must not go through the stack).
             code_pages: alloc::vec![false; CODE_PAGE_COUNT].into_boxed_slice(),
@@ -444,6 +496,8 @@ impl JitEngine {
             }
             self.generation = 1;
         }
+        self.spilled.clear();
+        self.arm_spilled.clear();
         self.code_pages.fill(false);
     }
 
@@ -505,6 +559,10 @@ impl JitEngine {
             pc = pc.wrapping_add(4);
         }
 
+        let lo = addr.saturating_sub(MAX_BLOCK_LEN as u32 * 4);
+        hit |= drop_spilled(&mut self.spilled, lo, addr.saturating_add(1), addr);
+        hit |= drop_spilled(&mut self.arm_spilled, lo, addr.saturating_add(1), addr);
+
         hit
     }
 
@@ -547,6 +605,9 @@ impl JitEngine {
             }
             pc = pc.wrapping_add(4);
         }
+
+        drop_spilled(&mut self.spilled, lo, end, start);
+        drop_spilled(&mut self.arm_spilled, lo, end, start);
     }
 
     #[inline(always)]
@@ -696,6 +757,10 @@ impl JitEngine {
         if self.cache[idx].gen_tag == self.generation && self.cache[idx].pc == pc && self.cache[idx].block.is_some() {
             return true;
         }
+        if let Some(block) = self.spilled.remove(&pc) {
+            install(&mut self.cache[idx], &mut self.spilled, self.generation, pc, block);
+            return true;
+        }
         let Some((ops, end_pc)) = self.decode_block(pc) else {
             return false;
         };
@@ -709,12 +774,15 @@ impl JitEngine {
         } else {
             pc.wrapping_add(2 * compiled_ops as u32)
         };
+        crate::BLOCK_COMPILES.fetch_add(1, ::core::sync::atomic::Ordering::Relaxed);
         self.code_pages[(pc >> CODE_PAGE_BITS) as usize] = true;
-        let cur_gen = self.generation;
-        let slot = &mut self.cache[idx];
-        slot.gen_tag = cur_gen;
-        slot.pc = pc;
-        slot.block = Some(CompiledBlock { code, end_pc });
+        install(
+            &mut self.cache[idx],
+            &mut self.spilled,
+            self.generation,
+            pc,
+            CompiledBlock { code, end_pc },
+        );
         true
     }
 
@@ -750,6 +818,10 @@ impl JitEngine {
         if self.arm_cache[idx].gen_tag == self.generation && self.arm_cache[idx].pc == pc && self.arm_cache[idx].block.is_some() {
             return true;
         }
+        if let Some(block) = self.arm_spilled.remove(&pc) {
+            install(&mut self.arm_cache[idx], &mut self.arm_spilled, self.generation, pc, block);
+            return true;
+        }
         let Some((ops, end_pc)) = self.decode_arm_block(pc) else {
             return false;
         };
@@ -761,12 +833,15 @@ impl JitEngine {
         } else {
             pc.wrapping_add(4 * compiled_ops as u32)
         };
+        crate::BLOCK_COMPILES.fetch_add(1, ::core::sync::atomic::Ordering::Relaxed);
         self.code_pages[(pc >> CODE_PAGE_BITS) as usize] = true;
-        let cur_gen = self.generation;
-        let slot = &mut self.arm_cache[idx];
-        slot.gen_tag = cur_gen;
-        slot.pc = pc;
-        slot.block = Some(CompiledBlock { code, end_pc });
+        install(
+            &mut self.arm_cache[idx],
+            &mut self.arm_spilled,
+            self.generation,
+            pc,
+            CompiledBlock { code, end_pc },
+        );
         true
     }
 
@@ -2234,6 +2309,48 @@ mod tests {
     // clean block boundary exactly at `end`, so the ops before it are actually
     // JIT-compiled rather than single-stepped by the end-in-block guard.
     const B_NEXT: u16 = 0xe7ff;
+
+    /// Runs the Thumb code at `at` to the halfword `len` bytes on and says what
+    /// it left in `r0`.
+    fn run_at(e: &mut JitEngine, at: u32, len: u32) -> u32 {
+        e.reg_write(ArmRegister::PC, at | 1);
+        loop {
+            match e.run(at + len, 1_000_000) {
+                Ok(EngineRunResult::CountExhausted) => continue,
+                other => assert_eq!(outcome(other), Outcome::End),
+            }
+            break;
+        }
+        e.reg_read(ArmRegister::R0)
+    }
+
+    /// Two blocks a cache's reach apart share a slot. The one pushed out is kept
+    /// and taken back on its next visit rather than compiled again - and still
+    /// dropped when the code it was compiled from is written over.
+    #[test]
+    fn a_block_pushed_out_of_its_slot_is_kept_until_its_code_changes() {
+        const OTHER: u32 = CODE + (super::CACHE_SLOTS as u32) * 2;
+        assert_eq!(JitEngine::slot_index(CODE), JitEngine::slot_index(OTHER));
+
+        // movs r0,#1; b next - and movs r0,#2; b next a slot's reach on.
+        let mut e = setup(JitEngine::new(), &thumb(&[0x2001, B_NEXT]), &[0u32; 15]);
+        e.mem_write(OTHER, &thumb(&[0x2002, B_NEXT])).unwrap();
+
+        assert_eq!(run_at(&mut e, CODE, 4), 1);
+        assert_eq!(run_at(&mut e, OTHER, 4), 2);
+        assert!(e.spilled.contains_key(&CODE));
+
+        // Back again: taken out of the spill, and the other one goes in.
+        assert_eq!(run_at(&mut e, CODE, 4), 1);
+        assert!(e.spilled.contains_key(&OTHER));
+        assert!(!e.spilled.contains_key(&CODE));
+
+        // The spilled block's code is rewritten - movs r0,#3 - and the next
+        // visit runs what is there now.
+        e.mem_write(OTHER, &thumb(&[0x2003])).unwrap();
+        assert!(!e.spilled.contains_key(&OTHER));
+        assert_eq!(run_at(&mut e, OTHER, 4), 3);
+    }
 
     #[test]
     fn jit_mov_pc_register() {

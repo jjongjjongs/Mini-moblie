@@ -70,6 +70,11 @@ pub static PEAK_THREADS: ::core::sync::atomic::AtomicU64 = ::core::sync::atomic:
 /// [`SVC_COUNT`] therefore never sees.
 pub static INTRINSIC_CALLS: ::core::sync::atomic::AtomicU64 = ::core::sync::atomic::AtomicU64::new(0);
 
+/// Blocks the JIT compiled, for the perf meter. Once a title is running its
+/// steady loop this should be near zero; a high rate means compiled blocks are
+/// being thrown away and rebuilt.
+pub static BLOCK_COMPILES: ::core::sync::atomic::AtomicU64 = ::core::sync::atomic::AtomicU64::new(0);
+
 pub use self::{
     allocator::Allocator,
     binary_patches::install_binary_patches,
