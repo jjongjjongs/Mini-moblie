@@ -11,6 +11,10 @@ use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 
 use crate::classes::javax::microedition::midlet::MIDlet;
 
+/// How long the event loop waits, at most, before it looks for events again
+/// when it has none to hand out.
+const EVENT_POLL_MS: u64 = 16;
+
 #[repr(i32)]
 #[allow(clippy::enum_variant_names)]
 enum EventQueueEvent {
@@ -346,7 +350,22 @@ impl EventQueue {
                     break;
                 }
 
-                context.system().sleep(16).await; // TODO we need to wait for events
+                // Nothing to hand out: wait for the next poll, or for the
+                // earliest timer still to come if that is sooner. Waiting the
+                // whole poll fired every timer up to that much late - by nine
+                // milliseconds as often as not - and a title that paces its
+                // frames by its own timer, as 제노니아2 does at about 66ms, lost
+                // that to every frame and drew them unevenly.
+                let now = context.system().platform().now();
+                let next_timer = pending_timer_events
+                    .iter()
+                    .filter_map(|event| match event {
+                        Event::Timer { due, .. } => Some(if *due > now { *due - now } else { 1 }),
+                        _ => None,
+                    })
+                    .min();
+                let wait = next_timer.map_or(EVENT_POLL_MS, |ms| ms.clamp(1, EVENT_POLL_MS));
+                context.system().sleep(wait).await; // TODO we need to wait for events
 
                 for event in pending_timer_events.drain(..) {
                     let current = match &event {
