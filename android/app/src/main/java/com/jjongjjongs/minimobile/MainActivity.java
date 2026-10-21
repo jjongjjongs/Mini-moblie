@@ -3,6 +3,7 @@ package com.jjongjjongs.minimobile;
 import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.Dialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
@@ -278,6 +279,7 @@ public final class MainActivity extends Activity {
 
     private static int LIB_DELETE = Color.rgb(192, 57, 43);       // #c0392b delete button
     private static int LIB_RED_SOFT = Color.rgb(253, 236, 235);   // #fdeceb danger icon tile
+    private static int LIB_RED_LINE = Color.rgb(245, 201, 196);   // #f5c9c4 danger button border
     private static int LIB_SELECT_BG = Color.rgb(243, 250, 245);  // #f3faf5 selected row tint
 
     private static int LIB_STAR = Color.rgb(230, 167, 0);         // #e6a700 favourite star
@@ -313,6 +315,7 @@ public final class MainActivity extends Activity {
             CARRIER_DRM = new int[]{Color.rgb(153, 57, 57), Color.rgb(248, 232, 232), Color.rgb(237, 213, 213)};
             LIB_DELETE = Color.rgb(192, 57, 43);
             LIB_RED_SOFT = Color.rgb(253, 236, 235);
+            LIB_RED_LINE = Color.rgb(245, 201, 196);
             LIB_SELECT_BG = Color.rgb(243, 250, 245);
             LIB_STAR = Color.rgb(230, 167, 0);
             LIB_STAR_OFF = Color.rgb(194, 204, 197);
@@ -340,6 +343,7 @@ public final class MainActivity extends Activity {
         CARRIER_DRM = new int[]{Color.rgb(224, 122, 122), Color.rgb(58, 31, 31), Color.rgb(90, 46, 46)};
         LIB_DELETE = Color.rgb(229, 83, 75);
         LIB_RED_SOFT = Color.rgb(58, 29, 27);
+        LIB_RED_LINE = Color.rgb(90, 42, 39);
         LIB_SELECT_BG = Color.rgb(23, 39, 29);
         LIB_STAR = Color.rgb(242, 184, 34);
         LIB_STAR_OFF = Color.rgb(60, 74, 65);
@@ -2116,11 +2120,9 @@ public final class MainActivity extends Activity {
             return;
         }
 
-        lightAlert()
-                .setTitle(targets.size() + "개 게임을 삭제할까요?")
-                .setMessage("목록에서 삭제됩니다. 저장한 내용은 그대로 남습니다.\n\n" + batchNames(targets))
-                .setNegativeButton("취소", null)
-                .setPositiveButton("삭제", (dialog, which) -> {
+        confirmCard(targets.size() + "개 게임을 삭제할까요?",
+                "목록에서만 빠지고, 저장한 내용은 그대로 남아요.\n\n" + batchNames(targets),
+                "삭제", true, () -> {
                     int removed = 0;
                     for (File game : targets) {
                         if (game.delete()) {
@@ -2132,8 +2134,7 @@ public final class MainActivity extends Activity {
                     selectMode = false;
                     selected.clear();
                     showLibrary();
-                })
-                .show();
+                });
     }
 
     /** Rebuilds the carrier filter chips with the given per-bucket counts. */
@@ -2303,6 +2304,52 @@ public final class MainActivity extends Activity {
         return bucket.equals("DRM") ? "ETC" : bucket;
     }
 
+    /**
+     * A game's cover: the archive's own icon if it carries one, otherwise a
+     * colour tile with the title's first character.
+     */
+    private View gameCover(File game) {
+        Bitmap bitmap = cachedIcon(game);
+        if (bitmap != null) {
+            ImageView icon = new ImageView(this);
+            icon.setImageBitmap(bitmap);
+            icon.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            roundCorners(icon, 11);
+            return icon;
+        }
+        String label = displayName(game);
+        TextView tile = new TextView(this);
+        tile.setText(label.isEmpty() ? "?" : label.substring(0, 1));
+        tile.setTextColor(Color.WHITE);
+        tile.setTextSize(18f);
+        tile.setTypeface(Typeface.DEFAULT_BOLD);
+        tile.setGravity(android.view.Gravity.CENTER);
+        tile.setBackground(roundedRect(colorForName(game.getName()), 0, 0, 11));
+        return tile;
+    }
+
+    /** The carrier badge, in place of the old file-extension tag, then the file size. */
+    private void fillGameMeta(LinearLayout line, File game) {
+        String bucket = carrierBucket(game);
+        int[] colors = carrierColors(bucket);
+        TextView tag = new TextView(this);
+        tag.setText(bucket.equals("ETC") ? "기타" : bucket);
+        tag.setTextSize(10f);
+        tag.setTypeface(Typeface.DEFAULT_BOLD);
+        tag.setTextColor(colors[0]);
+        tag.setBackground(roundedRect(colors[1], colors[2], 1, 6));
+        tag.setPadding(dp(6), dp(1), dp(6), dp(1));
+        LinearLayout.LayoutParams tagParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        tagParams.rightMargin = dp(6);
+        line.addView(tag, tagParams);
+
+        TextView size = new TextView(this);
+        size.setText(formatSize(game.length()));
+        size.setTextSize(11.5f);
+        size.setTextColor(LIB_MUTED);
+        line.addView(size);
+    }
+
     /** The archive's cover icon, cached by name+size+mtime (null = no icon). */
     private Bitmap cachedIcon(File game) {
         String key = game.getName() + ":" + game.length() + ":" + game.lastModified();
@@ -2412,28 +2459,7 @@ public final class MainActivity extends Activity {
             row.addView(check, checkParams);
         }
 
-        // Cover: the archive's own icon if it carries one, otherwise a colour
-        // tile with the title's first character.
-        Bitmap bitmap = cachedIcon(game);
-        View cover;
-        if (bitmap != null) {
-            ImageView icon = new ImageView(this);
-            icon.setImageBitmap(bitmap);
-            icon.setScaleType(ImageView.ScaleType.CENTER_CROP);
-            roundCorners(icon, 11);
-            cover = icon;
-        } else {
-            String label = displayName(game);
-            TextView tile = new TextView(this);
-            tile.setText(label.isEmpty() ? "?" : label.substring(0, 1));
-            tile.setTextColor(Color.WHITE);
-            tile.setTextSize(18f);
-            tile.setTypeface(Typeface.DEFAULT_BOLD);
-            tile.setGravity(android.view.Gravity.CENTER);
-            tile.setBackground(roundedRect(colorForName(game.getName()), 0, 0, 11));
-            cover = tile;
-        }
-        row.addView(cover, new LinearLayout.LayoutParams(dp(42), dp(42)));
+        row.addView(gameCover(game), new LinearLayout.LayoutParams(dp(42), dp(42)));
 
         // Title, then a tag chip plus the file size.
         LinearLayout meta = new LinearLayout(this);
@@ -2456,27 +2482,8 @@ public final class MainActivity extends Activity {
         metaLine.setGravity(android.view.Gravity.CENTER_VERTICAL);
         metaLine.setPadding(0, dp(2), 0, 0);
 
-        // Carrier badge in place of the old file-extension tag.
-        String bucket = carrierBucket(game);
-        int[] colors = carrierColors(bucket);
-        TextView tag = new TextView(this);
-        tag.setText(bucket.equals("ETC") ? "기타" : bucket);
-        tag.setTextSize(10f);
-        tag.setTypeface(Typeface.DEFAULT_BOLD);
-        tag.setTextColor(colors[0]);
-        tag.setBackground(roundedRect(colors[1], colors[2], 1, 6));
-        tag.setPadding(dp(6), dp(1), dp(6), dp(1));
-        LinearLayout.LayoutParams tagParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        tagParams.rightMargin = dp(6);
-        metaLine.addView(tag, tagParams);
-
-        TextView size = new TextView(this);
-        size.setText(formatSize(game.length()));
-        size.setTextSize(11.5f);
-        size.setTextColor(LIB_MUTED);
-        metaLine.addView(size);
-
         meta.addView(metaLine);
+        fillGameMeta(metaLine, game);
         row.addView(meta, metaParams);
 
         // A favourite star then the play affordance on the right - only when
@@ -2834,36 +2841,23 @@ public final class MainActivity extends Activity {
 
     /** What a long press offers: move the saves about, or drop the game. */
     private void showGameMenu(File game) {
-        // The two actions shared with the batch menu (📁 폴더 내보내기, 📥 폴더
-        // 불러오기, 🗑 초기화) keep the same icons there; the save-zip pair and
-        // 목록에서 삭제 get their own so nothing collides.
-        MenuItem[] items = {
-                new MenuItem("📤", "세이브 파일 꺼내기 (.zip)", "", "세이브를 .zip 으로 백업", false),
-                new MenuItem("📦", "세이브 불러오기 (.zip)", "", ".zip 세이브를 되돌리기", false),
-                new MenuItem("📁", "데이터 폴더로 내보내기", "", "다운로드/Mini Mobile 폴더로", false),
-                new MenuItem("📥", "데이터 폴더에서 불러오기", "", "폴더의 내용을 게임에 적용", false),
-                new MenuItem("🗑", "게임 데이터 초기화", "", "세이브·기록을 모두 삭제", true),
-                new MenuItem("✕", "목록에서 삭제", "", "목록에서만 삭제 (세이브는 유지)", true),
+        // The four that copy saves about are tiles; the two that lose
+        // something are red buttons under them, apart from the rest.
+        TileAction[] tiles = {
+                new TileAction(LineIcon.Kind.UPLOAD, "세이브 꺼내기", ".zip 백업", () -> exportSaves(game)),
+                new TileAction(LineIcon.Kind.DOWNLOAD, "세이브 불러오기", ".zip 되돌리기", () -> importSaves(game)),
+                new TileAction(LineIcon.Kind.FOLDER_OUT, "폴더로 내보내기", "다운로드/Mini Mobile", () -> exportDataFolder(game)),
+                new TileAction(LineIcon.Kind.FOLDER_IN, "폴더에서 불러오기", "폴더 내용 적용", () -> restoreDataFolder(game)),
         };
-        lightAlert()
-                .setTitle(displayName(game))
-                .setAdapter(menuAdapter(items), (dialog, which) -> {
-                    if (which == 0) {
-                        exportSaves(game);
-                    } else if (which == 1) {
-                        importSaves(game);
-                    } else if (which == 2) {
-                        exportDataFolder(game);
-                    } else if (which == 3) {
-                        restoreDataFolder(game);
-                    } else if (which == 4) {
-                        confirmErase(game);
-                    } else {
-                        confirmDelete(game);
-                    }
-                })
-                .setNegativeButton("취소", null)
-                .show();
+        TileAction[] dangers = {
+                new TileAction(LineIcon.Kind.RESET, "데이터 초기화", "", () -> confirmErase(game)),
+                new TileAction(LineIcon.Kind.TRASH, "목록에서 삭제", "", () -> confirmDelete(game)),
+        };
+        LinearLayout meta = new LinearLayout(this);
+        meta.setOrientation(LinearLayout.HORIZONTAL);
+        meta.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        fillGameMeta(meta, game);
+        showTileMenu(gameCover(game), displayName(game), meta, tiles, dangers);
     }
 
     /**
@@ -2876,49 +2870,315 @@ public final class MainActivity extends Activity {
         if (games.isEmpty()) {
             return;
         }
-        String n = "(" + games.size() + "개)";
-        MenuItem[] items = {
-                new MenuItem("📤", "세이브 파일 꺼내기", n, "각 게임의 .zip 을 세이브 폴더로", false),
-                new MenuItem("📁", "데이터 폴더로 내보내기", n, "다운로드/Mini Mobile/게임 이름 에 저장", false),
-                new MenuItem("📥", "데이터 폴더에서 불러오기", n, "각 폴더의 내용을 게임에 적용", false),
-                new MenuItem("🗑", "게임 데이터 초기화", n, "세이브·기록을 모두 삭제", true),
+        TileAction[] tiles = {
+                new TileAction(LineIcon.Kind.UPLOAD, "세이브 꺼내기", "게임마다 .zip 하나", () -> batchExportSaves(games)),
+                new TileAction(LineIcon.Kind.FOLDER_OUT, "폴더로 내보내기", "게임 이름 폴더에", () -> batchExportDataFolder(games)),
+                new TileAction(LineIcon.Kind.FOLDER_IN, "폴더에서 불러오기", "각 폴더 내용 적용", () -> confirmBatchRestore(games)),
         };
-        lightAlert()
-                .setTitle(games.size() + "개 게임에 적용")
-                .setAdapter(menuAdapter(items), (dialog, which) -> {
-                    if (which == 0) {
-                        batchExportSaves(games);
-                    } else if (which == 1) {
-                        batchExportDataFolder(games);
-                    } else if (which == 2) {
-                        confirmBatchRestore(games);
-                    } else {
-                        confirmBatchErase(games);
-                    }
-                })
-                .setNegativeButton("취소", null)
-                .show();
+        TileAction[] dangers = {
+                new TileAction(LineIcon.Kind.RESET, "데이터 초기화", "", () -> confirmBatchErase(games)),
+        };
+
+        // In place of a cover, the count on a green tile.
+        TextView count = new TextView(this);
+        count.setText(String.valueOf(games.size()));
+        count.setTextColor(LIB_GREEN_DEEP);
+        count.setTextSize(17f);
+        count.setTypeface(Typeface.DEFAULT_BOLD);
+        count.setGravity(android.view.Gravity.CENTER);
+        count.setBackground(roundedRect(LIB_GREEN_SOFT, LIB_GREEN_LINE, 1, 11));
+
+        long bytes = 0;
+        for (File game : games) {
+            bytes += game.length();
+        }
+        TextView size = new TextView(this);
+        size.setText("모두 " + formatSize(bytes));
+        size.setTextSize(11.5f);
+        size.setTextColor(LIB_MUTED);
+        showTileMenu(count, games.size() + "개 게임에 적용", size, tiles, dangers);
+    }
+
+    /** One choice on a tile menu: a line icon, a title, a short note and what it does. */
+    private static final class TileAction {
+        final LineIcon.Kind icon;
+        final String title;
+        final String note;
+        final Runnable run;
+
+        TileAction(LineIcon.Kind icon, String title, String note, Runnable run) {
+            this.icon = icon;
+            this.title = title;
+            this.note = note;
+            this.run = run;
+        }
     }
 
     /**
-     * One icon row for a game-actions menu: an emoji in a tinted badge, a bold
-     * title, an optional count in the accent colour (the batch menu's "(N개)"),
-     * and a one-line subtitle. Shared by the batch menu and the single-game menu.
+     * A game's actions as a card: its cover and name with a ✕ to close, the
+     * actions as tiles two to a row, and the ones that lose something as red
+     * buttons under them. There is no button bar - ✕, the back key or a tap
+     * outside close it - so the card is only as tall as what it offers.
      */
-    private static final class MenuItem {
-        final String emoji;
-        final String title;
-        final String count;    // "" for the single-game menu
-        final String subtitle;
-        final boolean danger;
+    private void showTileMenu(View cover, String title, View meta, TileAction[] tiles, TileAction[] dangers) {
+        showTileMenu(cover, title, meta, tiles, dangers, null);
+    }
 
-        MenuItem(String emoji, String title, String count, String subtitle, boolean danger) {
-            this.emoji = emoji;
-            this.title = title;
-            this.count = count;
-            this.subtitle = subtitle;
-            this.danger = danger;
+    /** {@link #showTileMenu}, running {@code onBack} when it is closed without a choice. */
+    private void showTileMenu(View cover, String title, View meta, TileAction[] tiles, TileAction[] dangers, Runnable onBack) {
+        Dialog dialog = libraryCardDialog(onBack);
+        LinearLayout card = libraryCard(dp(14), dp(14), dp(14), dp(14));
+
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        head.addView(cover, new LinearLayout.LayoutParams(dp(40), dp(40)));
+
+        LinearLayout names = new LinearLayout(this);
+        names.setOrientation(LinearLayout.VERTICAL);
+        TextView name = new TextView(this);
+        name.setText(title);
+        name.setTextColor(LIB_INK);
+        name.setTextSize(16f);
+        name.setTypeface(Typeface.DEFAULT_BOLD);
+        name.setSingleLine(true);
+        name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        names.addView(name);
+        LinearLayout.LayoutParams metaParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        metaParams.topMargin = dp(3);
+        names.addView(meta, metaParams);
+        LinearLayout.LayoutParams namesParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        namesParams.leftMargin = dp(11);
+        namesParams.rightMargin = dp(8);
+        head.addView(names, namesParams);
+
+        ImageView close = new ImageView(this);
+        close.setImageDrawable(new LineIcon(LineIcon.Kind.CLOSE, LIB_MUTED, 2.4f));
+        close.setPadding(dp(8), dp(8), dp(8), dp(8));
+        close.setBackground(pressable(roundedRect(LIB_BG, LIB_LINE, 1, 9)));
+        close.setContentDescription("닫기");
+        close.setOnClickListener(v -> dialog.cancel());
+        head.addView(close, new LinearLayout.LayoutParams(dp(32), dp(32)));
+        card.addView(head);
+
+        for (int i = 0; i < tiles.length; i += 2) {
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            for (int j = i; j < Math.min(i + 2, tiles.length); j++) {
+                LinearLayout.LayoutParams tileParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f);
+                if (j > i) {
+                    tileParams.leftMargin = dp(8);
+                }
+                row.addView(actionTile(dialog, tiles[j]), tileParams);
+            }
+            LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            rowParams.topMargin = dp(i == 0 ? 14 : 8);
+            card.addView(row, rowParams);
         }
+
+        LinearLayout red = new LinearLayout(this);
+        red.setOrientation(LinearLayout.HORIZONTAL);
+        for (int i = 0; i < dangers.length; i++) {
+            LinearLayout.LayoutParams buttonParams = new LinearLayout.LayoutParams(0, dp(42), 1f);
+            if (i > 0) {
+                buttonParams.leftMargin = dp(8);
+            }
+            red.addView(dangerButton(dialog, dangers[i]), buttonParams);
+        }
+        LinearLayout.LayoutParams redParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        redParams.topMargin = dp(10);
+        card.addView(red, redParams);
+
+        showLibraryCard(dialog, card);
+    }
+
+    /** A tile on {@link #showTileMenu}: the icon in a green square over its title and note. */
+    private View actionTile(Dialog dialog, TileAction action) {
+        LinearLayout tile = new LinearLayout(this);
+        tile.setOrientation(LinearLayout.VERTICAL);
+        tile.setGravity(android.view.Gravity.CENTER_HORIZONTAL);
+        tile.setPadding(dp(8), dp(12), dp(8), dp(11));
+        tile.setBackground(pressable(roundedRect(LIB_GREEN_SOFTER, LIB_LINE, 1, 16)));
+
+        ImageView icon = new ImageView(this);
+        icon.setImageDrawable(new LineIcon(action.icon, LIB_GREEN_DEEP));
+        icon.setPadding(dp(8), dp(8), dp(8), dp(8));
+        icon.setBackground(roundedRect(LIB_GREEN_SOFT, 0, 0, 10));
+        tile.addView(icon, new LinearLayout.LayoutParams(dp(34), dp(34)));
+
+        TextView title = new TextView(this);
+        title.setText(action.title);
+        title.setTextColor(LIB_INK);
+        title.setTextSize(13f);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setSingleLine(true);
+        title.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        titleParams.topMargin = dp(7);
+        tile.addView(title, titleParams);
+
+        TextView note = new TextView(this);
+        note.setText(action.note);
+        note.setTextColor(LIB_MUTED);
+        note.setTextSize(11f);
+        note.setSingleLine(true);
+        note.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        tile.addView(note);
+
+        tile.setOnClickListener(v -> {
+            dialog.dismiss();
+            action.run.run();
+        });
+        return tile;
+    }
+
+    /** A red button on {@link #showTileMenu}, for an action that loses something. */
+    private View dangerButton(Dialog dialog, TileAction action) {
+        LinearLayout button = new LinearLayout(this);
+        button.setOrientation(LinearLayout.HORIZONTAL);
+        button.setGravity(android.view.Gravity.CENTER);
+        button.setPadding(dp(8), 0, dp(8), 0);
+        button.setBackground(pressable(roundedRect(LIB_RED_SOFT, LIB_RED_LINE, 1, 12)));
+
+        ImageView icon = new ImageView(this);
+        icon.setImageDrawable(new LineIcon(action.icon, LIB_DELETE, 2.2f));
+        LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(dp(15), dp(15));
+        iconParams.rightMargin = dp(6);
+        button.addView(icon, iconParams);
+
+        TextView label = new TextView(this);
+        label.setText(action.title);
+        label.setTextColor(LIB_DELETE);
+        label.setTextSize(13f);
+        label.setTypeface(Typeface.DEFAULT_BOLD);
+        label.setSingleLine(true);
+        button.addView(label);
+
+        button.setOnClickListener(v -> {
+            dialog.dismiss();
+            action.run.run();
+        });
+        return button;
+    }
+
+    /**
+     * Asks before an action that cannot be taken back, on the same card as the
+     * menu it came from: the question, what it means, and 취소 beside the
+     * action, both full height and side by side rather than in a bar of their
+     * own. {@code danger} paints the action red; otherwise it is the list's green.
+     */
+    private void confirmCard(String title, String message, String action, boolean danger, Runnable onConfirm) {
+        TextView body = new TextView(this);
+        body.setText(message);
+        body.setTextColor(LIB_MUTED);
+        body.setTextSize(13f);
+        body.setLineSpacing(dp(2), 1f);
+        confirmCard(title, body, action, danger, onConfirm, null);
+    }
+
+    /**
+     * {@link #confirmCard} with {@code body} under the question in place of a
+     * line of text, running {@code onBack} when it is closed without the action.
+     */
+    private void confirmCard(String title, View body, String action, boolean danger, Runnable onConfirm, Runnable onBack) {
+        Dialog dialog = libraryCardDialog(onBack);
+        LinearLayout card = libraryCard(dp(18), dp(20), dp(18), dp(16));
+
+        TextView heading = new TextView(this);
+        heading.setText(title);
+        heading.setTextColor(LIB_INK);
+        heading.setTextSize(16.5f);
+        heading.setTypeface(Typeface.DEFAULT_BOLD);
+        card.addView(heading);
+
+        LinearLayout.LayoutParams bodyParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        bodyParams.topMargin = dp(7);
+        card.addView(body, bodyParams);
+
+        LinearLayout buttons = new LinearLayout(this);
+        buttons.setOrientation(LinearLayout.HORIZONTAL);
+
+        TextView cancel = new TextView(this);
+        cancel.setText("취소");
+        cancel.setTextColor(LIB_INK);
+        cancel.setTextSize(14f);
+        cancel.setTypeface(Typeface.DEFAULT_BOLD);
+        cancel.setGravity(android.view.Gravity.CENTER);
+        cancel.setBackground(pressable(roundedRect(LIB_SURFACE, LIB_LINE, 1, 12)));
+        cancel.setOnClickListener(v -> dialog.cancel());
+        buttons.addView(cancel, new LinearLayout.LayoutParams(0, dp(44), 1f));
+
+        TextView confirm = new TextView(this);
+        confirm.setText(action);
+        // White on the dark list's lighter green would not read; its ink does.
+        confirm.setTextColor(danger || !LibraryLook.dark(this) ? Color.WHITE : LIB_BG);
+        confirm.setTextSize(14f);
+        confirm.setTypeface(Typeface.DEFAULT_BOLD);
+        confirm.setGravity(android.view.Gravity.CENTER);
+        confirm.setBackground(pressable(roundedRect(danger ? LIB_DELETE : LIB_GREEN, 0, 0, 12)));
+        confirm.setOnClickListener(v -> {
+            dialog.dismiss();
+            onConfirm.run();
+        });
+        LinearLayout.LayoutParams confirmParams = new LinearLayout.LayoutParams(0, dp(44), 1f);
+        confirmParams.leftMargin = dp(8);
+        buttons.addView(confirm, confirmParams);
+
+        LinearLayout.LayoutParams buttonsParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        buttonsParams.topMargin = dp(18);
+        card.addView(buttons, buttonsParams);
+
+        showLibraryCard(dialog, card);
+    }
+
+    /**
+     * A bare dialog for a library card: no title, no frame, its own card the
+     * only thing drawn. Closing it without a choice - ✕, 취소, the back key or
+     * a tap outside - cancels it and runs {@code onBack}, if there is one; a
+     * choice dismisses it instead.
+     */
+    private Dialog libraryCardDialog(Runnable onBack) {
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
+        dialog.setCanceledOnTouchOutside(true);
+        if (onBack != null) {
+            dialog.setOnCancelListener(d -> onBack.run());
+        }
+        return dialog;
+    }
+
+    /** The card itself, in the list's surface colour with its hairline edge. */
+    private LinearLayout libraryCard(int left, int top, int right, int bottom) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(left, top, right, bottom);
+        card.setBackground(roundedRect(LIB_SURFACE, LIB_LINE, 1, 22));
+        return card;
+    }
+
+    /**
+     * Shows {@code card} centred, as wide as the screen less a margin each
+     * side and no wider than a phone's, scrolling should it ever be taller
+     * than the screen.
+     */
+    private void showLibraryCard(Dialog dialog, LinearLayout card) {
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(false);
+        scroll.addView(card);
+        dialog.setContentView(scroll);
+        android.view.Window window = dialog.getWindow();
+        if (window != null) {
+            window.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
+            int width = Math.min(getResources().getDisplayMetrics().widthPixels - dp(36), dp(380));
+            window.setLayout(width, ViewGroup.LayoutParams.WRAP_CONTENT);
+        }
+        dialog.show();
+    }
+
+    /** {@code shape} with a ripple in the list's ink, for something to tap. */
+    private android.graphics.drawable.Drawable pressable(GradientDrawable shape) {
+        int ripple = (LIB_INK & 0x00ffffff) | 0x22000000;
+        return new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(ripple), shape, shape);
     }
 
     /**
@@ -2932,62 +3192,19 @@ public final class MainActivity extends Activity {
         return new DialogFooter.Builder(new android.view.ContextThemeWrapper(this, theme));
     }
 
-    /** An {@link ArrayAdapter} that renders each {@link MenuItem} via {@link #menuItemView}. */
-    private ArrayAdapter<MenuItem> menuAdapter(MenuItem[] items) {
-        return new ArrayAdapter<MenuItem>(this, 0, items) {
-            @Override
-            public View getView(int position, View convertView, ViewGroup parent) {
-                return menuItemView(getItem(position));
-            }
-        };
-    }
-
-    /** Builds the view for one {@link MenuItem}, matching the library palette. */
-    private View menuItemView(MenuItem item) {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(android.view.Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(18), dp(11), dp(18), dp(11));
-
-        TextView icon = new TextView(this);
-        icon.setText(item.emoji);
-        icon.setTextSize(15f);
-        icon.setGravity(android.view.Gravity.CENTER);
-        icon.setBackground(roundedRect(item.danger ? LIB_RED_SOFT : LIB_GREEN_SOFTER, 0, 0, 9));
-        LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(dp(34), dp(34));
-        iconParams.rightMargin = dp(12);
-        row.addView(icon, iconParams);
-
-        LinearLayout text = new LinearLayout(this);
-        text.setOrientation(LinearLayout.VERTICAL);
-
-        TextView title = new TextView(this);
-        title.setTextSize(15f);
-        title.setTypeface(Typeface.DEFAULT_BOLD);
-        title.setTextColor(LIB_INK);
-        if (item.count == null || item.count.isEmpty()) {
-            title.setText(item.title);
-        } else {
-            // The title stays ink; only the "(N개)" count takes the accent colour.
-            String full = item.title + " " + item.count;
-            SpannableString span = new SpannableString(full);
-            span.setSpan(new ForegroundColorSpan(item.danger ? LIB_DELETE : LIB_GREEN_DEEP),
-                    item.title.length() + 1, full.length(), Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
-            title.setText(span);
+    /**
+     * {@code word} with the object particle it takes - 을 after a final
+     * consonant, 를 after a vowel - or both when it does not end in Hangul.
+     */
+    private static String withObject(String word) {
+        if (word.isEmpty()) {
+            return word;
         }
-        text.addView(title);
-
-        TextView sub = new TextView(this);
-        sub.setText(item.subtitle);
-        sub.setTextSize(11.5f);
-        sub.setTextColor(LIB_MUTED);
-        LinearLayout.LayoutParams subParams = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        subParams.topMargin = dp(1);
-        text.addView(sub, subParams);
-
-        row.addView(text, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        return row;
+        char last = word.charAt(word.length() - 1);
+        if (last < 0xAC00 || last > 0xD7A3) {
+            return word + "을(를)";
+        }
+        return word + ((last - 0xAC00) % 28 == 0 ? "를" : "을");
     }
 
     /** A bulleted list of the games, capped so a long selection stays readable. */
@@ -3083,30 +3300,27 @@ public final class MainActivity extends Activity {
      * it overwrites each game's saved data from its folder and cannot be undone.
      */
     private void confirmBatchRestore(ArrayList<File> games) {
-        lightAlert()
-                .setTitle(games.size() + "개 데이터 폴더에서 불러오기")
-                .setMessage("각 게임의 데이터 폴더(다운로드/Mini Mobile/<게임 이름>)의 내용을 지금 저장된 내용에 덮어씁니다.\n덮어쓴 뒤에는 되돌릴 수 없습니다.\n\n" + batchNames(games))
-                .setNegativeButton("취소", null)
-                .setPositiveButton("불러오기", (dialog, which) -> withDownloadPermission(() ->
-                        emulatorThread.execute(() -> {
-                            int done = 0, empty = 0, failed = 0;
-                            for (File game : games) {
-                                try {
-                                    if (DataFolder.restore(this, displayName(game)) == null) {
-                                        empty++;
-                                    } else {
-                                        done++;
-                                    }
-                                } catch (Exception e) {
-                                    failed++;
-                                }
+        confirmCard(games.size() + "개 게임을 폴더에서 불러올까요?",
+                "각 게임의 데이터 폴더(다운로드/Mini Mobile/<게임 이름>) 내용으로 지금 저장된 내용을 덮어써요. 되돌릴 수 없어요.\n\n" + batchNames(games),
+                "불러오기", false, () -> withDownloadPermission(() ->
+                emulatorThread.execute(() -> {
+                    int done = 0, empty = 0, failed = 0;
+                    for (File game : games) {
+                        try {
+                            if (DataFolder.restore(this, displayName(game)) == null) {
+                                empty++;
+                            } else {
+                                done++;
                             }
-                            final int fDone = done, fEmpty = empty, fFailed = failed;
-                            runOnUiThread(() -> Toast.makeText(this,
-                                    batchSummary(fDone + "개 불러옴 · 게임을 다시 시작하면 적용됩니다", "폴더에 데이터 없음", fDone, fEmpty, fFailed),
-                                    Toast.LENGTH_LONG).show());
-                        })))
-                .show();
+                        } catch (Exception e) {
+                            failed++;
+                        }
+                    }
+                    final int fDone = done, fEmpty = empty, fFailed = failed;
+                    runOnUiThread(() -> Toast.makeText(this,
+                            batchSummary(fDone + "개 불러옴 · 게임을 다시 시작하면 적용됩니다", "폴더에 데이터 없음", fDone, fEmpty, fFailed),
+                            Toast.LENGTH_LONG).show());
+                })));
     }
 
     /**
@@ -3114,30 +3328,27 @@ public final class MainActivity extends Activity {
      * list of games, as it removes each one's saves and cannot be undone.
      */
     private void confirmBatchErase(ArrayList<File> games) {
-        lightAlert()
-                .setTitle(games.size() + "개 게임 데이터 초기화")
-                .setMessage("선택한 게임이 저장한 내용을 모두 지웁니다.\n세이브도 함께 지워지고, 되돌릴 수 없습니다.\n남겨두려면 먼저 \"세이브 파일 꺼내기\"로 백업하세요.\n\n" + batchNames(games))
-                .setNegativeButton("취소", null)
-                .setPositiveButton(games.size() + "개 초기화", (dialog, which) ->
-                        emulatorThread.execute(() -> {
-                            int done = 0, empty = 0, failed = 0;
-                            for (File game : games) {
-                                try {
-                                    if (SaveEraser.erase(this, game) == 0) {
-                                        empty++;
-                                    } else {
-                                        done++;
-                                    }
-                                } catch (Exception e) {
-                                    failed++;
-                                }
+        confirmCard(games.size() + "개 게임을 초기화할까요?",
+                "고른 게임이 저장한 세이브와 기록을 모두 지워요. 되돌릴 수 없어요.\n남겨두려면 먼저 \"세이브 꺼내기\"로 백업하세요.\n\n" + batchNames(games),
+                games.size() + "개 초기화", true, () ->
+                emulatorThread.execute(() -> {
+                    int done = 0, empty = 0, failed = 0;
+                    for (File game : games) {
+                        try {
+                            if (SaveEraser.erase(this, game) == 0) {
+                                empty++;
+                            } else {
+                                done++;
                             }
-                            final int fDone = done, fEmpty = empty, fFailed = failed;
-                            runOnUiThread(() -> Toast.makeText(this,
-                                    batchSummary(fDone + "개 초기화됨", "저장된 내용 없음", fDone, fEmpty, fFailed),
-                                    Toast.LENGTH_LONG).show());
-                        }))
-                .show();
+                        } catch (Exception e) {
+                            failed++;
+                        }
+                    }
+                    final int fDone = done, fEmpty = empty, fFailed = failed;
+                    runOnUiThread(() -> Toast.makeText(this,
+                            batchSummary(fDone + "개 초기화됨", "저장된 내용 없음", fDone, fEmpty, fFailed),
+                            Toast.LENGTH_LONG).show());
+                }));
     }
 
     /**
@@ -3202,25 +3413,22 @@ public final class MainActivity extends Activity {
     /** Reads a game's data folder back into its saves, overwriting them. */
     private void restoreDataFolder(File game) {
         String title = displayName(game);
-        lightAlert()
-                .setTitle(displayName(game))
-                .setMessage("데이터 폴더(" + DataFolder.displayPath(title) + ")의 내용을 지금 저장된 내용에 덮어씁니다.\n덮어쓴 뒤에는 되돌릴 수 없습니다.")
-                .setNegativeButton("취소", null)
-                .setPositiveButton("불러오기", (dialog, which) -> withDownloadPermission(() ->
-                        emulatorThread.execute(() -> {
-                            try {
-                                DataFolder.Result result = DataFolder.restore(this, title);
-                                runOnUiThread(() -> Toast.makeText(
-                                        this,
-                                        result == null
-                                                ? "폴더에 세이브 데이터가 없습니다."
-                                                : ("폴더에서 불러왔습니다 (파일 " + result.files + "개). 게임을 다시 시작하면 적용됩니다."),
-                                        Toast.LENGTH_LONG).show());
-                            } catch (Exception e) {
-                                runOnUiThread(() -> Toast.makeText(this, "불러오기 실패: " + e.getMessage(), Toast.LENGTH_LONG).show());
-                            }
-                        })))
-                .show();
+        confirmCard(withObject(title) + " 폴더에서 불러올까요?",
+                "데이터 폴더(" + DataFolder.displayPath(title) + ") 내용으로 지금 저장된 내용을 덮어써요.\n되돌릴 수 없어요.",
+                "불러오기", false, () -> withDownloadPermission(() ->
+                emulatorThread.execute(() -> {
+                    try {
+                        DataFolder.Result result = DataFolder.restore(this, title);
+                        runOnUiThread(() -> Toast.makeText(
+                                this,
+                                result == null
+                                        ? "폴더에 세이브 데이터가 없습니다."
+                                        : ("폴더에서 불러왔습니다 (파일 " + result.files + "개). 게임을 다시 시작하면 적용됩니다."),
+                                Toast.LENGTH_LONG).show());
+                    } catch (Exception e) {
+                        runOnUiThread(() -> Toast.makeText(this, "불러오기 실패: " + e.getMessage(), Toast.LENGTH_LONG).show());
+                    }
+                })));
     }
 
     /**
@@ -3237,12 +3445,9 @@ public final class MainActivity extends Activity {
      * above it in the same menu.
      */
     private void confirmErase(File game) {
-        lightAlert()
-                .setTitle(displayName(game))
-                .setMessage("이 게임이 저장한 내용을 모두 지웁니다.\n세이브도 함께 지워지고, 되돌릴 수 없습니다.\n\n남겨두려면 먼저 \"세이브 파일 꺼내기\"로 백업하세요.")
-                .setNegativeButton("취소", null)
-                .setPositiveButton("초기화", (dialog, which) -> eraseSavesNow(game))
-                .show();
+        confirmCard(withObject(displayName(game)) + " 초기화할까요?",
+                "이 게임이 저장한 세이브와 기록을 모두 지워요. 되돌릴 수 없어요.\n남겨두려면 먼저 \"세이브 꺼내기\"로 백업하세요.",
+                "초기화", true, () -> eraseSavesNow(game));
     }
 
     private void eraseSavesNow(File game) {
@@ -3261,17 +3466,14 @@ public final class MainActivity extends Activity {
     }
 
     private void confirmDelete(File game) {
-        lightAlert()
-                .setTitle(displayName(game))
-                .setMessage("이 게임을 목록에서 삭제할까요?\n저장한 내용은 그대로 남습니다.")
-                .setNegativeButton("취소", null)
-                .setPositiveButton("삭제", (dialog, which) -> {
+        confirmCard(withObject(displayName(game)) + " 목록에서 삭제할까요?",
+                "저장한 세이브는 그대로 남아요.",
+                "삭제", true, () -> {
                     if (game.delete()) {
                         forgetPlayed(game);
                     }
                     showLibrary();
-                })
-                .show();
+                });
     }
 
     // --- saves -----------------------------------------------------------
@@ -3603,7 +3805,6 @@ public final class MainActivity extends Activity {
     private void confirmSaveImport(File game, String title, SaveShelf.Entry entry) {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(22), dp(6), dp(22), dp(4));
 
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.HORIZONTAL);
@@ -3654,12 +3855,8 @@ public final class MainActivity extends Activity {
         noteParams.topMargin = dp(10);
         box.addView(note, noteParams);
 
-        lightAlert()
-                .setTitle("이 세이브를 불러올까요?")
-                .setView(box)
-                .setNegativeButton("취소", (dialog, which) -> importSaves(game))
-                .setPositiveButton("불러오기", (dialog, which) -> withDownloadPermission(() -> restoreSave(game, title, entry)))
-                .show();
+        confirmCard("이 세이브를 불러올까요?", box, "불러오기", false,
+                () -> withDownloadPermission(() -> restoreSave(game, title, entry)), () -> importSaves(game));
     }
 
     /**
@@ -3685,27 +3882,21 @@ public final class MainActivity extends Activity {
         });
     }
 
-    /** What a long press on a save offers. */
+    /** What a long press on a save offers; closed without a choice, it goes back to the list. */
     private void showSaveActions(File game, String title, SaveShelf.Entry entry) {
         String label = entry.ours ? saveDay(entry.modified) : entry.title();
-        MenuItem[] items = {
-                new MenuItem("📦", "불러오기", "", "이 세이브로 바꾸기", false),
-                new MenuItem("📤", "공유하기", "", "카톡·드라이브 등으로 보내기", false),
-                new MenuItem("🗑", "이 세이브 파일 지우기", "", "지우면 되돌릴 수 없습니다", true),
+        TileAction[] tiles = {
+                new TileAction(LineIcon.Kind.DOWNLOAD, "불러오기", "이 세이브로 바꾸기", () -> confirmSaveImport(game, title, entry)),
+                new TileAction(LineIcon.Kind.UPLOAD, "공유하기", "카톡·드라이브 등으로", () -> shareSave(entry)),
         };
-        lightAlert()
-                .setTitle(label + " 세이브")
-                .setAdapter(menuAdapter(items), (dialog, which) -> {
-                    if (which == 0) {
-                        confirmSaveImport(game, title, entry);
-                    } else if (which == 1) {
-                        shareSave(entry);
-                    } else {
-                        confirmSaveDelete(game, entry, label);
-                    }
-                })
-                .setNegativeButton("취소", (dialog, which) -> importSaves(game))
-                .show();
+        TileAction[] dangers = {
+                new TileAction(LineIcon.Kind.TRASH, "이 세이브 파일 지우기", "", () -> confirmSaveDelete(game, entry, label)),
+        };
+        TextView meta = new TextView(this);
+        meta.setText("파일 " + entry.files + "개 · " + formatSize(entry.bytes) + " · " + saveAgo(entry.modified));
+        meta.setTextSize(11.5f);
+        meta.setTextColor(LIB_MUTED);
+        showTileMenu(saveBadge(entry), label + " 세이브", meta, tiles, dangers, () -> importSaves(game));
     }
 
     /** Hands the zip to the share sheet. */
@@ -3728,21 +3919,21 @@ public final class MainActivity extends Activity {
     }
 
     private void confirmSaveDelete(File game, SaveShelf.Entry entry, String label) {
-        lightAlert()
-                .setTitle("이 세이브 파일을 지울까요?")
-                .setMessage(label + "\n" + entry.name + "\n\n지운 파일은 되돌릴 수 없습니다.")
-                .setNegativeButton("취소", (dialog, which) -> importSaves(game))
-                .setPositiveButton("지우기", (dialog, which) -> emulatorThread.execute(() -> {
-                    boolean all = SaveShelf.delete(this, entry);
-                    runOnUiThread(() -> {
-                        Toast.makeText(this, all
-                                ? "세이브 파일을 지웠습니다."
-                                : "앱 안의 사본은 지웠어요. 다운로드/Mini Mobile/세이브 의 파일은 파일 앱에서 지워주세요.",
-                                Toast.LENGTH_LONG).show();
-                        importSaves(game);
-                    });
-                }))
-                .show();
+        TextView body = new TextView(this);
+        body.setText(label + "\n" + entry.name + "\n\n지운 파일은 되돌릴 수 없어요.");
+        body.setTextColor(LIB_MUTED);
+        body.setTextSize(13f);
+        body.setLineSpacing(dp(2), 1f);
+        confirmCard("이 세이브 파일을 지울까요?", body, "지우기", true, () -> emulatorThread.execute(() -> {
+            boolean all = SaveShelf.delete(this, entry);
+            runOnUiThread(() -> {
+                Toast.makeText(this, all
+                        ? "세이브 파일을 지웠습니다."
+                        : "앱 안의 사본은 지웠어요. 다운로드/Mini Mobile/세이브 의 파일은 파일 앱에서 지워주세요.",
+                        Toast.LENGTH_LONG).show();
+                importSaves(game);
+            });
+        }), () -> importSaves(game));
     }
 
     private void openSavePicker() {
