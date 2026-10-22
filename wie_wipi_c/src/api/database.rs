@@ -1902,9 +1902,23 @@ const M_E_NOENT: i32 = -12;
 /// `option.txt` and `coupon.txt` that way, got nothing back, and painted an
 /// empty card fifty times over instead of its splash.
 ///
-/// A packaged database counts as existing, the same as it does for
-/// [`exists_database`]: a title that ships its own initial state should be told
-/// it is there.
+/// What the archive ships beside the jar, in its `P/` directory, counts as
+/// existing: that is the handset's own storage as the dump left it. What is
+/// only inside the jar does not. A jar entry is one of the title's resources,
+/// read through the class loader, and the handset never had it as a store -
+/// opening one here is this runtime's convenience, not the handset's.
+///
+/// 컴투스프로야구2010 (`0104225F`) is what that difference broke. It reads its
+/// data tables out of the jar and then asks for each by the same name here, a
+/// store a server would have left to override it. Told yes, it opens the
+/// store and copies the name into a 15-byte field of a structure on its stack,
+/// where `XlsBallPathDataFactor.dat` ran over the read function stored behind
+/// it, and the title jumped to `0x120074` on the first key. Its own code shows
+/// a handset never answered yes there.
+///
+/// Opening a jar entry here copies it into the repository, so a store byte for
+/// byte that entry is the copy an earlier open made, not one the title wrote,
+/// and is not there either.
 pub async fn exists_database_ktf(context: &mut dyn WIPICContext, name_ptr: WIPICWord, _arg1: i32, _arg2: i32) -> Result<i32> {
     let name = match read_null_terminated_string_bytes(context, name_ptr) {
         Ok(bytes) => match String::from_utf8(bytes) {
@@ -1920,16 +1934,23 @@ pub async fn exists_database_ktf(context: &mut dyn WIPICContext, name_ptr: WIPIC
         }
     };
 
-    if packaged_store_bytes(context, &name).await?.is_some() {
+    let shipped = packaged_store_bytes(context, &name).await?;
+    let on_storage = context.system().filesystem().size(&name).await.is_some();
+    if shipped.is_some() && on_storage {
         tracing::debug!("MC_dbExists({name:?}) -> 0 (packaged)");
         return Ok(0);
     }
 
     let system = context.system();
     let pid = system.pid().to_owned();
-    let exists = system.platform().database_repository().exists(&name, &pid).await;
+    let repository = system.platform().database_repository();
+    let exists = repository.exists(&name, &pid).await;
+    let jar_copy = match &shipped {
+        Some(entry) if exists => repository.open(&name, &pid).await.get(1).await.as_deref() == Some(entry.as_slice()),
+        _ => false,
+    };
 
-    let result = if exists { 0 } else { M_E_NOENT };
+    let result = if exists && !jar_copy { 0 } else { M_E_NOENT };
     tracing::debug!("MC_dbExists({name:?}) -> {result}");
     Ok(result)
 }
@@ -3753,5 +3774,38 @@ mod tests {
         }
         let present: i32 = exists_database_ktf(&mut context, 0x3000, 1, 0).await.unwrap();
         assert_eq!(present, 0, "zero is yes");
+    }
+
+    /// 컴투스프로야구2010 asks for each table it read out of its jar by the
+    /// same name, and overruns its own stack when told one is there. A jar entry
+    /// is a resource, not a store; a file beside the jar is a store.
+    #[futures_test::test]
+    async fn a_jar_entry_is_not_a_store_but_a_file_beside_the_jar_is() {
+        let system = System::new(Box::new(TestPlatform::new()), "test-pid", "test-aid", DefaultTaskRunner);
+        system.filesystem().add_virtual("patch.dat", vec![1]);
+        let mut context = TestContext::with_system(system).with_resource("XlsBallPathDataFactor.dat", &[7, 7, 7]);
+        context.write_bytes(0x1000, b"XlsBallPathDataFactor.dat\0").unwrap();
+        context.write_bytes(0x1100, b"patch.dat\0").unwrap();
+
+        assert_eq!(exists_database_ktf(&mut context, 0x1000, 1, 0).await.unwrap(), -12);
+        assert_eq!(exists_database_ktf(&mut context, 0x1100, 1, 0).await.unwrap(), 0);
+
+        // Opening the entry copies it into the repository; that copy is still
+        // not a store the title made.
+        let db_id = open_database(&mut context, 0x1000, MODE_OPEN_EXISTING, 1).await.unwrap();
+        assert!(db_id > 0);
+        assert_eq!(close_database(&mut context, db_id).await.unwrap(), 0);
+        assert_eq!(exists_database_ktf(&mut context, 0x1000, 1, 0).await.unwrap(), -12);
+
+        // Written over, it is.
+        let pid = crate::context::WIPICContext::system(&mut context).pid().to_owned();
+        crate::context::WIPICContext::system(&mut context)
+            .platform()
+            .database_repository()
+            .open("XlsBallPathDataFactor.dat", &pid)
+            .await
+            .set(1, &[8])
+            .await;
+        assert_eq!(exists_database_ktf(&mut context, 0x1000, 1, 0).await.unwrap(), 0);
     }
 }
