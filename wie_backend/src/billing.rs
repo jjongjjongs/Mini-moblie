@@ -338,8 +338,31 @@ pub fn lgt_local_miniheroes2_response(request: &[u8]) -> Option<Vec<u8>> {
 /// frame, which this build reads at `[2..8]` as the LGT build does, is answered
 /// as the LGT build's is.
 ///
+/// 미니파이터 검사편 (`0104262C`) turns into its full version over the same
+/// socket: `"@A"`, the frame's length as eight ASCII digits padded with
+/// spaces, the subscriber number and `C_B_미니파이터2(KTF)(CYON)` - or `C_C_`
+/// for the same question asked without a purchase. `0x104854` splits the
+/// body of the reply on `_` and wants `C` first: then `D` is `정식판 전환이
+/// 완료되었습니다` and `U` `기존 정식판 등록 유저입니다`, and either returns 1,
+/// the full version. `!` puts up the third field as an error, and anything
+/// else - the `A` the login is answered with - fails without a word, so the
+/// title opened the socket again and asked again for as long as it ran.
+///
 /// `None` for anything that is neither stage's frame.
 pub fn ktf_local_miniheroes2_response(request: &[u8]) -> Option<Vec<u8>> {
+    if request.get(..2) == Some(b"@A".as_slice())
+        && let Some(answer) = [(b"C_B_", b'D'), (b"C_C_", b'U')]
+            .iter()
+            .find(|(question, _)| request.windows(question.len()).any(|window| window == question.as_slice()))
+            .map(|(_, answer)| *answer)
+    {
+        let mut frame = Vec::new();
+        frame.extend_from_slice(b"@A");
+        frame.extend_from_slice(b"00000013"); // 2 + 8 + 3, the whole frame
+        frame.extend_from_slice(&[b'C', b'_', answer]);
+        return Some(frame);
+    }
+
     if request.get(..2) == Some(b"@A".as_slice()) {
         let mut frame = Vec::new();
         frame.extend_from_slice(b"@A");
@@ -11639,6 +11662,18 @@ mod tests {
         // Anything without either marker is not answered.
         assert_eq!(ktf_local_miniheroes2_response(b"WM\x3c\x00A_KTF_x"), None);
         assert_eq!(ktf_local_miniheroes2_response(b"@"), None);
+    }
+
+    /// 미니파이터 검사편's full-version purchase, off the device log, is
+    /// answered `C_D` - done - and the same question without a purchase `C_U`.
+    #[test]
+    fn minifighter_turns_into_its_full_version() {
+        let purchase: &[u8] = b"@A46      1611112222C_B_\xb9\xcc\xb4\xcf\xc6\xc4\xc0\xcc\xc5\xcd2(KTF)(CYON)";
+        assert_eq!(purchase.len(), 46);
+        assert_eq!(ktf_local_miniheroes2_response(purchase).unwrap(), b"@A00000013C_D");
+
+        let check: &[u8] = b"@A46      1611112222C_C_\xb9\xcc\xb4\xcf\xc6\xc4\xc0\xcc\xc5\xcd2(KTF)(CYON)";
+        assert_eq!(ktf_local_miniheroes2_response(check).unwrap(), b"@A00000013C_U");
     }
 
     /// 액션퍼즐패밀리2's 73-byte type-0 login, off the wire: a `u16be` length,
