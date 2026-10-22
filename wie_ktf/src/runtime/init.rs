@@ -3,12 +3,12 @@ use core::{
     mem::{offset_of, size_of},
     pin::Pin,
 };
-use jvm::{ClassInstance, Jvm};
+use jvm::{ClassInstance, Jvm, runtime::JavaLangString};
 
 use wie_backend::System;
 use wie_core_arm::{Allocator, ArmCore, EmulatedFunction, ResultWriter, SvcId};
 use wie_jvm_support::JvmSupport;
-use wie_util::{Result, WieError, read_generic, read_null_terminated_string_bytes, read_null_terminated_table, write_generic};
+use wie_util::{ByteWrite, Result, WieError, read_generic, read_null_terminated_string_bytes, read_null_terminated_table, write_generic};
 
 use java_constants::{FieldAccessFlags, MethodAccessFlags};
 use jvm::{JavaType, JavaValue};
@@ -47,6 +47,18 @@ pub fn register_init_svc_handler(core: &mut ArmCore, jvm: &Jvm) -> Result<()> {
 /// has asked for, and every other slot answers with a warning naming itself
 /// and its arguments, so the next one says what it is in a single run.
 const MODULE_INTERFACE_SLOTS: u32 = 256;
+
+/// How many words the host-function table a module's `fn_init` takes is
+/// made with. `InitParam4` names the first twelve; titles built on the 2009
+/// toolchain reach past them, as far as `+0x50`.
+const INIT_PARAM_4_SLOTS: u32 = 24;
+
+/// The word of that table, at `+0x50`, a title asks an object's class of.
+const INIT_PARAM_4_OBJECT_CLASS: u32 = 0x50 / size_of::<u32>() as u32;
+
+/// The supervisor-call ids the words of that table no one has named answer
+/// to, offset by the word's index - see `unnamed_init_slot`.
+const INIT_PARAM_4_UNNAMED: u32 = 0x100;
 
 /// `MNInterface`'s throw, at `+0x20`, which takes the name of the class to
 /// throw and a word the module leaves zero.
@@ -1404,6 +1416,10 @@ async fn handle_init_svc(core: &mut ArmCore, jvm: &mut Jvm, id: SvcId) -> Result
 async fn handle_init_svc_framed(core: &mut ArmCore, jvm: &mut Jvm, id: SvcId) -> Result<()> {
     let (_, lr) = core.read_pc_lr()?;
 
+    if id.0 >= INIT_PARAM_4_UNNAMED {
+        return unnamed_init_slot(core, id.0 - INIT_PARAM_4_UNNAMED, lr);
+    }
+
     match InitSvcId::try_from(id)? {
         InitSvcId::GetInterface => get_interface(core, core.read_param(0)?).await?.write(core, lr),
         InitSvcId::JavaThrow => EmulatedFunction::call(&java_throw, core, jvm).await?.write(core, lr),
@@ -1413,6 +1429,9 @@ async fn handle_init_svc_framed(core: &mut ArmCore, jvm: &mut Jvm, id: SvcId) ->
         InitSvcId::JavaArrayNew => EmulatedFunction::call(&java_array_new, core, jvm).await?.write(core, lr),
         InitSvcId::JavaClassLoad => EmulatedFunction::call(&java_class_load, core, jvm).await?.write(core, lr),
         InitSvcId::Alloc => EmulatedFunction::call(&alloc, core, &mut ()).await?.write(core, lr),
+        InitSvcId::ObjectClass => EmulatedFunction::call(&object_class, core, &mut ()).await?.write(core, lr),
+        InitSvcId::MarkObject => EmulatedFunction::call(&mark_object, core, &mut ()).await?.write(core, lr),
+        InitSvcId::StringToBytes => EmulatedFunction::call(&string_to_bytes, core, jvm).await?.write(core, lr),
     }
 }
 
@@ -1484,19 +1503,37 @@ pub async fn load_native(
         // compiles to, so every title that raises an exception of its own needs
         // it - 주타이쿤2 died on the zero this word used to be.
         unk1: core.make_svc_stub(SVC_CATEGORY_INIT, InitSvcId::JavaThrowInstance)?,
-        unk2: 0,
+        unk2: core.make_svc_stub(SVC_CATEGORY_INIT, INIT_PARAM_4_UNNAMED + 3)?,
         fn_java_check_type: core.make_svc_stub(SVC_CATEGORY_INIT, InitSvcId::JavaCheckType)?,
         fn_java_new: core.make_svc_stub(SVC_CATEGORY_INIT, InitSvcId::JavaNew)?,
         fn_java_array_new: core.make_svc_stub(SVC_CATEGORY_INIT, InitSvcId::JavaArrayNew)?,
-        unk6: 0,
+        // Called on each object a static field holds, by a routine of the
+        // module's own that marks what it can reach for the handset's
+        // collector. Nothing here calls that routine; see `mark_object`.
+        unk6: core.make_svc_stub(SVC_CATEGORY_INIT, InitSvcId::MarkObject)?,
         fn_java_class_load: core.make_svc_stub(SVC_CATEGORY_INIT, InitSvcId::JavaClassLoad)?,
-        unk7: 0,
-        unk8: 0,
+        unk7: core.make_svc_stub(SVC_CATEGORY_INIT, INIT_PARAM_4_UNNAMED + 9)?,
+        // A string into a byte buffer - see `string_to_bytes`.
+        unk8: core.make_svc_stub(SVC_CATEGORY_INIT, InitSvcId::StringToBytes)?,
         fn_alloc: core.make_svc_stub(SVC_CATEGORY_INIT, InitSvcId::Alloc)?,
     };
 
-    let ptr_param_4 = Allocator::alloc(core, size_of::<InitParam4>() as u32)?;
+    // The table runs on past `InitParam4`. The words after it are read by
+    // titles built on the 2009 toolchain - 놈4, 디펜스히어로, 원조낚시광3,
+    // 미니파이터, 컴투스프로야구2010 - and made with this one at its twelve
+    // words, the first of them took a heap word beyond its end for the
+    // function that answers an object's class, and jumped to whatever that
+    // word held.
+    let ptr_param_4 = Allocator::alloc(core, INIT_PARAM_4_SLOTS * size_of::<u32>() as u32)?;
     write_generic(core, ptr_param_4, param_4)?;
+    for slot in (size_of::<InitParam4>() / size_of::<u32>()) as u32..INIT_PARAM_4_SLOTS {
+        let stub = if slot == INIT_PARAM_4_OBJECT_CLASS {
+            core.make_svc_stub(SVC_CATEGORY_INIT, InitSvcId::ObjectClass)?
+        } else {
+            core.make_svc_stub(SVC_CATEGORY_INIT, INIT_PARAM_4_UNNAMED + slot)?
+        };
+        write_generic(core, ptr_param_4 + slot * size_of::<u32>() as u32, stub)?;
+    }
 
     // The ordinary module opens with a stub of its own that rebases the image
     // and answers with a `WipiExe`, and takes the bss size. A relocated one is
@@ -1630,6 +1667,71 @@ async fn get_interface(core: &mut ArmCore, ptr_name: u32) -> Result<u32> {
             Ok(0)
         }
     }
+}
+
+/// A word of the host-function table nothing has been found to answer. It
+/// says which one was reached and answers zero, rather than leave the title to
+/// jump to whatever a word past the table's end happened to hold.
+fn unnamed_init_slot(core: &mut ArmCore, slot: u32, lr: u32) -> Result<()> {
+    tracing::warn!(
+        "Unnamed init function +{:#x} ({:#x}, {:#x}, {:#x}) from lr={lr:#x}",
+        slot * size_of::<u32>() as u32,
+        core.read_param(0)?,
+        core.read_param(1)?,
+        core.read_param(2)?
+    );
+
+    0u32.write(core, lr)
+}
+
+/// `+0x50`: the class record of an object. A title's compiled virtual call
+/// takes the vtable out of what this answers (`+0xc`), and its `checkcast`
+/// hands it on to `java_check_type`.
+async fn object_class(core: &mut ArmCore, _: &mut (), ptr_instance: u32) -> Result<u32> {
+    tracing::trace!("object_class({ptr_instance:#x})");
+
+    if ptr_instance == 0 {
+        tracing::warn!("object_class(null)");
+
+        return Ok(0);
+    }
+
+    Ok(KtfJvmSupport::class_instance_from_raw(core, ptr_instance).class()?.ptr_raw)
+}
+
+/// `+0x1c`: marks an object reachable for the handset's collector. The module
+/// calls it from a routine of its own that walks its static fields, which the
+/// handset's collector calls and this runtime never does; it has its own
+/// collector, which finds those fields itself.
+async fn mark_object(_: &mut ArmCore, _: &mut (), ptr_instance: u32) -> Result<u32> {
+    tracing::trace!("mark_object({ptr_instance:#x})");
+
+    Ok(0)
+}
+
+/// `+0x28`: a string's text into `buffer`, as the handset's bytes, ending in a
+/// zero within `size` bytes. The module turns the arguments its Java side was
+/// started with into a C `argv` this way, sizing each buffer to the string's
+/// length and one more.
+async fn string_to_bytes(core: &mut ArmCore, jvm: &mut Jvm, ptr_string: u32, buffer: u32, size: u32) -> Result<u32> {
+    tracing::trace!("string_to_bytes({ptr_string:#x}, {buffer:#x}, {size})");
+
+    if ptr_string == 0 || size == 0 {
+        return Ok(0);
+    }
+
+    let instance: Box<dyn ClassInstance> = Box::new(KtfJvmSupport::class_instance_from_raw(core, ptr_string));
+    let text = match JavaLangString::to_rust_string(jvm, &instance).await {
+        Ok(x) => x,
+        Err(x) => return Err(JvmSupport::to_wie_err(jvm, x).await),
+    };
+    let bytes = encoding_rs::EUC_KR.encode(&text).0;
+    let length = bytes.len().min(size as usize - 1);
+
+    core.write_bytes(buffer, &bytes[..length])?;
+    write_generic(core, buffer + length as u32, 0u8)?;
+
+    Ok(length as u32)
 }
 
 async fn alloc(core: &mut ArmCore, _: &mut (), a0: u32) -> Result<u32> {

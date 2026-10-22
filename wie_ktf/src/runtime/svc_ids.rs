@@ -11,6 +11,9 @@ pub enum InitSvcId {
     JavaClassLoad = 5,
     Alloc = 6,
     JavaThrowInstance = 19,
+    ObjectClass = 20,
+    MarkObject = 21,
+    StringToBytes = 22,
 }
 
 impl TryFrom<SvcId> for InitSvcId {
@@ -26,6 +29,9 @@ impl TryFrom<SvcId> for InitSvcId {
             5 => Self::JavaClassLoad,
             6 => Self::Alloc,
             19 => Self::JavaThrowInstance,
+            20 => Self::ObjectClass,
+            21 => Self::MarkObject,
+            22 => Self::StringToBytes,
             _ => return Err(wie_util::WieError::FatalError(alloc::format!("Unknown KTF init SVC id {}", value.0))),
         })
     }
