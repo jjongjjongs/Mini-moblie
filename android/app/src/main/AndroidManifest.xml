@@ -19,7 +19,12 @@
         android:name="android.hardware.gamepad"
         android:required="false" />
 
+    <!-- A game, so the handset files it with its games: appCategory is what
+         Android 8 and later read (Game Mode, the Play-less game lists), and
+         isGame what older launchers and Samsung's Game Launcher read. -->
     <application
+        android:appCategory="game"
+        android:isGame="true"
         android:allowBackup="true"
         android:extractNativeLibs="false"
         android:icon="@mipmap/ic_launcher"
