@@ -747,6 +747,14 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // the title and the dialogue all fit, so told that size the game fills the
     // screen with no content lost - only the unused black is gone.
     (TitlePlatform::Skt, "0049884301", panel(240, 208)),
+    // 버터플라이: drawn for a 240x320 handset's Card under its 26-row
+    // annunciator, 240x294. MainCanvas takes the Card's height, and past 294
+    // keeps the excess as `height_gap`, lays every screen out on 294 anyway and
+    // fills the band under it - so on the 240x320 default the frame's bottom
+    // border, the title and the dialogue sat on a 294-row layout with a stray
+    // band below, which read as scattered pictures. Told 240x294 it fills the
+    // screen as it did on the handset.
+    (TitlePlatform::Skt, "0098273562", panel(240, 294)),
     // 바운티블루스: drawn for a 128-wide handset - its field, portraits and
     // dialogue art are 128 wide - and it lays the screen out from the Canvas
     // height (`getHeight() + 16`): a 144-row field and a 32-row status panel
@@ -1140,6 +1148,13 @@ mod tests {
     #[test]
     fn dark_slayer_2_asks_for_the_panel_its_scene_fills() {
         assert_eq!(title_quirks(TitlePlatform::Skt, "0049884301").screen_size, Some((240, 208)));
+    }
+
+    /// 버터플라이 lays itself out on the 240x294 Card under a handset's
+    /// annunciator.
+    #[test]
+    fn butterfly_asks_for_the_card_it_was_drawn_for() {
+        assert_eq!(title_quirks(TitlePlatform::Skt, "0098273562").screen_size, Some((240, 294)));
     }
 
     /// 모바일크래프트 is a 120-wide title centred on the Canvas, so it asks for the
