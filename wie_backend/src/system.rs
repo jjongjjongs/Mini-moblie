@@ -202,11 +202,14 @@ impl System {
         // `tagNetHeader` ones 제노니아 writes - a `u16le` length and a `u16le`
         // command - read the way their own reader reads them
         // (`crate::billing::ktf_local_gamevil_2011_response`). Host-gated, so
-        // no other title is touched.
+        // no other title is touched. 놈4 (KTF 01042258) authenticates at 32015
+        // with the same records - 0x010a, answered 0x010b - before it will
+        // start at all.
         for (name, port) in [
             ("gamevil(218.145.70.36:23205)", 23205),
             ("gamevil(218.145.70.36:29505)", 29505),
             ("gamevil(218.145.70.36:31105)", crate::billing::GAMEVIL_SHOP_PORT),
+            ("gamevil(218.145.70.36:32015)", 32015),
         ] {
             local_network.register(Box::new(crate::local_network::BillingGatewayEndpoint::new_gamevil(
                 name,
