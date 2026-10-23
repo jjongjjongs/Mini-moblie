@@ -92,6 +92,14 @@ pub trait WIPICContext: ByteRead + ByteWrite + Send + Sync {
         false
     }
 
+    /// What a decoded image's clear pixels hold in its 16bpp colour plane, where
+    /// the handset writes a colour of its own there rather than the one the
+    /// picture carried. `None` keeps the picture's colour - the magenta KTF and
+    /// LGT titles key their own blits on.
+    fn decoded_clear_pixel(&self) -> Option<u16> {
+        None
+    }
+
     /// The order this handset keeps a graphics context's two colour words in.
     ///
     /// See `ContextLayout`. LGT's is the one the API is usually written down

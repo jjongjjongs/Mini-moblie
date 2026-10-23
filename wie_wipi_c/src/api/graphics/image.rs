@@ -29,13 +29,14 @@ pub fn create_wipi_image(context: &mut dyn WIPICContext, buf: WIPICIndirectPtr, 
     let height = image.height();
     let colors = image.colors();
     let has_alpha = colors.iter().any(|color| color.a != 0xff);
-    let raw: Vec<u16> = colors.iter().map(|color| Rgb565Pixel::from_color(*color)).collect();
+    let clear_pixel = context.decoded_clear_pixel();
+    let raw = colour_plane(&colors, clear_pixel);
     let rgb565 = VecImageBuffer::<Rgb565Pixel>::from_raw(width, height, raw);
 
     let (mask_at, mask_bits) = transparency_bits(&colors);
     let img_framebuffer = FrameBuffer::from_image_with_trailer(context, &rgb565, mask_at, &mask_bits)?;
     register_trailer(img_framebuffer.0.buf.0);
-    if has_alpha && is_magenta_keyed(&colors) {
+    if has_alpha && clear_pixel.is_none() && is_magenta_keyed(&colors) {
         register_magenta_keyed(img_framebuffer.0.buf.0);
     }
     // Only an image that carries alpha needs the full ARGB kept in the mask
@@ -58,6 +59,19 @@ pub fn create_wipi_image(context: &mut dyn WIPICContext, buf: WIPICIndirectPtr, 
         current: 0,
         len,
     })
+}
+
+/// A decoded image's colours as its 16bpp colour plane holds them: each in
+/// RGB565, or `clear_pixel` where the image is clear and the handset writes one
+/// - see `WIPICContext::decoded_clear_pixel`.
+fn colour_plane(colors: &[Color], clear_pixel: Option<u16>) -> Vec<u16> {
+    colors
+        .iter()
+        .map(|color| match clear_pixel {
+            Some(clear) if color.a < 0x80 => clear,
+            _ => Rgb565Pixel::from_color(*color),
+        })
+        .collect()
 }
 
 /// `image` enlarged to the panel, when it is the full-screen picture this title
@@ -199,7 +213,7 @@ mod tests {
 
     use wie_backend::canvas::{ArgbPixel, Color, Image, VecImageBuffer};
 
-    use super::{resample, transparency_bits};
+    use super::{colour_plane, resample, transparency_bits};
 
     /// Enlarging covers the panel with the picture's own colours and no others,
     /// each in its own share of the width.
@@ -237,6 +251,22 @@ mod tests {
         assert_eq!(at, 10 * 2, "nine pixels round up to ten, two bytes each");
         assert_eq!(bits.len(), 2, "read a halfword at a time, so a whole one");
         assert_eq!(u16::from_le_bytes([bits[0], bits[1]]), 0b0_1010_1010);
+    }
+
+    /// A clear pixel keeps its own colour unless the handset writes one of its
+    /// own there; SKT's `0xfff7` is what 마이시크릿러브's blitters skip.
+    #[test]
+    fn a_clear_pixel_takes_the_handsets_colour() {
+        let magenta = Color {
+            a: 0,
+            r: 0xff,
+            g: 0,
+            b: 0xff,
+        };
+        let colors = [INK, magenta];
+
+        assert_eq!(colour_plane(&colors, None), [0x0000, 0xf81f]);
+        assert_eq!(colour_plane(&colors, Some(0xfff7)), [0x0000, 0xfff7]);
     }
 
     /// An even count starts the mask straight after the pixels.

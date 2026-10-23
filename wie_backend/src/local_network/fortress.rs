@@ -43,6 +43,13 @@
 //! box up for good, anything else raises an empty box 100. Nor 241,
 //! `RES_ALIAS`, which registers a nickname and jumps to a state whose pictures
 //! were never loaded.
+//!
+//! 마이시크릿러브 (SKT `0080225376`) authenticates at the same server with code
+//! 119, 26 bytes: the code, the subscriber number and twelve more digits. Its
+//! read callback (`0x24f4`) adds what arrives to a buffer and calls `0x24a2`,
+//! which reads none of it: in the state the 인증 key set (9, at `0xfb0a`) any
+//! answer at all closes the socket, writes the 인증 to `secret.cfg` and goes
+//! on to the title. It is answered as the login is, under its own code.
 
 use alloc::{boxed::Box, vec::Vec};
 
@@ -54,6 +61,10 @@ const PORT: u16 = 5600;
 /// The login's code, and the code of the answer that completes the 인증.
 const LOGIN: &[u8; 3] = b"136";
 const AUTHENTICATED: &[u8; 4] = b"236\x00";
+
+/// 마이시크릿러브's 인증 and its answer, which is not read past arriving.
+const SECRET_LOVE_LOGIN: &[u8; 3] = b"119";
+const SECRET_LOVE_AUTHENTICATED: &[u8; 4] = b"219\x00";
 
 /// The full-version conversion's code, and the answer that converts it.
 const CONVERSION: &[u8; 3] = b"115";
@@ -88,6 +99,11 @@ impl LocalConnection for FortressConnection {
     fn write(&mut self, bytes: &[u8]) {
         if bytes.starts_with(LOGIN) {
             self.outgoing.extend_from_slice(AUTHENTICATED);
+            return;
+        }
+
+        if bytes.starts_with(SECRET_LOVE_LOGIN) {
+            self.outgoing.extend_from_slice(SECRET_LOVE_AUTHENTICATED);
             return;
         }
 
@@ -157,5 +173,13 @@ mod tests {
 
         connection.write(b"999");
         assert!(!connection.readable());
+    }
+
+    /// 마이시크릿러브's 인증, off the device log, is answered.
+    #[test]
+    fn secret_love_is_authenticated() {
+        let mut connection = FortressConnection::default();
+        connection.write(b"11901051468505010406271100");
+        assert_eq!(read_all(&mut connection), b"219\x00");
     }
 }

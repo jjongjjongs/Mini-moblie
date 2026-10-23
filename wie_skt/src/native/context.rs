@@ -33,6 +33,10 @@ use super::daf::Resources;
 /// is the allocator's to know.
 const ALLOC_HEADER_SIZE: WIPICWord = 4;
 
+/// What SKT's image decoder writes where a picture is clear - see
+/// `decoded_clear_pixel`.
+const SKT_CLEAR_PIXEL: u16 = 0xfff7;
+
 #[derive(Clone)]
 pub struct SktWIPICContext {
     pub core: ArmCore,
@@ -67,6 +71,15 @@ impl WIPICContext for SktWIPICContext {
 
     fn draw_image_keys_transparent_pixel(&self) -> bool {
         true
+    }
+
+    /// SKT's decoder leaves `0xfff7` where a picture is clear. 마이시크릿러브
+    /// draws its characters itself out of their colour planes, and every one of
+    /// its blitters (`0x936`, `0xc32`, `0x2b68`, `0x2c62`, `0xa7b6`) skips that
+    /// value and nothing else; its pictures are palette PNGs clear at a magenta
+    /// entry, which came down as magenta boxes round every face on the title.
+    fn decoded_clear_pixel(&self) -> Option<u16> {
+        Some(SKT_CLEAR_PIXEL)
     }
 
     fn alloc_raw(&mut self, size: WIPICWord) -> Result<WIPICWord> {
