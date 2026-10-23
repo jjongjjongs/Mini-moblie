@@ -515,6 +515,17 @@ impl LocalConnection for GxgConnection {
                     tracing::info!("gxg: confirming the purchase");
                     self.outgoing.extend_from_slice(&frame(&version, b"LCC", &CHARGED));
                 }
+                // A switch to another server on the same connection: 하얀섬 감독판
+                // and 하얀섬2, past their consent at the developer's server, name
+                // EA's `210.222.18.28:11530` the way an open does. Their library
+                // reads every answer with one parser (`0x5258` in 하얀섬2): a
+                // result byte and a length-prefixed message, with the open's
+                // fields only behind an open.
+                b"SP" => {
+                    self.target = open_target(&body);
+                    tracing::info!("gxg switch to {:?}", self.target);
+                    self.outgoing.extend_from_slice(&frame(&version, b"SCC", &CHARGED));
+                }
                 // And after it, the same `'Y'` and key once more as `BP`, which
                 // the library reads as `BC` (`0x384d0`) the same way, as event
                 // 12.
@@ -720,6 +731,24 @@ mod tests {
 
         connection.write(&frame(VERSION, b"BPC", b"Y9000522187"));
         assert_eq!(read_answer(connection.as_mut()), (*b"BCC", vec![0, 0]));
+    }
+
+    /// 하얀섬's switch to EA's server, off its log, is answered and moves the
+    /// connection's target there.
+    #[test]
+    fn hayanseom_switch_is_answered() {
+        let endpoint = GxgEndpoint::new();
+        let mut connection = connection(&endpoint);
+
+        let mut switch = vec![13];
+        switch.extend_from_slice(b"210.222.18.2811530\0\0");
+        connection.write(&frame(VERSION, b"SPC", &switch));
+        assert_eq!(read_answer(connection.as_mut()), (*b"SCC", vec![0, 0]));
+
+        let mut consent = b"SMSAGREE 01051468505 G1000135 N".to_vec();
+        consent.resize(64, 0);
+        connection.write(&frame(VERSION, b"DPC", &consent));
+        assert_eq!(read_answer(connection.as_mut()), (*b"DPC", vec![2, 0]));
     }
 
     /// 판다독미니게임's open names a four-digit port, NUL-ended, and its
