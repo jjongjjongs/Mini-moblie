@@ -711,6 +711,8 @@ pub fn lgt_local_rann_pr_response(request: &[u8]) -> Option<Vec<u8>> {
     // Consent, charge, and the other result-only exchanges at `0x43492`.
     const RESULT_ONLY: [u8; 7] = [0x14, 0x1e, 0x3c, 0x50, 0x33, 0x28, 0x2b];
     const SUCCEEDED: u8 = 0;
+    // 판다독미니게임's charge (`0x2d120`), which reads a code back.
+    const CHARGE_BY_CODE: u8 = 0x12;
 
     let head = request.get(..HEAD_SIZE)?;
     if head[0] > 1 || head[1] != PROTOCOL || head[3] != 0 {
@@ -721,16 +723,37 @@ pub fn lgt_local_rann_pr_response(request: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     let command = head[2];
-    if !RESULT_ONLY.contains(&command) {
+    let mut body = vec![SUCCEEDED, 0x00];
+    if command == CHARGE_BY_CODE {
+        // The charge carries the item's code; the reply hands it back after
+        // the result and the empty message, and is taken only when it matches.
+        let plain: Vec<u8> = request[HEAD_SIZE..]
+            .iter()
+            .zip(RANN_PR_KEY.iter().cycle())
+            .map(|(byte, key)| byte ^ key)
+            .collect();
+        let code = rann_pr_charge_code(&plain)?;
+        body.push(code.len() as u8);
+        body.extend_from_slice(code);
+    } else if !RESULT_ONLY.contains(&command) {
         return None;
     }
 
-    let body = [SUCCEEDED, 0x00];
     let mut response = Vec::with_capacity(HEAD_SIZE + body.len());
     response.extend_from_slice(&[0x00, PROTOCOL, command, 0x00]);
     response.extend_from_slice(&((HEAD_SIZE + body.len()) as u32).to_be_bytes());
     response.extend(body.iter().zip(RANN_PR_KEY.iter().cycle()).map(|(byte, key)| byte ^ key));
     Some(response)
+}
+
+/// The item code in a RANN charge's plain body: the subscriber number and the
+/// NULs that pad its field, then the code, length-prefixed -
+/// `01051468505 00000000 07 "C000007"` - and the handset model after it.
+fn rann_pr_charge_code(body: &[u8]) -> Option<&[u8]> {
+    let at = body.iter().position(|&byte| byte != 0 && !byte.is_ascii_digit())?;
+    let length = *body.get(at)? as usize;
+    let code = body.get(at + 1..at + 1 + length)?;
+    code.iter().all(u8::is_ascii_graphic).then_some(code)
 }
 
 /// What answers 위기일발 막장가족's 막장캡슐 purchase.
@@ -11966,6 +11989,21 @@ mod tests {
         assert_eq!(lgt_local_rann_pr_response(&ranks), None);
 
         assert_eq!(response(b"SMSAGREE 01085300848 G1000153 Y Emulator\0"), Some(vec![2, 0]));
+    }
+
+    /// 판다독미니게임's charge, off its log: its reply hands the item's code
+    /// back after the result and the message, as `0x2d120` compares it.
+    #[test]
+    fn panda_dog_charge_returns_the_code() {
+        let request = [
+            0x00, 0x65, 0x12, 0x00, 0x00, 0x00, 0x00, 0x2d, 0x5e, 0x52, 0x1b, 0xf1, 0x5f, 0x57, 0x1d, 0xfc, 0x5b, 0x53, 0x1e, 0xc4, 0x6e, 0x63, 0x2b,
+            0xc4, 0x6e, 0x63, 0x2b, 0xc4, 0x69, 0x20, 0x1b, 0xf4, 0x5e, 0x53, 0x1b, 0xf3, 0x66, 0x30, 0x68, 0x8c, 0x43, 0x34, 0x13, 0xf7, 0x5e,
+        ];
+        let reply = lgt_local_rann_pr_response(&request).expect("the charge is answered");
+        assert_eq!(&reply[..8], &[0x00, 0x65, 0x12, 0x00, 0x00, 0x00, 0x00, 0x12]);
+
+        let plain: Vec<u8> = reply[8..].iter().zip(RANN_PR_KEY.iter().cycle()).map(|(byte, key)| byte ^ key).collect();
+        assert_eq!(plain, b"\x00\x00\x07C000007");
     }
 
     /// 판다독미니게임's start-up request, as its log has the head - `01`, not
