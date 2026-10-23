@@ -68,6 +68,15 @@ pub fn loadable_archive(files: &BTreeMap<String, Vec<u8>>) -> bool {
     files.keys().any(|name| name.to_ascii_lowercase().ends_with(".daf"))
 }
 
+/// The id a native title runs and saves under: its `.daf`'s name without the
+/// extension or the folder an archive made off a handset keeps it in.
+pub fn title_id(files: &BTreeMap<String, Vec<u8>>) -> Option<String> {
+    let daf_name = files.keys().find(|name| name.to_ascii_lowercase().ends_with(".daf"))?;
+    let file_name = daf_name.rsplit_once('/').map(|x| x.1).unwrap_or(daf_name);
+
+    Some(file_name.rsplit_once('.').map(|x| x.0).unwrap_or(file_name).to_string())
+}
+
 /// The pieces a loaded native title runs on, for the emulator to keep.
 pub struct Loaded {
     pub core: ArmCore,
@@ -83,11 +92,8 @@ pub fn load(platform: Box<dyn Platform>, files: BTreeMap<String, Vec<u8>>) -> Re
     // An archive made off a handset keeps the title in a folder named for
     // it, saves and all; the title opens its saves by bare name, so the
     // folder comes off every entry.
-    let (directory, file_name) = match daf_name.rsplit_once('/') {
-        Some((directory, file_name)) => (Some(directory.to_owned() + "/"), file_name),
-        None => (None, daf_name.as_str()),
-    };
-    let id = file_name.rsplit_once('.').map(|x| x.0).unwrap_or(file_name).to_string();
+    let directory = daf_name.rsplit_once('/').map(|(directory, _)| directory.to_owned() + "/");
+    let id = title_id(&files).unwrap_or_default();
 
     tracing::info!("Loading SKT native title {id}");
 

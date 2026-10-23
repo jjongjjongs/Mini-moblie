@@ -961,6 +961,17 @@ pub fn save_ids(data: &[u8]) -> Option<SaveIds> {
         });
     }
 
+    // An SKT native title saves under its `.daf`'s name, which is the id the
+    // emulator gives it. It has no `.msd`, and fell through to the bare-jar
+    // id below - a name nothing was ever saved under, so 메이플스토리 Live's
+    // export found nothing to take out.
+    if let Some(id) = wie_skt::native_title_id(&files) {
+        return Some(SaveIds {
+            records: id.clone(),
+            files: id,
+        });
+    }
+
     // An SKT archive names itself in its descriptor, or failing that in the
     // descriptor's own filename, and uses the one name for both.
     if let Some((name, contents)) = files.iter().find(|(name, _)| name.ends_with(".msd")) {
@@ -1336,6 +1347,21 @@ mod tests {
 
         assert_eq!(ids.records, "_");
         assert_eq!(ids.files, "01040DAD");
+    }
+
+    /// An SKT native title made off a handset keeps its `.daf` in a folder
+    /// named for it, and saves under that name.
+    #[test]
+    fn an_skt_native_title_saves_under_its_daf() {
+        let archive = zip_of(&[
+            ("0095409621/0095409621.daf", b"daf"),
+            ("0095409621/0095409621.mod", b"mod"),
+            ("0095409621/mapleliveuser", b"save"),
+        ]);
+        let ids = save_ids(&archive).expect("the archive names its title");
+
+        assert_eq!(ids.records, "0095409621");
+        assert_eq!(ids.files, "0095409621");
     }
 
     #[test]
