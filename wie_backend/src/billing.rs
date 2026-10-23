@@ -647,15 +647,22 @@ pub fn lgt_local_apf2_response(request: &[u8]) -> Option<Vec<u8>> {
 /// here, a two-byte head with no text: the consent recorded, the purchase
 /// approved. The KOIN pair carries records this does not shape, and is left
 /// unanswered.
+///
+/// 검은방2 and 검은방3 (SKT `0081291658`, `0087844311`) send the same lines to
+/// `210.222.18.28:11530` through the GXG gateway, each in a fixed buffer -
+/// 127 bytes in the one, 64 in the other, the line NUL-padded to fill it -
+/// and judge the result as 하얀섬 does: the consent (`0x1efbe` in 검은방2,
+/// `0x47660` in 검은방3) goes on from 2 or 3, a charge from 0 or 1.
 pub fn lgt_local_ea_text_response(request: &[u8]) -> Option<Vec<u8>> {
     const SMS_CONSENT: &[u8] = b"SMSAGREE ";
     const CHARGE: &[u8] = b"CHARGE ";
     const CONSENT_RECORDED: u8 = 2;
     const CHARGE_APPROVED: u8 = 0;
 
-    // One printable line and its NUL, nothing after.
-    let (&last, line) = request.split_last()?;
-    if last != 0 || !line.iter().all(|&byte| (0x20..0x7f).contains(&byte)) {
+    // One printable line and its NUL, or as many NULs as fill its buffer.
+    let end = request.iter().position(|&byte| byte == 0)?;
+    let (line, padding) = request.split_at(end);
+    if !padding.iter().all(|&byte| byte == 0) || !line.iter().all(|&byte| (0x20..0x7f).contains(&byte)) {
         return None;
     }
 
@@ -11906,6 +11913,24 @@ mod tests {
         assert_eq!(lgt_local_ea_text_response(b"CHARGE 01057375505 G1000135 C2000468\0"), Some(vec![0, 0]));
         assert_eq!(lgt_local_ea_text_response(b"KOIN_REQ_P2 01057375505 G1000135\0"), None);
         assert_eq!(lgt_local_ea_text_response(b"SMSAGREE 01057375505 G1000135 N"), None);
+    }
+
+    /// 검은방2's and 검은방3's consent, off the device logs, NUL-padded to the
+    /// buffers they send, is recorded the same way; padding with anything but
+    /// NULs behind the line is not a line.
+    #[test]
+    fn black_room_consent_is_answered() {
+        let mut second = b"SMSAGREE 01051468505 G1000126 N ".to_vec();
+        second.resize(127, 0);
+        assert_eq!(lgt_local_ea_text_response(&second), Some(vec![2, 0]));
+
+        let mut third = b"SMSAGREE 01051468505 G1000142 N SCH-W830".to_vec();
+        third.resize(64, 0);
+        assert_eq!(lgt_local_ea_text_response(&third), Some(vec![2, 0]));
+
+        let mut trailing = third.clone();
+        trailing[63] = b'x';
+        assert_eq!(lgt_local_ea_text_response(&trailing), None);
     }
 
     /// 하얀섬2's consent request, off the device log, is answered with its own

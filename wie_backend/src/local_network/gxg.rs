@@ -296,11 +296,14 @@ fn open_target(body: &[u8]) -> Option<(String, u16)> {
 /// `[u32be length][command]` ones: EA프로야구2010's SKT builds carry the SMS
 /// question its LGT build sends `210.222.18.28:20102` straight to `:20100`
 /// through here, and left unanswered wait a long while on `네트워크 연결중`.
+/// 검은방2 and 검은방3 carry EA's text lines to `:11530`, their consent first
+/// (see [`crate::billing::lgt_local_ea_text_response`]).
 fn answer_data(data: &[u8]) -> Option<Vec<u8>> {
     crate::billing::lgt_local_marked_command_response(data)
         .or_else(|| crate::billing::lgt_local_opcode_header_response(data))
         .or_else(|| crate::billing::lgt_local_scrambled_opcode_header_response(data))
         .or_else(|| crate::billing::lgt_local_ea_baseball_response(data))
+        .or_else(|| crate::billing::lgt_local_ea_text_response(data))
         .or_else(|| marked_granted(data))
 }
 
@@ -648,6 +651,28 @@ mod tests {
         assert_eq!(answer_data(&decode(live)).unwrap(), [11, 0, 0, 0, 0xff, 0xff, 5, 0, 0, 0, 0]);
         assert_eq!(answer_data(&decode(dnf)).unwrap(), [11, 0, 0, 0, 0xff, 0xff, 0x21, 0, 0, 0, 0]);
         assert_eq!(answer_data(&decode(hero)).unwrap(), [0, 14, 0, 0x47, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    /// 검은방3's consent, as its log has it: an open to EA's server, then the
+    /// line in a NUL-padded 64-byte buffer, recorded with a 2.
+    #[test]
+    fn black_room_consent_is_carried_and_recorded() {
+        let mut open = b"00878399791051468505".to_vec();
+        open.extend_from_slice(&[0; 11]);
+        open.push(13);
+        open.extend_from_slice(b"210.222.18.2811530");
+        open.extend_from_slice(&[0, 0, 0, 1]);
+
+        let mut consent = b"SMSAGREE 01051468505 G1000142 N SCH-W830".to_vec();
+        consent.resize(64, 0);
+
+        let endpoint = GxgEndpoint::new();
+        let mut connection = connection(&endpoint);
+        connection.write(&frame(VERSION, b"IPC", &open));
+        assert_eq!(&read_answer(connection.as_mut()).0, b"ICS");
+
+        connection.write(&frame(VERSION, b"DPC", &consent));
+        assert_eq!(read_answer(connection.as_mut()), (*b"DPS", vec![2, 0]));
     }
 
     #[test]
