@@ -30,7 +30,7 @@ pub use self::{
         Filesystem, FilesystemMkdirError, FilesystemRenameError, FilesystemRmDirError, FilesystemSetModeError, Network, NetworkError, NetworkEvent,
         NetworkPoll, Platform,
     },
-    quirks::{TitlePlatform, TitleQuirks, title_quirks, title_quirks_for_descriptor, title_quirks_on_panel},
+    quirks::{TitlePlatform, TitleQuirks, title_quirks, title_quirks_for_descriptor, title_quirks_for_product, title_quirks_on_panel},
     screen::{Screen, frame_point_on_panel, present, quarter_turn_left},
     system::{Event, FilesystemOverlay, InputMethodOutput, KeyCode, PointerKind, System, set_touch_enabled, touch_enabled},
     task::YieldFuture,

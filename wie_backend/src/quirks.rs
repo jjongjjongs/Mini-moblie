@@ -996,6 +996,34 @@ const DESCRIPTOR_QUIRKS: &[(TitlePlatform, &str, (u32, u32), TitleQuirks)] = &[
     (TitlePlatform::Ktf, "010100D3", (176, 220), panel(176, 204)),
 ];
 
+/// Entries for one product, where its AID is shared with another title on a
+/// panel of the same size and only the product id tells them apart. Read
+/// through [`title_quirks_for_product`].
+const PRODUCT_QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
+    // 메이플스토리 (KTF PD002198): its field, status bars and talk box are
+    // laid out for 274 rows and centred in whatever it is given, so on the
+    // 240x320 its descriptor names it left 23 white rows above and below. On
+    // 240x274 it fills the panel exactly. 크로노스윙's KTF build (PD007589)
+    // carries the same AID, 010100D2, and the same descriptor size.
+    (TitlePlatform::Ktf, "PD002198", panel(240, 274)),
+    // 메이플스토리's 176-wide build (KTF PD001295, 0102589E): 194 rows
+    // centred in the 176x220 its descriptor names, 13 white rows above and
+    // below.
+    (TitlePlatform::Ktf, "PD001295", panel(176, 194)),
+];
+
+/// [`title_quirks_for_descriptor`], answered first by the product's own entry
+/// when it has one - see [`PRODUCT_QUIRKS`].
+pub fn title_quirks_for_product(platform: TitlePlatform, pid: &str, aid: &str, display_size: Option<(u32, u32)>) -> TitleQuirks {
+    for (entry_platform, entry_pid, quirks) in PRODUCT_QUIRKS {
+        if *entry_platform == platform && entry_pid.eq_ignore_ascii_case(pid) {
+            return *quirks;
+        }
+    }
+
+    title_quirks_for_descriptor(platform, aid, display_size)
+}
+
 /// [`title_quirks`] for the build whose descriptor names `display_size`, which
 /// also answers the entries that hold only for that build - see
 /// [`DESCRIPTOR_QUIRKS`].
@@ -1259,6 +1287,21 @@ mod tests {
     #[test]
     fn gunz_the_duel_gets_its_panel() {
         assert_eq!(title_quirks(TitlePlatform::Ktf, "01035471").screen_size, Some((176, 204)));
+    }
+
+    /// 메이플스토리's KTF builds centre their field in 274 rows (240 wide) or
+    /// 194 (176 wide) and fill a panel of that height; 크로노스윙, under the
+    /// same AID and descriptor size, is left as it was.
+    #[test]
+    fn maple_story_ktf_fills_the_field_it_centres() {
+        let maple = super::title_quirks_for_product(TitlePlatform::Ktf, "PD002198", "010100D2", Some((240, 320)));
+        assert_eq!(maple.screen_size, Some((240, 274)));
+
+        let narrow = super::title_quirks_for_product(TitlePlatform::Ktf, "PD001295", "0102589E", Some((176, 220)));
+        assert_eq!(narrow.screen_size, Some((176, 194)));
+
+        let chronos_wing = super::title_quirks_for_product(TitlePlatform::Ktf, "PD007589", "010100D2", Some((240, 320)));
+        assert_eq!(chronos_wing.screen_size, None);
     }
 
     /// 프린스메이커 온달편 fills the 128x128 panel its art was drawn for.

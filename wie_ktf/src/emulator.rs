@@ -8,7 +8,7 @@ use jvm::{ClassInstance, Result as JvmResult, runtime::JavaLangString};
 use wie_backend::{
     Emulator, Event, Instant, Options, Platform, System, TaskRunner, TitlePlatform,
     canvas::{Rgb565Pixel, VecImageBuffer},
-    extract_zip, gz, protected_container, title_quirks_for_descriptor, title_quirks_on_panel,
+    extract_zip, gz, protected_container, title_quirks_for_product, title_quirks_on_panel,
 };
 use wie_core_arm::{Allocator, ArmCore};
 use wie_jvm_support::JvmSupport;
@@ -180,7 +180,7 @@ impl KtfEmulator {
         let files = reroot_archive(extract_zip(archive).ok()?);
         let adf = KtfAdf::parse(files.get("__adf__")?);
 
-        title_quirks_for_descriptor(TitlePlatform::Ktf, &adf.aid, adf.display_size)
+        title_quirks_for_product(TitlePlatform::Ktf, &adf.pid, &adf.aid, adf.display_size)
             .screen_size
             .or(adf.display_size)
     }
