@@ -1466,6 +1466,10 @@ pub async fn load_native(
     // narrow the range if that ever becomes false.
     wie_core_arm::install_binary_patches(core, data, &[(IMAGE_BASE, data.len() as u32)])?;
 
+    // Past the image and its bss, which `load` mapped in whole pages.
+    let past_image = IMAGE_BASE + (data.len() + bss_size as usize).next_multiple_of(0x1000) as u32;
+    super::maple_live::install_warehouse_cap(core, system.aid(), past_image)?;
+
     register_wipic_svc_handler(core, system, jvm)?;
     register_init_svc_handler(core, jvm)?;
 
