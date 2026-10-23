@@ -22,10 +22,17 @@
 //! `0x17`, and dispatches on `[12]` and `[13]`: `IC` answers an open, `DP`
 //! carries data, `CC`, `SC` and `QC` are the gateway's own notices.
 //!
+//! The third letter of the type is `C` both ways. 크아 and 검은방2·3 never read
+//! it, but 판다독미니게임's build of the library does: its header parser
+//! (`0x27f4c`) refuses any frame whose `[14]` is not `C`, and an answer marked
+//! `S` came back as an error and the title closed the connection under its
+//! purchase.
+//!
 //! The open names the server the title wants, as a length-prefixed dotted
-//! quad and five ASCII digits of port - `0e "211.115.203.30" "10013"`, or
-//! with a dash between them - `0d "121.78.119.73" "-20535"` from
-//! 렙업만이살길2's older build of the library.
+//! quad and its port in ASCII digits - five of them, `0e "211.115.203.30"
+//! "10013"`, with a dash in front - `0d "121.78.119.73" "-20535"` from
+//! 렙업만이살길2's older build of the library - or as few as the port needs and
+//! a NUL, `0d "115.94.11.101" "6780"` from 판다독미니게임.
 //!
 //! The answer to an open, `IC`, is read by `0x2e4a8`: a result byte, two
 //! length-prefixed strings, seven ASCII digits, two bytes and a hundred more.
@@ -283,8 +290,9 @@ fn open_target(body: &[u8]) -> Option<(String, u16)> {
         }
 
         let port = body.get(at + 1 + length..)?;
-        let port = port.strip_prefix(b"-").unwrap_or(port).get(..5)?;
-        let port = core::str::from_utf8(port).ok()?.parse().ok()?;
+        let port = port.strip_prefix(b"-").unwrap_or(port);
+        let digits = port.iter().take(5).take_while(|x| x.is_ascii_digit()).count();
+        let port = core::str::from_utf8(&port[..digits]).ok()?.parse().ok()?;
         Some((String::from_utf8_lossy(address).into_owned(), port))
     })
 }
@@ -297,13 +305,17 @@ fn open_target(body: &[u8]) -> Option<(String, u16)> {
 /// question its LGT build sends `210.222.18.28:20102` straight to `:20100`
 /// through here, and left unanswered wait a long while on `네트워크 연결중`.
 /// 검은방2 and 검은방3 carry EA's text lines to `:11530`, their consent first
-/// (see [`crate::billing::lgt_local_ea_text_response`]).
+/// (see [`crate::billing::lgt_local_ea_text_response`]). 판다독미니게임 opens
+/// `115.94.11.101:6780`, the developer's server 하얀섬2 reaches straight, and
+/// carries the XORed frames of [`crate::billing::lgt_local_rann_pr_response`]
+/// - its binary holds the same key.
 fn answer_data(data: &[u8]) -> Option<Vec<u8>> {
     crate::billing::lgt_local_marked_command_response(data)
         .or_else(|| crate::billing::lgt_local_opcode_header_response(data))
         .or_else(|| crate::billing::lgt_local_scrambled_opcode_header_response(data))
         .or_else(|| crate::billing::lgt_local_ea_baseball_response(data))
         .or_else(|| crate::billing::lgt_local_ea_text_response(data))
+        .or_else(|| crate::billing::lgt_local_rann_pr_response(data))
         .or_else(|| marked_granted(data))
 }
 
@@ -417,7 +429,7 @@ fn open_answer(version: &[u8; 12]) -> Vec<u8> {
     body.extend_from_slice(b"0000000"); // seven digits
     body.extend_from_slice(&[0, 0]);
     body.extend_from_slice(&[0u8; 100]);
-    frame(version, b"ICS", &body)
+    frame(version, b"ICC", &body)
 }
 
 impl LocalConnection for GxgConnection {
@@ -450,7 +462,7 @@ impl LocalConnection for GxgConnection {
                         .is_some_and(|(host, port)| (host.as_str(), *port) == levelup::SEQUEL_TARGET) =>
                 {
                     match levelup::sequel_answer(&body) {
-                        Some(answer) => self.outgoing.extend_from_slice(&frame(&version, b"DPS", &answer)),
+                        Some(answer) => self.outgoing.extend_from_slice(&frame(&version, b"DPC", &answer)),
                         None => tracing::warn!("gxg: no answer for data to {:?}", self.target),
                     }
                 }
@@ -458,8 +470,8 @@ impl LocalConnection for GxgConnection {
                 b"DP" if self.target.as_ref().is_some_and(|(host, port)| (host.as_str(), *port) == com2us::TARGET) => {
                     match com2us::star_answer(&body).or_else(|| answer_data(&body)) {
                         Some(answer) => {
-                            tracing::info!("gxg -> DPS {}", answer.iter().map(|x| format!("{x:02x}")).collect::<String>());
-                            self.outgoing.extend_from_slice(&frame(&version, b"DPS", &answer));
+                            tracing::info!("gxg -> DPC {}", answer.iter().map(|x| format!("{x:02x}")).collect::<String>());
+                            self.outgoing.extend_from_slice(&frame(&version, b"DPC", &answer));
                         }
                         None => tracing::warn!("gxg: no answer for data to {:?}", self.target),
                     }
@@ -467,7 +479,7 @@ impl LocalConnection for GxgConnection {
                 // 스타디움2011 아시아's point shop; see [`stadium`].
                 b"DP" if self.target.as_ref().is_some_and(|(host, port)| (host.as_str(), *port) == stadium::TARGET) => {
                     match stadium::point_answer(&body) {
-                        Some(answer) => self.outgoing.extend_from_slice(&frame(&version, b"DPS", &answer)),
+                        Some(answer) => self.outgoing.extend_from_slice(&frame(&version, b"DPC", &answer)),
                         None => tracing::warn!("gxg: no answer for data to {:?}", self.target),
                     }
                 }
@@ -478,8 +490,8 @@ impl LocalConnection for GxgConnection {
                         stars.settle(&mut answer);
                         drop(stars);
 
-                        tracing::info!("gxg -> DPS {}", answer.iter().map(|x| format!("{x:02x}")).collect::<String>());
-                        self.outgoing.extend_from_slice(&frame(&version, b"DPS", &answer));
+                        tracing::info!("gxg -> DPC {}", answer.iter().map(|x| format!("{x:02x}")).collect::<String>());
+                        self.outgoing.extend_from_slice(&frame(&version, b"DPC", &answer));
                     }
                     None => tracing::warn!("gxg: no answer for data to {:?}", self.target),
                 },
@@ -492,7 +504,7 @@ impl LocalConnection for GxgConnection {
                 // `CS_BUYABLE_ITEM_APPLY_RESULT` (`0xbcaa8`).
                 b"CP" => {
                     tracing::info!("gxg: granting the charge");
-                    self.outgoing.extend_from_slice(&frame(&version, b"CCS", &CHARGED));
+                    self.outgoing.extend_from_slice(&frame(&version, b"CCC", &CHARGED));
                 }
                 // The gateway's confirmation of a purchase its server approved:
                 // 검은방3, once EA's server has answered `CHARGE`, sends `'Y'` and
@@ -501,7 +513,14 @@ impl LocalConnection for GxgConnection {
                 // byte and a length-prefixed message, handed on as event 11.
                 b"LP" => {
                     tracing::info!("gxg: confirming the purchase");
-                    self.outgoing.extend_from_slice(&frame(&version, b"LCS", &CHARGED));
+                    self.outgoing.extend_from_slice(&frame(&version, b"LCC", &CHARGED));
+                }
+                // And after it, the same `'Y'` and key once more as `BP`, which
+                // the library reads as `BC` (`0x384d0`) the same way, as event
+                // 12.
+                b"BP" => {
+                    tracing::info!("gxg: settling the purchase");
+                    self.outgoing.extend_from_slice(&frame(&version, b"BCC", &CHARGED));
                 }
                 _ => tracing::warn!("gxg: no answer for {}", String::from_utf8_lossy(&kind)),
             }
@@ -635,7 +654,7 @@ mod tests {
         let mut connection = connection(&endpoint);
         connection.write(&frame(VERSION, b"IPC", &body));
         let (kind, answer) = read_answer(connection.as_mut());
-        assert_eq!(&kind, b"ICS");
+        assert_eq!(&kind, b"ICC");
         assert_eq!(answer.len(), 1 + 1 + 1 + 7 + 2 + 100);
         assert_eq!(answer[0], 0);
     }
@@ -678,10 +697,10 @@ mod tests {
         let endpoint = GxgEndpoint::new();
         let mut connection = connection(&endpoint);
         connection.write(&frame(VERSION, b"IPC", &open));
-        assert_eq!(&read_answer(connection.as_mut()).0, b"ICS");
+        assert_eq!(&read_answer(connection.as_mut()).0, b"ICC");
 
         connection.write(&frame(VERSION, b"DPC", &consent));
-        assert_eq!(read_answer(connection.as_mut()), (*b"DPS", vec![2, 0]));
+        assert_eq!(read_answer(connection.as_mut()), (*b"DPC", vec![2, 0]));
     }
 
     /// 검은방3's purchase, off its log: EA's `CHARGE` is approved as data,
@@ -694,10 +713,31 @@ mod tests {
         let endpoint = GxgEndpoint::new();
         let mut connection = connection(&endpoint);
         connection.write(&frame(VERSION, b"DPC", &charge));
-        assert_eq!(read_answer(connection.as_mut()), (*b"DPS", vec![0, 0]));
+        assert_eq!(read_answer(connection.as_mut()), (*b"DPC", vec![0, 0]));
 
         connection.write(&frame(VERSION, b"LPC", b"Y9000522187"));
-        assert_eq!(read_answer(connection.as_mut()), (*b"LCS", vec![0, 0]));
+        assert_eq!(read_answer(connection.as_mut()), (*b"LCC", vec![0, 0]));
+
+        connection.write(&frame(VERSION, b"BPC", b"Y9000522187"));
+        assert_eq!(read_answer(connection.as_mut()), (*b"BCC", vec![0, 0]));
+    }
+
+    /// 판다독미니게임's open names a four-digit port, NUL-ended, and its
+    /// library takes an answer only when the type's third letter is `C`.
+    #[test]
+    fn panda_dog_open_is_understood_and_answered_in_kind() {
+        let mut open = b"00909700981051468505".to_vec();
+        open.extend_from_slice(&[0; 11]);
+        open.push(13);
+        open.extend_from_slice(b"115.94.11.1016780\0");
+        open.extend_from_slice(&[0, 0, 1]);
+        assert_eq!(open_target(&open), Some((String::from("115.94.11.101"), 6780)));
+
+        let endpoint = GxgEndpoint::new();
+        let mut connection = connection(&endpoint);
+        connection.write(&frame(VERSION, b"IPC", &open));
+        let (kind, _) = read_answer(connection.as_mut());
+        assert_eq!(kind[2], b'C');
     }
 
     #[test]
@@ -725,7 +765,7 @@ mod tests {
         };
         let mut pending = buffer[..length].to_vec();
         let (_, kind, body) = take_frame(&mut pending).unwrap();
-        assert_eq!((&kind, body.as_slice()), (b"DPS", &[0u8][..]));
+        assert_eq!((&kind, body.as_slice()), (b"DPC", &[0u8][..]));
     }
 
     #[test]
@@ -736,7 +776,7 @@ mod tests {
         charge.extend_from_slice(b"0000000001");
         connection.write(&frame(VERSION, b"CPC", &charge));
         let (kind, body) = read_answer(connection.as_mut());
-        assert_eq!((&kind, body.as_slice()), (b"CCS", &[0u8, 0][..]));
+        assert_eq!((&kind, body.as_slice()), (b"CCC", &[0u8, 0][..]));
     }
 
     #[test]
@@ -748,7 +788,7 @@ mod tests {
         let mut first = connection(&endpoint);
         first.write(&frame(VERSION, b"DPC", &opcode_request(0x5a, &report)));
         let (kind, answer) = read_answer(first.as_mut());
-        assert_eq!(&kind, b"DPS");
+        assert_eq!(&kind, b"DPC");
         assert_eq!(answer, [0, 5, 0, 0x5a, 0]);
 
         let mut second = connection(&endpoint);
