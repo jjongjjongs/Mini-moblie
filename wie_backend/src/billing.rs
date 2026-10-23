@@ -3484,9 +3484,19 @@ mod scrambled_opcode_header_tests {
 /// 00 66 00 32 00 00 00 ... 01 00 00 38 ... 0c b6 1d 5b ...
 /// ```
 ///
+/// That is its 인증서 request, the step 템페스트 sends as `0x1e`. The title's
+/// answer dispatcher (`0x74a98`, keyed by opcode) has no case for an `0x32`
+/// that issues anything: the 인증서 is kept by its `0x0c`/`0x14` case
+/// (`0x74b42`), the completion 템페스트 gets last. That case parses
+/// `[status][u16be length][message]` (`0x7e718`) and, only when the message
+/// is not empty, sets the flag at `0x150d728` - a field of the `savedata`
+/// record - and saves. Answered under `0x32`, the title went on to its menu
+/// but never set the flag, so every launch asked for the 인증서 again. So the
+/// request is answered with that completion and a message.
+///
 /// 엘피스's handler for that opcode, `0x48c5c`, takes a **`u32`** and keeps it
-/// at `[0x15041b8]` without comparing it against anything, so it is answered
-/// with one.
+/// at `[0x15041b8]` without comparing it against anything, so a report of any
+/// other length is still answered with one.
 ///
 /// None of them compares what it reads against anything, so the numbers are the
 /// shop's to issue; the eight bytes come back as a string, and the two the title
@@ -3685,6 +3695,15 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
     /// What 슈퍼액션히어로3 sends once its session is open, and `0x48c5c` reads
     /// the answer of.
     const REPORT_OPCODE: u8 = 0x32;
+    /// 슈퍼액션히어로3's 인증서 request, the one report of this length, and the
+    /// completion that keeps the 인증서: status 0, then a message the title
+    /// shows and will not accept empty.
+    const CERTIFICATE_REQUEST_BODY: usize = 97;
+    const CERTIFICATE_ISSUED_OPCODE: u8 = 0x14;
+    /// "인증서를 받았습니다." in EUC-KR.
+    const CERTIFICATE_ISSUED_TEXT: &[u8] = &[
+        0xc0, 0xce, 0xc1, 0xf5, 0xbc, 0xad, 0xb8, 0xa6, 0x20, 0xb9, 0xde, 0xbe, 0xd2, 0xbd, 0xc0, 0xb4, 0xcf, 0xb4, 0xd9, 0x2e,
+    ];
 
     /// The same opcode is 명품샵's request for a page of one counter's goods
     /// (`0x6f4b6`, and `0x39fec` and `0x3a15c` for the page before and after),
@@ -3825,6 +3844,12 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
         }
         REPORT_OPCODE if body.len() == SHOP_PAGE_BODY => (REPORT_OPCODE, alloc::vec![0; SHOP_PAGE_ANSWER]),
         // Whatever it carries, its answer is the one `u32` `0x48c5c` takes.
+        REPORT_OPCODE if body.len() == CERTIFICATE_REQUEST_BODY => {
+            let mut answer = alloc::vec![0u8];
+            answer.extend_from_slice(&(CERTIFICATE_ISSUED_TEXT.len() as u16).to_be_bytes());
+            answer.extend_from_slice(CERTIFICATE_ISSUED_TEXT);
+            (CERTIFICATE_ISSUED_OPCODE, answer)
+        }
         REPORT_OPCODE if !body.is_empty() => (REPORT_OPCODE, Vec::from(0u32.to_be_bytes())),
         // The verdict, and a string behind its length - which the title keeps
         // but does not need, so it is answered with none.
@@ -14888,11 +14913,26 @@ mod tests {
         let response = lgt_local_opcode_header_response(&request).unwrap();
         assert_eq!(response, vec![0x00, 0x05, 0x00, 0x00, 0x00]);
 
-        // Once its session is open it sends opcode 0x32, and 0x48c5c takes a
-        // u32 out of that answer.
+        // Once its session is open it sends opcode 0x32, its 인증서 request,
+        // and keeps the 인증서 only from a 0x14 completion with a message.
         let mut report = vec![0x00, 0x66, 0x00, 0x32, 0x00];
         report.resize(0x66, 0);
         let answer = lgt_local_opcode_header_response(&report).unwrap();
+        assert_eq!(&answer[..8], &[0x00, 0x1c, 0x00, 0x14, 0x00, 0x00, 0x00, 0x14]);
+        assert_eq!(answer.len(), 0x1c);
+        // "인증서를 받았습니다." in EUC-KR, the length above counting it.
+        assert_eq!(
+            &answer[8..],
+            &[
+                0xc0, 0xce, 0xc1, 0xf5, 0xbc, 0xad, 0xb8, 0xa6, 0x20, 0xb9, 0xde, 0xbe, 0xd2, 0xbd, 0xc0, 0xb4, 0xcf, 0xb4, 0xd9, 0x2e
+            ]
+        );
+
+        // A report of another length is still answered with a u32, which is
+        // what 엘피스's 0x48c5c takes.
+        let mut other = vec![0x00, 0x20, 0x00, 0x32, 0x00];
+        other.resize(0x20, 0);
+        let answer = lgt_local_opcode_header_response(&other).unwrap();
         assert_eq!(answer, vec![0x00, 0x09, 0x00, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00]);
 
         // With nothing behind its header it is not that message.
