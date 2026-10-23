@@ -3519,8 +3519,11 @@ mod scrambled_opcode_header_tests {
 /// **`u16`** length, and **that many bytes**, keeping them at `[ctx+0x44]`,
 /// `[ctx+0x46]` and `[ctx+0x48]` - the same three fields the request filled in,
 /// so the answer overwrites the model with whatever the licence server had to
-/// say. The byte is the verdict and the string is only kept, so the answer is
-/// the verdict and an empty string.
+/// say. The byte is the verdict and the string is only kept here, but
+/// 슈퍼액션히어로3's later build (`00028E76`) asks for its 인증서 with this same
+/// message and keeps it only when the string is not empty (`0x74cd6`, which
+/// otherwise sends the title back to its first screen), so the answer is the
+/// verdict and the 인증서's message.
 ///
 /// `None` for anything that is not one of those messages: it has to declare its
 /// own length, leave `[2]` and `[4]` clear, and be an opcode whose reader's
@@ -3851,11 +3854,14 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
             (CERTIFICATE_ISSUED_OPCODE, answer)
         }
         REPORT_OPCODE if !body.is_empty() => (REPORT_OPCODE, Vec::from(0u32.to_be_bytes())),
-        // The verdict, and a string behind its length - which the title keeps
-        // but does not need, so it is answered with none.
+        // The verdict, and a string behind its length. 아이뮤지션2 only keeps
+        // it, over the fifty bytes of model it sent; 슈퍼액션히어로3's later
+        // build, which asks for its 인증서 this way, will not keep one issued
+        // with an empty message, so it carries the 인증서's.
         LICENCE_OPCODE if body.len() == LICENCE_BODY => {
             let mut answer = alloc::vec![LICENCED];
-            answer.extend_from_slice(&0u16.to_be_bytes());
+            answer.extend_from_slice(&(CERTIFICATE_ISSUED_TEXT.len() as u16).to_be_bytes());
+            answer.extend_from_slice(CERTIFICATE_ISSUED_TEXT);
             (LICENCE_OPCODE, answer)
         }
         HERO_NOTICE_OPCODE if body.len() == HERO_NOTICE_BODY => {
@@ -15103,15 +15109,37 @@ mod tests {
         assert_eq!((answer[2], answer[4]), (0, 0));
         assert_eq!(answer[3], 0x14);
 
-        // The verdict, and a string of nothing behind its length. `0x1d854`
-        // takes three bytes and then the length's worth, so this is the whole
-        // of what it reads.
+        // The verdict, and a message behind its length. `0x1d854` takes three
+        // bytes and then the length's worth, so this is the whole of what it
+        // reads, and the message fits the fifty bytes of model it lands on.
         assert_eq!(answer[5], 0);
         let text = u16::from_be_bytes([answer[6], answer[7]]) as usize;
-        assert_eq!(text, 0);
+        assert!(text > 0 && text <= 50);
         assert_eq!(answer.len(), 5 + 3 + text);
 
         assert_eq!(response(&request), Some(answer));
+    }
+
+    /// 슈퍼액션히어로3's later build (`00028E76`) asks for its 인증서 with the
+    /// licence check, and its handler (`0x74cd6`) keeps the 인증서 only when the
+    /// answer's message is not empty - with none it goes back to the title.
+    #[test]
+    fn a_super_action_hero_3_licence_check_is_answered_with_a_message() {
+        // The frame off the device's log, byte for byte: the model, and no
+        // application id behind it.
+        let mut request = vec![0x00, 0x4f, 0x00, 0x14, 0x00, 0x0c, 0x04, 0x00];
+        request.extend_from_slice(b"Emulator");
+        request.resize(79, 0);
+
+        let answer = lgt_local_opcode_header_response(&request).unwrap();
+
+        assert_eq!(&answer[2..6], &[0x00, 0x14, 0x00, 0x00]);
+        let text = u16::from_be_bytes([answer[6], answer[7]]) as usize;
+        assert_eq!(text, 20);
+        assert_eq!(answer.len(), 8 + text);
+        // "인증서를 받았습니다." in EUC-KR: "인" first, the full stop last.
+        assert_eq!(&answer[8..10], &[0xc0, 0xce]);
+        assert_eq!(answer.last(), Some(&b'.'));
     }
 
     /// The licence check is that one body. A request under its opcode that is
