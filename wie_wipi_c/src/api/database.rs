@@ -1918,7 +1918,20 @@ const M_E_NOENT: i32 = -12;
 ///
 /// Opening a jar entry here copies it into the repository, so a store byte for
 /// byte that entry is the copy an earlier open made, not one the title wrote,
-/// and is not there either.
+/// and is not there either - when its name could never have been the title's.
+/// The same title makes `Xls_T.dat`, `Xls_B.dat` and `Xls_P.dat` itself on a
+/// new game, copying its teams, batters and pitchers out of the jar unchanged,
+/// and on every later launch asks for `Xls_T.dat` to decide whether to load
+/// all three from those stores. Told no, it took its tables from the jar but
+/// never loaded the batters or pitchers at all, and the first card it showed,
+/// the first pack it opened or the first game it started read a player through
+/// a null pointer (`0x11e5a4`, `0x102e4a`). A name that fits the 15-byte field
+/// is one the title can have made, so a copy under it is there.
+/// The longest store name 컴투스프로야구2010's opener has room for: it copies
+/// the name into a 15-byte field, terminator included. See
+/// [`exists_database_ktf`].
+const KTF_STORE_NAME_MAX: usize = 14;
+
 pub async fn exists_database_ktf(context: &mut dyn WIPICContext, name_ptr: WIPICWord, _arg1: i32, _arg2: i32) -> Result<i32> {
     let name = match read_null_terminated_string_bytes(context, name_ptr) {
         Ok(bytes) => match String::from_utf8(bytes) {
@@ -1946,7 +1959,9 @@ pub async fn exists_database_ktf(context: &mut dyn WIPICContext, name_ptr: WIPIC
     let repository = system.platform().database_repository();
     let exists = repository.exists(&name, &pid).await;
     let jar_copy = match &shipped {
-        Some(entry) if exists => repository.open(&name, &pid).await.get(1).await.as_deref() == Some(entry.as_slice()),
+        Some(entry) if exists && name.len() > KTF_STORE_NAME_MAX => {
+            repository.open(&name, &pid).await.get(1).await.as_deref() == Some(entry.as_slice())
+        }
         _ => false,
     };
 
@@ -3379,6 +3394,29 @@ mod tests {
         let db_id = open_database(&mut context, 0x1000, 8, 0).await.unwrap();
         assert!(db_id > 0);
         assert_eq!(close_database(&mut context, db_id).await.unwrap(), 0);
+        assert_eq!(exists_database_ktf(&mut context, 0x1000, 1, 0).await.unwrap(), 0);
+    }
+
+    /// 컴투스프로야구2010 copies its batters out of the jar into `Xls_B.dat`
+    /// unchanged on a new game, and later launches load them from that store
+    /// only when told it is there.
+    #[futures_test::test]
+    async fn a_store_the_title_copied_from_its_jar_is_there() {
+        let system = System::new(Box::new(TestPlatform::new()), "test-pid", "test-aid", DefaultTaskRunner);
+        let mut context = TestContext::with_system(system).with_resource("Xls_B.dat", &[7, 7, 7]);
+        context.write_bytes(0x1000, b"Xls_B.dat\0").unwrap();
+
+        // Only in the jar, it is not a store.
+        assert_eq!(exists_database_ktf(&mut context, 0x1000, 1, 0).await.unwrap(), -12);
+
+        let pid = crate::context::WIPICContext::system(&mut context).pid().to_owned();
+        crate::context::WIPICContext::system(&mut context)
+            .platform()
+            .database_repository()
+            .open("Xls_B.dat", &pid)
+            .await
+            .set(1, &[7, 7, 7])
+            .await;
         assert_eq!(exists_database_ktf(&mut context, 0x1000, 1, 0).await.unwrap(), 0);
     }
 
