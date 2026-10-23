@@ -3331,6 +3331,16 @@ mod minigame_heaven_5_star_purchase_tests {
         sah3.resize(0x67, 0);
         assert_eq!(response(&sah3), Some(frame("00 05 00 c8 00")));
 
+        // 슈퍼액션히어로2's, off the probe, over its plain socket.
+        let mut sah2 = frame("00 67 00 00 00 03 ee 00 00 01 03");
+        sah2.extend_from_slice(b"ver.1.0.3");
+        sah2.resize(5 + 26, 0);
+        sah2.extend_from_slice(b"01046119269");
+        sah2.resize(5 + 68, 0);
+        sah2.extend_from_slice(b"SAH2");
+        sah2.resize(0x67, 0);
+        assert_eq!(response(&sah2), Some(frame("00 05 00 c8 00")));
+
         let approval = frame("00 0d 00 c9 00 00 14 00 00 0f a0 00 04");
         let approved = response(&approval).expect("the approval is answered");
         assert_eq!(approved, frame("00 11 00 ca 00 00 00 0f a0 30 30 30 30 30 30 30 31"));
@@ -3580,6 +3590,10 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
     /// `00 67 00 00 00 03 ee 00 00 02 05 "V.1.0.0" ... "SAH3"`. Answered under
     /// opcode 0, it sent nothing more and the purchase sat where it was.
     const SAH3: &[u8] = b"SAH3";
+    /// 슈퍼액션히어로2 (KTF `0103BC81`) opens its 별구매 the same way, over a
+    /// plain socket to `211.115.66.244:15193`, with `SAH2` there:
+    /// `00 67 00 00 00 03 ee 00 00 01 03 "ver.1.0.3" ... "SAH2"`.
+    const SAH2: &[u8] = b"SAH2";
 
     /// The library's type `5`, which carries nothing and is answered in kind.
     const SIGNAL_OPCODE: u8 = 0x01;
@@ -3772,6 +3786,7 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
                 || body.get(KTF_TITLE_AT..KTF_TITLE_AT + APF4_ITEM.len()) == Some(APF4_ITEM)
                 || body.get(KTF_TITLE_AT..KTF_TITLE_AT + BB2010.len()) == Some(BB2010)
                 || body.get(KTF_TITLE_AT..KTF_TITLE_AT + SAH3.len()) == Some(SAH3)
+                || body.get(KTF_TITLE_AT..KTF_TITLE_AT + SAH2.len()) == Some(SAH2)
             {
                 (KTF_SESSION_ANSWER_OPCODE, Vec::new())
             } else {

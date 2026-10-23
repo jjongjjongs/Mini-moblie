@@ -194,6 +194,14 @@ impl System {
             15133,
         )));
 
+        // 슈퍼액션히어로2 (KTF) dials another of 컴투스's servers for its 별구매,
+        // over a plain socket, and speaks the same session there.
+        local_network.register(Box::new(crate::local_network::BillingGatewayEndpoint::new_length_prefixed(
+            "billing(211.115.66.244:15193)",
+            "211.115.66.244",
+            15193,
+        )));
+
         // GAMEVIL's shop servers for its 2010-11 KTF builds, gone for years:
         // 2011프로야구 dials 23205, 2011슈퍼사커 and 놈5 29505, and a purchase
         // sat on a connect that never completed. The answer to their opening
