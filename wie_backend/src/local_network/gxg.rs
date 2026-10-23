@@ -494,6 +494,15 @@ impl LocalConnection for GxgConnection {
                     tracing::info!("gxg: granting the charge");
                     self.outgoing.extend_from_slice(&frame(&version, b"CCS", &CHARGED));
                 }
+                // The gateway's confirmation of a purchase its server approved:
+                // 검은방3, once EA's server has answered `CHARGE`, sends `'Y'` and
+                // the item's key for the price it charged (`0x47600`). Its
+                // library reads `LC` as it reads `CC` (`0x3846c`): a result
+                // byte and a length-prefixed message, handed on as event 11.
+                b"LP" => {
+                    tracing::info!("gxg: confirming the purchase");
+                    self.outgoing.extend_from_slice(&frame(&version, b"LCS", &CHARGED));
+                }
                 _ => tracing::warn!("gxg: no answer for {}", String::from_utf8_lossy(&kind)),
             }
         }
@@ -673,6 +682,22 @@ mod tests {
 
         connection.write(&frame(VERSION, b"DPC", &consent));
         assert_eq!(read_answer(connection.as_mut()), (*b"DPS", vec![2, 0]));
+    }
+
+    /// 검은방3's purchase, off its log: EA's `CHARGE` is approved as data,
+    /// then the gateway's own confirmation is granted.
+    #[test]
+    fn black_room_purchase_is_charged_and_confirmed() {
+        let mut charge = b"CHARGE 01051468505 G1000142 C2000887".to_vec();
+        charge.resize(64, 0);
+
+        let endpoint = GxgEndpoint::new();
+        let mut connection = connection(&endpoint);
+        connection.write(&frame(VERSION, b"DPC", &charge));
+        assert_eq!(read_answer(connection.as_mut()), (*b"DPS", vec![0, 0]));
+
+        connection.write(&frame(VERSION, b"LPC", b"Y9000522187"));
+        assert_eq!(read_answer(connection.as_mut()), (*b"LCS", vec![0, 0]));
     }
 
     #[test]
