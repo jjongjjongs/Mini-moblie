@@ -697,6 +697,14 @@ const RANN_PR_KEY: [u8; 4] = [0x6e, 0x63, 0x2b, 0xc4];
 /// whole answer, and the parse succeeds only when the body ends right there.
 /// Each of those is answered with result 0 and no message. Commands that
 /// return data (rankings, save downloads, gift lists) are left unanswered.
+///
+/// 판다독미니게임 (SKT `0090973035`) speaks the same protocol to
+/// `115.94.11.101:6780` through the GXG gateway, and checks the reply the same
+/// way (`0x2c6a0`, body at `0x2c914`). The request it opens with every run,
+/// command 0x1e - 1016 bytes of body with the subscriber number and its
+/// records - starts with `01` rather than `00`; the reply still starts with
+/// `00`, which is what that check holds it to. Unanswered, the title showed its
+/// server check on every start.
 pub fn lgt_local_rann_pr_response(request: &[u8]) -> Option<Vec<u8>> {
     const HEAD_SIZE: usize = 8;
     const PROTOCOL: u8 = 0x65;
@@ -705,7 +713,7 @@ pub fn lgt_local_rann_pr_response(request: &[u8]) -> Option<Vec<u8>> {
     const SUCCEEDED: u8 = 0;
 
     let head = request.get(..HEAD_SIZE)?;
-    if head[0] != 0 || head[1] != PROTOCOL || head[3] != 0 {
+    if head[0] > 1 || head[1] != PROTOCOL || head[3] != 0 {
         return None;
     }
     let declared = u32::from_be_bytes([head[4], head[5], head[6], head[7]]) as usize;
@@ -11958,6 +11966,25 @@ mod tests {
         assert_eq!(lgt_local_rann_pr_response(&ranks), None);
 
         assert_eq!(response(b"SMSAGREE 01085300848 G1000153 Y Emulator\0"), Some(vec![2, 0]));
+    }
+
+    /// 판다독미니게임's start-up request, as its log has the head - `01`, not
+    /// `00`, in front - is answered with the reply head its check wants.
+    #[test]
+    fn panda_dog_start_up_check_is_answered() {
+        let mut request = vec![0u8; 1024];
+        request[..8].copy_from_slice(&[0x01, 0x65, 0x1e, 0x00, 0x00, 0x00, 0x04, 0x00]);
+        for (byte, key) in request[8..].iter_mut().zip(RANN_PR_KEY.iter().cycle()) {
+            *byte ^= key;
+        }
+
+        assert_eq!(
+            lgt_local_rann_pr_response(&request),
+            Some(vec![0x00, 0x65, 0x1e, 0x00, 0x00, 0x00, 0x00, 0x0a, 0x6e, 0x63])
+        );
+
+        request[0] = 0x02;
+        assert_eq!(lgt_local_rann_pr_response(&request), None);
     }
 
     /// 위기일발 막장가족's 막장캡슐 purchase, off the device log, is answered
