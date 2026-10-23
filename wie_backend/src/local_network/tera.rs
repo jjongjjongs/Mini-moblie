@@ -39,6 +39,21 @@
 //!
 //! So each is answered with its message come back and 1. After a record the
 //! title writes one zero byte, which asks for nothing.
+//!
+//! 원조낚시광3 (KTF `01042251`) buys its full version - 정식판 전환, 4000원 -
+//! from the same server at port 11001, with a fourth record:
+//!
+//! ```text
+//! 0x1b  67 bytes   a purchase: a header with the price (0x0fa0), the item
+//!                  "00490F10A", the shop "70056" and the title's name
+//! ```
+//!
+//! Its dispatcher (`0x1382d4`) has no case for `0x1b`: what answers the
+//! purchase is message `0x0d`, whose handler (`0x138a96`) takes the status
+//! behind it and on 1 clears the failure the screen reads, which puts up
+//! `정식판 전환이 완료되었습니다. 감사합니다.` and swaps 정식판전환 in its menu
+//! for 도감열람. Answered with `0x1b` - its own message come back - the title
+//! said `정식판 전환에 실패하였습니다`.
 
 use alloc::{boxed::Box, vec::Vec};
 
@@ -49,8 +64,9 @@ const PORTS: core::ops::RangeInclusive<u16> = 11001..=11003;
 
 const TAG: &[u8] = b"KTF";
 
-/// The messages answered, and the size of each one's record.
-const RECORDS: [(u8, usize); 3] = [(0x01, 60), (0x0d, 50), (0x14, 111)];
+/// The messages answered: each one's record size and the message the answer
+/// carries.
+const RECORDS: [(u8, usize, u8); 4] = [(0x01, 60, 0x01), (0x0d, 50, 0x0d), (0x14, 111, 0x14), (0x1b, 67, 0x0d)];
 
 /// The status every handler goes on from: the 인증서 issued, the shop's
 /// request granted, the item handed over.
@@ -97,7 +113,7 @@ impl LocalConnection for TeraConnection {
         }
 
         let message = self.pending[TAG.len()];
-        let Some(&(_, size)) = RECORDS.iter().find(|(known, _)| *known == message) else {
+        let Some(&(_, size, reply)) = RECORDS.iter().find(|(known, _, _)| *known == message) else {
             tracing::info!("tera: no reply shaped for {} bytes {:02x?}", self.pending.len(), self.pending);
             self.pending.clear();
             return;
@@ -109,7 +125,7 @@ impl LocalConnection for TeraConnection {
 
         self.pending.drain(..size);
 
-        let body = [message, GRANTED];
+        let body = [reply, GRANTED];
         self.outgoing.extend_from_slice(&(body.len() as u32).to_le_bytes());
         self.outgoing.extend_from_slice(&body);
     }
@@ -201,6 +217,20 @@ mod tests {
         assert!(!connection.readable());
         connection.write(&purchase[60..]);
         assert_eq!(read_all(&mut connection), [2, 0, 0, 0, 0x14, 1]);
+    }
+
+    /// 원조낚시광3's full-version purchase, off the device log, is answered as
+    /// message 0x0d.
+    #[test]
+    fn the_fishing_full_version_is_bought() {
+        let mut connection = TeraConnection::default();
+
+        let mut purchase = vec![0u8; 67];
+        purchase[..11].copy_from_slice(&[0x4b, 0x54, 0x46, 0x1b, 0x0d, 0x01, 0x01, 0xa0, 0x0f, 0x00, 0x00]);
+        purchase[11..20].copy_from_slice(b"00490F10A");
+        purchase[22..27].copy_from_slice(b"70056");
+        connection.write(&purchase);
+        assert_eq!(read_all(&mut connection), [2, 0, 0, 0, 0x0d, 1]);
     }
 
     #[test]
