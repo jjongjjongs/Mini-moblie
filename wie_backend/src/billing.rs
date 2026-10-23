@@ -3321,6 +3321,16 @@ mod minigame_heaven_5_star_purchase_tests {
         bb2010.resize(0x67, 0);
         assert_eq!(response(&bb2010), Some(frame("00 05 00 c8 00")));
 
+        // 슈퍼액션히어로3's 별 구매, off the device log, through its billing socket.
+        let mut sah3 = frame("00 67 00 00 00 03 ee 00 00 02 05");
+        sah3.extend_from_slice(b"V.1.0.0");
+        sah3.resize(5 + 26, 0);
+        sah3.extend_from_slice(b"01062170215");
+        sah3.resize(5 + 68, 0);
+        sah3.extend_from_slice(b"SAH3");
+        sah3.resize(0x67, 0);
+        assert_eq!(response(&sah3), Some(frame("00 05 00 c8 00")));
+
         let approval = frame("00 0d 00 c9 00 00 14 00 00 0f a0 00 04");
         let approved = response(&approval).expect("the approval is answered");
         assert_eq!(approved, frame("00 11 00 ca 00 00 00 0f a0 30 30 30 30 30 30 30 31"));
@@ -3565,6 +3575,11 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
     /// `00 67 00 00 00 03 ee 04 1a 01 03 "F1.0.2" ... "BB2010_FREE_PRE_CYON"`.
     /// Answered under opcode 0, it opened the socket again and asked again.
     const BB2010: &[u8] = b"BB2010_";
+    /// 슈퍼액션히어로3 (LGT) opens its 별 구매 the same way, through its billing
+    /// socket, with `SAH3` there:
+    /// `00 67 00 00 00 03 ee 00 00 02 05 "V.1.0.0" ... "SAH3"`. Answered under
+    /// opcode 0, it sent nothing more and the purchase sat where it was.
+    const SAH3: &[u8] = b"SAH3";
 
     /// The library's type `5`, which carries nothing and is answered in kind.
     const SIGNAL_OPCODE: u8 = 0x01;
@@ -3756,6 +3771,7 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
                 || body.get(KTF_TITLE_AT..KTF_TITLE_AT + GP5_ITEM.len()) == Some(GP5_ITEM)
                 || body.get(KTF_TITLE_AT..KTF_TITLE_AT + APF4_ITEM.len()) == Some(APF4_ITEM)
                 || body.get(KTF_TITLE_AT..KTF_TITLE_AT + BB2010.len()) == Some(BB2010)
+                || body.get(KTF_TITLE_AT..KTF_TITLE_AT + SAH3.len()) == Some(SAH3)
             {
                 (KTF_SESSION_ANSWER_OPCODE, Vec::new())
             } else {
