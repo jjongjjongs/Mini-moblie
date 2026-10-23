@@ -47,12 +47,17 @@
 //!
 //! ```text
 //! 0x01  60 bytes   the 인증서 its full version asks for at start-up
+//! 0x03  111 bytes  a shop purchase: the price (2000원 is 0x07d0), the item
+//!                  ("00490F10G") and its name, the shop "70056" and the
+//!                  title's name
 //! 0x0d  67 bytes   정식판 전환, 4000원: the price (0x0fa0), the item
 //!                  "00490F10A", the shop "70056" and the title's name
 //! ```
 //!
 //! The dispatcher (`0x1382d4`) takes the message out of the answer's first
-//! byte as 테라 does, and each is answered with its own message and 1. Read as
+//! byte as 테라 does, and each is answered with its own message and 1. Its
+//! case for 0x03 (`0x138660`) reads the status as the one for 0x0d does, so the
+//! 1 that took the full version through sells from the shop too. Read as
 //! a message, the ESC had been taken for one of its own - the purchase came
 //! out right by luck, answered `0x0d` as a 67-byte "0x1b", and the 60-byte
 //! 인증서 request waited for seven bytes that never came, so the title sat on
@@ -75,7 +80,7 @@ const RECORDS: [(u8, usize, u8); 3] = [(0x01, 60, 0x01), (0x0d, 50, 0x0d), (0x14
 const ESCAPE: u8 = 0x1b;
 
 /// Its messages and their records' sizes, the ESC included.
-const ESCAPED_RECORDS: [(u8, usize); 2] = [(0x01, 60), (0x0d, 67)];
+const ESCAPED_RECORDS: [(u8, usize); 3] = [(0x01, 60), (0x03, 111), (0x0d, 67)];
 
 /// The status every handler goes on from: the 인증서 issued, the shop's
 /// request granted, the item handed over.
@@ -254,6 +259,20 @@ mod tests {
         purchase[22..27].copy_from_slice(b"70056");
         connection.write(&purchase);
         assert_eq!(read_all(&mut connection), [2, 0, 0, 0, 0x0d, 1]);
+    }
+
+    /// A purchase from its shop, off the device log, is message 0x03 in 111
+    /// bytes.
+    #[test]
+    fn the_fishing_shop_sells() {
+        let mut connection = TeraConnection::default();
+
+        let mut purchase = vec![0u8; 111];
+        purchase[..15].copy_from_slice(&[0x4b, 0x54, 0x46, 0x1b, 0x03, 0x01, 0x02, 0, 0, 0, 0x01, 0xd0, 0x07, 0, 0]);
+        purchase[15..24].copy_from_slice(b"00490F10G");
+        purchase[66..71].copy_from_slice(b"70056");
+        connection.write(&purchase);
+        assert_eq!(read_all(&mut connection), [2, 0, 0, 0, 0x03, 1]);
     }
 
     /// Its 인증서, 60 bytes behind the same ESC, is issued - not left waiting
