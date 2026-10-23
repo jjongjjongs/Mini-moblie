@@ -254,12 +254,19 @@ pub fn lgt_local_seotda_response(request: &[u8]) -> Option<Vec<u8>> {
 /// notice. So the answer is a twelve-byte frame: the request's `[4..7]` come
 /// back, a zero and a one.
 ///
-/// `None` for anything that is not this 인증: the `"WM"` marker and command 1.
+/// The 인증 the title then asks for its full game is command 2, a 36-byte frame
+/// with the price in it - `57 4d 00 00 0c 00 02 00 "01046119269" 00
+/// "202411T08" 00 00 00 a0 0f 00 00`, 4000원 - and its handler (`0x129040`)
+/// reads its answer the same way: `[7]` zero and a one at `[8]` go on to what
+/// the purchase was for, anything else to the failure notice.
+///
+/// `None` for anything that is neither: the `"WM"` marker and command 1 or 2.
 pub fn ktf_local_wm_response(request: &[u8]) -> Option<Vec<u8>> {
     const AUTHENTICATE: u8 = 1;
+    const PURCHASE: u8 = 2;
     const TOTAL: usize = 12;
 
-    if request.get(..2) != Some(b"WM".as_slice()) || request.get(6) != Some(&AUTHENTICATE) {
+    if request.get(..2) != Some(b"WM".as_slice()) || !request.get(6).is_some_and(|command| [AUTHENTICATE, PURCHASE].contains(command)) {
         return None;
     }
 
@@ -408,6 +415,10 @@ pub fn ktf_local_miniheroes2_response(request: &[u8]) -> Option<Vec<u8>> {
         return Some(frame);
     }
 
+    if request.get(..2) == Some(b"MF".as_slice()) {
+        return ktf_local_minifighter_server_response(request);
+    }
+
     // The second stage's frame carries its length as a word too - "MH",
     // `16 00 00 00`, the subscriber number and a command - where the LGT
     // build's carries six digits; the reply is read the LGT build's way.
@@ -416,6 +427,43 @@ pub fn ktf_local_miniheroes2_response(request: &[u8]) -> Option<Vec<u8>> {
     }
 
     None
+}
+
+/// What answers 미니파이터 검사편's game server, `211.239.165.13:8034`, which it
+/// dials once its login at `.14` is answered.
+///
+/// Its frames are text: `MF%-6d%-10.10s%-2.2s` - `"MF"`, the length in six
+/// digits, the subscriber number and the build's `2C` - and then the request,
+/// whose first letter names it: `L` loads the save the server keeps, `K` asks
+/// for the 코인 balance, `E`, `D`, `B_M_..`, `M_30` and `R_..` buy. The
+/// receiver (`0x127c5c`) takes a reply that opens with `"MF"` as a string and
+/// `0x105acc` hands its caller what lies between the eight-character header
+/// and the last two characters. Each caller then wants the letter it asked
+/// with first, and an `F` is the server refusing.
+///
+/// `L`'s caller (`0x104b10`) parses a server save of 0x230 bytes behind its
+/// letter; there is none to give, and anything but `L` comes back from it as a
+/// finished exchange with nothing loaded, which keeps the save the handset
+/// has. So `L` is answered `F`, and every other request with its own letter and
+/// one field - what `K` (`0x104c84`) splits on `_` and keeps the length of.
+pub fn ktf_local_minifighter_server_response(request: &[u8]) -> Option<Vec<u8>> {
+    /// `"MF"`, six digits and the subscriber number and build behind them.
+    const REQUEST_HEADER: usize = 2 + 6 + 10 + 2;
+    /// What `0x105acc` drops off the end of a reply.
+    const TAIL: &[u8] = b"2C";
+
+    let letter = *request.get(REQUEST_HEADER).filter(|letter| letter.is_ascii_uppercase())?;
+    let body: Vec<u8> = match letter {
+        b'L' => b"F".to_vec(),
+        _ => alloc::vec![letter, b'_', b'0'],
+    };
+
+    let total = 2 + 6 + body.len() + TAIL.len();
+    let mut frame = Vec::from(&b"MF"[..]);
+    frame.extend_from_slice(format!("{total:<6}").as_bytes());
+    frame.extend_from_slice(&body);
+    frame.extend_from_slice(TAIL);
+    Some(frame)
 }
 
 /// What answers the 2010-11 GAMEVIL KTF titles' shop server.
@@ -3225,6 +3273,16 @@ mod minigame_heaven_5_star_purchase_tests {
         apf4.resize(0x67, 0);
         assert_eq!(response(&apf4), Some(frame("00 05 00 c8 00")));
 
+        // 컴투스프로야구2010's full version, off the device log, too.
+        let mut bb2010 = frame("00 67 00 00 00 03 ee 04 1a 01 03");
+        bb2010.extend_from_slice(b"F1.0.2");
+        bb2010.resize(5 + 26, 0);
+        bb2010.extend_from_slice(b"01046119269");
+        bb2010.resize(5 + 68, 0);
+        bb2010.extend_from_slice(b"BB2010_FREE_PRE_CYON");
+        bb2010.resize(0x67, 0);
+        assert_eq!(response(&bb2010), Some(frame("00 05 00 c8 00")));
+
         let approval = frame("00 0d 00 c9 00 00 14 00 00 0f a0 00 04");
         let approved = response(&approval).expect("the approval is answered");
         assert_eq!(approved, frame("00 11 00 ca 00 00 00 0f a0 30 30 30 30 30 30 30 31"));
@@ -3464,6 +3522,11 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
     /// that nothing could answer, where 미니게임천국5 under `0xc8` goes on to its
     /// approval.
     const APF4_ITEM: &[u8] = b"APF4_ITEM";
+    /// 컴투스프로야구2010 (KTF `0104225F`) turns into its full version the same
+    /// way, on the same server, with `BB2010_FREE_PRE_CYON` there:
+    /// `00 67 00 00 00 03 ee 04 1a 01 03 "F1.0.2" ... "BB2010_FREE_PRE_CYON"`.
+    /// Answered under opcode 0, it opened the socket again and asked again.
+    const BB2010: &[u8] = b"BB2010_";
 
     /// The library's type `5`, which carries nothing and is answered in kind.
     const SIGNAL_OPCODE: u8 = 0x01;
@@ -3654,6 +3717,7 @@ pub fn lgt_local_opcode_header_response(request: &[u8]) -> Option<Vec<u8>> {
                 || body.get(KTF_TITLE_AT..KTF_TITLE_AT + APF3.len()) == Some(APF3)
                 || body.get(KTF_TITLE_AT..KTF_TITLE_AT + GP5_ITEM.len()) == Some(GP5_ITEM)
                 || body.get(KTF_TITLE_AT..KTF_TITLE_AT + APF4_ITEM.len()) == Some(APF4_ITEM)
+                || body.get(KTF_TITLE_AT..KTF_TITLE_AT + BB2010.len()) == Some(BB2010)
             {
                 (KTF_SESSION_ANSWER_OPCODE, Vec::new())
             } else {
@@ -11701,6 +11765,16 @@ mod tests {
         assert_eq!(ktf_local_miniheroes2_response(b"@"), None);
     }
 
+    /// 미니파이터 검사편's game server answers each request with its own letter,
+    /// and the save load with the refusal that keeps the handset's own save.
+    #[test]
+    fn minifighter_game_server_answers_in_kind() {
+        let reply = super::ktf_local_miniheroes2_response(b"MF21    16111122222CK").unwrap();
+        assert_eq!(reply, b"MF13    K_02C");
+        let reply = super::ktf_local_miniheroes2_response(b"MF21    16111122222CL").unwrap();
+        assert_eq!(reply, b"MF11    F2C");
+    }
+
     /// 디펜스히어로's 인증, as the title wrote it, is answered command 1, status
     /// zero and a one at `[8]`.
     #[test]
@@ -11711,8 +11785,17 @@ mod tests {
         let reply = super::ktf_local_wm_response(&request).unwrap();
         assert_eq!(reply, b"WM\x0c\x00\x0c\x00\x01\x00\x01\x00\x00\x00");
 
-        request[6] = 2;
+        request[6] = 3;
         assert_eq!(super::ktf_local_wm_response(&request), None);
+
+        // The full game, off the device log.
+        let mut purchase = Vec::from(&b"WM\x00\x00\x0c\x00\x02\x0001046119269\0202411T08"[..]);
+        purchase.resize(32, 0);
+        purchase.extend_from_slice(&4000u32.to_le_bytes());
+        assert_eq!(
+            super::ktf_local_wm_response(&purchase).unwrap(),
+            b"WM\x0c\x00\x0c\x00\x02\x00\x01\x00\x00\x00"
+        );
     }
 
     /// 미니파이터 검사편's full-version purchase, off the device log, is

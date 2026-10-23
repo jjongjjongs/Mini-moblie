@@ -217,6 +217,14 @@ impl System {
                 port,
             )));
         }
+        // The address beside it, which 놈4 dialled on a handset - its server
+        // list names both, and which one a run picks is not this side's to
+        // settle - at its own port.
+        local_network.register(Box::new(crate::local_network::BillingGatewayEndpoint::new_gamevil(
+            "gamevil(218.145.70.37:32175)",
+            "218.145.70.37",
+            32175,
+        )));
 
         // 영웅서기5's shop and 창고 server for its KTF build, which it reaches
         // through `FastRelay` at the port after its LGT build's, gone for
@@ -250,6 +258,9 @@ impl System {
         for (name, host, port) in [
             ("miniheroes2(211.239.165.14:7205)", "211.239.165.14", 7205),
             ("miniheroes2(211.239.165.13:8036)", "211.239.165.13", 8036),
+            // 미니파이터 검사편's game server, dialled after its login - see
+            // `crate::billing::ktf_local_minifighter_server_response`.
+            ("minifighter(211.239.165.13:8034)", "211.239.165.13", 8034),
         ] {
             local_network.register(Box::new(crate::local_network::BillingGatewayEndpoint::new_miniheroes(name, host, port)));
         }
