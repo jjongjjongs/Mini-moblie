@@ -674,23 +674,35 @@ fn preload_db(state: &TestPlatformState, files: &BTreeMap<String, Vec<u8>>, dir:
         })
         .unwrap_or_default();
 
-    for database in std::fs::read_dir(dir).expect("preload db dir") {
-        let database = database.expect("preload db entry").path();
-        if !database.is_dir() {
+    preload_db_under(state, &pid, std::path::Path::new(dir), None);
+}
+
+/// The databases under `dir`, each a directory of numbered record files. A
+/// title that keeps its downloads in databases names them by path -
+/// 메이플스토리 Live's `png/popmenu/popmenuall.sbmp` - and an export keeps that
+/// path as directories, so a directory is walked into and its records are put
+/// under the path that leads to it.
+fn preload_db_under(state: &TestPlatformState, pid: &str, dir: &std::path::Path, name: Option<&str>) {
+    for entry in std::fs::read_dir(dir).expect("preload db dir") {
+        let path = entry.expect("preload db entry").path();
+        let leaf = path.file_name().unwrap().to_string_lossy().into_owned();
+
+        if path.is_dir() {
+            let name = match name {
+                Some(name) => format!("{name}/{leaf}"),
+                None => leaf,
+            };
+            preload_db_under(state, pid, &path, Some(&name));
             continue;
         }
 
-        let name = database.file_name().unwrap().to_string_lossy().into_owned();
-        for record in std::fs::read_dir(&database).expect("preload db records") {
-            let record = record.expect("preload record").path();
-            let Some(id) = record.file_name().and_then(|x| x.to_str()).and_then(|x| x.parse().ok()) else {
-                continue;
-            };
+        let (Some(name), Ok(id)) = (name, leaf.parse()) else {
+            continue;
+        };
 
-            let data = std::fs::read(&record).expect("preload record");
-            eprintln!("[probe] preload record {pid:?}/{name}/{id}: {} bytes", data.len());
-            state.preload_record(&pid, &name, id, data);
-        }
+        let data = std::fs::read(&path).expect("preload record");
+        eprintln!("[probe] preload record {pid:?}/{name}/{id}: {} bytes", data.len());
+        state.preload_record(pid, name, id, data);
     }
 }
 
