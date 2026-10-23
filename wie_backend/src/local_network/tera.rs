@@ -40,20 +40,23 @@
 //! So each is answered with its message come back and 1. After a record the
 //! title writes one zero byte, which asks for nothing.
 //!
-//! 원조낚시광3 (KTF `01042251`) buys its full version - 정식판 전환, 4000원 -
-//! from the same server at port 11001, with a fourth record:
+//! 원조낚시광3 (KTF `01042251`) speaks to the same server at port 11001 with
+//! one byte more in front: its header builder (`0x136660`) lays out
+//! `"KTF"`, an ESC (`0x1b`) and then the message, so its records are the same
+//! messages one byte further in:
 //!
 //! ```text
-//! 0x1b  67 bytes   a purchase: a header with the price (0x0fa0), the item
+//! 0x01  60 bytes   the 인증서 its full version asks for at start-up
+//! 0x0d  67 bytes   정식판 전환, 4000원: the price (0x0fa0), the item
 //!                  "00490F10A", the shop "70056" and the title's name
 //! ```
 //!
-//! Its dispatcher (`0x1382d4`) has no case for `0x1b`: what answers the
-//! purchase is message `0x0d`, whose handler (`0x138a96`) takes the status
-//! behind it and on 1 clears the failure the screen reads, which puts up
-//! `정식판 전환이 완료되었습니다. 감사합니다.` and swaps 정식판전환 in its menu
-//! for 도감열람. Answered with `0x1b` - its own message come back - the title
-//! said `정식판 전환에 실패하였습니다`.
+//! The dispatcher (`0x1382d4`) takes the message out of the answer's first
+//! byte as 테라 does, and each is answered with its own message and 1. Read as
+//! a message, the ESC had been taken for one of its own - the purchase came
+//! out right by luck, answered `0x0d` as a 67-byte "0x1b", and the 60-byte
+//! 인증서 request waited for seven bytes that never came, so the title sat on
+//! its progress bar.
 
 use alloc::{boxed::Box, vec::Vec};
 
@@ -66,7 +69,13 @@ const TAG: &[u8] = b"KTF";
 
 /// The messages answered: each one's record size and the message the answer
 /// carries.
-const RECORDS: [(u8, usize, u8); 4] = [(0x01, 60, 0x01), (0x0d, 50, 0x0d), (0x14, 111, 0x14), (0x1b, 67, 0x0d)];
+const RECORDS: [(u8, usize, u8); 3] = [(0x01, 60, 0x01), (0x0d, 50, 0x0d), (0x14, 111, 0x14)];
+
+/// What 원조낚시광3 writes between the tag and the message.
+const ESCAPE: u8 = 0x1b;
+
+/// Its messages and their records' sizes, the ESC included.
+const ESCAPED_RECORDS: [(u8, usize); 2] = [(0x01, 60), (0x0d, 67)];
 
 /// The status every handler goes on from: the 인증서 issued, the shop's
 /// request granted, the item handed over.
@@ -112,8 +121,22 @@ impl LocalConnection for TeraConnection {
             return;
         }
 
-        let message = self.pending[TAG.len()];
-        let Some(&(_, size, reply)) = RECORDS.iter().find(|(known, _, _)| *known == message) else {
+        let found = if self.pending[TAG.len()] == ESCAPE {
+            let Some(&message) = self.pending.get(TAG.len() + 1) else {
+                return;
+            };
+            ESCAPED_RECORDS
+                .iter()
+                .find(|(known, _)| *known == message)
+                .map(|&(_, size)| (size, message))
+        } else {
+            let message = self.pending[TAG.len()];
+            RECORDS
+                .iter()
+                .find(|(known, _, _)| *known == message)
+                .map(|&(_, size, reply)| (size, reply))
+        };
+        let Some((size, reply)) = found else {
             tracing::info!("tera: no reply shaped for {} bytes {:02x?}", self.pending.len(), self.pending);
             self.pending.clear();
             return;
@@ -219,8 +242,8 @@ mod tests {
         assert_eq!(read_all(&mut connection), [2, 0, 0, 0, 0x14, 1]);
     }
 
-    /// 원조낚시광3's full-version purchase, off the device log, is answered as
-    /// message 0x0d.
+    /// 원조낚시광3's full-version purchase, off the device log, is message 0x0d
+    /// behind an ESC, and is answered as one.
     #[test]
     fn the_fishing_full_version_is_bought() {
         let mut connection = TeraConnection::default();
@@ -231,6 +254,20 @@ mod tests {
         purchase[22..27].copy_from_slice(b"70056");
         connection.write(&purchase);
         assert_eq!(read_all(&mut connection), [2, 0, 0, 0, 0x0d, 1]);
+    }
+
+    /// Its 인증서, 60 bytes behind the same ESC, is issued - not left waiting
+    /// for the seven bytes a 67-byte record would have had.
+    #[test]
+    fn the_fishing_certificate_is_issued() {
+        let mut connection = TeraConnection::default();
+
+        let mut request = vec![0u8; 60];
+        request[..5].copy_from_slice(&[0x4b, 0x54, 0x46, 0x1b, 0x01]);
+        connection.write(&request[..30]);
+        assert!(!connection.readable());
+        connection.write(&request[30..]);
+        assert_eq!(read_all(&mut connection), [2, 0, 0, 0, 0x01, 1]);
     }
 
     #[test]
