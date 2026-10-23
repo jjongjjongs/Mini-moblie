@@ -1392,11 +1392,18 @@ pub async fn socket_connect(
     // anyway. Answered the way the local billing connect above is: the connect
     // is marked pending and `Connected(socket)` delivered, so the game's own
     // callback runs exactly as it would for a connection that succeeded.
+    //
+    // Not a billing socket in mode 1, whose frames carry `WPBill`'s 108-byte
+    // header and whose reads expect its 56-byte one: the gateway below speaks
+    // both, and the endpoints here are plain sockets' servers. 슈퍼액션히어로3
+    // (LGT) logs in at the 컴투스 GP4 server through its billing socket, and once
+    // that server had an endpoint for 미니게임천국4's plain socket the login went
+    // there instead - wrapped, unparsed and unanswered.
     let local = {
         let system = context.system();
         let mut local_network = system.local_network();
 
-        if local_network.is_empty() {
+        if local_network.is_empty() || billing_mode == 1 {
             None
         } else {
             local_network.connect("socket", &dotted_quad(address), dialled_port(port))
