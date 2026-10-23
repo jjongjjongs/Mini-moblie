@@ -235,6 +235,43 @@ pub fn lgt_local_seotda_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(frame)
 }
 
+/// What answers the `"WM"` 인증 디펜스히어로 (KTF `01042605`) asks for.
+///
+/// On 사용자 인증's 예 the title opens a plain socket to `211.43.222.180:21000` -
+/// the server 섯다맞고 logs in at, on another port - and writes one frame:
+///
+/// ```text
+/// 57 4d 18 00 0c 00 01 00 "01046119269" 00 "Emulator" 00 "69" 00
+///   "010424FB" 00 "69" 00 "ver1.0.4-e" 00 ...                   64 bytes
+/// ```
+///
+/// Its reader (`0x127918`) reads four bytes, and on `"WM"` takes `[2..4]` as
+/// the length of the whole frame and reads the rest. `0x127cbc` dispatches a
+/// frame from this server (mode 0) on the command at `[6]` through a table of
+/// fourteen, as 섯다맞고 does; the 인증's command is 1, and its handler
+/// (`0x129818`) wants `[7]` zero and the word at `[8]` one. Then it closes the
+/// connection and goes on to the title; anything else puts up the failure
+/// notice. So the answer is a twelve-byte frame: the request's `[4..7]` come
+/// back, a zero and a one.
+///
+/// `None` for anything that is not this 인증: the `"WM"` marker and command 1.
+pub fn ktf_local_wm_response(request: &[u8]) -> Option<Vec<u8>> {
+    const AUTHENTICATE: u8 = 1;
+    const TOTAL: usize = 12;
+
+    if request.get(..2) != Some(b"WM".as_slice()) || request.get(6) != Some(&AUTHENTICATE) {
+        return None;
+    }
+
+    let mut frame = vec![0u8; TOTAL];
+    frame[0..2].copy_from_slice(b"WM");
+    frame[2..4].copy_from_slice(&(TOTAL as u16).to_le_bytes());
+    frame[4..7].copy_from_slice(&request[4..7]);
+    frame[8..12].copy_from_slice(&1u32.to_le_bytes());
+
+    Some(frame)
+}
+
 /// What answers 미니게임히어로즈2's `A_LGT_` login.
 ///
 /// 미니게임히어로즈2 (`00030F5B`) opens a billing socket to `211.239.165.14:7205`
@@ -11662,6 +11699,20 @@ mod tests {
         // Anything without either marker is not answered.
         assert_eq!(ktf_local_miniheroes2_response(b"WM\x3c\x00A_KTF_x"), None);
         assert_eq!(ktf_local_miniheroes2_response(b"@"), None);
+    }
+
+    /// 디펜스히어로's 인증, as the title wrote it, is answered command 1, status
+    /// zero and a one at `[8]`.
+    #[test]
+    fn defense_hero_is_authenticated() {
+        let mut request = Vec::from(&b"WM\x18\x00\x0c\x00\x01\x0001046119269\0Emulator\x0069\x00010424FB\x0069\x00ver1.0.4-e"[..]);
+        request.resize(64, 0);
+
+        let reply = super::ktf_local_wm_response(&request).unwrap();
+        assert_eq!(reply, b"WM\x0c\x00\x0c\x00\x01\x00\x01\x00\x00\x00");
+
+        request[6] = 2;
+        assert_eq!(super::ktf_local_wm_response(&request), None);
     }
 
     /// 미니파이터 검사편's full-version purchase, off the device log, is

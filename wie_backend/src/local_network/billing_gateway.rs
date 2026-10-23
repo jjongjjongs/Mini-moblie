@@ -63,6 +63,9 @@ enum Framing {
     /// the record 윈즈테일 buys 하트 with. See
     /// [`crate::billing::lgt_local_ens_record_response`].
     Ens,
+    /// `["WM"][u16le length][u16le][command][status][body]`, one write to a
+    /// frame - 디펜스히어로's 인증. See [`crate::billing::ktf_local_wm_response`].
+    Wm,
 }
 
 /// Answers the carrier billing frames a title writes over a plain socket to one
@@ -160,6 +163,17 @@ impl BillingGatewayEndpoint {
         }
     }
 
+    /// Answers `host:port` for the `"WM"` frames 디펜스히어로 authenticates
+    /// with.
+    pub const fn new_wm(name: &'static str, host: &'static str, port: u16) -> Self {
+        Self {
+            name,
+            host,
+            port,
+            framing: Framing::Wm,
+        }
+    }
+
     /// Answers `host:port` for a title that reaches its server through the
     /// `FastRelay` carrier library - 템페스트's 정품인증.
     pub const fn new_relay(name: &'static str, host: &'static str, port: u16) -> Self {
@@ -209,7 +223,7 @@ impl BillingGatewayConnection {
             Framing::BigEndianLength | Framing::Relay => self.take_length_prefixed_frame(),
             Framing::KpTagged => self.take_kp_tagged_frame(),
             Framing::BigEndianLength32 => self.take_u32_length_prefixed_frame(),
-            Framing::MiniHeroes => self.take_write(),
+            Framing::MiniHeroes | Framing::Wm => self.take_write(),
             Framing::LittleEndianLength => self.take_little_endian_frame(),
             Framing::Ens => self.take_ens_frame(),
         }
@@ -385,6 +399,7 @@ impl LocalConnection for BillingGatewayConnection {
                 Framing::Relay => crate::billing::ktf_local_tempest_response(&frame),
                 Framing::MiniHeroes => crate::billing::ktf_local_miniheroes2_response(&frame),
                 Framing::LittleEndianLength => crate::billing::ktf_local_gamevil_2011_response(&frame),
+                Framing::Wm => crate::billing::ktf_local_wm_response(&frame),
                 _ => crate::billing::response(&frame),
             };
             match reply {

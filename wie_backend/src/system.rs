@@ -262,6 +262,16 @@ impl System {
             5018,
         )));
 
+        // 디펜스히어로's 인증 server, gone for years. 사용자 인증 opens a plain
+        // socket to it, writes a "WM" frame and sat on its connecting screen.
+        // Answered in process (`crate::billing::ktf_local_wm_response`), the
+        // title is authenticated. Host-gated, so no other title is touched.
+        local_network.register(Box::new(crate::local_network::BillingGatewayEndpoint::new_wm(
+            "billing(211.43.222.180:21000)",
+            "211.43.222.180",
+            21000,
+        )));
+
         // SBS포트리스4's KTF build logs in at this server, gone for years, and
         // sat on its connecting box. See `crate::local_network::fortress`.
         local_network.register(Box::new(crate::local_network::FortressEndpoint));
