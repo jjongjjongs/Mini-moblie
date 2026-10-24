@@ -91,6 +91,11 @@ const WAITING: u32 = 0x1ff0fc;
 /// The answer to 입구부활 (`0x1bf754`) stands the player at the entrance, on
 /// this 구역 or after loading the first, and either way ends closing
 /// 부활대기중: `network/b.^ = 0`. That setting goes through [`rise`].
+///
+/// Loading the first 구역 also puts the title to waiting on the server
+/// (`network/f.a(B)V` with 2), which takes no keys. A party's server ended
+/// that with the 구역's news once it was loaded; a dungeon the title fights
+/// itself has none coming, so [`rise`] ends the wait as well.
 const RISE: Site = Site {
     address: 0x1bf7e0,
     code: bl(0x1bf7e0, PUTSTATIC),
@@ -99,6 +104,8 @@ const RISE: Site = Site {
 /// `base/b.a()Lgame/chars/g;`, the player; `game/chars/e.i()S`, its health;
 /// and `e.d(I)V`, adding to the health up to the most.
 const PLAYER: u32 = 0x1feb4c;
+/// `network/f.a(B)V`, what the title waits on: 0 for nothing.
+const WAIT: u32 = 0x1feb8c;
 const HEALTH: u32 = 0x1ec8b8;
 const HEAL: u32 = 0x1f09f4;
 
@@ -235,8 +242,8 @@ fn fall(at: u32) -> Vec<u8> {
     code.bytes()
 }
 
-/// `network/b.^ = 0`, then the risen player given its health back if it has
-/// none.
+/// `network/b.^ = 0`, the risen player given its health back if it has none,
+/// and the wait for the server ended.
 fn rise(at: u32) -> Vec<u8> {
     let mut code = Thumb::new(at);
     code.op(0xb500); // push {lr}
@@ -255,6 +262,9 @@ fn rise(at: u32) -> Vec<u8> {
     code.load(2, 30000);
     code.call(CALLV);
     code.land(alive);
+    code.load(0, WAIT);
+    code.op(0x2100); // movs r1,#0
+    code.call(CALL);
     code.op(0xbd00); // pop {pc}
     code.bytes()
 }
