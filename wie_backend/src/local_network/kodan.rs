@@ -143,6 +143,20 @@ const ROUND: (u32, u32) = (7, 15100);
 /// it (`game/chars/g.b(Z)V`) - until then the player is a shadow.
 const STEP: (u32, u32) = (7, 17000);
 const STEPPED: (u32, u32) = (7, 17050);
+/// The player striking in a 구역 (`network/a.c(II)[B`, `0x1b79b0`), built by
+/// `game/chars/g.a(BBBBBBB)V`: `[i16][x][y][direction][3 bytes][target]
+/// [count][skill]`, the target being the monster's index in the 구역 or -1.
+/// The server tells the party what came of it through [`STRUCK`].
+const STRIKE: (u32, u32) = (7, 17110);
+/// A 구역's news (`network/a.k([BI)V`): `[u16 map]`; on the player's own map
+/// four lists of `[count]` monster moves (`0x1c4e04`), then three lists of
+/// `[count]` members' news (`0x1c3134`), `[count]` monsters struck
+/// ([`KodanWorld::struck`]), and two lists of `[count]` members' skills.
+const STRUCK: u32 = 17200;
+/// A monster's health; every blow takes [`BLOW`] of it.
+const MONSTER_HEALTH: i16 = 300;
+/// The damage of a blow: three fell a monster.
+const BLOW: i16 = 100;
 /// [`ENTER_AREA`]'s type for a dungeon.
 const DUNGEON: u8 = 2;
 /// [`ENTER_AREA`]'s type for a town.
@@ -209,6 +223,10 @@ pub(super) struct KodanWorld {
     /// The character's class, the first byte of [`SESSION_ACK`]
     /// (`game/engine/h.r`).
     class: u8,
+    /// The 구역 [`AREA_READY`] last named.
+    area: u16,
+    /// The health of the 구역's monsters struck so far, by index.
+    monsters: BTreeMap<u8, i16>,
 }
 
 impl KodanWorld {
@@ -349,7 +367,13 @@ impl KodanWorld {
                 info.extend_from_slice(&[0, 0, 0]);
                 vec![SlotRelay::message(kind, command, &info)]
             }
-            AREA_READY if self.logged_in => vec![SlotRelay::message(kind, command, &[])],
+            AREA_READY if self.logged_in => {
+                if let [high, low, ..] = body {
+                    self.area = u16::from_be_bytes([*high, *low]);
+                    self.monsters.clear();
+                }
+                vec![SlotRelay::message(kind, command, &[])]
+            }
             ROUND if self.logged_in => {
                 // `[u16 map][x][y][direction]`: where the player stands.
                 let mut replies = vec![SlotRelay::message(kind, command, &[1, 0, 0, 1])];
@@ -360,6 +384,13 @@ impl KodanWorld {
                 }
                 replies
             }
+            STRIKE if self.logged_in => match body.get(8) {
+                Some(&target) if target as i8 >= 0 => vec![SlotRelay::message(kind, STRUCK, &self.struck(target))],
+                _ => {
+                    tracing::warn!("코단 world: a strike this does not read: {}", hex(body));
+                    Vec::new()
+                }
+            },
             STEP | STEPPED if self.logged_in && body.len() >= 3 => vec![SlotRelay::message(kind, command, &self.step(&body[..3]))],
             PARTY if self.logged_in => {
                 let mut party = vec![0, 0, 0, 0, 0, 1];
@@ -433,6 +464,34 @@ impl KodanWorld {
         if written != Some(data.len()) {
             tracing::warn!("코단 world: {PROGRESS_FILE} was not written");
         }
+    }
+
+    /// [`STRUCK`] for the player's blow on the monster `target`: it loses
+    /// [`BLOW`] of its health, and falls once it has none. A monster's record
+    /// (`0x1c38a6`) is `[index][i32 striker][skill][count][count bytes][i16
+    /// most health][i16 health][state][i16 damage]` - state 1 a miss, 2 a hit
+    /// whose damage is shown (`game/chars/j.a(BBI)V`) - then `[count]` and
+    /// `[count]` of effects and whether it still stands: a fallen monster is
+    /// laid down (`game/chars/m.e()V`).
+    fn struck(&mut self, target: u8) -> Vec<u8> {
+        const HIT: u8 = 2;
+
+        let health = self.monsters.entry(target).or_insert(MONSTER_HEALTH);
+        *health = (*health - BLOW).max(0);
+
+        let mut news = self.area.to_be_bytes().to_vec();
+        news.extend_from_slice(&[0; 4 + 3]);
+        news.push(1);
+        news.push(target);
+        news.extend_from_slice(&(self.character as u32).to_be_bytes());
+        news.extend_from_slice(&[0, 0]);
+        news.extend_from_slice(&MONSTER_HEALTH.to_be_bytes());
+        news.extend_from_slice(&health.to_be_bytes());
+        news.push(HIT);
+        news.extend_from_slice(&BLOW.to_be_bytes());
+        news.extend_from_slice(&[0, 0, (*health > 0) as u8]);
+        news.extend_from_slice(&[0, 0]);
+        news
     }
 
     /// A [`STEP`] told back: the player's id before `[x][y][direction]`.
@@ -840,6 +899,33 @@ mod tests {
 
         let step = &ask(&mut world, 7, 17000, &[5, 4, 4])[0][12..];
         assert_eq!(step, &[0, 1, 0x0d, 0x5b, 5, 4, 4]);
+    }
+
+    /// A monster struck loses health on the 구역's map and falls on the third
+    /// blow; a blow at no one is not answered.
+    #[test]
+    fn a_monster_falls_to_three_blows() {
+        let mut world = KodanWorld::default();
+        ask(&mut world, 1, 1000, &[0x1e]);
+        ask(&mut world, 1, 1020, &[0, 0, 0, 0, 0, 0, 1, 0x0d, 0x5b, 3, b'a', b'b', b'c']);
+        ask(&mut world, 7, 15000, &[0, 0x4c]);
+
+        let strike = [0, 0, 0x0d, 6, 2, 0xff, 0xff, 0xff, 6, 1, 9, 0];
+        for health in [200i16, 100, 0] {
+            let news = &ask(&mut world, 7, 17110, &strike)[0];
+            assert_eq!(&news[8..12], &17200u32.to_be_bytes());
+            let news = &news[12..];
+            assert_eq!(&news[..9], &[0, 0x4c, 0, 0, 0, 0, 0, 0, 0], "the map, then nothing but the blow");
+            assert_eq!(&news[9..17], &[1, 6, 0, 1, 0x0d, 0x5b, 0, 0], "monster 6, struck by the player");
+            assert_eq!(&news[17..19], &300i16.to_be_bytes());
+            assert_eq!(&news[19..21], &health.to_be_bytes());
+            assert_eq!(&news[21..24], &[2, 0, 100], "a hit of 100");
+            assert_eq!(&news[24..], &[0, 0, (health > 0) as u8, 0, 0]);
+        }
+
+        let mut astray = strike;
+        astray[8] = 0xff;
+        assert!(ask(&mut world, 7, 17110, &astray).is_empty());
     }
 
     /// 입장 lands on the map 이스한트 is, and the arrival popup has text.
