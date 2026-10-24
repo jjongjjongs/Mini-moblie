@@ -1,0 +1,12 @@
+[package]
+name = "java_class_proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+dyn-clone = { workspace = true }
+
+java_constants = { workspace = true }
+jvm = { workspace = true }

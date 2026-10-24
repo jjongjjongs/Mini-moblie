@@ -8,6 +8,8 @@ use java_runtime::classes::java::lang::String;
 use jvm::{Array, ClassInstanceRef, Jvm, Result as JvmResult, runtime::JavaLangString};
 
 use wie_backend::Database;
+
+use crate::classes::javax::microedition::rms::{RecordComparator, RecordEnumeration, RecordFilter};
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 
 // class javax.microedition.rms.RecordStore
@@ -31,6 +33,12 @@ impl RecordStore {
                 JavaMethodProto::new("setRecord", "(I[BII)V", Self::set_record, Default::default()),
                 JavaMethodProto::new("getNumRecords", "()I", Self::get_num_records, Default::default()),
                 JavaMethodProto::new("closeRecordStore", "()V", Self::close_record_store, Default::default()),
+                JavaMethodProto::new(
+                    "enumerateRecords",
+                    "(Ljavax/microedition/rms/RecordFilter;Ljavax/microedition/rms/RecordComparator;Z)Ljavax/microedition/rms/RecordEnumeration;",
+                    Self::enumerate_records,
+                    Default::default(),
+                ),
                 JavaMethodProto::new(
                     "openRecordStore",
                     "(Ljava/lang/String;Z)Ljavax/microedition/rms/RecordStore;",
@@ -202,6 +210,82 @@ impl RecordStore {
         Ok(count as _)
     }
 
+    /// The store's records, as an enumeration over their ids.
+    ///
+    /// Without a filter every record is in it; without a comparator they come
+    /// in the order they were added, which is ascending id. With a filter, a
+    /// record is in it when `matches` says so; with a comparator they are
+    /// ordered by what `compare` answers, the first before the second when it
+    /// answers `PRECEDES`.
+    async fn enumerate_records(
+        jvm: &Jvm,
+        context: &mut WieJvmContext,
+        this: ClassInstanceRef<Self>,
+        filter: ClassInstanceRef<RecordFilter>,
+        comparator: ClassInstanceRef<RecordComparator>,
+        keep_updated: bool,
+    ) -> JvmResult<ClassInstanceRef<RecordEnumeration>> {
+        tracing::debug!("javax.microedition.rms.RecordStore::enumerateRecords({this:?}, {filter:?}, {comparator:?}, {keep_updated})");
+
+        let database = Self::get_database(jvm, context, &this).await?;
+        let mut ids = database.get_record_ids().await;
+        ids.sort_unstable();
+
+        let mut chosen: Vec<(i32, Option<ClassInstanceRef<Array<i8>>>)> = Vec::with_capacity(ids.len());
+        for id in ids {
+            let id = id as i32;
+            if filter.is_null() && comparator.is_null() {
+                chosen.push((id, None));
+                continue;
+            }
+
+            let record: ClassInstanceRef<Array<i8>> = jvm.invoke_virtual(&this, "getRecord", "(I)[B", (id,)).await?;
+            if !filter.is_null() {
+                let matches: bool = jvm.invoke_virtual(&filter, "matches", "([B)Z", (record.clone(),)).await?;
+                if !matches {
+                    continue;
+                }
+            }
+            chosen.push((id, Some(record)));
+        }
+
+        // An insertion sort, since every comparison is a call into the title.
+        if !comparator.is_null() {
+            for i in 1..chosen.len() {
+                let mut j = i;
+                while j > 0 {
+                    let (Some(left), Some(right)) = (chosen[j - 1].1.clone(), chosen[j].1.clone()) else {
+                        break;
+                    };
+                    let order: i32 = jvm.invoke_virtual(&comparator, "compare", "([B[B)I", (right, left)).await?;
+                    if order != RecordComparator::PRECEDES {
+                        break;
+                    }
+                    chosen.swap(j - 1, j);
+                    j -= 1;
+                }
+            }
+        }
+
+        let ids: Vec<i32> = chosen.into_iter().map(|(id, _)| id).collect();
+        let mut array = jvm.instantiate_array("I", ids.len() as _).await?;
+        jvm.store_array(&mut array, 0, ids).await?;
+
+        let enumeration: ClassInstanceRef<RecordEnumeration> = jvm
+            .new_class(
+                "net/wie/RecordEnumerationImpl",
+                "(Ljavax/microedition/rms/RecordStore;[I)V",
+                (this, array),
+            )
+            .await?
+            .into();
+
+        let mut enumeration_mut = enumeration.clone();
+        jvm.put_field(&mut enumeration_mut, "keptUpdated", "Z", keep_updated).await?;
+
+        Ok(enumeration)
+    }
+
     async fn close_record_store(_jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<()> {
         tracing::warn!("stub javax.microedition.rms.RecordStore::closeRecordStore({this:?})");
 
@@ -210,11 +294,52 @@ impl RecordStore {
 
     async fn open_record_store(
         jvm: &Jvm,
-        _context: &mut WieJvmContext,
+        context: &mut WieJvmContext,
         name: ClassInstanceRef<String>,
         create: bool,
     ) -> JvmResult<ClassInstanceRef<Self>> {
         tracing::debug!("javax.microedition.rms.RecordStore::openRecordStore({name:?}, {create:?})");
+
+        // An open that was told not to create has nothing to open when the
+        // store is not there. This opened one anyway, so a title asking "do I
+        // have a save?" was always told yes, and the read that followed found
+        // no records.
+        //
+        // 시네마타이쿤 is where that ends a run. Its `com.mc.util.a` keeps the
+        // title's settings in a store called `config`, and asks for them in two
+        // steps: a static `a(String)Z` that opens the store to see whether it is
+        // there, and a static `a(String)String` that opens it again and reads
+        // record one. The first is seven `try` blocks deep and answers false for
+        // a store that is not there; the second assumes it is. Told the store
+        // existed, the title read a record that was never written, got null, and
+        // died building a tokenizer over it - `String.toCharArray` on null,
+        // inside `GameAppMain.startApp`, before its first frame.
+        if !create {
+            let store_name = JavaLangString::to_rust_string(jvm, &name).await?;
+            let app_id = context.system().pid().to_owned();
+
+            // Whether the store is there, by its own resolved name rather than
+            // the top-level listing: 초밥의달인3 keeps its save in a store called
+            // `file/data`, whose directory is nested a level below the
+            // application's namespace where `list` never looks. Asked the
+            // listing, a save written under such a name was always reported
+            // missing, and the load screen showed empty slots over a save that
+            // was on disk the whole time.
+            let has_save = context.system().platform().database_repository().has_records(&store_name, &app_id).await;
+
+            if !has_save {
+                tracing::debug!("javax.microedition.rms.RecordStore::openRecordStore({store_name}) -> no such store");
+
+                // The specific type, not the base RecordStoreException: a title
+                // catches this on its own to tell "no save yet" apart from a
+                // store failure and create the store in response. 크레이지버스
+                // opens with create=false, catches this, and opens again with
+                // create=true to write its defaults.
+                return Err(jvm
+                    .exception("javax/microedition/rms/RecordStoreNotFoundException", "Record store not found")
+                    .await);
+            }
+        }
 
         let store = jvm
             .new_class("javax/microedition/rms/RecordStore", "(Ljava/lang/String;)V", (name,))
@@ -223,16 +348,35 @@ impl RecordStore {
         Ok(store.into())
     }
 
-    async fn delete_record_store(_jvm: &Jvm, _context: &mut WieJvmContext, name: ClassInstanceRef<String>) -> JvmResult<()> {
-        tracing::warn!("stub javax.microedition.rms.RecordStore::deleteRecordStore({name:?})");
+    async fn delete_record_store(jvm: &Jvm, context: &mut WieJvmContext, name: ClassInstanceRef<String>) -> JvmResult<()> {
+        tracing::debug!("javax.microedition.rms.RecordStore::deleteRecordStore({name:?})");
+
+        let name = JavaLangString::to_rust_string(jvm, &name).await?;
+
+        let system = context.system();
+        let app_id = system.pid().to_owned();
+
+        // Drop the backing store. Deletion is idempotent: removing a store that
+        // was never created is a no-op success, which keeps a title that clears
+        // an as-yet-unwritten save from taking an exception the reference does
+        // not raise here.
+        system.platform().database_repository().delete(&name, &app_id).await;
 
         Ok(())
     }
 
-    async fn list_record_stores(jvm: &Jvm, _context: &mut WieJvmContext) -> JvmResult<ClassInstanceRef<Array<String>>> {
-        tracing::warn!("stub javax.microedition.rms.RecordStore::listRecordStores()");
+    async fn list_record_stores(jvm: &Jvm, context: &mut WieJvmContext) -> JvmResult<ClassInstanceRef<Array<String>>> {
+        tracing::debug!("javax.microedition.rms.RecordStore::listRecordStores()");
 
-        let result = jvm.instantiate_array("Ljava/lang/String;", 0).await?;
+        let system = context.system();
+        let app_id = system.pid().to_owned();
+        let names = system.platform().database_repository().list(&app_id).await;
+
+        let mut result = jvm.instantiate_array("Ljava/lang/String;", names.len()).await?;
+        for (index, name) in names.iter().enumerate() {
+            let name = JavaLangString::from_rust_string(jvm, name).await?;
+            jvm.store_array(&mut result, index, [name]).await?;
+        }
 
         Ok(result.into())
     }
@@ -297,6 +441,201 @@ mod test {
                 panic!("unknown record deletion succeeded");
             };
             assert!(jvm.is_instance(&*exception, "javax/microedition/rms/InvalidRecordIDException"));
+
+            Ok(())
+        })
+    }
+
+    /// An open that was told not to create fails when the store is not there,
+    /// and succeeds once it is.
+    ///
+    /// 시네마타이쿤 asks that question about its `config` store to decide
+    /// whether it has settings to read. Answered yes for a store that was never
+    /// written, it read a record that does not exist, got null, and died on the
+    /// first thing it did with it.
+    #[test]
+    fn opening_a_store_that_is_not_there_without_creating_it_fails() -> Result<()> {
+        run_jvm_test(Box::new([get_protos().into()]), |jvm| async move {
+            let name: ClassInstanceRef<String> = JavaLangString::from_rust_string(&jvm, "config").await?.into();
+
+            let missing: JvmResult<ClassInstanceRef<RecordStore>> = jvm
+                .invoke_static(
+                    "javax/microedition/rms/RecordStore",
+                    "openRecordStore",
+                    "(Ljava/lang/String;Z)Ljavax/microedition/rms/RecordStore;",
+                    (name.clone(), false),
+                )
+                .await;
+            let Err(JavaError::JavaException(exception)) = missing else {
+                panic!("opening a store that was never written succeeded");
+            };
+            assert!(jvm.is_instance(&*exception, "javax/microedition/rms/RecordStoreException"));
+
+            // Written once, it opens without being asked to create it.
+            let created: ClassInstanceRef<RecordStore> = jvm
+                .invoke_static(
+                    "javax/microedition/rms/RecordStore",
+                    "openRecordStore",
+                    "(Ljava/lang/String;Z)Ljavax/microedition/rms/RecordStore;",
+                    (name.clone(), true),
+                )
+                .await?;
+            let mut data = jvm.instantiate_array("B", 1).await?;
+            jvm.store_array(&mut data, 0, [7i8]).await?;
+            let _: i32 = jvm.invoke_virtual(&created, "addRecord", "([BII)I", (data, 0, 1)).await?;
+
+            let reopened: ClassInstanceRef<RecordStore> = jvm
+                .invoke_static(
+                    "javax/microedition/rms/RecordStore",
+                    "openRecordStore",
+                    "(Ljava/lang/String;Z)Ljavax/microedition/rms/RecordStore;",
+                    (name, false),
+                )
+                .await?;
+            let count: i32 = jvm.invoke_virtual(&reopened, "getNumRecords", "()I", ()).await?;
+            assert_eq!(count, 1);
+
+            Ok(())
+        })
+    }
+
+    /// A store saved under a nested name opens again without being asked to
+    /// create it.
+    ///
+    /// 초밥의달인3 keeps its save in a store called `file/data`, whose directory
+    /// is nested a level below the application's namespace. The existence check
+    /// once read the top-level listing, which never sees such a store, so the
+    /// save was reported missing every time the game looked for it.
+    #[test]
+    fn a_store_saved_under_a_nested_name_is_found_again() -> Result<()> {
+        run_jvm_test(Box::new([get_protos().into()]), |jvm| async move {
+            let name: ClassInstanceRef<String> = JavaLangString::from_rust_string(&jvm, "file/data").await?.into();
+
+            // Not there before it is written, even though a name with a slash
+            // in it would once have slipped past the listing.
+            let missing: JvmResult<ClassInstanceRef<RecordStore>> = jvm
+                .invoke_static(
+                    "javax/microedition/rms/RecordStore",
+                    "openRecordStore",
+                    "(Ljava/lang/String;Z)Ljavax/microedition/rms/RecordStore;",
+                    (name.clone(), false),
+                )
+                .await;
+            let Err(JavaError::JavaException(exception)) = missing else {
+                panic!("opening a nested store that was never written succeeded");
+            };
+            assert!(jvm.is_instance(&*exception, "javax/microedition/rms/RecordStoreNotFoundException"));
+
+            let created: ClassInstanceRef<RecordStore> = jvm
+                .invoke_static(
+                    "javax/microedition/rms/RecordStore",
+                    "openRecordStore",
+                    "(Ljava/lang/String;Z)Ljavax/microedition/rms/RecordStore;",
+                    (name.clone(), true),
+                )
+                .await?;
+            let mut data = jvm.instantiate_array("B", 3).await?;
+            jvm.store_array(&mut data, 0, [4i8, 5, 6]).await?;
+            let _: i32 = jvm.invoke_virtual(&created, "addRecord", "([BII)I", (data, 0, 3)).await?;
+
+            let reopened: ClassInstanceRef<RecordStore> = jvm
+                .invoke_static(
+                    "javax/microedition/rms/RecordStore",
+                    "openRecordStore",
+                    "(Ljava/lang/String;Z)Ljavax/microedition/rms/RecordStore;",
+                    (name, false),
+                )
+                .await?;
+            let count: i32 = jvm.invoke_virtual(&reopened, "getNumRecords", "()I", ()).await?;
+            assert_eq!(count, 1, "the save under the nested name is found again");
+
+            Ok(())
+        })
+    }
+
+    /// A store saved under a nested name is offered by listRecordStores, which
+    /// is how a load screen that enumerates saves finds it.
+    ///
+    /// 초밥의달인3 saves under `file/data` and its load screen lists the stores.
+    /// The listing once dropped any name with a slash, so the save was written
+    /// and persisted but never shown, and the slots read empty after a restart.
+    #[test]
+    fn a_store_saved_under_a_nested_name_is_listed() -> Result<()> {
+        run_jvm_test(Box::new([get_protos().into()]), |jvm| async move {
+            let name: ClassInstanceRef<String> = JavaLangString::from_rust_string(&jvm, "file/data").await?.into();
+            let store: ClassInstanceRef<RecordStore> = jvm
+                .invoke_static(
+                    "javax/microedition/rms/RecordStore",
+                    "openRecordStore",
+                    "(Ljava/lang/String;Z)Ljavax/microedition/rms/RecordStore;",
+                    (name, true),
+                )
+                .await?;
+
+            let mut data = jvm.instantiate_array("B", 1).await?;
+            jvm.store_array(&mut data, 0, [7i8]).await?;
+            let _: i32 = jvm.invoke_virtual(&store, "addRecord", "([BII)I", (data, 0, 1)).await?;
+
+            let listed: ClassInstanceRef<Array<String>> = jvm
+                .invoke_static("javax/microedition/rms/RecordStore", "listRecordStores", "()[Ljava/lang/String;", ())
+                .await?;
+            assert_eq!(jvm.array_length(&listed).await?, 1);
+            let first: ClassInstanceRef<String> = jvm.load_array(&listed, 0, 1).await?.pop().unwrap();
+            assert_eq!(JavaLangString::to_rust_string(&jvm, &first).await?.as_str(), "file/data");
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn delete_record_store_removes_it_from_the_listing() -> Result<()> {
+        run_jvm_test(Box::new([get_protos().into()]), |jvm| async move {
+            let name: ClassInstanceRef<String> = JavaLangString::from_rust_string(&jvm, "save-slot").await?.into();
+            let store: ClassInstanceRef<RecordStore> = jvm
+                .invoke_static(
+                    "javax/microedition/rms/RecordStore",
+                    "openRecordStore",
+                    "(Ljava/lang/String;Z)Ljavax/microedition/rms/RecordStore;",
+                    (name.clone(), true),
+                )
+                .await?;
+
+            // The backing store is materialized by the first record operation,
+            // so write one record before expecting it in the listing.
+            let mut data = jvm.instantiate_array("B", 1).await?;
+            jvm.store_array(&mut data, 0, [7i8]).await?;
+            let _: i32 = jvm.invoke_virtual(&store, "addRecord", "([BII)I", (data, 0, 1)).await?;
+
+            let listed: ClassInstanceRef<Array<String>> = jvm
+                .invoke_static("javax/microedition/rms/RecordStore", "listRecordStores", "()[Ljava/lang/String;", ())
+                .await?;
+            assert_eq!(jvm.array_length(&listed).await?, 1);
+            let first: ClassInstanceRef<String> = jvm.load_array(&listed, 0, 1).await?.pop().unwrap();
+            assert_eq!(JavaLangString::to_rust_string(&jvm, &first).await?.as_str(), "save-slot");
+
+            let _: () = jvm
+                .invoke_static(
+                    "javax/microedition/rms/RecordStore",
+                    "deleteRecordStore",
+                    "(Ljava/lang/String;)V",
+                    (name.clone(),),
+                )
+                .await?;
+
+            let after: ClassInstanceRef<Array<String>> = jvm
+                .invoke_static("javax/microedition/rms/RecordStore", "listRecordStores", "()[Ljava/lang/String;", ())
+                .await?;
+            assert_eq!(jvm.array_length(&after).await?, 0);
+
+            // Deleting an absent store is a no-op success, not an exception.
+            let _: () = jvm
+                .invoke_static(
+                    "javax/microedition/rms/RecordStore",
+                    "deleteRecordStore",
+                    "(Ljava/lang/String;)V",
+                    (name,),
+                )
+                .await?;
 
             Ok(())
         })

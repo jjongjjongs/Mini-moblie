@@ -1,0 +1,26 @@
+[package]
+name = "jvm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+async-recursion = { workspace = true }
+async-trait = { workspace = true }
+bytemuck = { workspace = true }
+dyn-clone = { workspace = true }
+dyn-hash = { workspace = true }
+hashbrown = { workspace = true }
+nom = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+
+event-listener = { version = "^5.4", default-features = false }
+
+java_constants = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+
+test_utils = { workspace = true }

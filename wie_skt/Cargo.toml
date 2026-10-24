@@ -4,16 +4,34 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Enable the machine-code JIT engine (see wie_core_arm).
+jit = ["wie_core_arm/jit"]
+
 [dependencies]
 async-trait = { workspace = true }
 bytemuck = { workspace = true }
+futures = { workspace = true }
+miniz_oxide = { version = "^0.8", default-features = false, features = ["with-alloc"] }
+encoding_rs = { version = "^0.8", default-features = false, features = ["alloc"] }
 tracing = { workspace = true }
 
 wie_backend = { workspace = true }
+wie_core_arm = { workspace = true }
 wie_jvm_support = { workspace = true }
 wie_midp = { workspace = true }
 wie_skvm = { workspace = true }
 wie_util = { workspace = true }
+wie_wipi_c = { workspace = true }
 wie_wipi_java = { workspace = true }
 
+java_class_proto = { workspace = true }
+java_constants = { workspace = true }
+java_runtime = { workspace = true }
 jvm = { workspace = true }
+jvm_rust = { workspace = true }
+wipi_types = { workspace = true }
+
+[dev-dependencies]
+test_utils = { workspace = true }
+tracing-subscriber = { version = "^0.3", features = ["env-filter"] }
