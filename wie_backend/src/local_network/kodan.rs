@@ -130,7 +130,8 @@ const DUNGEON_INFO: (u32, u32) = (7, 14600);
 /// The time a dungeon gives, in minutes.
 const DUNGEON_MINUTES: u64 = 30;
 /// The 구역 ready, `[u16 map]`; its reader (`network/a.f()V`) asks
-/// [`ROUND`].
+/// [`ROUND`]. The world reads the 구역's [`Ground`] then, and from there on
+/// its monsters close in on the player, a step every [`POLL`].
 const AREA_READY: (u32, u32) = (7, 15000);
 /// A 구역's round (`0x1be1d0`): `[flag]`, `[count]` of `[i32][byte][byte]
 /// [byte]` (`network/a.a(IBBB)V`), `[count]` members' `[i32 id][byte][byte]
@@ -162,7 +163,12 @@ const STRIKE: (u32, u32) = (7, 17110);
 /// four lists of `[count]` monster moves (`0x1c4e04`), then three lists of
 /// `[count]` members' news (`0x1c3134`), `[count]` monsters struck
 /// ([`KodanWorld::struck`]), and two lists of `[count]` members' skills.
-const STRUCK: u32 = 17200;
+const STRUCK: (u32, u32) = (7, 17200);
+/// How near, in steps, the player must come before a monster closes in.
+const MONSTER_SIGHT: u8 = 7;
+/// The monster kinds that never move: the 결계 that bar a 구역's way on
+/// (`emd/1/<kind>`, named 열병사막결계, 결계, 딥던전결계, 결계, 반란군결계).
+const BARRIERS: [u8; 5] = [114, 119, 123, 128, 130];
 /// A monster's health; every blow takes [`BLOW`] of it.
 const MONSTER_HEALTH: i16 = 300;
 /// The damage of a blow: three fell a monster.
@@ -214,6 +220,79 @@ struct Progress {
     quests: Vec<(u32, u8)>,
 }
 
+/// The directions a step is told in.
+const UP: u8 = 1;
+const DOWN: u8 = 2;
+const LEFT: u8 = 3;
+const RIGHT: u8 = 4;
+
+/// A 구역 as the title's `nt` map file has it: `[4 bytes][len][name][len]
+/// [name][layers][width][height]`, a tile and then a ground byte for every
+/// spot - anything but 0 barring the way - then `[4 bytes][count]` monster
+/// kinds and `[count]` monsters of `[kind][x][y]`, which the title numbers in
+/// that order (`game/engine/i.j()V`).
+struct Ground {
+    width: u8,
+    height: u8,
+    ground: Vec<u8>,
+    monsters: Vec<Placed>,
+}
+
+/// A monster of a [`Ground`] and where it stands.
+#[derive(Clone, Copy)]
+struct Placed {
+    kind: u8,
+    x: u8,
+    y: u8,
+}
+
+impl Ground {
+    fn parse(data: &[u8]) -> Option<Self> {
+        let mut at = 4;
+        at += 1 + *data.get(at)? as usize;
+        at += 1 + *data.get(at)? as usize;
+        let [layers, width, height] = *data.get(at..at + 3)? else {
+            return None;
+        };
+        // Only the plain one-layer maps a dungeon's 구역 are.
+        if layers != 0 {
+            return None;
+        }
+        let spots = width as usize * height as usize;
+        at += 3 + spots;
+        let ground = data.get(at..at + spots)?.to_vec();
+        at += spots;
+        if data.get(at..at + 4)? != [0; 4] {
+            return None;
+        }
+        at += 4;
+        at += 1 + *data.get(at)? as usize;
+        let count = *data.get(at)? as usize;
+        at += 1;
+        let monsters = data
+            .get(at..at + 3 * count)?
+            .chunks(3)
+            .map(|monster| Placed {
+                kind: monster[0],
+                x: monster[1],
+                y: monster[2],
+            })
+            .collect();
+
+        Some(Self {
+            width,
+            height,
+            ground,
+            monsters,
+        })
+    }
+
+    /// Whether a monster can stand at `x`, `y`.
+    fn open(&self, x: i16, y: i16) -> bool {
+        (0..self.width as i16).contains(&x) && (0..self.height as i16).contains(&y) && self.ground[y as usize * self.width as usize + x as usize] == 0
+    }
+}
+
 /// The 코단 world server's side of one session.
 #[derive(Default)]
 pub(super) struct KodanWorld {
@@ -235,6 +314,13 @@ pub(super) struct KodanWorld {
     class: u8,
     /// The 구역 [`AREA_READY`] last named.
     area: u16,
+    /// The 구역's ground and its monsters where they stand now, read from the
+    /// title's own map of it.
+    ground: Option<Ground>,
+    /// Where the player stands in the 구역.
+    player: (u8, u8),
+    /// The polls answered, which pace the monsters' blows.
+    polls: u32,
     /// The health of the 구역's monsters struck so far, by index.
     monsters: BTreeMap<u8, i16>,
 }
@@ -263,7 +349,19 @@ impl KodanWorld {
                 self.logged_in = true;
                 vec![SlotRelay::message(kind, command, &[0])]
             }
-            POLL if self.logged_in => vec![SlotRelay::message(kind, command, &[])],
+            POLL if self.logged_in => {
+                let mut replies = vec![SlotRelay::message(kind, command, &[])];
+                self.polls = self.polls.wrapping_add(1);
+                let (moves, mut blows) = self.monsters_close_in();
+                // A monster beside the player swings every other poll.
+                if self.polls % 2 == 1 {
+                    blows.clear();
+                }
+                if !moves.is_empty() || !blows.is_empty() {
+                    replies.push(SlotRelay::message(STRUCK.0, STRUCK.1, &self.moved(&moves, &blows)));
+                }
+                replies
+            }
             VERSION if self.logged_in => vec![SlotRelay::message(kind, command, &[])],
             ENTER if self.logged_in => {
                 if let [_, a, b, c, d, e, f, g, h, len, name @ ..] = body
@@ -381,6 +479,7 @@ impl KodanWorld {
                 if let [high, low, ..] = body {
                     self.area = u16::from_be_bytes([*high, *low]);
                     self.monsters.clear();
+                    self.ground = self.ground_of(self.area);
                 }
                 vec![SlotRelay::message(kind, command, &[])]
             }
@@ -390,20 +489,31 @@ impl KodanWorld {
                 if let [_, _, place @ ..] = body
                     && place.len() >= 3
                 {
+                    self.player = (place[0], place[1]);
                     replies.push(SlotRelay::message(STEPPED.0, STEPPED.1, &self.step(&place[..3])));
                 }
                 replies
             }
             STRIKE if self.logged_in => match body.get(8) {
                 Some(&target) if target as i8 >= 0 => {
-                    vec![SlotRelay::message(kind, STRUCK, &self.struck(target, body.get(10).copied().unwrap_or(0)))]
+                    vec![SlotRelay::message(
+                        STRUCK.0,
+                        STRUCK.1,
+                        &self.struck(target, body.get(10).copied().unwrap_or(0)),
+                    )]
                 }
                 _ => {
                     tracing::warn!("코단 world: a strike this does not read: {}", hex(body));
                     Vec::new()
                 }
             },
-            STEP | STEPPED | STANDING | CLOSING_IN if self.logged_in => Vec::new(),
+            STEP | STEPPED | STANDING if self.logged_in => {
+                if let [x, y, ..] = body {
+                    self.player = (*x, *y);
+                }
+                Vec::new()
+            }
+            CLOSING_IN if self.logged_in => Vec::new(),
             PARTY if self.logged_in => {
                 let mut party = vec![0, 0, 0, 0, 0, 1];
                 party.extend_from_slice(&self.character_id.to_be_bytes());
@@ -504,6 +614,94 @@ impl KodanWorld {
         news.extend_from_slice(&BLOW.to_be_bytes());
         news.extend_from_slice(&[0, 0, (*health > 0) as u8]);
         news.extend_from_slice(&[0, 0]);
+        news
+    }
+
+    /// The 구역 `map`'s ground, from the title's `nt/<hundreds>/<map>` file.
+    fn ground_of(&self, map: u16) -> Option<Ground> {
+        let files = self.files.as_ref()?;
+        let path = alloc::format!("nt/{}/{:03}", map / 100, map);
+        let size = ready(files.size(&path)).flatten()?;
+        let mut data = vec![0; size];
+        if ready(files.read(&path, 0, size, &mut data)).flatten() != Some(size) {
+            return None;
+        }
+        let ground = Ground::parse(&data);
+        if ground.is_none() {
+            tracing::warn!("코단 world: {path} does not parse");
+        }
+        ground
+    }
+
+    /// One step for every monster that sees the player and is not yet beside
+    /// it, and a blow from every one that is: `[index][x][y][direction]`,
+    /// from where it stands.
+    fn monsters_close_in(&mut self) -> (Vec<[u8; 4]>, Vec<[u8; 4]>) {
+        let Some(ground) = &mut self.ground else {
+            return (Vec::new(), Vec::new());
+        };
+        let (px, py) = self.player;
+        let mut moves = Vec::new();
+        let mut blows = Vec::new();
+        for index in 0..ground.monsters.len() {
+            let monster = ground.monsters[index];
+            if BARRIERS.contains(&monster.kind) || self.monsters.get(&(index as u8)) == Some(&0) {
+                continue;
+            }
+            let (dx, dy) = (px as i16 - monster.x as i16, py as i16 - monster.y as i16);
+            let distance = dx.unsigned_abs() + dy.unsigned_abs();
+            let across = (dx.signum(), 0, if dx > 0 { RIGHT } else { LEFT });
+            let along = (0, dy.signum(), if dy > 0 { DOWN } else { UP });
+            if distance == 1 {
+                let facing = if dx != 0 { across.2 } else { along.2 };
+                blows.push([index as u8, monster.x, monster.y, facing]);
+                continue;
+            }
+            if distance == 0 || distance > MONSTER_SIGHT as u16 {
+                continue;
+            }
+
+            let ways = if dx.abs() >= dy.abs() { [across, along] } else { [along, across] };
+            for (step_x, step_y, direction) in ways {
+                if step_x == 0 && step_y == 0 {
+                    continue;
+                }
+                let (x, y) = (monster.x as i16 + step_x, monster.y as i16 + step_y);
+                let taken = (x, y) == (px as i16, py as i16)
+                    || ground
+                        .monsters
+                        .iter()
+                        .enumerate()
+                        .any(|(other, at)| (at.x as i16, at.y as i16) == (x, y) && self.monsters.get(&(other as u8)) != Some(&0));
+                if taken || !ground.open(x, y) {
+                    continue;
+                }
+                moves.push([index as u8, monster.x, monster.y, direction]);
+                ground.monsters[index].x = x as u8;
+                ground.monsters[index].y = y as u8;
+                break;
+            }
+        }
+        (moves, blows)
+    }
+
+    /// [`STRUCK`] with nothing but monsters stepping and striking
+    /// (`0x1c4e04`): a step `[index][x][y][direction][0]` puts the monster at
+    /// `x`, `y` and walks it on (`game/chars/m.c(BB)V`), a blow
+    /// `[index][x][y][direction]` swings it that way (`game/chars/m.d(BB)V`
+    /// with 0).
+    fn moved(&self, moves: &[[u8; 4]], blows: &[[u8; 4]]) -> Vec<u8> {
+        let mut news = self.area.to_be_bytes().to_vec();
+        news.push(moves.len() as u8);
+        for step in moves {
+            news.extend_from_slice(step);
+            news.push(0);
+        }
+        news.push(blows.len() as u8);
+        for blow in blows {
+            news.extend_from_slice(blow);
+        }
+        news.extend_from_slice(&[0; 2 + 3 + 1 + 2]);
         news
     }
 
@@ -765,7 +963,7 @@ fn starting_weapon(class: u8) -> Vec<u8> {
 mod tests {
     use alloc::{vec, vec::Vec};
 
-    use super::{KodanWorld, SlotRelay};
+    use super::{DOWN, Ground, KodanWorld, LEFT, RIGHT, SlotRelay};
 
     fn ask(world: &mut KodanWorld, kind: u32, command: u32, body: &[u8]) -> Vec<Vec<u8>> {
         world.respond(&SlotRelay::message(kind, command, body)).unwrap()
@@ -942,6 +1140,56 @@ mod tests {
         let mut astray = strike;
         astray[8] = 0xff;
         assert!(ask(&mut world, 7, 17110, &astray).is_empty());
+    }
+
+    /// A 구역 three spots wide with a wall down the middle row's left, a 결계
+    /// and two monsters.
+    fn a_ground() -> Ground {
+        let mut map = vec![0, 0, 0, 0, 1, b'a', 1, b'b', 0, 4, 3];
+        map.extend_from_slice(&[0; 12]);
+        map.extend_from_slice(&[0, 0, 0, 0, 0x40, 0x40, 0, 0, 0, 0, 0, 0]);
+        map.extend_from_slice(&[0, 0, 0, 0, 2, 119, 141, 3, 119, 3, 0, 141, 3, 2, 141, 0, 0]);
+        Ground::parse(&map).expect("parses")
+    }
+
+    #[test]
+    fn a_ground_reads_its_walls_and_monsters() {
+        let ground = a_ground();
+        assert_eq!((ground.width, ground.height), (4, 3));
+        assert!(!ground.open(0, 1) && !ground.open(1, 1) && ground.open(2, 1));
+        assert!(!ground.open(-1, 0) && !ground.open(4, 0) && !ground.open(0, 3));
+        let monsters: Vec<_> = ground.monsters.iter().map(|monster| (monster.kind, monster.x, monster.y)).collect();
+        assert_eq!(monsters, [(119, 3, 0), (141, 3, 2), (141, 0, 0)]);
+    }
+
+    /// A monster that sees the player steps toward it round a wall, one beside
+    /// it swings, and a 결계 stays put.
+    #[test]
+    fn monsters_close_in_on_the_player() {
+        let mut world = KodanWorld {
+            area: 0x4c,
+            ground: Some(a_ground()),
+            player: (2, 2),
+            ..KodanWorld::default()
+        };
+
+        let (moves, blows) = world.monsters_close_in();
+        assert_eq!(moves, [[2, 0, 0, RIGHT]], "across first, the wall being below");
+        assert_eq!(blows, [[1, 3, 2, LEFT]]);
+
+        let news = world.moved(&moves, &blows);
+        assert_eq!(news, [0, 0x4c, 1, 2, 0, 0, RIGHT, 0, 1, 1, 3, 2, LEFT, 0, 0, 0, 0, 0, 0, 0, 0]);
+
+        let (moves, _) = world.monsters_close_in();
+        assert_eq!(moves, [[2, 1, 0, RIGHT]]);
+        let (moves, _) = world.monsters_close_in();
+        assert_eq!(moves, [[2, 2, 0, DOWN]]);
+        let (moves, blows) = world.monsters_close_in();
+        assert!(moves.is_empty(), "beside the player now");
+        assert_eq!(blows.len(), 2);
+
+        world.monsters.insert(2, 0);
+        assert_eq!(world.monsters_close_in().1.len(), 1, "a fallen monster does nothing");
     }
 
     /// 입장 lands on the map 이스한트 is, and the arrival popup has text.
