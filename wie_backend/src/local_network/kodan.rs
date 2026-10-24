@@ -28,6 +28,8 @@ use core::{
     task::{Context, Poll, Waker},
 };
 
+use encoding_rs::EUC_KR;
+
 use super::relay::{MESSAGE_WELCOME, SlotRelay, hex};
 use crate::system::FilesystemOverlay;
 
@@ -274,6 +276,53 @@ const MENU_AMOUNT: (u32, u32) = (3, 5900);
 /// The quests and their states again, asked without a body; read as
 /// [`WORLD_STATE`] is (`0x1c0d5c`), with nothing asked after.
 const QUESTS: (u32, u32) = (11, 32300);
+/// One of [`QUESTS`] chosen, `[u32 quest][byte]`. Its reader
+/// (`game/a.a([BI)V`) takes `[len][title][u16 len][text][state]`, then for
+/// state 0 two `u32`s more; the title and the text are EUC-KR. The world
+/// tells them from [`QUESTS_TOLD`].
+const QUEST_TOLD: (u32, u32) = (11, 32400);
+/// 퀘스트포기 in [`QUEST_TOLD`]'s window, `[u32 quest]...` (`game/c.e()V`).
+/// Its reader (`0x1c0ea8`) takes no body and closes the window; the quest is
+/// forgotten, to be taken again.
+const QUEST_DROPPED: (u32, u32) = (11, 32200);
+/// Each quest's title and what its giver says on giving it, as the 코단
+/// maps' scripts (`p/nt/0`) have them: the title from the line the title
+/// shows on taking the quest (`x<title>y 퀘스트 입수!`), paired with the
+/// quest by the order of the quests the map's script marks (op `0x3f`), and
+/// `#NAME` for the character's name.
+const QUESTS_TOLD: &[(u32, &str, &str)] = &[
+    (1, "불길한 징조", "모르피스: 이스한트의 수비대장 하스펠이다. 잊지 않도록."),
+    (2, "진퇴양난", "아비게일: 실례군요. 제가 무슨 어린앤줄 아십니까."),
+    (3, "이방인의 증명", "쿱: 열병사막에서 사막 선인장 30마리를 처치하는 일이다."),
+    (4, "덜렁이 카야", "카야: 열병사막에서 두더지 모피 20개! #NAME씨, 화이팅~"),
+    (5, "사막의 전란", "모르피스: 이런데서 꾸물거릴 시간이 없다."),
+    (6, "전언", "모르피스: 아무래도 수정 동굴쪽 일이 신경쓰이는군."),
+    (7, "신뢰의 조건", "쿱: 이번에는 열병사막에서 모래망령 30마리를 처치하는 일이다!"),
+    (8, "실종된 하스펠", "아비게일: #NAME씨? 괜찮으십니까? 이런... 굉장한 부상이로군요."),
+    (9, "안전지대 확보", "쿱: 잊지마라, 루비동굴에 있는 기형박쥐 10마리를 처치하는 일이다."),
+    (10, "카야, 대위기!", "카야: 자, 이 사랑스런 카야를 위해 부지런히 봉사해주세요! 냐하하핫-"),
+    (11, "엘메스터 급행", "아비게일: 정말이지, #NAME씨는 늘 이런 식인겁니까."),
+    (12, "기도하는 자", "레이나: 그럼, 힘드시겠지만 꼭 부탁드려요."),
+    (13, "망자의 귀향", "레이나: 엘메스터에 계시는 시님을 꼭 만나봐 주세요."),
+    (14, "견본전달", "카야: 우우우, 연구재료까지 유디트님께 넘겨야 한다는게 왠지 분해요."),
+    (15, "히르켄 정찰", "발두인: 결과는 어떠한가?"),
+    (16, "동요의 원인", "시: 히르켄 산맥의 레드 서큐버스 30마리만 제거해주게."),
+    (17, "불꽃의 잔당", "유디트: 아앙- 힘내라구?!"),
+    (18, "순례자의 흔적", "흑기사: 딥던젼의 헤츨링들만 확인하면 정답이 나오겠지."),
+    (19, "심상재현", "흑기사: 비홀더 시신경을 30개만 모아와라. 조각 연결정도는 가능하겠지."),
+    (20, "숨겨진 의도", "시: 일단 수비방진 해체까지는 어떻게든 해볼 수 있게 되었군."),
+    (21, "발두인의 호출", "흑기사: 자넨 지금 여기서 나와 노닥거릴 시간이 없을텐데?"),
+    (22, "유디트의 지적", "발두인: 정규군 출진 전까지는 얼마간 시간이 있겠지."),
+    (
+        23,
+        "성사집행자",
+        "유디트: 아 참, 메테오라에 가서 뭔가 알게되거든 나중에 나한테도 좀 일러줘.",
+    ),
+    (24, "메테오라 결전", "시: 트야덴은 강한 자이다. 방심하지 않는게 좋아."),
+    (25, "후방교란", "아비게일: 죽지 않게 알아서 잘 하세요. 상급기사 30 명이라니. 무모해."),
+    (26, "간섭차단", "모르피스: 메테오라 요새의 엘프마도사 녀석들을 처리하고 와라."),
+    (27, "흑기사", "모르피스: 대체 언제 버릴테냐, 그 꾸물대는 버릇은..."),
+];
 /// The keepalive poll, answered with itself.
 const POLL: (u32, u32) = (0, 10);
 /// A fallen player's choices (`game/k.a(I)V`, 부활대기중). 입구부활, rising
@@ -538,6 +587,39 @@ impl KodanWorld {
                 arrival.extend_from_slice(&(MESSAGE_WELCOME.len() as u16).to_be_bytes());
                 arrival.extend_from_slice(MESSAGE_WELCOME);
                 vec![SlotRelay::message(kind, command, &arrival)]
+            }
+            QUEST_DROPPED if self.logged_in => {
+                let quest = be(body.get(..4).unwrap_or(&[0; 4])) as u32;
+                let before = self.progress.quests.len();
+                self.progress.quests.retain(|(known, state)| *known != quest || *state != QUEST_IN_HAND);
+                if self.progress.quests.len() != before {
+                    self.save();
+                }
+                vec![SlotRelay::message(kind, command, &[])]
+            }
+            QUEST_TOLD if self.logged_in => {
+                let quest = be(body.get(..4).unwrap_or(&[0; 4])) as u32;
+                let (title, text) = QUESTS_TOLD
+                    .iter()
+                    .find(|(known, _, _)| *known == quest)
+                    .map(|(_, title, text)| (*title, *text))
+                    .unwrap_or(("?", ""));
+                let state = self
+                    .progress
+                    .quests
+                    .iter()
+                    .find(|(known, _)| *known == quest)
+                    .map_or(QUEST_IN_HAND, |(_, state)| *state);
+
+                let title = EUC_KR.encode(title).0;
+                let text = EUC_KR.encode(text).0;
+                let mut told = vec![title.len() as u8];
+                told.extend_from_slice(&title);
+                let said = with_name(&text, &self.character_name);
+                told.extend_from_slice(&(said.len() as u16).to_be_bytes());
+                told.extend_from_slice(&said);
+                told.push(state);
+                vec![SlotRelay::message(kind, command, &told)]
             }
             QUEST_TAKEN if self.logged_in => match body.get(3..7) {
                 Some(quest) => {
@@ -1300,6 +1382,21 @@ impl Ware {
     }
 }
 
+/// `text` with each `#NAME` in it the character's `name`.
+fn with_name(text: &[u8], name: &[u8]) -> Vec<u8> {
+    const MARK: &[u8] = b"#NAME";
+
+    let mut said = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.windows(MARK.len()).position(|window| window == MARK) {
+        said.extend_from_slice(&rest[..at]);
+        said.extend_from_slice(name);
+        rest = &rest[at + MARK.len()..];
+    }
+    said.extend_from_slice(rest);
+    said
+}
+
 /// The bag a thing of `kind` is kept in: equipment in the first, the rest in
 /// the second.
 fn bag_of(kind: u8) -> u8 {
@@ -1855,6 +1952,31 @@ mod tests {
         // The belongings: the weapon the class starts with, and the axe.
         let belongings = &ask(&mut world, 8, 20000, &[])[0][12..];
         assert_eq!(&belongings[..4], &[0, 1, 0, 2]);
+    }
+
+    /// A quest chosen is told with its title and its giver's words, the
+    /// character's name in them; one given up is forgotten.
+    #[test]
+    fn a_quest_is_told_and_given_up() {
+        use encoding_rs::EUC_KR;
+
+        let mut world = KodanWorld::default();
+        ask(&mut world, 1, 1000, &[0x1e]);
+        world.character_name = b"oz".to_vec();
+        world.progress.quests = vec![(1, 2), (8, 1)];
+
+        let told = &ask(&mut world, 11, 32400, &[0, 0, 0, 8, 0])[0][12..];
+        let title = EUC_KR.encode("실종된 하스펠").0;
+        assert_eq!(told[0] as usize, title.len());
+        assert_eq!(&told[1..1 + title.len()], &title[..]);
+        let at = 1 + title.len();
+        let len = u16::from_be_bytes([told[at], told[at + 1]]) as usize;
+        let text = &told[at + 2..at + 2 + len];
+        assert!(text.windows(2).any(|window| window == b"oz"));
+        assert_eq!(&told[at + 2 + len..], &[1]);
+
+        assert_eq!(&ask(&mut world, 11, 32200, &[0, 0, 0, 8, 0])[0][12..], &[] as &[u8]);
+        assert_eq!(world.progress.quests, vec![(1, 2)], "a quest done stays done");
     }
 
     /// Nothing is answered before the login.
