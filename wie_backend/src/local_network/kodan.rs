@@ -185,6 +185,13 @@ const TOWN: u8 = 1;
 /// `network/a.a([BII)I`, is shown in a popup and must not be empty - the
 /// popup reads it through a null otherwise.
 const ARRIVED: (u32, u32) = (3, 5000);
+/// A quest taken from its giver, sent by the script op that builds `[1][0]
+/// [script byte][u32 quest][rest]` (`0x143cc0`). Its reader,
+/// `game/engine/h.a([BI)V`, takes `[result][step][u32 quest]` and, on success,
+/// `[count][records][count][item triples]`, then marks the quest taken at
+/// that step (`game/engine/f.c(SBB)V` with state 1). Until it is answered the
+/// title sits on TRANSMITTING.
+const QUEST_TAKEN: (u32, u32) = (11, 32000);
 /// A story event's reward, asked for at its end by the script op that builds
 /// `[0][3 script bytes][u32 quest][u64 experience][u64 gold][tail]`
 /// (`0x143f38`). Its reader, `game/engine/h.b([BI)V`, takes
@@ -223,7 +230,9 @@ const LEAVE_DUNGEON: (u32, u32) = (7, 14400);
 /// asks [`BELONGINGS`] and goes back to the map.
 const LEAVE_ROOMS: (u32, u32) = (7, 10600);
 
-/// The quest state the title gives a quest whose reward has been granted.
+/// The quest state the title gives a quest taken, and one whose reward has
+/// been granted.
+const QUEST_IN_HAND: u8 = 1;
 const QUEST_FINISHED: u8 = 2;
 
 /// The file the world keeps its [`Progress`] in, per character:
@@ -460,6 +469,24 @@ impl KodanWorld {
                 arrival.extend_from_slice(MESSAGE_WELCOME);
                 vec![SlotRelay::message(kind, command, &arrival)]
             }
+            QUEST_TAKEN if self.logged_in => match body.get(3..7) {
+                Some(quest) => {
+                    let quest = be(quest) as u32;
+                    if !self.progress.quests.iter().any(|(known, _)| *known == quest) {
+                        self.progress.quests.push((quest, QUEST_IN_HAND));
+                        self.save();
+                    }
+
+                    let mut taken = vec![0, 0];
+                    taken.extend_from_slice(&quest.to_be_bytes());
+                    taken.extend_from_slice(&[0, 0]);
+                    vec![SlotRelay::message(kind, command, &taken)]
+                }
+                None => {
+                    tracing::warn!("코단 world: a quest request this does not read: {}", hex(body));
+                    Vec::new()
+                }
+            },
             QUEST_DONE if self.logged_in => match body {
                 [_, _, _, _, rest @ ..] if rest.len() >= 20 => {
                     let quest = be(&rest[..4]) as u32;
@@ -1300,6 +1327,27 @@ mod tests {
         assert_eq!(ask(&mut world, 11, 32150, &[]).len(), 1);
         assert_eq!(ask(&mut world, 6, 7010, &[]).len(), 1);
         assert_eq!(ask(&mut world, 3, 5100, &[]).len(), 1);
+    }
+
+    /// A quest taken is answered for and kept as taken, until its reward
+    /// finishes it.
+    #[test]
+    fn a_quest_is_taken() {
+        let mut world = KodanWorld::default();
+        ask(&mut world, 1, 1000, &[0x1e]);
+
+        // What taking quest 3 sent on a handset.
+        let request = [1, 0, 1, 0, 0, 0, 3, 1, 0, 0, 0, 0x74, 0, 0, 0, 0x1e, 0];
+        assert_eq!(&ask(&mut world, 11, 32000, &request)[0][12..], &[0, 0, 0, 0, 0, 3, 0, 0]);
+        assert_eq!(&ask(&mut world, 11, 32450, &[])[0][12..], &[0, 1, 0, 0, 0, 0, 3, 1]);
+
+        // Taken again, it is not listed twice.
+        ask(&mut world, 11, 32000, &request);
+        assert_eq!(&ask(&mut world, 11, 32450, &[])[0][12..14], &[0, 1]);
+
+        let reward = [0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        ask(&mut world, 11, 32100, &reward);
+        assert_eq!(&ask(&mut world, 11, 32450, &[])[0][12..], &[0, 1, 0, 0, 0, 0, 3, 2]);
     }
 
     /// After a reward, the login's bookkeeping reports the quest finished and
