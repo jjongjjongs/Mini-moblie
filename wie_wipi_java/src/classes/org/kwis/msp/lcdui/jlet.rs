@@ -272,8 +272,19 @@ impl Jlet {
         Ok(value)
     }
 
-    async fn notify_destroyed(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<()> {
+    /// A title's own `destroyApp` commonly ends in `notifyDestroyed()` - 오즈-천공의
+    /// 기사단's does - so the `destroyApp` this calls comes straight back here.
+    /// The Jlet is marked destroyed before that call, and a second notice
+    /// finds it so and stops, where it otherwise recursed until the host's
+    /// stack ran out and took the app down with it.
+    async fn notify_destroyed(jvm: &Jvm, _: &mut WieJvmContext, mut this: ClassInstanceRef<Self>) -> JvmResult<()> {
         tracing::debug!("org.kwis.msp.lcdui.Jlet::notifyDestroyed({this:?})");
+
+        let state: i32 = jvm.get_field(&this, "state", "I").await?;
+        if state == DESTROYED {
+            return Ok(());
+        }
+        jvm.put_field(&mut this, "state", "I", DESTROYED).await?;
 
         let midlet: ClassInstanceRef<MIDlet> = jvm.get_field(&this, "wipiMidlet", "Lnet/wie/WIPIMIDlet;").await?;
         let _: () = jvm.invoke_virtual(&midlet, "notifyDestroyed", "()V", ()).await?;
