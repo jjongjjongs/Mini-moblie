@@ -32,6 +32,7 @@ mod fortress;
 mod funter;
 mod gpang;
 mod gxg;
+mod kodan;
 mod levelup;
 mod noreason;
 mod pawapro;

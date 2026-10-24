@@ -34,10 +34,31 @@
 //!
 //! Recovered from a working WIPI player's `slotRelay`; the display strings are
 //! its EUC-KR bytes.
+//!
+//! # 월드접속
+//!
+//! The same gateway session carries 오즈's 월드접속, which it opens in a mode
+//! of its own (`network/d.a` = 4) and walks further than the slot service:
+//!
+//! - `kind 1, command 1010, [len]"1.0.0" 00 00` - the client's version,
+//!   answered `kind 2, command 1140, [u16 len][text]`: the notice the title
+//!   shows under `공지사항` before going on.
+//! - `kind 4, command 1300, [character summary]` - sent once the notice is
+//!   confirmed, answered with the server list: a count, then per server
+//!   `[len][name][4-byte IP][u32 port][status]` (`network/a.e([BI)V`).
+//!
+//! # Where a session goes
+//!
+//! Every frame's extension is a tag-length-value block, and the relay library
+//! names the server it wants in it - tag `0x13` the IP and `0x12` the port. The
+//! gateway sessions name the title's own gateway; once a server is picked from
+//! the list, the title opens a new session naming that server's address, and
+//! [`KODAN_ADDRESS`] is the one this list hands out, answered by
+//! [`super::kodan`].
 
 use alloc::{boxed::Box, vec, vec::Vec};
 
-use super::{LocalConnection, LocalEndpoint, LocalRead};
+use super::{LocalConnection, LocalEndpoint, LocalRead, kodan::KodanWorld};
 
 /// The relay gateway this answers for.
 const HOST: &str = "wipiwicgsfg.magicn.com";
@@ -49,6 +70,34 @@ const RELAY_PREFIX: usize = 7;
 
 /// The slot message's fixed header: a `u32be` length, kind and command.
 const SLOT_HEADER: usize = 12;
+
+/// The world server the server list offers, as the relay extension names it.
+/// It is never dialled - the relay library only passes it along, and the
+/// session naming it is answered by [`KodanWorld`].
+pub(super) const KODAN_ADDRESS: ([u8; 4], u16) = ([127, 0, 0, 2], 7000);
+
+/// The extension tags naming the server a session is for.
+const TAG_PORT: u8 = 0x12;
+const TAG_IP: u8 = 0x13;
+
+/// 월드접속's first request once logged in: the client's version.
+const WORLD_VERSION: u32 = 1010;
+/// The notice the gateway answers it with.
+const NOTICE_KIND: u32 = 2;
+const NOTICE: u32 = 1140;
+/// The server list request and its answer.
+const SERVER_LIST_KIND: u32 = 4;
+const SERVER_LIST: u32 = 1300;
+/// The status byte a listed server shows as `쾌적`.
+const SERVER_IDLE: u8 = 0;
+
+/// "코단 월드에 오신 것을 환영합니다." in EUC-KR.
+pub(super) const MESSAGE_WELCOME: &[u8] = &[
+    0xc4, 0xda, 0xb4, 0xdc, 0x20, 0xbf, 0xf9, 0xb5, 0xe5, 0xbf, 0xa1, 0x20, 0xbf, 0xc0, 0xbd, 0xc5, 0x20, 0xb0, 0xcd, 0xc0, 0xbb, 0x20, 0xc8, 0xaf,
+    0xbf, 0xb5, 0xc7, 0xd5, 0xb4, 0xcf, 0xb4, 0xd9, 0x2e,
+];
+/// "코단" in EUC-KR, the one server's name.
+const SERVER_NAME: &[u8] = &[0xc4, 0xda, 0xb4, 0xdc];
 
 /// A frame larger than this is refused rather than buffered without bound.
 const MAX_FRAME: usize = 1 << 20;
@@ -91,25 +140,74 @@ struct RelayConnection {
     request: Vec<u8>,
     /// What is left to hand back.
     outgoing: Vec<u8>,
-    /// The slot-service conversation state.
-    slot: SlotRelay,
+    /// Which conversation this session is, decided by its first frame.
+    service: Option<Service>,
     /// A malformed or unsupported request drops the connection.
     closed: bool,
 }
 
+/// The conversation a session carries, by the server its extension names.
+enum Service {
+    Gateway(SlotRelay),
+    World(KodanWorld),
+}
+
+impl Service {
+    fn for_extension(extension: &[u8]) -> Self {
+        if target(extension) == Some(KODAN_ADDRESS) {
+            Service::World(KodanWorld::default())
+        } else {
+            Service::Gateway(SlotRelay::default())
+        }
+    }
+
+    /// The messages answering one request, or `None` to drop the session.
+    fn respond(&mut self, payload: &[u8]) -> Option<Vec<Vec<u8>>> {
+        match self {
+            Service::Gateway(slot) => slot.respond(payload).map(|reply| vec![reply]),
+            Service::World(world) => world.respond(payload),
+        }
+    }
+}
+
+/// The server an extension names, from its IP and port tags.
+fn target(extension: &[u8]) -> Option<([u8; 4], u16)> {
+    let mut ip = None;
+    let mut port = None;
+    let mut rest = extension;
+    while let [tag, len, tail @ ..] = rest {
+        let len = *len as usize;
+        if tail.len() < len {
+            break;
+        }
+        let value = &tail[..len];
+        match (*tag, value) {
+            (TAG_IP, &[a, b, c, d]) => ip = Some([a, b, c, d]),
+            (TAG_PORT, &[hi, lo]) => port = Some(u16::from_be_bytes([hi, lo])),
+            _ => {}
+        }
+        rest = &tail[len..];
+    }
+
+    Some((ip?, port?))
+}
+
 /// The recovered slot-service state machine.
 #[derive(Default)]
-struct SlotRelay {
+pub(super) struct SlotRelay {
     phase: u8,
     slot: u8,
     label: Vec<u8>,
 }
 
+/// A relay frame's extension TLVs and the slot message it carries.
+type Frame = (Vec<u8>, Vec<u8>);
+
 impl RelayConnection {
     /// Takes one relay frame's payload off the front of `request`. `Ok(None)`
     /// when a whole frame has not arrived; `Err` when the framing is not this
     /// one, which drops the connection.
-    fn take_payload(&mut self) -> Result<Option<Vec<u8>>, ()> {
+    fn take_payload(&mut self) -> Result<Option<Frame>, ()> {
         let data = &self.request;
         if data.is_empty() {
             return Ok(None);
@@ -135,9 +233,10 @@ impl RelayConnection {
             return Ok(None);
         }
 
+        let extension = data[RELAY_PREFIX..RELAY_PREFIX + ext_len].to_vec();
         let payload = data[RELAY_PREFIX + ext_len..size].to_vec();
         self.request.drain(..size);
-        Ok(Some(payload))
+        Ok(Some((extension, payload)))
     }
 
     /// Wraps `payload` in a relay envelope with no extensions.
@@ -153,7 +252,7 @@ impl RelayConnection {
 
 impl SlotRelay {
     /// A slot message carrying `kind`, `command` and `body`.
-    fn message(kind: u32, command: u32, body: &[u8]) -> Vec<u8> {
+    pub(super) fn message(kind: u32, command: u32, body: &[u8]) -> Vec<u8> {
         let length = SLOT_HEADER + body.len();
         let mut message = vec![0u8; length];
         message[0..4].copy_from_slice(&(length as u32).to_be_bytes());
@@ -187,6 +286,22 @@ impl SlotRelay {
             (1, 1000, 0) if body == [30] => {
                 self.phase = 1;
                 Some(Self::message(kind, command, &[0]))
+            }
+            // 월드접속's version, `[len]"1.0.0"` and two zero bytes: the notice.
+            (1, WORLD_VERSION, 1) if body.len() > 1 && (body[0] as usize) < body.len() => {
+                let mut notice = Vec::from((MESSAGE_WELCOME.len() as u16).to_be_bytes());
+                notice.extend_from_slice(MESSAGE_WELCOME);
+                Some(Self::message(NOTICE_KIND, NOTICE, &notice))
+            }
+            // The server list, asked for once the notice is confirmed: the one
+            // server this answers for.
+            (SERVER_LIST_KIND, SERVER_LIST, 1) => {
+                let mut list = vec![1, SERVER_NAME.len() as u8];
+                list.extend_from_slice(SERVER_NAME);
+                list.extend_from_slice(&KODAN_ADDRESS.0);
+                list.extend_from_slice(&(KODAN_ADDRESS.1 as u32).to_be_bytes());
+                list.push(SERVER_IDLE);
+                Some(Self::message(kind, command, &list))
             }
             // Identity: a length-prefixed field.
             (5, 1400, 1) if body.len() > 1 && body[0] as usize == body.len() - 1 && body[0] <= 127 => {
@@ -242,10 +357,12 @@ impl LocalConnection for RelayConnection {
 
         loop {
             match self.take_payload() {
-                Ok(Some(payload)) => match self.slot.respond(&payload) {
-                    Some(reply) => {
-                        tracing::info!("relay {HOST}:{PORT}: {} -> {}", hex(&payload), hex(&reply));
-                        self.outgoing.extend_from_slice(&Self::envelope(&reply));
+                Ok(Some((extension, payload))) => match self.service.get_or_insert_with(|| Service::for_extension(&extension)).respond(&payload) {
+                    Some(replies) => {
+                        for reply in replies {
+                            tracing::info!("relay {HOST}:{PORT}: {} -> {}", hex(&payload), hex(&reply));
+                            self.outgoing.extend_from_slice(&Self::envelope(&reply));
+                        }
                     }
                     None => {
                         tracing::warn!("relay {HOST}:{PORT}: no reply for {}, closing", hex(&payload));
@@ -282,7 +399,7 @@ impl LocalConnection for RelayConnection {
 }
 
 /// A compact hex rendering of a captured buffer, for pinning the framing.
-fn hex(bytes: &[u8]) -> alloc::string::String {
+pub(super) fn hex(bytes: &[u8]) -> alloc::string::String {
     use core::fmt::Write;
 
     let mut out = alloc::string::String::new();
@@ -347,6 +464,54 @@ mod tests {
         assert_eq!(body[0], 1);
         let label_len = body[1] as usize;
         assert_eq!(&body[2..2 + label_len], &[0x20, 0xb7, 0xce, 0xc4, 0xc3, b'1']);
+    }
+
+    /// 월드접속's version is answered with the notice under kind 2, and the
+    /// server list that follows offers the one world server.
+    #[test]
+    fn the_world_gateway_answers_with_a_notice_and_a_server() {
+        let mut connection = RelayConnection::default();
+        connection.write(&slot_frame(1, 1000, &[30]));
+        let _ = read_all(&mut connection);
+
+        connection.write(&slot_frame(1, 1010, &[5, b'1', b'.', b'0', b'.', b'0', 0, 0]));
+        let notice = read_all(&mut connection);
+        assert_eq!(&notice[11..19], &[0, 0, 0, 2, 0, 0, 0x04, 0x74], "kind 2 command 1140");
+
+        connection.write(&slot_frame(4, 1300, &[0]));
+        let list = read_all(&mut connection);
+        let body = &list[19..];
+        assert_eq!(body[0], 1, "one server");
+        let name = body[1] as usize;
+        assert_eq!(&body[2 + name..6 + name], &super::KODAN_ADDRESS.0);
+        assert_eq!(&body[6 + name..10 + name], &(super::KODAN_ADDRESS.1 as u32).to_be_bytes());
+    }
+
+    /// A session whose extension names the listed server is the world's.
+    #[test]
+    fn a_session_naming_the_world_server_is_the_worlds() {
+        let (ip, port) = super::KODAN_ADDRESS;
+        let mut extension = vec![0x06, 4, 1, 3, 0xcd, 0x8a, 0x12, 2];
+        extension.extend_from_slice(&port.to_be_bytes());
+        extension.extend_from_slice(&[0x13, 4]);
+        extension.extend_from_slice(&ip);
+        assert_eq!(super::target(&extension), Some(super::KODAN_ADDRESS));
+
+        let message = super::SlotRelay::message(1, 1000, &[30]);
+        let mut frame = vec![0u8; 7];
+        frame.extend_from_slice(&extension);
+        frame.extend_from_slice(&message);
+        let size = frame.len() as u32;
+        frame[1..5].copy_from_slice(&size.to_be_bytes());
+        frame[5..7].copy_from_slice(&(extension.len() as u16).to_be_bytes());
+
+        let mut connection = RelayConnection::default();
+        connection.write(&frame);
+        let _ = read_all(&mut connection);
+        // The world answers the version itself, under kind 1.
+        connection.write(&slot_frame(1, 1010, &[5, b'1', b'.', b'0', b'.', b'0', 0, 0]));
+        let answer = read_all(&mut connection);
+        assert_eq!(&answer[11..19], &[0, 0, 0, 1, 0, 0, 0x03, 0xf2]);
     }
 
     /// An unsupported request drops the connection rather than answering.
