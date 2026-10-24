@@ -211,6 +211,14 @@ const SCENE_OVER: (u32, u32) = (6, 7010);
 /// Its reader (`0x1bafd4`) takes no body and asks [`PLACE`] again, which
 /// walks the place's requests once more.
 const PLACE_AGAIN: (u32, u32) = (3, 5100);
+/// A list asked for from a menu of `game/l.b(B)V` (`0x17169a`), body `[0]`.
+/// Its reader (`0x1bb0f4`) takes `[count]` and that many records; with none
+/// it shows its own notice that the list is empty and lets the title go on.
+const LISTING: (u32, u32) = (3, 5150);
+/// Asked from the in-game menu (`game/o.g(B)V`, `0x17e330`) without a body.
+/// Its reader (`0x1bc15c`) takes a `u64`, keeps it, and opens the screen the
+/// option leads to.
+const MENU_COUNT: (u32, u32) = (3, 5700);
 /// The keepalive poll, answered with itself.
 const POLL: (u32, u32) = (0, 10);
 /// A fallen player's choices (`game/k.a(I)V`, 부활대기중). 입구부활, rising
@@ -585,6 +593,8 @@ impl KodanWorld {
                 vec![SlotRelay::message(kind, command, &party)]
             }
             QUEST_SYNC | SCENE_OVER | PLACE_AGAIN if self.logged_in => vec![SlotRelay::message(kind, command, &[])],
+            LISTING if self.logged_in => vec![SlotRelay::message(kind, command, &[0])],
+            MENU_COUNT if self.logged_in => vec![SlotRelay::message(kind, command, &[0; 8])],
             REVIVE if self.logged_in => {
                 let map = PLACES[self.here as usize].map;
                 let (x, y) = self.ground_of(map).and_then(|ground| ground.entrance).unwrap_or_default();
@@ -1142,6 +1152,16 @@ mod tests {
         assert_eq!(travel[0], 0, "travelled");
         assert_eq!(&ask(&mut world, 2, 1160, &[])[0][12..], &[0, FOUGHT_BY_THE_TITLE, 0, 76]);
         assert_eq!(&ask(&mut world, 7, 10000, &[])[0][12..], &[0]);
+    }
+
+    /// The menus' list and count are answered empty.
+    #[test]
+    fn menus_are_answered_empty() {
+        let mut world = KodanWorld::default();
+        ask(&mut world, 1, 1000, &[0x1e]);
+
+        assert_eq!(&ask(&mut world, 3, 5150, &[0])[0][12..], &[0]);
+        assert_eq!(&ask(&mut world, 3, 5700, &[])[0][12..], &[0; 8]);
     }
 
     /// A fallen player rises on the dungeon's first 구역 - at its entrance when
