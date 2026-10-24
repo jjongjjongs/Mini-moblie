@@ -43,8 +43,9 @@ const ENTER: (u32, u32) = (1, 1020);
 /// story's dialogue writes into its lines - so it must be the name, not
 /// arbitrary bytes. Its reader (`0x1ba11a`) then asks [`SESSION_ACK`].
 const SESSION: u32 = 1024;
-/// Answered with one byte, which the reader (`0x1ba0cc`) keeps on the player
-/// before asking for kind 11, command 32450.
+/// The character's summary, its class first. Answered with one byte, which
+/// the reader (`0x1ba0cc`) keeps on the player before asking for kind 11,
+/// command 32450.
 const SESSION_ACK: (u32, u32) = (1, 1026);
 /// Kind 11 is the world's own bookkeeping. 32450 is answered with a `u16`
 /// count of `[byte][u32 quest][byte state]` entries (`game/engine/f.a([BI)V`),
@@ -52,8 +53,17 @@ const SESSION_ACK: (u32, u32) = (1, 1026);
 /// clearing it; its reader then asks kind 8, command 20000.
 const WORLD_STATE: (u32, u32) = (11, 32450);
 /// Kind 8 is the character's belongings. 20000 is read by `network/a.f([BI)V`
-/// as a byte, then a count of `[byte][count][len-prefixed entries]` groups -
-/// none here - and its reader then asks kind 8, command 23000.
+/// as a byte, then a count of `[bag][count][len-prefixed item]` groups, each
+/// item made by `game/data/k.a([BBBI)` and put on the player by
+/// `game/chars/g.aj()V` when it names an equipment slot. The reader then asks
+/// kind 8, command 23000.
+///
+/// The player is drawn in a dungeon only when armed: `game/chars/g.D()V` picks
+/// the battle sprites only when `g.J()Z` finds a weapon in slot 1 or 6, and
+/// otherwise the town ones, which entering a dungeon has just released
+/// (`base/e.j()V`) - leaving a shadow where the player stands. So the world
+/// hands every character the weapon its class starts with
+/// ([`starting_weapon`]), equipped.
 const BELONGINGS: (u32, u32) = (8, 20000);
 /// Three `u64`s, kept in `network/b.a`, the second the gold held; the reader
 /// then asks kind 2, command 1102.
@@ -196,6 +206,9 @@ pub(super) struct KodanWorld {
     progress: Progress,
     /// The [`PLACES`] index the player stands at on the 코단 map.
     here: u16,
+    /// The character's class, the first byte of [`SESSION_ACK`]
+    /// (`game/engine/h.r`).
+    class: u8,
 }
 
 impl KodanWorld {
@@ -238,7 +251,12 @@ impl KodanWorld {
                 session.extend_from_slice(&self.character_name);
                 vec![SlotRelay::message(kind, SESSION, &session)]
             }
-            SESSION_ACK if self.logged_in => vec![SlotRelay::message(kind, command, &[1])],
+            SESSION_ACK if self.logged_in => {
+                if let [class, ..] = body {
+                    self.class = *class;
+                }
+                vec![SlotRelay::message(kind, command, &[1])]
+            }
             WORLD_STATE if self.logged_in => {
                 let mut state = (self.progress.quests.len() as u16).to_be_bytes().to_vec();
                 for (quest, quest_state) in &self.progress.quests {
@@ -248,7 +266,7 @@ impl KodanWorld {
                 }
                 vec![SlotRelay::message(kind, command, &state)]
             }
-            BELONGINGS if self.logged_in => vec![SlotRelay::message(kind, command, &[0, 0])],
+            BELONGINGS if self.logged_in => vec![SlotRelay::message(kind, command, &self.belongings())],
             COUNTERS if self.logged_in => {
                 let mut counters = vec![0; 8];
                 counters.extend_from_slice(&self.progress.gold.to_be_bytes());
@@ -366,6 +384,15 @@ impl KodanWorld {
         };
 
         Some(replies)
+    }
+
+    /// [`BELONGINGS`]: one bag holding the class's [`starting_weapon`],
+    /// equipped in the weapon slot.
+    fn belongings(&self) -> Vec<u8> {
+        let item = starting_weapon(self.class);
+        let mut belongings = vec![0, 1, 0, 1, item.len() as u8];
+        belongings.extend_from_slice(&item);
+        belongings
     }
 
     /// Every character's [`Progress`] in [`PROGRESS_FILE`]; none when there
@@ -626,6 +653,42 @@ fn ready<F: Future>(future: F) -> Option<F::Output> {
     }
 }
 
+/// The weapon slot, one of the two `game/chars/g.J()Z` looks in.
+const WEAPON_SLOT: u8 = 1;
+
+/// The weapon a character of `class` starts with, as [`BELONGINGS`] carries an
+/// item: the type `game/chars/g.aX()V` gives the class (types 0 to 5 being
+/// weapons, `game/data/e`), its first model, equipped in [`WEAPON_SLOT`].
+///
+/// An item is read in layers, each class of it adding its own fields after
+/// its parent's - `game/data/k`, `j`, `i` and the weapon's `e` - first the
+/// item itself and then its state. The fields past the slot are left at
+/// zero but for the durabilities, and the record is padded: the reader steps
+/// to the next item by the record's length, not by what it read.
+fn starting_weapon(class: u8) -> Vec<u8> {
+    let kind = match class {
+        0 => 0,
+        1 => 2,
+        2 => 3,
+        3 => 4,
+        _ => 5,
+    };
+
+    // `k`: type, model, count, the item's id, the slot it is worn in, and a
+    // byte; then `j` (9), `i` (6) and `e` (2).
+    let mut item = vec![kind, 0, 1];
+    item.extend_from_slice(&1u64.to_be_bytes());
+    item.extend_from_slice(&[WEAPON_SLOT, 0]);
+    item.extend_from_slice(&[0; 9 + 6 + 2]);
+    // The state: `k` (6), `j` (4), `i` (9) and `e` (4), the shorts holding the
+    // durability little-endian.
+    item.extend_from_slice(&[0; 6 + 4]);
+    item.extend_from_slice(&[0, 0, 100, 0, 0, 0, 0, 100, 0]);
+    item.extend_from_slice(&[100, 0, 0, 0]);
+    item.extend_from_slice(&[0; 8]);
+    item
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::{vec, vec::Vec};
@@ -669,6 +732,24 @@ mod tests {
             assert_eq!(replies.len(), 1, "{kind}/{command}");
             assert_eq!(header(&replies[0]), *answer, "{kind}/{command}");
         }
+    }
+
+    /// A character comes armed with its class's weapon, worn in the weapon
+    /// slot, so the battle sprites it is drawn with in a dungeon are loaded.
+    #[test]
+    fn a_character_is_armed_for_its_class() {
+        let mut world = KodanWorld::default();
+        ask(&mut world, 1, 1000, &[0x1e]);
+        ask(&mut world, 1, 1026, &[4, 0, 0x0b]);
+
+        let belongings = &ask(&mut world, 8, 20000, &[])[0][12..];
+        // One bag of one item.
+        assert_eq!(&belongings[..4], &[0, 1, 0, 1]);
+        let item = &belongings[5..];
+        assert_eq!(item.len(), belongings[4] as usize);
+        // Class 4 starts with type 5, model 0, worn in slot 1.
+        assert_eq!(&item[..3], &[5, 0, 1]);
+        assert_eq!(item[11], 1);
     }
 
     /// The session answer is the character's name, which the dialogue uses.
