@@ -109,6 +109,18 @@ const WAIT: u32 = 0x1feb8c;
 const HEALTH: u32 = 0x1ec8b8;
 const HEAL: u32 = 0x1f09f4;
 
+/// The answer to a party room's start (`0x1bf53e`) loads the dungeon and puts
+/// the title to waiting on the server, for the party's server to end with the
+/// 구역's news once it is loaded. The call goes through [`start`] instead,
+/// which has the dungeon fought as offline - as one entered from the map is,
+/// whatever the area the rooms were opened from - and nothing waited for.
+const START: Site = Site {
+    address: 0x1bf560,
+    code: bl(0x1bf560, CALL),
+};
+/// `network/b.Z`, the kind of the area the title is in.
+const KIND: u32 = 0x1fe11c;
+
 /// Code that is told it is offline in a dungeon: `[start, end)`, by the
 /// address a call returns to.
 const FIGHTING: [(u32, u32); 4] = [
@@ -129,7 +141,7 @@ pub(crate) fn install_local_fights(core: &mut ArmCore, aid: &str, cave: u32) -> 
     if !aid.eq_ignore_ascii_case(AID) {
         return Ok(());
     }
-    for site in [&KEEP_KIND, &ANSWER, &LEAVE, &FALL, &RISE] {
+    for site in [&KEEP_KIND, &ANSWER, &LEAVE, &FALL, &RISE, &START] {
         if !halfwords_at(core, site.address, &site.code)? {
             tracing::warn!(
                 "오즈: code at {:#x} differs from the known build; the 코단 world's fights stay the server's",
@@ -149,6 +161,7 @@ pub(crate) fn install_local_fights(core: &mut ArmCore, aid: &str, cave: u32) -> 
     let leave = place(leave);
     let fall = place(fall);
     let rise = place(rise);
+    let start = place(start);
     core.load(&code, cave, code.len())?;
 
     write(core, KEEP_KIND.address + 2, &[KEEP_KIND_WITH])?;
@@ -157,6 +170,7 @@ pub(crate) fn install_local_fights(core: &mut ArmCore, aid: &str, cave: u32) -> 
     write(core, LEAVE.address, &bl(LEAVE.address, leave))?;
     write(core, FALL.address, &bl(FALL.address, fall))?;
     write(core, RISE.address, &bl(RISE.address, rise))?;
+    write(core, START.address, &bl(START.address, start))?;
 
     tracing::info!("오즈: the 코단 world's dungeons are fought by the title's offline rules");
 
@@ -269,6 +283,22 @@ fn rise(at: u32) -> Vec<u8> {
     code.bytes()
 }
 
+/// `network/b.Z = -1`, and `network/f.a(B)V` with 0 for the 2 it was called
+/// with.
+fn start(at: u32) -> Vec<u8> {
+    let mut code = Thumb::new(at);
+    code.op(0xb500); // push {lr}
+    code.load(0, KIND);
+    code.op(0x2100); // movs r1,#0
+    code.op(0x3901); // subs r1,#1
+    code.call(PUTSTATIC);
+    code.load(0, WAIT);
+    code.op(0x2100); // movs r1,#0
+    code.call(CALL);
+    code.op(0xbd00); // pop {pc}
+    code.bytes()
+}
+
 /// Thumb condition codes.
 const NE: u16 = 0x1;
 const LO: u16 = 0x3;
@@ -370,6 +400,7 @@ mod tests {
         assert_eq!(LEAVE.code, [0xf03f, 0xffdc]);
         assert_eq!(FALL.code, [0xf083, 0xfbf6]);
         assert_eq!(RISE.code, [0xf016, 0xfe72]);
+        assert_eq!(START.code, [0xf017, 0xfec7]);
     }
 
     #[test]

@@ -219,6 +219,17 @@ const LISTING: (u32, u32) = (3, 5150);
 /// Its reader (`0x1bc15c`) takes a `u64`, keeps it, and opens the screen the
 /// option leads to.
 const MENU_COUNT: (u32, u32) = (3, 5700);
+/// The channels, asked with the 1 key in a dungeon (`game/k.a(I)V`,
+/// `0x1703c8`) without a body. Its reader (`0x1bad4c`) takes `[count]` and
+/// that many three-byte records, then lets the title go on.
+const CHANNELS: (u32, u32) = (3, 5010);
+/// Asked from the in-game menu (`game/o.g(B)V` with 4, `0x17e1ec`) without a
+/// body. Its reader (`0x1bc282`) takes a `u64`, keeps it, and opens the screen
+/// the option leads to.
+const MENU_AMOUNT: (u32, u32) = (3, 5900);
+/// The quests and their states again, asked without a body; read as
+/// [`WORLD_STATE`] is (`0x1c0d5c`), with nothing asked after.
+const QUESTS: (u32, u32) = (11, 32300);
 /// The keepalive poll, answered with itself.
 const POLL: (u32, u32) = (0, 10);
 /// A fallen player's choices (`game/k.a(I)V`, 부활대기중). 입구부활, rising
@@ -434,7 +445,7 @@ impl KodanWorld {
                 }
                 vec![SlotRelay::message(kind, command, &[1])]
             }
-            WORLD_STATE if self.logged_in => {
+            WORLD_STATE | QUESTS if self.logged_in => {
                 let mut state = (self.progress.quests.len() as u16).to_be_bytes().to_vec();
                 for (quest, quest_state) in &self.progress.quests {
                     state.push(0);
@@ -593,8 +604,8 @@ impl KodanWorld {
                 vec![SlotRelay::message(kind, command, &party)]
             }
             QUEST_SYNC | SCENE_OVER | PLACE_AGAIN if self.logged_in => vec![SlotRelay::message(kind, command, &[])],
-            LISTING if self.logged_in => vec![SlotRelay::message(kind, command, &[0])],
-            MENU_COUNT if self.logged_in => vec![SlotRelay::message(kind, command, &[0; 8])],
+            LISTING | CHANNELS if self.logged_in => vec![SlotRelay::message(kind, command, &[0])],
+            MENU_COUNT | MENU_AMOUNT if self.logged_in => vec![SlotRelay::message(kind, command, &[0; 8])],
             REVIVE if self.logged_in => {
                 let map = PLACES[self.here as usize].map;
                 let (x, y) = self.ground_of(map).and_then(|ground| ground.entrance).unwrap_or_default();
@@ -1161,7 +1172,9 @@ mod tests {
         ask(&mut world, 1, 1000, &[0x1e]);
 
         assert_eq!(&ask(&mut world, 3, 5150, &[0])[0][12..], &[0]);
+        assert_eq!(&ask(&mut world, 3, 5010, &[])[0][12..], &[0]);
         assert_eq!(&ask(&mut world, 3, 5700, &[])[0][12..], &[0; 8]);
+        assert_eq!(&ask(&mut world, 3, 5900, &[])[0][12..], &[0; 8]);
     }
 
     /// A fallen player rises on the dungeon's first 구역 - at its entrance when
@@ -1384,6 +1397,7 @@ mod tests {
         ask(&mut world, 11, 32100, &request);
 
         assert_eq!(&ask(&mut world, 11, 32450, &[])[0][12..], &[0, 1, 0, 0, 0, 0, 1, 2]);
+        assert_eq!(&ask(&mut world, 11, 32300, &[])[0][12..], &[0, 1, 0, 0, 0, 0, 1, 2]);
         let counters = &ask(&mut world, 8, 23000, &[0])[0][12..];
         assert_eq!(counters.len(), 24);
         assert_eq!(&counters[8..16], &500u64.to_be_bytes());
