@@ -97,6 +97,36 @@ const PARTY_OPEN: (u32, u32) = (7, 10000);
 /// [count]`, at most two groups, each `[i16 id][count]` members of
 /// `[len][name][byte]`.
 const PARTY: (u32, u32) = (7, 10400);
+/// Joining a room from [`PARTY`]'s list, `[u16 room]`. No reader takes the
+/// command back: the server answers with [`ROOM`].
+const JOIN_ROOM: (u32, u32) = (7, 11000);
+/// The room joined (`network/a.g([BI)V`): `[i16 room][i32 leader][i32
+/// player][count]`, the player's own slot filled from the player, then `count`
+/// others of `[i32][len][name][byte class][i16 level]`. Only the leader
+/// starts the dungeon (`0x16c76a`), so the player leads.
+const ROOM: u32 = 14000;
+/// The leader starting the dungeon, answered with itself (`0x1bef10`):
+/// `[i16 map][i32][i32][count]`, then each member's `[i32 id]` - the
+/// player's own followed by 23 bytes the title skips, another's by what it
+/// looks like - after which the title loads the map.
+const DUNGEON_START: (u32, u32) = (7, 14060);
+/// The dungeon's map loaded (kind 9, `0x1c05aa`): no body; the title resets
+/// the player for the dungeon and asks [`DUNGEON_INFO`].
+const DUNGEON_LOADED: (u32, u32) = (9, 30000);
+/// The dungeon's terms (`0x1bdd38`): `[3 bytes][u64 minutes][i16 count]`
+/// entries the title keeps, then `[count]` members' `[i32 id][i16]`; the
+/// title then asks kind 7, command 15000.
+const DUNGEON_INFO: (u32, u32) = (7, 14600);
+/// The time a dungeon gives, in minutes.
+const DUNGEON_MINUTES: u64 = 30;
+/// The 구역 ready, `[u16 map]`; its reader (`network/a.f()V`) asks
+/// [`ROUND`].
+const AREA_READY: (u32, u32) = (7, 15000);
+/// A 구역's round (`0x1be1d0`): `[flag]`, `[count]` of `[i32][byte][byte]
+/// [byte]` (`network/a.a(IBBB)V`), `[count]` members' `[i32 id][byte][byte]
+/// [byte][count][bytes]`, then a byte that, non-zero, starts the 구역
+/// (`game/engine/f.k()V`).
+const ROUND: (u32, u32) = (7, 15100);
 /// [`ENTER_AREA`]'s type for a dungeon.
 const DUNGEON: u8 = 2;
 /// [`ENTER_AREA`]'s type for a town.
@@ -273,6 +303,30 @@ impl KodanWorld {
                 }
             },
             PARTY_OPEN if self.logged_in => vec![SlotRelay::message(kind, command, &[0])],
+            JOIN_ROOM if self.logged_in => {
+                let mut room = body.get(..2).unwrap_or(&[0, 0]).to_vec();
+                room.extend_from_slice(&(self.character as u32).to_be_bytes());
+                room.extend_from_slice(&(self.character as u32).to_be_bytes());
+                room.push(0);
+                vec![SlotRelay::message(kind, ROOM, &room)]
+            }
+            DUNGEON_START if self.logged_in => {
+                let mut start = PLACES[self.here as usize].map.to_be_bytes().to_vec();
+                start.extend_from_slice(&[0; 8]);
+                start.push(1);
+                start.extend_from_slice(&(self.character as u32).to_be_bytes());
+                start.extend_from_slice(&[0; 23]);
+                vec![SlotRelay::message(kind, command, &start)]
+            }
+            DUNGEON_LOADED if self.logged_in => vec![SlotRelay::message(kind, command, &[])],
+            DUNGEON_INFO if self.logged_in => {
+                let mut info = vec![0, 0, 0];
+                info.extend_from_slice(&DUNGEON_MINUTES.to_be_bytes());
+                info.extend_from_slice(&[0, 0, 0]);
+                vec![SlotRelay::message(kind, command, &info)]
+            }
+            AREA_READY if self.logged_in => vec![SlotRelay::message(kind, command, &[])],
+            ROUND if self.logged_in => vec![SlotRelay::message(kind, command, &[1, 0, 0, 1])],
             PARTY if self.logged_in => {
                 let mut party = vec![0, 0, 0, 0, 0, 1];
                 party.extend_from_slice(&self.character_id.to_be_bytes());
@@ -645,6 +699,36 @@ mod tests {
         assert_eq!(travel[0], 0, "travelled");
         assert_eq!(&ask(&mut world, 2, 1160, &[])[0][12..], &[0, 2, 0, 76]);
         assert_eq!(&ask(&mut world, 7, 10000, &[])[0][12..], &[0]);
+    }
+
+    /// Joining a room makes the player its leader, and starting it lands on
+    /// the dungeon's first 구역 with the player as its one member, through to
+    /// the 구역's round.
+    #[test]
+    fn a_dungeon_starts_with_the_player_leading() {
+        let mut world = KodanWorld::default();
+        ask(&mut world, 1, 1000, &[0x1e]);
+        ask(&mut world, 1, 1020, &[0, 0, 0, 0, 0, 0, 1, 0x0d, 0x5b, 3, b'a', b'b', b'c']);
+        ask(&mut world, 2, 1150, &[0, 3]);
+
+        let room = &ask(&mut world, 7, 11000, &[0x0d, 0x5b])[0];
+        assert_eq!(&room[8..12], &14000u32.to_be_bytes(), "answered as the room");
+        let room = &room[12..];
+        assert_eq!(&room[..2], &[0x0d, 0x5b]);
+        assert_eq!(&room[2..6], &room[6..10], "the player leads");
+        assert_eq!(room[10], 0, "no one else");
+
+        let start = &ask(&mut world, 7, 14060, &[])[0][12..];
+        assert_eq!(&start[..2], &76u16.to_be_bytes(), "수행의동굴 1구역");
+        assert_eq!(start[10], 1);
+        assert_eq!(&start[11..15], &room[2..6]);
+        assert_eq!(start.len(), 15 + 23);
+
+        assert_eq!(ask(&mut world, 9, 30000, &[]).len(), 1);
+        let info = &ask(&mut world, 7, 14600, &[])[0][12..];
+        assert_eq!(&info[3..11], &30u64.to_be_bytes());
+        assert_eq!(ask(&mut world, 7, 15000, &[0, 0x4c]).len(), 1);
+        assert_eq!(&ask(&mut world, 7, 15100, &[0, 0x4c, 4, 4, 2])[0][12..], &[1, 0, 0, 1]);
     }
 
     /// 입장 lands on the map 이스한트 is, and the arrival popup has text.
