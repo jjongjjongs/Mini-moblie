@@ -164,13 +164,13 @@ struct RelayConnection {
 /// The conversation a session carries, by the server its extension names.
 enum Service {
     Gateway(SlotRelay),
-    World(KodanWorld),
+    World(Box<KodanWorld>),
 }
 
 impl Service {
     fn for_extension(extension: &[u8], files: &Option<FilesystemOverlay>) -> Self {
         if target(extension) == Some(KODAN_ADDRESS) {
-            Service::World(KodanWorld::new(files.clone()))
+            Service::World(Box::new(KodanWorld::new(files.clone())))
         } else {
             Service::Gateway(SlotRelay::default())
         }

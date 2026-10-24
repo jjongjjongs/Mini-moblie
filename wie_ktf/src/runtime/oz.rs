@@ -124,6 +124,29 @@ const START: Site = Site {
 /// `network/b.Z`, the kind of the area the title is in.
 const KIND: u32 = 0x1fe11c;
 
+/// `game/data/k.a([BBBI)`, making an item the server sent - a ware, a thing
+/// bought or one of the belongings - reads the item's own state
+/// (`k.a([BIZ)I`) and then what the item is (`k.a([BIZZZ)I`): its price,
+/// name, the level and classes it asks for, its might. That second part was
+/// the server's copy of the title's own item tables, and the server is gone;
+/// so the item is made from the tables instead, as the offline game makes
+/// its shop's wares (`k.a(BBZZ)`, `0x115784`), and the second part is not
+/// read. An item the tables do not know is made bare, as before.
+const MADE: Site = Site {
+    address: 0x114fb0,
+    code: bl(0x114fb0, CALL),
+};
+const DEFINED: Site = Site {
+    address: 0x114fe0,
+    code: bl(0x114fe0, CALLV),
+};
+/// Its result is not used; the call becomes two `nop`s.
+const NOTHING: [u16; 2] = [0x46c0, 0x46c0];
+/// The slots of `k.a(BB)`, an item bare, and `k.a(BBZZ)`, one from the
+/// tables.
+const BARE: u32 = 0x1e7a48;
+const FROM_THE_TABLES: u32 = 0x1e7ae0;
+
 /// Code that is told it is offline in a dungeon: `[start, end)`, by the
 /// address a call returns to.
 const FIGHTING: [(u32, u32); 4] = [
@@ -144,7 +167,7 @@ pub(crate) fn install_local_fights(core: &mut ArmCore, aid: &str, cave: u32) -> 
     if !aid.eq_ignore_ascii_case(AID) {
         return Ok(());
     }
-    for site in [&KEEP_KIND, &ANSWER, &LEAVE, &FALL, &RISE, &START] {
+    for site in [&KEEP_KIND, &ANSWER, &LEAVE, &FALL, &RISE, &START, &MADE, &DEFINED] {
         if !halfwords_at(core, site.address, &site.code)? {
             tracing::warn!(
                 "오즈: code at {:#x} differs from the known build; the 코단 world's fights stay the server's",
@@ -165,6 +188,7 @@ pub(crate) fn install_local_fights(core: &mut ArmCore, aid: &str, cave: u32) -> 
     let fall = place(fall);
     let rise = place(rise);
     let start = place(start);
+    let made = place(made);
     core.load(&code, cave, code.len())?;
 
     write(core, KEEP_KIND.address + 2, &[KEEP_KIND_WITH])?;
@@ -174,6 +198,8 @@ pub(crate) fn install_local_fights(core: &mut ArmCore, aid: &str, cave: u32) -> 
     write(core, FALL.address, &bl(FALL.address, fall))?;
     write(core, RISE.address, &bl(RISE.address, rise))?;
     write(core, START.address, &bl(START.address, start))?;
+    write(core, MADE.address, &bl(MADE.address, made))?;
+    write(core, DEFINED.address, &NOTHING)?;
 
     tracing::info!("오즈: the 코단 world's dungeons are fought by the title's offline rules");
 
@@ -305,6 +331,29 @@ fn start(at: u32) -> Vec<u8> {
     code.bytes()
 }
 
+/// `k.a(BBZZ)` for the kind in r1 and the model in r2, as the offline shop
+/// asks it (`0x115774`), or `k.a(BB)` when the tables have no such item.
+fn made(at: u32) -> Vec<u8> {
+    let mut code = Thumb::new(at);
+    code.op(0xb506); // push {r1,r2,lr}
+    code.op(0x2300); // movs r3,#0
+    code.op(0xb408); // push {r3}: the last argument
+    code.op(0x2301); // movs r3,#1
+    code.load(0, FROM_THE_TABLES);
+    code.call(CALL);
+    code.op(0xb001); // add sp,#4
+    code.op(0x2800); // cmp r0,#0
+    let found = code.branch(NE);
+    code.op(0x9900); // ldr r1,[sp]
+    code.op(0x9a01); // ldr r2,[sp,#4]
+    code.load(0, BARE);
+    code.call(CALL);
+    code.land(found);
+    code.op(0xb002); // add sp,#8
+    code.op(0xbd00); // pop {pc}
+    code.bytes()
+}
+
 /// Thumb condition codes.
 const NE: u16 = 0x1;
 const LO: u16 = 0x3;
@@ -407,6 +456,8 @@ mod tests {
         assert_eq!(FALL.code, [0xf083, 0xfbf6]);
         assert_eq!(RISE.code, [0xf016, 0xfe72]);
         assert_eq!(START.code, [0xf017, 0xfec7]);
+        assert_eq!(MADE.code, [0xf0c2, 0xf99f]);
+        assert_eq!(DEFINED.code, [0xf0c2, 0xf98e]);
     }
 
     #[test]

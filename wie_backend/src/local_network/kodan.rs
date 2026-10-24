@@ -211,10 +211,54 @@ const SCENE_OVER: (u32, u32) = (6, 7010);
 /// Its reader (`0x1bafd4`) takes no body and asks [`PLACE`] again, which
 /// walks the place's requests once more.
 const PLACE_AGAIN: (u32, u32) = (3, 5100);
-/// A list asked for from a menu of `game/l.b(B)V` (`0x17169a`), body `[0]`.
-/// Its reader (`0x1bb0f4`) takes `[count]` and that many records; with none
-/// it shows its own notice that the list is empty and lets the title go on.
-const LISTING: (u32, u32) = (3, 5150);
+/// A shop's wares (`game/l.b(B)V`, `0x17169a`), body `[aisle]`: 0 the
+/// weapons, 2 everything else. Its reader (`0x1bb0f4`) takes `[count]` and
+/// that many `[kind][len][name][u16 count]`, the kind choosing each ware's
+/// icon; with none it shows its own notice that nothing is sold. Otherwise
+/// it asks [`WARE`] for the first, and the arrows page through the rest.
+const SHOP: (u32, u32) = (3, 5150);
+/// The armour's wares, body `[kind]` from the menu of the armour's kinds
+/// (`game/o.m(I)V`, `0x18660a`): 경갑, 중갑, 천, 방패 and 반지. No reader
+/// takes it; it is answered as [`SHOP`], and the wares then asked as
+/// [`ARMOUR_WARE`].
+const ARMOUR_SHOP: (u32, u32) = (3, 5160);
+/// One ware, `[kind][index]`, asked for each the arrows reach
+/// (`game/l.c(I)V`).
+/// Its reader (`0x1bb082`) takes the item as [`BELONGINGS`] carries one and
+/// shows it.
+const WARE: (u32, u32) = (3, 5200);
+/// [`WARE`] for the armour, which no reader takes either; answered as
+/// [`WARE`].
+const ARMOUR_WARE: (u32, u32) = (3, 5210);
+/// Buying, `[kind][index][count]` (`game/l.d(I)V`). Its reader (`0x1bb70c`)
+/// takes `[result][len][message]`, shown in a popup, and for result 1 the
+/// belongings changed (`network/a.a([BI)I`: a count of `[bag][u32 len][item]`
+/// added, `game/g.a([BBI)V`, then a count of those replacing the ones where
+/// they lie, `game/g.b([BBI)V`) and `[counter][u64]`, one of [`COUNTERS`]'s.
+const BUY: (u32, u32) = (3, 5220);
+/// [`BUY`] for the armour; answered as [`BUY`].
+const BUY_ARMOUR: (u32, u32) = (3, 5230);
+/// [`BUY`]'s popups, EUC-KR: 구입하였습니다. and 골드가 부족합니다.
+const BOUGHT: &[u8] = &[0xb1, 0xb8, 0xc0, 0xd4, 0xc7, 0xcf, 0xbf, 0xb4, 0xbd, 0xc0, 0xb4, 0xcf, 0xb4, 0xd9, 0x2e];
+const NOT_ENOUGH_GOLD: &[u8] = &[
+    0xb0, 0xf1, 0xb5, 0xe5, 0xb0, 0xa1, 0x20, 0xba, 0xce, 0xc1, 0xb7, 0xc7, 0xd5, 0xb4, 0xcf, 0xb4, 0xd9, 0x2e,
+];
+/// [`COUNTERS`]' gold.
+const GOLD_COUNTER: u8 = 1;
+/// The shop's 캐쉬충전, asked without a body. Its reader (`0x1bb442`) takes
+/// `[count]` of `[byte][len][name][u64][u64]` offers, and the screen it opens
+/// reads past an empty list; so it is offered [`NO_CASH`], for nothing.
+const CASH_OFFERS: (u32, u32) = (3, 5240);
+/// 서비스 종료, EUC-KR.
+const NO_CASH: &[u8] = &[0xbc, 0xad, 0xba, 0xf1, 0xbd, 0xba, 0x20, 0xc1, 0xbe, 0xb7, 0xe1];
+/// Two of the shop's screens bought with cash, asked without a body; their
+/// readers (`0x1bb620`, and `0x1bb5de` for 가방구매) take the cash held, a
+/// `u64`, and open the screen.
+const CASH_HELD: (u32, u32) = (3, 5250);
+const BAGS: (u32, u32) = (3, 5260);
+/// What a shop sells, `[len][kind][model][u32 price LE][len][name][rest]`
+/// each.
+const WARES_FILE: &str = "itm/forshop";
 /// Asked from the in-game menu (`game/o.g(B)V`, `0x17e330`) without a body.
 /// Its reader (`0x1bc15c`) takes a `u64`, keeps it, and opens the screen the
 /// option leads to.
@@ -256,7 +300,9 @@ const QUEST_FINISHED: u8 = 2;
 
 /// The file the world keeps its [`Progress`] in, per character:
 /// `[u16 count]` of `[u64 character][u64 gold][u16 count][u32 quest][u8
-/// state]...`.
+/// state]...`, then what each bought: `[u16 count]` of `[u64 character][u16
+/// count][kind][model]...`. A file from before things were sold ends after
+/// the quests.
 const PROGRESS_FILE: &str = "kodan_world";
 
 /// What the world keeps for one character between sessions.
@@ -265,6 +311,8 @@ struct Progress {
     gold: u64,
     /// The quests and their states, as [`WORLD_STATE`] reports them.
     quests: Vec<(u32, u8)>,
+    /// What was bought, `(kind, model)`, which [`BELONGINGS`] hands back.
+    bought: Vec<(u8, u8)>,
 }
 
 /// The directions a step is told in.
@@ -385,6 +433,9 @@ pub(super) struct KodanWorld {
     polls: u32,
     /// The health of the 구역's monsters struck so far, by index.
     monsters: BTreeMap<u8, i16>,
+    /// The wares [`SHOP`] last listed, which [`WARE`] and [`BUY`] name by
+    /// index.
+    shelf: Vec<Ware>,
 }
 
 impl KodanWorld {
@@ -604,7 +655,97 @@ impl KodanWorld {
                 vec![SlotRelay::message(kind, command, &party)]
             }
             QUEST_SYNC | SCENE_OVER | PLACE_AGAIN if self.logged_in => vec![SlotRelay::message(kind, command, &[])],
-            LISTING | CHANNELS if self.logged_in => vec![SlotRelay::message(kind, command, &[0])],
+            CHANNELS if self.logged_in => vec![SlotRelay::message(kind, command, &[0])],
+            CASH_OFFERS if self.logged_in => {
+                let mut offers = vec![1, 0, NO_CASH.len() as u8];
+                offers.extend_from_slice(NO_CASH);
+                offers.extend_from_slice(&[0; 16]);
+                vec![SlotRelay::message(kind, command, &offers)]
+            }
+            CASH_HELD | BAGS if self.logged_in => vec![SlotRelay::message(kind, command, &[0; 8])],
+            SHOP | ARMOUR_SHOP if self.logged_in => {
+                let aisle = if command == ARMOUR_SHOP.1 {
+                    match body.first() {
+                        Some(make @ 0..=2) => Aisle::Armour(*make),
+                        Some(3) => Aisle::Shields,
+                        _ => Aisle::Rings,
+                    }
+                } else if body.first() == Some(&0) {
+                    Aisle::Weapons
+                } else {
+                    Aisle::Rest
+                };
+                self.shelf = self.wares().into_iter().filter(|ware| ware.is_in(aisle)).collect();
+                let mut kinds: Vec<u8> = self.shelf.iter().map(|ware| ware.kind).collect();
+                kinds.dedup();
+                let mut list = vec![kinds.len() as u8];
+                for kind in kinds {
+                    let name = kind_name(kind);
+                    list.push(kind);
+                    list.push(name.len() as u8);
+                    list.extend_from_slice(name);
+                    list.extend_from_slice(&(self.shelf.iter().filter(|ware| ware.kind == kind).count() as u16).to_be_bytes());
+                }
+                vec![SlotRelay::message(kind, SHOP.1, &list)]
+            }
+            WARE | ARMOUR_WARE if self.logged_in => {
+                // The armour's carry the kind of armour first.
+                let asked = if command == ARMOUR_WARE.1 { body.get(1..) } else { Some(body) };
+                match asked.and_then(|asked| self.ware(asked)) {
+                    Some(ware) => vec![SlotRelay::message(kind, WARE.1, &item_record(ware.kind, ware.model, 1, 0, 0))],
+                    None => {
+                        tracing::warn!("코단 world: no such ware: {}", hex(body));
+                        Vec::new()
+                    }
+                }
+            }
+            BUY | BUY_ARMOUR if self.logged_in => {
+                let asked = if command == BUY_ARMOUR.1 { body.get(1..).unwrap_or(&[]) } else { body };
+                let ware = self.ware(asked).cloned();
+                let count = asked.get(2).copied().unwrap_or(1).max(1);
+                match ware {
+                    Some(ware) => {
+                        let price = ware.price as u64 * count as u64;
+                        let mut bought = Vec::new();
+                        if price > self.progress.gold {
+                            bought.push(0);
+                            bought.push(NOT_ENOUGH_GOLD.len() as u8);
+                            bought.extend_from_slice(NOT_ENOUGH_GOLD);
+                        } else {
+                            self.progress.gold -= price;
+                            bought.push(1);
+                            bought.push(BOUGHT.len() as u8);
+                            bought.extend_from_slice(BOUGHT);
+                            // The things added - a piece of equipment each, the
+                            // rest heaped together - and none changed.
+                            let id = FIRST_BOUGHT_ID + self.progress.bought.len() as u64;
+                            let items: Vec<Vec<u8>> = if bag_of(ware.kind) == 0 {
+                                (0..count)
+                                    .map(|index| item_record(ware.kind, ware.model, 1, id + index as u64, 0))
+                                    .collect()
+                            } else {
+                                vec![item_record(ware.kind, ware.model, count, id, 0)]
+                            };
+                            self.progress.bought.extend((0..count).map(|_| (ware.kind, ware.model)));
+                            bought.push(items.len() as u8);
+                            for item in items {
+                                bought.push(bag_of(ware.kind));
+                                bought.extend_from_slice(&(item.len() as u32).to_be_bytes());
+                                bought.extend_from_slice(&item);
+                            }
+                            bought.push(0);
+                            self.save();
+                            bought.push(GOLD_COUNTER);
+                            bought.extend_from_slice(&self.progress.gold.to_be_bytes());
+                        }
+                        vec![SlotRelay::message(kind, BUY.1, &bought)]
+                    }
+                    None => {
+                        tracing::warn!("코단 world: no such ware to buy: {}", hex(body));
+                        Vec::new()
+                    }
+                }
+            }
             MENU_COUNT | MENU_AMOUNT if self.logged_in => vec![SlotRelay::message(kind, command, &[0; 8])],
             REVIVE if self.logged_in => {
                 let map = PLACES[self.here as usize].map;
@@ -631,10 +772,37 @@ impl KodanWorld {
 
     /// [`BELONGINGS`]: one bag holding the class's [`starting_weapon`],
     /// equipped in the weapon slot.
+    /// `[0][count]` of `[bag][count][len][item]...`: the class's weapon,
+    /// and everything bought, the equipment with it and the rest in a bag of
+    /// its own.
     fn belongings(&self) -> Vec<u8> {
-        let item = starting_weapon(self.class);
-        let mut belongings = vec![0, 1, 0, 1, item.len() as u8];
-        belongings.extend_from_slice(&item);
+        let mut bags: [Vec<Vec<u8>>; 2] = [vec![starting_weapon(self.class)], Vec::new()];
+        // The rest heaped by what they are, at the id the first was bought
+        // with.
+        let mut heaps: Vec<(u8, u8, u8, u64)> = Vec::new();
+        for (index, (kind, model)) in self.progress.bought.iter().enumerate() {
+            let id = FIRST_BOUGHT_ID + index as u64;
+            if bag_of(*kind) == 0 {
+                bags[0].push(item_record(*kind, *model, 1, id, 0));
+                continue;
+            }
+            match heaps.iter_mut().find(|heap| (heap.0, heap.1) == (*kind, *model) && heap.2 < u8::MAX) {
+                Some(heap) => heap.2 += 1,
+                None => heaps.push((*kind, *model, 1, id)),
+            }
+        }
+        bags[1].extend(heaps.into_iter().map(|(kind, model, count, id)| item_record(kind, model, count, id, 0)));
+
+        let mut belongings = vec![0];
+        let bags: Vec<(u8, &Vec<Vec<u8>>)> = (0..).zip(&bags).filter(|(_, items)| !items.is_empty()).collect();
+        belongings.push(bags.len() as u8);
+        for (bag, items) in bags {
+            belongings.extend_from_slice(&[bag, items.len() as u8]);
+            for item in items {
+                belongings.push(item.len() as u8);
+                belongings.extend_from_slice(item);
+            }
+        }
         belongings
     }
 
@@ -708,6 +876,29 @@ impl KodanWorld {
     }
 
     /// The 구역 `map`'s ground, from the title's `nt/<hundreds>/<map>` file.
+    /// The ware `[kind][index]` names: the shelf's `index`th of that kind.
+    fn ware(&self, asked: &[u8]) -> Option<&Ware> {
+        let [kind, index, ..] = *asked else {
+            return None;
+        };
+        self.shelf.iter().filter(|ware| ware.kind == kind).nth(index as usize)
+    }
+
+    /// Everything [`WARES_FILE`] lists; none when it does not read.
+    fn wares(&self) -> Vec<Ware> {
+        let Some(files) = &self.files else {
+            return Vec::new();
+        };
+        let Some(size) = ready(files.size(WARES_FILE)).flatten() else {
+            return Vec::new();
+        };
+        let mut data = vec![0; size];
+        if ready(files.read(WARES_FILE, 0, size, &mut data)).flatten() != Some(size) {
+            return Vec::new();
+        }
+        Ware::parse_all(&data)
+    }
+
     fn ground_of(&self, map: u16) -> Option<Ground> {
         let files = self.files.as_ref()?;
         let path = alloc::format!("nt/{}/{:03}", map / 100, map);
@@ -976,6 +1167,14 @@ fn encode(all: &BTreeMap<u64, Progress>) -> Vec<u8> {
             data.push(*state);
         }
     }
+    data.extend_from_slice(&(all.len() as u16).to_be_bytes());
+    for (character, progress) in all {
+        data.extend_from_slice(&character.to_be_bytes());
+        data.extend_from_slice(&(progress.bought.len() as u16).to_be_bytes());
+        for (kind, model) in &progress.bought {
+            data.extend_from_slice(&[*kind, *model]);
+        }
+    }
     data
 }
 
@@ -996,7 +1195,26 @@ fn decode(data: &[u8]) -> Option<BTreeMap<u64, Progress>> {
         for _ in 0..take(2)? {
             quests.push((take(4)? as u32, take(1)? as u8));
         }
-        all.insert(character, Progress { gold, quests });
+        all.insert(
+            character,
+            Progress {
+                gold,
+                quests,
+                ..Progress::default()
+            },
+        );
+    }
+    // A file from before things were sold ends here.
+    let Some(characters) = take(2) else {
+        return Some(all);
+    };
+    for _ in 0..characters {
+        let character = take(8)?;
+        let mut bought = Vec::new();
+        for _ in 0..take(2)? {
+            bought.push((take(1)? as u8, take(1)? as u8));
+        }
+        all.entry(character).or_default().bought = bought;
     }
     Some(all)
 }
@@ -1013,18 +1231,153 @@ fn ready<F: Future>(future: F) -> Option<F::Output> {
     }
 }
 
+/// A thing a shop sells, as [`WARES_FILE`] has it.
+#[derive(Clone, Debug, PartialEq)]
+struct Ware {
+    kind: u8,
+    model: u8,
+    price: u32,
+    name: Vec<u8>,
+    /// For a piece of armour, what it is made of: 0 leather, 1 metal, 2
+    /// cloth.
+    make: Option<u8>,
+}
+
+/// Where in a shop a [`Ware`] is shown.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Aisle {
+    Weapons,
+    /// Armour worn on the body, by [`Ware::make`].
+    Armour(u8),
+    Shields,
+    Rings,
+    Rest,
+}
+
+impl Ware {
+    fn parse_all(data: &[u8]) -> Vec<Self> {
+        let mut wares = Vec::new();
+        let mut at = 0;
+        while let Some(&len) = data.get(at) {
+            let Some(record) = data.get(at + 1..at + 1 + len as usize) else {
+                break;
+            };
+            if let Some(ware) = Self::parse(record) {
+                wares.push(ware);
+            }
+            at += 1 + len as usize;
+        }
+        wares
+    }
+
+    /// `[kind][model][u32 price LE][len][name][rest]`, the rest of a piece
+    /// of armour holding what it is made of 22 bytes in.
+    fn parse(record: &[u8]) -> Option<Self> {
+        let [kind, model, a, b, c, d, len, ..] = *record else {
+            return None;
+        };
+        let name = record.get(7..7 + len as usize)?.to_vec();
+        let rest = &record[7 + len as usize..];
+        let make = if (6..=9).contains(&kind) { rest.get(21).copied() } else { None };
+
+        Some(Self {
+            kind,
+            model,
+            price: u32::from_le_bytes([a, b, c, d]),
+            name,
+            make,
+        })
+    }
+
+    fn is_in(&self, aisle: Aisle) -> bool {
+        match aisle {
+            Aisle::Weapons => self.kind <= 5,
+            Aisle::Armour(make) => (6..=9).contains(&self.kind) && self.make == Some(make),
+            Aisle::Shields => self.kind == 10,
+            Aisle::Rings => self.kind == 11,
+            Aisle::Rest => self.kind >= 12,
+        }
+    }
+}
+
+/// The bag a thing of `kind` is kept in: equipment in the first, the rest in
+/// the second.
+fn bag_of(kind: u8) -> u8 {
+    if kind <= 11 { 0 } else { 1 }
+}
+
+/// The ids things bought are given, by the order they were bought in; the
+/// starting weapon is 1.
+const FIRST_BOUGHT_ID: u64 = 2;
+
+/// What a shop calls the wares of `kind`, EUC-KR.
+fn kind_name(kind: u8) -> &'static [u8] {
+    match kind {
+        0 => &[0xb0, 0xcb],                            // 검
+        1 => &[0xb5, 0xb5, 0xb3, 0xa2],                // 도끼
+        2 => &[0xb5, 0xd0, 0xb1, 0xe2],                // 둔기
+        3 => &[0xc3, 0xd1],                            // 총
+        4 => &[0xb4, 0xdc, 0xb0, 0xcb],                // 단검
+        5 => &[0xc1, 0xf6, 0xc6, 0xce, 0xc0, 0xcc],    // 지팡이
+        6 => &[0xc5, 0xf5, 0xb1, 0xb8],                // 투구
+        7 => &[0xb0, 0xa9, 0xbf, 0xca],                // 갑옷
+        8 => &[0xc7, 0xcf, 0xc0, 0xc7],                // 하의
+        9 => &[0xc0, 0xe5, 0xb0, 0xa9],                // 장갑
+        10 => &[0xb9, 0xe6, 0xc6, 0xd0],               // 방패
+        11 => &[0xb9, 0xdd, 0xc1, 0xf6],               // 반지
+        0x15 => &[0xb0, 0xe1, 0xc1, 0xa4],             // 결정
+        0x18 => &[0xbb, 0xfd, 0xb8, 0xed, 0xbc, 0xf6], // 생명수
+        0x19 => &[0xc6, 0xf7, 0xb5, 0xb5, 0xc1, 0xd6], // 포도주
+        0x1b => &[0xbe, 0xe0, 0xc7, 0xb0],             // 약품
+        _ => &[0xb1, 0xe2, 0xc5, 0xb8],                // 기타
+    }
+}
+
+/// An item as [`BELONGINGS`] carries one: `count` of `kind` and `model`, worn
+/// in `slot` (0 for none).
+///
+/// An item is read in layers, each class of it adding its own fields after
+/// its parent's - `game/data/k`, then for equipment `j` and `i`, and for a
+/// weapon `e` (`game/data/k.a(BB)`: kinds 0 to 5 are weapons, 6 to 10
+/// armour) - first the item itself and then its state. The fields past the
+/// slot are left at zero but for the durabilities, and the record is padded:
+/// the reader steps to the next item by the record's length, not by what it
+/// read.
+fn item_record(kind: u8, model: u8, count: u8, id: u64, slot: u8) -> Vec<u8> {
+    let weapon = kind <= 5;
+    let equipment = kind <= 10;
+
+    // `k`: kind, model, count, the item's id, the slot it is worn in, and a
+    // byte; then `j` (9), `i` (6) and `e` (2).
+    let mut item = vec![kind, model, count];
+    item.extend_from_slice(&id.to_be_bytes());
+    item.extend_from_slice(&[slot, 0]);
+    if equipment {
+        item.extend_from_slice(&[0; 9 + 6]);
+    }
+    if weapon {
+        item.extend_from_slice(&[0; 2]);
+    }
+    // The state: `k` (6), `j` (4), `i` (9) and `e` (4), the shorts holding the
+    // durability little-endian.
+    item.extend_from_slice(&[0; 6]);
+    if equipment {
+        item.extend_from_slice(&[0; 4]);
+        item.extend_from_slice(&[0, 0, 100, 0, 0, 0, 0, 100, 0]);
+    }
+    if weapon {
+        item.extend_from_slice(&[100, 0, 0, 0]);
+    }
+    item.extend_from_slice(&[0; 8]);
+    item
+}
+
 /// The weapon slot, one of the two `game/chars/g.J()Z` looks in.
 const WEAPON_SLOT: u8 = 1;
 
 /// The weapon a character of `class` starts with, as [`BELONGINGS`] carries an
 /// item: the type `game/chars/g.aX()V` gives the class (types 0 to 5 being
 /// weapons, `game/data/e`), its first model, equipped in [`WEAPON_SLOT`].
-///
-/// An item is read in layers, each class of it adding its own fields after
-/// its parent's - `game/data/k`, `j`, `i` and the weapon's `e` - first the
-/// item itself and then its state. The fields past the slot are left at
-/// zero but for the durabilities, and the record is padded: the reader steps
-/// to the next item by the record's length, not by what it read.
 fn starting_weapon(class: u8) -> Vec<u8> {
     let kind = match class {
         0 => 0,
@@ -1033,20 +1386,7 @@ fn starting_weapon(class: u8) -> Vec<u8> {
         3 => 4,
         _ => 5,
     };
-
-    // `k`: type, model, count, the item's id, the slot it is worn in, and a
-    // byte; then `j` (9), `i` (6) and `e` (2).
-    let mut item = vec![kind, 0, 1];
-    item.extend_from_slice(&1u64.to_be_bytes());
-    item.extend_from_slice(&[WEAPON_SLOT, 0]);
-    item.extend_from_slice(&[0; 9 + 6 + 2]);
-    // The state: `k` (6), `j` (4), `i` (9) and `e` (4), the shorts holding the
-    // durability little-endian.
-    item.extend_from_slice(&[0; 6 + 4]);
-    item.extend_from_slice(&[0, 0, 100, 0, 0, 0, 0, 100, 0]);
-    item.extend_from_slice(&[100, 0, 0, 0]);
-    item.extend_from_slice(&[0; 8]);
-    item
+    item_record(kind, 0, 1, 1, WEAPON_SLOT)
 }
 
 #[cfg(test)]
@@ -1417,13 +1757,104 @@ mod tests {
             Progress {
                 gold: 500,
                 quests: vec![(1, 2), (7, 1)],
+                bought: vec![],
             },
         );
         all.insert(3, Progress::default());
+        all.insert(
+            4,
+            Progress {
+                gold: 100,
+                quests: vec![],
+                bought: vec![(0, 2), (0x18, 0)],
+            },
+        );
         assert_eq!(decode(&encode(&all)), Some(all));
+
+        // A file from before things were sold.
+        let old = [0, 1, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0];
+        assert_eq!(decode(&old).unwrap()[&3].gold, 7);
 
         assert_eq!(decode(&[0, 1, 0, 0]), None);
         assert_eq!(decode(&[0, 0]), Some(BTreeMap::new()));
+    }
+
+    /// `[len][kind][model][u32 price LE][len][name][rest]`, as the shop's
+    /// file has its wares.
+    fn ware_record(kind: u8, model: u8, price: u32, name: &[u8], rest: &[u8]) -> Vec<u8> {
+        let mut record = vec![kind, model];
+        record.extend_from_slice(&price.to_le_bytes());
+        record.push(name.len() as u8);
+        record.extend_from_slice(name);
+        record.extend_from_slice(rest);
+        record.insert(0, record.len() as u8);
+        record
+    }
+
+    /// The shop's file is read into wares, each in its aisle: a piece of
+    /// armour by what it is made of.
+    #[test]
+    fn wares_are_shelved() {
+        use super::{Aisle, Ware};
+
+        let mut file = ware_record(0, 2, 800, b"sword", &[0; 36]);
+        let mut cloth = [0; 28];
+        cloth[21] = 2;
+        file.extend(ware_record(6, 0, 3300, b"hood", &cloth));
+        file.extend(ware_record(10, 0, 100, b"buckler", &[0; 28]));
+        file.extend(ware_record(0x18, 0, 400, b"water", &[0; 8]));
+
+        let wares = Ware::parse_all(&file);
+        assert_eq!(wares.len(), 4);
+        assert_eq!((wares[0].kind, wares[0].model, wares[0].price), (0, 2, 800));
+        assert_eq!(wares[1].make, Some(2));
+        assert!(wares[0].is_in(Aisle::Weapons));
+        assert!(wares[1].is_in(Aisle::Armour(2)) && !wares[1].is_in(Aisle::Armour(0)));
+        assert!(wares[2].is_in(Aisle::Shields));
+        assert!(wares[3].is_in(Aisle::Rest));
+    }
+
+    /// A ware is named by its kind and its place among the shelf's of that
+    /// kind; buying it takes its price, adds it to the belongings and keeps
+    /// it, and is refused without the gold.
+    #[test]
+    fn a_ware_is_bought() {
+        use super::Ware;
+
+        let mut world = KodanWorld::default();
+        ask(&mut world, 1, 1000, &[0x1e]);
+        let ware = |kind, model, price| Ware {
+            kind,
+            model,
+            price,
+            name: b"x".to_vec(),
+            make: None,
+        };
+        world.shelf = vec![ware(0, 2, 800), ware(1, 2, 400), ware(0, 3, 1400)];
+        world.progress.gold = 1000;
+
+        // The second sword.
+        let shown = &ask(&mut world, 3, 5200, &[0, 1])[0];
+        assert_eq!(&shown[8..12], &5200u32.to_be_bytes());
+        assert_eq!(&shown[12..15], &[0, 3, 1]);
+
+        let refused = &ask(&mut world, 3, 5220, &[0, 1, 1])[0][12..];
+        assert_eq!(refused[0], 0);
+        assert_eq!(world.progress.gold, 1000);
+
+        let bought = &ask(&mut world, 3, 5220, &[1, 0, 1])[0][12..];
+        assert_eq!(bought[0], 1);
+        let added = 2 + bought[1] as usize;
+        assert_eq!(&bought[added..added + 2], &[1, 0], "one thing, in the first bag");
+        let len = u32::from_be_bytes(bought[added + 2..added + 6].try_into().unwrap()) as usize;
+        assert_eq!(&bought[added + 6..added + 8], &[1, 2]);
+        assert_eq!(&bought[added + 6 + len..], &[0, 1, 0, 0, 0, 0, 0, 0, 2, 0x58]);
+        assert_eq!(world.progress.gold, 600);
+        assert_eq!(world.progress.bought, vec![(1, 2)]);
+
+        // The belongings: the weapon the class starts with, and the axe.
+        let belongings = &ask(&mut world, 8, 20000, &[])[0][12..];
+        assert_eq!(&belongings[..4], &[0, 1, 0, 2]);
     }
 
     /// Nothing is answered before the login.
