@@ -146,6 +146,9 @@ const ROUND: (u32, u32) = (7, 15100);
 /// once, when its [`ROUND`] starts - until then it is a shadow.
 const STEP: (u32, u32) = (7, 17000);
 const STEPPED: (u32, u32) = (7, 17050);
+/// The player standing in a 구역 (`game/chars/g.Y()V`), `[x][y][direction]`.
+/// The title reads nothing back for it.
+const STANDING: (u32, u32) = (7, 17010);
 /// The player closing on a monster to strike (`0x1b7480`), `[i16][x][y]
 /// [direction][2 bytes][count][count bytes][i32][target][byte]`. The title
 /// reads nothing back for it.
@@ -392,13 +395,15 @@ impl KodanWorld {
                 replies
             }
             STRIKE if self.logged_in => match body.get(8) {
-                Some(&target) if target as i8 >= 0 => vec![SlotRelay::message(kind, STRUCK, &self.struck(target))],
+                Some(&target) if target as i8 >= 0 => {
+                    vec![SlotRelay::message(kind, STRUCK, &self.struck(target, body.get(10).copied().unwrap_or(0)))]
+                }
                 _ => {
                     tracing::warn!("코단 world: a strike this does not read: {}", hex(body));
                     Vec::new()
                 }
             },
-            STEP | STEPPED | CLOSING_IN if self.logged_in => Vec::new(),
+            STEP | STEPPED | STANDING | CLOSING_IN if self.logged_in => Vec::new(),
             PARTY if self.logged_in => {
                 let mut party = vec![0, 0, 0, 0, 0, 1];
                 party.extend_from_slice(&self.character_id.to_be_bytes());
@@ -473,14 +478,15 @@ impl KodanWorld {
         }
     }
 
-    /// [`STRUCK`] for the player's blow on the monster `target`: it loses
-    /// [`BLOW`] of its health, and falls once it has none. A monster's record
+    /// [`STRUCK`] for the player's blow with `skill` on the monster `target`:
+    /// it loses [`BLOW`] of its health, and falls once it has none. A
+    /// monster's record
     /// (`0x1c38a6`) is `[index][i32 striker][skill][count][count bytes][i16
     /// most health][i16 health][state][i16 damage]` - state 1 a miss, 2 a hit
     /// whose damage is shown (`game/chars/j.a(BBI)V`) - then `[count]` and
     /// `[count]` of effects and whether it still stands: a fallen monster is
     /// laid down (`game/chars/m.e()V`).
-    fn struck(&mut self, target: u8) -> Vec<u8> {
+    fn struck(&mut self, target: u8, skill: u8) -> Vec<u8> {
         const HIT: u8 = 2;
 
         let health = self.monsters.entry(target).or_insert(MONSTER_HEALTH);
@@ -491,7 +497,7 @@ impl KodanWorld {
         news.push(1);
         news.push(target);
         news.extend_from_slice(&(self.character as u32).to_be_bytes());
-        news.extend_from_slice(&[0, 0]);
+        news.extend_from_slice(&[skill, 0]);
         news.extend_from_slice(&MONSTER_HEALTH.to_be_bytes());
         news.extend_from_slice(&health.to_be_bytes());
         news.push(HIT);
@@ -922,7 +928,11 @@ mod tests {
             assert_eq!(&news[8..12], &17200u32.to_be_bytes());
             let news = &news[12..];
             assert_eq!(&news[..9], &[0, 0x4c, 0, 0, 0, 0, 0, 0, 0], "the map, then nothing but the blow");
-            assert_eq!(&news[9..17], &[1, 6, 0, 1, 0x0d, 0x5b, 0, 0], "monster 6, struck by the player");
+            assert_eq!(
+                &news[9..17],
+                &[1, 6, 0, 1, 0x0d, 0x5b, 9, 0],
+                "monster 6, struck by the player with skill 9"
+            );
             assert_eq!(&news[17..19], &300i16.to_be_bytes());
             assert_eq!(&news[19..21], &health.to_be_bytes());
             assert_eq!(&news[21..24], &[2, 0, 100], "a hit of 100");
