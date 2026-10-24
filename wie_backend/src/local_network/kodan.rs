@@ -260,9 +260,14 @@ const CASH_HELD: (u32, u32) = (3, 5250);
 const BAGS: (u32, u32) = (3, 5260);
 /// A bag bought on [`BAGS`]' screen (`game/o.p(I)V`). Its reader
 /// (`0x1bc76a`) takes the bags held - kept as [`BELONGINGS`]' first byte
-/// sets them, 0 - and the cash left, a `u64`; with no cash nothing is
-/// bought.
+/// sets them - and the cash left, a `u64`. There is no cash, so the bag is
+/// given, up to [`MOST_BAGS`].
 const BAG_BOUGHT: (u32, u32) = (3, 5270);
+/// The bags a character holds: one to start with, as offline (`game/g`,
+/// `0x1642b8`) - with none the belongings show no bag at all - and four at
+/// most, as many as the belongings' row of bags has room for.
+const FIRST_BAGS: u8 = 1;
+const MOST_BAGS: u8 = 4;
 /// What a shop sells, `[len][kind][model][u32 price LE][len][name][rest]`
 /// each.
 const WARES_FILE: &str = "itm/forshop";
@@ -376,6 +381,8 @@ struct Progress {
     quests: Vec<(u32, u8)>,
     /// What was bought, `(kind, model)`, which [`BELONGINGS`] hands back.
     bought: Vec<(u8, u8)>,
+    /// The bags bought on [`BAGS`]' screen, beyond [`FIRST_BAGS`].
+    bags: u8,
 }
 
 /// The directions a step is told in.
@@ -759,7 +766,15 @@ impl KodanWorld {
                 vec![SlotRelay::message(kind, command, &offers)]
             }
             CASH_HELD | BAGS if self.logged_in => vec![SlotRelay::message(kind, command, &[0; 8])],
-            BAG_BOUGHT if self.logged_in => vec![SlotRelay::message(kind, command, &[0; 9])],
+            BAG_BOUGHT if self.logged_in => {
+                if self.bags() < MOST_BAGS {
+                    self.progress.bags += 1;
+                    self.save();
+                }
+                let mut bags = vec![self.bags()];
+                bags.extend_from_slice(&[0; 8]);
+                vec![SlotRelay::message(kind, command, &bags)]
+            }
             SHOP | ARMOUR_SHOP if self.logged_in => {
                 let aisle = if command == ARMOUR_SHOP.1 {
                     match body.first() {
@@ -891,7 +906,7 @@ impl KodanWorld {
         }
         bags[1].extend(heaps.into_iter().map(|(kind, model, count, id)| item_record(kind, model, count, id, 0)));
 
-        let mut belongings = vec![0];
+        let mut belongings = vec![self.bags()];
         let bags: Vec<(u8, &Vec<Vec<u8>>)> = (0..).zip(&bags).filter(|(_, items)| !items.is_empty()).collect();
         belongings.push(bags.len() as u8);
         for (bag, items) in bags {
@@ -974,6 +989,11 @@ impl KodanWorld {
     }
 
     /// The 구역 `map`'s ground, from the title's `nt/<hundreds>/<map>` file.
+    /// The bags the character holds, [`BELONGINGS`]' first byte.
+    fn bags(&self) -> u8 {
+        FIRST_BAGS.saturating_add(self.progress.bags).min(MOST_BAGS)
+    }
+
     /// The ware `[kind][index]` names: the shelf's `index`th of that kind.
     fn ware(&self, asked: &[u8]) -> Option<&Ware> {
         let [kind, index, ..] = *asked else {
@@ -1273,6 +1293,11 @@ fn encode(all: &BTreeMap<u64, Progress>) -> Vec<u8> {
             data.extend_from_slice(&[*kind, *model]);
         }
     }
+    data.extend_from_slice(&(all.len() as u16).to_be_bytes());
+    for (character, progress) in all {
+        data.extend_from_slice(&character.to_be_bytes());
+        data.push(progress.bags);
+    }
     data
 }
 
@@ -1313,6 +1338,14 @@ fn decode(data: &[u8]) -> Option<BTreeMap<u64, Progress>> {
             bought.push((take(1)? as u8, take(1)? as u8));
         }
         all.entry(character).or_default().bought = bought;
+    }
+    // A file from before bags were bought ends here.
+    let Some(characters) = take(2) else {
+        return Some(all);
+    };
+    for _ in 0..characters {
+        let character = take(8)?;
+        all.entry(character).or_default().bags = take(1)? as u8;
     }
     Some(all)
 }
@@ -1556,8 +1589,8 @@ mod tests {
         ask(&mut world, 1, 1026, &[4, 0, 0x0b]);
 
         let belongings = &ask(&mut world, 8, 20000, &[])[0][12..];
-        // One bag of one item.
-        assert_eq!(&belongings[..4], &[0, 1, 0, 1]);
+        // One bag held; a group of one item.
+        assert_eq!(&belongings[..4], &[1, 1, 0, 1]);
         let item = &belongings[5..];
         assert_eq!(item.len(), belongings[4] as usize);
         // Class 4 starts with type 5, model 0, worn in slot 1.
@@ -1631,7 +1664,12 @@ mod tests {
         assert_eq!(&ask(&mut world, 3, 5710, &[0x14, 1])[0][12..], &[0; 8]);
         assert_eq!(&ask(&mut world, 3, 5910, &[0, 0x12])[0][12..], &[0; 8]);
         assert_eq!(&ask(&mut world, 3, 5110, &[0, 4])[0][12..], &[] as &[u8]);
-        assert_eq!(&ask(&mut world, 3, 5270, &[])[0][12..], &[0; 9]);
+        assert_eq!(ask(&mut world, 8, 20000, &[])[0][12], 1, "one bag to start with");
+        assert_eq!(&ask(&mut world, 3, 5270, &[])[0][12..], &[2, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(ask(&mut world, 3, 5270, &[])[0][12], 3);
+        assert_eq!(ask(&mut world, 3, 5270, &[])[0][12], 4);
+        assert_eq!(ask(&mut world, 3, 5270, &[])[0][12], 4, "no more than the most");
+        assert_eq!(ask(&mut world, 8, 20000, &[])[0][12], 4);
     }
 
     /// A fallen player rises on the dungeon's first 구역 - at its entrance when
@@ -1875,6 +1913,7 @@ mod tests {
                 gold: 500,
                 quests: vec![(1, 2), (7, 1)],
                 bought: vec![],
+                bags: 0,
             },
         );
         all.insert(3, Progress::default());
@@ -1884,6 +1923,7 @@ mod tests {
                 gold: 100,
                 quests: vec![],
                 bought: vec![(0, 2), (0x18, 0)],
+                bags: 1,
             },
         );
         assert_eq!(decode(&encode(&all)), Some(all));
@@ -1971,7 +2011,7 @@ mod tests {
 
         // The belongings: the weapon the class starts with, and the axe.
         let belongings = &ask(&mut world, 8, 20000, &[])[0][12..];
-        assert_eq!(&belongings[..4], &[0, 1, 0, 2]);
+        assert_eq!(&belongings[..4], &[1, 1, 0, 2]);
     }
 
     /// A quest chosen is told with its title and its giver's words, the
