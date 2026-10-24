@@ -265,6 +265,15 @@ const WARES_FILE: &str = "itm/forshop";
 /// Its reader (`0x1bc15c`) takes a `u64`, keeps it, and opens the screen the
 /// option leads to.
 const MENU_COUNT: (u32, u32) = (3, 5700);
+/// 스킬초기화 and 스탯초기화, confirmed from the screens [`MENU_COUNT`] and
+/// [`MENU_AMOUNT`] open; the title has already reset the points itself.
+/// Their reader (`0x1bc10e`) takes the cash left, a `u64`, and goes back to
+/// the screen.
+const SKILLS_RESET: (u32, u32) = (3, 5710);
+const STATS_RESET: (u32, u32) = (3, 5910);
+/// The character's points as spent on leaving its screen, `[0][count]...`.
+/// Its reader (`0x1bb830`) takes no body and lets the title go on.
+const POINTS_SPENT: (u32, u32) = (3, 5110);
 /// The channels, asked with the 1 key in a dungeon (`game/k.a(I)V`,
 /// `0x1703c8`) without a body. Its reader (`0x1bad4c`) takes `[count]` and
 /// that many three-byte records, then lets the title go on.
@@ -828,7 +837,8 @@ impl KodanWorld {
                     }
                 }
             }
-            MENU_COUNT | MENU_AMOUNT if self.logged_in => vec![SlotRelay::message(kind, command, &[0; 8])],
+            POINTS_SPENT if self.logged_in => vec![SlotRelay::message(kind, command, &[])],
+            MENU_COUNT | MENU_AMOUNT | SKILLS_RESET | STATS_RESET if self.logged_in => vec![SlotRelay::message(kind, command, &[0; 8])],
             REVIVE if self.logged_in => {
                 let map = PLACES[self.here as usize].map;
                 let (x, y) = self.ground_of(map).and_then(|ground| ground.entrance).unwrap_or_default();
@@ -1612,6 +1622,9 @@ mod tests {
         assert_eq!(&ask(&mut world, 3, 5010, &[])[0][12..], &[0]);
         assert_eq!(&ask(&mut world, 3, 5700, &[])[0][12..], &[0; 8]);
         assert_eq!(&ask(&mut world, 3, 5900, &[])[0][12..], &[0; 8]);
+        assert_eq!(&ask(&mut world, 3, 5710, &[0x14, 1])[0][12..], &[0; 8]);
+        assert_eq!(&ask(&mut world, 3, 5910, &[0, 0x12])[0][12..], &[0; 8]);
+        assert_eq!(&ask(&mut world, 3, 5110, &[0, 4])[0][12..], &[] as &[u8]);
     }
 
     /// A fallen player rises on the dungeon's first 구역 - at its entrance when
