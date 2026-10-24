@@ -258,6 +258,11 @@ const NO_CASH: &[u8] = &[0xbc, 0xad, 0xba, 0xf1, 0xbd, 0xba, 0x20, 0xc1, 0xbe, 0
 /// `u64`, and open the screen.
 const CASH_HELD: (u32, u32) = (3, 5250);
 const BAGS: (u32, u32) = (3, 5260);
+/// A bag bought on [`BAGS`]' screen (`game/o.p(I)V`). Its reader
+/// (`0x1bc76a`) takes the bags held - kept as [`BELONGINGS`]' first byte
+/// sets them, 0 - and the cash left, a `u64`; with no cash nothing is
+/// bought.
+const BAG_BOUGHT: (u32, u32) = (3, 5270);
 /// What a shop sells, `[len][kind][model][u32 price LE][len][name][rest]`
 /// each.
 const WARES_FILE: &str = "itm/forshop";
@@ -754,6 +759,7 @@ impl KodanWorld {
                 vec![SlotRelay::message(kind, command, &offers)]
             }
             CASH_HELD | BAGS if self.logged_in => vec![SlotRelay::message(kind, command, &[0; 8])],
+            BAG_BOUGHT if self.logged_in => vec![SlotRelay::message(kind, command, &[0; 9])],
             SHOP | ARMOUR_SHOP if self.logged_in => {
                 let aisle = if command == ARMOUR_SHOP.1 {
                     match body.first() {
@@ -1625,6 +1631,7 @@ mod tests {
         assert_eq!(&ask(&mut world, 3, 5710, &[0x14, 1])[0][12..], &[0; 8]);
         assert_eq!(&ask(&mut world, 3, 5910, &[0, 0x12])[0][12..], &[0; 8]);
         assert_eq!(&ask(&mut world, 3, 5110, &[0, 4])[0][12..], &[] as &[u8]);
+        assert_eq!(&ask(&mut world, 3, 5270, &[])[0][12..], &[0; 9]);
     }
 
     /// A fallen player rises on the dungeon's first 구역 - at its entrance when
