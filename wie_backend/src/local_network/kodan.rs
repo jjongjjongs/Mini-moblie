@@ -61,6 +61,25 @@ const START_MAP: u16 = 1;
 /// `network/a.a([BII)I`, is shown in a popup and must not be empty - the
 /// popup reads it through a null otherwise.
 const ARRIVED: (u32, u32) = (3, 5000);
+/// A story event's reward, asked for at its end by the script op that builds
+/// `[0][3 script bytes][u32 quest][u64 experience][u64 gold][tail]`
+/// (`0x143f38`). Its reader, `game/engine/h.b([BI)V`, takes
+/// `[result][u32 quest]` and, on success, `[count][flag pairs][count][item
+/// triples][u64 experience gained][u64 gold held][count][records][count][item
+/// triples]`: the experience is added to the player's (`game/chars/g.b(J)V`),
+/// the gold replaces what the player holds, and the quest is marked done
+/// (`game/engine/f.c(SBB)V` with state 2). Until it is answered the title
+/// sits on TRANSMITTING.
+const QUEST_DONE: (u32, u32) = (11, 32100);
+/// Sent after a reward that brought experience; its reader only lets the
+/// title go on.
+const QUEST_SYNC: (u32, u32) = (11, 32150);
+/// Sent by a story event's script once its scene is over (`0x13ff88`). Its
+/// reader takes no body and asks [`PLACE_AGAIN`].
+const SCENE_OVER: (u32, u32) = (6, 7010);
+/// Its reader (`0x1bafd4`) takes no body and asks [`PLACE`] again, which
+/// walks the place's requests once more.
+const PLACE_AGAIN: (u32, u32) = (3, 5100);
 /// The keepalive poll, answered with itself.
 const POLL: (u32, u32) = (0, 10);
 
@@ -72,6 +91,8 @@ pub(super) struct KodanWorld {
     /// (`0x1b5e68`), the id being the player's own (`game/chars/g.a()J`).
     character_id: u16,
     character_name: Vec<u8>,
+    /// The gold the player holds, which a reward's answer states whole.
+    gold: u64,
 }
 
 impl KodanWorld {
@@ -121,6 +142,26 @@ impl KodanWorld {
                 arrival.extend_from_slice(MESSAGE_WELCOME);
                 vec![SlotRelay::message(kind, command, &arrival)]
             }
+            QUEST_DONE if self.logged_in => match body {
+                [_, _, _, _, quest @ ..] if quest.len() >= 20 => {
+                    let experience = u64::from_be_bytes(quest[4..12].try_into().unwrap());
+                    let gold = u64::from_be_bytes(quest[12..20].try_into().unwrap());
+                    self.gold = self.gold.saturating_add(gold);
+
+                    let mut reward = vec![0];
+                    reward.extend_from_slice(&quest[..4]);
+                    reward.extend_from_slice(&[0, 0]);
+                    reward.extend_from_slice(&experience.to_be_bytes());
+                    reward.extend_from_slice(&self.gold.to_be_bytes());
+                    reward.extend_from_slice(&[0, 0]);
+                    vec![SlotRelay::message(kind, command, &reward)]
+                }
+                _ => {
+                    tracing::warn!("코단 world: a reward request this does not read: {}", hex(body));
+                    Vec::new()
+                }
+            },
+            QUEST_SYNC | SCENE_OVER | PLACE_AGAIN if self.logged_in => vec![SlotRelay::message(kind, command, &[])],
             ENTER_AREA if self.logged_in => {
                 let mut entry = vec![0, 1];
                 entry.extend_from_slice(&START_MAP.to_be_bytes());
@@ -241,6 +282,33 @@ mod tests {
         let len = u16::from_be_bytes([arrival[1], arrival[2]]) as usize;
         assert!(len > 0);
         assert_eq!(arrival.len(), 3 + len);
+    }
+
+    /// A story event's reward is granted: the quest it names is done, the
+    /// experience is handed on and the gold is added to what is held.
+    #[test]
+    fn a_reward_is_granted() {
+        let mut world = KodanWorld::default();
+        ask(&mut world, 1, 1000, &[0x1e]);
+
+        // What 이스한트's opening scene sends at its end.
+        let request = [
+            0x00, 0x23, 0x17, 0x01, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0x03, 0xe8, 0, 0, 0, 0, 0, 0, 0x01, 0xf4, 0x00, 0x18, 0x00, 0x0a, 0x00,
+        ];
+        let reward = &ask(&mut world, 11, 32100, &request)[0][12..];
+        assert_eq!(&reward[..5], &[0, 0, 0, 0, 1], "granted, quest 1");
+        assert_eq!(&reward[5..7], &[0, 0], "no flags, no items");
+        assert_eq!(&reward[7..15], &1000u64.to_be_bytes());
+        assert_eq!(&reward[15..23], &500u64.to_be_bytes());
+        assert_eq!(&reward[23..], &[0, 0]);
+
+        // A second reward's gold is added to the first.
+        let reward = &ask(&mut world, 11, 32100, &request)[0][12..];
+        assert_eq!(&reward[15..23], &1000u64.to_be_bytes());
+
+        assert_eq!(ask(&mut world, 11, 32150, &[]).len(), 1);
+        assert_eq!(ask(&mut world, 6, 7010, &[]).len(), 1);
+        assert_eq!(ask(&mut world, 3, 5100, &[]).len(), 1);
     }
 
     /// Nothing is answered before the login.
