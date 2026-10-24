@@ -58,8 +58,12 @@ const BELONGINGS: (u32, u32) = (8, 20000);
 /// Three `u64`s, kept in `network/b.a`, the second the gold held; the reader
 /// then asks kind 2, command 1102.
 const COUNTERS: (u32, u32) = (8, 23000);
-/// `[byte][len][bytes][u16][u16 count][entries]` (`0x1ba2c4`), the entries
-/// `network/h` records - none here; the reader then asks kind 2, command 1114.
+/// The 코단 map (`0x1ba2c4`): `[byte][len][title][u16 here][u16 count]` and
+/// that many places, `[i16 id][i8 type][len][name][i16 x][i16 y][count][i16
+/// neighbour...]`, kept as `network/h` records. `here` is the place the
+/// player stands at (`network/b.c`); the map (`game/d`) draws each place at
+/// `(50 + x, 120 + y)` with a path to each neighbour, and the arrows move the
+/// cursor along those paths. The reader then asks kind 2, command 1114.
 const PLACE: (u32, u32) = (2, 1102);
 /// `[count][u16 index...]`, marking those of [`PLACE`]'s records (`0x1ba6f8`);
 /// the reader then asks kind 2, command 1120.
@@ -67,13 +71,36 @@ const PLACE_MARKS: (u32, u32) = (2, 1114);
 /// `[len][message]`, a message shown on entering (none here); its reader
 /// (`0x1ba7d4`) then puts the title into the world (`base/d.a(…, 1, 5, 100)`).
 const ENTER_WORLD: (u32, u32) = (2, 1120);
-/// `[len][message][u64]` (`0x1ba87c`), the `u64` a time the title keeps.
+/// 입장 on the 코단 map, `[u16 place]` - the cursor's (`network/b.d`).
+/// Answered `[len][message][u64]` (`0x1ba87c`), the `u64` a time the title
+/// keeps; a place other than the one the player stands at then asks whether
+/// to travel there, [`TRAVEL`], and the one stood at goes on to
+/// [`ENTER_AREA`].
 const AREA: (u32, u32) = (2, 1130);
-/// 입장 from the 코단 map: `[0][byte][u16 map]` (`0x1baba6`) puts the title in
-/// the world on that map; a non-zero first byte is a refusal with a message.
+/// 정보 on the 코단 map, `[u16 place]`, answered `[u16 len][text]`
+/// (`0x1ba936`), shown in the map's box.
+const AREA_INFO: (u32, u32) = (2, 1140);
+/// Travelling to the cursor's place, `[u16 place]`. Answered `[0][u64
+/// gold][len][message]` (`0x1ba9ae`): the player now stands there and holds
+/// that gold. A non-zero first byte refuses, with `[u16 len][text]`.
+const TRAVEL: (u32, u32) = (2, 1150);
+/// Entering the place stood at: `[0][type][u16 map]` (`0x1baba6`) puts the
+/// title on map `p/nt/0/<map>`. Type 2 is a dungeon, which the title first
+/// opens a party for (kind 7, command 10000); any other enters at once. A
+/// non-zero first byte is a refusal with a message.
 const ENTER_AREA: (u32, u32) = (2, 1160);
-/// The map 입장 lands on: `p/nt/0/001`, 이스한트 중앙.
-const START_MAP: u16 = 1;
+/// Kind 7 is a dungeon's party. 10000, asked once [`ENTER_AREA`] names a
+/// dungeon, is answered `[byte]` (`0x1bd858`), which the title keeps before
+/// opening the party screen and asking kind 7, command 10400.
+const PARTY_OPEN: (u32, u32) = (7, 10000);
+/// The party screen's contents (`network/a.h([BI)V`): `[len][title][i16][i16]
+/// [count]`, at most two groups, each `[i16 id][count]` members of
+/// `[len][name][byte]`.
+const PARTY: (u32, u32) = (7, 10400);
+/// [`ENTER_AREA`]'s type for a dungeon.
+const DUNGEON: u8 = 2;
+/// [`ENTER_AREA`]'s type for a town.
+const TOWN: u8 = 1;
 /// Kind 3 is life on the map. 5000, sent on arriving, is answered
 /// `[byte][u16 len][text]` (`0x1baee8`): the text, kept by
 /// `network/a.a([BII)I`, is shown in a popup and must not be empty - the
@@ -131,6 +158,8 @@ pub(super) struct KodanWorld {
     /// The whole id [`ENTER`] names, which [`PROGRESS_FILE`] is keyed by.
     character: u64,
     progress: Progress,
+    /// The [`PLACES`] index the player stands at on the 코단 map.
+    here: u16,
 }
 
 impl KodanWorld {
@@ -194,6 +223,23 @@ impl KodanWorld {
             PLACE_MARKS if self.logged_in => vec![SlotRelay::message(kind, command, &[0])],
             ENTER_WORLD if self.logged_in => vec![SlotRelay::message(kind, command, &[0])],
             AREA if self.logged_in => vec![SlotRelay::message(kind, command, &[0; 9])],
+            AREA_INFO if self.logged_in => {
+                let place = Self::place_named(body);
+                let mut info = (place.name.len() as u16).to_be_bytes().to_vec();
+                info.extend_from_slice(place.name);
+                vec![SlotRelay::message(kind, command, &info)]
+            }
+            TRAVEL if self.logged_in => {
+                if let [high, low, ..] = body
+                    && (u16::from_be_bytes([*high, *low]) as usize) < PLACES.len()
+                {
+                    self.here = u16::from_be_bytes([*high, *low]);
+                }
+                let mut travel = vec![0];
+                travel.extend_from_slice(&self.progress.gold.to_be_bytes());
+                travel.push(0);
+                vec![SlotRelay::message(kind, command, &travel)]
+            }
             ARRIVED if self.logged_in => {
                 let mut arrival = vec![0];
                 arrival.extend_from_slice(&(MESSAGE_WELCOME.len() as u16).to_be_bytes());
@@ -226,10 +272,21 @@ impl KodanWorld {
                     Vec::new()
                 }
             },
+            PARTY_OPEN if self.logged_in => vec![SlotRelay::message(kind, command, &[0])],
+            PARTY if self.logged_in => {
+                let mut party = vec![0, 0, 0, 0, 0, 1];
+                party.extend_from_slice(&self.character_id.to_be_bytes());
+                party.push(1);
+                party.push(self.character_name.len() as u8);
+                party.extend_from_slice(&self.character_name);
+                party.push(4);
+                vec![SlotRelay::message(kind, command, &party)]
+            }
             QUEST_SYNC | SCENE_OVER | PLACE_AGAIN if self.logged_in => vec![SlotRelay::message(kind, command, &[])],
             ENTER_AREA if self.logged_in => {
-                let mut entry = vec![0, 1];
-                entry.extend_from_slice(&START_MAP.to_be_bytes());
+                let place = &PLACES[self.here as usize];
+                let mut entry = vec![0, if place.dungeon { DUNGEON } else { TOWN }];
+                entry.extend_from_slice(&place.map.to_be_bytes());
                 vec![SlotRelay::message(kind, command, &entry)]
             }
             _ => {
@@ -281,29 +338,162 @@ impl KodanWorld {
         }
     }
 
-    /// [`PLACE`]: no title, the player's own index, and the players here -
-    /// only the player, whose record the world screen reads by that index.
+    /// [`PLACE`]: the 코단 map, with the player at [`Self::here`].
     fn place(&self) -> Vec<u8> {
-        const OWN_INDEX: u16 = 0;
-        const CLASS: u8 = 4;
-        const X: u16 = 100;
-        const Y: u16 = 100;
-
         let mut place = vec![0, 0];
-        place.extend_from_slice(&OWN_INDEX.to_be_bytes());
-        place.extend_from_slice(&1u16.to_be_bytes());
+        place.extend_from_slice(&self.here.to_be_bytes());
+        place.extend_from_slice(&(PLACES.len() as u16).to_be_bytes());
+        for (index, entry) in PLACES.iter().enumerate() {
+            place.extend_from_slice(&(index as u16).to_be_bytes());
+            place.push(entry.dungeon as u8);
+            place.push(entry.name.len() as u8);
+            place.extend_from_slice(entry.name);
+            place.extend_from_slice(&entry.x.to_be_bytes());
+            place.extend_from_slice(&entry.y.to_be_bytes());
 
-        place.extend_from_slice(&self.character_id.to_be_bytes());
-        place.push(CLASS);
-        place.push(self.character_name.len() as u8);
-        place.extend_from_slice(&self.character_name);
-        place.extend_from_slice(&X.to_be_bytes());
-        place.extend_from_slice(&Y.to_be_bytes());
-        place.push(0);
-
+            let neighbours = PATHS
+                .iter()
+                .filter_map(|(a, b)| match index as u16 {
+                    i if i == *a => Some(*b),
+                    i if i == *b => Some(*a),
+                    _ => None,
+                })
+                .collect::<Vec<u16>>();
+            place.push(neighbours.len() as u8);
+            for neighbour in neighbours {
+                place.extend_from_slice(&neighbour.to_be_bytes());
+            }
+        }
         place
     }
+
+    /// The place a `[u16 place]` request names, or the first when it names
+    /// none.
+    fn place_named(body: &[u8]) -> &'static Place {
+        match body {
+            [high, low, ..] => PLACES.get(u16::from_be_bytes([*high, *low]) as usize).unwrap_or(&PLACES[0]),
+            _ => &PLACES[0],
+        }
+    }
 }
+
+/// One place on the 코단 map.
+struct Place {
+    /// EUC-KR.
+    name: &'static [u8],
+    /// The `p/nt/0` map entering lands on: a town's square, a dungeon's first
+    /// 구역.
+    map: u16,
+    dungeon: bool,
+    x: i16,
+    y: i16,
+}
+
+/// The 코단 map's places, the towns and the dungeons the title carries maps
+/// for, laid out over the continent the map shows. The first is where a
+/// session starts.
+const PLACES: &[Place] = &[
+    // 이스한트, 중앙
+    Place {
+        name: &[0xc0, 0xcc, 0xbd, 0xba, 0xc7, 0xd1, 0xc6, 0xae],
+        map: 1,
+        dungeon: false,
+        x: 45,
+        y: 55,
+    },
+    // 엘메스터, 성기사의 광장
+    Place {
+        name: &[0xbf, 0xa4, 0xb8, 0xde, 0xbd, 0xba, 0xc5, 0xcd],
+        map: 6,
+        dungeon: false,
+        x: 110,
+        y: 40,
+    },
+    // 수련자의사막
+    Place {
+        name: &[0xbc, 0xf6, 0xb7, 0xc3, 0xc0, 0xda, 0xc0, 0xc7, 0xbb, 0xe7, 0xb8, 0xb7],
+        map: 72,
+        dungeon: true,
+        x: 15,
+        y: 80,
+    },
+    // 수행의동굴
+    Place {
+        name: &[0xbc, 0xf6, 0xc7, 0xe0, 0xc0, 0xc7, 0xb5, 0xbf, 0xb1, 0xbc],
+        map: 76,
+        dungeon: true,
+        x: 60,
+        y: 92,
+    },
+    // 과거의폐허
+    Place {
+        name: &[0xb0, 0xfa, 0xb0, 0xc5, 0xc0, 0xc7, 0xc6, 0xf3, 0xc7, 0xe3],
+        map: 80,
+        dungeon: true,
+        x: 25,
+        y: 20,
+    },
+    // 열병사막
+    Place {
+        name: &[0xbf, 0xad, 0xba, 0xb4, 0xbb, 0xe7, 0xb8, 0xb7],
+        map: 11,
+        dungeon: true,
+        x: 5,
+        y: 48,
+    },
+    // 루비동굴
+    Place {
+        name: &[0xb7, 0xe7, 0xba, 0xf1, 0xb5, 0xbf, 0xb1, 0xbc],
+        map: 19,
+        dungeon: true,
+        x: 88,
+        y: 78,
+    },
+    // 히르켄산맥
+    Place {
+        name: &[0xc8, 0xf7, 0xb8, 0xa3, 0xc4, 0xcb, 0xbb, 0xea, 0xb8, 0xc6],
+        map: 40,
+        dungeon: true,
+        x: 72,
+        y: 10,
+    },
+    // 딥던전
+    Place {
+        name: &[0xb5, 0xf6, 0xb4, 0xf8, 0xc0, 0xfc],
+        map: 29,
+        dungeon: true,
+        x: 135,
+        y: 88,
+    },
+    // 메테오라 요새
+    Place {
+        name: &[0xb8, 0xde, 0xc5, 0xd7, 0xbf, 0xc0, 0xb6, 0xf3, 0x20, 0xbf, 0xe4, 0xbb, 0xf5],
+        map: 54,
+        dungeon: true,
+        x: 140,
+        y: 12,
+    },
+];
+
+/// The paths between [`PLACES`], by index: 이스한트 to the beginners'
+/// dungeons and to 엘메스터, 엘메스터 to the harder ones.
+const PATHS: &[(u16, u16)] = &[
+    (0, 1),
+    (0, 2),
+    (0, 3),
+    (0, 4),
+    (0, 5),
+    (2, 5),
+    (4, 5),
+    (1, 6),
+    (1, 7),
+    (1, 8),
+    (1, 9),
+    (3, 6),
+    (4, 7),
+    (6, 8),
+    (7, 9),
+];
 
 /// A big-endian number of up to eight bytes.
 fn be(bytes: &[u8]) -> u64 {
@@ -413,20 +603,48 @@ mod tests {
         assert_eq!(&session[12..], &[3, b'a', b'b', b'c']);
     }
 
-    /// The players here are the player alone, under the id and name 1020 gave,
-    /// at the index the world screen reads the player's own record by.
+    /// The 코단 map lists every place, the player at the first, each with the
+    /// paths to its neighbours both ways.
     #[test]
-    fn the_place_holds_the_player() {
+    fn the_map_lists_the_places() {
+        use super::{PATHS, PLACES};
+
         let mut world = KodanWorld::default();
         ask(&mut world, 1, 1000, &[0x1e]);
-        ask(&mut world, 1, 1020, &[0, 0, 0, 0, 0, 0, 0, 0, 7, 3, b'a', b'b', b'c']);
 
-        let place = &ask(&mut world, 2, 1102, &[])[0][12..];
-        // No title, own index 0, one player.
-        assert_eq!(&place[..6], &[0, 0, 0, 0, 0, 1]);
-        // Id 7, then the name behind the class byte.
-        assert_eq!(&place[6..8], &[0, 7]);
-        assert_eq!(&place[9..13], &[3, b'a', b'b', b'c']);
+        let map = &ask(&mut world, 2, 1102, &[])[0][12..];
+        // No title, standing at the first place, then every place.
+        assert_eq!(&map[..4], &[0, 0, 0, 0]);
+        assert_eq!(u16::from_be_bytes([map[4], map[5]]) as usize, PLACES.len());
+
+        let mut cursor = &map[6..];
+        let mut paths = 0;
+        for (index, place) in PLACES.iter().enumerate() {
+            assert_eq!(u16::from_be_bytes([cursor[0], cursor[1]]) as usize, index);
+            assert_eq!(cursor[2], place.dungeon as u8);
+            let name = cursor[3] as usize;
+            assert_eq!(&cursor[4..4 + name], place.name);
+            cursor = &cursor[4 + name + 4..];
+            let neighbours = cursor[0] as usize;
+            paths += neighbours;
+            cursor = &cursor[1 + 2 * neighbours..];
+        }
+        assert!(cursor.is_empty());
+        assert_eq!(paths, 2 * PATHS.len());
+    }
+
+    /// Travelling to a dungeon and entering it opens its party, on the
+    /// dungeon's first 구역.
+    #[test]
+    fn a_dungeon_is_entered_through_its_party() {
+        let mut world = KodanWorld::default();
+        ask(&mut world, 1, 1000, &[0x1e]);
+
+        // 수행의동굴.
+        let travel = &ask(&mut world, 2, 1150, &[0, 3])[0][12..];
+        assert_eq!(travel[0], 0, "travelled");
+        assert_eq!(&ask(&mut world, 2, 1160, &[])[0][12..], &[0, 2, 0, 76]);
+        assert_eq!(&ask(&mut world, 7, 10000, &[])[0][12..], &[0]);
     }
 
     /// 입장 lands on the map 이스한트 is, and the arrival popup has text.
