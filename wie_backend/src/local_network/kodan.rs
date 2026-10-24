@@ -127,6 +127,12 @@ const AREA_READY: (u32, u32) = (7, 15000);
 /// [byte][count][bytes]`, then a byte that, non-zero, starts the 구역
 /// (`game/engine/f.k()V`).
 const ROUND: (u32, u32) = (7, 15100);
+/// A step in a 구역, `[x][y][direction]`: 17000 setting off, 17050 arriving.
+/// The server tells the party, the walker too, `[i32 id][x][y][direction]`
+/// under the same command (`0x1bf8a4`), which places that member and shows
+/// it (`game/chars/g.b(Z)V`) - until then the player is a shadow.
+const STEP: (u32, u32) = (7, 17000);
+const STEPPED: (u32, u32) = (7, 17050);
 /// [`ENTER_AREA`]'s type for a dungeon.
 const DUNGEON: u8 = 2;
 /// [`ENTER_AREA`]'s type for a town.
@@ -326,7 +332,17 @@ impl KodanWorld {
                 vec![SlotRelay::message(kind, command, &info)]
             }
             AREA_READY if self.logged_in => vec![SlotRelay::message(kind, command, &[])],
-            ROUND if self.logged_in => vec![SlotRelay::message(kind, command, &[1, 0, 0, 1])],
+            ROUND if self.logged_in => {
+                // `[u16 map][x][y][direction]`: where the player stands.
+                let mut replies = vec![SlotRelay::message(kind, command, &[1, 0, 0, 1])];
+                if let [_, _, place @ ..] = body
+                    && place.len() >= 3
+                {
+                    replies.push(SlotRelay::message(STEPPED.0, STEPPED.1, &self.step(&place[..3])));
+                }
+                replies
+            }
+            STEP | STEPPED if self.logged_in && body.len() >= 3 => vec![SlotRelay::message(kind, command, &self.step(&body[..3]))],
             PARTY if self.logged_in => {
                 let mut party = vec![0, 0, 0, 0, 0, 1];
                 party.extend_from_slice(&self.character_id.to_be_bytes());
@@ -390,6 +406,13 @@ impl KodanWorld {
         if written != Some(data.len()) {
             tracing::warn!("코단 world: {PROGRESS_FILE} was not written");
         }
+    }
+
+    /// A [`STEP`] told back: the player's id before `[x][y][direction]`.
+    fn step(&self, place: &[u8]) -> Vec<u8> {
+        let mut step = (self.character as u32).to_be_bytes().to_vec();
+        step.extend_from_slice(place);
+        step
     }
 
     /// [`PLACE`]: the 코단 map, with the player at [`Self::here`].
@@ -728,7 +751,14 @@ mod tests {
         let info = &ask(&mut world, 7, 14600, &[])[0][12..];
         assert_eq!(&info[3..11], &30u64.to_be_bytes());
         assert_eq!(ask(&mut world, 7, 15000, &[0, 0x4c]).len(), 1);
-        assert_eq!(&ask(&mut world, 7, 15100, &[0, 0x4c, 4, 4, 2])[0][12..], &[1, 0, 0, 1]);
+        let round = ask(&mut world, 7, 15100, &[0, 0x4c, 4, 4, 2]);
+        assert_eq!(&round[0][12..], &[1, 0, 0, 1]);
+        // The player placed where it stands.
+        assert_eq!(&round[1][8..12], &17050u32.to_be_bytes());
+        assert_eq!(&round[1][12..], &[0, 1, 0x0d, 0x5b, 4, 4, 2]);
+
+        let step = &ask(&mut world, 7, 17000, &[5, 4, 4])[0][12..];
+        assert_eq!(step, &[0, 1, 0x0d, 0x5b, 5, 4, 4]);
     }
 
     /// 입장 lands on the map 이스한트 is, and the arrival popup has text.
