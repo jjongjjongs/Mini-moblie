@@ -102,12 +102,15 @@ const RISE: Site = Site {
 };
 /// The methods [`rise`] calls, by the slots calls to them are made through:
 /// `base/b.a()Lgame/chars/g;`, the player; `game/chars/e.i()S`, its health;
-/// and `e.d(I)V`, adding to the health up to the most.
+/// `e.d(I)V`, adding to the health up to the most; and [`STAND`].
 const PLAYER: u32 = 0x1feb4c;
 /// `network/f.a(B)V`, what the title waits on: 0 for nothing.
 const WAIT: u32 = 0x1feb8c;
 const HEALTH: u32 = 0x1ec8b8;
 const HEAL: u32 = 0x1f09f4;
+/// `game/chars/g.h()V`, the player back to standing. Loading a 구역 has it
+/// stood again; one risen where it fell, on the 구역 it is on, is not.
+const STAND: u32 = 0x1fbeb8;
 
 /// The answer to a party room's start (`0x1bf53e`) loads the dungeon and puts
 /// the title to waiting on the server, for the party's server to end with the
@@ -256,8 +259,8 @@ fn fall(at: u32) -> Vec<u8> {
     code.bytes()
 }
 
-/// `network/b.^ = 0`, the risen player given its health back if it has none,
-/// and the wait for the server ended.
+/// `network/b.^ = 0`, the risen player given its health back if it has none
+/// and stood up, and the wait for the server ended.
 fn rise(at: u32) -> Vec<u8> {
     let mut code = Thumb::new(at);
     code.op(0xb500); // push {lr}
@@ -269,13 +272,16 @@ fn rise(at: u32) -> Vec<u8> {
     code.load(0, HEALTH);
     code.call(CALLV);
     code.op(0x0400); // lsls r0,r0,#16
-    code.op(0xbc02); // pop {r1}
+    code.op(0x9900); // ldr r1,[sp]
     code.op(0x2800); // cmp r0,#0
     let alive = code.branch(GT);
     code.load(0, HEAL);
     code.load(2, 30000);
     code.call(CALLV);
     code.land(alive);
+    code.op(0xbc02); // pop {r1}
+    code.load(0, STAND);
+    code.call(CALLV);
     code.load(0, WAIT);
     code.op(0x2100); // movs r1,#0
     code.call(CALL);
