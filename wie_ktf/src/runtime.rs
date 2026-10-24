@@ -1,6 +1,7 @@
 mod init;
 mod java;
 mod maple_live;
+mod oz;
 mod svc_ids;
 mod wipi_c;
 

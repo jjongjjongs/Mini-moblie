@@ -1,0 +1,377 @@
+//! 오즈 천공의 기사단 (`0103CD8A`): the 코단 world's dungeons fought by the
+//! title's own rules.
+//!
+//! The title plays offline as well as online, and nearly every rule of a fight
+//! asks which it is: `network/b.a()B` answers -1 offline, 0 in an area the
+//! server runs and 1 in one the title runs. Offline the title walks and swings
+//! the monsters itself, lands the player's blows and shots, takes the player's
+//! health, gives the experience and the things a fallen monster leaves, and
+//! lays the player down; in an area the server runs it waits for the server to
+//! say each of those, and in one the title runs - a town - there is nothing to
+//! fight.
+//!
+//! The server that ran the 코단 world's dungeons is gone, and the rules it
+//! played by went with it. So a dungeon is fought as offline. The area's kind,
+//! the byte the server answers an entry with (`network/a.b(I[BI)V`), is kept
+//! in `network/b.Z` as it came instead of as 1, and the emulated server enters
+//! a dungeon with kind -1. `b.a()B` then answers -1 there, but only to the
+//! fighting: the characters (`game/chars/*`) and the skills
+//! (`game/engine/h`). Everything else - loading the map, the player's own
+//! record, the screens - asks the same question to choose between the save on
+//! the handset and the server's, and keeps being told 1, a town's answer.
+//!
+//! Two things the server did around a fight are done here as well. It told the
+//! title the player had fallen, which opened 부활대기중 (rise at the entrance,
+//! or give the dungeon up); and the player it stood up at the entrance had
+//! health again.
+
+use alloc::vec::Vec;
+
+use wie_core_arm::ArmCore;
+use wie_util::{ByteRead, ByteWrite, Result};
+
+const AID: &str = "0103CD8A";
+
+/// The runtime's static call, `r0` the method.
+const CALL: u32 = 0x1d72f2;
+/// The runtime's virtual call, `r0` the method and `r1` the object.
+const CALLV: u32 = 0x1d7300;
+/// A static field's value, and setting it, `r0` the field and `r1` the value.
+const GETSTATIC: u32 = 0x1d5f2c;
+const PUTSTATIC: u32 = 0x1d64c8;
+/// `network/b.a()B`.
+const ONLINE: u32 = 0x1c587c;
+
+/// Code changed, and what is there in the build this was written against.
+struct Site {
+    address: u32,
+    code: [u16; 2],
+}
+
+/// `network/a.b(I[BI)V`, on an entry: `cmp r0,#2; beq party; ldr r0,=Z;
+/// movs r1,#1`, then `Z = r1`. The `movs` becomes `adds r1,r4,#0`, the kind
+/// read into r4.
+const KEEP_KIND: Site = Site {
+    address: 0x1bac62,
+    code: [0x488a, 0x2101],
+};
+const KEEP_KIND_WITH: u16 = 0x1c21;
+
+/// `network/b.a()B` once connected, with `Z` in r0: `negs r3,r0; orrs r3,r0;
+/// lsrs r3,#31; adds r0,r3,#0; b out`, that is `Z != 0`. The first two become
+/// a call to [`answer`], and the third the `b out`.
+const ANSWER: Site = Site {
+    address: 0x1c58ac,
+    code: [0x4243, 0x4303],
+};
+const ANSWER_OUT: u16 = 0xe7f5;
+
+/// `game/chars/m.e()V`, a monster falling, hands each thing it leaves to
+/// `game/engine/f.a(SB)Z`, the number in r1. That counts it in a table of the
+/// 140 things of the offline game, and a 코단 world monster leaves things
+/// numbered past them - which only the server ever handed out - and the count
+/// runs off the table's end. The call goes through [`leave`] instead.
+const LEAVE: Site = Site {
+    address: 0x197336,
+    code: bl(0x197336, CALL),
+};
+/// The things the offline game has.
+const THINGS: u16 = 140;
+
+/// `game/chars/g.X()V`, every frame: the player with no health left is laid
+/// down, `g.S()V`. The call goes through [`fall`].
+const FALL: Site = Site {
+    address: 0x153b10,
+    code: bl(0x153b10, CALLV),
+};
+/// `network/b.^`, set to 10 by the server's word of the player falling
+/// (`0x1c2e80`), and what opens 부활대기중 (`game/o`, `game/k`).
+const WAITING: u32 = 0x1ff0fc;
+
+/// The answer to 입구부활 (`0x1bf754`) stands the player at the entrance, on
+/// this 구역 or after loading the first, and either way ends closing
+/// 부활대기중: `network/b.^ = 0`. That setting goes through [`rise`].
+const RISE: Site = Site {
+    address: 0x1bf7e0,
+    code: bl(0x1bf7e0, PUTSTATIC),
+};
+/// The methods [`rise`] calls, by the slots calls to them are made through:
+/// `base/b.a()Lgame/chars/g;`, the player; `game/chars/e.i()S`, its health;
+/// and `e.d(I)V`, adding to the health up to the most.
+const PLAYER: u32 = 0x1feb4c;
+const HEALTH: u32 = 0x1ec8b8;
+const HEAL: u32 = 0x1f09f4;
+
+/// Code that is told it is offline in a dungeon: `[start, end)`, by the
+/// address a call returns to.
+const FIGHTING: [(u32, u32); 4] = [
+    // game/chars/a to e.
+    (0x117874, 0x136ab4),
+    // game/engine/h, the skills.
+    (0x13e664, 0x145c84),
+    // game/chars/g.
+    (0x14b260, 0x159774),
+    // game/chars/h to n.
+    (0x18dd58, 0x1a0600),
+];
+
+/// Installs the changes if this is the title and the code is the build they
+/// were written against. `cave` is unmapped memory within a Thumb `bl` of the
+/// image, for the code they call.
+pub(crate) fn install_local_fights(core: &mut ArmCore, aid: &str, cave: u32) -> Result<()> {
+    if !aid.eq_ignore_ascii_case(AID) {
+        return Ok(());
+    }
+    for site in [&KEEP_KIND, &ANSWER, &LEAVE, &FALL, &RISE] {
+        if !halfwords_at(core, site.address, &site.code)? {
+            tracing::warn!(
+                "오즈: code at {:#x} differs from the known build; the 코단 world's fights stay the server's",
+                site.address
+            );
+            return Ok(());
+        }
+    }
+
+    let mut code = Vec::new();
+    let mut place = |routine: fn(u32) -> Vec<u8>| {
+        let at = cave + code.len() as u32;
+        code.extend_from_slice(&routine(at));
+        at
+    };
+    let answer = place(answer);
+    let leave = place(leave);
+    let fall = place(fall);
+    let rise = place(rise);
+    core.load(&code, cave, code.len())?;
+
+    write(core, KEEP_KIND.address + 2, &[KEEP_KIND_WITH])?;
+    let [high, low] = bl(ANSWER.address, answer);
+    write(core, ANSWER.address, &[high, low, ANSWER_OUT])?;
+    write(core, LEAVE.address, &bl(LEAVE.address, leave))?;
+    write(core, FALL.address, &bl(FALL.address, fall))?;
+    write(core, RISE.address, &bl(RISE.address, rise))?;
+
+    tracing::info!("오즈: the 코단 world's dungeons are fought by the title's offline rules");
+
+    Ok(())
+}
+
+/// `network/b.a()B`'s answer, from `Z` in r0, with the caller's return address
+/// at `[sp, #4]` where `b.a()B` pushed it.
+fn answer(at: u32) -> Vec<u8> {
+    let mut code = Thumb::new(at);
+    code.op(0x0603); // lsls r3,r0,#24: Z, a byte
+    let plain = code.branch(PL);
+    code.op(0x9b01); // ldr r3,[sp,#4]
+    code.op(0xb404); // push {r2}
+    let mut offline = Vec::new();
+    for (start, end) in FIGHTING {
+        code.load(2, start);
+        code.op(0x4293); // cmp r3,r2
+        let before = code.branch(LO);
+        code.load(2, end);
+        code.op(0x4293);
+        offline.push(code.branch(LO));
+        code.land(before);
+    }
+    code.op(0xbc04); // pop {r2}
+    code.op(0x2001); // movs r0,#1: a town's answer
+    code.op(0x4770); // bx lr
+    for branch in offline {
+        code.land(branch);
+    }
+    code.op(0xbc04);
+    code.op(0x2000); // movs r0,#0
+    code.op(0x3801); // subs r0,#1: offline's
+    code.op(0x4770);
+    code.land(plain);
+    code.op(0x4243); // negs r3,r0
+    code.op(0x4303); // orrs r3,r0
+    code.op(0x0fdb); // lsrs r3,r3,#31
+    code.op(0x1c18); // adds r0,r3,#0
+    code.op(0x4770);
+    code.bytes()
+}
+
+/// `game/engine/f.a(SB)Z` for a thing the offline game has, false for one it
+/// has not.
+fn leave(at: u32) -> Vec<u8> {
+    let mut code = Thumb::new(at);
+    code.op(0x2900 | (THINGS - 1)); // cmp r1,#139
+    let past = code.branch(HI);
+    code.load(3, CALL | 1);
+    code.op(0x4718); // bx r3, returning where the call would have
+    code.land(past);
+    code.op(0x2000); // movs r0,#0
+    code.op(0x4770);
+    code.bytes()
+}
+
+/// `g.S()V`, `r0` and `r1` as the call had them, after opening 부활대기중 as
+/// the server's word did - where the title runs the area while connected, and
+/// only once.
+fn fall(at: u32) -> Vec<u8> {
+    let mut code = Thumb::new(at);
+    code.op(0xb503); // push {r0,r1,lr}
+    code.call(ONLINE);
+    code.op(0x0600); // lsls r0,r0,#24
+    code.op(0x1600); // asrs r0,r0,#24
+    code.op(0x2801); // cmp r0,#1
+    let elsewhere = code.branch(NE);
+    code.load(0, WAITING);
+    code.call(GETSTATIC);
+    code.op(0x2800); // cmp r0,#0
+    let open = code.branch(NE);
+    code.load(0, WAITING);
+    code.op(0x210a); // movs r1,#10
+    code.call(PUTSTATIC);
+    code.land(elsewhere);
+    code.land(open);
+    code.op(0xbc03); // pop {r0,r1}
+    code.op(0xbc08); // pop {r3}
+    code.op(0x469e); // mov lr,r3
+    code.load(3, CALLV | 1);
+    code.op(0x4718); // bx r3
+    code.bytes()
+}
+
+/// `network/b.^ = 0`, then the risen player given its health back if it has
+/// none.
+fn rise(at: u32) -> Vec<u8> {
+    let mut code = Thumb::new(at);
+    code.op(0xb500); // push {lr}
+    code.call(PUTSTATIC);
+    code.load(0, PLAYER);
+    code.call(CALL);
+    code.op(0xb401); // push {r0}
+    code.op(0x1c01); // adds r1,r0,#0
+    code.load(0, HEALTH);
+    code.call(CALLV);
+    code.op(0x0400); // lsls r0,r0,#16
+    code.op(0xbc02); // pop {r1}
+    code.op(0x2800); // cmp r0,#0
+    let alive = code.branch(GT);
+    code.load(0, HEAL);
+    code.load(2, 30000);
+    code.call(CALLV);
+    code.land(alive);
+    code.op(0xbd00); // pop {pc}
+    code.bytes()
+}
+
+/// Thumb condition codes.
+const NE: u16 = 0x1;
+const LO: u16 = 0x3;
+const PL: u16 = 0x5;
+const HI: u16 = 0x8;
+const GT: u16 = 0xc;
+
+/// Thumb code built a halfword at a time, the words it loads placed after it.
+/// Its place, and so its length, are 4-aligned.
+struct Thumb {
+    at: u32,
+    code: Vec<u16>,
+    /// Each `ldr rX,[pc,#n]`: where it is, and the word it loads.
+    loads: Vec<(usize, u32)>,
+}
+
+impl Thumb {
+    fn new(at: u32) -> Self {
+        debug_assert_eq!(at % 4, 0);
+        Self {
+            at,
+            code: Vec::new(),
+            loads: Vec::new(),
+        }
+    }
+
+    fn op(&mut self, op: u16) {
+        self.code.push(op);
+    }
+
+    /// `bl to`.
+    fn call(&mut self, to: u32) {
+        let here = self.at + 2 * self.code.len() as u32;
+        self.code.extend_from_slice(&bl(here, to));
+    }
+
+    /// `ldr reg,=word`.
+    fn load(&mut self, reg: u16, word: u32) {
+        self.loads.push((self.code.len(), word));
+        self.code.push(0x4800 | (reg << 8));
+    }
+
+    /// A conditional branch forward, to where [`Thumb::land`] is called.
+    fn branch(&mut self, condition: u16) -> usize {
+        self.code.push(0xd000 | (condition << 8));
+        self.code.len() - 1
+    }
+
+    fn land(&mut self, branch: usize) {
+        let offset = self.code.len() - branch - 2;
+        debug_assert!(offset < 0x80);
+        self.code[branch] |= offset as u16;
+    }
+
+    fn bytes(mut self) -> Vec<u8> {
+        if self.code.len() % 2 == 1 {
+            self.code.push(0x46c0); // mov r8,r8
+        }
+        let pool = self.at + 2 * self.code.len() as u32;
+        for (index, &(at, _)) in self.loads.iter().enumerate() {
+            let pc = (self.at + 2 * at as u32 + 4) & !3;
+            let offset = (pool + 4 * index as u32 - pc) / 4;
+            debug_assert!(offset < 0x100);
+            self.code[at] |= offset as u16;
+        }
+
+        let mut bytes: Vec<u8> = self.code.iter().flat_map(|x| x.to_le_bytes()).collect();
+        for (_, word) in &self.loads {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        bytes
+    }
+}
+
+const fn bl(from: u32, to: u32) -> [u16; 2] {
+    let offset = to.wrapping_sub(from + 4) as i32;
+
+    [0xf000 | ((offset >> 12) as u16 & 0x7ff), 0xf800 | ((offset >> 1) as u16 & 0x7ff)]
+}
+
+fn write(core: &mut ArmCore, address: u32, code: &[u16]) -> Result<()> {
+    let bytes: Vec<u8> = code.iter().flat_map(|x| x.to_le_bytes()).collect();
+    core.write_bytes(address, &bytes)
+}
+
+fn halfwords_at(core: &ArmCore, address: u32, expected: &[u16]) -> Result<bool> {
+    let mut bytes = alloc::vec![0; expected.len() * 2];
+    core.read_bytes(address, &mut bytes)?;
+
+    Ok(bytes.chunks(2).map(|x| u16::from_le_bytes([x[0], x[1]])).eq(expected.iter().copied()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_hooked_calls_are_the_ones_read_out_of_the_build() {
+        assert_eq!(LEAVE.code, [0xf03f, 0xffdc]);
+        assert_eq!(FALL.code, [0xf083, 0xfbf6]);
+        assert_eq!(RISE.code, [0xf016, 0xfe72]);
+    }
+
+    #[test]
+    fn a_load_reaches_its_word_after_the_code() {
+        let leave = leave(0x1000);
+        let halfword = |at: usize| u16::from_le_bytes([leave[at], leave[at + 1]]);
+
+        assert_eq!(leave.len(), 16);
+        // `bhi past` lands past the load and the `bx`.
+        assert_eq!(halfword(2), 0xd801);
+        // `ldr r3,[pc,#4]` at +4 loads the word at +12.
+        assert_eq!(halfword(4), 0x4b01);
+        assert_eq!(u32::from_le_bytes(leave[12..16].try_into().unwrap()), CALL | 1);
+    }
+}

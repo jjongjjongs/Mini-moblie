@@ -149,6 +149,8 @@ struct Watch {
     label: String,
     branches: u32,
     hits: u32,
+    /// Report the registers on each pass instead of tracing, `branches` times.
+    registers: bool,
 }
 
 /// Starts a trace whenever the core reaches `pc`.
@@ -168,6 +170,20 @@ struct Watch {
 /// starts a function or is a branch target is seen whichever engine is running.
 /// One in the middle of a straight run is only seen by the interpreter.
 pub fn watch(pc: u32, label: &str, branches: u32) {
+    watch_slot(pc, label, branches, false);
+}
+
+/// Reports the registers each time the core reaches `pc`, the first `passes`
+/// times.
+///
+/// A trace says where a routine went; this says what it was handed. A routine
+/// called on every character each frame needs the second - which character,
+/// how much damage - and many passes of it, where a trace would stop at three.
+pub fn watch_registers(pc: u32, label: &str, passes: u32) {
+    watch_slot(pc, label, passes, true);
+}
+
+fn watch_slot(pc: u32, label: &str, branches: u32, registers: bool) {
     let mut watches = WATCHES.lock();
 
     let Some(slot) = watches.iter().position(Option::is_none) else {
@@ -179,6 +195,7 @@ pub fn watch(pc: u32, label: &str, branches: u32) {
         label: String::from(label),
         branches,
         hits: 0,
+        registers,
     });
     drop(watches);
 
@@ -201,6 +218,11 @@ pub fn is_watching() -> bool {
 /// running - a trace that reaches a watched address again should carry on
 /// rather than restart.
 pub fn reached(pc: u32) {
+    reached_with(pc, &[]);
+}
+
+/// [`reached`], with the core's registers for a watch that reports them.
+pub fn reached_with(pc: u32, registers: &[u32]) {
     let Some(slot) = WATCH_PCS.iter().position(|watched| watched.load(Ordering::Relaxed) == pc) else {
         return;
     };
@@ -212,6 +234,29 @@ pub fn reached(pc: u32) {
 
     watch.hits += 1;
     let (hits, label, branches) = (watch.hits, watch.label.clone(), watch.branches);
+
+    if watch.registers {
+        if hits >= branches {
+            watches[slot] = None;
+            drop(watches);
+
+            WATCH_PCS[slot].store(0, Ordering::Relaxed);
+            WATCH_LIVE.fetch_sub(1, Ordering::Relaxed);
+        }
+
+        let named = |index: usize| registers.get(index).copied().unwrap_or_default();
+        tracing::info!(
+            "probe {label} #{hits}: r0={:#x} r1={:#x} r2={:#x} r3={:#x} r4={:#x} r5={:#x} lr={:#x}",
+            named(0),
+            named(1),
+            named(2),
+            named(3),
+            named(4),
+            named(5),
+            named(14)
+        );
+        return;
+    }
 
     if hits > WATCH_TRACE_LIMIT {
         // Reached again, and said what it had to say. Give the slot up, so the
@@ -351,6 +396,7 @@ pub fn wrote(address: u32, width: u32, value: u32) {
 /// ```text
 /// pc:3a376        trace from this address, for the default number of branches
 /// pc:3a376/50000  the same, for that many branches
+/// r:3a376/40      the registers each time it is reached, the first 40 times
 /// w:1518700       report the next writes to this address
 /// w:1718c0+84     the same for every word of the 0x84 bytes from it
 /// w:171c18>5      writes to this address of a value above 5 only
@@ -411,8 +457,9 @@ pub fn set_watches(spec: &str) -> Result<(), String> {
 
         match kind.trim() {
             "pc" => watch(address, entry, branches.unwrap_or(DEFAULT_WATCH_BRANCHES)),
+            "r" => watch_registers(address, entry, branches.unwrap_or(DEFAULT_REGISTER_PASSES)),
             "w" => watch_write(address, entry),
-            other => return Err(alloc::format!("{other:?} is not `pc` or `w`")),
+            other => return Err(alloc::format!("{other:?} is not `pc`, `r` or `w`")),
         }
     }
 
@@ -421,6 +468,9 @@ pub fn set_watches(spec: &str) -> Result<(), String> {
 
 /// Branches recorded from a `pc:` watch that does not say how many.
 const DEFAULT_WATCH_BRANCHES: u32 = 30_000;
+
+/// Passes reported from an `r:` watch that does not say how many.
+const DEFAULT_REGISTER_PASSES: u32 = 50;
 
 /// Forgets every watch, leaving the per-instruction checks costing nothing.
 pub fn clear_watches() {

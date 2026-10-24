@@ -173,8 +173,11 @@ const BARRIERS: [u8; 5] = [114, 119, 123, 128, 130];
 const MONSTER_HEALTH: i16 = 300;
 /// The damage of a blow: three fell a monster.
 const BLOW: i16 = 100;
-/// [`ENTER_AREA`]'s type for a dungeon.
-const DUNGEON: u8 = 2;
+/// [`ENTER_AREA`]'s type for a dungeon the title fights by its offline rules
+/// (`wie_ktf`'s `runtime/oz.rs`), which is every dungeon entered from the
+/// map: the server's rules for its monsters went with it. 2 would be one the
+/// server runs, as a party's is.
+const FOUGHT_BY_THE_TITLE: u8 = 0xff;
 /// [`ENTER_AREA`]'s type for a town.
 const TOWN: u8 = 1;
 /// Kind 3 is life on the map. 5000, sent on arriving, is answered
@@ -203,6 +206,22 @@ const SCENE_OVER: (u32, u32) = (6, 7010);
 const PLACE_AGAIN: (u32, u32) = (3, 5100);
 /// The keepalive poll, answered with itself.
 const POLL: (u32, u32) = (0, 10);
+/// A fallen player's choices (`game/k.a(I)V`, 부활대기중). 입구부활, rising
+/// at the dungeon's entrance, is answered `[u16 map][x][y]` (`0x1bf754`):
+/// the title goes to `map` if it is not there and stands the player at `x`,
+/// `y`.
+const REVIVE: (u32, u32) = (7, 17130);
+/// 미션포기, giving the dungeon up. Its answer has no body; the title asks
+/// [`GIVEN_UP`] next (`0x1c0596`).
+const GIVE_UP: (u32, u32) = (9, 30100);
+/// Answered without a body; the title asks [`LEAVE_DUNGEON`] (`0x1c0d80`).
+const GIVEN_UP: (u32, u32) = (11, 32500);
+/// Answered without a body (`0x1bee70`); the title goes back to the dungeon's
+/// party rooms, [`PARTY`].
+const LEAVE_DUNGEON: (u32, u32) = (7, 14400);
+/// Leaving the party rooms. Answered without a body (`0x1bd960`); the title
+/// asks [`BELONGINGS`] and goes back to the map.
+const LEAVE_ROOMS: (u32, u32) = (7, 10600);
 
 /// The quest state the title gives a quest whose reward has been granted.
 const QUEST_FINISHED: u8 = 2;
@@ -236,7 +255,15 @@ struct Ground {
     height: u8,
     ground: Vec<u8>,
     monsters: Vec<Placed>,
+    /// Where one comes in from outside: a dungeon's first 구역 marks it
+    /// `[9][x][y]` just before its doors, `[0x18][u16 map][x][y][direction]`
+    /// each.
+    entrance: Option<(u8, u8)>,
 }
+
+/// A [`Ground`]'s mark of where one comes in, and of a door.
+const ENTRANCE: u8 = 9;
+const DOOR: u8 = 0x18;
 
 /// A monster of a [`Ground`] and where it stands.
 #[derive(Clone, Copy)]
@@ -278,12 +305,19 @@ impl Ground {
                 y: monster[2],
             })
             .collect();
+        at += 3 * count;
+        let entrance = data
+            .get(at..)?
+            .windows(4)
+            .find(|mark| mark[0] == ENTRANCE && mark[1] < width && mark[2] < height && mark[3] == DOOR)
+            .map(|mark| (mark[1], mark[2]));
 
         Some(Self {
             width,
             height,
             ground,
             monsters,
+            entrance,
         })
     }
 
@@ -524,9 +558,17 @@ impl KodanWorld {
                 vec![SlotRelay::message(kind, command, &party)]
             }
             QUEST_SYNC | SCENE_OVER | PLACE_AGAIN if self.logged_in => vec![SlotRelay::message(kind, command, &[])],
+            REVIVE if self.logged_in => {
+                let map = PLACES[self.here as usize].map;
+                let (x, y) = self.ground_of(map).and_then(|ground| ground.entrance).unwrap_or_default();
+                let mut revive = map.to_be_bytes().to_vec();
+                revive.extend_from_slice(&[x, y]);
+                vec![SlotRelay::message(kind, command, &revive)]
+            }
+            GIVE_UP | GIVEN_UP | LEAVE_DUNGEON | LEAVE_ROOMS if self.logged_in => vec![SlotRelay::message(kind, command, &[])],
             ENTER_AREA if self.logged_in => {
                 let place = &PLACES[self.here as usize];
-                let mut entry = vec![0, if place.dungeon { DUNGEON } else { TOWN }];
+                let mut entry = vec![0, if place.dungeon { FOUGHT_BY_THE_TITLE } else { TOWN }];
                 entry.extend_from_slice(&place.map.to_be_bytes());
                 vec![SlotRelay::message(kind, command, &entry)]
             }
@@ -963,7 +1005,7 @@ fn starting_weapon(class: u8) -> Vec<u8> {
 mod tests {
     use alloc::{vec, vec::Vec};
 
-    use super::{DOWN, Ground, KodanWorld, LEFT, RIGHT, SlotRelay};
+    use super::{DOOR, DOWN, FOUGHT_BY_THE_TITLE, GIVE_UP, GIVEN_UP, Ground, KodanWorld, LEAVE_DUNGEON, LEAVE_ROOMS, LEFT, RIGHT, SlotRelay};
 
     fn ask(world: &mut KodanWorld, kind: u32, command: u32, body: &[u8]) -> Vec<Vec<u8>> {
         world.respond(&SlotRelay::message(kind, command, body)).unwrap()
@@ -1061,18 +1103,41 @@ mod tests {
         assert_eq!(paths, 2 * PATHS.len());
     }
 
-    /// Travelling to a dungeon and entering it opens its party, on the
-    /// dungeon's first 구역.
+    /// Travelling to a dungeon and entering it lands on its first 구역, as an
+    /// area the title fights by its own rules.
     #[test]
-    fn a_dungeon_is_entered_through_its_party() {
+    fn a_dungeon_is_entered_to_be_fought_by_the_title() {
         let mut world = KodanWorld::default();
         ask(&mut world, 1, 1000, &[0x1e]);
 
         // 수행의동굴.
         let travel = &ask(&mut world, 2, 1150, &[0, 3])[0][12..];
         assert_eq!(travel[0], 0, "travelled");
-        assert_eq!(&ask(&mut world, 2, 1160, &[])[0][12..], &[0, 2, 0, 76]);
+        assert_eq!(&ask(&mut world, 2, 1160, &[])[0][12..], &[0, FOUGHT_BY_THE_TITLE, 0, 76]);
         assert_eq!(&ask(&mut world, 7, 10000, &[])[0][12..], &[0]);
+    }
+
+    /// A fallen player rises on the dungeon's first 구역 - at its entrance when
+    /// the map can be read - or gives the dungeon up, back to its rooms and
+    /// out to the map.
+    #[test]
+    fn a_fallen_player_rises_or_gives_up() {
+        let mut world = KodanWorld::default();
+        ask(&mut world, 1, 1000, &[0x1e]);
+        ask(&mut world, 2, 1150, &[0, 3]);
+
+        assert_eq!(&ask(&mut world, 7, 17130, &[])[0][12..], &[0, 76, 0, 0]);
+        for (kind, command) in [GIVE_UP, GIVEN_UP, LEAVE_DUNGEON, LEAVE_ROOMS] {
+            assert_eq!(ask(&mut world, kind, command, &[])[0].len(), 12, "{command} has no body");
+        }
+    }
+
+    /// A first 구역's entrance is the mark just before its doors.
+    #[test]
+    fn a_ground_reads_its_entrance() {
+        let mut map = a_ground_file();
+        map.extend_from_slice(&[0, 0, 1, 9, 2, 1, DOOR, 0x49, 0, 1, 2, 1, 0]);
+        assert_eq!(Ground::parse(&map).expect("parses").entrance, Some((2, 1)));
     }
 
     /// Joining a room makes the player its leader, and starting it lands on
@@ -1144,12 +1209,16 @@ mod tests {
 
     /// A 구역 three spots wide with a wall down the middle row's left, a 결계
     /// and two monsters.
-    fn a_ground() -> Ground {
+    fn a_ground_file() -> Vec<u8> {
         let mut map = vec![0, 0, 0, 0, 1, b'a', 1, b'b', 0, 4, 3];
         map.extend_from_slice(&[0; 12]);
         map.extend_from_slice(&[0, 0, 0, 0, 0x40, 0x40, 0, 0, 0, 0, 0, 0]);
         map.extend_from_slice(&[0, 0, 0, 0, 2, 119, 141, 3, 119, 3, 0, 141, 3, 2, 141, 0, 0]);
-        Ground::parse(&map).expect("parses")
+        map
+    }
+
+    fn a_ground() -> Ground {
+        Ground::parse(&a_ground_file()).expect("parses")
     }
 
     #[test]

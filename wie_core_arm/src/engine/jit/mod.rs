@@ -1094,7 +1094,7 @@ impl ArmEngine for JitEngine {
             if interpret {
                 wie_backend::probe::observe(pc);
             } else if wie_backend::probe::is_watching() {
-                wie_backend::probe::reached(pc);
+                wie_backend::probe::reached_with(pc, &self.ctx.regs);
                 interpret = wie_backend::probe::is_armed();
             }
 

@@ -86,7 +86,8 @@ impl ArmEngine for Arm32CpuEngine {
             if wie_backend::probe::is_armed() {
                 wie_backend::probe::observe(pc);
             } else if wie_backend::probe::is_watching() {
-                wie_backend::probe::reached(pc);
+                let registers: [u32; 16] = array::from_fn(|index| self.cpu.reg_get(Mode::User, index as u8));
+                wie_backend::probe::reached_with(pc, &registers);
             }
 
             // So a watched write can name the instruction that made it.
