@@ -138,11 +138,18 @@ const AREA_READY: (u32, u32) = (7, 15000);
 /// (`game/engine/f.k()V`).
 const ROUND: (u32, u32) = (7, 15100);
 /// A step in a 구역, `[x][y][direction]`: 17000 setting off, 17050 arriving.
-/// The server tells the party, the walker too, `[i32 id][x][y][direction]`
-/// under the same command (`0x1bf8a4`), which places that member and shows
-/// it (`game/chars/g.b(Z)V`) - until then the player is a shadow.
+/// The server tells the party `[i32 id][x][y][direction]` under the same
+/// command (`0x1bf8a4`), which places that member and shows it
+/// (`game/chars/g.b(Z)V`). The walker is not told its own steps: told late,
+/// one snaps it back to where it set off, which it reports as another
+/// arrival, and the two bounce it between two tiles for good. It is placed
+/// once, when its [`ROUND`] starts - until then it is a shadow.
 const STEP: (u32, u32) = (7, 17000);
 const STEPPED: (u32, u32) = (7, 17050);
+/// The player closing on a monster to strike (`0x1b7480`), `[i16][x][y]
+/// [direction][2 bytes][count][count bytes][i32][target][byte]`. The title
+/// reads nothing back for it.
+const CLOSING_IN: (u32, u32) = (7, 17100);
 /// The player striking in a 구역 (`network/a.c(II)[B`, `0x1b79b0`), built by
 /// `game/chars/g.a(BBBBBBB)V`: `[i16][x][y][direction][3 bytes][target]
 /// [count][skill]`, the target being the monster's index in the 구역 or -1.
@@ -391,7 +398,7 @@ impl KodanWorld {
                     Vec::new()
                 }
             },
-            STEP | STEPPED if self.logged_in && body.len() >= 3 => vec![SlotRelay::message(kind, command, &self.step(&body[..3]))],
+            STEP | STEPPED | CLOSING_IN if self.logged_in => Vec::new(),
             PARTY if self.logged_in => {
                 let mut party = vec![0, 0, 0, 0, 0, 1];
                 party.extend_from_slice(&self.character_id.to_be_bytes());
@@ -897,8 +904,7 @@ mod tests {
         assert_eq!(&round[1][8..12], &17050u32.to_be_bytes());
         assert_eq!(&round[1][12..], &[0, 1, 0x0d, 0x5b, 4, 4, 2]);
 
-        let step = &ask(&mut world, 7, 17000, &[5, 4, 4])[0][12..];
-        assert_eq!(step, &[0, 1, 0x0d, 0x5b, 5, 4, 4]);
+        assert!(ask(&mut world, 7, 17000, &[5, 4, 4]).is_empty(), "the walker is not told its own steps");
     }
 
     /// A monster struck loses health on the 구역's map and falls on the third
