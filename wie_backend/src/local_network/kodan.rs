@@ -21,8 +21,10 @@ const LOGIN: (u32, u32) = (1, 1000);
 const VERSION: (u32, u32) = (1, 1010);
 /// The character entering the world, answered with [`SESSION`].
 const ENTER: (u32, u32) = (1, 1020);
-/// `[len][bytes]`, kept by `network/b.a([B)V`; its reader (`0x1ba11a`) then
-/// asks [`SESSION_ACK`].
+/// `[len][name]`: the character's name as the world knows it, kept by
+/// `network/b.a([B)V` and put on the player (`0x1ba18e`), whose name the
+/// story's dialogue writes into its lines - so it must be the name, not
+/// arbitrary bytes. Its reader (`0x1ba11a`) then asks [`SESSION_ACK`].
 const SESSION: u32 = 1024;
 /// Answered with one byte, which the reader (`0x1ba0cc`) keeps on the player
 /// before asking for kind 11, command 32450.
@@ -66,7 +68,8 @@ const POLL: (u32, u32) = (0, 10);
 #[derive(Default)]
 pub(super) struct KodanWorld {
     logged_in: bool,
-    /// The character [`ENTER`] names: `[u32][u32 id][u16][len][name]`.
+    /// The character [`ENTER`] names: `[byte][u64 id][len][name]`
+    /// (`0x1b5e68`), the id being the player's own (`game/chars/g.a()J`).
     character_id: u16,
     character_name: Vec<u8>,
 }
@@ -93,13 +96,16 @@ impl KodanWorld {
             POLL if self.logged_in => vec![SlotRelay::message(kind, command, &[])],
             VERSION if self.logged_in => vec![SlotRelay::message(kind, command, &[])],
             ENTER if self.logged_in => {
-                if let [_, _, _, _, a, b, c, d, _, _, len, name @ ..] = body
+                if let [_, _, _, _, _, _, _, high, low, len, name @ ..] = body
                     && name.len() >= *len as usize
                 {
-                    self.character_id = u32::from_be_bytes([*a, *b, *c, *d]) as u16;
+                    // A place's records carry an `i16` id: the low half.
+                    self.character_id = u16::from_be_bytes([*high, *low]);
                     self.character_name = name[..*len as usize].to_vec();
                 }
-                vec![SlotRelay::message(kind, SESSION, &[4, 0, 0, 0, 1])]
+                let mut session = vec![self.character_name.len() as u8];
+                session.extend_from_slice(&self.character_name);
+                vec![SlotRelay::message(kind, SESSION, &session)]
             }
             SESSION_ACK if self.logged_in => vec![SlotRelay::message(kind, command, &[1])],
             WORLD_STATE if self.logged_in => vec![SlotRelay::message(kind, command, &[0, 0])],
@@ -179,11 +185,7 @@ mod tests {
         let steps: &[((u32, u32), &[u8], (u32, u32))] = &[
             ((1, 1000), &[0x1e], (1, 1000)),
             ((1, 1010), &[5, b'1', b'.', b'0', b'.', b'0', 0, 0], (1, 1010)),
-            (
-                (1, 1020),
-                &[0, 0, 0, 0, 0, 0, 0, 1, 0x0d, 0x5b, 5, 0x20, 0xba, 0xc0, 0xc7, 0xfc],
-                (1, 1024),
-            ),
+            ((1, 1020), &[0, 0, 0, 0, 0, 0, 1, 0x0d, 0x5b, 5, 0x20, 0xba, 0xc0, 0xc7, 0xfc], (1, 1024)),
             ((1, 1026), &[4], (1, 1026)),
             ((11, 32450), &[], (11, 32450)),
             ((8, 20000), &[], (8, 20000)),
@@ -202,13 +204,22 @@ mod tests {
         }
     }
 
+    /// The session answer is the character's name, which the dialogue uses.
+    #[test]
+    fn the_session_carries_the_name() {
+        let mut world = KodanWorld::default();
+        ask(&mut world, 1, 1000, &[0x1e]);
+        let session = &ask(&mut world, 1, 1020, &[0, 0, 0, 0, 0, 0, 0, 0, 7, 3, b'a', b'b', b'c'])[0];
+        assert_eq!(&session[12..], &[3, b'a', b'b', b'c']);
+    }
+
     /// The players here are the player alone, under the id and name 1020 gave,
     /// at the index the world screen reads the player's own record by.
     #[test]
     fn the_place_holds_the_player() {
         let mut world = KodanWorld::default();
         ask(&mut world, 1, 1000, &[0x1e]);
-        ask(&mut world, 1, 1020, &[0, 0, 0, 0, 0, 0, 0, 7, 0x0d, 0x5b, 3, b'a', b'b', b'c']);
+        ask(&mut world, 1, 1020, &[0, 0, 0, 0, 0, 0, 0, 0, 7, 3, b'a', b'b', b'c']);
 
         let place = &ask(&mut world, 2, 1102, &[])[0][12..];
         // No title, own index 0, one player.
