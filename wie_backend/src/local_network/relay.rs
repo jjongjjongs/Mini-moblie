@@ -59,6 +59,7 @@
 use alloc::{boxed::Box, vec, vec::Vec};
 
 use super::{LocalConnection, LocalEndpoint, LocalRead, kodan::KodanWorld};
+use crate::system::FilesystemOverlay;
 
 /// The relay gateway this answers for.
 const HOST: &str = "wipiwicgsfg.magicn.com";
@@ -118,7 +119,16 @@ const MESSAGE_FREE: &[u8] = &[
 const LABEL_PREFIX: &[u8] = &[0x20, 0xb7, 0xce, 0xc4, 0xc3];
 
 /// Answers the carrier relay middleware.
-pub struct RelayEndpoint;
+pub struct RelayEndpoint {
+    /// The title's own files, where the 코단 world keeps what it remembers.
+    files: Option<FilesystemOverlay>,
+}
+
+impl RelayEndpoint {
+    pub fn new(files: Option<FilesystemOverlay>) -> Self {
+        Self { files }
+    }
+}
 
 impl LocalEndpoint for RelayEndpoint {
     fn name(&self) -> &str {
@@ -130,7 +140,10 @@ impl LocalEndpoint for RelayEndpoint {
     }
 
     fn open(&self, _scheme: &str, _host: &str, _port: u16) -> Box<dyn LocalConnection> {
-        Box::new(RelayConnection::default())
+        Box::new(RelayConnection {
+            files: self.files.clone(),
+            ..RelayConnection::default()
+        })
     }
 }
 
@@ -144,6 +157,8 @@ struct RelayConnection {
     service: Option<Service>,
     /// A malformed or unsupported request drops the connection.
     closed: bool,
+    /// Handed to the 코단 world, if that is what this session turns out to be.
+    files: Option<FilesystemOverlay>,
 }
 
 /// The conversation a session carries, by the server its extension names.
@@ -153,9 +168,9 @@ enum Service {
 }
 
 impl Service {
-    fn for_extension(extension: &[u8]) -> Self {
+    fn for_extension(extension: &[u8], files: &Option<FilesystemOverlay>) -> Self {
         if target(extension) == Some(KODAN_ADDRESS) {
-            Service::World(KodanWorld::default())
+            Service::World(KodanWorld::new(files.clone()))
         } else {
             Service::Gateway(SlotRelay::default())
         }
@@ -357,7 +372,11 @@ impl LocalConnection for RelayConnection {
 
         loop {
             match self.take_payload() {
-                Ok(Some((extension, payload))) => match self.service.get_or_insert_with(|| Service::for_extension(&extension)).respond(&payload) {
+                Ok(Some((extension, payload))) => match self
+                    .service
+                    .get_or_insert_with(|| Service::for_extension(&extension, &self.files))
+                    .respond(&payload)
+                {
                     Some(replies) => {
                         for reply in replies {
                             tracing::info!("relay {HOST}:{PORT}: {} -> {}", hex(&payload), hex(&reply));

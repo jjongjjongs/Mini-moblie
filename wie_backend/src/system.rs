@@ -97,6 +97,8 @@ impl System {
         T: TaskRunner + 'static,
     {
         let audio_sink = platform.audio_sink();
+        let platform = Arc::new(platform);
+        let filesystem = FilesystemOverlay::new(platform.clone(), aid);
 
         let mut local_network = LocalNetwork::new();
         for endpoint in platform.local_endpoints() {
@@ -135,7 +137,9 @@ impl System {
         // in process lets 오즈-천공의 기사단's 새로하기 reach character-name
         // entry rather than stopping on `서버와의 접속이 끊어졌습니다`.
         // Host-gated, so no other title is touched.
-        local_network.register(Box::new(crate::local_network::RelayEndpoint));
+        // 월드접속's 코단 world is answered behind it too, keeping what it
+        // remembers among the title's own files.
+        local_network.register(Box::new(crate::local_network::RelayEndpoint::new(Some(filesystem.clone()))));
 
         // 렙업만이살길1's shop server (211.113.45.131:9002), gone for years. A
         // purchase of 돼지 dials it and sits on `구매중 입니다.` waiting for a
@@ -314,13 +318,11 @@ impl System {
             local_network.register(Box::new(crate::local_network::BillingGatewayEndpoint::new_relay(name, host, port)));
         }
 
-        let platform = Arc::new(platform);
-
         Self {
             pid: pid.to_owned(),
             aid: aid.to_owned(), // TODO create metadata dictionary or something
             executor: Executor::new(),
-            filesystem: FilesystemOverlay::new(platform.clone(), aid),
+            filesystem,
             platform,
             event_queue: Arc::new(RwLock::new(EventQueue::new())),
             audio: Arc::new(RwLock::new(Audio::new(audio_sink))),
