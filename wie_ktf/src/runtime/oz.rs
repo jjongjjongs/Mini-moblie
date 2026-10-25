@@ -78,17 +78,29 @@ const ANSWER: Site = Site {
 };
 const ANSWER_OUT: u16 = 0xe7f5;
 
-/// `game/chars/m.e()V`, a monster falling, hands each thing it leaves to
-/// `game/engine/f.a(SB)Z`, the number in r1. That counts it in a table of the
-/// 140 things of the offline game, and a 코단 world monster leaves things
-/// numbered past them - which only the server ever handed out - and the count
-/// runs off the table's end. The call goes through [`leave`] instead.
+/// `game/chars/m.e()V`, a monster falling, has it counted by
+/// `game/engine/f.a(SB)Z`, the monster's number in r1 (`emd/<n>`). That
+/// counts it down in a table of the 140 monsters of the offline game, and
+/// then towards the quests that ask for it (`f.a(S)[S`: the quest's
+/// `[monster, so far, wanted]`, `so far` raised while short of `wanted`,
+/// answering true so the title says so). The 코단 world's own monsters are
+/// numbered past the table (140 to 145: 사막슬라임 to 폐허의폭군), and the
+/// count ran off its end. The call goes through [`leave`] instead, which
+/// counts one of those towards its quests only. What a monster drops is not
+/// this: each one's `emd` record carries its own table of drops, the world's
+/// monsters' too, and the title rolls them itself.
 const LEAVE: Site = Site {
     address: 0x197336,
     code: bl(0x197336, CALL),
 };
-/// The things the offline game has.
+/// The monsters the offline game has.
 const THINGS: u16 = 140;
+/// The slot of `game/engine/f.a(S)[S`, the quest asking for a monster.
+const QUEST_OF: u32 = 0x1ec9a0;
+/// The runtime's short array load, `r0` the array and `r1` the index, and
+/// store, the value in `r2`.
+const SALOAD: u32 = 0x1d67fc;
+const SASTORE: u32 = 0x1d6858;
 
 /// `game/chars/g.X()V`, every frame: the player with no health left is laid
 /// down, `g.S()V`. The call goes through [`fall`].
@@ -263,8 +275,8 @@ fn answer(at: u32) -> Vec<u8> {
     code.bytes()
 }
 
-/// `game/engine/f.a(SB)Z` for a thing the offline game has, false for one it
-/// has not.
+/// `game/engine/f.a(SB)Z` for a monster the offline game has; for one it has
+/// not, its quest's count raised as `f.a(SB)Z` would, true if it was.
 fn leave(at: u32) -> Vec<u8> {
     let mut code = Thumb::new(at);
     code.op(0x2900 | (THINGS - 1)); // cmp r1,#139
@@ -272,8 +284,33 @@ fn leave(at: u32) -> Vec<u8> {
     code.load(3, CALL | 1);
     code.op(0x4718); // bx r3, returning where the call would have
     code.land(past);
+    code.op(0xb510); // push {r4,lr}
+    code.load(0, QUEST_OF);
+    code.call(CALL); // the quest, r1 the monster
+    code.op(0x2800); // cmp r0,#0
+    let no_quest = code.branch(EQ);
+    code.op(0x1c04); // adds r4,r0,#0
+    code.op(0x2101); // movs r1,#1
+    code.call(SALOAD); // so far
+    code.op(0xb401); // push {r0}
+    code.op(0x1c20); // adds r0,r4,#0
+    code.op(0x2102); // movs r1,#2
+    code.call(SALOAD); // wanted
+    code.op(0xbc04); // pop {r2}
+    code.op(0x4282); // cmp r2,r0
+    let done = code.branch(GE);
+    code.op(0x3201); // adds r2,#1
+    code.op(0x0412); // lsls r2,r2,#16
+    code.op(0x1412); // asrs r2,r2,#16
+    code.op(0x1c20); // adds r0,r4,#0
+    code.op(0x2101); // movs r1,#1
+    code.call(SASTORE);
+    code.op(0x2001); // movs r0,#1
+    code.op(0xbd10); // pop {r4,pc}
+    code.land(no_quest);
+    code.land(done);
     code.op(0x2000); // movs r0,#0
-    code.op(0x4770);
+    code.op(0xbd10); // pop {r4,pc}
     code.bytes()
 }
 
@@ -465,10 +502,12 @@ async fn held(jvm: &Jvm) -> Option<Vec<u8>> {
 }
 
 /// Thumb condition codes.
+const EQ: u16 = 0x0;
 const NE: u16 = 0x1;
 const LO: u16 = 0x3;
 const PL: u16 = 0x5;
 const HI: u16 = 0x8;
+const GE: u16 = 0xa;
 const GT: u16 = 0xc;
 
 /// Thumb code built a halfword at a time, the words it loads placed after it.
@@ -575,12 +614,22 @@ mod tests {
     fn a_load_reaches_its_word_after_the_code() {
         let leave = leave(0x1000);
         let halfword = |at: usize| u16::from_le_bytes([leave[at], leave[at + 1]]);
+        let word = |at: usize| u32::from_le_bytes(leave[at..at + 4].try_into().unwrap());
 
-        assert_eq!(leave.len(), 16);
+        // 34 halfwords of code, then the two words it loads.
+        assert_eq!(leave.len(), 34 * 2 + 8);
         // `bhi past` lands past the load and the `bx`.
         assert_eq!(halfword(2), 0xd801);
-        // `ldr r3,[pc,#4]` at +4 loads the word at +12.
-        assert_eq!(halfword(4), 0x4b01);
-        assert_eq!(u32::from_le_bytes(leave[12..16].try_into().unwrap()), CALL | 1);
+        // `ldr r3,[pc,#n]` at +4 loads the first word, at +68.
+        assert_eq!(halfword(4), 0x4b00 | ((68 - 8) / 4));
+        assert_eq!(word(68), CALL | 1);
+        // `ldr r0,[pc,#n]` at +10 loads the second, at +72.
+        assert_eq!(halfword(10), 0x4800 | ((72 - 12) / 4));
+        assert_eq!(word(72), QUEST_OF);
+        // Both the branches out land on `movs r0,#0`, the halfword before
+        // the last.
+        assert_eq!(halfword(18), 0xd000 | (31 - 9 - 2));
+        assert_eq!(halfword(42), 0xda00 | (31 - 21 - 2));
+        assert_eq!(halfword(62), 0x2000);
     }
 }
