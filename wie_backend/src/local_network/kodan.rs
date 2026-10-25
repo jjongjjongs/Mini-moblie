@@ -79,7 +79,8 @@ const STORE_ID: (u32, u32) = (8, 20210);
 /// thing's state, 28 bytes (`0x1b7cc2`). The reader (`0x1c014a`) adds the
 /// things answered to the world's inventory as [`BUY`]'s do (`network/a.b([BI)I`:
 /// `[count]` of `[bag][u32 len][item]`) and takes the thing out of the
-/// single game's.
+/// single game's. The title (`wie_ktf`'s `oz`) has moved the thing itself
+/// into the world's inventory as it sent this, so none is answered.
 const STORE: (u32, u32) = (8, 20200);
 /// 네트워크 창고's 내리기: the world's picked thing put into the single
 /// game's inventory and out of the world's (`0x1c04cc`), reading nothing.
@@ -91,9 +92,9 @@ const THROW_AWAY: (u32, u32) = (8, 20100);
 /// takes `[u64 gold][u64]`, the first two of [`COUNTERS`] backwards.
 /// The body is `[0][0]` and names nothing; the thing is the one
 /// [`HELD_FILE`] says was picked, and the player is given its price over
-/// [`LET_GO_SHARE`].
+/// [`LET_GO_SHARE`]: all of it.
 const LET_GO: (u32, u32) = (8, 20150);
-const LET_GO_SHARE: u64 = 2;
+const LET_GO_SHARE: u64 = 1;
 /// The 코단 map (`0x1ba2c4`): `[byte][len][title][u16 here][u16 count]` and
 /// that many places, `[i16 id][i8 type][len][name][i16 x][i16 y][count][i16
 /// neighbour...]`, kept as `network/h` records. `here` is the place the
@@ -408,10 +409,16 @@ const PROGRESS_FILE: &str = "kodan_world";
 /// and gold (`network/b.a[1]`) before a request whenever they changed - the
 /// things a dungeon fought by the title leaves, and what was worn, used and
 /// thrown away, the server never hears of: `[u64 gold][u16 count]` and that
-/// many [`Held`], then the id of the thing picked among them if one is. Taken on the next request once the session's [`COUNTERS`]
-/// are answered, and removed; before then it is what the title held before
-/// it was told.
+/// many [`Held`]; the id of the thing picked among them, all ones for none;
+/// and each thing's state, `[u16 len][state]` in the same order - what the
+/// title's tables do not make of it, which the server keeps unread. Taken on
+/// the next request once the session's [`COUNTERS`] are answered, and
+/// removed; before then it is what the title held before it was told.
 const HELD_FILE: &str = "kodan_held";
+/// The states [`HELD_FILE`] last told, `[u16 count]` of `[u64 id][u16
+/// len][state]`, written as [`BELONGINGS`] is answered for the title to put
+/// back on the things it makes.
+const STATES_FILE: &str = "kodan_states";
 
 /// What the world keeps for one character between sessions.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -427,6 +434,9 @@ struct Progress {
     /// [`BELONGINGS`] then hands back instead of what was bought; `None`
     /// until it has told.
     held: Option<Vec<Held>>,
+    /// What each thing held is beyond its [`Held`], by id, as [`HELD_FILE`]
+    /// last told it; handed back in [`STATES_FILE`].
+    states: BTreeMap<u64, Vec<u8>>,
 }
 
 /// A thing the player holds, as [`HELD_FILE`] has it: `[kind][model][count]
@@ -458,7 +468,22 @@ impl Held {
     /// The id of the thing picked, which follows the things.
     fn picked(data: &[u8]) -> Option<u64> {
         let count = be(data.get(8..10)?) as usize;
-        Some(be(data.get(10 + count * Self::LEN..10 + count * Self::LEN + 8)?))
+        let picked = be(data.get(10 + count * Self::LEN..10 + count * Self::LEN + 8)?);
+        (picked != u64::MAX).then_some(picked)
+    }
+
+    /// Each thing's state, which follows the one picked; none when `data`
+    /// does not have them all.
+    fn states(data: &[u8]) -> Option<Vec<Vec<u8>>> {
+        let count = be(data.get(8..10)?) as usize;
+        let mut at = 10 + count * Self::LEN + 8;
+        let mut states = Vec::with_capacity(count);
+        for _ in 0..count {
+            let len = be(data.get(at..at + 2)?) as usize;
+            states.push(data.get(at + 2..at + 2 + len)?.to_vec());
+            at += 2 + len;
+        }
+        Some(states)
     }
 
     fn parse(record: &[u8]) -> Self {
@@ -680,7 +705,10 @@ impl KodanWorld {
                 }
                 vec![SlotRelay::message(kind, command, &state)]
             }
-            BELONGINGS if self.logged_in => vec![SlotRelay::message(kind, command, &self.belongings())],
+            BELONGINGS if self.logged_in => {
+                self.hand_back_states();
+                vec![SlotRelay::message(kind, command, &self.belongings())]
+            }
             COUNTERS if self.logged_in => {
                 self.synced = true;
                 let mut counters = vec![0; 8];
@@ -698,8 +726,9 @@ impl KodanWorld {
                     let id = u64::from_be_bytes([b0, b1, b2, b3, b4, b5, b6, b7]);
                     let bag = bag_of(kind_stored);
                     let count = if bag == 0 { 1 } else { count.max(1) };
-                    let item = item_record(kind_stored, model, count, id, NOT_WORN);
-                    if let Some(held) = &mut self.progress.held {
+                    if let Some(held) = &mut self.progress.held
+                        && held.iter().all(|thing| thing.id != id)
+                    {
                         held.push(Held {
                             kind: kind_stored,
                             model,
@@ -710,10 +739,9 @@ impl KodanWorld {
                         });
                         self.save();
                     }
-                    let mut stored = vec![1, bag];
-                    stored.extend_from_slice(&(item.len() as u32).to_be_bytes());
-                    stored.extend_from_slice(&item);
-                    vec![SlotRelay::message(kind, command, &stored)]
+                    // The title has put the thing among the world's
+                    // belongings itself, as it was; none are added.
+                    vec![SlotRelay::message(kind, command, &[0])]
                 }
                 _ => {
                     tracing::warn!("코단 world: no such thing to store: {}", hex(body));
@@ -956,7 +984,7 @@ impl KodanWorld {
                 // The armour's carry the kind of armour first.
                 let asked = if command == ARMOUR_WARE.1 { body.get(1..) } else { Some(body) };
                 match asked.and_then(|asked| self.ware(asked)) {
-                    Some(ware) => vec![SlotRelay::message(kind, WARE.1, &item_record(ware.kind, ware.model, 1, 0, NOT_WORN))],
+                    Some(ware) => vec![SlotRelay::message(kind, WARE.1, &ware.record(1, 0))],
                     None => {
                         tracing::warn!("코단 world: no such ware: {}", hex(body));
                         Vec::new()
@@ -984,11 +1012,9 @@ impl KodanWorld {
                             // rest heaped together - and none changed.
                             let id = self.next_id();
                             let items: Vec<Vec<u8>> = if bag_of(ware.kind) == 0 {
-                                (0..count)
-                                    .map(|index| item_record(ware.kind, ware.model, 1, id + index as u64, NOT_WORN))
-                                    .collect()
+                                (0..count).map(|index| ware.record(1, id + index as u64)).collect()
                             } else {
-                                vec![item_record(ware.kind, ware.model, count, id, NOT_WORN)]
+                                vec![ware.record(count, id)]
                             };
                             self.progress.bought.extend((0..count).map(|_| (ware.kind, ware.model)));
                             if let Some(held) = &mut self.progress.held {
@@ -1201,10 +1227,20 @@ impl KodanWorld {
             return;
         };
         self.picked = Held::picked(data);
-        if self.progress.gold != gold || self.progress.held.as_ref() != Some(&held) {
+        let states: BTreeMap<u64, Vec<u8>> = Held::states(data)
+            .map(|states| {
+                held.iter()
+                    .zip(states)
+                    .filter(|(_, state)| !state.is_empty())
+                    .map(|(thing, state)| (thing.id, state))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if self.progress.gold != gold || self.progress.held.as_ref() != Some(&held) || self.progress.states != states {
             tracing::info!("코단 world: the player holds {} things and {gold} gold", held.len());
             self.progress.gold = gold;
             self.progress.held = Some(held);
+            self.progress.states = states;
             self.save();
         }
     }
@@ -1217,6 +1253,7 @@ impl KodanWorld {
         let held = self.progress.held.as_mut()?;
         let index = held.iter().position(|thing| thing.id == picked)?;
         let thing = held.remove(index);
+        self.progress.states.remove(&thing.id);
         self.save();
         Some(thing)
     }
@@ -1238,6 +1275,31 @@ impl KodanWorld {
         match data.get(at + 2..at + 6) {
             Some(&[a, b, c, d]) => u32::from_le_bytes([a, b, c, d]),
             _ => 0,
+        }
+    }
+
+    /// Writes [`STATES_FILE`] with the states of the things held.
+    fn hand_back_states(&self) {
+        let Some(files) = &self.files else {
+            return;
+        };
+        let held = self.progress.held.iter().flatten();
+        let states: Vec<(u64, &Vec<u8>)> = held.filter_map(|thing| Some((thing.id, self.progress.states.get(&thing.id)?))).collect();
+        if states.is_empty() {
+            return;
+        }
+        let mut data = (states.len() as u16).to_be_bytes().to_vec();
+        for (id, state) in states {
+            data.extend_from_slice(&id.to_be_bytes());
+            data.extend_from_slice(&(state.len() as u16).to_be_bytes());
+            data.extend_from_slice(state);
+        }
+        let written = ready(async {
+            files.truncate(STATES_FILE, 0).await;
+            files.write(STATES_FILE, 0, &data).await
+        });
+        if written != Some(data.len()) {
+            tracing::warn!("코단 world: {STATES_FILE} was not written");
         }
     }
 
@@ -1564,25 +1626,35 @@ fn encode(all: &BTreeMap<u64, Progress>) -> Vec<u8> {
             thing.write(&mut data);
         }
     }
+    data.extend_from_slice(&(all.len() as u16).to_be_bytes());
+    for (character, progress) in all {
+        data.extend_from_slice(&character.to_be_bytes());
+        data.extend_from_slice(&(progress.states.len() as u16).to_be_bytes());
+        for (id, state) in &progress.states {
+            data.extend_from_slice(&id.to_be_bytes());
+            data.extend_from_slice(&(state.len() as u16).to_be_bytes());
+            data.extend_from_slice(state);
+        }
+    }
     data
 }
 
 /// What [`encode`] wrote, or `None` when `data` is not that.
 fn decode(data: &[u8]) -> Option<BTreeMap<u64, Progress>> {
     let mut cursor = data;
-    let mut take = |count: usize| -> Option<u64> {
+    let mut take_bytes = |count: usize| -> Option<&[u8]> {
         let (head, rest) = cursor.split_at_checked(count)?;
         cursor = rest;
-        Some(be(head))
+        Some(head)
     };
 
     let mut all = BTreeMap::new();
-    for _ in 0..take(2)? {
-        let character = take(8)?;
-        let gold = take(8)?;
+    for _ in 0..be(take_bytes(2)?) {
+        let character = be(take_bytes(8)?);
+        let gold = be(take_bytes(8)?);
         let mut quests = Vec::new();
-        for _ in 0..take(2)? {
-            quests.push((take(4)? as u32, take(1)? as u8));
+        for _ in 0..be(take_bytes(2)?) {
+            quests.push((be(take_bytes(4)?) as u32, be(take_bytes(1)?) as u8));
         }
         all.insert(
             character,
@@ -1594,43 +1666,57 @@ fn decode(data: &[u8]) -> Option<BTreeMap<u64, Progress>> {
         );
     }
     // A file from before things were sold ends here.
-    let Some(characters) = take(2) else {
+    let Some(characters) = take_bytes(2).map(be) else {
         return Some(all);
     };
     for _ in 0..characters {
-        let character = take(8)?;
+        let character = be(take_bytes(8)?);
         let mut bought = Vec::new();
-        for _ in 0..take(2)? {
-            bought.push((take(1)? as u8, take(1)? as u8));
+        for _ in 0..be(take_bytes(2)?) {
+            bought.push((be(take_bytes(1)?) as u8, be(take_bytes(1)?) as u8));
         }
         all.entry(character).or_default().bought = bought;
     }
     // A file from before bags were bought ends here.
-    let Some(characters) = take(2) else {
+    let Some(characters) = take_bytes(2).map(be) else {
         return Some(all);
     };
     for _ in 0..characters {
-        let character = take(8)?;
-        all.entry(character).or_default().bags = take(1)? as u8;
+        let character = be(take_bytes(8)?);
+        all.entry(character).or_default().bags = be(take_bytes(1)?) as u8;
     }
     // A file from before what was held was told ends here.
-    let Some(characters) = take(2) else {
+    let Some(characters) = take_bytes(2).map(be) else {
         return Some(all);
     };
     for _ in 0..characters {
-        let character = take(8)?;
+        let character = be(take_bytes(8)?);
         let mut held = Vec::new();
-        for _ in 0..take(2)? {
+        for _ in 0..be(take_bytes(2)?) {
             held.push(Held {
-                kind: take(1)? as u8,
-                model: take(1)? as u8,
-                count: take(1)? as u8,
-                slot: take(1)? as u8,
-                bag: take(1)? as u8,
-                id: take(8)?,
+                kind: be(take_bytes(1)?) as u8,
+                model: be(take_bytes(1)?) as u8,
+                count: be(take_bytes(1)?) as u8,
+                slot: be(take_bytes(1)?) as u8,
+                bag: be(take_bytes(1)?) as u8,
+                id: be(take_bytes(8)?),
             });
         }
         all.entry(character).or_default().held = Some(held);
+    }
+    // A file from before what each thing held is ends here.
+    let Some(characters) = take_bytes(2).map(be) else {
+        return Some(all);
+    };
+    for _ in 0..characters {
+        let character = be(take_bytes(8)?);
+        let mut states = BTreeMap::new();
+        for _ in 0..be(take_bytes(2)?) {
+            let id = be(take_bytes(8)?);
+            let len = be(take_bytes(2)?) as usize;
+            states.insert(id, take_bytes(len)?.to_vec());
+        }
+        all.entry(character).or_default().states = states;
     }
     Some(all)
 }
@@ -1657,6 +1743,29 @@ struct Ware {
     /// For a piece of armour, what it is made of: 0 leather, 1 metal, 2
     /// cloth.
     make: Option<u8>,
+    /// For a ring, what it gives.
+    ring: Option<Ring>,
+}
+
+/// What a ring (`game/data/c`, a `game/data/j`) gives that its record has to
+/// say: `j`'s five abilities (`j.c`), which [`RINGS_FILE`] tells after the
+/// name as `[least][most]` pairs six bytes in. The title rolls each between
+/// the two when it makes a ring from its tables, but a record's abilities
+/// (`j.a([BIZ)I`) are put over the roll; the ring sold has the most of each.
+/// Its own `a`, `b` and `a` the record does not hold, and stay the tables'.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Ring {
+    abilities: [u8; 5],
+}
+
+impl Ring {
+    fn parse(rest: &[u8]) -> Option<Self> {
+        let pairs = rest.get(6..16)?;
+        let most = |index: usize| pairs[index * 2].max(pairs[index * 2 + 1]);
+        Some(Self {
+            abilities: [most(0), most(1), most(2), most(3), most(4)],
+        })
+    }
 }
 
 /// Where in a shop a [`Ware`] is shown.
@@ -1700,14 +1809,15 @@ impl Ware {
             };
             if let [a, b, c, d, name_len, ..] = *record {
                 let name = record.get(5..5 + name_len as usize);
-                let grade = record.get(5 + name_len as usize + 3);
-                if let (Some(name), Some(&SOLD_RING_GRADE)) = (name, grade) {
+                let rest = record.get(5 + name_len as usize..).unwrap_or_default();
+                if let (Some(name), Some(&SOLD_RING_GRADE)) = (name, rest.get(3)) {
                     rings.push(Self {
                         kind: RING,
                         model,
                         price: u32::from_le_bytes([a, b, c, d]),
                         name: name.to_vec(),
                         make: None,
+                        ring: Ring::parse(rest),
                     });
                 }
             }
@@ -1733,7 +1843,16 @@ impl Ware {
             price: u32::from_le_bytes([a, b, c, d]),
             name,
             make,
+            ring: None,
         })
+    }
+
+    /// The record of `count` of this ware with the id `id`, not worn.
+    fn record(&self, count: u8, id: u64) -> Vec<u8> {
+        match &self.ring {
+            Some(ring) => ring_record(self.model, id, NOT_WORN, ring),
+            None => item_record(self.kind, self.model, count, id, NOT_WORN),
+        }
     }
 
     fn is_in(&self, aisle: Aisle) -> bool {
@@ -1830,6 +1949,20 @@ fn item_record(kind: u8, model: u8, count: u8, id: u64, slot: u8) -> Vec<u8> {
     if weapon {
         item.extend_from_slice(&[100, 0, 0, 0]);
     }
+    item.extend_from_slice(&[0; 8]);
+    item
+}
+
+/// A ring's record (`game/data/c`): `k`'s part as [`item_record`]'s, then
+/// `j`'s five abilities, all `k.a([BIZ)I` reads of a ring; the rest the
+/// title takes from its tables (see `wie_ktf`'s `oz`).
+fn ring_record(model: u8, id: u64, slot: u8, ring: &Ring) -> Vec<u8> {
+    const RING: u8 = 11;
+
+    let mut item = vec![RING, model, 1];
+    item.extend_from_slice(&id.to_be_bytes());
+    item.extend_from_slice(&[slot, 0]);
+    item.extend_from_slice(&ring.abilities);
     item.extend_from_slice(&[0; 8]);
     item
 }
@@ -2236,6 +2369,7 @@ mod tests {
                 bought: vec![],
                 bags: 0,
                 held: None,
+                states: BTreeMap::new(),
             },
         );
         all.insert(3, Progress::default());
@@ -2254,6 +2388,7 @@ mod tests {
                     bag: 0,
                     id: 9,
                 }]),
+                states: BTreeMap::from([(9, vec![1, b'c', 7, 0, 0xff])]),
             },
         );
         assert_eq!(decode(&encode(&all)), Some(all));
@@ -2342,6 +2477,7 @@ mod tests {
             price,
             name: b"x".to_vec(),
             make: None,
+            ring: None,
         };
         world.shelf = vec![ware(0, 2, 800), ware(1, 2, 400), ware(0, 3, 1400)];
         world.progress.gold = 1000;
@@ -2424,6 +2560,7 @@ mod tests {
             price: 1000,
             name: b"x".to_vec(),
             make: None,
+            ring: None,
         }];
         ask(&mut world, 3, 5230, &[4, 11, 0, 1]);
         assert_eq!(world.progress.gold, 234);
@@ -2459,13 +2596,8 @@ mod tests {
         let mut stored = 2u64.to_be_bytes().to_vec();
         stored.extend_from_slice(&[7, 4, 1]);
         stored.resize(28, 0);
-        let added = &ask(&mut world, 8, 20200, &stored)[0][12..];
-        assert_eq!(&added[..2], &[1, 0], "one thing, in the equipment's bag");
-        let len = u32::from_be_bytes([added[2], added[3], added[4], added[5]]) as usize;
-        assert_eq!(added.len(), 6 + len);
-        assert_eq!(&added[6..9], &[7, 4, 1]);
-        assert_eq!(&added[9..17], &2u64.to_be_bytes());
-        assert_eq!(added[17], 0xff, "not worn");
+        // The title moved the armour itself; nothing is added.
+        assert_eq!(&ask(&mut world, 8, 20200, &stored)[0][12..], &[0]);
         let armour = Held {
             kind: 7,
             model: 4,
@@ -2475,6 +2607,9 @@ mod tests {
             id: 2,
         };
         assert_eq!(world.progress.held.as_deref(), Some(&[staff, armour][..]));
+        // Told again with the armour among the world's, it is not held twice.
+        ask(&mut world, 8, 20200, &stored);
+        assert_eq!(world.progress.held.as_deref(), Some(&[staff, armour][..]));
 
         // Taken out with the armour picked.
         let mut told = 0u64.to_be_bytes().to_vec();
@@ -2482,10 +2617,16 @@ mod tests {
         staff.write(&mut told);
         armour.write(&mut told);
         told.extend_from_slice(&2u64.to_be_bytes());
+        told.extend_from_slice(&[0, 0, 0, 3, 1, 2, 3]);
         assert_eq!(Held::picked(&told), Some(2));
+        assert_eq!(Held::states(&told), Some(vec![vec![], vec![1, 2, 3]]));
         world.hold(&told);
+        assert_eq!(world.progress.states.get(&2), Some(&vec![1, 2, 3]));
         assert!(ask(&mut world, 8, 20300, &[0, 0])[0][12..].is_empty());
         assert_eq!(world.progress.held.as_deref(), Some(&[staff][..]));
+
+        // What a thing is goes with it, and is gone with it.
+        assert!(world.progress.states.is_empty());
 
         // Let go of with nothing picked, for nothing.
         let sold = &ask(&mut world, 8, 20150, &[0, 0])[0][12..];

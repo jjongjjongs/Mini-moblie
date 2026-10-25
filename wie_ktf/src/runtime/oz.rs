@@ -33,7 +33,8 @@
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 
-use jvm::{ClassInstance, Jvm};
+use java_constants::FieldAccessFlags;
+use jvm::{ClassDefinition, ClassInstance, Field, JavaValue, Jvm};
 use spin::Mutex;
 
 use wie_backend::System;
@@ -466,10 +467,37 @@ const LOADED_MAP: (&str, &str, &str) = ("network/b", "h", "S");
 /// The file [`KEEP`] writes, which the emulated 코단 world server
 /// (`wie_backend`'s `kodan`) takes on the request that follows:
 /// `[u64 gold][u16 count]` and that many `[kind][model][count][slot][bag]
-/// [u64 id]`, then the `u64` id of the thing picked among them, if one is:
-/// what 네트워크 창고's 내리기, 버리기 and 판매하기 name, their requests
-/// telling nothing of it.
+/// [u64 id]`; the `u64` id of the thing picked among them, or all ones when
+/// none is - what 네트워크 창고's 내리기, 버리기 and 판매하기 name, their
+/// requests telling nothing of it; and each thing's [`state`], `[u16
+/// len][state]`, in the same order.
 const HELD_FILE: &str = "kodan_held";
+/// The file the server writes as it tells the title its belongings: `[u16
+/// count]` of `[u64 id][u16 len][state]`, the [`state`] each thing had when
+/// [`HELD_FILE`] last told it. A belonging's record holds little of it - the
+/// title makes the rest from its tables, rolling what they leave to chance -
+/// so it is put back on the request the belongings' reader sends next
+/// ([`BELONGINGS_READ`]), and the file taken.
+const STATES_FILE: &str = "kodan_states";
+/// The request `network/a.f([BI)V` sends once it has made the belongings.
+const BELONGINGS_READ: (u32, u32) = (8, 23000);
+/// 네트워크 창고's 올리기 (`0x1b7cc2`), carrying the single game's picked
+/// thing into the world. Its answer adds the things it names to the world's
+/// belongings, made from their records, and takes the picked thing out of the
+/// single game's; the server names none, and the thing itself is put among
+/// the world's belongings here as it goes - with everything it is.
+const CARRIED: (u32, u32) = (8, 20200);
+/// `base/b.a()Lgame/chars/g;`, the player, and its `a`, the single game's
+/// belongings.
+const THE_PLAYER: (&str, &str, &str) = ("base/b", "a", "()Lgame/chars/g;");
+const SINGLE_BELONGINGS: (&str, &str) = ("a", "Lgame/g;");
+/// `game/g.b(Lgame/data/k;)Z`, putting a thing among belongings, as
+/// 내리기's answer does (`0x1c04cc`).
+const PUT: (&str, &str) = ("b", "(Lgame/data/k;)Z");
+/// `game/data/k`, every thing's class, and the fields [`HELD_FILE`] holds
+/// apart from the [`state`].
+const ITEM_CLASS: &str = "game/data/k";
+const ITEM_FIELDS: [(&str, &str); 6] = [("l", "B"), ("m", "B"), ("n", "B"), ("o", "B"), ("p", "B"), ("b", "J")];
 
 /// `network/b.a`, the belongings: a `game/g`, a `Vector` of `game/data/k`.
 const BELONGINGS: (&str, &str, &str) = ("network/b", "a", "Lgame/g;");
@@ -489,10 +517,17 @@ async fn handle_oz_svc(core: &mut ArmCore, (system, jvm, kept): &mut (System, Jv
     let (_, lr) = core.read_pc_lr()?;
 
     if id.0 == KEEP {
+        let asked = (core.read_param(0)?, core.read_param(1)?);
         let framed = jvm.try_push_native_frame(Vec::new());
-        if (core.read_param(0)?, core.read_param(1)?) == RISE_ASKED {
+        if asked == RISE_ASKED {
             let (class, name, descriptor) = LOADED_MAP;
             let _: core::result::Result<(), _> = jvm.put_static_field(class, name, descriptor, 0i16).await;
+        }
+        if asked == BELONGINGS_READ {
+            put_back_states(system, jvm).await;
+        }
+        if asked == CARRIED {
+            carry(jvm).await;
         }
         let held = held(jvm).await;
         if framed {
@@ -511,6 +546,213 @@ async fn handle_oz_svc(core: &mut ArmCore, (system, jvm, kept): &mut (System, Jv
     ().write(core, lr)
 }
 
+/// [`CARRIED`]'s thing put among the world's belongings.
+async fn carry(jvm: &Jvm) -> Option<()> {
+    let (class, name, descriptor) = THE_PLAYER;
+    let player: Box<dyn ClassInstance> = jvm.invoke_static::<_, Option<_>>(class, name, descriptor, ()).await.ok()??;
+    let (name, descriptor) = SINGLE_BELONGINGS;
+    let single: Box<dyn ClassInstance> = jvm.get_field::<Option<_>>(&player, name, descriptor).await.ok()??;
+    let (name, descriptor) = PICKED;
+    let thing: Box<dyn ClassInstance> = jvm.invoke_virtual::<_, Option<_>>(&single, name, descriptor, ()).await.ok()??;
+    let (class, name, descriptor) = BELONGINGS;
+    let belongings: Box<dyn ClassInstance> = jvm.get_static_field::<Option<_>>(class, name, descriptor).await.ok()??;
+    let (name, descriptor) = PUT;
+    let put: bool = jvm.invoke_virtual(&belongings, name, descriptor, (thing,)).await.ok()?;
+    if !put {
+        tracing::warn!("오즈: the thing carried into the world found no room");
+    }
+    Some(())
+}
+
+/// [`STATES_FILE`]'s states put back on the world's belongings, by id.
+async fn put_back_states(system: &System, jvm: &Jvm) -> Option<()> {
+    let files = system.filesystem();
+    let size = files.size(STATES_FILE).await?;
+    let mut data = alloc::vec![0; size];
+    let read = files.read(STATES_FILE, 0, size, &mut data).await;
+    files.remove(STATES_FILE).await;
+    if read != Some(size) {
+        return None;
+    }
+
+    let mut states = Vec::new();
+    let count = u16::from_be_bytes([*data.first()?, *data.get(1)?]) as usize;
+    let mut at = 2;
+    for _ in 0..count {
+        let id = i64::from_be_bytes(data.get(at..at + 8)?.try_into().ok()?);
+        let len = u16::from_be_bytes([data[at + 8], *data.get(at + 9)?]) as usize;
+        states.push((id, data.get(at + 10..at + 10 + len)?));
+        at += 10 + len;
+    }
+
+    let (class, name, descriptor) = BELONGINGS;
+    let belongings: Box<dyn ClassInstance> = jvm.get_static_field::<Option<_>>(class, name, descriptor).await.ok()??;
+    let count: i32 = jvm.invoke_virtual(&belongings, "size", "()I", ()).await.ok()?;
+    let mut put_back = 0;
+    for index in 0..count {
+        let mut item: Box<dyn ClassInstance> = jvm
+            .invoke_virtual::<_, Option<_>>(&belongings, "elementAt", "(I)Ljava/lang/Object;", (index,))
+            .await
+            .ok()??;
+        let id: i64 = jvm.get_field(&item, ITEM_ID, "J").await.ok()?;
+        if let Some((_, state)) = states.iter().find(|(kept, _)| *kept == id)
+            && put_state(jvm, &mut item, state).await.is_some()
+        {
+            put_back += 1;
+        }
+    }
+    tracing::info!("오즈: {put_back} of the world's belongings are as they were");
+    Some(())
+}
+
+/// The classes a thing's [`state`] is read from: its own, then each it
+/// extends up to [`ITEM_CLASS`].
+async fn item_classes(jvm: &Jvm, item: &dyn ClassInstance) -> Option<Vec<Box<dyn ClassDefinition>>> {
+    let mut classes = Vec::new();
+    let mut class = item.class_definition();
+    loop {
+        let last = class.name() == ITEM_CLASS;
+        let parent = class.super_class_name();
+        classes.push(class);
+        if last {
+            return Some(classes);
+        }
+        if classes.len() > 8 {
+            return None;
+        }
+        class = jvm.resolve_class(&parent?).await.ok()?.definition;
+    }
+}
+
+/// What a thing is beyond what [`HELD_FILE`]'s record says of it: its class's
+/// name, `[len][name]`, then every field of its own and the classes it
+/// extends but [`ITEM_FIELDS`], in the order the classes declare them - a
+/// byte, short, int or long as itself, big-endian, and a `byte[]` or
+/// `short[]` as `[u16 len]` and its elements, all ones for none.
+async fn state(jvm: &Jvm, item: &dyn ClassInstance) -> Option<Vec<u8>> {
+    let classes = item_classes(jvm, item).await?;
+    let name = classes.first()?.name();
+    let mut state = alloc::vec![name.len() as u8];
+    state.extend_from_slice(name.as_bytes());
+    for class in &classes {
+        for field in class.fields() {
+            if !kept_in_state(&**class, &*field) {
+                continue;
+            }
+            match (field.descriptor().as_str(), item.get_field(&*field).ok()?) {
+                (_, JavaValue::Byte(value)) => state.push(value as u8),
+                (_, JavaValue::Boolean(value)) => state.push(value as u8),
+                (_, JavaValue::Short(value)) => state.extend_from_slice(&value.to_be_bytes()),
+                (_, JavaValue::Char(value)) => state.extend_from_slice(&value.to_be_bytes()),
+                (_, JavaValue::Int(value)) => state.extend_from_slice(&value.to_be_bytes()),
+                (_, JavaValue::Long(value)) => state.extend_from_slice(&value.to_be_bytes()),
+                ("[B", JavaValue::Object(array)) => match array {
+                    Some(array) => {
+                        let len = jvm.array_length(&array).await.ok()?;
+                        state.extend_from_slice(&(len as u16).to_be_bytes());
+                        let values: Vec<i8> = jvm.load_array(&array, 0, len).await.ok()?;
+                        state.extend(values.into_iter().map(|value| value as u8));
+                    }
+                    None => state.extend_from_slice(&u16::MAX.to_be_bytes()),
+                },
+                ("[S", JavaValue::Object(array)) => match array {
+                    Some(array) => {
+                        let len = jvm.array_length(&array).await.ok()?;
+                        state.extend_from_slice(&(len as u16).to_be_bytes());
+                        let values: Vec<i16> = jvm.load_array(&array, 0, len).await.ok()?;
+                        for value in values {
+                            state.extend_from_slice(&value.to_be_bytes());
+                        }
+                    }
+                    None => state.extend_from_slice(&u16::MAX.to_be_bytes()),
+                },
+                _ => {}
+            }
+        }
+    }
+    Some(state)
+}
+
+/// Puts a [`state`] back on a thing of the same class.
+async fn put_state(jvm: &Jvm, item: &mut Box<dyn ClassInstance>, state: &[u8]) -> Option<()> {
+    let classes = item_classes(jvm, &**item).await?;
+    let name = classes.first()?.name();
+    let len = *state.first()? as usize;
+    if state.get(1..1 + len)? != name.as_bytes() {
+        return None;
+    }
+
+    let mut values = Vec::new();
+    let mut at = 1 + len;
+    let mut take = |count: usize| -> Option<&[u8]> {
+        let taken = state.get(at..at + count)?;
+        at += count;
+        Some(taken)
+    };
+    for class in &classes {
+        for field in class.fields() {
+            if !kept_in_state(&**class, &*field) {
+                continue;
+            }
+            let descriptor = field.descriptor();
+            let value = match descriptor.as_str() {
+                "B" => JavaValue::Byte(take(1)?[0] as i8),
+                "Z" => JavaValue::Boolean(take(1)?[0] != 0),
+                "S" => JavaValue::Short(i16::from_be_bytes(take(2)?.try_into().ok()?)),
+                "C" => JavaValue::Char(u16::from_be_bytes(take(2)?.try_into().ok()?)),
+                "I" => JavaValue::Int(i32::from_be_bytes(take(4)?.try_into().ok()?)),
+                "J" => JavaValue::Long(i64::from_be_bytes(take(8)?.try_into().ok()?)),
+                "[B" | "[S" => {
+                    let count = u16::from_be_bytes(take(2)?.try_into().ok()?);
+                    if count == u16::MAX {
+                        values.push((field, None));
+                        continue;
+                    }
+                    let size = if descriptor == "[B" { 1 } else { 2 };
+                    values.push((field, Some((descriptor, take(count as usize * size)?.to_vec()))));
+                    continue;
+                }
+                _ => continue,
+            };
+            item.put_field(&*field, value).ok()?;
+        }
+    }
+    for (field, array) in values {
+        let value = match array {
+            Some((descriptor, bytes)) => {
+                let array = if descriptor == "[B" {
+                    let mut array = jvm.instantiate_array("B", bytes.len()).await.ok()?;
+                    jvm.store_array(&mut array, 0, bytes.iter().map(|&byte| byte as i8).collect::<Vec<_>>())
+                        .await
+                        .ok()?;
+                    array
+                } else {
+                    let shorts: Vec<i16> = bytes.chunks_exact(2).map(|pair| i16::from_be_bytes([pair[0], pair[1]])).collect();
+                    let mut array = jvm.instantiate_array("S", shorts.len()).await.ok()?;
+                    jvm.store_array(&mut array, 0, shorts).await.ok()?;
+                    array
+                };
+                Some(array)
+            }
+            None => None,
+        };
+        item.put_field(&*field, JavaValue::Object(value)).ok()?;
+    }
+    Some(())
+}
+
+/// Whether `field` of `class` is in a [`state`]: every field of a thing's
+/// but the statics and [`ITEM_FIELDS`].
+fn kept_in_state(class: &dyn ClassDefinition, field: &dyn Field) -> bool {
+    if field.access_flags().contains(FieldAccessFlags::STATIC) {
+        return false;
+    }
+    !(class.name() == ITEM_CLASS
+        && ITEM_FIELDS
+            .iter()
+            .any(|&(name, descriptor)| field.name() == name && field.descriptor() == descriptor))
+}
+
 /// What the player holds and its gold, as [`HELD_FILE`] has them; `None`
 /// before the title has belongings to read.
 async fn held(jvm: &Jvm) -> Option<Vec<u8>> {
@@ -523,6 +765,7 @@ async fn held(jvm: &Jvm) -> Option<Vec<u8>> {
     let count: i32 = jvm.invoke_virtual(&belongings, "size", "()I", ()).await.ok()?;
     let mut held = (gold as u64).to_be_bytes().to_vec();
     held.extend_from_slice(&(count as u16).to_be_bytes());
+    let mut items = Vec::new();
     for index in 0..count {
         let item: Box<dyn ClassInstance> = jvm
             .invoke_virtual::<_, Option<_>>(&belongings, "elementAt", "(I)Ljava/lang/Object;", (index,))
@@ -532,11 +775,19 @@ async fn held(jvm: &Jvm) -> Option<Vec<u8>> {
             held.push(jvm.get_field::<i8>(&item, field, "B").await.ok()? as u8);
         }
         held.extend_from_slice(&jvm.get_field::<i64>(&item, ITEM_ID, "J").await.ok()?.to_be_bytes());
+        items.push(item);
     }
     let (name, descriptor) = PICKED;
     let picked: Option<Box<dyn ClassInstance>> = jvm.invoke_virtual(&belongings, name, descriptor, ()).await.ok()?;
-    if let Some(picked) = picked {
-        held.extend_from_slice(&jvm.get_field::<i64>(&picked, ITEM_ID, "J").await.ok()?.to_be_bytes());
+    let picked = match picked {
+        Some(picked) => jvm.get_field::<i64>(&picked, ITEM_ID, "J").await.ok()?,
+        None => -1,
+    };
+    held.extend_from_slice(&picked.to_be_bytes());
+    for item in &items {
+        let state = state(jvm, &**item).await.unwrap_or_default();
+        held.extend_from_slice(&(state.len() as u16).to_be_bytes());
+        held.extend_from_slice(&state);
     }
     Some(held)
 }
