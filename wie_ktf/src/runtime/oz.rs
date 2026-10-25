@@ -469,7 +469,7 @@ const LOADED_MAP: (&str, &str, &str) = ("network/b", "h", "S");
 /// The file [`KEEP`] writes, which the emulated 코단 world server
 /// (`wie_backend`'s `kodan`) takes on the request that follows:
 /// `[u64 gold][u16 count]` and that many `[kind][model][count][slot][bag]
-/// [place][재련도][most 재련도][u64 id]`; the `u64` id of the thing picked among them, or all ones when
+/// [place][재련도][most 재련도][미스릴코팅][u64 id]`; the `u64` id of the thing picked among them, or all ones when
 /// none is - what 네트워크 창고's 내리기, 버리기 and 판매하기 name, their
 /// requests telling nothing of it; and each thing's [`state`], `[u16
 /// len][state]`, in the same order.
@@ -524,6 +524,10 @@ const ITEM_BYTES: [&str; 6] = ["l", "m", "n", "o", "p", "q"];
 /// it takes (`i.a()B`, `i.a(B)V`).
 const EQUIPMENT: &str = "game/data/i";
 const REFINED: (&str, &str) = ("a", "[B");
+/// `game/data/e`, a weapon, and its `s`: its 미스릴코팅, the CRI it gives
+/// (`game/g.a(BBBB)V`'s second).
+const WEAPON: &str = "game/data/e";
+const COATED: (&str, &str) = ("s", "B");
 /// And its id.
 const ITEM_ID: &str = "b";
 /// `game/g.a()Lgame/data/k;`, the thing picked in a `game/g`, or null.
@@ -672,6 +676,18 @@ async fn refined(jvm: &Jvm, item: &dyn ClassInstance) -> Option<[u8; 2]> {
     };
     let values: Vec<i8> = jvm.load_array(&array, 0, 2).await.ok()?;
     Some([*values.first()? as u8, *values.get(1)? as u8])
+}
+
+/// A weapon's 미스릴코팅; `None` for any other thing.
+async fn coated(jvm: &Jvm, item: &dyn ClassInstance) -> Option<u8> {
+    let classes = item_classes(jvm, item).await?;
+    let weapon = classes.iter().find(|class| class.name() == WEAPON)?;
+    let (name, descriptor) = COATED;
+    let field = weapon.field(name, descriptor, false)?;
+    match item.get_field(&*field).ok()? {
+        JavaValue::Byte(value) => Some(value as u8),
+        _ => None,
+    }
 }
 
 /// The classes a thing's [`state`] is read from: its own, then each it
@@ -844,6 +860,7 @@ async fn held(jvm: &Jvm) -> Option<Vec<u8>> {
             held.push(jvm.get_field::<i8>(&item, field, "B").await.ok()? as u8);
         }
         held.extend_from_slice(&refined(jvm, &*item).await.unwrap_or([0, 0]));
+        held.push(coated(jvm, &*item).await.unwrap_or(0));
         held.extend_from_slice(&jvm.get_field::<i64>(&item, ITEM_ID, "J").await.ok()?.to_be_bytes());
         items.push(item);
     }

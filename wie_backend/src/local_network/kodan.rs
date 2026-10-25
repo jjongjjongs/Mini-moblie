@@ -263,28 +263,38 @@ const ARMOUR_WARE: (u32, u32) = (3, 5210);
 /// added, `game/g.a([BBI)V`, then a count of those replacing the ones where
 /// they lie, `game/g.b([BBI)V`) and `[counter][u64]`, one of [`COUNTERS`]'s.
 const BUY: (u32, u32) = (3, 5220);
-/// The 대장장이's 제련, asked as a piece of equipment is picked: `[menu]
-/// [bag][place]`, the menu 0 for 제련 (`game/l.a(I)V`). The reader
+/// The 대장장이's 제련, 미스릴코팅 and 특수제련, asked as a piece of equipment
+/// is picked: `[menu][bag][place]`, the menu one of [`REFINE_MENU`],
+/// [`COAT_MENU`] and [`SPECIAL_MENU`] (`game/l.a(I)V`). The reader
 /// (`0x1bbb7e`) takes `[menu][kind][len][name][i16 count][u64 price]`, the
 /// kind and name those of the material and the count of it taken, which the
 /// window (`game/o.a(Lorg/kwis/msp/lcdui/Graphics;Lgame/data/k;II)V`) shows
-/// beside the 재련도 to be. Offline it reckons the same itself: [`STONE`]s
-/// one more than the 재련도, and a hundred gold for each 재련도 there is.
+/// beside what the thing will be. Offline it reckons them itself, which is
+/// what is answered here: for 제련, [`STONE`]s one more than the 재련도 and
+/// [`REFINE_PRICE`] gold for each 재련도 there is; for 미스릴코팅,
+/// [`MITHRIL`] of the grade the coating has reached, half the weapon's level
+/// of it, and [`COAT_PRICE`] gold for each coating with the one to come.
+/// 특수제련 is the shop's, paid in cash; here it takes nothing.
 const REFINE_INFO: (u32, u32) = (3, 5300);
 /// The 제련 itself, asked the same. The reader (`0x1bb874`) takes `[menu]
-/// [failed][bag][place]`, and when it has not failed the 재련도 now
-/// (`game/g.a(BBBB)V`, the menu 0 setting `i.a(B)V`); then `[count]` of
-/// `[bag][place][count]` things whose count changed, `[count]` of
-/// `[bag][place]` things gone, and the gold and the third counter. A 제련
-/// here never fails.
+/// [failed][bag][place]`, and when it has not failed the 재련도 or the
+/// coating now (`game/g.a(BBBB)V`: the menu 1 setting the weapon's `s`, the
+/// others `i.a(B)V`); then `[count]` of `[bag][place][count]` things whose
+/// count changed, `[count]` of `[bag][place]` things gone, and the gold and
+/// the cash (`network/b.a[J][2]`). None fails here.
 const REFINE: (u32, u32) = (3, 5310);
-/// The 제련 menu's own.
 const REFINE_MENU: u8 = 0;
-/// 제련석, what a 제련 takes, and its name in EUC-KR.
+const COAT_MENU: u8 = 1;
+const SPECIAL_MENU: u8 = 2;
+/// 제련석, what a 제련 takes, and 미스릴, a coating: 하급, 중급 and 상급 by
+/// model.
 const STONE: u8 = 22;
-const STONE_NAME: &[u8] = b"\xc1\xa6\xb7\xc3\xbc\xae";
-/// A 제련's price per 재련도 there is.
+const MITHRIL: u8 = 23;
+/// A 제련's price per 재련도 there is, and a coating's per coating.
 const REFINE_PRICE: u64 = 100;
+const COAT_PRICE: u64 = 5000;
+/// The most coating a weapon takes, the offline window knowing three.
+const MOST_COATING: u8 = 3;
 /// [`BUY`] for the armour; answered as [`BUY`].
 const BUY_ARMOUR: (u32, u32) = (3, 5230);
 /// [`BUY`]'s popups, EUC-KR: 구입하였습니다. and 골드가 부족합니다.
@@ -462,9 +472,10 @@ struct Progress {
 }
 
 /// A thing the player holds, as [`HELD_FILE`] has it: `[kind][model][count]
-/// [slot][bag][place][재련도][most 재련도][u64 id]`, the title's own
+/// [slot][bag][place][재련도][most 재련도][미스릴코팅][u64 id]`, the title's own
 /// `game/data/k` fields `l`, `m`, `n`, `o`, `p`, `q` and `b`, and for a piece
-/// of equipment (`game/data/i`) its `a`, the 재련도 and the most it takes.
+/// of equipment (`game/data/i`) its `a`, the 재련도 and the most it takes,
+/// and for a weapon (`game/data/e`) its `s`, the 미스릴코팅.
 /// [`PROGRESS_FILE`] keeps all but the place and the 재련도s
 /// ([`Held::write`]), which the title tells again.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -480,11 +491,12 @@ struct Held {
     place: u8,
     refine: u8,
     most_refine: u8,
+    coating: u8,
     id: u64,
 }
 
 impl Held {
-    const LEN: usize = 16;
+    const LEN: usize = 17;
 
     /// The gold and the things [`HELD_FILE`] holds, or `None` when `data` is
     /// not that.
@@ -527,7 +539,8 @@ impl Held {
             place: record[5],
             refine: record[6],
             most_refine: record[7],
-            id: be(&record[8..16]),
+            coating: record[8],
+            id: be(&record[9..17]),
         }
     }
 
@@ -543,6 +556,7 @@ impl Held {
             self.place,
             self.refine,
             self.most_refine,
+            self.coating,
         ]);
         data.extend_from_slice(&self.id.to_be_bytes());
     }
@@ -1115,7 +1129,7 @@ impl KodanWorld {
                 }
             }
             REFINE_INFO | REFINE if self.logged_in => match *body {
-                [REFINE_MENU, bag, place, ..] => match self.refine(command == REFINE.1, bag, place) {
+                [menu @ (REFINE_MENU | COAT_MENU | SPECIAL_MENU), bag, place, ..] => match self.refine(menu, command == REFINE.1, bag, place) {
                     Some(answer) => vec![SlotRelay::message(kind, command, &answer)],
                     None => {
                         tracing::warn!("코단 world: nothing at {bag}/{place} to 제련");
@@ -1364,20 +1378,37 @@ impl KodanWorld {
     /// `itm/<kind>` record starts with, the records `[u16 len][u32 price
     /// LE]...` one a model.
     fn price_of(&self, kind: u8, model: u8) -> u32 {
-        let Some(data) = self.file(&alloc::format!("itm/{kind:02}")) else {
-            return 0;
-        };
-        let mut at = 0;
-        for _ in 0..model {
-            let Some(&[high, low]) = data.get(at..at + 2) else {
-                return 0;
-            };
-            at += 2 + u16::from_be_bytes([high, low]) as usize;
-        }
-        match data.get(at + 2..at + 6) {
-            Some(&[a, b, c, d]) => u32::from_le_bytes([a, b, c, d]),
+        match self.itm_record(kind, model).as_deref() {
+            Some(&[a, b, c, d, ..]) => u32::from_le_bytes([a, b, c, d]),
             _ => 0,
         }
+    }
+
+    /// The `itm/<kind>` record of `model`: `[u32 price LE][len][name][rest]`,
+    /// the rest a piece of equipment's `j` part with its level (`h`) the
+    /// third byte.
+    fn itm_record(&self, kind: u8, model: u8) -> Option<Vec<u8>> {
+        let data = self.file(&alloc::format!("itm/{kind:02}"))?;
+        let mut at = 0;
+        for _ in 0..model {
+            at += 2 + be(data.get(at..at + 2)?) as usize;
+        }
+        let len = be(data.get(at..at + 2)?) as usize;
+        Some(data.get(at + 2..at + 2 + len)?.to_vec())
+    }
+
+    /// The name of `model` of `kind`, EUC-KR.
+    fn name_of(&self, kind: u8, model: u8) -> Vec<u8> {
+        let record = self.itm_record(kind, model).unwrap_or_default();
+        let len = record.get(4).copied().unwrap_or(0) as usize;
+        record.get(5..5 + len).unwrap_or_default().to_vec()
+    }
+
+    /// The level a piece of equipment asks for.
+    fn level_of(&self, kind: u8, model: u8) -> u8 {
+        let record = self.itm_record(kind, model).unwrap_or_default();
+        let len = record.get(4).copied().unwrap_or(0) as usize;
+        record.get(5 + len + 2).copied().unwrap_or(0)
     }
 
     /// Writes [`STATES_FILE`] with the states of the things held.
@@ -1405,64 +1436,85 @@ impl KodanWorld {
         }
     }
 
-    /// [`REFINE_INFO`]'s answer for the equipment at `place` in `bag`, or
-    /// with `refining` [`REFINE`]'s, the 제련 done: the [`STONE`]s it takes
-    /// taken from the heaps held, the first first, and its price from the
-    /// gold. Without enough of either, or with the most 재련도 there is, the
-    /// thing is left as it was.
-    fn refine(&mut self, refining: bool, bag: u8, place: u8) -> Option<Vec<u8>> {
-        let held = self.progress.held.as_mut()?;
-        let at = held.iter().position(|thing| (thing.bag, thing.place) == (bag, place))?;
-        let refine = held[at].refine;
-        let needed = refine as u32 + 1;
-        let price = refine as u64 * REFINE_PRICE;
+    /// [`REFINE_INFO`]'s answer for the equipment at `place` in `bag` and
+    /// the `menu`, or with `refining` [`REFINE`]'s, the 제련 or coating
+    /// done: the material it takes taken from the heaps held, the first
+    /// first, and its price from the gold. Without enough of either, or with
+    /// the most there is, the thing is left as it was.
+    fn refine(&mut self, menu: u8, refining: bool, bag: u8, place: u8) -> Option<Vec<u8>> {
+        let thing = *self
+            .progress
+            .held
+            .as_ref()?
+            .iter()
+            .find(|thing| (thing.bag, thing.place) == (bag, place))?;
+        // What it is now and the most it can be, the material and how many
+        // of it, and the price.
+        let (now, most, material, needed, price) = match menu {
+            COAT_MENU => (
+                thing.coating,
+                MOST_COATING,
+                (MITHRIL, thing.coating.min(MOST_COATING - 1)),
+                self.level_of(thing.kind, thing.model) as u32 / 2,
+                (thing.coating as u64 + 1) * COAT_PRICE,
+            ),
+            SPECIAL_MENU => (thing.refine, thing.most_refine, (STONE, 0), 0, 0),
+            _ => (
+                thing.refine,
+                thing.most_refine,
+                (STONE, 0),
+                thing.refine as u32 + 1,
+                thing.refine as u64 * REFINE_PRICE,
+            ),
+        };
 
         if !refining {
-            let mut info = vec![REFINE_MENU, STONE, STONE_NAME.len() as u8];
-            info.extend_from_slice(STONE_NAME);
+            let name = self.name_of(material.0, material.1);
+            let mut info = vec![menu, material.0, name.len() as u8];
+            info.extend_from_slice(&name);
             info.extend_from_slice(&(needed as i16).to_be_bytes());
             info.extend_from_slice(&price.to_be_bytes());
             return Some(info);
         }
 
-        let stones: u32 = held.iter().filter(|thing| thing.kind == STONE).map(|thing| thing.count as u32).sum();
-        let can = refine < held[at].most_refine && stones >= needed && self.progress.gold >= price;
+        let is_material = |thing: &Held| (thing.kind, thing.model) == material;
+        let held = self.progress.held.as_mut()?;
+        let have: u32 = held.iter().filter(|thing| is_material(thing)).map(|thing| thing.count as u32).sum();
+        let can = now < most && have >= needed && self.progress.gold >= price;
         let mut changed = Vec::new();
         let mut gone = Vec::new();
         if can {
-            held[at].refine += 1;
             let mut left = needed;
-            for thing in held.iter_mut().filter(|thing| thing.kind == STONE) {
-                let taken = left.min(thing.count as u32);
-                thing.count -= taken as u8;
+            for heap in held.iter_mut().filter(|heap| is_material(heap)) {
+                let taken = left.min(heap.count as u32);
+                heap.count -= taken as u8;
                 left -= taken;
-                if thing.count == 0 {
-                    gone.push([thing.bag, thing.place]);
+                if heap.count == 0 {
+                    gone.push([heap.bag, heap.place]);
                 } else if taken > 0 {
-                    changed.push([thing.bag, thing.place, thing.count]);
+                    changed.push([heap.bag, heap.place, heap.count]);
                 }
             }
-            held.retain(|thing| thing.kind != STONE || thing.count > 0);
+            held.retain(|heap| !is_material(heap) || heap.count > 0);
+            let made = held.iter_mut().find(|made| made.id == thing.id)?;
+            if menu == COAT_MENU {
+                made.coating += 1;
+            } else {
+                made.refine += 1;
+            }
             self.progress.gold -= price;
-            tracing::info!("코단 world: 제련 to {} for {needed} 제련석 and {price} gold", refine + 1);
+            tracing::info!("코단 world: menu {menu} to {} for {needed} of {material:?} and {price} gold", now + 1);
         } else {
             tracing::warn!(
-                "코단 world: no 제련 of {bag}/{place}: 재련도 {refine}, {stones} 제련석, {} gold",
+                "코단 world: no menu {menu} on {bag}/{place}: {now} of {most}, {have} of {needed} {material:?}, {} gold",
                 self.progress.gold
             );
         }
-        let refined = self
-            .progress
-            .held
-            .as_ref()?
-            .iter()
-            .find(|thing| (thing.bag, thing.place) == (bag, place))?
-            .refine;
 
-        let mut answer = vec![REFINE_MENU, 0, bag, place, refined, changed.len() as u8];
-        changed.iter().for_each(|thing| answer.extend_from_slice(thing));
+        let mut answer = vec![menu, 0, bag, place, if can { now + 1 } else { now }, changed.len() as u8];
+        changed.iter().for_each(|heap| answer.extend_from_slice(heap));
         answer.push(gone.len() as u8);
-        gone.iter().for_each(|thing| answer.extend_from_slice(thing));
+        gone.iter().for_each(|heap| answer.extend_from_slice(heap));
         answer.extend_from_slice(&self.progress.gold.to_be_bytes());
         answer.extend_from_slice(&[0; 8]);
         if can {
@@ -2790,10 +2842,11 @@ mod tests {
         stones(5, 1, 4).write_told(&mut told);
         world.hold(&told);
 
+        // Without the title's files the material has no name.
         let info = &ask(&mut world, 3, 5300, &[0, 0, 0])[0][12..];
-        assert_eq!(&info[..3], &[0, 22, 6]);
-        assert_eq!(&info[9..11], &2i16.to_be_bytes(), "one more 제련석 than the 재련도");
-        assert_eq!(&info[11..19], &100u64.to_be_bytes());
+        assert_eq!(&info[..3], &[0, 22, 0]);
+        assert_eq!(&info[3..5], &2i16.to_be_bytes(), "one more 제련석 than the 재련도");
+        assert_eq!(&info[5..13], &100u64.to_be_bytes());
 
         let done = &ask(&mut world, 3, 5310, &[0, 0, 0])[0][12..];
         assert_eq!(&done[..5], &[0, 0, 0, 0, 2], "재련도 2");
@@ -2801,6 +2854,23 @@ mod tests {
         assert_eq!(&done[9..12], &[1, 1, 0], "the first heap gone");
         assert_eq!(&done[12..20], &900u64.to_be_bytes());
         assert_eq!(world.progress.held.as_deref(), Some(&[Held { refine: 2, ..sword }, stones(4, 1, 4)][..]));
+
+        // A coating asks 미스릴 of its grade, and 5000 gold for the first.
+        let info = &ask(&mut world, 3, 5300, &[1, 0, 0])[0][12..];
+        assert_eq!(&info[..3], &[1, 23, 0]);
+        assert_eq!(&info[5..13], &5000u64.to_be_bytes());
+        // Without the gold for it, the weapon is left as it was.
+        let coated = &ask(&mut world, 3, 5310, &[1, 0, 0])[0][12..];
+        assert_eq!(&coated[..7], &[1, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(&coated[7..15], &900u64.to_be_bytes());
+        world.progress.gold = 6000;
+        let coated = &ask(&mut world, 3, 5310, &[1, 0, 0])[0][12..];
+        assert_eq!(&coated[..7], &[1, 0, 0, 0, 1, 0, 0], "coating 1, its 미스릴 none at level 0");
+        assert_eq!(&coated[7..15], &1000u64.to_be_bytes());
+
+        // 특수제련 takes nothing.
+        let special = &ask(&mut world, 3, 5310, &[2, 0, 0])[0][12..];
+        assert_eq!(&special[..7], &[2, 0, 0, 0, 3, 0, 0], "재련도 3");
 
         // Nothing at the place asked of: no answer.
         assert!(ask(&mut world, 3, 5300, &[0, 0, 9]).is_empty());
