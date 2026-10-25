@@ -272,8 +272,8 @@ const BUY: (u32, u32) = (3, 5220);
 /// beside what the thing will be. Offline it reckons them itself, which is
 /// what is answered here: for 제련, [`STONE`]s one more than the 재련도 and
 /// [`REFINE_PRICE`] gold for each 재련도 there is; for 미스릴코팅,
-/// [`MITHRIL`] of the grade the coating has reached, half the weapon's level
-/// of it, and [`COAT_PRICE`] gold for each coating with the one to come.
+/// [`MITHRIL`] of the grade the coating has reached and half the weapon's
+/// level of it, for [`COAT_PRICE`].
 /// 특수제련 is the shop's, paid in cash; here it takes nothing.
 const REFINE_INFO: (u32, u32) = (3, 5300);
 /// The 제련 itself, asked the same. The reader (`0x1bb874`) takes `[menu]
@@ -281,7 +281,10 @@ const REFINE_INFO: (u32, u32) = (3, 5300);
 /// coating now (`game/g.a(BBBB)V`: the menu 1 setting the weapon's `s`, the
 /// others `i.a(B)V`); then `[count]` of `[bag][place][count]` things whose
 /// count changed, `[count]` of `[bag][place]` things gone, and the gold and
-/// the cash (`network/b.a[J][2]`). None fails here.
+/// the cash (`network/b.a[J][2]`). One that failed says only so, and under
+/// the 제련 menu has the thing broken (`0x1bbb4c`). None fails by chance
+/// here; one without the gold or the material for it is refused, as failed
+/// under the coating's menu.
 const REFINE: (u32, u32) = (3, 5310);
 const REFINE_MENU: u8 = 0;
 const COAT_MENU: u8 = 1;
@@ -290,9 +293,10 @@ const SPECIAL_MENU: u8 = 2;
 /// model.
 const STONE: u8 = 22;
 const MITHRIL: u8 = 23;
-/// A 제련's price per 재련도 there is, and a coating's per coating.
+/// A 제련's price per 재련도 there is, and a coating's: nothing, where the
+/// offline window asks 5000 gold for each coating with the one to come.
 const REFINE_PRICE: u64 = 100;
-const COAT_PRICE: u64 = 5000;
+const COAT_PRICE: u64 = 0;
 /// The most coating a weapon takes, the offline window knowing three.
 const MOST_COATING: u8 = 3;
 /// [`BUY`] for the armour; answered as [`BUY`].
@@ -1456,7 +1460,7 @@ impl KodanWorld {
                 MOST_COATING,
                 (MITHRIL, thing.coating.min(MOST_COATING - 1)),
                 self.level_of(thing.kind, thing.model) as u32 / 2,
-                (thing.coating as u64 + 1) * COAT_PRICE,
+                COAT_PRICE,
             ),
             SPECIAL_MENU => (thing.refine, thing.most_refine, (STONE, 0), 0, 0),
             _ => (
@@ -1511,7 +1515,14 @@ impl KodanWorld {
             );
         }
 
-        let mut answer = vec![menu, 0, bag, place, if can { now + 1 } else { now }, changed.len() as u8];
+        let mut answer = if can {
+            vec![menu, 0, bag, place, now + 1]
+        } else {
+            // Failed, which [`REFINE`]'s reader takes for the thing broken
+            // when the menu is 제련's: so refused under the coating's.
+            vec![menu.max(COAT_MENU), 1, bag, place]
+        };
+        answer.push(changed.len() as u8);
         changed.iter().for_each(|heap| answer.extend_from_slice(heap));
         answer.push(gone.len() as u8);
         gone.iter().for_each(|heap| answer.extend_from_slice(heap));
@@ -2855,22 +2866,22 @@ mod tests {
         assert_eq!(&done[12..20], &900u64.to_be_bytes());
         assert_eq!(world.progress.held.as_deref(), Some(&[Held { refine: 2, ..sword }, stones(4, 1, 4)][..]));
 
-        // A coating asks 미스릴 of its grade, and 5000 gold for the first.
+        // A coating asks 미스릴 of its grade, and no gold.
         let info = &ask(&mut world, 3, 5300, &[1, 0, 0])[0][12..];
         assert_eq!(&info[..3], &[1, 23, 0]);
-        assert_eq!(&info[5..13], &5000u64.to_be_bytes());
-        // Without the gold for it, the weapon is left as it was.
-        let coated = &ask(&mut world, 3, 5310, &[1, 0, 0])[0][12..];
-        assert_eq!(&coated[..7], &[1, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(&coated[7..15], &900u64.to_be_bytes());
-        world.progress.gold = 6000;
+        assert_eq!(&info[5..13], &0u64.to_be_bytes());
         let coated = &ask(&mut world, 3, 5310, &[1, 0, 0])[0][12..];
         assert_eq!(&coated[..7], &[1, 0, 0, 0, 1, 0, 0], "coating 1, its 미스릴 none at level 0");
-        assert_eq!(&coated[7..15], &1000u64.to_be_bytes());
+        assert_eq!(&coated[7..15], &900u64.to_be_bytes());
 
         // 특수제련 takes nothing.
         let special = &ask(&mut world, 3, 5310, &[2, 0, 0])[0][12..];
         assert_eq!(&special[..7], &[2, 0, 0, 0, 3, 0, 0], "재련도 3");
+
+        // A 제련 refused is told as a coating failed, not to break the thing.
+        world.progress.gold = 0;
+        let refused = &ask(&mut world, 3, 5310, &[0, 0, 0])[0][12..];
+        assert_eq!(&refused[..4], &[1, 1, 0, 0]);
 
         // Nothing at the place asked of: no answer.
         assert!(ask(&mut world, 3, 5300, &[0, 0, 9]).is_empty());
