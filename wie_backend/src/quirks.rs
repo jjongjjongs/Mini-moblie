@@ -1006,6 +1006,10 @@ const PRODUCT_QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // 240x274 it fills the panel exactly. 크로노스윙's KTF build (PD007589)
     // carries the same AID, 010100D2, and the same descriptor size.
     (TitlePlatform::Ktf, "PD002198", panel(240, 274)),
+    // 메이플스토리 궁수편 (KTF PD001969): the same 274 rows, 23 white above
+    // and below on its descriptor's 240x320. Its AID, 010100D4, is
+    // 템페스트's too.
+    (TitlePlatform::Ktf, "PD001969", panel(240, 274)),
     // 메이플스토리's 176-wide build (KTF PD001295, 0102589E): 194 rows
     // centred in the 176x220 its descriptor names, 13 white rows above and
     // below.
@@ -1299,6 +1303,9 @@ mod tests {
 
         let narrow = super::title_quirks_for_product(TitlePlatform::Ktf, "PD001295", "0102589E", Some((176, 220)));
         assert_eq!(narrow.screen_size, Some((176, 194)));
+
+        let archer = super::title_quirks_for_product(TitlePlatform::Ktf, "PD001969", "010100D4", Some((240, 320)));
+        assert_eq!(archer.screen_size, Some((240, 274)));
 
         let chronos_wing = super::title_quirks_for_product(TitlePlatform::Ktf, "PD007589", "010100D2", Some((240, 320)));
         assert_eq!(chronos_wing.screen_size, None);
