@@ -204,6 +204,7 @@ pub(crate) fn install_local_fights(core: &mut ArmCore, system: &System, jvm: &Jv
         &SENT,
         &CHOSEN,
         &CHOSEN_AGAIN,
+        &SALE_SHARE,
     ] {
         if !halfwords_at(core, site.address, &site.code)? {
             tracing::warn!(
@@ -247,6 +248,7 @@ pub(crate) fn install_local_fights(core: &mut ArmCore, system: &System, jvm: &Jv
     write(core, DEFINED.address, &NOTHING)?;
     write(core, CHOSEN.address, &bl(CHOSEN.address, chosen))?;
     write(core, CHOSEN_AGAIN.address, &bl(CHOSEN_AGAIN.address, chosen))?;
+    write(core, SALE_SHARE.address, &SALE_WHOLE)?;
     write(core, SENT.address, &bl(SENT.address, sent))?;
 
     tracing::info!("오즈: the 코단 world's dungeons are fought by the title's offline rules");
@@ -467,7 +469,7 @@ const LOADED_MAP: (&str, &str, &str) = ("network/b", "h", "S");
 /// The file [`KEEP`] writes, which the emulated 코단 world server
 /// (`wie_backend`'s `kodan`) takes on the request that follows:
 /// `[u64 gold][u16 count]` and that many `[kind][model][count][slot][bag]
-/// [u64 id]`; the `u64` id of the thing picked among them, or all ones when
+/// [place][재련도][most 재련도][u64 id]`; the `u64` id of the thing picked among them, or all ones when
 /// none is - what 네트워크 창고's 내리기, 버리기 and 판매하기 name, their
 /// requests telling nothing of it; and each thing's [`state`], `[u16
 /// len][state]`, in the same order.
@@ -496,7 +498,17 @@ const SINGLE_BELONGINGS: (&str, &str) = ("a", "Lgame/g;");
 /// `game/data/k`, every thing's class, and the fields [`HELD_FILE`] holds
 /// apart from the [`state`].
 const ITEM_CLASS: &str = "game/data/k";
-const ITEM_FIELDS: [(&str, &str); 6] = [("l", "B"), ("m", "B"), ("n", "B"), ("o", "B"), ("p", "B"), ("b", "J")];
+/// The price (`a`) is the tables' too: the single game's things carry none.
+const ITEM_FIELDS: [(&str, &str); 8] = [
+    ("l", "B"),
+    ("m", "B"),
+    ("n", "B"),
+    ("o", "B"),
+    ("p", "B"),
+    ("q", "B"),
+    ("b", "J"),
+    ("a", "J"),
+];
 
 /// `network/b.a`, the belongings: a `game/g`, a `Vector` of `game/data/k`.
 const BELONGINGS: (&str, &str, &str) = ("network/b", "a", "Lgame/g;");
@@ -505,8 +517,13 @@ const BELONGINGS: (&str, &str, &str) = ("network/b", "a", "Lgame/g;");
 const COUNTERS: (&str, &str, &str) = ("network/b", "a", "[J");
 const GOLD: usize = 1;
 /// The fields of a `game/data/k` [`HELD_FILE`] keeps, in its order: the
-/// kind, the model, the count, the slot it is worn in and the bag.
-const ITEM_BYTES: [&str; 5] = ["l", "m", "n", "o", "p"];
+/// kind, the model, the count, the slot it is worn in, the bag and the place
+/// in it.
+const ITEM_BYTES: [&str; 6] = ["l", "m", "n", "o", "p", "q"];
+/// `game/data/i`, a piece of equipment, and its `a`: the 재련도 and the most
+/// it takes (`i.a()B`, `i.a(B)V`).
+const EQUIPMENT: &str = "game/data/i";
+const REFINED: (&str, &str) = ("a", "[B");
 /// And its id.
 const ITEM_ID: &str = "b";
 /// `game/g.a()Lgame/data/k;`, the thing picked in a `game/g`, or null.
@@ -641,6 +658,20 @@ async fn put_back_states(system: &System, jvm: &Jvm) -> Option<()> {
     }
     tracing::info!("오즈: {put_back} of the world's belongings are as they were");
     Some(())
+}
+
+/// A piece of equipment's 재련도 and the most it takes; `None` for any
+/// other thing.
+async fn refined(jvm: &Jvm, item: &dyn ClassInstance) -> Option<[u8; 2]> {
+    let classes = item_classes(jvm, item).await?;
+    let equipment = classes.iter().find(|class| class.name() == EQUIPMENT)?;
+    let (name, descriptor) = REFINED;
+    let field = equipment.field(name, descriptor, false)?;
+    let JavaValue::Object(Some(array)) = item.get_field(&*field).ok()? else {
+        return None;
+    };
+    let values: Vec<i8> = jvm.load_array(&array, 0, 2).await.ok()?;
+    Some([*values.first()? as u8, *values.get(1)? as u8])
 }
 
 /// The classes a thing's [`state`] is read from: its own, then each it
@@ -812,6 +843,7 @@ async fn held(jvm: &Jvm) -> Option<Vec<u8>> {
         for field in ITEM_BYTES {
             held.push(jvm.get_field::<i8>(&item, field, "B").await.ok()? as u8);
         }
+        held.extend_from_slice(&refined(jvm, &*item).await.unwrap_or([0, 0]));
         held.extend_from_slice(&jvm.get_field::<i64>(&item, ITEM_ID, "J").await.ok()?.to_be_bytes());
         items.push(item);
     }
@@ -844,6 +876,15 @@ const CHOSEN_AGAIN: Site = Site {
 };
 /// `game/o.t(I)V`'s way out.
 const CHOSEN_OUT: u32 = 0x18842e;
+
+/// 네트워크 창고's 판매하기 asks 판매가격 N실버 입니다 with N the thing's
+/// price (`k.a`) over 4, times its count (`game/n.c(B)V`); the server pays
+/// it all, and the 4 becomes 1 (`movs r2,#4; movs r3,#0`, a long's halves).
+const SALE_SHARE: Site = Site {
+    address: 0x17a938,
+    code: [0x2204, 0x2300],
+};
+const SALE_WHOLE: [u16; 2] = [0x2201, 0x2300];
 
 /// The call [`CHOSEN`] stands for, and back to it with what it answered, or
 /// out of `game/o.t(I)V` - nothing done - when that is null.

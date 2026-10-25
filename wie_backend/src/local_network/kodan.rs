@@ -263,6 +263,28 @@ const ARMOUR_WARE: (u32, u32) = (3, 5210);
 /// added, `game/g.a([BBI)V`, then a count of those replacing the ones where
 /// they lie, `game/g.b([BBI)V`) and `[counter][u64]`, one of [`COUNTERS`]'s.
 const BUY: (u32, u32) = (3, 5220);
+/// The 대장장이's 제련, asked as a piece of equipment is picked: `[menu]
+/// [bag][place]`, the menu 0 for 제련 (`game/l.a(I)V`). The reader
+/// (`0x1bbb7e`) takes `[menu][kind][len][name][i16 count][u64 price]`, the
+/// kind and name those of the material and the count of it taken, which the
+/// window (`game/o.a(Lorg/kwis/msp/lcdui/Graphics;Lgame/data/k;II)V`) shows
+/// beside the 재련도 to be. Offline it reckons the same itself: [`STONE`]s
+/// one more than the 재련도, and a hundred gold for each 재련도 there is.
+const REFINE_INFO: (u32, u32) = (3, 5300);
+/// The 제련 itself, asked the same. The reader (`0x1bb874`) takes `[menu]
+/// [failed][bag][place]`, and when it has not failed the 재련도 now
+/// (`game/g.a(BBBB)V`, the menu 0 setting `i.a(B)V`); then `[count]` of
+/// `[bag][place][count]` things whose count changed, `[count]` of
+/// `[bag][place]` things gone, and the gold and the third counter. A 제련
+/// here never fails.
+const REFINE: (u32, u32) = (3, 5310);
+/// The 제련 menu's own.
+const REFINE_MENU: u8 = 0;
+/// 제련석, what a 제련 takes, and its name in EUC-KR.
+const STONE: u8 = 22;
+const STONE_NAME: &[u8] = b"\xc1\xa6\xb7\xc3\xbc\xae";
+/// A 제련's price per 재련도 there is.
+const REFINE_PRICE: u64 = 100;
 /// [`BUY`] for the armour; answered as [`BUY`].
 const BUY_ARMOUR: (u32, u32) = (3, 5230);
 /// [`BUY`]'s popups, EUC-KR: 구입하였습니다. and 골드가 부족합니다.
@@ -440,20 +462,29 @@ struct Progress {
 }
 
 /// A thing the player holds, as [`HELD_FILE`] has it: `[kind][model][count]
-/// [slot][bag][u64 id]`, the title's own `game/data/k` fields `l`, `m`, `n`,
-/// `o`, `p` and `b`.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// [slot][bag][place][재련도][most 재련도][u64 id]`, the title's own
+/// `game/data/k` fields `l`, `m`, `n`, `o`, `p`, `q` and `b`, and for a piece
+/// of equipment (`game/data/i`) its `a`, the 재련도 and the most it takes.
+/// [`PROGRESS_FILE`] keeps all but the place and the 재련도s
+/// ([`Held::write`]), which the title tells again.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Held {
     kind: u8,
     model: u8,
     count: u8,
     slot: u8,
     bag: u8,
+    /// Where in its bag the thing is kept (`k.q`): the last byte of the
+    /// record's first part, and with the bag how 제련 and the world's other
+    /// requests name a thing. No two things of a bag share one.
+    place: u8,
+    refine: u8,
+    most_refine: u8,
     id: u64,
 }
 
 impl Held {
-    const LEN: usize = 13;
+    const LEN: usize = 16;
 
     /// The gold and the things [`HELD_FILE`] holds, or `None` when `data` is
     /// not that.
@@ -493,10 +524,31 @@ impl Held {
             count: record[2],
             slot: record[3],
             bag: record[4],
-            id: be(&record[5..13]),
+            place: record[5],
+            refine: record[6],
+            most_refine: record[7],
+            id: be(&record[8..16]),
         }
     }
 
+    /// The thing as [`HELD_FILE`] tells it.
+    #[cfg(test)]
+    fn write_told(&self, data: &mut Vec<u8>) {
+        data.extend_from_slice(&[
+            self.kind,
+            self.model,
+            self.count,
+            self.slot,
+            self.bag,
+            self.place,
+            self.refine,
+            self.most_refine,
+        ]);
+        data.extend_from_slice(&self.id.to_be_bytes());
+    }
+
+    /// The thing as [`PROGRESS_FILE`] keeps it: `[kind][model][count][slot]
+    /// [bag][u64 id]`.
     fn write(&self, data: &mut Vec<u8>) {
         data.extend_from_slice(&[self.kind, self.model, self.count, self.slot, self.bag]);
         data.extend_from_slice(&self.id.to_be_bytes());
@@ -706,6 +758,7 @@ impl KodanWorld {
                 vec![SlotRelay::message(kind, command, &state)]
             }
             BELONGINGS if self.logged_in => {
+                self.place_held();
                 self.hand_back_states();
                 vec![SlotRelay::message(kind, command, &self.belongings())]
             }
@@ -726,6 +779,10 @@ impl KodanWorld {
                     let id = u64::from_be_bytes([b0, b1, b2, b3, b4, b5, b6, b7]);
                     let bag = bag_of(kind_stored);
                     let count = if bag == 0 { 1 } else { count.max(1) };
+                    let place = match self.progress.held.iter().flatten().find(|thing| thing.id == id) {
+                        Some(thing) => thing.place,
+                        None => self.free_places(bag, 1).first().copied().unwrap_or_default(),
+                    };
                     if let Some(held) = &mut self.progress.held
                         && held.iter().all(|thing| thing.id != id)
                     {
@@ -735,12 +792,14 @@ impl KodanWorld {
                             count,
                             slot: NOT_WORN,
                             bag,
+                            place,
                             id,
+                            ..Held::default()
                         });
                         self.save();
                     }
                     // The title puts what the thing was on the one made.
-                    let item = item_record(kind_stored, model, count, id, NOT_WORN);
+                    let item = placed(item_record(kind_stored, model, count, id, NOT_WORN), place);
                     let mut stored = vec![1, bag];
                     stored.extend_from_slice(&(item.len() as u32).to_be_bytes());
                     stored.extend_from_slice(&item);
@@ -1014,27 +1073,27 @@ impl KodanWorld {
                             // The things added - a piece of equipment each, the
                             // rest heaped together - and none changed.
                             let id = self.next_id();
-                            let items: Vec<Vec<u8>> = if bag_of(ware.kind) == 0 {
-                                (0..count).map(|index| ware.record(1, id + index as u64)).collect()
+                            let bag = bag_of(ware.kind);
+                            // `(count, id, place)` of each thing added.
+                            let things: Vec<(u8, u64, u8)> = if bag == 0 {
+                                let places = self.free_places(bag, count as usize);
+                                (0..count).zip(places).map(|(index, place)| (1, id + index as u64, place)).collect()
                             } else {
-                                vec![ware.record(count, id)]
+                                self.free_places(bag, 1).into_iter().map(|place| (count, id, place)).collect()
                             };
+                            let items: Vec<Vec<u8>> = things.iter().map(|&(count, id, place)| placed(ware.record(count, id), place)).collect();
                             self.progress.bought.extend((0..count).map(|_| (ware.kind, ware.model)));
                             if let Some(held) = &mut self.progress.held {
-                                let bag = bag_of(ware.kind);
-                                let thing = |count, id| Held {
+                                held.extend(things.iter().map(|&(count, id, place)| Held {
                                     kind: ware.kind,
                                     model: ware.model,
                                     count,
                                     slot: NOT_WORN,
                                     bag,
+                                    place,
                                     id,
-                                };
-                                if bag == 0 {
-                                    held.extend((0..count).map(|index| thing(1, id + index as u64)));
-                                } else {
-                                    held.push(thing(count, id));
-                                }
+                                    ..Held::default()
+                                }));
                             }
                             bought.push(items.len() as u8);
                             for item in items {
@@ -1055,6 +1114,19 @@ impl KodanWorld {
                     }
                 }
             }
+            REFINE_INFO | REFINE if self.logged_in => match *body {
+                [REFINE_MENU, bag, place, ..] => match self.refine(command == REFINE.1, bag, place) {
+                    Some(answer) => vec![SlotRelay::message(kind, command, &answer)],
+                    None => {
+                        tracing::warn!("코단 world: nothing at {bag}/{place} to 제련");
+                        Vec::new()
+                    }
+                },
+                _ => {
+                    tracing::warn!("코단 world: no answer yet for kind {kind} command {command}: {}", hex(body));
+                    Vec::new()
+                }
+            },
             POINTS_SPENT if self.logged_in => vec![SlotRelay::message(kind, command, &[])],
             MENU_COUNT | MENU_AMOUNT | SKILLS_RESET | STATS_RESET if self.logged_in => vec![SlotRelay::message(kind, command, &[0; 8])],
             REVIVE if self.logged_in => {
@@ -1125,12 +1197,39 @@ impl KodanWorld {
         belongings.push(bags.len() as u8);
         for (bag, items) in bags {
             belongings.extend_from_slice(&[bag, items.len() as u8]);
-            for item in items {
+            for (place, item) in (0..).zip(items) {
                 belongings.push(item.len() as u8);
-                belongings.extend_from_slice(&item);
+                belongings.extend_from_slice(&placed(item, place));
             }
         }
         belongings
+    }
+
+    /// Numbers each bag's things in [`HELD_FILE`]'s order, as
+    /// [`Self::belongings_in`] places them.
+    fn place_held(&mut self) {
+        let Some(held) = &mut self.progress.held else {
+            return;
+        };
+        let mut next: BTreeMap<u8, u8> = BTreeMap::new();
+        for thing in held {
+            let place = next.entry(thing.bag).or_default();
+            thing.place = *place;
+            *place = place.wrapping_add(1);
+        }
+    }
+
+    /// `count` places in `bag` no thing held is kept in, the lowest first.
+    fn free_places(&self, bag: u8, count: usize) -> Vec<u8> {
+        let taken: Vec<u8> = self
+            .progress
+            .held
+            .iter()
+            .flatten()
+            .filter(|thing| thing.bag == bag)
+            .map(|thing| thing.place)
+            .collect();
+        (0..=u8::MAX).filter(|place| !taken.contains(place)).take(count).collect()
     }
 
     /// Every character's [`Progress`] in [`PROGRESS_FILE`]; none when there
@@ -1304,6 +1403,72 @@ impl KodanWorld {
         if written != Some(data.len()) {
             tracing::warn!("코단 world: {STATES_FILE} was not written");
         }
+    }
+
+    /// [`REFINE_INFO`]'s answer for the equipment at `place` in `bag`, or
+    /// with `refining` [`REFINE`]'s, the 제련 done: the [`STONE`]s it takes
+    /// taken from the heaps held, the first first, and its price from the
+    /// gold. Without enough of either, or with the most 재련도 there is, the
+    /// thing is left as it was.
+    fn refine(&mut self, refining: bool, bag: u8, place: u8) -> Option<Vec<u8>> {
+        let held = self.progress.held.as_mut()?;
+        let at = held.iter().position(|thing| (thing.bag, thing.place) == (bag, place))?;
+        let refine = held[at].refine;
+        let needed = refine as u32 + 1;
+        let price = refine as u64 * REFINE_PRICE;
+
+        if !refining {
+            let mut info = vec![REFINE_MENU, STONE, STONE_NAME.len() as u8];
+            info.extend_from_slice(STONE_NAME);
+            info.extend_from_slice(&(needed as i16).to_be_bytes());
+            info.extend_from_slice(&price.to_be_bytes());
+            return Some(info);
+        }
+
+        let stones: u32 = held.iter().filter(|thing| thing.kind == STONE).map(|thing| thing.count as u32).sum();
+        let can = refine < held[at].most_refine && stones >= needed && self.progress.gold >= price;
+        let mut changed = Vec::new();
+        let mut gone = Vec::new();
+        if can {
+            held[at].refine += 1;
+            let mut left = needed;
+            for thing in held.iter_mut().filter(|thing| thing.kind == STONE) {
+                let taken = left.min(thing.count as u32);
+                thing.count -= taken as u8;
+                left -= taken;
+                if thing.count == 0 {
+                    gone.push([thing.bag, thing.place]);
+                } else if taken > 0 {
+                    changed.push([thing.bag, thing.place, thing.count]);
+                }
+            }
+            held.retain(|thing| thing.kind != STONE || thing.count > 0);
+            self.progress.gold -= price;
+            tracing::info!("코단 world: 제련 to {} for {needed} 제련석 and {price} gold", refine + 1);
+        } else {
+            tracing::warn!(
+                "코단 world: no 제련 of {bag}/{place}: 재련도 {refine}, {stones} 제련석, {} gold",
+                self.progress.gold
+            );
+        }
+        let refined = self
+            .progress
+            .held
+            .as_ref()?
+            .iter()
+            .find(|thing| (thing.bag, thing.place) == (bag, place))?
+            .refine;
+
+        let mut answer = vec![REFINE_MENU, 0, bag, place, refined, changed.len() as u8];
+        changed.iter().for_each(|thing| answer.extend_from_slice(thing));
+        answer.push(gone.len() as u8);
+        gone.iter().for_each(|thing| answer.extend_from_slice(thing));
+        answer.extend_from_slice(&self.progress.gold.to_be_bytes());
+        answer.extend_from_slice(&[0; 8]);
+        if can {
+            self.save();
+        }
+        Some(answer)
     }
 
     /// The id a thing bought now is given: past every one bought and held.
@@ -1703,6 +1868,7 @@ fn decode(data: &[u8]) -> Option<BTreeMap<u64, Progress>> {
                 slot: be(take_bytes(1)?) as u8,
                 bag: be(take_bytes(1)?) as u8,
                 id: be(take_bytes(8)?),
+                ..Held::default()
             });
         }
         all.entry(character).or_default().held = Some(held);
@@ -1968,6 +2134,17 @@ fn ring_record(model: u8, id: u64, slot: u8, ring: &Ring) -> Vec<u8> {
     item.extend_from_slice(&ring.abilities);
     item.extend_from_slice(&[0; 8]);
     item
+}
+
+/// `record` with the thing kept at `place` in its bag: the first part's last
+/// byte, `k.q`.
+fn placed(mut record: Vec<u8>, place: u8) -> Vec<u8> {
+    const PLACE: usize = 12;
+
+    if let Some(at) = record.get_mut(PLACE) {
+        *at = place;
+    }
+    record
 }
 
 /// The weapon slot, one of the two `game/chars/g.J()Z` looks in.
@@ -2390,6 +2567,7 @@ mod tests {
                     slot: 0xff,
                     bag: 0,
                     id: 9,
+                    ..Held::default()
                 }]),
                 states: BTreeMap::from([(9, vec![1, b'c', 7, 0, 0xff])]),
             },
@@ -2523,12 +2701,13 @@ mod tests {
             slot,
             bag,
             id,
+            ..Held::default()
         };
         let held = vec![thing(5, 0, 1, 1, 0, 1), thing(11, 0, 1, 0xff, 0, 2), thing(0x18, 0, 3, 0xff, 1, 7)];
         let mut told = 1234u64.to_be_bytes().to_vec();
         told.extend_from_slice(&(held.len() as u16).to_be_bytes());
         for thing in &held {
-            thing.write(&mut told);
+            thing.write_told(&mut told);
         }
         assert_eq!(Held::parse_all(&told), Some((1234, held.clone())));
         assert_eq!(Held::parse_all(&told[..told.len() - 1]), None);
@@ -2567,7 +2746,64 @@ mod tests {
         }];
         ask(&mut world, 3, 5230, &[4, 11, 0, 1]);
         assert_eq!(world.progress.gold, 234);
-        assert_eq!(world.progress.held.as_ref().unwrap().last(), Some(&thing(11, 4, 1, 0xff, 0, 8)));
+        // Kept past the staff and the first ring, which the belongings
+        // placed first in the bag.
+        let ring = Held {
+            place: 2,
+            ..thing(11, 4, 1, 0xff, 0, 8)
+        };
+        assert_eq!(world.progress.held.as_ref().unwrap().last(), Some(&ring));
+    }
+
+    /// A 제련 is told its price and what it takes, then done: the 재련도
+    /// raised, the 제련석 and the gold taken.
+    #[test]
+    fn a_refine_is_done() {
+        use super::Held;
+
+        let mut world = KodanWorld::default();
+        ask(&mut world, 1, 1000, &[0x1e]);
+        ask(&mut world, 8, 23000, &[]);
+        let sword = Held {
+            kind: 0,
+            model: 2,
+            count: 1,
+            slot: 0xff,
+            refine: 1,
+            most_refine: 3,
+            id: 2,
+            ..Held::default()
+        };
+        let stones = |count, place, id| Held {
+            kind: 22,
+            count,
+            slot: 0xff,
+            bag: 1,
+            place,
+            id,
+            ..Held::default()
+        };
+        let mut told = 1000u64.to_be_bytes().to_vec();
+        told.extend_from_slice(&3u16.to_be_bytes());
+        sword.write_told(&mut told);
+        stones(1, 0, 3).write_told(&mut told);
+        stones(5, 1, 4).write_told(&mut told);
+        world.hold(&told);
+
+        let info = &ask(&mut world, 3, 5300, &[0, 0, 0])[0][12..];
+        assert_eq!(&info[..3], &[0, 22, 6]);
+        assert_eq!(&info[9..11], &2i16.to_be_bytes(), "one more 제련석 than the 재련도");
+        assert_eq!(&info[11..19], &100u64.to_be_bytes());
+
+        let done = &ask(&mut world, 3, 5310, &[0, 0, 0])[0][12..];
+        assert_eq!(&done[..5], &[0, 0, 0, 0, 2], "재련도 2");
+        assert_eq!(&done[5..9], &[1, 1, 1, 4], "four 제련석 left of the second heap");
+        assert_eq!(&done[9..12], &[1, 1, 0], "the first heap gone");
+        assert_eq!(&done[12..20], &900u64.to_be_bytes());
+        assert_eq!(world.progress.held.as_deref(), Some(&[Held { refine: 2, ..sword }, stones(4, 1, 4)][..]));
+
+        // Nothing at the place asked of: no answer.
+        assert!(ask(&mut world, 3, 5300, &[0, 0, 9]).is_empty());
     }
 
     /// 네트워크 창고's 올리기 gives the thing an id and adds it to the world's
@@ -2586,10 +2822,11 @@ mod tests {
             slot: 1,
             bag: 0,
             id: 1,
+            ..Held::default()
         };
         let mut told = 0u64.to_be_bytes().to_vec();
         told.extend_from_slice(&1u16.to_be_bytes());
-        staff.write(&mut told);
+        staff.write_told(&mut told);
         world.hold(&told);
 
         let id = &ask(&mut world, 8, 20210, &[7, 4])[0][12..];
@@ -2611,7 +2848,9 @@ mod tests {
             count: 1,
             slot: 0xff,
             bag: 0,
+            place: 1,
             id: 2,
+            ..Held::default()
         };
         assert_eq!(world.progress.held.as_deref(), Some(&[staff, armour][..]));
         // Told again with the armour already held, it is not held twice.
@@ -2621,8 +2860,8 @@ mod tests {
         // Taken out with the armour picked.
         let mut told = 0u64.to_be_bytes().to_vec();
         told.extend_from_slice(&2u16.to_be_bytes());
-        staff.write(&mut told);
-        armour.write(&mut told);
+        staff.write_told(&mut told);
+        armour.write_told(&mut told);
         told.extend_from_slice(&2u64.to_be_bytes());
         told.extend_from_slice(&[0, 0, 0, 3, 1, 2, 3]);
         assert_eq!(Held::picked(&told), Some(2));
