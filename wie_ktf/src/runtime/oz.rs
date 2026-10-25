@@ -191,7 +191,19 @@ pub(crate) fn install_local_fights(core: &mut ArmCore, system: &System, jvm: &Jv
     if !system.aid().eq_ignore_ascii_case(AID) {
         return Ok(());
     }
-    for site in [&KEEP_KIND, &ANSWER, &LEAVE, &FALL, &RISE, &START, &MADE, &DEFINED, &SENT] {
+    for site in [
+        &KEEP_KIND,
+        &ANSWER,
+        &LEAVE,
+        &FALL,
+        &RISE,
+        &START,
+        &MADE,
+        &DEFINED,
+        &SENT,
+        &CHOSEN,
+        &CHOSEN_AGAIN,
+    ] {
         if !halfwords_at(core, site.address, &site.code)? {
             tracing::warn!(
                 "오즈: code at {:#x} differs from the known build; the 코단 world's fights stay the server's",
@@ -213,6 +225,7 @@ pub(crate) fn install_local_fights(core: &mut ArmCore, system: &System, jvm: &Jv
     let rise = place(&rise);
     let start = place(&start);
     let made = place(&made);
+    let chosen = place(&chosen);
     core.register_svc_handler(
         SVC_CATEGORY_OZ,
         handle_oz_svc,
@@ -231,6 +244,8 @@ pub(crate) fn install_local_fights(core: &mut ArmCore, system: &System, jvm: &Jv
     write(core, START.address, &bl(START.address, start))?;
     write(core, MADE.address, &bl(MADE.address, made))?;
     write(core, DEFINED.address, &NOTHING)?;
+    write(core, CHOSEN.address, &bl(CHOSEN.address, chosen))?;
+    write(core, CHOSEN_AGAIN.address, &bl(CHOSEN_AGAIN.address, chosen))?;
     write(core, SENT.address, &bl(SENT.address, sent))?;
 
     tracing::info!("오즈: the 코단 world's dungeons are fought by the title's offline rules");
@@ -517,6 +532,37 @@ async fn held(jvm: &Jvm) -> Option<Vec<u8>> {
     Some(held)
 }
 
+/// 조합서 선택 (`game/o.t(I)V`, the 연금술사's 조합) takes the 조합서 picked,
+/// `game/g.a()Lgame/data/k;`, and reads it at once; with none to pick
+/// (표시할 아이템이 없습니다) it is null, and OK there stopped the title. The
+/// two calls go through [`chosen`].
+const CHOSEN: Site = Site {
+    address: 0x188980,
+    code: bl(0x188980, CALLV),
+};
+const CHOSEN_AGAIN: Site = Site {
+    address: 0x1889b8,
+    code: bl(0x1889b8, CALLV),
+};
+/// `game/o.t(I)V`'s way out.
+const CHOSEN_OUT: u32 = 0x18842e;
+
+/// The call [`CHOSEN`] stands for, and back to it with what it answered, or
+/// out of `game/o.t(I)V` - nothing done - when that is null.
+fn chosen(at: u32) -> Vec<u8> {
+    let mut code = Thumb::new(at);
+    code.op(0xb500); // push {lr}
+    code.call(CALLV);
+    code.op(0xbc08); // pop {r3}
+    code.op(0x2800); // cmp r0,#0
+    let none = code.branch(EQ);
+    code.op(0x4718); // bx r3
+    code.land(none);
+    code.load(3, CHOSEN_OUT | 1);
+    code.op(0x4718); // bx r3
+    code.bytes()
+}
+
 /// Thumb condition codes.
 const EQ: u16 = 0x0;
 const NE: u16 = 0x1;
@@ -624,6 +670,8 @@ mod tests {
         assert_eq!(MADE.code, [0xf0c2, 0xf99f]);
         assert_eq!(DEFINED.code, [0xf0c2, 0xf98e]);
         assert_eq!(SENT.code, [0xf021, 0xff6e]);
+        assert_eq!(CHOSEN.code, [0xf04e, 0xfcbe]);
+        assert_eq!(CHOSEN_AGAIN.code, [0xf04e, 0xfca2]);
     }
 
     #[test]
