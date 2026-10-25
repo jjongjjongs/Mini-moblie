@@ -138,6 +138,7 @@ impl BucketAllocator {
         Err(WieError::AllocationFailure)
     }
 
+    #[cfg(test)]
     pub fn free(core: &mut ArmCore, base_address: u32, address: u32, size: u32) -> Result<()> {
         let bucket_index = Self::find_bucket_index(size);
         Self::free_in_bucket(core, base_address, address, bucket_index)

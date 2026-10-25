@@ -33,12 +33,15 @@ impl Allocator {
         }
     }
 
-    pub fn free(core: &mut ArmCore, address: u32, size: u32) -> Result<()> {
-        if size > BUCKET_MAX as _ {
-            ListAllocator::free(core, address)
-        } else {
-            BucketAllocator::free(core, HEAP_BASE + HEAP_SIZE / 2, address, size)
-        }
+    /// Frees the block at `address`, which half of the heap it lies in saying
+    /// which allocator gave it out, and in the buckets which slot - not
+    /// `size`, which can be wrong where the address is not: 리얼사커매니저2009
+    /// hands `MC_grpCreateImage` a pointer into the middle of a block of its
+    /// own, and the word before it, read as the size when the image went,
+    /// sent a list address to the buckets, whose index ran off the end. An
+    /// address no allocator gave out is now an error to the caller.
+    pub fn free(core: &mut ArmCore, address: u32, _size: u32) -> Result<()> {
+        Self::free_unsized(core, address)
     }
 
     pub fn allocation_size(core: &ArmCore, address: u32) -> Result<u32> {
@@ -127,6 +130,27 @@ mod tests {
         // An address anywhere in a slot names that slot.
         assert_eq!(Allocator::bucket_slot_of(small + 5), Some((small, 8)));
         assert_eq!(Allocator::bucket_slot_of(large), None);
+
+        Ok(())
+    }
+
+    /// A free of an address no allocator gave out fails, whatever size comes
+    /// with it, and leaves what was given out as it was.
+    #[test]
+    fn free_of_an_address_not_given_out_fails() -> Result<()> {
+        let mut core = ArmCore::new(false, None).unwrap();
+        Allocator::init(&mut core)?;
+
+        let list = Allocator::alloc(&mut core, 0x2000)?;
+        let bucket = Allocator::alloc(&mut core, 100)?;
+        write_generic(&mut core, list + 0x100, 0x20u32)?;
+
+        assert!(Allocator::free(&mut core, list + 0x104, 0x24).is_err());
+        assert!(Allocator::free(&mut core, bucket + 4, 100).is_err());
+
+        Allocator::free(&mut core, list, 0x2000)?;
+        Allocator::free(&mut core, bucket, 100)?;
+        assert_eq!(Allocator::alloc(&mut core, 100)?, bucket);
 
         Ok(())
     }
