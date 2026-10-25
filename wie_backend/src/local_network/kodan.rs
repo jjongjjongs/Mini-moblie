@@ -79,8 +79,8 @@ const STORE_ID: (u32, u32) = (8, 20210);
 /// thing's state, 28 bytes (`0x1b7cc2`). The reader (`0x1c014a`) adds the
 /// things answered to the world's inventory as [`BUY`]'s do (`network/a.b([BI)I`:
 /// `[count]` of `[bag][u32 len][item]`) and takes the thing out of the
-/// single game's. The title (`wie_ktf`'s `oz`) has moved the thing itself
-/// into the world's inventory as it sent this, so none is answered.
+/// single game's. The record holds little of the thing; the title
+/// (`wie_ktf`'s `oz`) puts the rest of what it was back on it.
 const STORE: (u32, u32) = (8, 20200);
 /// 네트워크 창고's 내리기: the world's picked thing put into the single
 /// game's inventory and out of the world's (`0x1c04cc`), reading nothing.
@@ -739,9 +739,12 @@ impl KodanWorld {
                         });
                         self.save();
                     }
-                    // The title has put the thing among the world's
-                    // belongings itself, as it was; none are added.
-                    vec![SlotRelay::message(kind, command, &[0])]
+                    // The title puts what the thing was on the one made.
+                    let item = item_record(kind_stored, model, count, id, NOT_WORN);
+                    let mut stored = vec![1, bag];
+                    stored.extend_from_slice(&(item.len() as u32).to_be_bytes());
+                    stored.extend_from_slice(&item);
+                    vec![SlotRelay::message(kind, command, &stored)]
                 }
                 _ => {
                     tracing::warn!("코단 world: no such thing to store: {}", hex(body));
@@ -2596,8 +2599,12 @@ mod tests {
         let mut stored = 2u64.to_be_bytes().to_vec();
         stored.extend_from_slice(&[7, 4, 1]);
         stored.resize(28, 0);
-        // The title moved the armour itself; nothing is added.
-        assert_eq!(&ask(&mut world, 8, 20200, &stored)[0][12..], &[0]);
+        let added = &ask(&mut world, 8, 20200, &stored)[0][12..];
+        assert_eq!(&added[..2], &[1, 0], "one thing, in the equipment's bag");
+        let len = u32::from_be_bytes([added[2], added[3], added[4], added[5]]) as usize;
+        assert_eq!(added.len(), 6 + len);
+        assert_eq!(&added[6..9], &[7, 4, 1]);
+        assert_eq!(&added[9..17], &2u64.to_be_bytes());
         let armour = Held {
             kind: 7,
             model: 4,
@@ -2607,7 +2614,7 @@ mod tests {
             id: 2,
         };
         assert_eq!(world.progress.held.as_deref(), Some(&[staff, armour][..]));
-        // Told again with the armour among the world's, it is not held twice.
+        // Told again with the armour already held, it is not held twice.
         ask(&mut world, 8, 20200, &stored);
         assert_eq!(world.progress.held.as_deref(), Some(&[staff, armour][..]));
 

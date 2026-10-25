@@ -230,7 +230,7 @@ pub(crate) fn install_local_fights(core: &mut ArmCore, system: &System, jvm: &Jv
     core.register_svc_handler(
         SVC_CATEGORY_OZ,
         handle_oz_svc,
-        &(system.clone(), jvm.clone(), Arc::new(Mutex::new(Vec::new()))),
+        &(system.clone(), jvm.clone(), Arc::new(Mutex::new(Kept::default()))),
     )?;
     let keep = core.make_svc_stub(SVC_CATEGORY_OZ, KEEP)?;
     let sent = place(&|at| sent(at, keep));
@@ -482,18 +482,17 @@ const STATES_FILE: &str = "kodan_states";
 /// The request `network/a.f([BI)V` sends once it has made the belongings.
 const BELONGINGS_READ: (u32, u32) = (8, 23000);
 /// 네트워크 창고's 올리기 (`0x1b7cc2`), carrying the single game's picked
-/// thing into the world. Its answer adds the things it names to the world's
-/// belongings, made from their records, and takes the picked thing out of the
-/// single game's; the server names none, and the thing itself is put among
-/// the world's belongings here as it goes - with everything it is.
+/// thing into the world. Its answer adds the thing to the world's belongings
+/// made from a record - which holds little of it, and puts it where the
+/// world's things are kept (`common/d`'s `b` and `a`, which 제련 and the
+/// others name a thing by) - and takes the single game's out. So the
+/// thing's [`state`] is taken here as it goes, and put on the world's copy
+/// on the next request.
 const CARRIED: (u32, u32) = (8, 20200);
 /// `base/b.a()Lgame/chars/g;`, the player, and its `a`, the single game's
 /// belongings.
 const THE_PLAYER: (&str, &str, &str) = ("base/b", "a", "()Lgame/chars/g;");
 const SINGLE_BELONGINGS: (&str, &str) = ("a", "Lgame/g;");
-/// `game/g.b(Lgame/data/k;)Z`, putting a thing among belongings, as
-/// 내리기's answer does (`0x1c04cc`).
-const PUT: (&str, &str) = ("b", "(Lgame/data/k;)Z");
 /// `game/data/k`, every thing's class, and the fields [`HELD_FILE`] holds
 /// apart from the [`state`].
 const ITEM_CLASS: &str = "game/data/k";
@@ -513,7 +512,16 @@ const ITEM_ID: &str = "b";
 /// `game/g.a()Lgame/data/k;`, the thing picked in a `game/g`, or null.
 const PICKED: (&str, &str) = ("a", "()Lgame/data/k;");
 
-async fn handle_oz_svc(core: &mut ArmCore, (system, jvm, kept): &mut (System, Jvm, Arc<Mutex<Vec<u8>>>), id: SvcId) -> Result<()> {
+/// What [`KEEP`] keeps between calls: the [`HELD_FILE`] it last wrote, and a
+/// thing [`CARRIED`] into the world whose [`state`] waits to be put on the
+/// world's copy of it, `(id, state)`.
+#[derive(Default)]
+struct Kept {
+    held: Vec<u8>,
+    carried: Option<(i64, Vec<u8>)>,
+}
+
+async fn handle_oz_svc(core: &mut ArmCore, (system, jvm, kept): &mut (System, Jvm, Arc<Mutex<Kept>>), id: SvcId) -> Result<()> {
     let (_, lr) = core.read_pc_lr()?;
 
     if id.0 == KEEP {
@@ -526,42 +534,72 @@ async fn handle_oz_svc(core: &mut ArmCore, (system, jvm, kept): &mut (System, Jv
         if asked == BELONGINGS_READ {
             put_back_states(system, jvm).await;
         }
+        let carried = kept.lock().carried.take();
+        if let Some((carried_id, state)) = carried
+            && !put_carried_state(jvm, carried_id, &state).await
+        {
+            kept.lock().carried = Some((carried_id, state));
+        }
         if asked == CARRIED {
-            carry(jvm).await;
+            let carried = carried_state(jvm).await;
+            kept.lock().carried = carried;
         }
         let held = held(jvm).await;
         if framed {
             jvm.pop_frame();
         }
         if let Some(held) = held
-            && *kept.lock() != held
+            && kept.lock().held != held
         {
             let files = system.filesystem();
             files.truncate(HELD_FILE, 0).await;
             files.write(HELD_FILE, 0, &held).await;
-            *kept.lock() = held;
+            kept.lock().held = held;
         }
     }
 
     ().write(core, lr)
 }
 
-/// [`CARRIED`]'s thing put among the world's belongings.
-async fn carry(jvm: &Jvm) -> Option<()> {
+/// The id and [`state`] of [`CARRIED`]'s thing, the single game's picked
+/// one.
+async fn carried_state(jvm: &Jvm) -> Option<(i64, Vec<u8>)> {
     let (class, name, descriptor) = THE_PLAYER;
     let player: Box<dyn ClassInstance> = jvm.invoke_static::<_, Option<_>>(class, name, descriptor, ()).await.ok()??;
     let (name, descriptor) = SINGLE_BELONGINGS;
     let single: Box<dyn ClassInstance> = jvm.get_field::<Option<_>>(&player, name, descriptor).await.ok()??;
     let (name, descriptor) = PICKED;
     let thing: Box<dyn ClassInstance> = jvm.invoke_virtual::<_, Option<_>>(&single, name, descriptor, ()).await.ok()??;
+    let id: i64 = jvm.get_field(&thing, ITEM_ID, "J").await.ok()?;
+    Some((id, state(jvm, &*thing).await?))
+}
+
+/// Puts a [`carried_state`] on the world's thing with its id, once the
+/// answer to [`CARRIED`] has made it; whether there was one.
+async fn put_carried_state(jvm: &Jvm, id: i64, state: &[u8]) -> bool {
+    let Some(mut item) = world_thing(jvm, id).await else {
+        return false;
+    };
+    let put = put_state(jvm, &mut item, state).await.is_some();
+    tracing::info!("오즈: the thing carried into the world is as it was: {put}");
+    put
+}
+
+/// The world's belonging with the id `id`.
+async fn world_thing(jvm: &Jvm, id: i64) -> Option<Box<dyn ClassInstance>> {
     let (class, name, descriptor) = BELONGINGS;
     let belongings: Box<dyn ClassInstance> = jvm.get_static_field::<Option<_>>(class, name, descriptor).await.ok()??;
-    let (name, descriptor) = PUT;
-    let put: bool = jvm.invoke_virtual(&belongings, name, descriptor, (thing,)).await.ok()?;
-    if !put {
-        tracing::warn!("오즈: the thing carried into the world found no room");
+    let count: i32 = jvm.invoke_virtual(&belongings, "size", "()I", ()).await.ok()?;
+    for index in 0..count {
+        let item: Box<dyn ClassInstance> = jvm
+            .invoke_virtual::<_, Option<_>>(&belongings, "elementAt", "(I)Ljava/lang/Object;", (index,))
+            .await
+            .ok()??;
+        if jvm.get_field::<i64>(&item, ITEM_ID, "J").await.ok()? == id {
+            return Some(item);
+        }
     }
-    Some(())
+    None
 }
 
 /// [`STATES_FILE`]'s states put back on the world's belongings, by id.
