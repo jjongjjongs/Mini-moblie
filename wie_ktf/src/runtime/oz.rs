@@ -436,6 +436,18 @@ fn sent(at: u32, keep: u32) -> Vec<u8> {
     code.bytes()
 }
 
+/// 입구부활 (`game/k`), asked of the server.
+const RISE_ASKED: (u32, u32) = (7, 17130);
+/// `network/b.h`, the map the title last loaded on the server's word. The
+/// answer to [`RISE_ASKED`] loads the map it names when that is another one,
+/// and there ends 부활대기중 and has the player risen ([`RISE`]); naming the
+/// map last loaded, it only moves the player, still fallen, and 부활대기중
+/// keeps the keys. A dungeon entered from the map leaves this 0; a party's
+/// start, or a rising that loaded the map, sets it to the dungeon's, and the
+/// player risen after either could not move. So it is 0 whenever 입구부활 is
+/// asked, and every rising is by a load.
+const LOADED_MAP: (&str, &str, &str) = ("network/b", "h", "S");
+
 /// The file [`KEEP`] writes, which the emulated 코단 world server
 /// (`wie_backend`'s `kodan`) takes on the request that follows:
 /// `[u64 gold][u16 count]` and that many `[kind][model][count][slot][bag]
@@ -459,6 +471,10 @@ async fn handle_oz_svc(core: &mut ArmCore, (system, jvm, kept): &mut (System, Jv
 
     if id.0 == KEEP {
         let framed = jvm.try_push_native_frame(Vec::new());
+        if (core.read_param(0)?, core.read_param(1)?) == RISE_ASKED {
+            let (class, name, descriptor) = LOADED_MAP;
+            let _: core::result::Result<(), _> = jvm.put_static_field(class, name, descriptor, 0i16).await;
+        }
         let held = held(jvm).await;
         if framed {
             jvm.pop_frame();
