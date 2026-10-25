@@ -36,7 +36,7 @@ mod kodan;
 mod levelup;
 mod noreason;
 mod pawapro;
-mod pigmy;
+pub(crate) mod pigmy;
 mod relay;
 mod sdw;
 mod snowboard;

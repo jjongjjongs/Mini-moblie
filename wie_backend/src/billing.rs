@@ -4212,19 +4212,16 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
     const PIRATE_CONFIRM_REQUEST: u16 = 0x0006;
     const PIRATE_CONFIRM_ANSWER: u16 = 0x0007;
 
-    /// 시그너스기사단 로컬캐시상점's purchase confirmation, the same shape 해적편's
-    /// `0x0006` takes in a different title of this family. Entering the cash shop
-    /// writes command `0x005a` with the short `01 00` category body, then its
-    /// reader waits on the answer `0x005b`.
-    ///
-    /// That reader (`0x15980`, reached as command `0x4d + 0x0e`) reads the status
-    /// where every frame of this family keeps a high byte of its length - zero for
-    /// a frame this short, so granted - and then the confirmation body
-    /// 도적편's hatch reader takes ([`HATCH_BODY`]), none of which gates the
-    /// purchase. Left unanswered the shop's read callback never fires and it waits
-    /// on `0x005b` forever. Granted with that body zeroed, so the shop goes on.
-    const CYGNUS_CASH_REQUEST: u16 = 0x005a;
-    const CYGNUS_CASH_ANSWER: u16 = 0x005b;
+    /// 시그너스기사단's 피그미 hatching: command `0x005a` (built at `0xca8e`)
+    /// carries the egg's bracket and a flag, `01 00` for a character of up to
+    /// level 20, and its reader (`0x15980`, reached as command `0x4d + 0x0e`)
+    /// waits on `0x005b` with what it hatched into - the body 메이플 Live's
+    /// `0x0059` has, the item first. Answered with that body zeroed, every egg
+    /// hatched into item 0, 사각나무방패; it is answered with equipment worn
+    /// within the bracket, drawn from the title's own table - see
+    /// [`crate::local_network::pigmy::cygnus_answer`].
+    const CYGNUS_HATCH_REQUEST: u16 = 0x005a;
+    const CYGNUS_HATCH_ANSWER: u16 = 0x005b;
 
     /// The results `0xb234` goes on from. They are not the same value: the
     /// register step stops on 0 where the other two go on from it.
@@ -4365,11 +4362,12 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
         // confirmation body and none of it gates the hatch, so the granted result
         // carries that body zeroed.
         PIRATE_CONFIRM_REQUEST if body.len() <= 4 => (PIRATE_CONFIRM_ANSWER, vec![0u8; HATCH_BODY]),
-        // 시그너스기사단's cash-shop purchase confirmation, told apart by its short
-        // category body the same way. Its reader takes the 도적편-style confirmation
-        // body and none of it gates the purchase, so the granted result carries it
-        // zeroed.
-        CYGNUS_CASH_REQUEST if body.len() <= 4 => (CYGNUS_CASH_ANSWER, vec![0u8; HATCH_BODY]),
+        // 시그너스기사단's 피그미 hatching, told apart by its short body the same
+        // way, answered with what it hatched into.
+        CYGNUS_HATCH_REQUEST if body.len() <= 4 => (
+            CYGNUS_HATCH_ANSWER,
+            crate::local_network::pigmy::cygnus_answer(body, next_draw(u32::MAX)).unwrap_or_else(|| vec![0u8; HATCH_BODY]),
+        ),
         // 해적편's post-save sync step. No other title in this family speaks this
         // command, and its reader reads none of the body, so the granted result
         // finishes the save.
@@ -15460,19 +15458,25 @@ mod tests {
         assert_eq!(response.len() - 6, 0x3e);
     }
 
-    /// 시그너스기사단's cash-shop confirmation (command 0x5a), the frame a device
-    /// capture caught, is granted under command 0x5b with the same zeroed
-    /// confirmation body.
+    /// 시그너스기사단's 피그미 hatching (command 0x5a), the frame a device
+    /// capture caught, is granted under command 0x5b with a piece of equipment
+    /// - not always item 0, which a zeroed answer made every egg.
     #[test]
-    fn the_cygnus_cash_shop_confirmation_is_granted() {
+    fn the_cygnus_pigmy_hatches_into_equipment() {
         let request = [0x0a, 0x00, 0x00, 0x00, 0xff, 0xff, 0x5a, 0x00, 0x01, 0x00];
-        let response = lgt_local_marked_command_response(&request).unwrap();
+        let mut items = Vec::new();
+        for _ in 0..8 {
+            let response = lgt_local_marked_command_response(&request).unwrap();
 
-        assert_eq!(u32::from_le_bytes(response[0..4].try_into().unwrap()) as usize, response.len());
-        assert_eq!(&response[4..6], &[0xff, 0xff]);
-        assert_eq!(u16::from_le_bytes(response[6..8].try_into().unwrap()), 0x005b);
-        assert!(response[8..].iter().all(|&byte| byte == 0));
-        assert_eq!(response.len() - 6, 0x3e);
+            assert_eq!(u32::from_le_bytes(response[0..4].try_into().unwrap()) as usize, response.len());
+            assert_eq!(&response[4..6], &[0xff, 0xff]);
+            assert_eq!(u16::from_le_bytes(response[6..8].try_into().unwrap()), 0x005b);
+            assert_eq!(response[8], 0, "granted");
+            assert_eq!(&response[13..21], &[0, 0, 0, 0, 1, 0, 0, 0], "one piece of equipment");
+            assert_eq!(response.len() - 6, 0x3e);
+            items.push(u32::from_le_bytes(response[9..13].try_into().unwrap()));
+        }
+        assert!(items.iter().any(|&item| item != items[0]), "hatchings differ: {items:?}");
     }
 
     /// A command-6 frame that carries a long body is not this confirmation step,
