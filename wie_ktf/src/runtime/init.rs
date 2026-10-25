@@ -1469,7 +1469,7 @@ pub async fn load_native(
     // Past the image and its bss, which `load` mapped in whole pages.
     let past_image = IMAGE_BASE + (data.len() + bss_size as usize).next_multiple_of(0x1000) as u32;
     super::maple_live::install_warehouse_cap(core, system.aid(), past_image)?;
-    super::oz::install_local_fights(core, system.aid(), past_image)?;
+    super::oz::install_local_fights(core, system, jvm, past_image)?;
 
     register_wipic_svc_handler(core, system, jvm)?;
     register_init_svc_handler(core, jvm)?;

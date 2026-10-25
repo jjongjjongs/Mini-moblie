@@ -12,6 +12,7 @@ const SVC_CATEGORY_JAVA: u32 = 4;
 const SVC_CATEGORY_MODULE: u32 = 5;
 const SVC_CATEGORY_MODULE_CLASS: u32 = 6;
 const SVC_CATEGORY_MODULE_JUMP: u32 = 7;
+const SVC_CATEGORY_OZ: u32 = 8;
 
 pub(crate) use self::init::enter_module_thread;
 pub use self::java::jvm_support::{KtfJvmSupport, collector::STRESS_INTERVAL as GC_STRESS_INTERVAL};

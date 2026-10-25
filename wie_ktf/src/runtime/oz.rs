@@ -24,11 +24,23 @@
 //! title the player had fallen, which opened 부활대기중 (rise at the entrance,
 //! or give the dungeon up); and the player it stood up at the entrance had
 //! health again.
+//!
+//! And the server kept what the player held. What a dungeon fought here
+//! leaves, and what is worn, used and thrown away in a town, the emulated
+//! server never hears of; so before each request the title sends, what the
+//! player holds and its gold are read off the title's own belongings and
+//! written where that server takes them from ([`HELD_FILE`]).
 
-use alloc::vec::Vec;
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 
-use wie_core_arm::ArmCore;
+use jvm::{ClassInstance, Jvm};
+use spin::Mutex;
+
+use wie_backend::System;
+use wie_core_arm::{ArmCore, ResultWriter, SvcId};
 use wie_util::{ByteRead, ByteWrite, Result};
+
+use crate::runtime::SVC_CATEGORY_OZ;
 
 const AID: &str = "0103CD8A";
 
@@ -163,11 +175,11 @@ const FIGHTING: [(u32, u32); 4] = [
 /// Installs the changes if this is the title and the code is the build they
 /// were written against. `cave` is unmapped memory within a Thumb `bl` of the
 /// image, for the code they call.
-pub(crate) fn install_local_fights(core: &mut ArmCore, aid: &str, cave: u32) -> Result<()> {
-    if !aid.eq_ignore_ascii_case(AID) {
+pub(crate) fn install_local_fights(core: &mut ArmCore, system: &System, jvm: &Jvm, cave: u32) -> Result<()> {
+    if !system.aid().eq_ignore_ascii_case(AID) {
         return Ok(());
     }
-    for site in [&KEEP_KIND, &ANSWER, &LEAVE, &FALL, &RISE, &START, &MADE, &DEFINED] {
+    for site in [&KEEP_KIND, &ANSWER, &LEAVE, &FALL, &RISE, &START, &MADE, &DEFINED, &SENT] {
         if !halfwords_at(core, site.address, &site.code)? {
             tracing::warn!(
                 "오즈: code at {:#x} differs from the known build; the 코단 world's fights stay the server's",
@@ -178,17 +190,24 @@ pub(crate) fn install_local_fights(core: &mut ArmCore, aid: &str, cave: u32) -> 
     }
 
     let mut code = Vec::new();
-    let mut place = |routine: fn(u32) -> Vec<u8>| {
+    let mut place = |routine: &dyn Fn(u32) -> Vec<u8>| {
         let at = cave + code.len() as u32;
         code.extend_from_slice(&routine(at));
         at
     };
-    let answer = place(answer);
-    let leave = place(leave);
-    let fall = place(fall);
-    let rise = place(rise);
-    let start = place(start);
-    let made = place(made);
+    let answer = place(&answer);
+    let leave = place(&leave);
+    let fall = place(&fall);
+    let rise = place(&rise);
+    let start = place(&start);
+    let made = place(&made);
+    core.register_svc_handler(
+        SVC_CATEGORY_OZ,
+        handle_oz_svc,
+        &(system.clone(), jvm.clone(), Arc::new(Mutex::new(Vec::new()))),
+    )?;
+    let keep = core.make_svc_stub(SVC_CATEGORY_OZ, KEEP)?;
+    let sent = place(&|at| sent(at, keep));
     core.load(&code, cave, code.len())?;
 
     write(core, KEEP_KIND.address + 2, &[KEEP_KIND_WITH])?;
@@ -200,6 +219,7 @@ pub(crate) fn install_local_fights(core: &mut ArmCore, aid: &str, cave: u32) -> 
     write(core, START.address, &bl(START.address, start))?;
     write(core, MADE.address, &bl(MADE.address, made))?;
     write(core, DEFINED.address, &NOTHING)?;
+    write(core, SENT.address, &bl(SENT.address, sent))?;
 
     tracing::info!("오즈: the 코단 world's dungeons are fought by the title's offline rules");
 
@@ -354,6 +374,96 @@ fn made(at: u32) -> Vec<u8> {
     code.bytes()
 }
 
+/// `network/a.a(II)V`, sending a request, has it built by `network/a.a(II)[B`
+/// with the kind in r1 and the command in r2. The call goes through [`sent`],
+/// which first has [`KEEP`] look at what the player holds.
+const SENT: Site = Site {
+    address: 0x1b5412,
+    code: bl(0x1b5412, CALL),
+};
+const KEEP: u32 = 1;
+
+/// [`KEEP`] with the kind and the command, then the call it stands for.
+fn sent(at: u32, keep: u32) -> Vec<u8> {
+    let mut code = Thumb::new(at);
+    code.op(0xb507); // push {r0,r1,r2,lr}
+    code.op(0x1c08); // adds r0,r1,#0
+    code.op(0x1c11); // adds r1,r2,#0
+    code.load(3, keep);
+    code.op(0x4798); // blx r3
+    code.op(0xbc07); // pop {r0,r1,r2}
+    code.op(0xbc08); // pop {r3}
+    code.op(0x469e); // mov lr,r3
+    code.load(3, CALL | 1);
+    code.op(0x4718); // bx r3
+    code.bytes()
+}
+
+/// The file [`KEEP`] writes, which the emulated 코단 world server
+/// (`wie_backend`'s `kodan`) takes on the request that follows:
+/// `[u64 gold][u16 count]` and that many `[kind][model][count][slot][bag]
+/// [u64 id]`.
+const HELD_FILE: &str = "kodan_held";
+
+/// `network/b.a`, the belongings: a `game/g`, a `Vector` of `game/data/k`.
+const BELONGINGS: (&str, &str, &str) = ("network/b", "a", "Lgame/g;");
+/// `network/b.a`, the counters the server tells (`0x1bb70c`), the gold
+/// second.
+const COUNTERS: (&str, &str, &str) = ("network/b", "a", "[J");
+const GOLD: usize = 1;
+/// The fields of a `game/data/k` [`HELD_FILE`] keeps, in its order: the
+/// kind, the model, the count, the slot it is worn in and the bag.
+const ITEM_BYTES: [&str; 5] = ["l", "m", "n", "o", "p"];
+/// And its id.
+const ITEM_ID: &str = "b";
+
+async fn handle_oz_svc(core: &mut ArmCore, (system, jvm, kept): &mut (System, Jvm, Arc<Mutex<Vec<u8>>>), id: SvcId) -> Result<()> {
+    let (_, lr) = core.read_pc_lr()?;
+
+    if id.0 == KEEP {
+        let framed = jvm.try_push_native_frame(Vec::new());
+        let held = held(jvm).await;
+        if framed {
+            jvm.pop_frame();
+        }
+        if let Some(held) = held
+            && *kept.lock() != held
+        {
+            let files = system.filesystem();
+            files.truncate(HELD_FILE, 0).await;
+            files.write(HELD_FILE, 0, &held).await;
+            *kept.lock() = held;
+        }
+    }
+
+    ().write(core, lr)
+}
+
+/// What the player holds and its gold, as [`HELD_FILE`] has them; `None`
+/// before the title has belongings to read.
+async fn held(jvm: &Jvm) -> Option<Vec<u8>> {
+    let (class, name, descriptor) = BELONGINGS;
+    let belongings: Box<dyn ClassInstance> = jvm.get_static_field::<Option<_>>(class, name, descriptor).await.ok()??;
+    let (class, name, descriptor) = COUNTERS;
+    let counters: Box<dyn ClassInstance> = jvm.get_static_field::<Option<_>>(class, name, descriptor).await.ok()??;
+    let gold: i64 = *jvm.load_array::<i64>(&counters, GOLD, 1).await.ok()?.first()?;
+
+    let count: i32 = jvm.invoke_virtual(&belongings, "size", "()I", ()).await.ok()?;
+    let mut held = (gold as u64).to_be_bytes().to_vec();
+    held.extend_from_slice(&(count as u16).to_be_bytes());
+    for index in 0..count {
+        let item: Box<dyn ClassInstance> = jvm
+            .invoke_virtual::<_, Option<_>>(&belongings, "elementAt", "(I)Ljava/lang/Object;", (index,))
+            .await
+            .ok()??;
+        for field in ITEM_BYTES {
+            held.push(jvm.get_field::<i8>(&item, field, "B").await.ok()? as u8);
+        }
+        held.extend_from_slice(&jvm.get_field::<i64>(&item, ITEM_ID, "J").await.ok()?.to_be_bytes());
+    }
+    Some(held)
+}
+
 /// Thumb condition codes.
 const NE: u16 = 0x1;
 const LO: u16 = 0x3;
@@ -458,6 +568,7 @@ mod tests {
         assert_eq!(START.code, [0xf017, 0xfec7]);
         assert_eq!(MADE.code, [0xf0c2, 0xf99f]);
         assert_eq!(DEFINED.code, [0xf0c2, 0xf98e]);
+        assert_eq!(SENT.code, [0xf021, 0xff6e]);
     }
 
     #[test]

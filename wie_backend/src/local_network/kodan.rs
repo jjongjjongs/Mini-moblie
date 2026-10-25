@@ -379,6 +379,15 @@ const QUEST_FINISHED: u8 = 2;
 /// count][kind][model]...`. A file from before things were sold ends after
 /// the quests.
 const PROGRESS_FILE: &str = "kodan_world";
+/// What the player holds and its gold, which the title's runtime writes
+/// (`wie_ktf`'s 오즈 changes) off the title's own belongings (`network/b.a`)
+/// and gold (`network/b.a[1]`) before a request whenever they changed - the
+/// things a dungeon fought by the title leaves, and what was worn, used and
+/// thrown away, the server never hears of: `[u64 gold][u16 count]` and that
+/// many [`Held`]. Taken on the next request once the session's [`COUNTERS`]
+/// are answered, and removed; before then it is what the title held before
+/// it was told.
+const HELD_FILE: &str = "kodan_held";
 
 /// What the world keeps for one character between sessions.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -390,6 +399,53 @@ struct Progress {
     bought: Vec<(u8, u8)>,
     /// The bags bought on [`BAGS`]' screen, beyond [`FIRST_BAGS`].
     bags: u8,
+    /// What the player held when [`HELD_FILE`] last told, which
+    /// [`BELONGINGS`] then hands back instead of what was bought; `None`
+    /// until it has told.
+    held: Option<Vec<Held>>,
+}
+
+/// A thing the player holds, as [`HELD_FILE`] has it: `[kind][model][count]
+/// [slot][bag][u64 id]`, the title's own `game/data/k` fields `l`, `m`, `n`,
+/// `o`, `p` and `b`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Held {
+    kind: u8,
+    model: u8,
+    count: u8,
+    slot: u8,
+    bag: u8,
+    id: u64,
+}
+
+impl Held {
+    const LEN: usize = 13;
+
+    /// The gold and the things [`HELD_FILE`] holds, or `None` when `data` is
+    /// not that.
+    fn parse_all(data: &[u8]) -> Option<(u64, Vec<Self>)> {
+        let gold = be(data.get(..8)?);
+        let count = be(data.get(8..10)?) as usize;
+        let records = data.get(10..10 + count * Self::LEN)?;
+        let held = records.chunks_exact(Self::LEN).map(Self::parse).collect();
+        Some((gold, held))
+    }
+
+    fn parse(record: &[u8]) -> Self {
+        Self {
+            kind: record[0],
+            model: record[1],
+            count: record[2],
+            slot: record[3],
+            bag: record[4],
+            id: be(&record[5..13]),
+        }
+    }
+
+    fn write(&self, data: &mut Vec<u8>) {
+        data.extend_from_slice(&[self.kind, self.model, self.count, self.slot, self.bag]);
+        data.extend_from_slice(&self.id.to_be_bytes());
+    }
 }
 
 /// The directions a step is told in.
@@ -487,6 +543,9 @@ pub(super) struct KodanWorld {
     /// nothing outlives the session.
     files: Option<FilesystemOverlay>,
     logged_in: bool,
+    /// Whether the title has been told this session's belongings and gold,
+    /// after which what [`HELD_FILE`] says is what it holds.
+    synced: bool,
     /// The character [`ENTER`] names: `[byte][u64 id][len][name]`
     /// (`0x1b5e68`), the id being the player's own (`game/chars/g.a()J`).
     character_id: u16,
@@ -534,6 +593,10 @@ impl KodanWorld {
         let command = u32::from_be_bytes([payload[8], payload[9], payload[10], payload[11]]);
         let body = &payload[HEADER..];
 
+        if self.logged_in {
+            self.take_held();
+        }
+
         let replies = match (kind, command) {
             LOGIN if body == [0x1e] => {
                 self.logged_in = true;
@@ -562,6 +625,7 @@ impl KodanWorld {
                     self.character_id = self.character as u16;
                     self.character_name = name[..*len as usize].to_vec();
                     self.progress = self.load().remove(&self.character).unwrap_or_default();
+                    self.synced = false;
                 }
                 let mut session = vec![self.character_name.len() as u8];
                 session.extend_from_slice(&self.character_name);
@@ -584,6 +648,7 @@ impl KodanWorld {
             }
             BELONGINGS if self.logged_in => vec![SlotRelay::message(kind, command, &self.belongings())],
             COUNTERS if self.logged_in => {
+                self.synced = true;
                 let mut counters = vec![0; 8];
                 counters.extend_from_slice(&self.progress.gold.to_be_bytes());
                 counters.extend_from_slice(&[0; 8]);
@@ -837,7 +902,7 @@ impl KodanWorld {
                             bought.extend_from_slice(BOUGHT);
                             // The things added - a piece of equipment each, the
                             // rest heaped together - and none changed.
-                            let id = FIRST_BOUGHT_ID + self.progress.bought.len() as u64;
+                            let id = self.next_id();
                             let items: Vec<Vec<u8>> = if bag_of(ware.kind) == 0 {
                                 (0..count)
                                     .map(|index| item_record(ware.kind, ware.model, 1, id + index as u64, NOT_WORN))
@@ -846,6 +911,22 @@ impl KodanWorld {
                                 vec![item_record(ware.kind, ware.model, count, id, NOT_WORN)]
                             };
                             self.progress.bought.extend((0..count).map(|_| (ware.kind, ware.model)));
+                            if let Some(held) = &mut self.progress.held {
+                                let bag = bag_of(ware.kind);
+                                let thing = |count, id| Held {
+                                    kind: ware.kind,
+                                    model: ware.model,
+                                    count,
+                                    slot: NOT_WORN,
+                                    bag,
+                                    id,
+                                };
+                                if bag == 0 {
+                                    held.extend((0..count).map(|index| thing(1, id + index as u64)));
+                                } else {
+                                    held.push(thing(count, id));
+                                }
+                            }
                             bought.push(items.len() as u8);
                             for item in items {
                                 bought.push(bag_of(ware.kind));
@@ -890,12 +971,21 @@ impl KodanWorld {
         Some(replies)
     }
 
-    /// [`BELONGINGS`]: one bag holding the class's [`starting_weapon`],
-    /// equipped in the weapon slot.
-    /// `[0][count]` of `[bag][count][len][item]...`: the class's weapon,
-    /// and everything bought, the equipment with it and the rest in a bag of
-    /// its own.
+    /// [`BELONGINGS`], `[bags][count]` of `[bag][count][len][item]...`: what
+    /// the player held when [`HELD_FILE`] last told, each in its bag; before
+    /// it has told, the class's [`starting_weapon`] equipped in the weapon
+    /// slot and everything bought, the equipment with it and the rest in a
+    /// bag of its own.
     fn belongings(&self) -> Vec<u8> {
+        if let Some(held) = &self.progress.held {
+            let mut bags: BTreeMap<u8, Vec<Vec<u8>>> = BTreeMap::new();
+            for thing in held {
+                let item = item_record(thing.kind, thing.model, thing.count, thing.id, thing.slot);
+                bags.entry(thing.bag).or_default().push(item);
+            }
+            return self.belongings_in(bags.into_iter().collect());
+        }
+
         let mut bags: [Vec<Vec<u8>>; 2] = [vec![starting_weapon(self.class)], Vec::new()];
         // The rest heaped by what they are, at the id the first was bought
         // with.
@@ -917,14 +1007,18 @@ impl KodanWorld {
                 .map(|(kind, model, count, id)| item_record(kind, model, count, id, NOT_WORN)),
         );
 
+        self.belongings_in((0..).zip(bags).filter(|(_, items)| !items.is_empty()).collect())
+    }
+
+    /// [`BELONGINGS`] of the items in `bags`, by bag.
+    fn belongings_in(&self, bags: Vec<(u8, Vec<Vec<u8>>)>) -> Vec<u8> {
         let mut belongings = vec![self.bags()];
-        let bags: Vec<(u8, &Vec<Vec<u8>>)> = (0..).zip(&bags).filter(|(_, items)| !items.is_empty()).collect();
         belongings.push(bags.len() as u8);
         for (bag, items) in bags {
             belongings.extend_from_slice(&[bag, items.len() as u8]);
             for item in items {
                 belongings.push(item.len() as u8);
-                belongings.extend_from_slice(item);
+                belongings.extend_from_slice(&item);
             }
         }
         belongings
@@ -1003,6 +1097,41 @@ impl KodanWorld {
     /// The bags the character holds, [`BELONGINGS`]' first byte.
     fn bags(&self) -> u8 {
         FIRST_BAGS.saturating_add(self.progress.bags).min(MOST_BAGS)
+    }
+
+    /// Takes [`HELD_FILE`] if the title wrote it.
+    fn take_held(&mut self) {
+        let Some(data) = self.file(HELD_FILE) else {
+            return;
+        };
+        if let Some(files) = &self.files {
+            ready(files.remove(HELD_FILE));
+        }
+        self.hold(&data);
+    }
+
+    /// What [`HELD_FILE`]'s `data` says the player holds and its gold, kept
+    /// once the title has been told this session's.
+    fn hold(&mut self, data: &[u8]) {
+        if !self.synced {
+            return;
+        }
+        let Some((gold, held)) = Held::parse_all(data) else {
+            tracing::warn!("코단 world: {HELD_FILE} does not parse: {}", hex(data));
+            return;
+        };
+        if self.progress.gold != gold || self.progress.held.as_ref() != Some(&held) {
+            tracing::info!("코단 world: the player holds {} things and {gold} gold", held.len());
+            self.progress.gold = gold;
+            self.progress.held = Some(held);
+            self.save();
+        }
+    }
+
+    /// The id a thing bought now is given: past every one bought and held.
+    fn next_id(&self) -> u64 {
+        let held = self.progress.held.iter().flatten().map(|thing| thing.id + 1).max().unwrap_or(0);
+        (FIRST_BOUGHT_ID + self.progress.bought.len() as u64).max(held)
     }
 
     /// The ware `[kind][index]` names: the shelf's `index`th of that kind.
@@ -1310,6 +1439,18 @@ fn encode(all: &BTreeMap<u64, Progress>) -> Vec<u8> {
         data.extend_from_slice(&character.to_be_bytes());
         data.push(progress.bags);
     }
+    let held: Vec<(&u64, &Vec<Held>)> = all
+        .iter()
+        .filter_map(|(character, progress)| Some((character, progress.held.as_ref()?)))
+        .collect();
+    data.extend_from_slice(&(held.len() as u16).to_be_bytes());
+    for (character, things) in held {
+        data.extend_from_slice(&character.to_be_bytes());
+        data.extend_from_slice(&(things.len() as u16).to_be_bytes());
+        for thing in things {
+            thing.write(&mut data);
+        }
+    }
     data
 }
 
@@ -1358,6 +1499,25 @@ fn decode(data: &[u8]) -> Option<BTreeMap<u64, Progress>> {
     for _ in 0..characters {
         let character = take(8)?;
         all.entry(character).or_default().bags = take(1)? as u8;
+    }
+    // A file from before what was held was told ends here.
+    let Some(characters) = take(2) else {
+        return Some(all);
+    };
+    for _ in 0..characters {
+        let character = take(8)?;
+        let mut held = Vec::new();
+        for _ in 0..take(2)? {
+            held.push(Held {
+                kind: take(1)? as u8,
+                model: take(1)? as u8,
+                count: take(1)? as u8,
+                slot: take(1)? as u8,
+                bag: take(1)? as u8,
+                id: take(8)?,
+            });
+        }
+        all.entry(character).or_default().held = Some(held);
     }
     Some(all)
 }
@@ -1952,7 +2112,7 @@ mod tests {
     fn progress_survives_the_file() {
         use alloc::collections::BTreeMap;
 
-        use super::{Progress, decode, encode};
+        use super::{Held, Progress, decode, encode};
 
         let mut all = BTreeMap::new();
         all.insert(
@@ -1962,6 +2122,7 @@ mod tests {
                 quests: vec![(1, 2), (7, 1)],
                 bought: vec![],
                 bags: 0,
+                held: None,
             },
         );
         all.insert(3, Progress::default());
@@ -1972,6 +2133,14 @@ mod tests {
                 quests: vec![],
                 bought: vec![(0, 2), (0x18, 0)],
                 bags: 1,
+                held: Some(vec![Held {
+                    kind: 11,
+                    model: 3,
+                    count: 1,
+                    slot: 0xff,
+                    bag: 0,
+                    id: 9,
+                }]),
             },
         );
         assert_eq!(decode(&encode(&all)), Some(all));
@@ -2086,6 +2255,66 @@ mod tests {
         // The belongings: the weapon the class starts with, and the axe.
         let belongings = &ask(&mut world, 8, 20000, &[])[0][12..];
         assert_eq!(&belongings[..4], &[1, 1, 0, 2]);
+    }
+
+    /// What the title says the player holds is kept once the session's
+    /// belongings were told, handed back as the belongings, and added to by
+    /// what is bought.
+    #[test]
+    fn what_is_held_is_kept() {
+        use super::{Held, Ware};
+
+        let thing = |kind, model, count, slot, bag, id| Held {
+            kind,
+            model,
+            count,
+            slot,
+            bag,
+            id,
+        };
+        let held = vec![thing(5, 0, 1, 1, 0, 1), thing(11, 0, 1, 0xff, 0, 2), thing(0x18, 0, 3, 0xff, 1, 7)];
+        let mut told = 1234u64.to_be_bytes().to_vec();
+        told.extend_from_slice(&(held.len() as u16).to_be_bytes());
+        for thing in &held {
+            thing.write(&mut told);
+        }
+        assert_eq!(Held::parse_all(&told), Some((1234, held.clone())));
+        assert_eq!(Held::parse_all(&told[..told.len() - 1]), None);
+
+        let mut world = KodanWorld::default();
+        ask(&mut world, 1, 1000, &[0x1e]);
+        // What the title held before it was told is not kept.
+        world.hold(&told);
+        assert_eq!(world.progress.held, None);
+        ask(&mut world, 8, 23000, &[]);
+        world.hold(&told);
+        assert_eq!(world.progress.gold, 1234);
+        assert_eq!(world.progress.held.as_ref(), Some(&held));
+
+        // One bag, two groups: the staff worn and the ring, then the water.
+        let belongings = &ask(&mut world, 8, 20000, &[])[0][12..];
+        assert_eq!(&belongings[..4], &[1, 2, 0, 2]);
+        let len = belongings[4] as usize;
+        assert_eq!(&belongings[5..8], &[5, 0, 1]);
+        assert_eq!(&belongings[8..16], &1u64.to_be_bytes());
+        assert_eq!(belongings[16], 1, "worn");
+        let ring = 5 + len;
+        assert_eq!(belongings[ring + 1 + 11], 0xff, "not worn");
+        let water = ring + 1 + belongings[ring] as usize;
+        assert_eq!(&belongings[water..water + 2], &[1, 1]);
+        assert_eq!(&belongings[water + 3..water + 6], &[0x18, 0, 3]);
+
+        // A ring bought after the water is given the id past it.
+        world.shelf = vec![Ware {
+            kind: 11,
+            model: 4,
+            price: 1000,
+            name: b"x".to_vec(),
+            make: None,
+        }];
+        ask(&mut world, 3, 5230, &[4, 11, 0, 1]);
+        assert_eq!(world.progress.gold, 234);
+        assert_eq!(world.progress.held.as_ref().unwrap().last(), Some(&thing(11, 4, 1, 0xff, 0, 8)));
     }
 
     /// A quest chosen is told with its title and its giver's words, the
