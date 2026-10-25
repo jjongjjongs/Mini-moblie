@@ -83,11 +83,11 @@ const STORE_ID: (u32, u32) = (8, 20210);
 /// (`wie_ktf`'s `oz`) puts the rest of what it was back on it.
 const STORE: (u32, u32) = (8, 20200);
 /// 네트워크 창고's 돈 올리기 and 내리기: `[u64 amount]` from the single game's
-/// money into the world's store of it, and back. The readers (`0x1c025e`,
-/// `0x1c03c0`) take the store's `u64` (`network/b.a[J][0]`); the single
+/// money into the world's store of it, and back. The readers (`0x1c03c0`,
+/// `0x1c025e`) take the store's `u64` (`network/b.a[J][0]`); the single
 /// game's money the title keeps itself, taking it as 올리기 is answered.
-const MONEY_IN: (u32, u32) = (8, 20500);
-const MONEY_OUT: (u32, u32) = (8, 20400);
+const MONEY_IN: (u32, u32) = (8, 20400);
+const MONEY_OUT: (u32, u32) = (8, 20500);
 /// 장비 변경 적용: `[byte][byte]` then `[slot][byte]` pairs of what the
 /// player now wears. The reader (`0x1c04b2`) takes nothing; what is worn
 /// [`HELD_FILE`] tells anyway.
@@ -2995,8 +2995,8 @@ mod tests {
         assert!(world.progress.states.is_empty());
 
         // Money stored and taken back.
-        assert_eq!(&ask(&mut world, 8, 20500, &300u64.to_be_bytes())[0][12..], &300u64.to_be_bytes());
-        assert_eq!(&ask(&mut world, 8, 20400, &100u64.to_be_bytes())[0][12..], &200u64.to_be_bytes());
+        assert_eq!(&ask(&mut world, 8, 20400, &300u64.to_be_bytes())[0][12..], &300u64.to_be_bytes());
+        assert_eq!(&ask(&mut world, 8, 20500, &100u64.to_be_bytes())[0][12..], &200u64.to_be_bytes());
         assert!(ask(&mut world, 8, 21000, &[0, 1])[0][12..].is_empty());
 
         // Let go of with nothing picked, for nothing.
