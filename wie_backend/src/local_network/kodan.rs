@@ -82,6 +82,16 @@ const STORE_ID: (u32, u32) = (8, 20210);
 /// single game's. The record holds little of the thing; the title
 /// (`wie_ktf`'s `oz`) puts the rest of what it was back on it.
 const STORE: (u32, u32) = (8, 20200);
+/// 네트워크 창고's 돈 올리기 and 내리기: `[u64 amount]` from the single game's
+/// money into the world's store of it, and back. The readers (`0x1c025e`,
+/// `0x1c03c0`) take the store's `u64` (`network/b.a[J][0]`); the single
+/// game's money the title keeps itself, taking it as 올리기 is answered.
+const MONEY_IN: (u32, u32) = (8, 20500);
+const MONEY_OUT: (u32, u32) = (8, 20400);
+/// 장비 변경 적용: `[byte][byte]` then `[slot][byte]` pairs of what the
+/// player now wears. The reader (`0x1c04b2`) takes nothing; what is worn
+/// [`HELD_FILE`] tells anyway.
+const WORN: (u32, u32) = (8, 21000);
 /// 네트워크 창고's 내리기: the world's picked thing put into the single
 /// game's inventory and out of the world's (`0x1c04cc`), reading nothing.
 /// Like [`THROW_AWAY`] and [`LET_GO`] it is asked with `[0][0]`.
@@ -473,6 +483,8 @@ struct Progress {
     /// What each thing held is beyond its [`Held`], by id, as [`HELD_FILE`]
     /// last told it; handed back in [`STATES_FILE`].
     states: BTreeMap<u64, Vec<u8>>,
+    /// The money kept in 네트워크 창고's 돈, the first of [`COUNTERS`].
+    stored_money: u64,
 }
 
 /// A thing the player holds, as [`HELD_FILE`] has it: `[kind][model][count]
@@ -782,7 +794,7 @@ impl KodanWorld {
             }
             COUNTERS if self.logged_in => {
                 self.synced = true;
-                let mut counters = vec![0; 8];
+                let mut counters = self.progress.stored_money.to_be_bytes().to_vec();
                 counters.extend_from_slice(&self.progress.gold.to_be_bytes());
                 counters.extend_from_slice(&[0; 8]);
                 vec![SlotRelay::message(kind, command, &counters)]
@@ -828,6 +840,18 @@ impl KodanWorld {
                     Vec::new()
                 }
             },
+            WORN if self.logged_in => vec![SlotRelay::message(kind, command, &[])],
+            MONEY_IN | MONEY_OUT if self.logged_in => {
+                let amount = body.get(..8).map(be).unwrap_or(0);
+                let stored = &mut self.progress.stored_money;
+                *stored = if command == MONEY_IN.1 {
+                    stored.saturating_add(amount)
+                } else {
+                    stored.saturating_sub(amount)
+                };
+                self.save();
+                vec![SlotRelay::message(kind, command, &self.progress.stored_money.to_be_bytes())]
+            }
             TAKE_OUT | THROW_AWAY if self.logged_in => {
                 self.part_with_picked();
                 vec![SlotRelay::message(kind, command, &[])]
@@ -839,7 +863,7 @@ impl KodanWorld {
                     self.save();
                 }
                 let mut counters = self.progress.gold.to_be_bytes().to_vec();
-                counters.extend_from_slice(&[0; 8]);
+                counters.extend_from_slice(&self.progress.stored_money.to_be_bytes());
                 vec![SlotRelay::message(kind, command, &counters)]
             }
             PLACE if self.logged_in => vec![SlotRelay::message(kind, command, &self.place())],
@@ -1867,6 +1891,11 @@ fn encode(all: &BTreeMap<u64, Progress>) -> Vec<u8> {
             data.extend_from_slice(state);
         }
     }
+    data.extend_from_slice(&(all.len() as u16).to_be_bytes());
+    for (character, progress) in all {
+        data.extend_from_slice(&character.to_be_bytes());
+        data.extend_from_slice(&progress.stored_money.to_be_bytes());
+    }
     data
 }
 
@@ -1949,6 +1978,14 @@ fn decode(data: &[u8]) -> Option<BTreeMap<u64, Progress>> {
             states.insert(id, take_bytes(len)?.to_vec());
         }
         all.entry(character).or_default().states = states;
+    }
+    // A file from before money was stored ends here.
+    let Some(characters) = take_bytes(2).map(be) else {
+        return Some(all);
+    };
+    for _ in 0..characters {
+        let character = be(take_bytes(8)?);
+        all.entry(character).or_default().stored_money = be(take_bytes(8)?);
     }
     Some(all)
 }
@@ -2613,6 +2650,7 @@ mod tests {
                 bags: 0,
                 held: None,
                 states: BTreeMap::new(),
+                stored_money: 0,
             },
         );
         all.insert(3, Progress::default());
@@ -2633,6 +2671,7 @@ mod tests {
                     ..Held::default()
                 }]),
                 states: BTreeMap::from([(9, vec![1, b'c', 7, 0, 0xff])]),
+                stored_money: 1234,
             },
         );
         assert_eq!(decode(&encode(&all)), Some(all));
@@ -2955,9 +2994,15 @@ mod tests {
         // What a thing is goes with it, and is gone with it.
         assert!(world.progress.states.is_empty());
 
+        // Money stored and taken back.
+        assert_eq!(&ask(&mut world, 8, 20500, &300u64.to_be_bytes())[0][12..], &300u64.to_be_bytes());
+        assert_eq!(&ask(&mut world, 8, 20400, &100u64.to_be_bytes())[0][12..], &200u64.to_be_bytes());
+        assert!(ask(&mut world, 8, 21000, &[0, 1])[0][12..].is_empty());
+
         // Let go of with nothing picked, for nothing.
         let sold = &ask(&mut world, 8, 20150, &[0, 0])[0][12..];
-        assert_eq!(sold, &[0; 16]);
+        assert_eq!(&sold[..8], &[0; 8]);
+        assert_eq!(&sold[8..], &200u64.to_be_bytes(), "the money stored kept");
         assert_eq!(world.progress.held.as_deref(), Some(&[staff][..]));
     }
 
