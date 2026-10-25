@@ -309,6 +309,34 @@ const REFINE_PRICE: u64 = 100;
 const COAT_PRICE: u64 = 0;
 /// The most coating a weapon takes, the offline window knowing three.
 const MOST_COATING: u8 = 3;
+/// The 연금술사's 능력부여 window opening; nothing asked. The reader
+/// (`0x1bc0ae`) takes `[u64]`, the price the window shows,
+/// [`ENCHANT_PRICE`].
+const ENCHANT_INFO: (u32, u32) = (3, 5500);
+/// 능력부여 itself: `[bag][place]` of the equipment, then of the stone or
+/// orb put to it (`game/o.s(I)V`). The reader (`0x1bbd8e`) takes `[bag]
+/// [place][how]`, then by `how` what the equipment has now: [`GEM_GIVEN`]
+/// `[kind][model][value]` (`i.a(BBB)Z`, a gem's stat raised by the value),
+/// [`ORB_GIVEN`] `[orb]` (`i.a(B)Z`) or [`ELEMENT_GIVEN`] `[element]`
+/// (`i.b(B)Z`), any other nothing; then `[bag][place][count]` of the stone
+/// or orb, gone with none left, and the gold. Offline (`0x187dc2`) the
+/// same is done for 1500 gold: a gem (kinds [`GEMS`]) put to a weapon,
+/// helmet or armour gives its stat 1 to 10, chosen by chance; a
+/// [`CRYSTAL`] its element to a weapon, its model one less than the
+/// element; an [`ORB`] the same way its orb.
+const ENCHANT: (u32, u32) = (3, 5510);
+const GEM_GIVEN: u8 = 0;
+const ORB_GIVEN: u8 = 1;
+const ELEMENT_GIVEN: u8 = 2;
+const NOTHING_GIVEN: u8 = 3;
+const ENCHANT_PRICE: u64 = 1500;
+const GEMS: core::ops::RangeInclusive<u8> = 16..=20;
+const CRYSTAL: u8 = 21;
+const ORB: u8 = 34;
+/// The kinds of the weapons, then of the helmets and armour, which alone of
+/// the rest take a gem (`game/data/a.a()Z`).
+const WEAPONS: core::ops::RangeInclusive<u8> = 0..=5;
+const GEM_TAKERS: core::ops::RangeInclusive<u8> = 0..=7;
 /// [`BUY`] for the armour; answered as [`BUY`].
 const BUY_ARMOUR: (u32, u32) = (3, 5230);
 /// [`BUY`]'s popups, EUC-KR: 구입하였습니다. and 골드가 부족합니다.
@@ -1169,6 +1197,16 @@ impl KodanWorld {
                     Vec::new()
                 }
             },
+            ENCHANT_INFO if self.logged_in => vec![SlotRelay::message(kind, command, &ENCHANT_PRICE.to_be_bytes())],
+            ENCHANT if self.logged_in => match *body {
+                [bag, place, stone_bag, stone_place, ..] => {
+                    vec![SlotRelay::message(kind, command, &self.enchant(bag, place, stone_bag, stone_place))]
+                }
+                _ => {
+                    tracing::warn!("코단 world: no answer yet for kind {kind} command {command}: {}", hex(body));
+                    Vec::new()
+                }
+            },
             POINTS_SPENT if self.logged_in => vec![SlotRelay::message(kind, command, &[])],
             MENU_COUNT | MENU_AMOUNT | SKILLS_RESET | STATS_RESET if self.logged_in => vec![SlotRelay::message(kind, command, &[0; 8])],
             REVIVE if self.logged_in => {
@@ -1556,6 +1594,58 @@ impl KodanWorld {
             self.save();
         }
         Some(answer)
+    }
+
+    /// [`ENCHANT`]'s answer, the stone or orb at `stone_place` in
+    /// `stone_bag` put to the equipment at `place` in `bag`, one of it taken
+    /// and [`ENCHANT_PRICE`] gold. One that cannot be, the stone not taking
+    /// to it or the gold short, gives nothing and takes nothing.
+    fn enchant(&mut self, bag: u8, place: u8, stone_bag: u8, stone_place: u8) -> Vec<u8> {
+        let held = self.progress.held.as_deref().unwrap_or_default();
+        let at = |bag: u8, place: u8| held.iter().position(|thing| (thing.bag, thing.place) == (bag, place));
+        let target = at(bag, place).map(|at| held[at]);
+        let stone = at(stone_bag, stone_place);
+        let given = match (target, stone.map(|at| held[at])) {
+            (Some(target), Some(stone)) if self.progress.gold >= ENCHANT_PRICE && stone.count > 0 => match stone.kind {
+                kind if GEMS.contains(&kind) && GEM_TAKERS.contains(&target.kind) => {
+                    // By chance as offline, from what changes with each.
+                    let mixed = (target.id ^ self.progress.gold.rotate_left(17)).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+                    Some(vec![GEM_GIVEN, kind, stone.model, (mixed >> 59) as u8 % 10 + 1])
+                }
+                ORB if WEAPONS.contains(&target.kind) => Some(vec![ORB_GIVEN, stone.model + 1]),
+                CRYSTAL if WEAPONS.contains(&target.kind) => Some(vec![ELEMENT_GIVEN, stone.model + 1]),
+                _ => None,
+            },
+            _ => None,
+        };
+
+        let mut answer = vec![bag, place];
+        let left = match (&given, stone, self.progress.held.as_mut()) {
+            (Some(given), Some(stone), Some(held)) => {
+                answer.extend_from_slice(given);
+                held[stone].count -= 1;
+                let left = held[stone].count;
+                if left == 0 {
+                    held.remove(stone);
+                }
+                self.progress.gold -= ENCHANT_PRICE;
+                self.save();
+                tracing::info!("코단 world: 능력부여 {} on {bag}/{place}", hex(given));
+                left
+            }
+            _ => {
+                answer.push(NOTHING_GIVEN);
+                tracing::warn!(
+                    "코단 world: no 능력부여 of {stone_bag}/{stone_place} on {bag}/{place}: {target:?}, {} gold",
+                    self.progress.gold
+                );
+                let held = self.progress.held.as_deref().unwrap_or_default();
+                stone.map(|stone| held[stone].count).unwrap_or(0)
+            }
+        };
+        answer.extend_from_slice(&[stone_bag, stone_place, left]);
+        answer.extend_from_slice(&self.progress.gold.to_be_bytes());
+        answer
     }
 
     /// The id a thing bought now is given: past every one bought and held.
@@ -2859,6 +2949,66 @@ mod tests {
 
     /// A 제련 is told its price and what it takes, then done: the 재련도
     /// raised, the 제련석 and the gold taken.
+    #[test]
+    fn an_enchant_is_done() {
+        use super::Held;
+
+        let mut world = KodanWorld::default();
+        ask(&mut world, 1, 1000, &[0x1e]);
+        ask(&mut world, 8, 23000, &[]);
+        let thing = |kind, count, place, id| Held {
+            kind,
+            count,
+            slot: 0xff,
+            place,
+            id,
+            ..Held::default()
+        };
+        let mut told = 4000u64.to_be_bytes().to_vec();
+        told.extend_from_slice(&5u16.to_be_bytes());
+        thing(0, 1, 0, 1).write_told(&mut told);
+        thing(7, 1, 1, 2).write_told(&mut told);
+        thing(16, 2, 2, 3).write_told(&mut told);
+        Held {
+            model: 3,
+            ..thing(34, 1, 3, 4)
+        }
+        .write_told(&mut told);
+        Held {
+            model: 1,
+            ..thing(21, 1, 4, 5)
+        }
+        .write_told(&mut told);
+        world.hold(&told);
+
+        assert_eq!(&ask(&mut world, 3, 5500, &[])[0][12..], &1500u64.to_be_bytes());
+
+        // A gem on armour, one of two taken.
+        let gem = &ask(&mut world, 3, 5510, &[0, 1, 0, 2])[0][12..];
+        assert_eq!(&gem[..5], &[0, 1, 0, 16, 0]);
+        assert!((1..=10).contains(&gem[5]), "a stat raised 1 to 10");
+        assert_eq!(&gem[6..9], &[0, 2, 1]);
+        assert_eq!(&gem[9..], &2500u64.to_be_bytes());
+
+        // An orb on armour is refused, taking nothing.
+        let refused = &ask(&mut world, 3, 5510, &[0, 1, 0, 3])[0][12..];
+        assert_eq!(&refused[..6], &[0, 1, 3, 0, 3, 1]);
+        assert_eq!(&refused[6..], &2500u64.to_be_bytes());
+
+        // On the weapon, the orb its model one more; the last one gone.
+        let orb = &ask(&mut world, 3, 5510, &[0, 0, 0, 3])[0][12..];
+        assert_eq!(&orb[..7], &[0, 0, 1, 4, 0, 3, 0]);
+        assert_eq!(&orb[7..], &1000u64.to_be_bytes());
+
+        // Without the gold, the crystal is kept.
+        let short = &ask(&mut world, 3, 5510, &[0, 0, 0, 4])[0][12..];
+        assert_eq!(&short[..6], &[0, 0, 3, 0, 4, 1]);
+        world.progress.gold = 1500;
+        let element = &ask(&mut world, 3, 5510, &[0, 0, 0, 4])[0][12..];
+        assert_eq!(&element[..7], &[0, 0, 2, 2, 0, 4, 0]);
+        assert_eq!(world.progress.held.as_ref().map(|held| held.len()), Some(3));
+    }
+
     #[test]
     fn a_refine_is_done() {
         use super::Held;
