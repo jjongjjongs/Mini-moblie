@@ -70,6 +70,30 @@ const BELONGINGS: (u32, u32) = (8, 20000);
 /// Three `u64`s, kept in `network/b.a`, the second the gold held; the reader
 /// then asks kind 2, command 1102.
 const COUNTERS: (u32, u32) = (8, 23000);
+/// 네트워크 창고's 올리기, a thing of the single game's inventory carried
+/// into the world, asked first for the id it is given there: the body is the
+/// thing's `[kind][model]`, and the reader (`0x1c00c4`) puts the `u64` answer
+/// on the thing and asks [`STORE`].
+const STORE_ID: (u32, u32) = (8, 20210);
+/// [`STORE_ID`]'s second half: `[u64 id][kind][model][count]` and the
+/// thing's state, 28 bytes (`0x1b7cc2`). The reader (`0x1c014a`) adds the
+/// things answered to the world's inventory as [`BUY`]'s do (`network/a.b([BI)I`:
+/// `[count]` of `[bag][u32 len][item]`) and takes the thing out of the
+/// single game's.
+const STORE: (u32, u32) = (8, 20200);
+/// 네트워크 창고's 내리기: the world's picked thing put into the single
+/// game's inventory and out of the world's (`0x1c04cc`), reading nothing.
+/// Like [`THROW_AWAY`] and [`LET_GO`] it is asked with `[0][0]`.
+const TAKE_OUT: (u32, u32) = (8, 20300);
+/// The world's picked thing thrown away (`0x1c003e`), reading nothing.
+const THROW_AWAY: (u32, u32) = (8, 20100);
+/// The world's picked thing let go of for gold (`0x1c01c6`): the reader
+/// takes `[u64 gold][u64]`, the first two of [`COUNTERS`] backwards.
+/// The body is `[0][0]` and names nothing; the thing is the one
+/// [`HELD_FILE`] says was picked, and the player is given its price over
+/// [`LET_GO_SHARE`].
+const LET_GO: (u32, u32) = (8, 20150);
+const LET_GO_SHARE: u64 = 2;
 /// The 코단 map (`0x1ba2c4`): `[byte][len][title][u16 here][u16 count]` and
 /// that many places, `[i16 id][i8 type][len][name][i16 x][i16 y][count][i16
 /// neighbour...]`, kept as `network/h` records. `here` is the place the
@@ -384,7 +408,7 @@ const PROGRESS_FILE: &str = "kodan_world";
 /// and gold (`network/b.a[1]`) before a request whenever they changed - the
 /// things a dungeon fought by the title leaves, and what was worn, used and
 /// thrown away, the server never hears of: `[u64 gold][u16 count]` and that
-/// many [`Held`]. Taken on the next request once the session's [`COUNTERS`]
+/// many [`Held`], then the id of the thing picked among them if one is. Taken on the next request once the session's [`COUNTERS`]
 /// are answered, and removed; before then it is what the title held before
 /// it was told.
 const HELD_FILE: &str = "kodan_held";
@@ -429,6 +453,12 @@ impl Held {
         let records = data.get(10..10 + count * Self::LEN)?;
         let held = records.chunks_exact(Self::LEN).map(Self::parse).collect();
         Some((gold, held))
+    }
+
+    /// The id of the thing picked, which follows the things.
+    fn picked(data: &[u8]) -> Option<u64> {
+        let count = be(data.get(8..10)?) as usize;
+        Some(be(data.get(10 + count * Self::LEN..10 + count * Self::LEN + 8)?))
     }
 
     fn parse(record: &[u8]) -> Self {
@@ -546,6 +576,10 @@ pub(super) struct KodanWorld {
     /// Whether the title has been told this session's belongings and gold,
     /// after which what [`HELD_FILE`] says is what it holds.
     synced: bool,
+    /// The last id [`STORE_ID`] handed out this session.
+    given_id: u64,
+    /// The id of the thing [`HELD_FILE`] last said was picked.
+    picked: Option<u64>,
     /// The character [`ENTER`] names: `[byte][u64 id][len][name]`
     /// (`0x1b5e68`), the id being the player's own (`game/chars/g.a()J`).
     character_id: u16,
@@ -651,6 +685,52 @@ impl KodanWorld {
                 self.synced = true;
                 let mut counters = vec![0; 8];
                 counters.extend_from_slice(&self.progress.gold.to_be_bytes());
+                counters.extend_from_slice(&[0; 8]);
+                vec![SlotRelay::message(kind, command, &counters)]
+            }
+            STORE_ID if self.logged_in => {
+                let id = self.next_id().max(self.given_id + 1);
+                self.given_id = id;
+                vec![SlotRelay::message(kind, command, &id.to_be_bytes())]
+            }
+            STORE if self.logged_in => match *body {
+                [b0, b1, b2, b3, b4, b5, b6, b7, kind_stored, model, count, ..] => {
+                    let id = u64::from_be_bytes([b0, b1, b2, b3, b4, b5, b6, b7]);
+                    let bag = bag_of(kind_stored);
+                    let count = if bag == 0 { 1 } else { count.max(1) };
+                    let item = item_record(kind_stored, model, count, id, NOT_WORN);
+                    if let Some(held) = &mut self.progress.held {
+                        held.push(Held {
+                            kind: kind_stored,
+                            model,
+                            count,
+                            slot: NOT_WORN,
+                            bag,
+                            id,
+                        });
+                        self.save();
+                    }
+                    let mut stored = vec![1, bag];
+                    stored.extend_from_slice(&(item.len() as u32).to_be_bytes());
+                    stored.extend_from_slice(&item);
+                    vec![SlotRelay::message(kind, command, &stored)]
+                }
+                _ => {
+                    tracing::warn!("코단 world: no such thing to store: {}", hex(body));
+                    Vec::new()
+                }
+            },
+            TAKE_OUT | THROW_AWAY if self.logged_in => {
+                self.part_with_picked();
+                vec![SlotRelay::message(kind, command, &[])]
+            }
+            LET_GO if self.logged_in => {
+                if let Some(thing) = self.part_with_picked() {
+                    let price = self.price_of(thing.kind, thing.model) as u64 * thing.count.max(1) as u64;
+                    self.progress.gold += price / LET_GO_SHARE;
+                    self.save();
+                }
+                let mut counters = self.progress.gold.to_be_bytes().to_vec();
                 counters.extend_from_slice(&[0; 8]);
                 vec![SlotRelay::message(kind, command, &counters)]
             }
@@ -1120,11 +1200,44 @@ impl KodanWorld {
             tracing::warn!("코단 world: {HELD_FILE} does not parse: {}", hex(data));
             return;
         };
+        self.picked = Held::picked(data);
         if self.progress.gold != gold || self.progress.held.as_ref() != Some(&held) {
             tracing::info!("코단 world: the player holds {} things and {gold} gold", held.len());
             self.progress.gold = gold;
             self.progress.held = Some(held);
             self.save();
+        }
+    }
+
+    /// Takes the thing [`HELD_FILE`] last said was picked out of what the
+    /// player holds, and gives it back. The title tells what it holds anyway
+    /// with its next message; this keeps the world right should none come.
+    fn part_with_picked(&mut self) -> Option<Held> {
+        let picked = self.picked.take()?;
+        let held = self.progress.held.as_mut()?;
+        let index = held.iter().position(|thing| thing.id == picked)?;
+        let thing = held.remove(index);
+        self.save();
+        Some(thing)
+    }
+
+    /// What the thing `kind`, `model` is bought for: the `u32` its
+    /// `itm/<kind>` record starts with, the records `[u16 len][u32 price
+    /// LE]...` one a model.
+    fn price_of(&self, kind: u8, model: u8) -> u32 {
+        let Some(data) = self.file(&alloc::format!("itm/{kind:02}")) else {
+            return 0;
+        };
+        let mut at = 0;
+        for _ in 0..model {
+            let Some(&[high, low]) = data.get(at..at + 2) else {
+                return 0;
+            };
+            at += 2 + u16::from_be_bytes([high, low]) as usize;
+        }
+        match data.get(at + 2..at + 6) {
+            Some(&[a, b, c, d]) => u32::from_le_bytes([a, b, c, d]),
+            _ => 0,
         }
     }
 
@@ -2315,6 +2428,69 @@ mod tests {
         ask(&mut world, 3, 5230, &[4, 11, 0, 1]);
         assert_eq!(world.progress.gold, 234);
         assert_eq!(world.progress.held.as_ref().unwrap().last(), Some(&thing(11, 4, 1, 0xff, 0, 8)));
+    }
+
+    /// 네트워크 창고's 올리기 gives the thing an id and adds it to the world's
+    /// inventory; 내리기 takes out the thing the title says was picked.
+    #[test]
+    fn the_storage_takes_and_gives() {
+        use super::Held;
+
+        let mut world = KodanWorld::default();
+        ask(&mut world, 1, 1000, &[0x1e]);
+        ask(&mut world, 8, 23000, &[]);
+        let staff = Held {
+            kind: 5,
+            model: 0,
+            count: 1,
+            slot: 1,
+            bag: 0,
+            id: 1,
+        };
+        let mut told = 0u64.to_be_bytes().to_vec();
+        told.extend_from_slice(&1u16.to_be_bytes());
+        staff.write(&mut told);
+        world.hold(&told);
+
+        let id = &ask(&mut world, 8, 20210, &[7, 4])[0][12..];
+        assert_eq!(id, &2u64.to_be_bytes());
+        assert_eq!(&ask(&mut world, 8, 20210, &[7, 4])[0][12..], &3u64.to_be_bytes(), "never the same twice");
+
+        let mut stored = 2u64.to_be_bytes().to_vec();
+        stored.extend_from_slice(&[7, 4, 1]);
+        stored.resize(28, 0);
+        let added = &ask(&mut world, 8, 20200, &stored)[0][12..];
+        assert_eq!(&added[..2], &[1, 0], "one thing, in the equipment's bag");
+        let len = u32::from_be_bytes([added[2], added[3], added[4], added[5]]) as usize;
+        assert_eq!(added.len(), 6 + len);
+        assert_eq!(&added[6..9], &[7, 4, 1]);
+        assert_eq!(&added[9..17], &2u64.to_be_bytes());
+        assert_eq!(added[17], 0xff, "not worn");
+        let armour = Held {
+            kind: 7,
+            model: 4,
+            count: 1,
+            slot: 0xff,
+            bag: 0,
+            id: 2,
+        };
+        assert_eq!(world.progress.held.as_deref(), Some(&[staff, armour][..]));
+
+        // Taken out with the armour picked.
+        let mut told = 0u64.to_be_bytes().to_vec();
+        told.extend_from_slice(&2u16.to_be_bytes());
+        staff.write(&mut told);
+        armour.write(&mut told);
+        told.extend_from_slice(&2u64.to_be_bytes());
+        assert_eq!(Held::picked(&told), Some(2));
+        world.hold(&told);
+        assert!(ask(&mut world, 8, 20300, &[0, 0])[0][12..].is_empty());
+        assert_eq!(world.progress.held.as_deref(), Some(&[staff][..]));
+
+        // Let go of with nothing picked, for nothing.
+        let sold = &ask(&mut world, 8, 20150, &[0, 0])[0][12..];
+        assert_eq!(sold, &[0; 16]);
+        assert_eq!(world.progress.held.as_deref(), Some(&[staff][..]));
     }
 
     /// A quest chosen is told with its title and its giver's words, the

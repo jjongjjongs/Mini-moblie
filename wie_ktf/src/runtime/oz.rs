@@ -466,7 +466,9 @@ const LOADED_MAP: (&str, &str, &str) = ("network/b", "h", "S");
 /// The file [`KEEP`] writes, which the emulated 코단 world server
 /// (`wie_backend`'s `kodan`) takes on the request that follows:
 /// `[u64 gold][u16 count]` and that many `[kind][model][count][slot][bag]
-/// [u64 id]`.
+/// [u64 id]`, then the `u64` id of the thing picked among them, if one is:
+/// what 네트워크 창고's 내리기, 버리기 and 판매하기 name, their requests
+/// telling nothing of it.
 const HELD_FILE: &str = "kodan_held";
 
 /// `network/b.a`, the belongings: a `game/g`, a `Vector` of `game/data/k`.
@@ -480,6 +482,8 @@ const GOLD: usize = 1;
 const ITEM_BYTES: [&str; 5] = ["l", "m", "n", "o", "p"];
 /// And its id.
 const ITEM_ID: &str = "b";
+/// `game/g.a()Lgame/data/k;`, the thing picked in a `game/g`, or null.
+const PICKED: (&str, &str) = ("a", "()Lgame/data/k;");
 
 async fn handle_oz_svc(core: &mut ArmCore, (system, jvm, kept): &mut (System, Jvm, Arc<Mutex<Vec<u8>>>), id: SvcId) -> Result<()> {
     let (_, lr) = core.read_pc_lr()?;
@@ -528,6 +532,11 @@ async fn held(jvm: &Jvm) -> Option<Vec<u8>> {
             held.push(jvm.get_field::<i8>(&item, field, "B").await.ok()? as u8);
         }
         held.extend_from_slice(&jvm.get_field::<i64>(&item, ITEM_ID, "J").await.ok()?.to_be_bytes());
+    }
+    let (name, descriptor) = PICKED;
+    let picked: Option<Box<dyn ClassInstance>> = jvm.invoke_virtual(&belongings, name, descriptor, ()).await.ok()?;
+    if let Some(picked) = picked {
+        held.extend_from_slice(&jvm.get_field::<i64>(&picked, ITEM_ID, "J").await.ok()?.to_be_bytes());
     }
     Some(held)
 }
