@@ -542,9 +542,9 @@ impl KtfJvmSupport {
 
         Self::write_class_record(core, record, &JavaClassDefinition::from_raw(ptr_class, core))?;
 
-        // An array class has no vtable of its own here - nothing dispatches
-        // through one - so the record keeps its holder, which is what stops
-        // another class taking it.
+        // A class with no vtable keeps the holder in its record instead, which
+        // is what stops another class taking it. An array class has
+        // `java/lang/Object`'s; see `JavaArrayClassDefinition::new`.
         if ptr_vtable == 0 {
             write_generic(core, record + VTABLE_OFFSET, VTABLE_HELD)?;
         }
