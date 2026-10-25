@@ -271,6 +271,13 @@ const MOST_BAGS: u8 = 4;
 /// What a shop sells, `[len][kind][model][u32 price LE][len][name][rest]`
 /// each.
 const WARES_FILE: &str = "itm/forshop";
+/// The title's rings, of which [`WARES_FILE`] has none:
+/// `[u16 len][u32 price LE][len][name][rest]` each, the ring's model its
+/// place in the file and the rest's fourth byte its grade.
+const RINGS_FILE: &str = "itm/11";
+/// The grade of the rings sold: the least there is, as the most of the
+/// other wares are of the least of theirs.
+const SOLD_RING_GRADE: u8 = 1;
 /// Asked from the in-game menu (`game/o.g(B)V`, `0x17e330`) without a body.
 /// Its reader (`0x1bc15c`) takes a `u64`, keeps it, and opens the screen the
 /// option leads to.
@@ -804,7 +811,7 @@ impl KodanWorld {
                 // The armour's carry the kind of armour first.
                 let asked = if command == ARMOUR_WARE.1 { body.get(1..) } else { Some(body) };
                 match asked.and_then(|asked| self.ware(asked)) {
-                    Some(ware) => vec![SlotRelay::message(kind, WARE.1, &item_record(ware.kind, ware.model, 1, 0, 0))],
+                    Some(ware) => vec![SlotRelay::message(kind, WARE.1, &item_record(ware.kind, ware.model, 1, 0, NOT_WORN))],
                     None => {
                         tracing::warn!("코단 world: no such ware: {}", hex(body));
                         Vec::new()
@@ -833,10 +840,10 @@ impl KodanWorld {
                             let id = FIRST_BOUGHT_ID + self.progress.bought.len() as u64;
                             let items: Vec<Vec<u8>> = if bag_of(ware.kind) == 0 {
                                 (0..count)
-                                    .map(|index| item_record(ware.kind, ware.model, 1, id + index as u64, 0))
+                                    .map(|index| item_record(ware.kind, ware.model, 1, id + index as u64, NOT_WORN))
                                     .collect()
                             } else {
-                                vec![item_record(ware.kind, ware.model, count, id, 0)]
+                                vec![item_record(ware.kind, ware.model, count, id, NOT_WORN)]
                             };
                             self.progress.bought.extend((0..count).map(|_| (ware.kind, ware.model)));
                             bought.push(items.len() as u8);
@@ -896,7 +903,7 @@ impl KodanWorld {
         for (index, (kind, model)) in self.progress.bought.iter().enumerate() {
             let id = FIRST_BOUGHT_ID + index as u64;
             if bag_of(*kind) == 0 {
-                bags[0].push(item_record(*kind, *model, 1, id, 0));
+                bags[0].push(item_record(*kind, *model, 1, id, NOT_WORN));
                 continue;
             }
             match heaps.iter_mut().find(|heap| (heap.0, heap.1) == (*kind, *model) && heap.2 < u8::MAX) {
@@ -904,7 +911,11 @@ impl KodanWorld {
                 None => heaps.push((*kind, *model, 1, id)),
             }
         }
-        bags[1].extend(heaps.into_iter().map(|(kind, model, count, id)| item_record(kind, model, count, id, 0)));
+        bags[1].extend(
+            heaps
+                .into_iter()
+                .map(|(kind, model, count, id)| item_record(kind, model, count, id, NOT_WORN)),
+        );
 
         let mut belongings = vec![self.bags()];
         let bags: Vec<(u8, &Vec<Vec<u8>>)> = (0..).zip(&bags).filter(|(_, items)| !items.is_empty()).collect();
@@ -1002,19 +1013,20 @@ impl KodanWorld {
         self.shelf.iter().filter(|ware| ware.kind == kind).nth(index as usize)
     }
 
-    /// Everything [`WARES_FILE`] lists; none when it does not read.
+    /// Everything [`WARES_FILE`] lists, and the rings of
+    /// [`SOLD_RING_GRADE`]; none of either when its file does not read.
     fn wares(&self) -> Vec<Ware> {
-        let Some(files) = &self.files else {
-            return Vec::new();
-        };
-        let Some(size) = ready(files.size(WARES_FILE)).flatten() else {
-            return Vec::new();
-        };
+        let mut wares = self.file(WARES_FILE).map(|data| Ware::parse_all(&data)).unwrap_or_default();
+        wares.extend(self.file(RINGS_FILE).map(|data| Ware::parse_rings(&data)).unwrap_or_default());
+        wares
+    }
+
+    /// The title's file at `path`, if there is one and it reads.
+    fn file(&self, path: &str) -> Option<Vec<u8>> {
+        let files = self.files.as_ref()?;
+        let size = ready(files.size(path)).flatten()?;
         let mut data = vec![0; size];
-        if ready(files.read(WARES_FILE, 0, size, &mut data)).flatten() != Some(size) {
-            return Vec::new();
-        }
-        Ware::parse_all(&data)
+        (ready(files.read(path, 0, size, &mut data)).flatten() == Some(size)).then_some(data)
     }
 
     fn ground_of(&self, map: u16) -> Option<Ground> {
@@ -1401,6 +1413,37 @@ impl Ware {
         wares
     }
 
+    /// The rings of [`SOLD_RING_GRADE`] in [`RINGS_FILE`].
+    fn parse_rings(data: &[u8]) -> Vec<Self> {
+        const RING: u8 = 11;
+
+        let mut rings = Vec::new();
+        let mut at = 0;
+        let mut model = 0;
+        while let Some(&[high, low]) = data.get(at..at + 2) {
+            let len = u16::from_be_bytes([high, low]) as usize;
+            let Some(record) = data.get(at + 2..at + 2 + len) else {
+                break;
+            };
+            if let [a, b, c, d, name_len, ..] = *record {
+                let name = record.get(5..5 + name_len as usize);
+                let grade = record.get(5 + name_len as usize + 3);
+                if let (Some(name), Some(&SOLD_RING_GRADE)) = (name, grade) {
+                    rings.push(Self {
+                        kind: RING,
+                        model,
+                        price: u32::from_le_bytes([a, b, c, d]),
+                        name: name.to_vec(),
+                        make: None,
+                    });
+                }
+            }
+            at += 2 + len;
+            model += 1;
+        }
+        rings
+    }
+
     /// `[kind][model][u32 price LE][len][name][rest]`, the rest of a piece
     /// of armour holding what it is made of 22 bytes in.
     fn parse(record: &[u8]) -> Option<Self> {
@@ -1480,7 +1523,7 @@ fn kind_name(kind: u8) -> &'static [u8] {
 }
 
 /// An item as [`BELONGINGS`] carries one: `count` of `kind` and `model`, worn
-/// in `slot` (0 for none).
+/// in `slot` ([`NOT_WORN`] for none).
 ///
 /// An item is read in layers, each class of it adding its own fields after
 /// its parent's - `game/data/k`, then for equipment `j` and `i`, and for a
@@ -1520,6 +1563,11 @@ fn item_record(kind: u8, model: u8, count: u8, id: u64, slot: u8) -> Vec<u8> {
 
 /// The weapon slot, one of the two `game/chars/g.J()Z` looks in.
 const WEAPON_SLOT: u8 = 1;
+/// The slot of a thing not worn, -1 as `game/data/k.<init>(BB)` leaves it.
+/// Slot 0 is worn: what is in it is drawn on the character
+/// (`resource/b.a(Lgame/chars/g;Lgame/chars/f;IZ)V`) as armour, which a ring
+/// is not.
+const NOT_WORN: u8 = 0xff;
 
 /// The weapon a character of `class` starts with, as [`BELONGINGS`] carries an
 /// item: the type `game/chars/g.aX()V` gives the class (types 0 to 5 being
@@ -1969,6 +2017,32 @@ mod tests {
         assert!(wares[1].is_in(Aisle::Armour(2)) && !wares[1].is_in(Aisle::Armour(0)));
         assert!(wares[2].is_in(Aisle::Shields));
         assert!(wares[3].is_in(Aisle::Rest));
+    }
+
+    /// The rings are read from their own file, only those of the grade sold,
+    /// each the model of its place in the file.
+    #[test]
+    fn rings_are_shelved() {
+        use super::{Aisle, Ware};
+
+        let ring = |price: u32, name: &[u8], grade: u8| {
+            let mut record = price.to_le_bytes().to_vec();
+            record.push(name.len() as u8);
+            record.extend_from_slice(name);
+            record.extend_from_slice(&[0, 0, 20, grade, 0, 1]);
+            let mut ring = (record.len() as u16).to_be_bytes().to_vec();
+            ring.extend(record);
+            ring
+        };
+        let mut file = ring(8000, b"amethyst", 1);
+        file.extend(ring(16000, b"valour", 2));
+        file.extend(ring(8000, b"grit", 1));
+
+        let rings = Ware::parse_rings(&file);
+        assert_eq!(rings.len(), 2);
+        assert_eq!((rings[0].kind, rings[0].model, rings[0].price), (11, 0, 8000));
+        assert_eq!((rings[1].model, &rings[1].name[..]), (2, &b"grit"[..]));
+        assert!(rings.iter().all(|ring| ring.is_in(Aisle::Rings)));
     }
 
     /// A ware is named by its kind and its place among the shelf's of that
