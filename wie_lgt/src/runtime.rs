@@ -6,6 +6,7 @@ pub mod firmware_link;
 pub mod init;
 pub(crate) mod java;
 mod savepoint;
+mod soccer_manager;
 pub(crate) mod stdlib;
 mod svc_ids;
 pub(crate) mod wipi_c;
