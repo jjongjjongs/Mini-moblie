@@ -9,6 +9,7 @@ mod savepoint;
 pub(crate) mod stdlib;
 mod svc_ids;
 pub(crate) mod wipi_c;
+mod zenonia2;
 
 const SVC_CATEGORY_INIT: u32 = 1;
 const SVC_CATEGORY_WIPIC: u32 = 3;

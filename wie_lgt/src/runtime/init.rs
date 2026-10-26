@@ -4409,6 +4409,7 @@ pub async fn load_native(
     } = load_executable(core, data)?;
 
     super::cygnus::install_merchant_extensions(core, system.aid())?;
+    super::zenonia2::install_frame_guards(core, system.aid())?;
 
     // Gamevil's titles draw every sprite through one small routine, and in a
     // 제노니아2 field that routine was more than half of everything the title
