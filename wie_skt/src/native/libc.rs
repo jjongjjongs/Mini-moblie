@@ -38,6 +38,8 @@ pub fn body(slot: u32) -> Option<WIPICMethodBody> {
         17 => memchr.into_body(),
         18 => memset.into_body(),
         20 => atoi.into_body(),
+        22 => strtod.into_body(),
+        24 => strtoul.into_body(),
         26 => time.into_body(),
         29 => localtime.into_body(),
         _ => return None,
@@ -277,6 +279,148 @@ async fn atoi(context: &mut dyn WIPICContext, string: WIPICWord) -> Result<i32> 
     Ok(c_atoi(&read_string(context, string)?))
 }
 
+/// `strtod(string, end)`: the decimal number `string` starts with, as the
+/// double's bits in `r0:r1`, and where it stopped written to `end` - the
+/// string itself where it holds no number. 메이플스토리 Live reads a number
+/// of its own text this way (`0x18a2ae`) and, stopped at an `x`, reads it
+/// again in base 16 through [`strtoul`]; so a hexadecimal one is not
+/// taken here.
+async fn strtod(context: &mut dyn WIPICContext, string: WIPICWord, end: WIPICWord) -> Result<u64> {
+    let bytes = read_string(context, string)?;
+    let (value, used) = c_strtod(&bytes);
+    if end != 0 {
+        context.write_bytes(end, &(string + used as WIPICWord).to_le_bytes())?;
+    }
+
+    Ok(value.to_bits())
+}
+
+/// The number `bytes` starts with and how many bytes it took, none for no
+/// number.
+fn c_strtod(bytes: &[u8]) -> (f64, usize) {
+    let start = bytes.iter().take_while(|x| x.is_ascii_whitespace()).count();
+    let mut at = start;
+    let negative = match bytes.get(at) {
+        Some(b'-') => {
+            at += 1;
+            true
+        }
+        Some(b'+') => {
+            at += 1;
+            false
+        }
+        _ => false,
+    };
+
+    let digits = |at: usize| bytes[at..].iter().take_while(|x| x.is_ascii_digit()).count();
+    let whole = digits(at);
+    let mut value = bytes[at..at + whole]
+        .iter()
+        .fold(0f64, |value, digit| value * 10.0 + f64::from(digit - b'0'));
+    at += whole;
+
+    let mut fraction = 0;
+    if bytes.get(at) == Some(&b'.') {
+        fraction = digits(at + 1);
+        let mut scale = 1f64;
+        for digit in &bytes[at + 1..at + 1 + fraction] {
+            scale /= 10.0;
+            value += f64::from(digit - b'0') * scale;
+        }
+        if whole + fraction > 0 {
+            at += 1 + fraction;
+        }
+    }
+    if whole + fraction == 0 {
+        return (0.0, 0);
+    }
+
+    // An exponent only where digits follow it.
+    if matches!(bytes.get(at), Some(b'e' | b'E')) {
+        let mut exponent_at = at + 1;
+        let exponent_negative = match bytes.get(exponent_at) {
+            Some(b'-') => {
+                exponent_at += 1;
+                true
+            }
+            Some(b'+') => {
+                exponent_at += 1;
+                false
+            }
+            _ => false,
+        };
+        let exponent_digits = digits(exponent_at);
+        if exponent_digits > 0 {
+            let exponent = bytes[exponent_at..exponent_at + exponent_digits].iter().fold(0i32, |exponent, digit| {
+                exponent.saturating_mul(10).saturating_add(i32::from(digit - b'0'))
+            });
+            let exponent = if exponent_negative { -exponent } else { exponent };
+            for _ in 0..exponent.unsigned_abs().min(400) {
+                if exponent < 0 {
+                    value /= 10.0;
+                } else {
+                    value *= 10.0;
+                }
+            }
+            at = exponent_at + exponent_digits;
+        }
+    }
+
+    (if negative { -value } else { value }, at)
+}
+
+/// `strtoul(string, end, base)`: the number `string` starts with in `base`,
+/// 2 to 36 or 0 to go by its prefix, where it stopped written to `end`.
+async fn strtoul(context: &mut dyn WIPICContext, string: WIPICWord, end: WIPICWord, base: WIPICWord) -> Result<WIPICWord> {
+    let bytes = read_string(context, string)?;
+    let (value, used) = c_strtoul(&bytes, base);
+    if end != 0 {
+        context.write_bytes(end, &(string + used as WIPICWord).to_le_bytes())?;
+    }
+
+    Ok(value)
+}
+
+fn c_strtoul(bytes: &[u8], base: u32) -> (u32, usize) {
+    let mut at = bytes.iter().take_while(|x| x.is_ascii_whitespace()).count();
+    let negative = match bytes.get(at) {
+        Some(b'-') => {
+            at += 1;
+            true
+        }
+        Some(b'+') => {
+            at += 1;
+            false
+        }
+        _ => false,
+    };
+
+    let prefixed = bytes.get(at) == Some(&b'0') && matches!(bytes.get(at + 1), Some(b'x' | b'X'));
+    let hex_digit_after = bytes.get(at + 2).is_some_and(u8::is_ascii_hexdigit);
+    let base = match base {
+        0 if prefixed && hex_digit_after => 16,
+        0 if bytes.get(at) == Some(&b'0') => 8,
+        0 => 10,
+        base @ 2..=36 => base,
+        _ => return (0, 0),
+    };
+    if base == 16 && prefixed && hex_digit_after {
+        at += 2;
+    }
+
+    let mut value: u32 = 0;
+    let mut used = 0;
+    while let Some(digit) = bytes.get(at + used).and_then(|x| (*x as char).to_digit(base)) {
+        value = value.wrapping_mul(base).wrapping_add(digit);
+        used += 1;
+    }
+    if used == 0 {
+        return (0, 0);
+    }
+
+    (if negative { value.wrapping_neg() } else { value }, at + used)
+}
+
 pub(super) fn c_atoi(bytes: &[u8]) -> i32 {
     let mut digits = bytes.iter().skip_while(|x| x.is_ascii_whitespace()).peekable();
     let negative = match digits.peek() {
@@ -377,7 +521,26 @@ fn broken_down(seconds: i64) -> [i32; 9] {
 
 #[cfg(test)]
 mod tests {
-    use super::{broken_down, c_atoi};
+    use super::{broken_down, c_atoi, c_strtod, c_strtoul};
+
+    /// What 메이플스토리 Live's number reader (`0x18a2ae`) asks of them: a
+    /// decimal number, stopped at an `x` so the hexadecimal one is read again
+    /// in base 16, and nothing taken from a string with no number.
+    #[test]
+    fn numbers_are_read_where_they_stop() {
+        assert_eq!(c_strtod(b"  -12.5e1 rest"), (-125.0, 9));
+        assert_eq!(c_strtod(b"300"), (300.0, 3));
+        assert_eq!(c_strtod(b"0x1F"), (0.0, 1));
+        assert_eq!(c_strtod(b"7e"), (7.0, 1));
+        assert_eq!(c_strtod(b"name"), (0.0, 0));
+        assert_eq!(c_strtod(b"."), (0.0, 0));
+
+        assert_eq!(c_strtoul(b"0x1F", 16), (0x1f, 4));
+        assert_eq!(c_strtoul(b"ff;", 16), (0xff, 2));
+        assert_eq!(c_strtoul(b"-3", 10), (u32::MAX - 2, 2));
+        assert_eq!(c_strtoul(b"0x", 16), (0, 1));
+        assert_eq!(c_strtoul(b"z", 10), (0, 0));
+    }
 
     #[test]
     fn atoi_reads_a_leading_number() {
