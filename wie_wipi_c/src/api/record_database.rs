@@ -145,13 +145,48 @@ fn split_records(data: &[u8], record_size: u32) -> Vec<Vec<u8>> {
 }
 
 /// The one-file shape: the header, then its records.
+///
+/// A record can carry a byte in front of it that is not part of what it holds:
+/// 드래곤로드's `FUNTER_DL.db` is two eight-byte records in eighteen bytes, each
+/// behind a `01`. The title reads its save key out of the first, and took the
+/// marker and seven bytes of key while this split the file into eight-byte
+/// pieces - so its save never decrypted, its settings came back zeroed, and a
+/// zero speed is its slowest, a frame every 500 ms. Records sit behind that
+/// byte when the file is exactly long enough for one each.
 fn parse_one_file(data: &[u8]) -> Option<Vec<Vec<u8>>> {
     let (record_size, count, _) = parse_packaged_header(data, ONE_FILE_MAGIC)?;
     if count > MAX_RECORDS || record_size as usize > MAX_RECORD_BYTES {
         return None;
     }
 
-    Some(split_records(&data[PACKAGED_HEADER..], record_size))
+    let body = &data[PACKAGED_HEADER..];
+    if marked_records(body, record_size, count) {
+        return Some(
+            split_records(body, record_size + 1)
+                .into_iter()
+                .map(|record| record[1..].to_vec())
+                .collect(),
+        );
+    }
+
+    Some(split_records(body, record_size))
+}
+
+/// Whether a one-file body is `count` records each behind a byte of its own.
+fn marked_records(body: &[u8], record_size: u32, count: u32) -> bool {
+    record_size != 0 && count != 0 && body.len() as u64 == count as u64 * (record_size as u64 + 1)
+}
+
+/// What this used to make of a one-file database whose records are marked, if
+/// this one is: its body cut into pieces of the record size, markers and all.
+fn misread_one_file(data: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let (record_size, count, _) = parse_packaged_header(data, ONE_FILE_MAGIC)?;
+    let body = &data[PACKAGED_HEADER..];
+    if count > MAX_RECORDS || record_size as usize > MAX_RECORD_BYTES || !marked_records(body, record_size, count) {
+        return None;
+    }
+
+    Some(split_records(body, record_size))
 }
 
 /// The split shape: an index that says how many records there are and how long
@@ -209,6 +244,54 @@ async fn packaged_records(context: &mut dyn WIPICContext, name: &str) -> Result<
     Ok(None)
 }
 
+/// Puts right a database that was seeded from a misread copy of the archive's.
+///
+/// Seeding happens once, on the first open, and the store keeps what it was
+/// given; a handset that ran the title before [`parse_one_file`] read marked
+/// records holds the misread ones still, and would go on handing the title a
+/// wrong key. A store that holds exactly what the misreading made - nothing
+/// the title has written since - is seeded again from the right reading.
+async fn reseed_misread(context: &mut dyn WIPICContext, name: &str, stored: &str) -> Result<()> {
+    let mut packaged = None;
+    for candidate in [name.to_string(), format!("{name}.db")] {
+        if let Some(data) = packaged_store_bytes(context, &candidate).await? {
+            packaged = Some(data);
+            break;
+        }
+    }
+    let Some(data) = packaged else {
+        return Ok(());
+    };
+    let (Some(misread), Some(records)) = (misread_one_file(&data), parse_one_file(&data)) else {
+        return Ok(());
+    };
+
+    let system = context.system();
+    let pid = system.pid().to_owned();
+    let repository = system.platform().database_repository();
+
+    let db = repository.open(stored, &pid).await;
+    let mut held = Vec::new();
+    for id in db.get_record_ids().await {
+        held.push(db.get(id).await.unwrap_or_default());
+    }
+    drop(db);
+
+    if held != misread {
+        return Ok(());
+    }
+
+    repository.delete(stored, &pid).await;
+    let mut db = repository.open(stored, &pid).await;
+    for record in &records {
+        db.add(record).await;
+    }
+
+    tracing::info!("MC_rdbOpen({name:?}): reseeded {} packaged records misread before", records.len());
+
+    Ok(())
+}
+
 /// `MC_rdbOpen(name, record_size, create)` - slot 0.
 ///
 /// A database exists when the player has written one or when the archive ships
@@ -235,7 +318,9 @@ pub async fn open(context: &mut dyn WIPICContext, ptr_name: WIPICWord, record_si
         system.platform().database_repository().exists(&stored, &pid).await
     };
 
-    if !exists {
+    if exists {
+        reseed_misread(context, &name, &stored).await?;
+    } else {
         // The archive's own copy is the database's initial content, laid into
         // the store the first time the title opens it.
         let packaged = packaged_records(context, &name).await?;
@@ -485,4 +570,38 @@ pub async fn record_size(context: &mut dyn WIPICContext, handle: WIPICWord) -> R
     tracing::debug!("MC_rdbGetRecordSize({handle:#x}) -> {size}");
 
     Ok(size as i32)
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::{vec, vec::Vec};
+
+    use super::{PACKAGED_HEADER, misread_one_file, parse_one_file};
+
+    fn one_file(record_size: u32, count: u32, body: &[u8]) -> Vec<u8> {
+        let mut data = vec![0; PACKAGED_HEADER];
+        data[..5].copy_from_slice(b"qtcdb");
+        data[5..9].copy_from_slice(&record_size.to_be_bytes());
+        data[9..13].copy_from_slice(&count.to_be_bytes());
+        data.extend_from_slice(body);
+
+        data
+    }
+
+    #[test]
+    fn marked_records_are_read_without_their_marker() {
+        // 드래곤로드's FUNTER_DL.db, whose first record is its save key.
+        let data = one_file(8, 2, b"\x01YVQZZQEX\x01EIHNTSAZ");
+
+        assert_eq!(parse_one_file(&data), Some(vec![b"YVQZZQEX".to_vec(), b"EIHNTSAZ".to_vec()]));
+        assert_eq!(misread_one_file(&data), Some(vec![b"\x01YVQZZQE".to_vec(), b"X\x01EIHNTS".to_vec()]));
+    }
+
+    #[test]
+    fn unmarked_records_are_read_as_they_are() {
+        let data = one_file(4, 2, b"abcdefgh");
+
+        assert_eq!(parse_one_file(&data), Some(vec![b"abcd".to_vec(), b"efgh".to_vec()]));
+        assert_eq!(misread_one_file(&data), None);
+    }
 }
