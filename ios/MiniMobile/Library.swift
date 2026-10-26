@@ -331,6 +331,47 @@ enum GameQuality {
     }
 }
 
+/// How big a title's screen is drawn, kept per title and per way up - the
+/// screen under the keys, or with them either side - as on Android: its own
+/// choice that way up, else the one made for every title that way up, else
+/// 맞춤.
+enum GameScale {
+    private static let prefix = "scale."
+
+    private static func key(_ name: String, sideways: Bool) -> String {
+        prefix + name + (sideways ? "|가로" : "|세로")
+    }
+
+    static func get(_ game: GameFile, sideways: Bool) -> ScreenScale {
+        let defaults = UserDefaults.standard
+        let stored = defaults.string(forKey: key(game.name, sideways: sideways)) ?? defaults.string(forKey: key("*", sideways: sideways))
+        if let stored, let scale = ScreenScale(encoded: stored) {
+            return scale
+        }
+        // The one 확대 방식 every title shared before carries its 정수배
+        // over; its 꽉 채움 is gone, and is 맞춤.
+        if defaults.string(forKey: SettingKey.scale) == "integer" {
+            return ScreenScale(mode: .integer, width: 100, height: 100, linked: true)
+        }
+        return .fit
+    }
+
+    /// Keeps `scale` for `game` `sideways` way up, or for every title that
+    /// way up - dropping each one's own choice for it, so they all follow.
+    static func set(_ scale: ScreenScale, for game: GameFile, sideways: Bool, everyGame all: Bool) {
+        let defaults = UserDefaults.standard
+        if all {
+            let way = key("", sideways: sideways).dropFirst(prefix.count)
+            for stored in defaults.dictionaryRepresentation().keys where stored.hasPrefix(prefix) && stored.hasSuffix(way) {
+                defaults.removeObject(forKey: stored)
+            }
+            defaults.set(scale.encoded, forKey: key("*", sideways: sideways))
+        } else {
+            defaults.set(scale.encoded, forKey: key(game.name, sideways: sideways))
+        }
+    }
+}
+
 /// Whether touches on the game screen reach a title, kept per title as the
 /// speed is. Off unless the player turned it on for a title made for a touch
 /// handset.

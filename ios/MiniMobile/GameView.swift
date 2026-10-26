@@ -1,42 +1,114 @@
 import SwiftUI
 
-/// How the title's screen fills its area.
-enum ScreenScale: String, CaseIterable, Identifiable {
+/// How the title's screen is sized: 맞춤, 정수배, or 직접 조절's own width
+/// and height.
+enum ScaleMode: Int, CaseIterable, Identifiable {
     /// As large as fits, keeping its shape.
-    case fit
+    case fit = 0
     /// The largest whole multiple that fits: every handset pixel the same size.
-    case integer
-    /// The whole area, shape or not.
-    case fill
+    case integer = 1
+    /// 맞춤's width and height each taken by a percent the player sets.
+    case custom = 2
 
-    var id: String { rawValue }
+    var id: Int { rawValue }
 
     var label: String {
         switch self {
         case .fit: return "맞춤"
         case .integer: return "정수배"
-        case .fill: return "꽉 채움"
+        case .custom: return "직접 조절"
         }
     }
 
+    var detail: String {
+        switch self {
+        case .fit: return "비율을 지키며 칸에 들어가는 가장 큰 크기예요."
+        case .integer: return "2배·3배처럼 딱 떨어지게 키워요. 도트가 고르게 보여요."
+        case .custom: return "가로·세로를 원하는 크기로 맞춰요."
+        }
+    }
+}
+
+/// How big the title's screen is drawn in its area, kept per title and per
+/// way up (see `GameScale`).
+struct ScreenScale: Equatable {
+    /// The smallest 직접 조절 goes, in percent of 맞춤.
+    static let smallest = 50
+    static let fit = ScreenScale(mode: .fit, width: 100, height: 100, linked: true)
+
+    var mode: ScaleMode
+    /// 직접 조절's width and height, in percent of 맞춤's.
+    var width: Int
+    var height: Int
+    /// Whether 직접 조절's two rulers move together.
+    var linked: Bool
+
+    /// 맞춤, 정수배, 직접 80%, or 직접 110×100% when the sides differ.
+    var label: String {
+        switch mode {
+        case .fit: return "맞춤"
+        case .integer: return "정수배"
+        case .custom: return width == height ? "직접 \(width)%" : "직접 \(width)×\(height)%"
+        }
+    }
+
+    /// The size a frame of `image` pixels is shown at in `area`.
     func size(of image: CGSize, in area: CGSize) -> CGSize {
         guard image.width > 0, image.height > 0 else { return .zero }
         let fit = min(area.width / image.width, area.height / image.height)
-        switch self {
+        switch mode {
         case .fit:
             return CGSize(width: image.width * fit, height: image.height * fit)
         case .integer:
             let whole = fit.rounded(.down)
             let factor = whole >= 1 ? whole : fit
             return CGSize(width: image.width * factor, height: image.height * factor)
-        case .fill:
-            return area
+        case .custom:
+            return CGSize(
+                width: min(area.width, image.width * fit * CGFloat(width) / 100),
+                height: min(area.height, image.height * fit * CGFloat(height) / 100)
+            )
         }
+    }
+
+    /// How far 직접 조절 can take the width and the height of a frame of
+    /// `image` pixels in `area`, in percent of 맞춤: as far as the area's
+    /// edge. 맞춤 already meets the edge one way, so that side stops at 100.
+    static func limits(of image: CGSize, in area: CGSize) -> (width: Int, height: Int) {
+        guard image.width > 0, image.height > 0, area.width > 0, area.height > 0 else { return (100, 100) }
+        let fit = min(area.width / image.width, area.height / image.height)
+        return (
+            max(100, Int((area.width * 100 / (image.width * fit)).rounded(.down))),
+            max(100, Int((area.height * 100 / (image.height * fit)).rounded(.down)))
+        )
+    }
+
+    /// "mode,width,height,linked", as it is kept - the Android app's form.
+    var encoded: String {
+        "\(mode.rawValue),\(width),\(height),\(linked ? 1 : 0)"
+    }
+
+    init(mode: ScaleMode, width: Int, height: Int, linked: Bool) {
+        self.mode = mode
+        self.width = width
+        self.height = height
+        self.linked = linked
+    }
+
+    /// What `encoded` wrote, or nil for anything else.
+    init?(encoded: String) {
+        let parts = encoded.split(separator: ",").map { Int($0) }
+        guard parts.count == 4, let raw = parts[0], let mode = ScaleMode(rawValue: raw),
+              let width = parts[1], let height = parts[2], let linked = parts[3],
+              width >= Self.smallest, height >= Self.smallest else { return nil }
+        self.init(mode: mode, width: width, height: height, linked: linked != 0)
     }
 }
 
 /// The settings the game screen reads, by their UserDefaults keys.
 enum SettingKey {
+    /// The one 확대 방식 every title shared before 화면 배율, read only for
+    /// what it carries over (see `GameScale`).
     static let scale = "screen.scale"
     /// The smoothing toggle the quality setting replaced, read once as the
     /// starting choice (see `GameQuality`).
@@ -95,6 +167,7 @@ private enum MenuWindow {
 private enum GameSheet: String, Identifiable {
     case speed
     case quality
+    case scale
     case settings
     case log
 
@@ -108,7 +181,6 @@ struct GameView: View {
     @StateObject private var emulator = Emulator()
     @Environment(\.dismiss) private var dismiss
 
-    @AppStorage(SettingKey.scale) private var scale = ScreenScale.fit
     @AppStorage(SettingKey.padMode) private var padMode = PadMode.below
     @AppStorage(SettingKey.padHeight) private var padHeight = 0.42
     @AppStorage(SettingKey.opacityBelow) private var opacityBelow = 1.0
@@ -123,6 +195,10 @@ struct GameView: View {
     @AppStorage(SettingKey.unfoldedSides) private var unfoldedSides = true
     @AppStorage(SettingKey.padTheme) private var padTheme = PadTheme.gold
 
+    /// How big the screen is drawn, this title this way up (see `GameScale`).
+    @State private var scale = ScreenScale.fit
+    /// The area the screen is drawn in, for 화면 배율's limits and pictures.
+    @State private var screenArea = CGSize.zero
     /// Whether the play area is wide enough to be unfolded; see `unfoldedMinWidth`.
     @State private var wide = false
     /// Whether the window is on its side: the keys go either side of the
@@ -154,6 +230,21 @@ struct GameView: View {
     /// Whether the pad goes either side of the screen: 펼친 화면 on, on a wide window.
     private var sides: Bool {
         wide && unfoldedSides
+    }
+
+    /// Which way up 화면 배율 is kept for: the keys either side of the
+    /// screen - on its side, or 펼친 화면 - or under it. The area is a
+    /// different shape each way.
+    private var scaleSideways: Bool {
+        sideways || sides
+    }
+
+    /// The title's screen in its own pixels: the frame's, or a handset
+    /// panel's before the first.
+    private var titlePixels: CGSize {
+        guard let frame = emulator.feed.image else { return CGSize(width: 240, height: 320) }
+        let doubled = CGFloat(max(emulator.feed.scale, 1))
+        return CGSize(width: CGFloat(frame.width) / doubled, height: CGFloat(frame.height) / doubled)
     }
 
     private var arrangement: PadArrangement {
@@ -195,6 +286,7 @@ struct GameView: View {
         .onAppear {
             speed = GameSpeed.get(game)
             quality = GameQuality.get(game)
+            scale = GameScale.get(game, sideways: scaleSideways)
             touch = GameTouch.get(game)
             padHidden = GamePad.hidden(game)
             padShape = GamePad.shape(game)
@@ -214,12 +306,16 @@ struct GameView: View {
             OrientationControl.shared.leaveGame()
         }
         .onChange(of: quality) { value in emulator.setHq2x(value == .hq2x) }
+        // Turned, or laid out the other way, the screen takes the size kept for that way.
+        .onChange(of: scaleSideways) { value in scale = GameScale.get(game, sideways: value) }
         .sheet(item: $sheet) { sheet in
             switch sheet {
             case .speed:
                 SpeedView(game: game, speed: $speed)
             case .quality:
                 QualityView(game: game, emulator: emulator, quality: $quality)
+            case .scale:
+                ScaleView(game: game, sideways: scaleSideways, area: screenArea, pixels: titlePixels, scale: $scale)
             case .settings:
                 GameSettingsView(game: game, padShape: shapeBinding, wide: wide, sideways: sideways, onEditPad: beginEditing)
             case .log:
@@ -258,7 +354,7 @@ struct GameView: View {
         ZStack(alignment: .top) {
             GeometryReader { _ in
                 ZStack {
-                    screen(alignment: .center, scale: scale == .fill ? .fit : scale)
+                    screen(alignment: .center)
                     pad
                 }
             }
@@ -400,6 +496,7 @@ struct GameView: View {
                 }
                 MenuRow(symbol: "speedometer", label: "게임 속도", value: GameSpeed.format(speed)) { open(.speed) }
                 MenuRow(symbol: "photo", label: "화질", value: quality.label) { open(.quality) }
+                MenuRow(symbol: "arrow.up.left.and.arrow.down.right", label: "화면 배율", value: scale.label) { open(.scale) }
                 MenuRow(symbol: "rotate.right", label: "화면 방향", value: orientation.label, opens: true) {
                     menuWindow = .orientation
                 }
@@ -651,11 +748,13 @@ struct GameView: View {
 
     // MARK: - Screen and pad
 
-    private func screen(alignment: Alignment, scale: ScreenScale? = nil) -> some View {
+    private func screen(alignment: Alignment) -> some View {
         GeometryReader { geometry in
             ZStack(alignment: alignment) {
                 Color.black
-                GameScreen(feed: emulator.feed, scale: scale ?? self.scale, quality: quality, area: geometry.size, touch: touch) { pixels, shown in
+                    .onAppear { screenArea = geometry.size }
+                    .onChange(of: geometry.size) { screenArea = $0 }
+                GameScreen(feed: emulator.feed, scale: scale, quality: quality, area: geometry.size, touch: touch) { pixels, shown in
                     screenTouch(frame: pixels, shown: shown)
                 }
                 if let message = emulator.message {
@@ -924,18 +1023,25 @@ private struct SpeedChipStyle: ButtonStyle {
 /// the tick tapped under the needle, and it always comes to rest on a tick.
 private struct SpeedRuler: View {
     @Binding var tenths: Int
+    /// The ruler's ends, in its ticks: tenths of a speed, or percents for
+    /// 화면 배율.
+    var range: ClosedRange<Int> = GameSpeed.tenths
+    var spacing: CGFloat = 12
+    /// A tick's label, nil for none: the speed every half, and at the slow end.
+    var label: (Int) -> String? = { value in
+        value % 5 == 0 || value == GameSpeed.tenths.lowerBound ? GameSpeed.format(Float(value) / 10) : nil
+    }
     /// How far the finger has carried the ruler past the tick it is on.
     @State private var carried: CGFloat = 0
     /// The tick under the needle when the finger came down.
     @State private var startTenths: Int?
 
-    private let spacing: CGFloat = 12
 
     var body: some View {
         GeometryReader { geometry in
             let centre = geometry.size.width / 2
             ZStack(alignment: .topLeading) {
-                ForEach(GameSpeed.tenths, id: \.self) { value in
+                ForEach(range, id: \.self) { value in
                     let x = centre + CGFloat(value - tenths) * spacing + carried
                     let distance = min(1, abs(x - centre) / max(centre, 1))
                     tick(value)
@@ -988,8 +1094,8 @@ private struct SpeedRuler: View {
             Rectangle()
                 .fill(whole ? Color.primary : Color.secondary)
                 .frame(width: whole ? 2 : 1, height: whole ? 24 : half ? 16 : 10)
-            if half || value == GameSpeed.tenths.lowerBound {
-                Text(GameSpeed.format(Float(value) / 10))
+            if let text = label(value) {
+                Text(text)
                     .font(.system(size: 11, weight: whole ? .semibold : .regular))
                     .foregroundColor(whole ? .primary : .secondary)
                     .fixedSize()
@@ -999,7 +1105,7 @@ private struct SpeedRuler: View {
     }
 
     private func clamp(_ value: Int) -> Int {
-        min(max(value, GameSpeed.tenths.lowerBound), GameSpeed.tenths.upperBound)
+        min(max(value, range.lowerBound), range.upperBound)
     }
 }
 
@@ -1166,6 +1272,247 @@ private struct QualityPreviews {
     }
 }
 
+/// 화면 배율: 맞춤, 정수배 and 직접 조절, each with a picture of where the
+/// screen sits in its area. 직접 조절 opens a ruler for the width and one for
+/// the height, moving together until they are let go of each other. It is
+/// kept for this title the way the screen is laid out now - under the keys,
+/// or with them either side - as the area is a different shape each way. A
+/// choice shows on the screen behind at once; 적용 keeps it, and anything
+/// else puts the screen back.
+private struct ScaleView: View {
+    let game: GameFile
+    let sideways: Bool
+    let area: CGSize
+    let pixels: CGSize
+    @Binding var scale: ScreenScale
+    @Environment(\.dismiss) private var dismiss
+    @State private var everyGame = false
+    @State private var saved: ScreenScale
+    @State private var applied = false
+
+    init(game: GameFile, sideways: Bool, area: CGSize, pixels: CGSize, scale: Binding<ScreenScale>) {
+        self.game = game
+        self.sideways = sideways
+        self.area = area
+        self.pixels = pixels
+        _scale = scale
+        _saved = State(initialValue: scale.wrappedValue)
+    }
+
+    private var limits: (width: Int, height: Int) {
+        ScreenScale.limits(of: pixels, in: area)
+    }
+
+    /// Where each ruler ends. Linked, both stop at the nearer edge, so the
+    /// shape holds all along either of them.
+    private var widthEnd: Int {
+        scale.linked ? min(limits.width, limits.height) : limits.width
+    }
+
+    private var heightEnd: Int {
+        scale.linked ? min(limits.width, limits.height) : limits.height
+    }
+
+    var body: some View {
+        MenuPanel(title: "화면 배율") {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("이 게임의 \(sideways ? "가로" : "세로") 화면에만 적용 · 다음에 열어도 유지")
+                    .font(.system(size: 12.5))
+                    .foregroundColor(MenuPalette.muted)
+                ForEach(ScaleMode.allCases) { mode in
+                    Button {
+                        scale.mode = mode
+                        keepOnRulers()
+                    } label: {
+                        card(mode)
+                    }
+                    .buttonStyle(.plain)
+                }
+                if scale.mode == .custom {
+                    customPanel
+                }
+                Button {
+                    everyGame.toggle()
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: everyGame ? "checkmark.square.fill" : "square")
+                            .foregroundColor(MenuPalette.accent)
+                        Text("모든 게임에 이 배율 쓰기")
+                            .font(.system(size: 12.5))
+                            .foregroundColor(MenuPalette.muted)
+                    }
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 2)
+            }
+        } footer: {
+            Spacer()
+            Button("취소") { dismiss() }
+                .buttonStyle(MenuButtonStyle(kind: .secondary))
+            Button("적용") {
+                applied = true
+                GameScale.set(scale, for: game, sideways: sideways, everyGame: everyGame)
+                dismiss()
+            }
+            .buttonStyle(MenuButtonStyle(kind: .primary))
+        }
+        .onAppear(perform: keepOnRulers)
+        // However the window goes away without 적용, the screen goes back.
+        .onDisappear {
+            if !applied {
+                scale = saved
+            }
+        }
+    }
+
+    /// 직접 조절's two sides, each with its ruler, and the switch that ties
+    /// them together.
+    private var customPanel: some View {
+        VStack(spacing: 8) {
+            Toggle(isOn: Binding(get: { scale.linked }, set: { on in
+                scale.linked = on
+                // Linking puts the height on the width.
+                if on {
+                    scale.height = scale.width
+                }
+                keepOnRulers()
+            })) {
+                Text("가로·세로 같이 움직이기")
+                    .font(.system(size: 13.5))
+                    .foregroundColor(MenuPalette.ink)
+            }
+            .toggleStyle(SwitchToggleStyle(tint: MenuPalette.accent))
+            axis("가로", value: side(\.width), end: widthEnd)
+            axis("세로", value: side(\.height), end: heightEnd)
+            Button("맞춤 크기로 되돌리기") {
+                withAnimation(.easeOut(duration: 0.25)) {
+                    scale.width = 100
+                    scale.height = 100
+                }
+            }
+            .font(.system(size: 12.5, weight: .bold))
+            .foregroundColor(MenuPalette.accent)
+            .buttonStyle(.plain)
+            .padding(.top, 2)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.black.opacity(0.24)))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(MenuPalette.raisedLine, lineWidth: 1))
+    }
+
+    /// One side's percent, taking the other with it while they are linked.
+    private func side(_ path: WritableKeyPath<ScreenScale, Int>) -> Binding<Int> {
+        Binding(get: { scale[keyPath: path] }, set: { value in
+            scale[keyPath: path] = value
+            if scale.linked {
+                scale.width = value
+                scale.height = value
+            }
+        })
+    }
+
+    /// Brings both sides within their rulers' ends.
+    private func keepOnRulers() {
+        scale.width = min(max(scale.width, ScreenScale.smallest), widthEnd)
+        scale.height = min(max(scale.height, ScreenScale.smallest), heightEnd)
+    }
+
+    /// A side's name and range, − its percent +, and its ruler. − and + move
+    /// it a percent.
+    private func axis(_ name: String, value: Binding<Int>, end: Int) -> some View {
+        VStack(spacing: 2) {
+            HStack(spacing: 8) {
+                Text(name)
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundColor(MenuPalette.ink)
+                Text("\(ScreenScale.smallest)~\(end)%")
+                    .font(.system(size: 11.5))
+                    .foregroundColor(MenuPalette.muted)
+                Spacer(minLength: 4)
+                step("minus", value: value, by: -1, end: end)
+                Text("\(value.wrappedValue)%")
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundColor(MenuPalette.accent)
+                    .frame(minWidth: 68)
+                step("plus", value: value, by: 1, end: end)
+            }
+            SpeedRuler(tenths: value, range: ScreenScale.smallest...end, spacing: 6) { tick in
+                // Every ten, the ends - unless the far one would sit on the last ten's label.
+                tick % 10 == 0 || tick == ScreenScale.smallest || (tick == end && end % 10 >= 6) ? "\(tick)%" : nil
+            }
+            .frame(height: 58)
+        }
+    }
+
+    private func step(_ symbol: String, value: Binding<Int>, by change: Int, end: Int) -> some View {
+        Button {
+            let next = min(max(value.wrappedValue + change, ScreenScale.smallest), end)
+            withAnimation(.easeOut(duration: 0.2)) { value.wrappedValue = next }
+        } label: {
+            Image(systemName: symbol)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(MenuPalette.ink)
+                .frame(width: 32, height: 32)
+                .overlay(Circle().stroke(MenuPalette.outline))
+        }
+        .buttonStyle(.borderless)
+    }
+
+    /// One way to size the screen: a picture of it in its area, its name and
+    /// what it does, and whether it is the one chosen.
+    private func card(_ mode: ScaleMode) -> some View {
+        let on = scale.mode == mode
+        return HStack(spacing: 11) {
+            picture(mode)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(mode.label)
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundColor(MenuPalette.ink)
+                    if mode == .fit {
+                        Text("지금 방식")
+                            .font(.system(size: 11))
+                            .foregroundColor(MenuPalette.muted)
+                    }
+                }
+                Text(mode.detail)
+                    .font(.system(size: 12))
+                    .foregroundColor(MenuPalette.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+            Circle()
+                .fill(on ? MenuPalette.accent : Color.clear)
+                .overlay(Circle().stroke(on ? MenuPalette.accent : MenuPalette.outline, lineWidth: 2))
+                .frame(width: 18, height: 18)
+        }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 10).fill(on ? MenuPalette.accent.opacity(0.1) : Color.clear))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(on ? MenuPalette.accent : MenuPalette.raisedLine, lineWidth: 1))
+        .contentShape(Rectangle())
+    }
+
+    /// The area, outlined, and the screen in it at `mode` - 직접 조절 at the
+    /// sizes on its rulers.
+    private func picture(_ mode: ScaleMode) -> some View {
+        let room = CGSize(width: max(area.width, 1), height: max(area.height, 1))
+        let shown = ScreenScale(mode: mode, width: scale.width, height: scale.height, linked: scale.linked).size(of: pixels, in: room)
+        let fit = min(34 / room.width, 42 / room.height)
+        return ZStack {
+            Color(red: 13 / 255, green: 14 / 255, blue: 17 / 255)
+            Rectangle()
+                .stroke(MenuPalette.outline, lineWidth: 1)
+                .frame(width: room.width * fit, height: room.height * fit)
+            Rectangle()
+                .fill(MenuPalette.accent)
+                .frame(width: shown.width * fit, height: shown.height * fit)
+        }
+        .frame(width: 40, height: 48)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+}
+
 /// What an arrangement is called in the pad editor and the layout storage.
 private func arrangementName(_ arrangement: PadArrangement, mode: PadMode) -> String {
     switch arrangement {
@@ -1221,7 +1568,6 @@ private struct GameSettingsView: View {
     let onEditPad: () -> Void
 
     @Environment(\.dismiss) private var dismiss
-    @AppStorage(SettingKey.scale) private var scale = ScreenScale.fit
     @AppStorage(SettingKey.padMode) private var padMode = PadMode.below
     @AppStorage(SettingKey.padHeight) private var padHeight = 0.42
     @AppStorage(SettingKey.opacityBelow) private var opacityBelow = 1.0
@@ -1247,17 +1593,6 @@ private struct GameSettingsView: View {
     var body: some View {
         NavigationView {
             Form {
-                Section {
-                    Picker("확대 방식", selection: $scale) {
-                        ForEach(ScreenScale.allCases) { Text($0.label).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                } header: {
-                    Text("화면")
-                } footer: {
-                    Text("정수배는 모든 픽셀을 같은 크기로 키워 글자가 가장 또렷합니다. 확대할 때 부드럽게 할지는 메뉴의 ‘화질’에서 게임마다 고릅니다.")
-                }
-
                 Section {
                     designs
                     VStack(alignment: .leading, spacing: 6) {
