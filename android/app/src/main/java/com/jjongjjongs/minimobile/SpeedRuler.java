@@ -21,6 +21,9 @@ import android.widget.OverScroller;
  * settles onto the nearest tick, so the value is always a whole tenth. Small
  * ticks mark tenths, taller ones halves and the tallest whole speeds, which
  * are labelled along with the halves.
+ *
+ * <p>The same ruler measures {@link #percent percentages} for the screen
+ * size: a tick a percent, taller ones every five and labels every ten.
  */
 final class SpeedRuler extends View {
     /** The ends of the ruler, in tenths: 0.1x and 4x. */
@@ -32,7 +35,12 @@ final class SpeedRuler extends View {
         void onTenths(int tenths);
     }
 
-    private final float spacing;
+    private float spacing;
+    /** The ends of this ruler, in its ticks: {@link #MIN}-{@link #MAX}, or percents. */
+    private int min = MIN;
+    private int max = MAX;
+    /** Whether the ticks are percents rather than tenths of a speed. */
+    private boolean percent;
     private final Paint tick = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint label = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint needle = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -45,7 +53,7 @@ final class SpeedRuler extends View {
     private final int subInk;
     private final int accent;
 
-    /** How far along the ruler the needle is, in pixels from {@link #MIN}. */
+    /** How far along the ruler the needle is, in pixels from its low end. */
     private float offset;
     private int reported = -1;
     private Listener listener;
@@ -77,18 +85,39 @@ final class SpeedRuler extends View {
         maxFling = configuration.getScaledMaximumFlingVelocity();
     }
 
+    /**
+     * A ruler of whole percents from `min` to `max`, labelled every ten. Its
+     * ticks are closer than the speed's, as there are more of them.
+     */
+    static SpeedRuler percent(Context context, int ink, int subInk, int accent, int min, int max) {
+        SpeedRuler ruler = new SpeedRuler(context, ink, subInk, accent);
+        ruler.percent = true;
+        ruler.spacing = 6 * context.getResources().getDisplayMetrics().density;
+        ruler.min = min;
+        ruler.max = Math.max(min, max);
+        return ruler;
+    }
+
+    /** Moves the ends to `min`-`max`, keeping the tick under the needle where it is still on the ruler. */
+    void setRange(int min, int max) {
+        int value = tenths();
+        this.min = min;
+        this.max = Math.max(min, max);
+        setTenths(value, false);
+    }
+
     void setListener(Listener listener) {
         this.listener = listener;
     }
 
     /** The tick under the needle. */
     int tenths() {
-        return MIN + Math.round(offset / spacing);
+        return min + Math.round(offset / spacing);
     }
 
     /** Puts `tenths` under the needle, sliding there or jumping. */
     void setTenths(int tenths, boolean animate) {
-        float target = (clamp(tenths) - MIN) * spacing;
+        float target = (clamp(tenths) - min) * spacing;
         scroller.forceFinished(true);
         if (animate && getWidth() > 0) {
             scroller.startScroll(Math.round(offset), 0, Math.round(target - offset), 0, 220);
@@ -138,12 +167,12 @@ final class SpeedRuler extends View {
                 velocity.computeCurrentVelocity(1000, maxFling);
                 float speed = -velocity.getXVelocity();
                 if (dragging && Math.abs(speed) > minFling) {
-                    scroller.fling(Math.round(offset), 0, Math.round(speed), 0, 0, Math.round((MAX - MIN) * spacing), 0, 0);
+                    scroller.fling(Math.round(offset), 0, Math.round(speed), 0, 0, Math.round((max - min) * spacing), 0, 0);
                     postInvalidateOnAnimation();
                 } else if (!dragging) {
                     // A tap: the tick tapped slides under the needle.
                     float tapped = offset + (event.getX() - getWidth() / 2f);
-                    setTenths(MIN + Math.round(tapped / spacing), true);
+                    setTenths(min + Math.round(tapped / spacing), true);
                 } else {
                     settle();
                 }
@@ -173,7 +202,7 @@ final class SpeedRuler extends View {
 
     /** Slides onto the nearest tick. */
     private void settle() {
-        float target = (tenths() - MIN) * spacing;
+        float target = (tenths() - min) * spacing;
         // The scroller moves in whole pixels, so within one of the tick is on it.
         if (Math.abs(target - offset) < 1f) {
             offset = target;
@@ -186,7 +215,7 @@ final class SpeedRuler extends View {
     }
 
     private void moveTo(float position) {
-        offset = Math.max(0f, Math.min((MAX - MIN) * spacing, position));
+        offset = Math.max(0f, Math.min((max - min) * spacing, position));
         report();
         invalidate();
     }
@@ -209,8 +238,8 @@ final class SpeedRuler extends View {
         dragging = false;
     }
 
-    private static int clamp(int tenths) {
-        return Math.max(MIN, Math.min(MAX, tenths));
+    private int clamp(int tenths) {
+        return Math.max(min, Math.min(max, tenths));
     }
 
     @Override
@@ -219,8 +248,8 @@ final class SpeedRuler extends View {
         float centre = getWidth() / 2f;
         float top = 6 * density;
 
-        for (int tenths = MIN; tenths <= MAX; tenths++) {
-            float x = centre + (tenths - MIN) * spacing - offset;
+        for (int tenths = min; tenths <= max; tenths++) {
+            float x = centre + (tenths - min) * spacing - offset;
             if (x < -spacing || x > getWidth() + spacing) {
                 continue;
             }
@@ -231,17 +260,19 @@ final class SpeedRuler extends View {
 
             boolean whole = tenths % 10 == 0;
             boolean half = tenths % 5 == 0;
+            // A percent ruler's far end is labelled too, unless it would sit on the last ten's label.
+            boolean labelled = percent ? whole || tenths == min || (tenths == max && max % 10 >= 6) : half || tenths == min;
             float length = (whole ? 24 : half ? 16 : 10) * density;
             tick.setStrokeWidth((whole ? 2 : 1) * density);
             tick.setColor(whole ? ink : half ? subInk : Color.rgb(107, 111, 123));
             tick.setAlpha(alpha);
             canvas.drawLine(x, top, x, top + length, tick);
 
-            if (half || tenths == MIN) {
+            if (labelled) {
                 label.setColor(whole ? ink : subInk);
                 label.setAlpha(alpha);
                 label.setTypeface(whole ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
-                canvas.drawText(format(tenths), x, top + 40 * density, label);
+                canvas.drawText(percent ? tenths + "%" : format(tenths), x, top + 40 * density, label);
             }
         }
 

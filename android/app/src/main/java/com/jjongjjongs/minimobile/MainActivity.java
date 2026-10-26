@@ -4839,6 +4839,8 @@ public final class MainActivity extends Activity {
         // Upright, the window is not wide enough to give the screen its full
         // height: it is narrowed to leave the key columns their room.
         gameView.upright = side && !landscapeMode;
+        // The size the player left this title's screen at, this way up.
+        gameView.setScale(currentGame != null ? gameScale(currentGame, side) : ScreenScale.FIT);
         keypad.landscape = side;
         keypad.upright = side && !landscapeMode;
         keypad.numbers = keypadNumbers;
@@ -5165,6 +5167,9 @@ public final class MainActivity extends Activity {
         String speedValue = currentGame != null ? formatSpeed(gameSpeed(currentGame)) : formatSpeed(1f);
         rows.add(new GameMenuRow("⏩", "게임 속도", speedValue, this::showSpeedDialog));
         rows.add(new GameMenuRow("🖼", "화질", QUALITY_NAMES[screenQuality], this::showQualityDialog));
+        if (currentGame != null) {
+            rows.add(new GameMenuRow("🔍", "화면 배율", scaleLabel(gameScale(currentGame, sideLayout())), this::showScaleDialog));
+        }
         rows.add(new GameMenuRow("👆", "화면 터치", touchOn ? "켜짐" : "꺼짐", this::toggleTouch));
         // A phone with its own keypad may have no touch screen to reach back
         // through, so the way out is here too.
@@ -5549,6 +5554,373 @@ public final class MainActivity extends Activity {
         if (gameView != null) {
             gameView.setQuality(quality);
         }
+    }
+
+    /** The screen as large as fits at its own shape: how it was always drawn. */
+    static final int SCALE_FIT = 0;
+    /** The largest whole number of device pixels to each of the title's that fits. */
+    static final int SCALE_INTEGER = 1;
+    /** 맞춤's width and height each taken by a percent the player sets. */
+    static final int SCALE_CUSTOM = 2;
+
+    /** The smallest 직접 조절 goes, in percent of 맞춤. */
+    private static final int SCALE_SMALLEST = 50;
+
+    /** How big a title's screen is drawn: one of the SCALE_ modes, and 직접 조절's percents. */
+    static final class ScreenScale {
+        static final ScreenScale FIT = new ScreenScale(SCALE_FIT, 100, 100, true);
+
+        final int mode;
+        final int width;
+        final int height;
+        /** Whether 직접 조절's two rulers move together. */
+        final boolean linked;
+
+        ScreenScale(int mode, int width, int height, boolean linked) {
+            this.mode = mode;
+            this.width = width;
+            this.height = height;
+            this.linked = linked;
+        }
+
+        /** "mode,width,height,linked", as it is kept. */
+        String encode() {
+            return mode + "," + width + "," + height + "," + (linked ? 1 : 0);
+        }
+
+        /** What {@link #encode} wrote, or null for anything else. */
+        static ScreenScale decode(String text) {
+            if (text == null) {
+                return null;
+            }
+            String[] parts = text.split(",");
+            if (parts.length != 4) {
+                return null;
+            }
+            try {
+                int mode = Integer.parseInt(parts[0]);
+                int width = Integer.parseInt(parts[1]);
+                int height = Integer.parseInt(parts[2]);
+                if (mode < SCALE_FIT || mode > SCALE_CUSTOM || width < SCALE_SMALLEST || height < SCALE_SMALLEST) {
+                    return null;
+                }
+                return new ScreenScale(mode, width, height, !parts[3].equals("0"));
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        }
+    }
+
+    /**
+     * The key a screen size is kept under: the title's file name, or
+     * {@link #QUALITY_EVERY_GAME} for every title, with the way up after it -
+     * the screen upright over the keys and laid out between them sideways
+     * have rooms of different shapes, so each keeps its own.
+     */
+    private static String scaleKey(String game, boolean side) {
+        return game + (side ? "|가로" : "|세로");
+    }
+
+    /** How big `game`'s screen is drawn `side` way up: its own choice, else every title's, else 맞춤. */
+    private ScreenScale gameScale(File game, boolean side) {
+        SharedPreferences prefs = getSharedPreferences("mini_scale", MODE_PRIVATE);
+        ScreenScale own = ScreenScale.decode(prefs.getString(scaleKey(game.getName(), side), null));
+        if (own != null) {
+            return own;
+        }
+        ScreenScale every = ScreenScale.decode(prefs.getString(scaleKey(QUALITY_EVERY_GAME, side), null));
+
+        return every != null ? every : ScreenScale.FIT;
+    }
+
+    /**
+     * Keeps `scale` for `game` `side` way up, or for every title that way up -
+     * dropping each one's own choice for it, so they all follow.
+     */
+    private void saveGameScale(File game, boolean side, ScreenScale scale, boolean everyGame) {
+        SharedPreferences prefs = getSharedPreferences("mini_scale", MODE_PRIVATE);
+        SharedPreferences.Editor editor = prefs.edit();
+        if (everyGame) {
+            String way = scaleKey("", side);
+            for (String key : prefs.getAll().keySet()) {
+                if (key.endsWith(way)) {
+                    editor.remove(key);
+                }
+            }
+            editor.putString(scaleKey(QUALITY_EVERY_GAME, side), scale.encode());
+        } else {
+            editor.putString(scaleKey(game.getName(), side), scale.encode());
+        }
+        editor.apply();
+    }
+
+    /** 맞춤, 정수배, 직접 80%, or 직접 110×100% when the sides differ. */
+    private static String scaleLabel(ScreenScale scale) {
+        switch (scale.mode) {
+            case SCALE_INTEGER:
+                return "정수배";
+            case SCALE_CUSTOM:
+                return scale.width == scale.height ? "직접 " + scale.width + "%" : "직접 " + scale.width + "×" + scale.height + "%";
+            default:
+                return "맞춤";
+        }
+    }
+
+    /**
+     * A small picture of where the screen sits at `scale`: the room the
+     * screen view has, dark, and the screen in it in the accent.
+     */
+    private Bitmap scalePicture(ScreenScale scale) {
+        int boxWidth = dp(40);
+        int boxHeight = dp(48);
+        Bitmap picture = Bitmap.createBitmap(boxWidth, boxHeight, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(picture);
+        canvas.drawColor(Color.rgb(13, 14, 17));
+
+        float roomWidth = Math.max(1, gameView.getWidth());
+        float roomHeight = Math.max(1, gameView.getHeight());
+        float fit = Math.min((boxWidth - dp(6)) / roomWidth, (boxHeight - dp(6)) / roomHeight);
+        float left = (boxWidth - roomWidth * fit) / 2f;
+        float top = (boxHeight - roomHeight * fit) / 2f;
+
+        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(Math.max(1, dp(1)));
+        paint.setColor(Color.rgb(58, 61, 71));
+        canvas.drawRect(left, top, left + roomWidth * fit, top + roomHeight * fit, paint);
+
+        RectF shown = gameView.screenRect(scale);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(COLOR_ACCENT);
+        canvas.drawRect(left + shown.left * fit, top + shown.top * fit, left + shown.right * fit, top + shown.bottom * fit, paint);
+        return picture;
+    }
+
+    /**
+     * The screen-size window from the gear menu: 맞춤, 정수배 and 직접 조절,
+     * each with a picture of where the screen sits. 직접 조절 opens a ruler
+     * for the width and one for the height, moving together until they are
+     * let go of each other. What is chosen is kept for the way the screen is
+     * laid out now - upright, or sideways between the keys - and shows on the
+     * screen behind at once; 취소 puts it back.
+     */
+    private void showScaleDialog() {
+        final File game = currentGame;
+        if (game == null || gameView == null) {
+            return;
+        }
+        final boolean side = sideLayout();
+        final ScreenScale saved = gameScale(game, side);
+        final int[] mode = {saved.mode};
+        final boolean[] linked = {saved.linked};
+        final int[] limits = gameView.customLimits();
+
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(16), 0, dp(16), dp(4));
+        body.addView(settingScope("이 게임의 " + (side ? "가로" : "세로") + " 화면에만 적용 · 다음에 열어도 유지"));
+
+        // 직접 조절's rulers, made first so the cards can show the panel.
+        final SpeedRuler widthRuler = SpeedRuler.percent(this, COLOR_TEXT, COLOR_SUBTEXT, COLOR_ACCENT, SCALE_SMALLEST, limits[0]);
+        final SpeedRuler heightRuler = SpeedRuler.percent(this, COLOR_TEXT, COLOR_SUBTEXT, COLOR_ACCENT, SCALE_SMALLEST, limits[1]);
+        final TextView widthValue = new TextView(this);
+        final TextView heightValue = new TextView(this);
+        final TextView widthRange = new TextView(this);
+        final TextView heightRange = new TextView(this);
+
+        final Runnable preview = () -> {
+            ScreenScale chosen = new ScreenScale(mode[0], widthRuler.tenths(), heightRuler.tenths(), linked[0]);
+            widthValue.setText(chosen.width + "%");
+            heightValue.setText(chosen.height + "%");
+            gameView.setScale(chosen);
+        };
+        // Linked, both rulers stop where the nearer edge is, so the shape can
+        // be kept all the way along either of them.
+        final Runnable ranges = () -> {
+            int both = Math.min(limits[0], limits[1]);
+            int widthEnd = linked[0] ? both : limits[0];
+            int heightEnd = linked[0] ? both : limits[1];
+            widthRuler.setRange(SCALE_SMALLEST, widthEnd);
+            heightRuler.setRange(SCALE_SMALLEST, heightEnd);
+            widthRange.setText(SCALE_SMALLEST + "~" + widthEnd + "%");
+            heightRange.setText(SCALE_SMALLEST + "~" + heightEnd + "%");
+        };
+
+        LinearLayout custom = new LinearLayout(this);
+        custom.setOrientation(LinearLayout.VERTICAL);
+        custom.setPadding(dp(10), dp(10), dp(10), dp(8));
+        GradientDrawable panel = new GradientDrawable();
+        panel.setCornerRadius(dp(10));
+        panel.setColor(Color.argb(60, 0, 0, 0));
+        panel.setStroke(Math.max(1, dp(1)), Color.rgb(58, 61, 71));
+        custom.setBackground(panel);
+
+        LinearLayout linkRow = new LinearLayout(this);
+        linkRow.setOrientation(LinearLayout.HORIZONTAL);
+        linkRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        TextView linkText = new TextView(this);
+        linkText.setText("가로·세로 같이 움직이기");
+        linkText.setTextSize(13.5f);
+        linkText.setTextColor(COLOR_TEXT);
+        linkRow.addView(linkText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        final android.widget.Switch link = new android.widget.Switch(this);
+        link.setChecked(linked[0]);
+        link.setThumbTintList(new android.content.res.ColorStateList(
+                new int[][] {{android.R.attr.state_checked}, {}}, new int[] {COLOR_ACCENT, Color.rgb(154, 156, 166)}));
+        link.setTrackTintList(new android.content.res.ColorStateList(
+                new int[][] {{android.R.attr.state_checked}, {}}, new int[] {Color.argb(120, 84, 199, 214), Color.rgb(58, 61, 71)}));
+        linkRow.addView(link);
+        custom.addView(linkRow);
+
+        custom.addView(scaleAxis("가로", widthRange, widthValue, widthRuler), matchWidth(dp(6)));
+        custom.addView(scaleAxis("세로", heightRange, heightValue, heightRuler), matchWidth(dp(4)));
+
+        TextView reset = new TextView(this);
+        reset.setText("맞춤 크기로 되돌리기");
+        reset.setTextSize(12.5f);
+        reset.setTypeface(Typeface.DEFAULT_BOLD);
+        reset.setTextColor(COLOR_ACCENT);
+        reset.setGravity(android.view.Gravity.CENTER);
+        reset.setPadding(0, dp(8), 0, dp(4));
+        reset.setOnClickListener(v -> {
+            widthRuler.setTenths(100, true);
+            heightRuler.setTenths(100, true);
+        });
+        custom.addView(reset, matchWidth(0));
+
+        String[] names = {"맞춤", "정수배", "직접 조절"};
+        String[] descriptions = {
+                "비율을 지키며 칸에 들어가는 가장 큰 크기예요.",
+                "2배·3배처럼 딱 떨어지게 키워요. 도트가 고르게 보여요.",
+                "가로·세로를 원하는 크기로 맞춰요.",
+        };
+        ScreenScale[] pictured = {
+                ScreenScale.FIT,
+                new ScreenScale(SCALE_INTEGER, 100, 100, true),
+                new ScreenScale(SCALE_CUSTOM, 80, 80, true),
+        };
+        final View[] cards = new View[3];
+        final Runnable refresh = () -> {
+            for (int i = 0; i < cards.length; i++) {
+                markOption(cards[i], i == mode[0]);
+            }
+            custom.setVisibility(mode[0] == SCALE_CUSTOM ? View.VISIBLE : View.GONE);
+        };
+        for (int i = 0; i < 3; i++) {
+            final int choice = i;
+            View card = optionCard(names[i], i == SCALE_FIT ? "지금 방식" : null, descriptions[i], scalePicture(pictured[i]), null);
+            card.setOnClickListener(v -> {
+                mode[0] = choice;
+                refresh.run();
+                preview.run();
+            });
+            cards[i] = card;
+            body.addView(card, matchWidth(i > 0 ? dp(8) : 0));
+        }
+        body.addView(custom, matchWidth(dp(8)));
+
+        ranges.run();
+        widthRuler.setTenths(saved.width, false);
+        heightRuler.setTenths(linked[0] ? saved.width : saved.height, false);
+        // Linked, moving either ruler takes the other with it.
+        widthRuler.setListener(value -> {
+            if (linked[0] && heightRuler.tenths() != value) {
+                heightRuler.setTenths(value, false);
+            }
+            preview.run();
+        });
+        heightRuler.setListener(value -> {
+            if (linked[0] && widthRuler.tenths() != value) {
+                widthRuler.setTenths(value, false);
+            }
+            preview.run();
+        });
+        link.setOnCheckedChangeListener((button, on) -> {
+            linked[0] = on;
+            ranges.run();
+            // Linking puts the height on the width.
+            if (on) {
+                heightRuler.setTenths(widthRuler.tenths(), true);
+            }
+            preview.run();
+        });
+
+        final android.widget.CheckBox everyGame = new android.widget.CheckBox(this);
+        everyGame.setText("모든 게임에 이 배율 쓰기");
+        everyGame.setTextColor(COLOR_SUBTEXT);
+        everyGame.setTextSize(12.5f);
+        everyGame.setButtonTintList(android.content.res.ColorStateList.valueOf(COLOR_ACCENT));
+        LinearLayout.LayoutParams everyParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        everyParams.topMargin = dp(8);
+        body.addView(everyGame, everyParams);
+        refresh.run();
+        preview.run();
+
+        final boolean[] applied = {false};
+        ControlStyle style = new ControlStyle(this, false);
+        AlertDialog dialog = new AlertDialog.Builder(style.context)
+                .setTitle("화면 배율")
+                .setView(scrolling(body))
+                .setPositiveButton("적용", (d, which) -> {
+                    applied[0] = true;
+                    ScreenScale chosen = new ScreenScale(mode[0], widthRuler.tenths(), heightRuler.tenths(), linked[0]);
+                    saveGameScale(game, side, chosen, everyGame.isChecked());
+                    gameView.setScale(chosen);
+                })
+                .setNegativeButton("취소", null)
+                .create();
+        // However the window goes away without 적용, the screen goes back.
+        dialog.setOnDismissListener(d -> {
+            if (!applied[0] && gameView != null) {
+                gameView.setScale(saved);
+            }
+        });
+        showMenuDialog(style, dialog);
+    }
+
+    /** Full width, `top` below what is over it. */
+    private static LinearLayout.LayoutParams matchWidth(int top) {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        params.topMargin = top;
+        return params;
+    }
+
+    /**
+     * One side of 직접 조절: its name and range, − value +, and its ruler.
+     * − and + move it a percent.
+     */
+    private View scaleAxis(String name, TextView range, TextView value, SpeedRuler ruler) {
+        LinearLayout axis = new LinearLayout(this);
+        axis.setOrientation(LinearLayout.VERTICAL);
+
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        TextView label = new TextView(this);
+        label.setText(name);
+        label.setTextSize(14f);
+        label.setTypeface(Typeface.DEFAULT_BOLD);
+        label.setTextColor(COLOR_TEXT);
+        head.addView(label);
+        range.setTextSize(11.5f);
+        range.setTextColor(COLOR_SUBTEXT);
+        range.setPadding(dp(8), 0, 0, 0);
+        head.addView(range, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        head.addView(speedStepButton("−", name + " 1% 작게", () -> ruler.setTenths(ruler.tenths() - 1, true)),
+                new LinearLayout.LayoutParams(dp(32), dp(32)));
+        value.setTextSize(20f);
+        value.setTypeface(Typeface.DEFAULT_BOLD);
+        value.setTextColor(COLOR_ACCENT);
+        value.setGravity(android.view.Gravity.CENTER);
+        head.addView(value, new LinearLayout.LayoutParams(dp(68), ViewGroup.LayoutParams.WRAP_CONTENT));
+        head.addView(speedStepButton("+", name + " 1% 크게", () -> ruler.setTenths(ruler.tenths() + 1, true)),
+                new LinearLayout.LayoutParams(dp(32), dp(32)));
+        axis.addView(head);
+
+        axis.addView(ruler, matchWidth(dp(4)));
+        return axis;
     }
 
     /**
@@ -6115,6 +6487,7 @@ public final class MainActivity extends Activity {
             runOnUiThread(() -> {
                 if (gameView != null) {
                     gameView.setQuality(quality);
+                    gameView.setScale(gameScale(game, sideLayout()));
                 }
             });
 
@@ -6482,6 +6855,8 @@ public final class MainActivity extends Activity {
          * screen gives up height so the key columns keep their width.
          */
         boolean upright;
+        /** How big the screen is drawn in this view; see {@link #screenRect}. */
+        private ScreenScale scale = ScreenScale.FIT;
 
         GameView(MainActivity activity) {
             super(activity);
@@ -6690,11 +7065,9 @@ public final class MainActivity extends Activity {
             // The title's own pixels, however many of the bitmap's each takes.
             int width = bitmap.getWidth() / frameScale;
             int height = bitmap.getHeight() / frameScale;
-            float scale = Math.min((float) getWidth() / width, (float) getHeight() / height);
-            float left = (getWidth() - width * scale) / 2f;
-            float top = (getHeight() - height * scale) / 2f;
-            float x = (viewX - left) / scale;
-            float y = (viewY - top) / scale;
+            RectF shown = screenRect(scale);
+            float x = (viewX - shown.left) * width / shown.width();
+            float y = (viewY - shown.top) * height / shown.height();
             boolean inside = x >= 0 && y >= 0 && x < width && y < height;
             touchX = Math.max(0, Math.min(width - 1, (int) x));
             touchY = Math.max(0, Math.min(height - 1, (int) y));
@@ -6709,12 +7082,73 @@ public final class MainActivity extends Activity {
                 return;
             }
 
-            float scale = Math.min((float) getWidth() / bitmap.getWidth(), (float) getHeight() / bitmap.getHeight());
-            float left = (getWidth() - bitmap.getWidth() * scale) / 2f;
-            float top = (getHeight() - bitmap.getHeight() * scale) / 2f;
+            canvas.drawBitmap(bitmap, null, screenRect(scale), paint);
+        }
 
-            canvas.drawBitmap(bitmap, null,
-                    new RectF(left, top, left + bitmap.getWidth() * scale, top + bitmap.getHeight() * scale), paint);
+        /** Draws the screen `scale`'s size from now on. */
+        void setScale(ScreenScale scale) {
+            this.scale = scale;
+            invalidate();
+        }
+
+        /** The title's screen in its own pixels: the frame's, or a handset panel's before the first. */
+        private int titleWidth() {
+            return bitmap != null ? bitmap.getWidth() / frameScale : 240;
+        }
+
+        private int titleHeight() {
+            return bitmap != null ? bitmap.getHeight() / frameScale : 320;
+        }
+
+        /**
+         * Where the screen is drawn in this view at `scale`, centred:
+         *
+         * <ul>
+         * <li>맞춤, as large as fits at the screen's own shape;
+         * <li>정수배, the largest whole number of this view's pixels to each of
+         * the title's that fits, or 맞춤 where not even one does;
+         * <li>직접 조절, 맞춤's width and height each taken by its own percent,
+         * and never past this view's edge.
+         * </ul>
+         */
+        RectF screenRect(ScreenScale scale) {
+            float width = titleWidth();
+            float height = titleHeight();
+            float fit = Math.min(getWidth() / width, getHeight() / height);
+
+            float shownWidth = width * fit;
+            float shownHeight = height * fit;
+            if (scale.mode == SCALE_INTEGER && fit >= 1f) {
+                float whole = (float) Math.floor(fit);
+                shownWidth = width * whole;
+                shownHeight = height * whole;
+            } else if (scale.mode == SCALE_CUSTOM) {
+                shownWidth = Math.min(getWidth(), shownWidth * scale.width / 100f);
+                shownHeight = Math.min(getHeight(), shownHeight * scale.height / 100f);
+            }
+
+            float left = (getWidth() - shownWidth) / 2f;
+            float top = (getHeight() - shownHeight) / 2f;
+            return new RectF(left, top, left + shownWidth, top + shownHeight);
+        }
+
+        /**
+         * How far 직접 조절 can take the width and the height, in percent of
+         * 맞춤: as far as this view's edge. 맞춤 already meets the edge one way,
+         * so that side stops at 100.
+         */
+        int[] customLimits() {
+            float width = titleWidth();
+            float height = titleHeight();
+            float fit = Math.min(getWidth() / width, getHeight() / height);
+            if (fit <= 0f) {
+                return new int[] {100, 100};
+            }
+
+            return new int[] {
+                    Math.max(100, (int) Math.floor(getWidth() * 100f / (width * fit))),
+                    Math.max(100, (int) Math.floor(getHeight() * 100f / (height * fit))),
+            };
         }
     }
 
