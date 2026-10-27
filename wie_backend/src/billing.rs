@@ -499,6 +499,13 @@ pub fn ktf_local_minifighter_server_response(request: &[u8]) -> Option<Vec<u8>> 
 /// Anything else is answered with the command plus one, a status of one and
 /// zeros behind it - enough of them for the longest of those copies.
 ///
+/// 놈3 (KTF `010390DD`) speaks the same record through `BillSocket://` to
+/// `game.gamevil.net:30805` rather than over a plain socket. Its purchase is
+/// command `0x0606` with the subscriber number, and its reader (`0x10f5fa`)
+/// takes the `u16le` length, then that many bytes less two, the command and
+/// the status off the front; the purchase succeeds (`0x110750`) on `0x0607`
+/// with a status of one, and anything else is `네트워크 에러 입니다`.
+///
 /// `None` for anything that is not one of these records: the length has to be
 /// the record's own and the command one a title sends, which is the even ones.
 pub fn ktf_local_gamevil_2011_response(request: &[u8]) -> Option<Vec<u8>> {
@@ -565,6 +572,18 @@ mod gamevil_2011_tests {
         let mut answer = request.clone();
         answer[2] = 0x01;
         assert_eq!(ktf_local_gamevil_2011_response(&answer), None);
+    }
+
+    #[test]
+    fn nom3s_purchase_through_billsocket_is_granted() {
+        // Off the device log: command 0x0606 and the subscriber number.
+        let mut request = vec![0x11, 0x00, 0x06, 0x06];
+        request.extend_from_slice(b"01046119269\0\n");
+        assert_eq!(request.len(), 0x11);
+
+        let reply = response(&request).expect("the purchase is answered");
+        assert_eq!(u16::from_le_bytes([reply[0], reply[1]]) as usize, reply.len());
+        assert_eq!(&reply[2..5], &[0x07, 0x06, 0x01]);
     }
 }
 
@@ -11245,6 +11264,9 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_rann_pr_response(request))
         .or_else(|| lgt_local_ea_text_response(request))
         .or_else(|| ktf_local_school_purchase_response(request))
+        // Last: it takes any record whose length is its own and whose command
+        // is even, so everything with a narrower shape goes first.
+        .or_else(|| ktf_local_gamevil_2011_response(request))
 }
 
 #[cfg(test)]
