@@ -546,6 +546,40 @@ pub fn ktf_local_gamevil_2011_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(response)
 }
 
+/// 놈3's purchase record, which 제노니아's matcher would take.
+///
+/// After the `0x0606` that [`ktf_local_gamevil_2011_response`] answers, 놈3
+/// (KTF `010390DD`) writes a 76-byte `0x0500`: its own id `0x3819`
+/// (`0x110af6`), the subscriber number, the item (`놈3_아이템1000`), the price
+/// and the item code. That is long enough for
+/// [`lgt_local_gamevil_packet_response`], whose status of zero 제노니아 takes
+/// as granted - but 놈3 goes on (`0x110ba2`) only on `0x0501` with a status of
+/// exactly one, and called anything else `네트워크 에러 입니다`.
+///
+/// `None` for anything but that record: its own length, `0x0500` and the id.
+pub fn ktf_local_nom3_purchase_response(request: &[u8]) -> Option<Vec<u8>> {
+    const PURCHASE: u16 = 0x0500;
+    const TITLE_ID: u32 = 0x3819;
+    /// What `0x110bb2` wants.
+    const GRANTED: u8 = 1;
+    /// Header, status and room behind them, as the other GAMEVIL answers.
+    const LENGTH: usize = 0x20;
+
+    if request.len() < 8 || u16::from_le_bytes([request[0], request[1]]) as usize != request.len() {
+        return None;
+    }
+    if u16::from_le_bytes([request[2], request[3]]) != PURCHASE || u32::from_le_bytes([request[4], request[5], request[6], request[7]]) != TITLE_ID {
+        return None;
+    }
+
+    let mut response = vec![0u8; LENGTH];
+    response[0..2].copy_from_slice(&(LENGTH as u16).to_le_bytes());
+    response[2..4].copy_from_slice(&(PURCHASE + 1).to_le_bytes());
+    response[4] = GRANTED;
+
+    Some(response)
+}
+
 /// The shop server GAMEVIL's KTF titles fall back on, and are sent on to - see
 /// [`ktf_local_gamevil_2011_response`].
 pub const GAMEVIL_SHOP_PORT: u16 = 31105;
@@ -584,6 +618,27 @@ mod gamevil_2011_tests {
         let reply = response(&request).expect("the purchase is answered");
         assert_eq!(u16::from_le_bytes([reply[0], reply[1]]) as usize, reply.len());
         assert_eq!(&reply[2..5], &[0x07, 0x06, 0x01]);
+    }
+
+    #[test]
+    fn nom3s_item_purchase_is_granted_with_a_status_of_one() {
+        // Off the device log: 놈3_아이템1000 for 1000원.
+        let mut request = vec![0x4c, 0x00, 0x00, 0x05, 0x19, 0x38, 0x00, 0x00];
+        request.extend_from_slice(b"01046119269\0");
+        request.extend_from_slice(b"\xb3\xf03_\xbe\xc6\xc0\xcc\xc5\xdb1000");
+        request.resize(0x3c, 0);
+        request.extend_from_slice(&1000u32.to_le_bytes());
+        request.extend_from_slice(b"00210DV04\0\0\0");
+        assert_eq!(request.len(), 0x4c);
+
+        let reply = response(&request).expect("the purchase is answered");
+        assert_eq!(u16::from_le_bytes([reply[0], reply[1]]) as usize, reply.len());
+        assert_eq!(&reply[2..5], &[0x01, 0x05, 0x01]);
+
+        // 제노니아's purchases keep their own answer.
+        let mut other = request.clone();
+        other[4] = 0x18;
+        assert_eq!(ktf_local_nom3_purchase_response(&other), None);
     }
 }
 
@@ -11223,6 +11278,7 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         // Before the 제노니아 packet matcher, which claims these by their length
         // and answers with a status this title's purchase receiver refuses.
         .or_else(|| lgt_local_supersoccer_response(request))
+        .or_else(|| ktf_local_nom3_purchase_response(request))
         .or_else(|| lgt_local_gamevil_packet_response(request))
         .or_else(|| lgt_local_subscriber_record_response(request))
         .or_else(|| lgt_local_command_tag_response(request))
