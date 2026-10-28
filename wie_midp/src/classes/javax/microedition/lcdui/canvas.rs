@@ -40,6 +40,7 @@ impl Canvas {
                 JavaMethodProto::new("hasPointerEvents", "()Z", Self::has_pointer_events, Default::default()),
                 JavaMethodProto::new("hasPointerMotionEvents", "()Z", Self::has_pointer_events, Default::default()),
                 JavaMethodProto::new("setFullScreenMode", "(Z)V", Self::set_full_screen_mode, Default::default()),
+                JavaMethodProto::new("sizeChanged", "(II)V", Self::size_changed, Default::default()),
                 JavaMethodProto::new("isDoubleBuffered", "()Z", Self::is_double_buffered, Default::default()),
                 JavaMethodProto::new("getWidth", "()I", Self::get_width, Default::default()),
                 JavaMethodProto::new("getHeight", "()I", Self::get_height, Default::default()),
@@ -292,6 +293,14 @@ impl Canvas {
 
     async fn key_released(_: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, key: i32) -> JvmResult<()> {
         tracing::debug!("javax.microedition.lcdui.Canvas::keyReleased({this:?}, {key})");
+
+        Ok(())
+    }
+
+    /// MIDP 2.0's notice that the canvas changed size. A title overrides it
+    /// and calls up to it; here, as on a handset, there is nothing behind it.
+    async fn size_changed(_: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>, width: i32, height: i32) -> JvmResult<()> {
+        tracing::debug!("javax.microedition.lcdui.Canvas::sizeChanged({this:?}, {width}, {height})");
 
         Ok(())
     }

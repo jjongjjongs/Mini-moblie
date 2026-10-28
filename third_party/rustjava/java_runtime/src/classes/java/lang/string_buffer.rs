@@ -39,6 +39,14 @@ impl StringBuffer {
                 JavaMethodProto::new("append", "(C)Ljava/lang/StringBuffer;", Self::append_character, Default::default()),
                 JavaMethodProto::new("append", "([CII)Ljava/lang/StringBuffer;", Self::append_char_array, Default::default()),
                 JavaMethodProto::new("delete", "(II)Ljava/lang/StringBuffer;", Self::delete, Default::default()),
+                JavaMethodProto::new("deleteCharAt", "(I)Ljava/lang/StringBuffer;", Self::delete_char_at, Default::default()),
+                JavaMethodProto::new("setCharAt", "(IC)V", Self::set_char_at, Default::default()),
+                JavaMethodProto::new(
+                    "insert",
+                    "(ILjava/lang/String;)Ljava/lang/StringBuffer;",
+                    Self::insert_string,
+                    Default::default(),
+                ),
                 JavaMethodProto::new("toString", "()Ljava/lang/String;", Self::to_string, Default::default()),
                 JavaMethodProto::new("setLength", "(I)V", Self::set_length, Default::default()),
                 JavaMethodProto::new("length", "()I", Self::length, Default::default()),
@@ -198,6 +206,62 @@ impl StringBuffer {
 
         jvm.store_array(&mut java_value, 0, new_chars).await?;
         jvm.put_field(&mut this, "count", "I", new_count).await?;
+
+        Ok(this)
+    }
+
+    async fn delete_char_at(jvm: &Jvm, context: &mut RuntimeContext, this: ClassInstanceRef<Self>, index: i32) -> Result<ClassInstanceRef<Self>> {
+        tracing::debug!("java.lang.StringBuffer::deleteCharAt({this:?}, {index})");
+
+        let count: i32 = jvm.get_field(&this, "count", "I").await?;
+        if index < 0 || index >= count {
+            return Err(jvm.exception("java/lang/StringIndexOutOfBoundsException", "deleteCharAt").await);
+        }
+
+        Self::delete(jvm, context, this, index, index + 1).await
+    }
+
+    async fn set_char_at(jvm: &Jvm, _: &mut RuntimeContext, this: ClassInstanceRef<Self>, index: i32, ch: JavaChar) -> Result<()> {
+        tracing::debug!("java.lang.StringBuffer::setCharAt({this:?}, {index}, {ch})");
+
+        let count: i32 = jvm.get_field(&this, "count", "I").await?;
+        if index < 0 || index >= count {
+            return Err(jvm.exception("java/lang/StringIndexOutOfBoundsException", "setCharAt").await);
+        }
+
+        let mut java_value: ClassInstanceRef<Array<JavaChar>> = jvm.get_field(&this, "value", "[C").await?;
+        jvm.store_array(&mut java_value, index as _, vec![ch]).await?;
+
+        Ok(())
+    }
+
+    async fn insert_string(
+        jvm: &Jvm,
+        _: &mut RuntimeContext,
+        mut this: ClassInstanceRef<Self>,
+        offset: i32,
+        string: ClassInstanceRef<String>,
+    ) -> Result<ClassInstanceRef<Self>> {
+        tracing::debug!("java.lang.StringBuffer::insert({this:?}, {offset}, {string:?})");
+
+        let count: i32 = jvm.get_field(&this, "count", "I").await?;
+        if offset < 0 || offset > count {
+            return Err(jvm.exception("java/lang/StringIndexOutOfBoundsException", "insert").await);
+        }
+
+        let inserted: Vec<JavaChar> = if string.is_null() {
+            "null".encode_utf16().collect()
+        } else {
+            JavaLangString::to_rust_string(jvm, &string).await?.encode_utf16().collect()
+        };
+
+        let java_value: ClassInstanceRef<Array<JavaChar>> = jvm.get_field(&this, "value", "[C").await?;
+        let tail: Vec<JavaChar> = jvm.load_array(&java_value, offset as _, (count - offset) as _).await?;
+
+        // Cut the buffer at the offset and append the insertion and the rest.
+        jvm.put_field(&mut this, "count", "I", offset).await?;
+        Self::append_utf16(jvm, &mut this, inserted).await?;
+        Self::append_utf16(jvm, &mut this, tail).await?;
 
         Ok(this)
     }

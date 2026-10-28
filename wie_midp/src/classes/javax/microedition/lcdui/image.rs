@@ -63,6 +63,7 @@ impl Image {
                     Self::create_image_from_image,
                     MethodAccessFlags::STATIC,
                 ),
+                JavaMethodProto::new("getRGB", "([IIIIIII)V", Self::get_rgb, Default::default()),
                 JavaMethodProto::new(
                     "createRGBImage",
                     "([IIIZ)Ljavax/microedition/lcdui/Image;",
@@ -275,6 +276,55 @@ impl Image {
             .collect();
 
         Self::create_image_instance(jvm, width as _, height as _, &data, 4).await
+    }
+
+    /// MIDP 2.0's read of a region as `0xAARRGGBB` words, `scan_length` apart
+    /// a row, from `offset` on.
+    #[allow(clippy::too_many_arguments)]
+    async fn get_rgb(
+        jvm: &Jvm,
+        _: &mut WieJvmContext,
+        this: ClassInstanceRef<Self>,
+        mut rgb: ClassInstanceRef<Array<i32>>,
+        offset: i32,
+        scan_length: i32,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) -> JvmResult<()> {
+        tracing::debug!("javax.microedition.lcdui.Image::getRGB({this:?}, {rgb:?}, {offset}, {scan_length}, {x}, {y}, {width}, {height})");
+
+        if width <= 0 || height <= 0 {
+            return Ok(());
+        }
+
+        let image = Self::image(jvm, &this).await?;
+        if x < 0 || y < 0 || x + width > image.width() as i32 || y + height > image.height() as i32 {
+            return Err(jvm
+                .exception("java/lang/IllegalArgumentException", "getRGB region is outside the image")
+                .await);
+        }
+
+        let length = jvm.array_length(&rgb).await? as i64;
+        for row in 0..height {
+            let start = offset as i64 + row as i64 * scan_length as i64;
+            if start < 0 || start + width as i64 > length {
+                return Err(jvm
+                    .exception("java/lang/ArrayIndexOutOfBoundsException", "getRGB runs off the array")
+                    .await);
+            }
+
+            let words: Vec<i32> = (0..width)
+                .map(|column| {
+                    let color = image.get_pixel(x + column, y + row);
+                    (u32::from(color.a) << 24 | u32::from(color.r) << 16 | u32::from(color.g) << 8 | u32::from(color.b)) as i32
+                })
+                .collect();
+            jvm.store_array(&mut rgb, start as _, words).await?;
+        }
+
+        Ok(())
     }
 
     async fn get_graphics(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<ClassInstanceRef<Graphics>> {

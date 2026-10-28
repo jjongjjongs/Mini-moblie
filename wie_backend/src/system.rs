@@ -1,4 +1,5 @@
 mod audio;
+mod audio_formats;
 mod event_queue;
 mod file_system;
 mod input_method;

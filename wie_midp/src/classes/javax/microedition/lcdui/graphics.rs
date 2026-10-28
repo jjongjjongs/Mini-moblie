@@ -104,6 +104,7 @@ impl Graphics {
                 JavaMethodProto::new("fillRect", "(IIII)V", Self::fill_rect, Default::default()),
                 JavaMethodProto::new("fillRoundRect", "(IIIIII)V", Self::fill_round_rect, Default::default()),
                 JavaMethodProto::new("fillArc", "(IIIIII)V", Self::fill_arc, Default::default()),
+                JavaMethodProto::new("fillTriangle", "(IIIIII)V", Self::fill_triangle, Default::default()),
                 JavaMethodProto::new("drawLine", "(IIII)V", Self::draw_line, Default::default()),
                 JavaMethodProto::new("drawRect", "(IIII)V", Self::draw_rect, Default::default()),
                 JavaMethodProto::new("drawRoundRect", "(IIIIII)V", Self::draw_round_rect, Default::default()),
@@ -448,6 +449,67 @@ impl Graphics {
             Rgb8Pixel::to_color(rgb as _),
             clip,
         );
+
+        Ok(())
+    }
+
+    /// MIDP 2.0's filled triangle, laid down a row at a time: each row spans
+    /// the two edges it crosses, sampled at the row's centre.
+    #[allow(clippy::too_many_arguments)]
+    async fn fill_triangle(
+        jvm: &Jvm,
+        _: &mut WieJvmContext,
+        mut this: ClassInstanceRef<Self>,
+        x1: i32,
+        y1: i32,
+        x2: i32,
+        y2: i32,
+        x3: i32,
+        y3: i32,
+    ) -> JvmResult<()> {
+        tracing::debug!("javax.microedition.lcdui.Graphics::fillTriangle({this:?}, {x1}, {y1}, {x2}, {y2}, {x3}, {y3})");
+
+        let rgb: i32 = jvm.get_field(&this, "color", "I").await?;
+        let mut canvas = Self::canvas(jvm, &mut this).await?;
+        let translate_x: i32 = jvm.get_field(&this, "translateX", "I").await?;
+        let translate_y: i32 = jvm.get_field(&this, "translateY", "I").await?;
+        let clip = Self::clip(jvm, &this).await?;
+        let color = Rgb8Pixel::to_color(rgb as _);
+
+        let points = [(x1, y1), (x2, y2), (x3, y3)];
+        let top = y1.min(y2).min(y3);
+        let bottom = y1.max(y2).max(y3);
+
+        for y in top..=bottom {
+            let centre = y as f32 + 0.5;
+            let mut left = f32::MAX;
+            let mut right = f32::MIN;
+            for i in 0..3 {
+                let (ax, ay) = points[i];
+                let (bx, by) = points[(i + 1) % 3];
+                if ay == by {
+                    if ay == y {
+                        left = left.min(ax.min(bx) as f32);
+                        right = right.max(ax.max(bx) as f32);
+                    }
+                    continue;
+                }
+                let (low, high) = if ay < by { (ay, by) } else { (by, ay) };
+                if centre < low as f32 || centre > high as f32 {
+                    continue;
+                }
+                let x = ax as f32 + (centre - ay as f32) * (bx - ax) as f32 / (by - ay) as f32;
+                left = left.min(x);
+                right = right.max(x);
+            }
+            if left > right {
+                continue;
+            }
+
+            let from = left.round() as i32;
+            let to = right.round() as i32;
+            canvas.fill_rect(translate_x + from, translate_y + y, (to - from + 1).max(1) as u32, 1, color, clip);
+        }
 
         Ok(())
     }

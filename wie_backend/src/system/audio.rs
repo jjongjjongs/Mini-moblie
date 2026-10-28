@@ -10,6 +10,8 @@ use smaf_player::{SmafEvent, parse_smaf};
 
 use crate::{System, audio_sink::AudioSink};
 
+use super::audio_formats::{parse_midi, parse_wave};
+
 pub type AudioHandle = u32;
 #[derive(Debug)]
 pub enum AudioError {
@@ -19,6 +21,18 @@ pub enum AudioError {
 
 enum AudioFile {
     Smaf(Vec<u8>),
+    /// A Standard MIDI File, played as its events - see [`parse_midi`].
+    Midi(Vec<u8>),
+    /// A RIFF WAVE file, played as one recording - see [`parse_wave`].
+    Wave(Vec<u8>),
+}
+
+impl AudioFile {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            AudioFile::Smaf(data) | AudioFile::Midi(data) | AudioFile::Wave(data) => data,
+        }
+    }
 }
 
 pub struct Audio {
@@ -150,6 +164,31 @@ impl Audio {
         Ok(audio_handle)
     }
 
+    /// A Standard MIDI File, for MIDP's `audio/midi`. Refused when it does not
+    /// read as one, so the title gets the exception it would on a handset.
+    pub fn load_midi(&mut self, data: &[u8]) -> Result<AudioHandle, AudioError> {
+        parse_midi(data).ok_or(AudioError::InvalidAudio)?;
+
+        Ok(self.insert(AudioFile::Midi(data.to_vec())))
+    }
+
+    /// A RIFF WAVE file, for MIDP's `audio/x-wav`; see [`Self::load_midi`].
+    pub fn load_wave(&mut self, data: &[u8]) -> Result<AudioHandle, AudioError> {
+        parse_wave(data).ok_or(AudioError::InvalidAudio)?;
+
+        Ok(self.insert(AudioFile::Wave(data.to_vec())))
+    }
+
+    fn insert(&mut self, file: AudioFile) -> AudioHandle {
+        let audio_handle = self.last_audio_handle;
+
+        self.last_audio_handle += 1;
+        self.files.insert(audio_handle, file);
+        self.volumes.insert(audio_handle, Arc::new(AtomicU8::new(FULL_VOLUME)));
+
+        audio_handle
+    }
+
     pub fn play(&mut self, system: &System, audio_handle: AudioHandle, repeat: bool) -> Result<(), AudioError> {
         self.play_with_completion(system, audio_handle, repeat)?;
 
@@ -160,9 +199,14 @@ impl Audio {
     /// ending needs to tell apart: whether it played out, whether it was
     /// stopped, and whether it was simply replaced by another play.
     pub fn play_with_completion(&mut self, system: &System, audio_handle: AudioHandle, repeat: bool) -> Result<Playback, AudioError> {
-        let data = match self.files.get(&audio_handle) {
-            Some(AudioFile::Smaf(data)) => data.clone(),
-            None => return Err(AudioError::InvalidHandle),
+        let file = self.files.get(&audio_handle).ok_or(AudioError::InvalidHandle)?;
+        let data = file.bytes().to_vec();
+        // Only SMAF goes to the sink's own renderer; the others are played as
+        // the events they read as.
+        let events = match file {
+            AudioFile::Smaf(_) => None,
+            AudioFile::Midi(data) => Some(parse_midi(data).unwrap_or_default()),
+            AudioFile::Wave(data) => Some(parse_wave(data).unwrap_or_default()),
         };
         let volume = self.volumes.get(&audio_handle).ok_or(AudioError::InvalidHandle)?.clone();
         let hash = smaf_hash(&data);
@@ -211,7 +255,9 @@ impl Audio {
         // Offer the file to the sink's own renderer first. When it takes it, the
         // sink plays the pre-rendered stream and this task only watches for the
         // stop flag (looping) or the clip's length (one-shot).
-        if let Some(duration_ms) = self.sink.play_smaf(audio_handle, &data, repeat) {
+        if events.is_none()
+            && let Some(duration_ms) = self.sink.play_smaf(audio_handle, &data, repeat)
+        {
             if repeat {
                 // Track the looping clip so an identical re-play coalesces and a
                 // real stop is honored by the reaper after a short grace.
@@ -265,7 +311,10 @@ impl Audio {
         }
 
         // Otherwise stream the sequence live as MIDI events.
-        let player = SmafPlayer::new(&data);
+        let player = match events {
+            Some(events) => SmafPlayer::from_events(events),
+            None => SmafPlayer::new(&data),
+        };
         let clip = audio_handle;
         let mut system_clone = system.clone();
         let sink_clone = self.sink.clone();
@@ -502,6 +551,11 @@ pub struct SmafPlayer {
 impl SmafPlayer {
     pub fn new(data: &[u8]) -> Self {
         Self { events: parse_smaf(data) }
+    }
+
+    /// A sequence read from another format into the same events.
+    fn from_events(events: Vec<(usize, SmafEvent)>) -> Self {
+        Self { events }
     }
 
     /// How long one pass takes, in milliseconds: until the last event, or the

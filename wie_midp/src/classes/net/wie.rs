@@ -11,6 +11,6 @@ pub use self::{
     },
     launcher::Launcher,
     local_socket::{LocalSocketInputStream, LocalSocketOutputStream, LocalStreamConnection},
-    smaf_player::SmafPlayer,
+    smaf_player::{FORMAT_MIDI, FORMAT_WAVE, SmafPlayer},
     wie_error::WieError,
 };
