@@ -65,7 +65,8 @@ pub fn format(format: &[u8], args: &[u32], read_string: &mut dyn FnMut(u32) -> R
                     result.push(b'%');
                     break;
                 }
-                b'd' | b'u' => {
+                // `%i` is `%d` by another name.
+                b'd' | b'i' | b'u' => {
                     // ILP32 ABI: long is one word; only long long occupies two
                     let long = longs >= 2;
                     let raw = if long {
@@ -74,7 +75,7 @@ pub fn format(format: &[u8], args: &[u32], read_string: &mut dyn FnMut(u32) -> R
                         next_arg(&mut arg_iter) as u64
                     };
 
-                    let (negative, magnitude) = if c == b'd' {
+                    let (negative, magnitude) = if c != b'u' {
                         let arg = if long { raw as i64 } else { raw as u32 as i32 as i64 };
                         (arg < 0, arg.unsigned_abs())
                     } else {
@@ -97,14 +98,19 @@ pub fn format(format: &[u8], args: &[u32], read_string: &mut dyn FnMut(u32) -> R
                     conversion.push_string(&mut result, &[value]);
                     break;
                 }
-                b'x' => {
+                // `%X` is the same in capitals. 제노니아3 colours an item's
+                // name with `!c%X` when a box is opened, and unread, the colour
+                // stayed in the arguments for the `%s` after it, which took
+                // 0xffff00 for a string and stopped the title.
+                b'x' | b'X' => {
                     let arg = if longs >= 2 {
                         next_arg64(&mut arg_iter)
                     } else {
                         next_arg(&mut arg_iter) as u64
                     };
 
-                    conversion.push_number(&mut result, false, &format!("{arg:x}"));
+                    let digits = if c == b'X' { format!("{arg:X}") } else { format!("{arg:x}") };
+                    conversion.push_number(&mut result, false, &digits);
                     break;
                 }
                 b'l' => longs += 1,
@@ -310,6 +316,19 @@ mod test {
     fn test_hex_width() -> Result<()> {
         assert_eq!(format("%08x", &[0xbeef])?, "0000beef");
         assert_eq!(format("%8x", &[0xbeef])?, "    beef");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_capital_hex_takes_its_argument() -> Result<()> {
+        let mut read = |ptr: u32| -> Result<Vec<u8>> {
+            assert_eq!(ptr, 0x1000);
+            Ok(b"item".to_vec())
+        };
+
+        assert_eq!(format_with("!c%06X%s", &[0xffff00, 0x1000], &mut read)?, b"!cFFFF00item");
+        assert_eq!(format("%X %i", &[0xab, 0xffff_fffe])?, "AB -2");
 
         Ok(())
     }
