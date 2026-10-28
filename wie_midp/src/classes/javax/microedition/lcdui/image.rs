@@ -63,6 +63,12 @@ impl Image {
                     Self::create_image_from_image,
                     MethodAccessFlags::STATIC,
                 ),
+                JavaMethodProto::new(
+                    "createRGBImage",
+                    "([IIIZ)Ljavax/microedition/lcdui/Image;",
+                    Self::create_rgb_image,
+                    MethodAccessFlags::STATIC,
+                ),
             ],
             fields: vec![
                 JavaFieldProto::new("w", "I", Default::default()),
@@ -226,6 +232,49 @@ impl Image {
         let src_image = Image::image(jvm, &image).await?;
 
         Self::create_image_instance(jvm, src_image.width(), src_image.height(), &src_image.raw(), src_image.bytes_per_pixel()).await
+    }
+
+    /// MIDP 2.0's image from `0xAARRGGBB` words, row by row.
+    ///
+    /// Gameloft's 리얼풋볼매니저2010 (Nokia N95 build) builds its loading bar
+    /// from these, and stopped on its logo with `NoSuchMethodError` before it.
+    /// Without `processAlpha` every pixel is opaque, as the spec has it.
+    async fn create_rgb_image(
+        jvm: &Jvm,
+        _: &mut WieJvmContext,
+        rgb: ClassInstanceRef<Array<i32>>,
+        width: i32,
+        height: i32,
+        process_alpha: bool,
+    ) -> JvmResult<ClassInstanceRef<Image>> {
+        tracing::debug!("javax.microedition.lcdui.Image::createRGBImage({rgb:?}, {width}, {height}, {process_alpha})");
+
+        if rgb.is_null() {
+            return Err(jvm.exception("java/lang/NullPointerException", "createRGBImage of null").await);
+        }
+        if width <= 0 || height <= 0 {
+            return Err(jvm
+                .exception("java/lang/IllegalArgumentException", "createRGBImage of an empty size")
+                .await);
+        }
+
+        let count = width as usize * height as usize;
+        if (jvm.array_length(&rgb).await? as usize) < count {
+            return Err(jvm
+                .exception("java/lang/ArrayIndexOutOfBoundsException", "createRGBImage needs width * height words")
+                .await);
+        }
+
+        let words: Vec<i32> = jvm.load_array(&rgb, 0, count).await?;
+        let data: Vec<u8> = words
+            .into_iter()
+            .flat_map(|word| {
+                let word = if process_alpha { word as u32 } else { word as u32 | 0xff00_0000 };
+                word.to_le_bytes()
+            })
+            .collect();
+
+        Self::create_image_instance(jvm, width as _, height as _, &data, 4).await
     }
 
     async fn get_graphics(jvm: &Jvm, _: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<ClassInstanceRef<Graphics>> {

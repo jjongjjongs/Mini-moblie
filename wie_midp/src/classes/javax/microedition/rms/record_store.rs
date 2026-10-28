@@ -46,6 +46,12 @@ impl RecordStore {
                     MethodAccessFlags::STATIC,
                 ),
                 JavaMethodProto::new(
+                    "openRecordStore",
+                    "(Ljava/lang/String;ZIZ)Ljavax/microedition/rms/RecordStore;",
+                    Self::open_record_store_shared,
+                    MethodAccessFlags::STATIC,
+                ),
+                JavaMethodProto::new(
                     "deleteRecordStore",
                     "(Ljava/lang/String;)V",
                     Self::delete_record_store,
@@ -290,6 +296,25 @@ impl RecordStore {
         tracing::warn!("stub javax.microedition.rms.RecordStore::closeRecordStore({this:?})");
 
         Ok(())
+    }
+
+    /// MIDP 2.0's open, which also says who else may use the store.
+    ///
+    /// A handset runs one MIDlet suite at a time, and so does this, so the
+    /// sharing it asks for changes nothing: it is the plain open. 리얼풋볼매니저2010
+    /// (Gameloft, Nokia N95 build) saves through this one, and stopped on
+    /// `NoSuchMethodError` the first time it did.
+    async fn open_record_store_shared(
+        jvm: &Jvm,
+        context: &mut WieJvmContext,
+        name: ClassInstanceRef<String>,
+        create: bool,
+        auth_mode: i32,
+        writable: bool,
+    ) -> JvmResult<ClassInstanceRef<Self>> {
+        tracing::debug!("javax.microedition.rms.RecordStore::openRecordStore({name:?}, {create:?}, {auth_mode}, {writable})");
+
+        Self::open_record_store(jvm, context, name, create).await
     }
 
     async fn open_record_store(
