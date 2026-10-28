@@ -640,10 +640,6 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // out sideways for a handset held landscape, so the picture reaches the
     // upright panel a quarter turn off until it is turned back.
     (TitlePlatform::Lgt, "00031347", sideways()),
-    // 소울세이버: drawn for a handset held landscape onto its 240x320 panel, its
-    // own on-screen pad and buttons included, and played by touch - the
-    // touches it hears are the upright panel's, which it turns itself.
-    (TitlePlatform::Lgt, "0003106B", sideways()),
     // 학교가는 길: an org.kwis.msp.lwc title whose ProxyCard repaints partial
     // regions that leave the previous screen's own pixels standing - its comic
     // select screen kept the title band drawn over it, and the building screen
@@ -1173,6 +1169,14 @@ mod tests {
         assert!(quirks.drawn_sideways);
         assert_eq!(quirks.screen_size, None);
         assert!(!quirks.expects_annunciator);
+    }
+
+    /// 소울세이버 (LGT 0003106B) draws upright on its 240x320 panel, from its
+    /// consent dialog through the title to the field. Marked sideways, every
+    /// screen was turned onto its side and its text read bottom to top.
+    #[test]
+    fn soul_saver_is_drawn_upright() {
+        assert!(!title_quirks(TitlePlatform::Lgt, "0003106B").drawn_sideways);
     }
 
     /// 다크슬레이어2 centres a fixed-height scene on the Canvas, so a panel sized
