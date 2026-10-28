@@ -8,21 +8,48 @@ use java_class_proto::JavaFieldProto;
 use java_constants::FieldAccessFlags;
 use jvm::Field;
 
-#[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Debug)]
 struct FieldInner {
-    // The class that declares the field is part of what the field is: a class
+    // The class that declares the field, for what the field prints as. A class
     // may declare a field with the same name and type as one its superclass
-    // declares, and an instance then holds both (JVMS 5.4.3.2). Without it the
-    // two compare equal and share one slot in the instance's storage.
+    // declares, and an instance then holds both (JVMS 5.4.3.2); they are kept
+    // apart by being two fields - see `FieldImpl`'s equality - not by this.
+    #[allow(dead_code)]
     class_name: String,
     name: String,
     descriptor: String,
     access_flags: FieldAccessFlags,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+/// A field is the one its class definition made: every `FieldImpl` an
+/// instance or a class stores under is a clone of the one in the definition's
+/// field list, so two are the same field exactly when they share it. Equality
+/// and order go by that rather than by comparing the class name, name and
+/// descriptor, which every field read and write paid for each node of the
+/// storage map it walked.
+#[derive(Clone, Debug)]
 pub struct FieldImpl {
     inner: Arc<FieldInner>,
+}
+
+impl PartialEq for FieldImpl {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+}
+
+impl Eq for FieldImpl {}
+
+impl PartialOrd for FieldImpl {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for FieldImpl {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        Arc::as_ptr(&self.inner).cmp(&Arc::as_ptr(&other.inner))
+    }
 }
 
 impl FieldImpl {
@@ -50,6 +77,13 @@ impl FieldImpl {
                 access_flags: field_info.access_flags,
             }),
         }
+    }
+}
+
+impl FieldImpl {
+    /// Whether this is the field named; see `MethodImpl::is`.
+    pub(crate) fn is(&self, name: &str, descriptor: &str) -> bool {
+        self.inner.name == name && self.inner.descriptor == descriptor
     }
 }
 

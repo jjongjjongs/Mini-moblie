@@ -194,9 +194,7 @@ impl ClassDefinition for ClassDefinitionImpl {
         self.inner
             .methods
             .iter()
-            .find(|&method| {
-                method.name() == name && method.descriptor() == descriptor && method.access_flags().contains(MethodAccessFlags::STATIC) == is_static
-            })
+            .find(|&method| method.is(name, descriptor) && method.access_flags().contains(MethodAccessFlags::STATIC) == is_static)
             .map(|x| Box::new(x.clone()) as Box<dyn Method>)
     }
 
@@ -204,9 +202,7 @@ impl ClassDefinition for ClassDefinitionImpl {
         self.inner
             .fields
             .iter()
-            .find(|&field| {
-                field.name() == name && field.descriptor() == descriptor && field.access_flags().contains(FieldAccessFlags::STATIC) == is_static
-            })
+            .find(|&field| field.is(name, descriptor) && field.access_flags().contains(FieldAccessFlags::STATIC) == is_static)
             .map(|x| Box::new(x.clone()) as Box<dyn Field>)
     }
 

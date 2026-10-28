@@ -448,6 +448,14 @@ where
             return;
         }
 
+        // An opaque pixel blends to itself, so the read of what lies under it
+        // and the arithmetic come to nothing; most of what a sprite draws is
+        // such pixels.
+        if color.a == 0xff {
+            self.image_buffer.put_pixel(x, y, color);
+            return;
+        }
+
         let bg = self.image_buffer.get_pixel(x, y);
         let factor = color.a as f32 / 255.0;
 

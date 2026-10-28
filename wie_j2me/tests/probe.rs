@@ -246,9 +246,14 @@ fn j2me_jar_probe() {
             let x = if kind == PointerKind::Pressed { x } else { x + 3 };
             emulator.handle_event(Event::Pointer { kind, x, y });
         }
+        let started = std::time::Instant::now();
         if let Err(error) = emulator.tick() {
             stopped = Some(error);
             break;
+        }
+        let took = started.elapsed();
+        if took.as_millis() >= 300 {
+            eprintln!("[probe] slow tick {ticks} took {took:?}");
         }
         ticks += 1;
     }

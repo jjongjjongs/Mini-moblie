@@ -4,7 +4,7 @@ use alloc::{borrow::ToOwned, boxed::Box, collections::BTreeMap, format, string::
 use core::{
     fmt::Debug,
     iter,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 
 use dyn_clone::clone_box;
@@ -47,6 +47,10 @@ struct JvmInner {
     pins: RwLock<Pins>,
     /// What [`Jvm::collect_garbage`] runs once it is done. See [`Jvm::set_gc_hook`].
     gc_hook: RwLock<Option<GcHook>>,
+    /// When [`Jvm::collect_garbage_when_due`] last collected, in the caller's
+    /// milliseconds, and how many objects were left alive by it.
+    last_collection_ms: AtomicU64,
+    live_after_collection: AtomicUsize,
     get_current_thread_id: Box<dyn Fn() -> u64 + Sync + Send>,
     bootstrap_class_loader: Box<dyn BootstrapClassLoader>,
     bootstrapping: AtomicBool,
@@ -94,6 +98,8 @@ impl Jvm {
                 monitors: RwLock::new(BTreeMap::new()),
                 pins: RwLock::new(BTreeMap::new()),
                 gc_hook: RwLock::new(None),
+                last_collection_ms: AtomicU64::new(0),
+                live_after_collection: AtomicUsize::new(0),
                 get_current_thread_id: Box::new(get_current_thread_id),
                 bootstrap_class_loader: Box::new(bootstrap_class_loader),
                 bootstrapping: AtomicBool::new(true),
@@ -924,6 +930,35 @@ impl Jvm {
                 }
             })
             .collect()
+    }
+
+    /// [`Self::collect_garbage`], when there is reason to: the heap has grown
+    /// by a quarter (and at least a thousand objects) since the last
+    /// collection, or a second has passed. `now_ms` is the caller's clock.
+    ///
+    /// A collection walks every live object, and an embedder that collected
+    /// once a frame spent a fifth of a MIDP 2.0 title's time doing it -
+    /// 리얼풋볼매니저2010 keeps a league's worth of objects alive, and walked
+    /// all of them twenty times a second to free a handful of strings.
+    pub fn collect_garbage_when_due(&self, now_ms: u64) -> Result<usize> {
+        const GROWTH_FLOOR: usize = 1024;
+        const INTERVAL_MS: u64 = 1000;
+
+        let live = self.inner.all_objects.read().len();
+        let after_last = self.inner.live_after_collection.load(Ordering::Relaxed);
+        let grown = live >= after_last + (after_last / 4).max(GROWTH_FLOOR);
+        let elapsed = now_ms.saturating_sub(self.inner.last_collection_ms.load(Ordering::Relaxed)) >= INTERVAL_MS;
+        if !grown && !elapsed {
+            return Ok(0);
+        }
+
+        let collected = self.collect_garbage()?;
+        self.inner.last_collection_ms.store(now_ms, Ordering::Relaxed);
+        self.inner
+            .live_after_collection
+            .store(self.inner.all_objects.read().len(), Ordering::Relaxed);
+
+        Ok(collected)
     }
 
     pub fn collect_garbage(&self) -> Result<usize> {

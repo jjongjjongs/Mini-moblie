@@ -490,7 +490,7 @@ impl Display {
 
                 wie_backend::present(context.system(), &*image);
             }
-            jvm.collect_garbage()?;
+            jvm.collect_garbage_when_due(context.system().platform().now().raw())?;
         }
 
         Ok(())

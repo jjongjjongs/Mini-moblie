@@ -118,6 +118,15 @@ impl MethodImpl {
     }
 }
 
+impl MethodImpl {
+    /// Whether this is the method named, compared in place: the trait's
+    /// `name`/`descriptor` hand back owned copies, and a lookup that called
+    /// them made two allocations for every method of the class it passed.
+    pub(crate) fn is(&self, name: &str, descriptor: &str) -> bool {
+        self.inner.name == name && self.inner.descriptor == descriptor
+    }
+}
+
 #[async_trait::async_trait]
 impl Method for MethodImpl {
     fn name(&self) -> String {
