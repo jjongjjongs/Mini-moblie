@@ -6356,9 +6356,12 @@ public final class MainActivity extends Activity {
             }
         });
         dialog.show();
-        // Over the game screen alone, like 키패드 디자인, rather than across
-        // the keypad as well.
-        fitOverGameScreen(dialog, false);
+        // On its side the screen is a narrow band between the keys, and the
+        // menu sits over it alone, like 키패드 디자인, rather than across the
+        // keys as well. Upright it keeps the ordinary dialog's place and size.
+        if (landscapeMode) {
+            fitOverGameScreen(dialog, false);
+        }
     }
 
     /** A round − or + beside the speed. */
