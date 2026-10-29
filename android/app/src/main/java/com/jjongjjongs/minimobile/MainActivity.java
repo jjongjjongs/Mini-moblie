@@ -5344,6 +5344,80 @@ public final class MainActivity extends Activity {
         return new android.graphics.Rect(at[0], at[1], at[0] + gameView.getWidth(), at[1] + gameView.getHeight());
     }
 
+    /**
+     * Sits a shown dialog over the game screen and nothing else: centred on
+     * it, as tall as it, and as wide as it or the 300 dp a dialog's controls
+     * need, whichever is more - so the keypad round it stays in sight.
+     * Undimmed when {@code clear}, for a dialog whose changes show on the
+     * keypad as they are made.
+     *
+     * <p>A dialog window is placed in a frame that may stand off the display
+     * by a cutout or a system bar, so where it lands is read back once it is
+     * laid out and the difference taken off.
+     */
+    void fitOverGameScreen(Dialog dialog, boolean clear) {
+        final android.view.Window window = dialog.getWindow();
+        android.graphics.Rect screen = gameScreenOnDisplay();
+        if (window == null || screen == null) {
+            return;
+        }
+        if (clear) {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+        }
+        android.util.DisplayMetrics metrics = getResources().getDisplayMetrics();
+        int width = Math.min(metrics.widthPixels, Math.max(screen.width(), dp(300)));
+        int height = Math.min(metrics.heightPixels, Math.max(screen.height(), dp(280)));
+        final int left = Math.max(0, Math.min(metrics.widthPixels - width, screen.centerX() - width / 2));
+        final int top = Math.max(0, Math.min(metrics.heightPixels - height, screen.top));
+        final WindowManager.LayoutParams params = window.getAttributes();
+        params.gravity = android.view.Gravity.TOP | android.view.Gravity.START;
+        params.x = left;
+        params.y = top;
+        params.width = width;
+        params.height = height;
+        window.setAttributes(params);
+
+        final View decor = window.getDecorView();
+        decor.getViewTreeObserver().addOnGlobalLayoutListener(new android.view.ViewTreeObserver.OnGlobalLayoutListener() {
+            @Override
+            public void onGlobalLayout() {
+                decor.getViewTreeObserver().removeOnGlobalLayoutListener(this);
+                int[] at = new int[2];
+                decor.getLocationOnScreen(at);
+                if (at[0] != left || at[1] != top) {
+                    params.x -= at[0] - left;
+                    params.y -= at[1] - top;
+                    window.setAttributes(params);
+                }
+            }
+        });
+    }
+
+    /** Run each time the player is laid out again after a turn, while a dialog over it follows it. */
+    private final List<Runnable> relaidOut = new ArrayList<>();
+
+    void whenRelaidOut(Runnable action) {
+        relaidOut.add(action);
+    }
+
+    void stopWhenRelaidOut(Runnable action) {
+        relaidOut.remove(action);
+    }
+
+    /**
+     * Turns the player on its side or upright and holds it there, as the
+     * rotate item of the game menu does with auto-rotate off - for 내 사진's
+     * tabs, so the face being set is the one on show.
+     */
+    void turnPlayer(boolean onItsSide) {
+        if (onItsSide == landscapeMode) {
+            return;
+        }
+        orientationPinned = true;
+        setRequestedOrientation(onItsSide ? ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE : ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+        showRotateState();
+    }
+
     /** Whether the keypad is laid out landscape now, which keeps its own 내 사진 face. */
     boolean keypadLandscape() {
         return keypad != null && keypad.landscape;
@@ -6282,6 +6356,9 @@ public final class MainActivity extends Activity {
             }
         });
         dialog.show();
+        // Over the game screen alone, like 키패드 디자인, rather than across
+        // the keypad as well.
+        fitOverGameScreen(dialog, false);
     }
 
     /** A round − or + beside the speed. */
@@ -6489,6 +6566,18 @@ public final class MainActivity extends Activity {
             // size, so the player follows it without turning.
             unfolded = isUnfolded(newConfig);
             buildPlayerContent();
+            if (!relaidOut.isEmpty()) {
+                final View screen = gameView;
+                screen.getViewTreeObserver().addOnGlobalLayoutListener(new android.view.ViewTreeObserver.OnGlobalLayoutListener() {
+                    @Override
+                    public void onGlobalLayout() {
+                        screen.getViewTreeObserver().removeOnGlobalLayoutListener(this);
+                        for (Runnable action : new ArrayList<>(relaidOut)) {
+                            action.run();
+                        }
+                    }
+                });
+            }
         }
     }
 

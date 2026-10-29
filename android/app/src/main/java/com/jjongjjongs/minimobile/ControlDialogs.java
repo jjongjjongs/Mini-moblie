@@ -619,7 +619,8 @@ final class ControlDialogs {
         }
         markOption(rows, saved);
 
-        photoPanel[0] = keypadPhotoPanel(player, photo, pictures);
+        final Runnable[] follow = new Runnable[1];
+        photoPanel[0] = keypadPhotoPanel(player, photo, pictures, follow);
         photoPanel[0].setVisibility(saved == KeypadTheme.PHOTO ? View.VISIBLE : View.GONE);
         column.addView(photoPanel[0]);
 
@@ -642,7 +643,15 @@ final class ControlDialogs {
                 })
                 .setNegativeButton("취소", null)
                 .setNeutralButton("꾹 눌러 보기", null).create();
+        // A turn, by the tabs or by hand, lays the player out again; the
+        // dialog follows it over the screen, and the tabs follow the turn.
+        final Runnable refit = () -> {
+            player.fitOverGameScreen(dialog, true);
+            follow[0].run();
+        };
+        player.whenRelaidOut(refit);
         track(dialog, () -> {
+            player.stopWhenRelaidOut(refit);
             this.keypadPhotoPicked = null;
             if (!applied[0]) {
                 KeypadPhoto.discardPending(this.s.a);
@@ -650,7 +659,7 @@ final class ControlDialogs {
                 player.showKeypadPhoto(keptPhoto);
             }
         });
-        fitOverScreen(player, dialog);
+        player.fitOverGameScreen(dialog, true);
 
         // Held down, the dialog goes clear and the whole keypad shows as the
         // changes have left it; the touch is taken, so it never closes it.
@@ -670,31 +679,6 @@ final class ControlDialogs {
     }
 
     /**
-     * Sits a dialog over the game screen and nothing else, undimmed, so the
-     * keypad round it shows each change as it is made. On its side the screen
-     * is narrow, so the dialog is let out to a width its controls fit in,
-     * over the near edges of the bands.
-     */
-    private void fitOverScreen(MainActivity player, Dialog dialog) {
-        android.view.Window window = dialog.getWindow();
-        android.graphics.Rect screen = player.gameScreenOnDisplay();
-        if (window == null || screen == null) {
-            return;
-        }
-        window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND);
-        android.util.DisplayMetrics metrics = player.getResources().getDisplayMetrics();
-        int width = Math.min(metrics.widthPixels, Math.max(screen.width(), this.style.dp(300)));
-        int height = Math.min(metrics.heightPixels, Math.max(screen.height(), this.style.dp(280)));
-        android.view.WindowManager.LayoutParams params = window.getAttributes();
-        params.gravity = android.view.Gravity.TOP | android.view.Gravity.START;
-        params.x = Math.max(0, Math.min(metrics.widthPixels - width, screen.centerX() - width / 2));
-        params.y = Math.max(0, Math.min(metrics.heightPixels - height, screen.top));
-        params.width = width;
-        params.height = height;
-        window.setAttributes(params);
-    }
-
-    /**
      * 내 사진's settings, under the designs. Upright and on its side each have
      * their own, picked by the tabs at the top: one picture across the keypad
      * or one for each half, each picture chosen, turned, placed and zoomed on
@@ -702,7 +686,7 @@ final class ControlDialogs {
      * drawn at once on the keypad behind the dialog and on the design
      * pictures; the way up the phone is not held in is seen when it is.
      */
-    private View keypadPhotoPanel(final MainActivity player, final KeypadPhoto photo, final List<View> pictures) {
+    private View keypadPhotoPanel(final MainActivity player, final KeypadPhoto photo, final List<View> pictures, final Runnable[] follow) {
         final LinearLayout panel = new LinearLayout(this.style.context);
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(this.style.dp(12), this.style.dp(10), this.style.dp(12), this.style.dp(8));
@@ -724,17 +708,30 @@ final class ControlDialogs {
             }
         };
 
-        panel.addView(chipRow(new String[]{"세로 화면", "가로 화면"}, side[0] ? 1 : 0, index -> {
-            side[0] = index == 1;
-            slot[0] = photo.face(side[0]).split ? KeypadPhoto.LEFT : KeypadPhoto.WHOLE;
-            render[0].run();
-        }));
         panel.addView(body);
+
+        // The tabs turn the player too, so the face being set is the one on
+        // show; the turn lays it out again and follow catches the tabs up.
+        follow[0] = () -> {
+            boolean now = player.keypadLandscape();
+            if (now != side[0]) {
+                side[0] = now;
+                slot[0] = photo.face(now).split ? KeypadPhoto.LEFT : KeypadPhoto.WHOLE;
+            }
+            render[0].run();
+        };
 
         render[0] = () -> {
             body.removeAllViews();
             final KeypadPhoto.Face face = photo.face(side[0]);
             final KeypadPhoto.Slot picked = face.slots[slot[0]];
+
+            body.addView(chipRow(new String[]{"세로 화면", "가로 화면"}, side[0] ? 1 : 0, index -> {
+                side[0] = index == 1;
+                slot[0] = photo.face(side[0]).split ? KeypadPhoto.LEFT : KeypadPhoto.WHOLE;
+                player.turnPlayer(side[0]);
+                render[0].run();
+            }));
 
             if (side[0] != player.keypadLandscape()) {
                 TextView note = this.style.text(side[0] ? "가로 화면 설정은 폰을 눕혀 게임할 때 보여요." : "세로 화면 설정은 폰을 세워 게임할 때 보여요.",
