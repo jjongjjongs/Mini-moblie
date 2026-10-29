@@ -205,7 +205,7 @@ struct GameView: View {
 
     /// The palette the pad is drawn in: the design's, or 내 사진's for the way it lays the picture on.
     private var padPalette: PadPalette {
-        photoLook?.palette ?? padTheme.palette
+        photoLook?.palette(layout: layout) ?? padTheme.palette
     }
 
     /// How big the screen is drawn, this title this way up (see `GameScale`).
@@ -322,27 +322,34 @@ struct GameView: View {
         // Turned, or laid out the other way, the screen takes the size kept for that way.
         .onChange(of: scaleSideways) { value in scale = GameScale.get(game, sideways: value) }
         .sheet(item: $sheet) { sheet in
-            switch sheet {
-            case .speed:
-                SpeedView(game: game, speed: $speed)
-            case .quality:
-                QualityView(game: game, emulator: emulator, quality: $quality)
-            case .scale:
-                ScaleView(game: game, sideways: scaleSideways, area: screenArea, pixels: titlePixels, scale: $scale)
-            case .settings:
-                GameSettingsView(game: game, padShape: shapeBinding, wide: wide, sideways: sideways, onEditPad: beginEditing)
-            case .photo:
-                NavigationView {
-                    PadPhotoSettingsView(landscape: sideways || arrangement == .sides)
-                        .toolbar {
-                            ToolbarItem(placement: .navigationBarTrailing) {
-                                Button("완료") { sheet = nil }
-                            }
+            sheetContent(sheet)
+        }
+    }
+
+    /// What each of the game's sheets shows. Kept out of `body`, which is
+    /// as much as the compiler will type-check in one expression.
+    @ViewBuilder
+    private func sheetContent(_ sheet: GameSheet) -> some View {
+        switch sheet {
+        case .speed:
+            SpeedView(game: game, speed: $speed)
+        case .quality:
+            QualityView(game: game, emulator: emulator, quality: $quality)
+        case .scale:
+            ScaleView(game: game, sideways: scaleSideways, area: screenArea, pixels: titlePixels, scale: $scale)
+        case .settings:
+            GameSettingsView(game: game, padShape: shapeBinding, wide: wide, sideways: sideways, onEditPad: beginEditing)
+        case .photo:
+            NavigationView {
+                PadPhotoSettingsView(landscape: sideways || arrangement == .sides)
+                    .toolbar {
+                        ToolbarItem(placement: .navigationBarTrailing) {
+                            Button("완료") { self.sheet = nil }
                         }
-                }
-            case .log:
-                LogView()
+                    }
             }
+        case .log:
+            LogView()
         }
     }
 
@@ -376,6 +383,11 @@ struct GameView: View {
         ZStack(alignment: .top) {
             GeometryReader { _ in
                 ZStack {
+                    // 내 사진 lays its pictures in the bands either side of the
+                    // screen; the stock designs have no tray on their side.
+                    if photoLook != nil {
+                        PadTray(palette: padPalette, photo: photoLook, layout: layout, cornerRadius: 0, ground: false)
+                    }
                     screen(alignment: .center)
                     pad
                 }
@@ -419,7 +431,7 @@ struct GameView: View {
                     // 펼친 화면: the screen in the middle, a key column in each
                     // outer band, all on the tray.
                     ZStack {
-                        PadTray(palette: padPalette, photo: photoLook)
+                        PadTray(palette: padPalette, photo: photoLook, layout: layout)
                         screen(alignment: .center)
                             .padding(.horizontal, geometry.size.width * PadLayout.sidesBand)
                         pad
@@ -429,7 +441,7 @@ struct GameView: View {
                         screen(alignment: .center)
                         pad
                             .frame(height: geometry.size.height * min(max(padHeight, 0.25), 0.65))
-                            .background(PadTray(palette: padPalette, photo: photoLook))
+                            .background(PadTray(palette: padPalette, photo: photoLook, layout: layout))
                     }
                 case .overlay:
                     ZStack {
@@ -573,7 +585,7 @@ struct GameView: View {
                     .foregroundColor(MenuPalette.muted)
                 ForEach(PadTheme.allCases) { theme in
                     MenuOption(label: theme.label, on: theme == padTheme) {
-                        if theme == .photo, let picture = photoStore.image {
+                        if theme == .photo, let picture = photoStore.thumbnail {
                             Image(uiImage: picture).resizable().scaledToFill()
                         } else {
                             LinearGradient(colors: [theme.palette.faceTop, theme.palette.faceBottom], startPoint: .top, endPoint: .bottom)
@@ -582,7 +594,7 @@ struct GameView: View {
                     } action: {
                         padTheme = theme
                         // With no picture yet, 내 사진 goes straight to choosing one.
-                        if theme == .photo && photoStore.image == nil {
+                        if theme == .photo && !photoStore.hasPicture(sideways || arrangement == .sides) {
                             open(.photo)
                         } else {
                             menuWindow = .main
@@ -590,7 +602,7 @@ struct GameView: View {
                     }
                 }
                 if padTheme == .photo {
-                    MenuRow(symbol: "photo.on.rectangle", label: "내 사진 설정", value: photoStore.mode.label, opens: true) {
+                    MenuRow(symbol: "photo.on.rectangle", label: "내 사진 설정", opens: true) {
                         open(.photo)
                     }
                 }
@@ -1639,7 +1651,7 @@ private struct GameSettingsView: View {
                         } label: {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("내 사진 설정")
-                                Text(photoStore.image == nil ? "사진을 골라 주세요" : photoStore.mode.label)
+                                Text(photoStore.hasPicture(arrangement == .sides || arrangement == .landscape) ? "사진·방식 바꾸기" : "사진을 골라 주세요")
                                     .font(.caption).foregroundColor(.secondary)
                             }
                         }
@@ -1741,7 +1753,7 @@ private struct GameSettingsView: View {
             ForEach(PadTheme.allCases) { theme in
                 let chosen = theme == padTheme
                 let look = PadPhotoLook(theme: theme, store: photoStore, landscape: false)
-                let palette = look?.palette ?? theme.palette
+                let palette = look?.palette(layout: PadLayout.standard(.below)) ?? theme.palette
                 Button {
                     padTheme = theme
                 } label: {
@@ -1751,7 +1763,7 @@ private struct GameSettingsView: View {
                                      labelScale: 0.7, palette: palette, letters: false, photo: look)
                         }
                         .frame(height: 84)
-                        .background(PadTray(palette: palette, photo: look, cornerRadius: 0))
+                        .background(PadTray(palette: palette, photo: look, layout: PadLayout.standard(.below), cornerRadius: 0))
                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                         .overlay(
                             RoundedRectangle(cornerRadius: 10, style: .continuous)

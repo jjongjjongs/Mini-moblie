@@ -485,7 +485,7 @@ struct PadFaces: View {
         return ZStack(alignment: .topLeading) {
             if let photo {
                 PadPhotoCut(
-                    photo: photo, size: size, ring: ring,
+                    photo: photo, layout: layout, size: size, ring: ring,
                     shapes: keys.filter { !$0.hidden && $0.kind != .save }.map { key in
                         let rect = key.rect(in: size).insetBy(dx: 3, dy: 3)
                         return (rect, KeyFace.cornerRadius(of: key, size: rect.size, palette: palette))
