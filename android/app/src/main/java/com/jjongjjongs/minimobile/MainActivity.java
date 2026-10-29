@@ -5331,7 +5331,20 @@ public final class MainActivity extends Activity {
         showKeypadPhoto(photo);
     }
 
-    /** Whether the keypad is laid out landscape now, which keeps its own picture focus. */
+    /**
+     * Where the game screen is on the display, for a dialog to sit over it
+     * alone and leave the keypad round it in sight; null with none shown.
+     */
+    android.graphics.Rect gameScreenOnDisplay() {
+        if (gameView == null || !gameView.isShown() || gameView.getWidth() == 0 || gameView.getHeight() == 0) {
+            return null;
+        }
+        int[] at = new int[2];
+        gameView.getLocationOnScreen(at);
+        return new android.graphics.Rect(at[0], at[1], at[0] + gameView.getWidth(), at[1] + gameView.getHeight());
+    }
+
+    /** Whether the keypad is laid out landscape now, which keeps its own 내 사진 face. */
     boolean keypadLandscape() {
         return keypad != null && keypad.landscape;
     }

@@ -640,7 +640,8 @@ final class ControlDialogs {
                         ControlPatch.toast(this.s.a, "키패드 디자인: " + KeypadTheme.NAMES[chosen[0]]);
                     }
                 })
-                .setNegativeButton("취소", null).create();
+                .setNegativeButton("취소", null)
+                .setNeutralButton("꾹 눌러 보기", null).create();
         track(dialog, () -> {
             this.keypadPhotoPicked = null;
             if (!applied[0]) {
@@ -649,6 +650,48 @@ final class ControlDialogs {
                 player.showKeypadPhoto(keptPhoto);
             }
         });
+        fitOverScreen(player, dialog);
+
+        // Held down, the dialog goes clear and the whole keypad shows as the
+        // changes have left it; the touch is taken, so it never closes it.
+        Button peek = dialog.getButton(AlertDialog.BUTTON_NEUTRAL);
+        if (peek != null && dialog.getWindow() != null) {
+            final View window = dialog.getWindow().getDecorView();
+            peek.setOnTouchListener((v, event) -> {
+                int action = event.getActionMasked();
+                if (action == android.view.MotionEvent.ACTION_DOWN) {
+                    window.setAlpha(0f);
+                } else if (action == android.view.MotionEvent.ACTION_UP || action == android.view.MotionEvent.ACTION_CANCEL) {
+                    window.setAlpha(1f);
+                }
+                return true;
+            });
+        }
+    }
+
+    /**
+     * Sits a dialog over the game screen and nothing else, undimmed, so the
+     * keypad round it shows each change as it is made. On its side the screen
+     * is narrow, so the dialog is let out to a width its controls fit in,
+     * over the near edges of the bands.
+     */
+    private void fitOverScreen(MainActivity player, Dialog dialog) {
+        android.view.Window window = dialog.getWindow();
+        android.graphics.Rect screen = player.gameScreenOnDisplay();
+        if (window == null || screen == null) {
+            return;
+        }
+        window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+        android.util.DisplayMetrics metrics = player.getResources().getDisplayMetrics();
+        int width = Math.min(metrics.widthPixels, Math.max(screen.width(), this.style.dp(300)));
+        int height = Math.min(metrics.heightPixels, Math.max(screen.height(), this.style.dp(280)));
+        android.view.WindowManager.LayoutParams params = window.getAttributes();
+        params.gravity = android.view.Gravity.TOP | android.view.Gravity.START;
+        params.x = Math.max(0, Math.min(metrics.widthPixels - width, screen.centerX() - width / 2));
+        params.y = Math.max(0, Math.min(metrics.heightPixels - height, screen.top));
+        params.width = width;
+        params.height = height;
+        window.setAttributes(params);
     }
 
     /**
