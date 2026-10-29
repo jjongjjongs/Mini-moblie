@@ -163,9 +163,9 @@ struct PadRing: Equatable {
     var radius: CGFloat
 
     /// The share of the radius OK takes in the middle. OK is the key pressed
-    /// most, and at 0.44 it has half as much again as the third of the radius
-    /// it had, while the arrows keep most of their band.
-    static let okShare: CGFloat = 0.44
+    /// most, and at 0.40 it has a quarter as much again as the third of the
+    /// radius it had, while the arrows keep most of their band.
+    static let okShare: CGFloat = 0.40
 
     var bounds: CGRect {
         CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2)

@@ -7698,10 +7698,10 @@ public final class MainActivity extends Activity {
 
         /**
          * The share of the disc's radius OK takes in the middle. OK is the key
-         * pressed most, and at 0.44 it has half as much again as the third of
-         * the radius it had, while the arrows keep most of their band.
+         * pressed most, and at 0.40 it has a quarter as much again as the
+         * third of the radius it had, while the arrows keep most of their band.
          */
-        private static final float OK_SHARE = 0.44f;
+        private static final float OK_SHARE = 0.40f;
 
         /** The disc's radius: as far as the plus reaches on its shortest arm. */
         private float ringRadius() {
