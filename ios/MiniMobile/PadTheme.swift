@@ -1,13 +1,15 @@
 import SwiftUI
 
-/// How the pad looks: one of three faces, picked in 화면·패드 설정 or the
-/// game menu, the same three the Android app offers. Only colours and corner
+/// How the pad looks: one of four faces, picked in 화면·패드 설정 or the
+/// game menu, the same four the Android app offers. Only colours and corner
 /// shapes - where the keys are is the layout's business, so a player's own
-/// key positions survive a change of look.
+/// key positions survive a change of look. The fourth, 내 사진, is a picture
+/// of the player's own over 다크 글래스; see `PadPhotoStore`.
 enum PadTheme: String, CaseIterable, Identifiable {
     case gold
     case glass
     case silver
+    case photo
 
     var id: String { rawValue }
 
@@ -16,6 +18,7 @@ enum PadTheme: String, CaseIterable, Identifiable {
         case .gold: return "골드"
         case .glass: return "다크 글래스"
         case .silver: return "실버"
+        case .photo: return "내 사진"
         }
     }
 
@@ -24,6 +27,8 @@ enum PadTheme: String, CaseIterable, Identifiable {
         case .gold: return .gold
         case .glass: return .glass
         case .silver: return .silver
+        // 내 사진 draws over this face wherever its picture does not.
+        case .photo: return .glass
         }
     }
 }
@@ -90,6 +95,10 @@ struct PadPalette {
     var okBottom: Color
     var okEdge: Color?
     var okInk: Color
+    /// Labels shadowed so they read over a picture (내 사진).
+    var labelShadow = false
+    /// The disc's arrows and OK shadowed, for a picture on the disc alone.
+    var ringShadow = false
 
     var tray: LinearGradient {
         LinearGradient(colors: [trayTop, trayBottom], startPoint: .top, endPoint: .bottom)
@@ -248,6 +257,7 @@ struct RingFace: View {
                 Text(quarter.2)
                     .font(.system(size: radius * 0.2))
                     .foregroundColor(pressed.contains(quarter.0) ? palette.arrowPressed : palette.arrow)
+                    .labelShadow(palette.labelShadow || palette.ringShadow)
                     .offset(quarter.3)
             }
             ZStack {
@@ -261,9 +271,17 @@ struct RingFace: View {
                 Text("OK")
                     .font(.system(size: inner * 0.55, weight: .bold))
                     .foregroundColor(okHeld ? palette.pressedInk : palette.okInk)
+                    .labelShadow(palette.labelShadow)
             }
             .frame(width: inner * 2, height: inner * 2)
         }
         .frame(width: diameter, height: diameter)
+    }
+}
+
+extension View {
+    /// A soft shadow under a label, so it reads over a picture.
+    func labelShadow(_ on: Bool) -> some View {
+        shadow(color: on ? Color.black.opacity(0.75) : Color.clear, radius: on ? 2 : 0, x: 0, y: on ? 1 : 0)
     }
 }

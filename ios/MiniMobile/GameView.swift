@@ -169,6 +169,7 @@ private enum GameSheet: String, Identifiable {
     case quality
     case scale
     case settings
+    case photo
     case log
 
     var id: String { rawValue }
@@ -194,6 +195,18 @@ struct GameView: View {
     @AppStorage(SettingKey.layoutLandscape) private var layoutLandscape = ""
     @AppStorage(SettingKey.unfoldedSides) private var unfoldedSides = true
     @AppStorage(SettingKey.padTheme) private var padTheme = PadTheme.gold
+    @ObservedObject private var photoStore = PadPhotoStore.shared
+
+    /// 내 사진's picture and settings when that is the design and a picture
+    /// has been chosen; nil otherwise, and the pad draws its design alone.
+    private var photoLook: PadPhotoLook? {
+        PadPhotoLook(theme: padTheme, store: photoStore, landscape: sideways || arrangement == .sides)
+    }
+
+    /// The palette the pad is drawn in: the design's, or 내 사진's for the way it lays the picture on.
+    private var padPalette: PadPalette {
+        photoLook?.palette ?? padTheme.palette
+    }
 
     /// How big the screen is drawn, this title this way up (see `GameScale`).
     @State private var scale = ScreenScale.fit
@@ -318,6 +331,15 @@ struct GameView: View {
                 ScaleView(game: game, sideways: scaleSideways, area: screenArea, pixels: titlePixels, scale: $scale)
             case .settings:
                 GameSettingsView(game: game, padShape: shapeBinding, wide: wide, sideways: sideways, onEditPad: beginEditing)
+            case .photo:
+                NavigationView {
+                    PadPhotoSettingsView(landscape: sideways || arrangement == .sides)
+                        .toolbar {
+                            ToolbarItem(placement: .navigationBarTrailing) {
+                                Button("완료") { sheet = nil }
+                            }
+                        }
+                }
             case .log:
                 LogView()
             }
@@ -397,7 +419,7 @@ struct GameView: View {
                     // 펼친 화면: the screen in the middle, a key column in each
                     // outer band, all on the tray.
                     ZStack {
-                        RoundedRectangle(cornerRadius: 14, style: .continuous).fill(padTheme.palette.tray)
+                        PadTray(palette: padPalette, photo: photoLook)
                         screen(alignment: .center)
                             .padding(.horizontal, geometry.size.width * PadLayout.sidesBand)
                         pad
@@ -407,7 +429,7 @@ struct GameView: View {
                         screen(alignment: .center)
                         pad
                             .frame(height: geometry.size.height * min(max(padHeight, 0.25), 0.65))
-                            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(padTheme.palette.tray))
+                            .background(PadTray(palette: padPalette, photo: photoLook))
                     }
                 case .overlay:
                     ZStack {
@@ -551,11 +573,25 @@ struct GameView: View {
                     .foregroundColor(MenuPalette.muted)
                 ForEach(PadTheme.allCases) { theme in
                     MenuOption(label: theme.label, on: theme == padTheme) {
-                        LinearGradient(colors: [theme.palette.faceTop, theme.palette.faceBottom], startPoint: .top, endPoint: .bottom)
-                            .overlay(RoundedRectangle(cornerRadius: 7).stroke(theme.palette.edge ?? MenuPalette.raisedLine, lineWidth: 1))
+                        if theme == .photo, let picture = photoStore.image {
+                            Image(uiImage: picture).resizable().scaledToFill()
+                        } else {
+                            LinearGradient(colors: [theme.palette.faceTop, theme.palette.faceBottom], startPoint: .top, endPoint: .bottom)
+                                .overlay(RoundedRectangle(cornerRadius: 7).stroke(theme.palette.edge ?? MenuPalette.raisedLine, lineWidth: 1))
+                        }
                     } action: {
                         padTheme = theme
-                        menuWindow = .main
+                        // With no picture yet, 내 사진 goes straight to choosing one.
+                        if theme == .photo && photoStore.image == nil {
+                            open(.photo)
+                        } else {
+                            menuWindow = .main
+                        }
+                    }
+                }
+                if padTheme == .photo {
+                    MenuRow(symbol: "photo.on.rectangle", label: "내 사진 설정", value: photoStore.mode.label, opens: true) {
+                        open(.photo)
                     }
                 }
             }
@@ -787,8 +823,9 @@ struct GameView: View {
                 opacity: padMode == .below || arrangement == .landscape ? opacityBelow : opacityOverlay,
                 labelScale: labelScale,
                 haptics: haptics,
-                palette: padTheme.palette,
-                letters: arrangement != .numbers
+                palette: padPalette,
+                letters: arrangement != .numbers,
+                photo: photoLook
             ) { index, pressed in
                 emulator.key(index, pressed: pressed)
             }
@@ -1581,6 +1618,7 @@ private struct GameSettingsView: View {
     @AppStorage(SettingKey.layoutLandscape) private var layoutLandscape = ""
     @AppStorage(SettingKey.unfoldedSides) private var unfoldedSides = true
     @AppStorage(SettingKey.padTheme) private var padTheme = PadTheme.gold
+    @ObservedObject private var photoStore = PadPhotoStore.shared
 
     private var arrangement: PadArrangement {
         padArrangement(mode: padMode, shape: padShape, sides: wide && unfoldedSides, sideways: sideways)
@@ -1595,6 +1633,17 @@ private struct GameSettingsView: View {
             Form {
                 Section {
                     designs
+                    if padTheme == .photo {
+                        NavigationLink {
+                            PadPhotoSettingsView(landscape: arrangement == .sides || arrangement == .landscape)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("내 사진 설정")
+                                Text(photoStore.image == nil ? "사진을 골라 주세요" : photoStore.mode.label)
+                                    .font(.caption).foregroundColor(.secondary)
+                            }
+                        }
+                    }
                     VStack(alignment: .leading, spacing: 6) {
                         Text("위치").font(.caption).foregroundColor(.secondary)
                         Picker("위치", selection: $padMode) {
@@ -1686,21 +1735,23 @@ private struct GameSettingsView: View {
         }
     }
 
-    /// The three designs as small pictures of the pad itself; a tap applies one.
+    /// The designs as small pictures of the pad itself; a tap applies one.
     private var designs: some View {
         HStack(spacing: 8) {
             ForEach(PadTheme.allCases) { theme in
                 let chosen = theme == padTheme
+                let look = PadPhotoLook(theme: theme, store: photoStore, landscape: false)
+                let palette = look?.palette ?? theme.palette
                 Button {
                     padTheme = theme
                 } label: {
                     VStack(spacing: 6) {
                         GeometryReader { geometry in
                             PadFaces(layout: PadLayout.standard(.below), size: geometry.size, pressed: [],
-                                     labelScale: 0.7, palette: theme.palette, letters: false)
+                                     labelScale: 0.7, palette: palette, letters: false, photo: look)
                         }
                         .frame(height: 84)
-                        .background(theme.palette.tray)
+                        .background(PadTray(palette: palette, photo: look, cornerRadius: 0))
                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                         .overlay(
                             RoundedRectangle(cornerRadius: 10, style: .continuous)

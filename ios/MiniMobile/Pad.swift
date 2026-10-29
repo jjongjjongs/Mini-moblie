@@ -380,13 +380,20 @@ struct KeyFace: View {
     /// 숫자 크게 and the pictures in the settings leave them off.
     var letters = true
 
-    var body: some View {
+    /// How round a key's corners are in a design: pills, or its own radius.
+    static func cornerRadius(of key: PadKey, size: CGSize, palette: PadPalette) -> CGFloat {
         let kind = key.kind
         let function = kind == .soft || kind == .save || kind == .back
         let short = min(size.width, size.height)
-        let radius: CGFloat = function
+        return function
             ? (palette.pillFunctions ? short / 2 : min(palette.functionRadius, short / 2))
             : (kind == .number && palette.pillNumbers ? short / 2 : min(palette.radius, short / 2))
+    }
+
+    var body: some View {
+        let kind = key.kind
+        let function = kind == .soft || kind == .save || kind == .back
+        let radius = Self.cornerRadius(of: key, size: size, palette: palette)
         var hollow = function && palette.hollowFunctions
         var top = palette.faceTop
         var bottom = palette.faceBottom
@@ -444,6 +451,7 @@ struct KeyFace: View {
             }
             .foregroundColor(ink)
             .padding(.horizontal, 2)
+            .labelShadow(palette.labelShadow)
         } else {
             Text(key.label)
                 .font(.system(size: base, weight: .bold))
@@ -451,6 +459,8 @@ struct KeyFace: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.5)
                 .padding(.horizontal, 2)
+                // 저장 is a solid key whatever lies under the others.
+                .labelShadow(palette.labelShadow && key.kind != .save)
         }
     }
 }
@@ -466,11 +476,22 @@ struct PadFaces: View {
     var letters = true
     /// Keys drawn faded: the hidden ones, in the editor.
     var showHidden = false
+    /// 내 사진's picture, cut to the keys or the disc under their faces.
+    var photo: PadPhotoLook? = nil
 
     var body: some View {
         let ring = layout.ring(in: size)
         let keys = layout.keys.filter { (showHidden || !$0.hidden) && !(ring != nil && PadLayout.ringKeys.contains($0.index)) }
         return ZStack(alignment: .topLeading) {
+            if let photo {
+                PadPhotoCut(
+                    photo: photo, size: size, ring: ring,
+                    shapes: keys.filter { !$0.hidden && $0.kind != .save }.map { key in
+                        let rect = key.rect(in: size).insetBy(dx: 3, dy: 3)
+                        return (rect, KeyFace.cornerRadius(of: key, size: rect.size, palette: palette))
+                    }
+                )
+            }
             if let ring {
                 RingFace(pressed: pressed, diameter: ring.radius * 2, palette: palette)
                     .position(x: ring.center.x, y: ring.center.y)
@@ -497,6 +518,7 @@ struct PadView: View {
     let haptics: Bool
     let palette: PadPalette
     var letters = true
+    var photo: PadPhotoLook? = nil
     let onKey: (Int32, Bool) -> Void
 
     @State private var pressed = Set<Int32>()
@@ -507,7 +529,8 @@ struct PadView: View {
             ZStack(alignment: .topLeading) {
                 // Only drawn: the touch area below reads the touches, and a
                 // touch beside the keys goes through to the screen.
-                PadFaces(layout: layout, size: geometry.size, pressed: pressed, labelScale: labelScale, palette: palette, letters: letters)
+                PadFaces(layout: layout, size: geometry.size, pressed: pressed, labelScale: labelScale, palette: palette, letters: letters,
+                         photo: photo)
                     .allowsHitTesting(false)
                     .opacity(opacity)
 
