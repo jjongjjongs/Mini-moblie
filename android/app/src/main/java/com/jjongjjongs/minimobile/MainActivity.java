@@ -471,6 +471,11 @@ public final class MainActivity extends Activity {
     private boolean keypadHidden;
     /** The keypad's design, one for every title (see {@link KeypadTheme}). */
     private int keypadTheme = KeypadTheme.GOLD;
+    /**
+     * The picture and settings of the 내 사진 design, as shown - the kept ones,
+     * or the picker's while it is open. Read when that design is first wanted.
+     */
+    private KeypadPhoto keypadPhoto;
     /** Whether the running title uses the 숫자 크게 arrangement; kept per title. */
     private boolean keypadNumbers;
     /** The band behind the keys in landscape, coloured as the design's tray. */
@@ -4778,6 +4783,9 @@ public final class MainActivity extends Activity {
         markPlayed(game);
         keypadHidden = gameKeypadHidden(game);
         keypadTheme = KeypadTheme.saved(this);
+        if (keypadTheme == KeypadTheme.PHOTO && keypadPhoto == null) {
+            keypadPhoto = KeypadPhoto.load(this);
+        }
         keypadNumbers = getSharedPreferences("mini_keypad_numbers", MODE_PRIVATE).getBoolean(game.getName(), false);
         framePainted = false;
         // Whichever way the phone is being held: the player opens the way the
@@ -5300,6 +5308,32 @@ public final class MainActivity extends Activity {
     void saveKeypadTheme(int id) {
         KeypadTheme.save(this, id);
         showKeypadTheme(id);
+    }
+
+    /** The 내 사진 picture and settings as shown, read the first time they are wanted. */
+    KeypadPhoto keypadPhoto() {
+        if (keypadPhoto == null) {
+            keypadPhoto = KeypadPhoto.load(this);
+        }
+        return keypadPhoto;
+    }
+
+    /** Shows the keypad with these 내 사진 settings without keeping them, for the picker. */
+    void showKeypadPhoto(KeypadPhoto photo) {
+        keypadPhoto = photo;
+        if (keypad != null) {
+            keypad.invalidate();
+        }
+    }
+
+    void saveKeypadPhoto(KeypadPhoto photo) {
+        photo.save(this);
+        showKeypadPhoto(photo);
+    }
+
+    /** Whether the keypad is laid out landscape now, which keeps its own picture focus. */
+    boolean keypadLandscape() {
+        return keypad != null && keypad.landscape;
     }
 
     /** Whether the running title is set to the 숫자 크게 arrangement. */
@@ -7599,14 +7633,18 @@ public final class MainActivity extends Activity {
         @Override
         protected void onDraw(Canvas canvas) {
             KeypadTheme theme = theme();
+            KeypadPhoto photo = photo(theme);
 
             // The tray, except in landscape, where this view lies over the
             // screen and the band behind it is the tray.
-            if (!landscape) {
+            if (!landscape && (photo == null || photo.mode == KeypadPhoto.DISC)) {
                 shade.setShader(new android.graphics.LinearGradient(0, 0, 0, getHeight(), theme.trayTop, theme.trayBottom,
                         android.graphics.Shader.TileMode.CLAMP));
                 canvas.drawRect(0, 0, getWidth(), getHeight(), shade);
                 shade.setShader(null);
+            }
+            if (photo != null) {
+                drawPhotoTray(canvas, photo);
             }
 
             if (!preview) {
@@ -7616,7 +7654,11 @@ public final class MainActivity extends Activity {
 
             ring = ringActive();
             if (ring) {
-                drawRing(canvas, theme);
+                if (photo != null) {
+                    drawPhotoRing(canvas, photo);
+                } else {
+                    drawRing(canvas, theme);
+                }
             }
 
             for (int index = 0; index < keys.size(); index++) {
@@ -7627,7 +7669,11 @@ public final class MainActivity extends Activity {
                 if (!preview && ControlPatch.hidden(this, key)) {
                     continue;
                 }
-                drawKey(canvas, theme, key);
+                if (photo != null) {
+                    drawPhotoKey(canvas, theme, photo, key);
+                } else {
+                    drawKey(canvas, theme, key);
+                }
             }
 
             if (!preview) {
@@ -7635,20 +7681,28 @@ public final class MainActivity extends Activity {
             }
         }
 
-        private void drawKey(Canvas canvas, KeypadTheme theme, Key key) {
+        private boolean isFunction(Key key) {
+            return key.style == KEY_SOFT || key.style == KEY_SAVE || key.style == KEY_CLEAR;
+        }
+
+        /** How round a key's corners are in a design: pills, or its own corner radius. */
+        private float keyRadius(KeypadTheme theme, Key key) {
             RectF bounds = key.bounds;
-            boolean function = key.style == KEY_SOFT || key.style == KEY_SAVE || key.style == KEY_CLEAR;
             boolean number = key.jamo != null || key.latin != null || key.code == CODE_STAR || key.code == CODE_HASH;
             float shortSide = Math.min(bounds.width(), bounds.height());
-
-            float radius;
-            if (function) {
-                radius = theme.pillFunctions ? shortSide / 2f : Math.min(dp(theme.fnRadiusDp), shortSide / 2f);
-            } else if (number && theme.pillNumbers) {
-                radius = shortSide / 2f;
-            } else {
-                radius = Math.min(dp(theme.radiusDp), shortSide / 2f);
+            if (isFunction(key)) {
+                return theme.pillFunctions ? shortSide / 2f : Math.min(dp(theme.fnRadiusDp), shortSide / 2f);
             }
+            if (number && theme.pillNumbers) {
+                return shortSide / 2f;
+            }
+            return Math.min(dp(theme.radiusDp), shortSide / 2f);
+        }
+
+        private void drawKey(Canvas canvas, KeypadTheme theme, Key key) {
+            RectF bounds = key.bounds;
+            boolean function = isFunction(key);
+            float radius = keyRadius(theme, key);
 
             boolean hollow = function && theme.hollowFunctions;
             int top = theme.faceTop;
@@ -7693,6 +7747,13 @@ public final class MainActivity extends Activity {
             int inkColor = key.down ? theme.pressedInk
                     : !function ? theme.ink
                     : key.style == KEY_SAVE ? theme.saveInk : key.style == KEY_CLEAR ? theme.backInk : theme.fnInk;
+            drawLabel(canvas, key, inkColor, key.down ? theme.pressedInk : theme.subInk);
+        }
+
+        /** What is printed on a key: its label, and on a number the letters beside it. */
+        private void drawLabel(Canvas canvas, Key key, int inkColor, int subColor) {
+            RectF bounds = key.bounds;
+            boolean function = isFunction(key);
             ink.setColor(inkColor);
             float was = ink.getTextSize();
 
@@ -7725,7 +7786,7 @@ public final class MainActivity extends Activity {
             canvas.drawText(label, digitX, centerY + ink.getTextSize() * 0.36f, ink);
             ink.setTextSize(was);
 
-            subInk.setColor(key.down ? theme.pressedInk : theme.subInk);
+            subInk.setColor(subColor);
             float subWas = subInk.getTextSize();
             if (key.jamo != null && key.latin != null) {
                 fit(subInk, key.jamo, letterRoom);
@@ -7814,6 +7875,286 @@ public final class MainActivity extends Activity {
             ink.setColor(held ? theme.pressedInk : theme.okInk);
             ink.setTextSize(inner * 0.55f);
             canvas.drawText("OK", cx, cy + ink.getTextSize() * 0.36f, ink);
+            ink.setTextSize(was);
+        }
+
+        // 내 사진: KeypadPhoto has the picture and how it is laid on. The keys
+        // and the disc keep their places and shapes; only their faces change.
+
+        private static final int PHOTO_ACCENT = 0xff54c7d6;
+        private static final int PHOTO_ACCENT_INK = 0xff0c2a2f;
+        private static final int PHOTO_BACK_INK = 0xffff8a80;
+
+        /** The picture the keys are cut from, readied by {@link #drawPhotoTray} for what is drawn after it. */
+        private final Paint picture = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+        /** {@link KeypadPhoto#TINT}'s key face and accent, taken from the picture. */
+        private int tintFace;
+        private int tintAccent;
+
+        /** The 내 사진 settings to draw with, or null in a stock design or with no picture chosen yet. */
+        private KeypadPhoto photo(KeypadTheme theme) {
+            KeypadPhoto photo = keypadPhoto;
+            return theme.id == KeypadTheme.PHOTO && photo != null && photo.picture != null ? photo : null;
+        }
+
+        private float density() {
+            return getResources().getDisplayMetrics().density;
+        }
+
+        private void drawPhotoTray(Canvas canvas, KeypadPhoto photo) {
+            int width = getWidth();
+            int height = getHeight();
+            float density = density();
+            float blur = photo.blur * density;
+            float dim = photo.dim / 100f;
+            int focus = landscape ? photo.landscapeFocus : photo.portraitFocus;
+
+            android.graphics.Bitmap tray = null;
+            android.graphics.Bitmap cut = null;
+            int trayColor = 0;
+            switch (photo.mode) {
+                case KeypadPhoto.BACKDROP:
+                    tray = photo.layer(width, height, blur, dim, focus);
+                    // Frosted: the keys show the same picture, softer.
+                    cut = photo.layer(width, height, blur + 8 * density, dim, focus);
+                    break;
+                case KeypadPhoto.STENCIL:
+                    trayColor = 0xff0c0d10;
+                    cut = photo.layer(width, height, blur, dim * 0.8f, focus);
+                    break;
+                case KeypadPhoto.TINT: {
+                    tray = photo.layer(width, height, blur + 10 * density, Math.min(0.85f, dim + 0.25f), focus);
+                    int[] palette = photo.palette();
+                    int dark = KeypadPhoto.mix(Color.rgb(18, 19, 24), palette[0], 0.3f);
+                    tintFace = KeypadPhoto.mix(dark, palette[1], 0.18f);
+                    // A dark picture's most vivid colour would vanish on its
+                    // own dark keys; it is lifted until it reads.
+                    tintAccent = KeypadPhoto.luminance(palette[1]) < 0.3f ? KeypadPhoto.mix(palette[1], Color.WHITE, 0.45f) : palette[1];
+                    break;
+                }
+                default:
+                    break;
+            }
+            picture.setShader(cut == null ? null
+                    : new android.graphics.BitmapShader(cut, android.graphics.Shader.TileMode.CLAMP, android.graphics.Shader.TileMode.CLAMP));
+            if (tray == null && trayColor == 0) {
+                return;
+            }
+
+            int saved = canvas.save();
+            if (landscape) {
+                // This view lies over the game screen in landscape; the tray
+                // goes round it.
+                if (gameView == null || gameView.getParent() != getParent()) {
+                    canvas.restoreToCount(saved);
+                    return;
+                }
+                if (android.os.Build.VERSION.SDK_INT >= 26) {
+                    canvas.clipOutRect(gameView.getLeft(), gameView.getTop(), gameView.getRight(), gameView.getBottom());
+                } else {
+                    canvas.clipRect(gameView.getLeft(), gameView.getTop(), gameView.getRight(), gameView.getBottom(),
+                            android.graphics.Region.Op.DIFFERENCE);
+                }
+            }
+            if (tray != null) {
+                canvas.drawBitmap(tray, 0, 0, null);
+            } else {
+                canvas.drawColor(trayColor);
+            }
+            canvas.restoreToCount(saved);
+        }
+
+        private void fillShape(Canvas canvas, RectF bounds, float radius, int color) {
+            fill.setShader(null);
+            fill.setColor(color);
+            canvas.drawRoundRect(bounds, radius, radius, fill);
+        }
+
+        private void shadowed(boolean on) {
+            if (on) {
+                float density = density();
+                ink.setShadowLayer(2.5f * density, 0, density, 0xc0000000);
+                subInk.setShadowLayer(2f * density, 0, density, 0xc0000000);
+            } else {
+                ink.clearShadowLayer();
+                subInk.clearShadowLayer();
+            }
+        }
+
+        private void drawPhotoKey(Canvas canvas, KeypadTheme theme, KeypadPhoto photo, Key key) {
+            if (photo.mode == KeypadPhoto.DISC) {
+                drawKey(canvas, theme, key);
+                return;
+            }
+            RectF bounds = key.bounds;
+            float radius = keyRadius(theme, key);
+            float glass = photo.glass / 100f;
+            boolean save = key.style == KEY_SAVE;
+            int inkColor;
+            int subColor;
+            boolean shadow = false;
+
+            if (photo.mode == KeypadPhoto.TINT) {
+                if (save) {
+                    fillShape(canvas, bounds, radius, tintAccent);
+                    if (key.down) {
+                        fillShape(canvas, bounds, radius, 0x40000000);
+                    }
+                    inkColor = KeypadPhoto.luminance(tintAccent) > 0.55f ? 0xff13161c : Color.WHITE;
+                } else {
+                    fillShape(canvas, bounds, radius, KeypadPhoto.withAlpha(tintFace, 1f - glass * 0.55f));
+                    if (key.down) {
+                        fillShape(canvas, bounds, radius, KeypadPhoto.withAlpha(tintAccent, 0.55f));
+                    }
+                    edge.setColor(KeypadPhoto.withAlpha(tintAccent, 0.45f));
+                    canvas.drawRoundRect(bounds, radius, radius, edge);
+                    inkColor = key.style == KEY_CLEAR ? PHOTO_BACK_INK : 0xfff4f5f8;
+                }
+                subColor = KeypadPhoto.mix(tintAccent, Color.WHITE, 0.35f);
+            } else {
+                if (save) {
+                    // 저장 stays the one solid key, so it is found at a glance on any picture.
+                    fillShape(canvas, bounds, radius, key.down ? 0xff3a9aa7 : PHOTO_ACCENT);
+                    inkColor = PHOTO_ACCENT_INK;
+                } else {
+                    canvas.drawRoundRect(bounds, radius, radius, picture);
+                    if (photo.mode == KeypadPhoto.BACKDROP) {
+                        fillShape(canvas, bounds, radius, KeypadPhoto.withAlpha(Color.WHITE, 0.08f + glass * 0.26f));
+                    }
+                    if (key.down) {
+                        fillShape(canvas, bounds, radius, KeypadPhoto.withAlpha(PHOTO_ACCENT, 0.5f));
+                    }
+                    edge.setColor(KeypadPhoto.withAlpha(Color.WHITE, photo.mode == KeypadPhoto.BACKDROP ? 0.32f : 0.18f));
+                    canvas.drawRoundRect(bounds, radius, radius, edge);
+                    inkColor = key.style == KEY_CLEAR ? PHOTO_BACK_INK : Color.WHITE;
+                    shadow = true;
+                }
+                subColor = KeypadPhoto.withAlpha(Color.WHITE, 0.8f);
+            }
+
+            shadowed(shadow);
+            drawLabel(canvas, key, inkColor, subColor);
+            shadowed(false);
+        }
+
+        /** {@link #drawRing} for 내 사진: the same disc, quarters and OK, faced from the picture. */
+        private void drawPhotoRing(Canvas canvas, KeypadPhoto photo) {
+            RectF ok = keys.get(KEY_OK).bounds;
+            float cx = ok.centerX();
+            float cy = ok.centerY();
+            float radius = ringRadius();
+            float inner = radius * 0.36f;
+            float glass = photo.glass / 100f;
+            float density = density();
+            int mode = photo.mode;
+            boolean tint = mode == KeypadPhoto.TINT;
+            int accent = tint ? tintAccent : PHOTO_ACCENT;
+
+            switch (mode) {
+                case KeypadPhoto.BACKDROP:
+                    canvas.drawCircle(cx, cy, radius, picture);
+                    fill.setShader(null);
+                    fill.setColor(KeypadPhoto.withAlpha(Color.WHITE, 0.08f + glass * 0.26f));
+                    canvas.drawCircle(cx, cy, radius, fill);
+                    break;
+                case KeypadPhoto.STENCIL:
+                    canvas.drawCircle(cx, cy, radius, picture);
+                    break;
+                case KeypadPhoto.TINT:
+                    fill.setShader(null);
+                    fill.setColor(KeypadPhoto.withAlpha(KeypadPhoto.mix(tintFace, Color.BLACK, 0.1f), 1f - glass * 0.55f));
+                    canvas.drawCircle(cx, cy, radius, fill);
+                    break;
+                default: {
+                    // The picture fitted to the disc itself, not to the tray.
+                    int size = Math.max(1, Math.round(radius * 2));
+                    android.graphics.Bitmap face = photo.layer(size, size, photo.blur * density, photo.dim / 100f,
+                            landscape ? photo.landscapeFocus : photo.portraitFocus);
+                    if (face != null) {
+                        android.graphics.BitmapShader shader = new android.graphics.BitmapShader(face,
+                                android.graphics.Shader.TileMode.CLAMP, android.graphics.Shader.TileMode.CLAMP);
+                        android.graphics.Matrix at = new android.graphics.Matrix();
+                        at.setTranslate(cx - radius, cy - radius);
+                        shader.setLocalMatrix(at);
+                        fill.setShader(shader);
+                        canvas.drawCircle(cx, cy, radius, fill);
+                        fill.setShader(null);
+                    }
+                    break;
+                }
+            }
+
+            scratch.set(cx - radius, cy - radius, cx + radius, cy + radius);
+            int[] quarters = {KEY_RIGHT, KEY_DOWN, KEY_LEFT, KEY_UP};
+            fill.setShader(null);
+            fill.setColor(KeypadPhoto.withAlpha(accent, 0.45f));
+            for (int quarter = 0; quarter < 4; quarter++) {
+                if (keys.get(quarters[quarter]).down) {
+                    canvas.drawArc(scratch, -45 + quarter * 90, 90, true, fill);
+                }
+            }
+
+            float stroke = edge.getStrokeWidth();
+            int seam = mode == KeypadPhoto.STENCIL ? 0x8c000000
+                    : tint ? KeypadPhoto.withAlpha(accent, 0.25f) : KeypadPhoto.withAlpha(Color.WHITE, 0.24f);
+            edge.setColor(seam);
+            if (mode == KeypadPhoto.STENCIL) {
+                edge.setStrokeWidth(2.5f * density);
+            }
+            for (int index = 0; index < 4; index++) {
+                double angle = Math.toRadians(45 + index * 90);
+                float dx = (float) Math.cos(angle);
+                float dy = (float) Math.sin(angle);
+                canvas.drawLine(cx + dx * inner, cy + dy * inner, cx + dx * radius, cy + dy * radius, edge);
+            }
+            edge.setStrokeWidth(stroke);
+            edge.setColor(tint ? KeypadPhoto.withAlpha(accent, 0.45f)
+                    : KeypadPhoto.withAlpha(Color.WHITE, mode == KeypadPhoto.BACKDROP ? 0.32f : 0.18f));
+            canvas.drawCircle(cx, cy, radius, edge);
+
+            float was = ink.getTextSize();
+            shadowed(!tint);
+            ink.setTextSize(radius * 0.2f);
+            String[] arrows = {"▶", "▼", "◀", "▲"};
+            float reach = (inner + radius) / 2f;
+            float[][] at = {{reach, 0}, {0, reach}, {-reach, 0}, {0, -reach}};
+            for (int quarter = 0; quarter < 4; quarter++) {
+                boolean down = keys.get(quarters[quarter]).down;
+                ink.setColor(tint ? (down ? Color.WHITE : accent) : (down ? PHOTO_ACCENT : Color.WHITE));
+                canvas.drawText(arrows[quarter], cx + at[quarter][0], cy + at[quarter][1] + ink.getTextSize() * 0.36f, ink);
+            }
+            shadowed(false);
+
+            boolean held = keys.get(KEY_OK).down;
+            switch (mode) {
+                case KeypadPhoto.BACKDROP:
+                    canvas.drawCircle(cx, cy, inner, picture);
+                    fill.setColor(KeypadPhoto.withAlpha(Color.WHITE, 0.16f + glass * 0.26f));
+                    break;
+                case KeypadPhoto.STENCIL:
+                    fill.setColor(0x8c0c0d10);
+                    break;
+                case KeypadPhoto.TINT:
+                    fill.setColor(KeypadPhoto.withAlpha(KeypadPhoto.mix(tintFace, Color.WHITE, 0.06f), 1f - glass * 0.55f));
+                    break;
+                default:
+                    fill.setColor(0xd122252d);
+                    break;
+            }
+            canvas.drawCircle(cx, cy, inner, fill);
+            if (held) {
+                fill.setColor(KeypadPhoto.withAlpha(accent, 0.55f));
+                canvas.drawCircle(cx, cy, inner, fill);
+            }
+            edge.setColor(tint ? KeypadPhoto.withAlpha(accent, 0.45f)
+                    : KeypadPhoto.withAlpha(Color.WHITE, mode == KeypadPhoto.DISC ? 0.2f : mode == KeypadPhoto.STENCIL ? 0.25f : 0.32f));
+            canvas.drawCircle(cx, cy, inner, edge);
+
+            shadowed(mode == KeypadPhoto.BACKDROP || mode == KeypadPhoto.STENCIL);
+            ink.setColor(tint ? 0xfff4f5f8 : Color.WHITE);
+            ink.setTextSize(inner * 0.55f);
+            canvas.drawText("OK", cx, cy + ink.getTextSize() * 0.36f, ink);
+            shadowed(false);
             ink.setTextSize(was);
         }
 

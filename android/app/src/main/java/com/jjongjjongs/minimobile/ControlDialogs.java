@@ -34,6 +34,10 @@ import java.util.TreeMap;
 final class ControlDialogs {
     static final int EXPORT_LAYOUT = 6211;
     static final int IMPORT_LAYOUT = 6212;
+    static final int PICK_KEYPAD_PHOTO = 6213;
+
+    /** Takes the picture 내 사진's 사진 고르기 brought back, while its dialog is open. */
+    java.util.function.Consumer<android.graphics.Bitmap> keypadPhotoPicked;
     boolean captureArmed;
     AlertDialog captureDialog;
     String pendingBackup;
@@ -203,6 +207,10 @@ final class ControlDialogs {
     }
 
     boolean activityResult(int i, int i2, Intent intent) {
+        if (i == PICK_KEYPAD_PHOTO) {
+            keypadPhotoResult(i2, intent);
+            return true;
+        }
         if (i != EXPORT_LAYOUT && i != IMPORT_LAYOUT) {
             return false;
         }
@@ -571,9 +579,11 @@ final class ControlDialogs {
     }
 
     /**
-     * 키패드 디자인: the three designs as small pictures of the keypad itself.
+     * 키패드 디자인: the designs as small pictures of the keypad itself.
      * Picking one shows it on the real keypad behind the dialog at once;
      * 적용 keeps it for every title, and anything else puts the old one back.
+     * 내 사진 opens its own settings under the list - the picture, how it is
+     * laid on and how dark and soft it is drawn - each shown at once too.
      */
     void keypadDesign() {
         if (!(this.s.a instanceof MainActivity)) {
@@ -583,23 +593,34 @@ final class ControlDialogs {
         final int saved = player.keypadThemeId();
         final int[] chosen = {saved};
         final boolean[] applied = {false};
+        final KeypadPhoto keptPhoto = player.keypadPhoto();
+        final KeypadPhoto photo = keptPhoto.copy();
+        player.showKeypadPhoto(photo);
 
         LinearLayout column = column();
         column.addView(this.style.hint("모든 게임에 함께 적용됩니다. 키 위치·크기는 그대로예요."));
         final List<LinearLayout> rows = new ArrayList<>();
+        final List<View> pictures = new ArrayList<>();
+        final View[] photoPanel = new View[1];
         for (int id = 0; id < KeypadTheme.NAMES.length; id++) {
             final int theme = id;
-            LinearLayout row = optionRow(player.keypadPreview(theme, false), 132, 84,
-                    KeypadTheme.NAMES[theme], KeypadTheme.DESCRIPTIONS[theme]);
+            View picture = player.keypadPreview(theme, false);
+            pictures.add(picture);
+            LinearLayout row = optionRow(picture, 132, 84, KeypadTheme.NAMES[theme], KeypadTheme.DESCRIPTIONS[theme]);
             row.setOnClickListener(v -> {
                 chosen[0] = theme;
                 markOption(rows, theme);
                 player.showKeypadTheme(theme);
+                photoPanel[0].setVisibility(theme == KeypadTheme.PHOTO ? View.VISIBLE : View.GONE);
             });
             rows.add(row);
             column.addView(row);
         }
         markOption(rows, saved);
+
+        photoPanel[0] = keypadPhotoPanel(player, photo, pictures);
+        photoPanel[0].setVisibility(saved == KeypadTheme.PHOTO ? View.VISIBLE : View.GONE);
+        column.addView(photoPanel[0]);
 
         ScrollView scrollView = new ScrollView(this.style.context);
         scrollView.addView(column);
@@ -607,14 +628,202 @@ final class ControlDialogs {
                 .setPositiveButton("적용", (d, which) -> {
                     applied[0] = true;
                     player.saveKeypadTheme(chosen[0]);
-                    ControlPatch.toast(this.s.a, "키패드 디자인: " + KeypadTheme.NAMES[chosen[0]]);
+                    if (chosen[0] == KeypadTheme.PHOTO) {
+                        player.saveKeypadPhoto(photo);
+                        ControlPatch.toast(this.s.a, photo.picture == null
+                                ? "사진을 고르기 전까지는 다크 글래스로 보여요"
+                                : "키패드 디자인: 내 사진 · " + KeypadPhoto.MODES[photo.mode]);
+                    } else {
+                        KeypadPhoto.discardPending(this.s.a);
+                        player.showKeypadPhoto(keptPhoto);
+                        ControlPatch.toast(this.s.a, "키패드 디자인: " + KeypadTheme.NAMES[chosen[0]]);
+                    }
                 })
                 .setNegativeButton("취소", null).create();
         track(dialog, () -> {
+            this.keypadPhotoPicked = null;
             if (!applied[0]) {
+                KeypadPhoto.discardPending(this.s.a);
                 player.showKeypadTheme(saved);
+                player.showKeypadPhoto(keptPhoto);
             }
         });
+    }
+
+    /**
+     * 내 사진's settings, under the designs: 사진 고르기, the four ways of
+     * laying the picture on, and four sliders. Every change is drawn at once
+     * on the keypad behind the dialog and on the design pictures.
+     */
+    private View keypadPhotoPanel(final MainActivity player, final KeypadPhoto photo, final List<View> pictures) {
+        LinearLayout panel = new LinearLayout(this.style.context);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(this.style.dp(12), this.style.dp(12), this.style.dp(12), this.style.dp(8));
+        panel.setBackground(this.style.rounded(this.style.SOFT, this.style.GREEN, 1, 14));
+        LinearLayout.LayoutParams panelParams = new LinearLayout.LayoutParams(-1, -2);
+        panelParams.topMargin = this.style.dp(10);
+        panel.setLayoutParams(panelParams);
+
+        final Runnable redraw = () -> {
+            player.showKeypadPhoto(photo);
+            for (View picture : pictures) {
+                picture.invalidate();
+            }
+        };
+
+        LinearLayout pickRow = new LinearLayout(this.style.context);
+        pickRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        final TextView status = this.style.text(photo.picture == null ? "아직 고른 사진이 없어요" : "사진을 바꾸려면 다시 골라요", 12f, this.style.MUTED);
+        Button pick = this.style.button("사진 고르기", true);
+        pick.setOnClickListener(v -> {
+            this.keypadPhotoPicked = bitmap -> {
+                photo.setPicture(bitmap);
+                status.setText("새 사진은 적용을 누르면 저장돼요");
+                redraw.run();
+            };
+            pickKeypadPhoto();
+        });
+        pickRow.addView(pick, new LinearLayout.LayoutParams(-2, -2));
+        status.setPadding(this.style.dp(10), 0, 0, 0);
+        pickRow.addView(status, new LinearLayout.LayoutParams(0, -2, 1f));
+        panel.addView(pickRow);
+
+        panel.addView(panelLabel("입히는 방식"));
+        final List<TextView> modes = new ArrayList<>();
+        LinearLayout modeRow = null;
+        for (int mode = 0; mode < KeypadPhoto.MODES.length; mode++) {
+            if (mode % 2 == 0) {
+                modeRow = new LinearLayout(this.style.context);
+                panel.addView(modeRow, new LinearLayout.LayoutParams(-1, -2));
+            }
+            final int index = mode;
+            TextView chip = this.style.text(KeypadPhoto.MODES[mode], 12.5f, this.style.INK);
+            chip.setGravity(android.view.Gravity.CENTER);
+            chip.setPadding(this.style.dp(8), this.style.dp(9), this.style.dp(8), this.style.dp(9));
+            chip.setOnClickListener(v -> {
+                photo.mode = index;
+                markModes(modes, index);
+                redraw.run();
+            });
+            LinearLayout.LayoutParams chipParams = new LinearLayout.LayoutParams(0, -2, 1f);
+            chipParams.setMargins(index % 2 == 0 ? 0 : this.style.dp(3), this.style.dp(3), index % 2 == 0 ? this.style.dp(3) : 0, this.style.dp(3));
+            modeRow.addView(chip, chipParams);
+            modes.add(chip);
+        }
+        markModes(modes, photo.mode);
+
+        final boolean landscape = player.keypadLandscape();
+        panel.addView(photoSlider("어둡게", 80, photo.dim, v -> v + "%", v -> {
+            photo.dim = v;
+            redraw.run();
+        }));
+        panel.addView(photoSlider("흐림", 20, photo.blur, String::valueOf, v -> {
+            photo.blur = v;
+            redraw.run();
+        }));
+        panel.addView(photoSlider("키 비침 (유리 키·색 뽑기)", 100, photo.glass, v -> v + "%", v -> {
+            photo.glass = v;
+            redraw.run();
+        }));
+        panel.addView(photoSlider(landscape ? "사진 위치 (가로 화면)" : "사진 위치 (세로 화면)", 100,
+                landscape ? photo.landscapeFocus : photo.portraitFocus, v -> v <= 10 ? "위" : v >= 90 ? "아래" : v + "%", v -> {
+                    if (landscape) {
+                        photo.landscapeFocus = v;
+                    } else {
+                        photo.portraitFocus = v;
+                    }
+                    redraw.run();
+                }));
+        return panel;
+    }
+
+    private TextView panelLabel(String text) {
+        TextView label = this.style.text(text, 12f, this.style.MUTED);
+        label.setPadding(0, this.style.dp(12), 0, this.style.dp(4));
+        return label;
+    }
+
+    private void markModes(List<TextView> modes, int chosen) {
+        for (int index = 0; index < modes.size(); index++) {
+            boolean on = index == chosen;
+            modes.get(index).setBackground(this.style.rounded(on ? this.style.BG : this.style.SOFT, on ? this.style.GREEN : this.style.LINE, on ? 2 : 1, 10));
+            modes.get(index).setTextColor(on ? this.style.GREEN : this.style.INK);
+        }
+    }
+
+    /** A named slider from 0 to {@code max}, its value shown beside the name as it moves. */
+    private View photoSlider(String name, int max, int value, final java.util.function.IntFunction<String> shown,
+            final java.util.function.IntConsumer changed) {
+        LinearLayout box = new LinearLayout(this.style.context);
+        box.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout labelRow = new LinearLayout(this.style.context);
+        labelRow.setPadding(0, this.style.dp(10), 0, 0);
+        labelRow.addView(this.style.text(name, 12f, this.style.MUTED), new LinearLayout.LayoutParams(0, -2, 1f));
+        final TextView amount = this.style.text(shown.apply(value), 12.5f, this.style.DEEP);
+        amount.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        labelRow.addView(amount);
+        box.addView(labelRow);
+
+        android.widget.SeekBar bar = new android.widget.SeekBar(this.style.context);
+        bar.setMax(max);
+        bar.setProgress(value);
+        bar.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(android.widget.SeekBar seekBar, int progress, boolean fromUser) {
+                amount.setText(shown.apply(progress));
+                changed.accept(progress);
+            }
+
+            @Override
+            public void onStartTrackingTouch(android.widget.SeekBar seekBar) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(android.widget.SeekBar seekBar) {
+            }
+        });
+        box.addView(bar, new LinearLayout.LayoutParams(-1, -2));
+        return box;
+    }
+
+    /** Opens the system's picture picker for 내 사진; {@link #keypadPhotoResult} takes what it brings back. */
+    private void pickKeypadPhoto() {
+        try {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.setType("image/*");
+            this.s.fileBusy = true;
+            this.s.syncPause();
+            this.s.a.startActivityForResult(intent, PICK_KEYPAD_PHOTO);
+        } catch (Exception e) {
+            error("사진 선택기를 열지 못했습니다: " + e.getMessage());
+            this.s.fileBusy = false;
+            this.s.syncPause();
+        }
+    }
+
+    private void keypadPhotoResult(int result, Intent intent) {
+        this.s.fileBusy = false;
+        this.s.syncPause();
+        final java.util.function.Consumer<android.graphics.Bitmap> picked = this.keypadPhotoPicked;
+        if (result != -1 || intent == null || intent.getData() == null || picked == null) {
+            return;
+        }
+        final Uri uri = intent.getData();
+        final Activity activity = this.s.a;
+        new Thread(() -> {
+            try {
+                final android.graphics.Bitmap bitmap = KeypadPhoto.importPicture(activity, uri);
+                activity.runOnUiThread(() -> {
+                    // The dialog may have closed while the picture was read.
+                    if (this.keypadPhotoPicked == picked) {
+                        picked.accept(bitmap);
+                    }
+                });
+            } catch (Exception e) {
+                activity.runOnUiThread(() -> error("사진을 읽지 못했습니다: " + e.getMessage()));
+            }
+        }, "Mini keypad photo").start();
     }
 
     /**

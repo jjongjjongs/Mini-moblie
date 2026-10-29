@@ -4,8 +4,10 @@ import android.content.Context;
 import android.graphics.Color;
 
 /**
- * How the on-screen keypad looks: one of three faces the player picks from
- * 조작 설정 → 키패드 디자인, for every title at once.
+ * How the on-screen keypad looks: one of four faces the player picks from
+ * 조작 설정 → 키패드 디자인, for every title at once. The fourth, 내 사진,
+ * is a picture of the player's own laid over 다크 글래스; see
+ * {@link KeypadPhoto}.
  *
  * <p>Only colours and corner shapes live here. Where the keys are is the
  * layout's business and does not change with the face, so a player's own
@@ -15,12 +17,14 @@ final class KeypadTheme {
     static final int GOLD = 0;
     static final int GLASS = 1;
     static final int SILVER = 2;
+    static final int PHOTO = 3;
 
-    static final String[] NAMES = {"골드", "다크 글래스", "실버"};
+    static final String[] NAMES = {"골드", "다크 글래스", "실버", "내 사진"};
     static final String[] DESCRIPTIONS = {
             "금색 각인에 따뜻한 갈색 바탕. 지금까지의 키패드를 다듬은 모양",
             "앱 화면과 같은 검정·청록. 테두리 없는 둥근 키",
             "은색 폴더폰처럼 밝은 바탕, 알약 모양 숫자키",
+            "고른 사진을 키패드에 입혀요. 입히는 방식은 아래에서 골라요",
     };
 
     private static final String PREFS = "mini_keypad_style";
@@ -79,6 +83,8 @@ final class KeypadTheme {
         this.id = id;
         switch (id) {
             case GLASS:
+            case PHOTO:
+                // 내 사진 draws over this face wherever its picture does not.
                 trayTop = trayBottom = Color.rgb(17, 18, 22);
                 faceTop = faceBottom = Color.rgb(34, 37, 45);
                 edge = 0;
@@ -185,7 +191,7 @@ final class KeypadTheme {
         }
     }
 
-    private static final KeypadTheme[] ALL = {new KeypadTheme(GOLD), new KeypadTheme(GLASS), new KeypadTheme(SILVER)};
+    private static final KeypadTheme[] ALL = {new KeypadTheme(GOLD), new KeypadTheme(GLASS), new KeypadTheme(SILVER), new KeypadTheme(PHOTO)};
 
     static KeypadTheme of(int id) {
         return id >= 0 && id < ALL.length ? ALL[id] : ALL[GOLD];
