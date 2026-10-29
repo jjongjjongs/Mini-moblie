@@ -7591,6 +7591,13 @@ public final class MainActivity extends Activity {
             return true;
         }
 
+        /**
+         * The share of the disc's radius OK takes in the middle. Half: OK is
+         * the key pressed most, and at this size it is about twice what a
+         * third of the radius gave it, the arrows keeping a band as wide.
+         */
+        private static final float OK_SHARE = 0.5f;
+
         /** The disc's radius: as far as the plus reaches on its shortest arm. */
         private float ringRadius() {
             RectF ok = keys.get(KEY_OK).bounds;
@@ -7614,7 +7621,7 @@ public final class MainActivity extends Activity {
             if (distance > radius) {
                 return null;
             }
-            if (distance <= radius * 0.36f) {
+            if (distance <= radius * OK_SHARE) {
                 return keys.get(KEY_OK);
             }
             double angle = Math.toDegrees(Math.atan2(dy, dx));
@@ -7815,7 +7822,7 @@ public final class MainActivity extends Activity {
             float cx = ok.centerX();
             float cy = ok.centerY();
             float radius = ringRadius();
-            float inner = radius * 0.36f;
+            float inner = radius * OK_SHARE;
 
             if (theme.shadow != 0) {
                 fill.setShader(null);
@@ -7854,7 +7861,8 @@ public final class MainActivity extends Activity {
             float was = ink.getTextSize();
             ink.setTextSize(radius * 0.2f);
             String[] arrows = {"▶", "▼", "◀", "▲"};
-            float reach = radius * 0.7f;
+            // Each arrow in the middle of the band round OK.
+            float reach = (inner + radius) / 2f;
             float[][] at = {{reach, 0}, {0, reach}, {-reach, 0}, {0, -reach}};
             for (int quarter = 0; quarter < 4; quarter++) {
                 ink.setColor(keys.get(quarters[quarter]).down ? theme.arrowPressed : theme.arrow);
@@ -8043,7 +8051,7 @@ public final class MainActivity extends Activity {
             float cx = ok.centerX();
             float cy = ok.centerY();
             float radius = ringRadius();
-            float inner = radius * 0.36f;
+            float inner = radius * OK_SHARE;
             float glass = photo.glass / 100f;
             float density = density();
             int mode = photo.mode;

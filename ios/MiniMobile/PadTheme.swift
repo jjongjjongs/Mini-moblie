@@ -153,8 +153,10 @@ struct PadRing: Equatable {
     var center: CGPoint
     var radius: CGFloat
 
-    /// The share of the radius OK takes in the middle.
-    static let okShare: CGFloat = 0.36
+    /// The share of the radius OK takes in the middle. Half: OK is the key
+    /// pressed most, and at this size it is about twice what a third of the
+    /// radius gave it.
+    static let okShare: CGFloat = 0.5
 
     var bounds: CGRect {
         CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2)
@@ -209,11 +211,13 @@ struct RingFace: View {
     var body: some View {
         let radius = diameter / 2
         let inner = radius * PadRing.okShare
+        // Each arrow in the middle of the band round OK.
+        let reach = (inner + radius) / 2
         let quarters: [(Int32, Double, String, CGSize)] = [
-            (Int32(WIE_KEY_RIGHT), -45, "▶︎", CGSize(width: radius * 0.7, height: 0)),
-            (Int32(WIE_KEY_DOWN), 45, "▼", CGSize(width: 0, height: radius * 0.7)),
-            (Int32(WIE_KEY_LEFT), 135, "◀︎", CGSize(width: -radius * 0.7, height: 0)),
-            (Int32(WIE_KEY_UP), 225, "▲", CGSize(width: 0, height: -radius * 0.7)),
+            (Int32(WIE_KEY_RIGHT), -45, "▶︎", CGSize(width: reach, height: 0)),
+            (Int32(WIE_KEY_DOWN), 45, "▼", CGSize(width: 0, height: reach)),
+            (Int32(WIE_KEY_LEFT), 135, "◀︎", CGSize(width: -reach, height: 0)),
+            (Int32(WIE_KEY_UP), 225, "▲", CGSize(width: 0, height: -reach)),
         ]
         let okHeld = pressed.contains(Int32(WIE_KEY_OK))
 
