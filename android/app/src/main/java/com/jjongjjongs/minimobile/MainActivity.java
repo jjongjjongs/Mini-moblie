@@ -5045,6 +5045,14 @@ public final class MainActivity extends Activity {
         return landscapeMode || (unfolded && unfoldedSideLayout());
     }
 
+    /** Keeps 펼친 화면 for every game and lays the player out again at once. */
+    void saveUnfoldedSideLayout(boolean side) {
+        getSharedPreferences("mini_ui", MODE_PRIVATE).edit().putBoolean("unfolded_side_layout", side).apply();
+        if (playerVisible && gameView != null && keypad != null) {
+            buildPlayerContent();
+        }
+    }
+
     /** Whether the window is unfolded right now, for 조작 설정's row. */
     boolean unfoldedNow() {
         return isUnfolded(getResources().getConfiguration());
@@ -5074,13 +5082,10 @@ public final class MainActivity extends Activity {
             View card = optionCard(titles[i], tags[i], descriptions[i], layoutPicture(side), null);
             markOption(card, side == current);
             card.setOnClickListener(v -> {
-                getSharedPreferences("mini_ui", MODE_PRIVATE).edit().putBoolean("unfolded_side_layout", side).apply();
                 if (dialog[0] != null) {
                     dialog[0].dismiss();
                 }
-                if (playerVisible && gameView != null && keypad != null) {
-                    buildPlayerContent();
-                }
+                saveUnfoldedSideLayout(side);
             });
             LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -5135,118 +5140,374 @@ public final class MainActivity extends Activity {
     }
 
     /**
-     * What the rotate menu item says, which is what tapping it does. With the
-     * phone's auto-rotate on it locks or unlocks the current orientation
-     * (고정/해제); with auto-rotate off it forces the other orientation.
+     * The game menu the gear opens: a card over the game, held paused while
+     * it is up.
+     *
+     * <p>At its head the title and that it is paused. Under that the six
+     * settings changed most, as tiles that say what each is set to now - a
+     * tap toggles it, or opens its window - then the game speed, set right
+     * here on the ruler or by a tenth with − and +. The log and diagnostics,
+     * which most players never touch, sit small under 문제 해결, and the card
+     * ends on its two ways out: 게임 끝내기 and, biggest, 게임으로 돌아가기.
+     *
+     * <p>On its side the card sits over the game screen alone and is laid out
+     * tighter, so all of it shows at once.
      */
-    private String rotateMenuLabel() {
-        if (autoRotateOn()) {
-            return orientationPinned ? "화면 고정 해제" : "화면 고정";
+    private void showGameMenu() {
+        final File game = currentGame;
+        final boolean compact = landscapeMode;
+        final boolean collecting = NativeBridge.nativeLogCollecting() != 0;
+        final AlertDialog[] shown = new AlertDialog[1];
+        // A choice closes the menu and then acts, so a window it opens is the
+        // one on show and the game is paused under that window, not this one.
+        final java.util.function.Function<Runnable, Runnable> closing = action -> () -> {
+            if (shown[0] != null) {
+                shown[0].dismiss();
+            }
+            action.run();
+        };
+
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(16), dp(compact ? 12 : 18), dp(16), dp(compact ? 12 : 16));
+
+        body.addView(gameMenuHeader(game, compact, () -> {
+            if (shown[0] != null) {
+                shown[0].dismiss();
+            }
+        }));
+
+        List<GameMenuTile> tiles = new ArrayList<>();
+        tiles.add(new GameMenuTile(LineIcon.Kind.KEYPAD, "키패드", keypadHidden ? "숨김" : "보임", !keypadHidden,
+                closing.apply(this::toggleKeypad)));
+        tiles.add(new GameMenuTile(LineIcon.Kind.ROTATE, "화면 방향",
+                (landscapeMode ? "가로" : "세로") + (autoRotateOn() ? (orientationPinned ? " · 고정" : " · 자동") : ""), landscapeMode,
+                closing.apply(this::toggleOrientation)));
+        tiles.add(new GameMenuTile(LineIcon.Kind.TOUCH, "화면 터치", touchOn ? "켜짐" : "꺼짐", touchOn,
+                closing.apply(this::toggleTouch)));
+        tiles.add(new GameMenuTile(LineIcon.Kind.QUALITY, "화질", QUALITY_NAMES[screenQuality], screenQuality != 0,
+                closing.apply(this::showQualityDialog)));
+        if (game != null) {
+            ScreenScale scale = gameScale(game, sideLayout());
+            tiles.add(new GameMenuTile(LineIcon.Kind.SCALE, "화면 배율", scaleLabel(scale), scale.mode != SCALE_FIT,
+                    closing.apply(this::showScaleDialog)));
         }
-        return landscapeMode ? "세로 화면으로" : "가로 화면으로";
+        tiles.add(new GameMenuTile(LineIcon.Kind.CONTROLS, "조작 설정", "키패드·패드 ›", false,
+                closing.apply(() -> ControlPatch.showSettings(this))));
+        LinearLayout.LayoutParams gridParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        gridParams.topMargin = dp(compact ? 10 : 16);
+        body.addView(gameMenuGrid(tiles, compact), gridParams);
+
+        if (game != null) {
+            LinearLayout.LayoutParams speedParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            speedParams.topMargin = dp(compact ? 8 : 12);
+            body.addView(gameMenuSpeed(game, compact), speedParams);
+        }
+
+        // 문제 해결: small and last but one, out of the way of the rest.
+        if (!compact) {
+            TextView trouble = new TextView(this);
+            trouble.setText("문제 해결");
+            trouble.setTextSize(11.5f);
+            trouble.setTypeface(Typeface.DEFAULT_BOLD);
+            trouble.setTextColor(Color.rgb(107, 110, 120));
+            trouble.setPadding(dp(4), dp(14), 0, dp(4));
+            body.addView(trouble);
+        }
+        LinearLayout tools = new LinearLayout(this);
+        tools.setOrientation(LinearLayout.HORIZONTAL);
+        Runnable log = collecting ? this::stopLogCollectAndSave : this::startLogCollect;
+        String logLabel = compact ? (collecting ? "로그 저장" : "로그") : (collecting ? "로그 수집 종료·저장" : "로그 수집 시작");
+        tools.addView(gameMenuQuietButton(logLabel, closing.apply(log)), new LinearLayout.LayoutParams(0, dp(40), 1f));
+        LinearLayout.LayoutParams diagParams = new LinearLayout.LayoutParams(0, dp(40), 1f);
+        diagParams.leftMargin = dp(8);
+        tools.addView(gameMenuQuietButton(compact ? "진단" : "진단 설정", closing.apply(this::showDiagnosticsDialog)), diagParams);
+
+        LinearLayout ways = new LinearLayout(this);
+        ways.setOrientation(LinearLayout.HORIZONTAL);
+        TextView leave = gameMenuButton("게임 끝내기", Color.TRANSPARENT, Color.rgb(90, 47, 49), Color.rgb(255, 138, 128));
+        leave.setOnClickListener(v -> closing.apply(this::confirmLeaveGame).run());
+        TextView back = gameMenuButton("게임으로 돌아가기", COLOR_ACCENT, COLOR_ACCENT, Color.rgb(12, 42, 47));
+        back.setOnClickListener(v -> {
+            if (shown[0] != null) {
+                shown[0].dismiss();
+            }
+        });
+
+        if (compact) {
+            // On its side, one row: the tools, then the ways out.
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.addView(tools, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.2f));
+            LinearLayout.LayoutParams leaveParams = new LinearLayout.LayoutParams(0, dp(44), 1f);
+            leaveParams.leftMargin = dp(8);
+            row.addView(leave, leaveParams);
+            LinearLayout.LayoutParams backParams = new LinearLayout.LayoutParams(0, dp(44), 1.4f);
+            backParams.leftMargin = dp(8);
+            row.addView(back, backParams);
+            LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            rowParams.topMargin = dp(8);
+            body.addView(row, rowParams);
+        } else {
+            body.addView(tools);
+            ways.addView(leave, new LinearLayout.LayoutParams(0, dp(52), 1f));
+            LinearLayout.LayoutParams backParams = new LinearLayout.LayoutParams(0, dp(52), 1.6f);
+            backParams.leftMargin = dp(8);
+            ways.addView(back, backParams);
+            LinearLayout.LayoutParams waysParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            waysParams.topMargin = dp(16);
+            body.addView(ways, waysParams);
+        }
+
+        ControlStyle style = new ControlStyle(this, false);
+        AlertDialog dialog = new AlertDialog.Builder(style.context).setView(scrolling(body)).create();
+        shown[0] = dialog;
+        // Paused while the menu is up, as its head says; going back, or any
+        // choice, lets the game run again - a window a choice opens holds it
+        // itself where it needs to.
+        paused = true;
+        dialog.setOnDismissListener(d -> paused = false);
+        showMenuDialog(style, dialog);
+    }
+
+    /** The menu's head: the carrier's badge, the title and that it is paused, and a close button. */
+    private View gameMenuHeader(File game, boolean compact, Runnable close) {
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(android.view.Gravity.CENTER_VERTICAL);
+
+        if (game != null && !compact) {
+            String bucket = carrierBucket(game);
+            int[] colors = gameMenuBadge(bucket);
+            TextView badge = new TextView(this);
+            badge.setText(bucket.equals("ETC") ? "기타" : bucket);
+            badge.setTextSize(11f);
+            badge.setTypeface(Typeface.DEFAULT_BOLD);
+            badge.setTextColor(colors[0]);
+            badge.setGravity(android.view.Gravity.CENTER);
+            badge.setBackground(roundedRect(colors[1], colors[2], 1, 12));
+            LinearLayout.LayoutParams badgeParams = new LinearLayout.LayoutParams(dp(44), dp(44));
+            badgeParams.rightMargin = dp(12);
+            head.addView(badge, badgeParams);
+        }
+
+        LinearLayout words = new LinearLayout(this);
+        words.setOrientation(LinearLayout.VERTICAL);
+        TextView title = new TextView(this);
+        title.setText(running && currentGameName != null ? currentGameName : "게임");
+        title.setTextSize(compact ? 16f : 18f);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setTextColor(COLOR_TEXT);
+        title.setSingleLine(true);
+        title.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        words.addView(title);
+        TextView state = new TextView(this);
+        state.setText(compact ? "●  일시정지됨" : "●  일시정지됨 · 닫으면 이어서 진행돼요");
+        state.setTextSize(compact ? 11.5f : 12f);
+        state.setTextColor(COLOR_SUBTEXT);
+        android.text.SpannableString dot = new android.text.SpannableString(state.getText());
+        dot.setSpan(new android.text.style.ForegroundColorSpan(Color.rgb(230, 167, 0)), 0, 1, 0);
+        state.setText(dot);
+        words.addView(state);
+        head.addView(words, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        ImageView x = new ImageView(this);
+        x.setImageDrawable(new LineIcon(LineIcon.Kind.CLOSE, COLOR_TEXT, 2.2f));
+        int inset = dp(compact ? 11 : 13);
+        x.setPadding(inset, inset, inset, inset);
+        x.setBackground(roundedRect(COLOR_PANEL_2, COLOR_HAIR, 1, 22));
+        x.setContentDescription("메뉴 닫기");
+        x.setOnClickListener(v -> close.run());
+        head.addView(x, new LinearLayout.LayoutParams(dp(compact ? 40 : 44), dp(compact ? 40 : 44)));
+        return head;
+    }
+
+    /** The carrier badge's colours {ink, fill, edge} on the menu's dark card. */
+    private static int[] gameMenuBadge(String bucket) {
+        switch (bucket) {
+            case "SKT": return new int[]{Color.rgb(240, 138, 75), Color.rgb(58, 36, 24), Color.rgb(90, 53, 34)};
+            case "KTF": return new int[]{Color.rgb(106, 165, 255), Color.rgb(26, 40, 64), Color.rgb(42, 61, 94)};
+            case "LGT": return new int[]{Color.rgb(224, 122, 203), Color.rgb(54, 32, 58), Color.rgb(83, 50, 86)};
+            case "DRM": return new int[]{Color.rgb(224, 122, 122), Color.rgb(58, 31, 31), Color.rgb(90, 46, 46)};
+            default: return new int[]{Color.rgb(138, 156, 144), Color.rgb(31, 41, 36), Color.rgb(45, 58, 51)};
+        }
+    }
+
+    /** The tiles, three to a row; a short last row keeps its tiles their width. */
+    private View gameMenuGrid(List<GameMenuTile> tiles, boolean compact) {
+        LinearLayout grid = new LinearLayout(this);
+        grid.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout row = null;
+        for (int index = 0; index < tiles.size(); index++) {
+            if (index % 3 == 0) {
+                row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                if (index > 0) {
+                    rowParams.topMargin = dp(compact ? 6 : 8);
+                }
+                grid.addView(row, rowParams);
+            }
+            LinearLayout.LayoutParams tileParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f);
+            if (index % 3 > 0) {
+                tileParams.leftMargin = dp(compact ? 6 : 8);
+            }
+            row.addView(gameMenuTile(tiles.get(index), compact), tileParams);
+        }
+        int left = tiles.size() % 3;
+        for (int pad = left == 0 ? 0 : left; pad > 0 && pad < 3; pad++) {
+            LinearLayout.LayoutParams spacer = new LinearLayout.LayoutParams(0, 1, 1f);
+            spacer.leftMargin = dp(compact ? 6 : 8);
+            row.addView(new View(this), spacer);
+        }
+        return grid;
+    }
+
+    /** One tile: its icon, its name and what it is set to, lit in the accent while it is on. */
+    private View gameMenuTile(GameMenuTile tile, boolean compact) {
+        int ink = tile.on ? COLOR_ACCENT : COLOR_SUBTEXT;
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(compact ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
+        box.setGravity(compact ? android.view.Gravity.CENTER_VERTICAL : android.view.Gravity.START);
+        box.setPadding(dp(compact ? 10 : 12), dp(compact ? 8 : 12), dp(8), dp(compact ? 8 : 12));
+        box.setMinimumHeight(dp(compact ? 50 : 92));
+        box.setBackground(roundedRect(tile.on ? Color.rgb(29, 58, 63) : COLOR_PANEL_2, tile.on ? Color.rgb(47, 111, 120) : COLOR_HAIR, 1, compact ? 14 : 16));
+        box.setClickable(true);
+        box.setFocusable(true);
+        box.setContentDescription(tile.name + ", " + tile.value);
+        box.setOnClickListener(v -> tile.action.run());
+
+        ImageView icon = new ImageView(this);
+        icon.setImageDrawable(new LineIcon(tile.icon, ink, 1.8f));
+        int size = dp(compact ? 18 : 22);
+        LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(size, size);
+        if (compact) {
+            iconParams.rightMargin = dp(8);
+        } else {
+            iconParams.bottomMargin = dp(6);
+        }
+        box.addView(icon, iconParams);
+
+        LinearLayout words = new LinearLayout(this);
+        words.setOrientation(LinearLayout.VERTICAL);
+        TextView name = new TextView(this);
+        name.setText(tile.name);
+        name.setTextSize(compact ? 12f : 13f);
+        name.setTypeface(Typeface.DEFAULT_BOLD);
+        name.setTextColor(COLOR_TEXT);
+        name.setSingleLine(true);
+        words.addView(name);
+        TextView value = new TextView(this);
+        value.setText(tile.value);
+        value.setTextSize(compact ? 11f : 12f);
+        value.setTypeface(Typeface.DEFAULT_BOLD);
+        value.setTextColor(ink);
+        value.setSingleLine(true);
+        value.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        words.addView(value);
+        box.addView(words, new LinearLayout.LayoutParams(compact ? 0 : ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT, compact ? 1f : 0f));
+        return box;
     }
 
     /**
-     * The list the gear opens: the same actions the title bar carried, chosen
-     * from a menu and applied on tap. Log collect is one entry that reads start
-     * or stop from the current state; rotate names the orientation it switches
-     * to.
+     * 게임 속도, set in the menu itself: − and + by a tenth either side of the
+     * speed, over the ruler. It takes at once, for this title, as 게임 속도's
+     * window does on 적용.
      */
-    private void showGameMenu() {
-        boolean collecting = NativeBridge.nativeLogCollecting() != 0;
-        List<GameMenuRow> rows = new ArrayList<>();
-        rows.add(new GameMenuRow("⌨", keypadHidden ? "키패드 꺼내기" : "키패드 숨기기", null, this::toggleKeypad));
-        rows.add(new GameMenuRow("📋", collecting ? "로그 수집 종료·저장" : "로그 수집 시작", null, () -> {
-            if (collecting) {
-                stopLogCollectAndSave();
-            } else {
-                startLogCollect();
-            }
-        }));
-        rows.add(new GameMenuRow("🔧", "로그 진단 설정", null, this::showDiagnosticsDialog));
-        rows.add(new GameMenuRow("⚙", "조작 설정 (키패드·게임패드)", null, () -> ControlPatch.showSettings(this)));
-        rows.add(new GameMenuRow("🔄", rotateMenuLabel(), null, this::toggleOrientation));
-        // Only an unfolded screen has anything for this to change.
-        if (unfolded) {
-            rows.add(new GameMenuRow("📖", "펼친 화면", unfoldedSideLayout() ? "가로 배치" : "세로 배치", this::showUnfoldedLayoutDialog));
-        }
-        // The speed row says what the speed is, so the menu answers the
-        // question without opening anything.
-        String speedValue = currentGame != null ? formatSpeed(gameSpeed(currentGame)) : formatSpeed(1f);
-        rows.add(new GameMenuRow("⏩", "게임 속도", speedValue, this::showSpeedDialog));
-        rows.add(new GameMenuRow("🖼", "화질", QUALITY_NAMES[screenQuality], this::showQualityDialog));
-        if (currentGame != null) {
-            rows.add(new GameMenuRow("🔍", "화면 배율", scaleLabel(gameScale(currentGame, sideLayout())), this::showScaleDialog));
-        }
-        rows.add(new GameMenuRow("👆", "화면 터치", touchOn ? "켜짐" : "꺼짐", this::toggleTouch));
-        // A phone with its own keypad may have no touch screen to reach back
-        // through, so the way out is here too.
-        if (hasPhoneKeypad()) {
-            rows.add(new GameMenuRow("⏏", "게임 끝내기", null, this::confirmLeaveGame));
-        }
-        List<String> labels = new ArrayList<>();
-        for (GameMenuRow row : rows) {
-            labels.add(row.label);
-        }
+    private View gameMenuSpeed(File game, boolean compact) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(compact ? 10 : 14), dp(compact ? 6 : 12), dp(compact ? 10 : 14), dp(compact ? 8 : 12));
+        box.setBackground(roundedRect(COLOR_PANEL_2, COLOR_HAIR, 1, compact ? 14 : 16));
 
-        android.widget.ArrayAdapter<String> adapter =
-                new android.widget.ArrayAdapter<String>(this, 0, labels) {
-                    @Override
-                    public View getView(int position, View convertView, ViewGroup parent) {
-                        LinearLayout line = new LinearLayout(MainActivity.this);
-                        line.setOrientation(LinearLayout.HORIZONTAL);
-                        line.setGravity(android.view.Gravity.CENTER_VERTICAL);
-                        line.setPadding(dp(18), dp(12), dp(18), dp(12));
-                        TextView icon = new TextView(MainActivity.this);
-                        GameMenuRow row = rows.get(position);
-                        icon.setText(row.icon);
-                        icon.setTextSize(15f);
-                        icon.setGravity(android.view.Gravity.CENTER);
-                        GradientDrawable box = new GradientDrawable();
-                        box.setColor(COLOR_PANEL_2);
-                        box.setCornerRadius(dp(8));
-                        box.setStroke(Math.max(1, dp(1)), COLOR_HAIR);
-                        icon.setBackground(box);
-                        LinearLayout.LayoutParams ip = new LinearLayout.LayoutParams(dp(30), dp(30));
-                        ip.rightMargin = dp(12);
-                        line.addView(icon, ip);
-                        TextView label = new TextView(MainActivity.this);
-                        label.setText(getItem(position));
-                        label.setTextColor(COLOR_TEXT);
-                        label.setTextSize(15f);
-                        line.addView(label, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-                        String shown = row.value;
-                        if (shown != null) {
-                            TextView value = new TextView(MainActivity.this);
-                            value.setText(shown);
-                            boolean off = "꺼짐".equals(shown);
-                            value.setTextColor(off ? COLOR_SUBTEXT : COLOR_ACCENT);
-                            value.setTextSize(15f);
-                            value.setTypeface(Typeface.DEFAULT_BOLD);
-                            line.addView(value);
-                        }
-                        return line;
-                    }
-                };
-        ControlStyle style = new ControlStyle(this, false);
-        showMenuDialog(style, new AlertDialog.Builder(style.context)
-                .setTitle(running && currentGameName != null ? currentGameName : "게임")
-                .setAdapter(adapter, (dialog, which) -> rows.get(which).action.run())
-                .setNegativeButton("닫기", null)
-                .create());
+        final TextView big = new TextView(this);
+        big.setTextSize(compact ? 20f : 26f);
+        big.setTypeface(Typeface.DEFAULT_BOLD);
+        big.setTextColor(COLOR_ACCENT);
+        big.setGravity(android.view.Gravity.CENTER);
+        final SpeedRuler ruler = new SpeedRuler(this, COLOR_TEXT, COLOR_SUBTEXT, COLOR_ACCENT);
+
+        LinearLayout top = new LinearLayout(this);
+        top.setOrientation(LinearLayout.HORIZONTAL);
+        top.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        LinearLayout words = new LinearLayout(this);
+        words.setOrientation(LinearLayout.VERTICAL);
+        TextView name = new TextView(this);
+        name.setText("게임 속도");
+        name.setTextSize(compact ? 13f : 14f);
+        name.setTypeface(Typeface.DEFAULT_BOLD);
+        name.setTextColor(COLOR_TEXT);
+        words.addView(name);
+        TextView scope = new TextView(this);
+        scope.setText(compact ? "줄자를 밀거나 −/+ 로 0.1씩" : "이 게임에만 · 소리는 원래 속도");
+        scope.setTextSize(compact ? 10.5f : 11.5f);
+        scope.setTextColor(COLOR_SUBTEXT);
+        words.addView(scope);
+        top.addView(words, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        int step = dp(compact ? 34 : 40);
+        top.addView(speedStepButton("−", "0.1 느리게", () -> ruler.setTenths(ruler.tenths() - 1, true)), new LinearLayout.LayoutParams(step, step));
+        top.addView(big, new LinearLayout.LayoutParams(dp(compact ? 60 : 76), ViewGroup.LayoutParams.WRAP_CONTENT));
+        top.addView(speedStepButton("+", "0.1 빠르게", () -> ruler.setTenths(ruler.tenths() + 1, true)), new LinearLayout.LayoutParams(step, step));
+        box.addView(top);
+
+        LinearLayout.LayoutParams rulerParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                compact ? dp(44) : ViewGroup.LayoutParams.WRAP_CONTENT);
+        rulerParams.topMargin = dp(compact ? 4 : 8);
+        box.addView(ruler, rulerParams);
+
+        final float saved = gameSpeed(game);
+        big.setText(formatSpeed(saved));
+        // A speed saved off the tenths (a quarter, from before the ruler) is
+        // shown as it is until the ruler moves.
+        ruler.setTenths(Math.round(saved * 10f), false);
+        ruler.setListener(tenths -> {
+            float value = tenths / 10f;
+            big.setText(formatSpeed(value));
+            applyGameSpeed(game, value);
+        });
+        return box;
     }
 
-    /** A row of the game menu: its icon, label, the value on its right (or null) and what a tap does. */
-    private static final class GameMenuRow {
-        final String icon;
-        final String label;
+    /** One of 문제 해결's two small outlined buttons. */
+    private TextView gameMenuQuietButton(String label, Runnable action) {
+        TextView button = gameMenuButton(label, Color.TRANSPARENT, COLOR_HAIR, COLOR_SUBTEXT);
+        button.setTextSize(12.5f);
+        button.setTypeface(Typeface.DEFAULT);
+        button.setOnClickListener(v -> action.run());
+        return button;
+    }
+
+    /** A rounded button of the menu: its fill, edge and ink. */
+    private TextView gameMenuButton(String label, int fill, int edge, int ink) {
+        TextView button = new TextView(this);
+        button.setText(label);
+        button.setTextSize(14.5f);
+        button.setTypeface(Typeface.DEFAULT_BOLD);
+        button.setTextColor(ink);
+        button.setGravity(android.view.Gravity.CENTER);
+        button.setSingleLine(true);
+        button.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        button.setPadding(dp(8), 0, dp(8), 0);
+        button.setBackground(roundedRect(fill, edge, 1, 16));
+        button.setClickable(true);
+        button.setFocusable(true);
+        return button;
+    }
+
+    /** A tile of the game menu: its icon, name, what it is set to, whether that is on, and what a tap does. */
+    private static final class GameMenuTile {
+        final LineIcon.Kind icon;
+        final String name;
         final String value;
+        final boolean on;
         final Runnable action;
 
-        GameMenuRow(String icon, String label, String value, Runnable action) {
+        GameMenuTile(LineIcon.Kind icon, String name, String value, boolean on, Runnable action) {
             this.icon = icon;
-            this.label = label;
+            this.name = name;
             this.value = value;
+            this.on = on;
             this.action = action;
         }
     }
@@ -5449,6 +5710,16 @@ public final class MainActivity extends Activity {
         view.previewTheme = theme;
         view.numbers = numbers;
         return view;
+    }
+
+    /** Shows a picture from {@link #keypadPreview} in another design and arrangement. */
+    void showKeypadPreview(View preview, int theme, boolean numbers) {
+        if (preview instanceof KeypadView) {
+            KeypadView view = (KeypadView) preview;
+            view.previewTheme = theme;
+            view.numbers = numbers;
+            view.relayout();
+        }
     }
 
     /** Asks before leaving the game for the library, the game held still meanwhile. */

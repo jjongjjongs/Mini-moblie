@@ -456,66 +456,244 @@ final class ControlDialogs {
         }
     }
 
+    /**
+     * 조작 설정, opened in-game from the game menu, the game paused under it.
+     *
+     * <p>At its top a picture of the keypad as it is now, with what it is
+     * named under it. The keypad's look is chosen right here, each choice
+     * drawn on that picture and on the keypad at once: the design from its
+     * four small pictures (내 사진 then offers its own editor), the
+     * arrangement for this title, and 펼친 화면 for a Fold or tablet. The rest
+     * - moving and sizing keys, hiding them, 연사, saved layouts and the
+     * gamepad - is one list, each row saying what it is for.
+     */
     void mainMenu() {
-        MainActivity player = this.s.a instanceof MainActivity ? (MainActivity) this.s.a : null;
-        String design = player != null ? KeypadTheme.NAMES[player.keypadThemeId()] : "";
-        String arrangement = player != null && player.keypadNumbers() ? "숫자 크게" : "기본";
-        String unfolded = player == null || player.unfoldedSideLayout() ? "가로 배치" : "세로 배치";
-        final String[] strArr = {"키패드 디자인 · " + design, "키패드 배치 · " + arrangement, "펼친 화면 · " + unfolded, "키패드 위치·크기 편집", "버튼별 표시·숨김", "버튼별 연사 ON/OFF", "배치 저장·백업·초기화", "게임패드 버튼 배치"};
-        final String[] iconArr = {"🎨", "🎹", "📖", "✏", "👁", "⚡", "🗂", "🎮"};
+        final MainActivity player = this.s.a instanceof MainActivity ? (MainActivity) this.s.a : null;
         LinearLayout column = column();
-        column.addView(this.style.hint("설정을 변경하는 동안 게임을 일시정지합니다."));
         ScrollView scrollView = new ScrollView(this.style.context);
         scrollView.addView(column);
-        LinearLayout linearLayout = null;
         final AlertDialog create = builder("조작 설정").setView(scrollView).setPositiveButton("게임으로 돌아가기", (DialogInterface.OnClickListener) null).create();
-        for (int i = 0; i < strArr.length; i++) {
-            final int idx = i;
-            if (idx == 0) {
-                linearLayout = this.style.section(column, "키패드");
-            } else if (idx == 6) {
-                linearLayout = this.style.section(column, "배치");
-            } else if (idx == 7) {
-                linearLayout = this.style.section(column, "게임패드");
-            }
-            String detail = idx == 6 ? "저장 · 불러오기 · 파일 백업·복원 · 초기화" : idx == 2 ? "폴드를 펼쳤을 때·태블릿" : null;
-            this.style.menuRow(linearLayout, iconArr[idx], strArr[idx], detail, new View.OnClickListener() {
-                @Override // android.view.View.OnClickListener
-                public void onClick(View view) {
-                    switch (idx) {
-                        case 0:
-                            ControlDialogs.this.keypadDesign();
-                            break;
-                        case 1:
-                            ControlDialogs.this.keypadArrangement();
-                            break;
-                        case 2:
-                            if (player != null) {
-                                player.showUnfoldedLayoutDialog();
-                            }
-                            break;
-                        case 3:
-                            ControlDialogs.this.s.editor.start();
-                            break;
-                        case 4:
-                            ControlDialogs.this.visibility();
-                            break;
-                        case 5:
-                            ControlDialogs.this.rapidSettings();
-                            break;
-                        case 6:
-                            ControlDialogs.this.layoutStorageMenu();
-                            break;
-                        case 7:
-                            ControlDialogs.this.padMenu();
-                            break;
-                    }
-                    create.dismiss();
+        column.addView(this.style.hint("설정을 바꾸는 동안 게임은 일시정지돼요."));
+
+        if (player != null) {
+            final int[] theme = {player.keypadThemeId()};
+            final boolean[] numbers = {player.keypadNumbers()};
+
+            // The keypad as it is, and its name.
+            LinearLayout card = new LinearLayout(this.style.context);
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setBackground(this.style.rounded(this.style.BG, this.style.LINE, 1, 16));
+            card.setPadding(this.style.dp(1), this.style.dp(1), this.style.dp(1), this.style.dp(1));
+            final View preview = player.keypadPreview(theme[0], numbers[0]);
+            preview.setClipToOutline(true);
+            preview.setOutlineProvider(new android.view.ViewOutlineProvider() {
+                @Override
+                public void getOutline(View view, android.graphics.Outline outline) {
+                    outline.setRoundRect(0, 0, view.getWidth(), view.getHeight(), ControlDialogs.this.style.dp(15));
                 }
             });
+            card.addView(preview, new LinearLayout.LayoutParams(-1, this.style.dp(136)));
+            LinearLayout caption = new LinearLayout(this.style.context);
+            caption.setPadding(this.style.dp(12), this.style.dp(8), this.style.dp(12), this.style.dp(8));
+            caption.addView(this.style.text("지금 키패드", 12f, this.style.MUTED), new LinearLayout.LayoutParams(0, -2, 1f));
+            final TextView summary = this.style.text("", 12f, this.style.GREEN);
+            summary.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+            caption.addView(summary);
+            card.addView(caption);
+            column.addView(card);
+
+            // The design, from its four pictures; 내 사진 adds its editor.
+            column.addView(settingsLabel("키패드 모양 · 모든 게임"));
+            LinearLayout designs = new LinearLayout(this.style.context);
+            final List<View> swatches = new ArrayList<>();
+            final List<TextView> names = new ArrayList<>();
+            final Button photoEdit = this.style.button("내 사진 편집 · 사진, 위치, 입히는 방식  ›", false);
+            photoEdit.setOnClickListener(v -> {
+                create.dismiss();
+                keypadDesign();
+            });
+            final Runnable refresh = () -> {
+                summary.setText(KeypadTheme.NAMES[theme[0]] + " · " + (numbers[0] ? "숫자 크게" : "기본 배치"));
+                player.showKeypadPreview(preview, theme[0], numbers[0]);
+                for (int index = 0; index < swatches.size(); index++) {
+                    boolean on = index == theme[0];
+                    swatches.get(index).setForeground(this.style.rounded(0, on ? this.style.GREEN : this.style.LINE, on ? 2 : 1, 12));
+                    names.get(index).setTextColor(on ? this.style.GREEN : this.style.INK);
+                    names.get(index).setTypeface(on ? android.graphics.Typeface.DEFAULT_BOLD : android.graphics.Typeface.DEFAULT);
+                }
+                photoEdit.setVisibility(theme[0] == KeypadTheme.PHOTO ? View.VISIBLE : View.GONE);
+            };
+            for (int id = 0; id < KeypadTheme.NAMES.length; id++) {
+                final int which = id;
+                LinearLayout option = new LinearLayout(this.style.context);
+                option.setOrientation(LinearLayout.VERTICAL);
+                option.setGravity(android.view.Gravity.CENTER_HORIZONTAL);
+                option.setClickable(true);
+                option.setFocusable(true);
+                option.setContentDescription("키패드 디자인 " + KeypadTheme.NAMES[which]);
+                View picture = player.keypadPreview(which, false);
+                picture.setClipToOutline(true);
+                picture.setOutlineProvider(new android.view.ViewOutlineProvider() {
+                    @Override
+                    public void getOutline(View view, android.graphics.Outline outline) {
+                        outline.setRoundRect(0, 0, view.getWidth(), view.getHeight(), ControlDialogs.this.style.dp(12));
+                    }
+                });
+                option.addView(picture, new LinearLayout.LayoutParams(-1, this.style.dp(52)));
+                TextView name = this.style.text(KeypadTheme.NAMES[which], 12f, this.style.INK);
+                name.setGravity(android.view.Gravity.CENTER);
+                name.setSingleLine(true);
+                name.setPadding(0, this.style.dp(6), 0, 0);
+                option.addView(name, new LinearLayout.LayoutParams(-1, -2));
+                option.setOnClickListener(v -> {
+                    theme[0] = which;
+                    player.saveKeypadTheme(which);
+                    refresh.run();
+                });
+                LinearLayout.LayoutParams optionParams = new LinearLayout.LayoutParams(0, -2, 1f);
+                if (id > 0) {
+                    optionParams.leftMargin = this.style.dp(8);
+                }
+                designs.addView(option, optionParams);
+                swatches.add(picture);
+                names.add(name);
+            }
+            column.addView(designs);
+            LinearLayout.LayoutParams editParams = new LinearLayout.LayoutParams(-1, -2);
+            editParams.topMargin = this.style.dp(10);
+            column.addView(photoEdit, editParams);
+
+            // The arrangement, this title only; 펼친 화면, every title.
+            column.addView(segmentRow("배치", "이 게임에만", new String[]{"기본", "숫자 크게"}, numbers[0] ? 1 : 0, index -> {
+                numbers[0] = index == 1;
+                player.saveKeypadNumbers(numbers[0]);
+                refresh.run();
+            }));
+            column.addView(segmentRow("펼친 화면", "폴드·태블릿에서", new String[]{"가로 배치", "세로 배치"},
+                    player.unfoldedSideLayout() ? 0 : 1, index -> player.saveUnfoldedSideLayout(index == 0)));
+            refresh.run();
         }
+
+        // Everything else, one list.
+        column.addView(settingsLabel("키와 게임패드"));
+        LinearLayout list = new LinearLayout(this.style.context);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setBackground(this.style.rounded(this.style.BG, this.style.LINE, 1, 16));
+        String pad = connectedPadName();
+        Object[][] rows = {
+                {LineIcon.Kind.MOVE, "위치·크기 편집", "키를 끌어 옮기고 크기 바꾸기", (Runnable) () -> this.s.editor.start()},
+                {LineIcon.Kind.EYE, "버튼 표시·숨김", "안 쓰는 키 감추기", (Runnable) this::visibility},
+                {LineIcon.Kind.BOLT, "연사", "누르고 있으면 반복 입력", (Runnable) this::rapidSettings},
+                {LineIcon.Kind.SAVE, "배치 저장·백업", "저장 · 불러오기 · 파일 백업 · 초기화", (Runnable) this::layoutStorageMenu},
+                {LineIcon.Kind.GAMEPAD, "게임패드 버튼", "없음".equals(pad) ? "연결된 패드 없음" : "연결됨 · " + pad, (Runnable) this::padMenu},
+        };
+        for (int index = 0; index < rows.length; index++) {
+            final Runnable action = (Runnable) rows[index][3];
+            View row = settingsRow((LineIcon.Kind) rows[index][0], (String) rows[index][1], (String) rows[index][2], index < rows.length - 1);
+            row.setOnClickListener(v -> {
+                create.dismiss();
+                action.run();
+            });
+            list.addView(row);
+        }
+        column.addView(list);
         track(create);
     }
+
+    /** A small heading over a group of 조작 설정. */
+    private TextView settingsLabel(String text) {
+        TextView label = this.style.text(text, 12f, this.style.MUTED);
+        label.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        label.setPadding(this.style.dp(2), this.style.dp(16), 0, this.style.dp(8));
+        return label;
+    }
+
+    /**
+     * A named choice of two, as a segmented switch: the name and where it
+     * applies over the two halves, the chosen one raised in the accent.
+     */
+    private View segmentRow(String name, String scope, String[] labels, int chosen, final java.util.function.IntConsumer picked) {
+        LinearLayout box = new LinearLayout(this.style.context);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(0, this.style.dp(16), 0, 0);
+        LinearLayout head = new LinearLayout(this.style.context);
+        head.setPadding(this.style.dp(2), 0, this.style.dp(2), this.style.dp(8));
+        TextView title = this.style.text(name, 13.5f, this.style.INK);
+        title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        head.addView(title, new LinearLayout.LayoutParams(0, -2, 1f));
+        head.addView(this.style.text(scope, 11.5f, this.style.MUTED));
+        box.addView(head);
+
+        LinearLayout track = new LinearLayout(this.style.context);
+        track.setPadding(this.style.dp(4), this.style.dp(4), this.style.dp(4), this.style.dp(4));
+        track.setBackground(this.style.rounded(this.style.SOFT, this.style.SOFT, 0, 12));
+        final List<TextView> halves = new ArrayList<>();
+        for (int index = 0; index < labels.length; index++) {
+            final int which = index;
+            TextView half = this.style.text(labels[index], 13f, this.style.MUTED);
+            half.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+            half.setGravity(android.view.Gravity.CENTER);
+            half.setClickable(true);
+            half.setFocusable(true);
+            half.setOnClickListener(v -> {
+                markSegment(halves, which);
+                picked.accept(which);
+            });
+            LinearLayout.LayoutParams halfParams = new LinearLayout.LayoutParams(0, this.style.dp(40), 1f);
+            if (index > 0) {
+                halfParams.leftMargin = this.style.dp(4);
+            }
+            track.addView(half, halfParams);
+            halves.add(half);
+        }
+        markSegment(halves, chosen);
+        box.addView(track);
+        return box;
+    }
+
+    private void markSegment(List<TextView> halves, int chosen) {
+        for (int index = 0; index < halves.size(); index++) {
+            boolean on = index == chosen;
+            halves.get(index).setBackground(on ? this.style.rounded(this.style.BG, this.style.BG, 0, 9) : null);
+            halves.get(index).setTextColor(on ? this.style.GREEN : this.style.MUTED);
+        }
+    }
+
+    /** A row of 조작 설정's list: its icon, its name over what it is for, and a chevron. */
+    private View settingsRow(LineIcon.Kind icon, String name, String detail, boolean ruled) {
+        LinearLayout row = new LinearLayout(this.style.context);
+        row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        row.setPadding(this.style.dp(14), this.style.dp(9), this.style.dp(14), this.style.dp(9));
+        row.setMinimumHeight(this.style.dp(54));
+        row.setClickable(true);
+        row.setFocusable(true);
+        if (ruled) {
+            android.graphics.drawable.GradientDrawable rule = new android.graphics.drawable.GradientDrawable();
+            rule.setColor(this.style.SOFT);
+            android.graphics.drawable.InsetDrawable line = new android.graphics.drawable.InsetDrawable(rule, 0, 0, 0, 0);
+            android.graphics.drawable.LayerDrawable under = new android.graphics.drawable.LayerDrawable(new android.graphics.drawable.Drawable[]{line});
+            under.setLayerInset(0, this.style.dp(48), 0, 0, 0);
+            under.setLayerGravity(0, android.view.Gravity.BOTTOM);
+            under.setLayerHeight(0, Math.max(1, this.style.dp(1)));
+            row.setBackground(under);
+        }
+        android.widget.ImageView glyph = new android.widget.ImageView(this.style.context);
+        glyph.setImageDrawable(new LineIcon(icon, this.style.MUTED, 1.8f));
+        LinearLayout.LayoutParams glyphParams = new LinearLayout.LayoutParams(this.style.dp(20), this.style.dp(20));
+        glyphParams.rightMargin = this.style.dp(14);
+        row.addView(glyph, glyphParams);
+        LinearLayout words = new LinearLayout(this.style.context);
+        words.setOrientation(LinearLayout.VERTICAL);
+        words.addView(this.style.text(name, 14f, this.style.INK));
+        TextView under = this.style.text(detail, 11.5f, this.style.MUTED);
+        under.setSingleLine(true);
+        under.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        words.addView(under);
+        row.addView(words, new LinearLayout.LayoutParams(0, -2, 1f));
+        row.addView(this.style.text("›", 18f, this.style.MUTED));
+        return row;
+    }
+
 
     /**
      * 배치 저장·백업·초기화: the layout saved on this device and loaded or
