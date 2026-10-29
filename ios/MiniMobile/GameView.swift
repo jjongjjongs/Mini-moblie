@@ -293,8 +293,9 @@ struct GameView: View {
                 ExitConfirm(onYes: closeGame, onNo: { confirmingExit = false })
             }
         }
-        .onChange(of: menuWindow) { _ in updateCapture() }
-        .onChange(of: confirmingExit) { _ in updateCapture() }
+        .onChange(of: menuWindow) { _ in overGameChanged() }
+        .onChange(of: sheet) { _ in updatePause() }
+        .onChange(of: confirmingExit) { _ in overGameChanged() }
         .statusBar(hidden: true)
         .onAppear {
             speed = GameSpeed.get(game)
@@ -520,59 +521,49 @@ struct GameView: View {
         }
     }
 
+    /// The game menu: the APK's card, laid out the same way (see
+    /// `GameMenuCard`). The design, shape, 펼친 화면 and the pad editor live
+    /// in 조작 설정 now, as they do there.
     private var mainMenu: some View {
-        MenuDialog(title: game.title, onDismiss: { menuWindow = nil }) {
-            VStack(spacing: 0) {
-                MenuRow(symbol: padHidden ? "keyboard" : "keyboard.chevron.compact.down",
-                        label: padHidden ? "키패드 꺼내기" : "키패드 숨기기") {
-                    menuWindow = nil
-                    togglePad()
-                }
-                MenuRow(symbol: "speedometer", label: "게임 속도", value: GameSpeed.format(speed)) { open(.speed) }
-                MenuRow(symbol: "photo", label: "화질", value: quality.label) { open(.quality) }
-                MenuRow(symbol: "arrow.up.left.and.arrow.down.right", label: "화면 배율", value: scale.label) { open(.scale) }
-                MenuRow(symbol: "rotate.right", label: "화면 방향", value: orientation.label, opens: true) {
-                    menuWindow = .orientation
-                }
-                MenuRow(symbol: "paintpalette", label: "키패드 디자인", value: padTheme.label, opens: true) {
-                    menuWindow = .design
-                }
-                MenuRow(symbol: "circle.grid.3x3", label: "키패드 모양", note: "· 이 게임만", value: padShape.label, opens: true) {
-                    menuWindow = .shape
-                }
-                // Only a wide window has anything for this to change.
-                if wide {
-                    MenuRow(symbol: "rectangle.split.3x1", label: "펼친 화면", value: unfoldedSides ? "가로 배치" : "세로 배치", opens: true) {
-                        menuWindow = .unfolded
-                    }
-                }
-                MenuRow(symbol: "slider.horizontal.3", label: "화면·패드 설정", opens: true) { open(.settings) }
-                if !padHidden {
-                    MenuRow(symbol: "square.grid.3x3", label: "가상 패드 편집") {
-                        menuWindow = nil
-                        beginEditing()
-                    }
-                }
-                MenuRow(symbol: touch ? "hand.tap.fill" : "hand.tap", label: "화면 터치",
-                        value: touch ? "켜짐" : "꺼짐", valueOff: !touch) {
-                    menuWindow = nil
-                    toggleTouch()
-                }
-                MenuRow(symbol: "doc.text.magnifyingglass", label: "로그 보기") { open(.log) }
-                // The bar with 닫기 is put away with the pad, and on its side.
-                if padHidden || sideways {
-                    MenuRow(symbol: "xmark", label: "게임 닫기") {
-                        menuWindow = nil
-                        confirmingExit = true
-                    }
-                }
-            }
-            .padding(.bottom, 6)
-        } footer: {
-            Spacer()
-            Button("닫기") { menuWindow = nil }
-                .buttonStyle(MenuButtonStyle(kind: .secondary))
-        }
+        GameMenuCard(
+            title: game.title,
+            compact: sideways,
+            tiles: menuTiles,
+            speed: speed,
+            onSpeed: { value in
+                speed = value
+                GameSpeed.set(value, for: game)
+                wie_set_speed(value)
+            },
+            onLog: { open(.log) },
+            onLeave: {
+                menuWindow = nil
+                confirmingExit = true
+            },
+            onClose: { menuWindow = nil }
+        )
+    }
+
+    /// The menu's tiles: each says what it is set to, and lights while it is on.
+    private var menuTiles: [GameMenuTile] {
+        [
+            GameMenuTile(symbol: "keyboard", name: "키패드", value: padHidden ? "숨김" : "보임", on: !padHidden) {
+                menuWindow = nil
+                togglePad()
+            },
+            GameMenuTile(symbol: "rotate.right", name: "화면 방향", value: orientation.label, on: orientation != .auto) {
+                menuWindow = .orientation
+            },
+            GameMenuTile(symbol: touch ? "hand.tap.fill" : "hand.tap", name: "화면 터치", value: touch ? "켜짐" : "꺼짐", on: touch) {
+                menuWindow = nil
+                toggleTouch()
+            },
+            GameMenuTile(symbol: "photo", name: "화질", value: quality.label, on: quality != .smooth) { open(.quality) },
+            GameMenuTile(symbol: "arrow.up.left.and.arrow.down.right", name: "화면 배율", value: scale.label, on: scale != .fit) {
+                open(.scale)
+            },
+            GameMenuTile(symbol: "slider.horizontal.3", name: "조작 설정", value: "키패드·패드 ›", on: false) { open(.settings) },
+        ]
     }
 
     /// The pad's three designs; a choice applies at once, to every title, and
@@ -717,6 +708,17 @@ struct GameView: View {
         // after it has.
         OrientationControl.shared.leaveGame()
         dismiss()
+    }
+
+    /// The game held still while the menu, 종료 or 조작 설정 is up, as the
+    /// APK holds it, and let run again once they are gone.
+    private func overGameChanged() {
+        updateCapture()
+        updatePause()
+    }
+
+    private func updatePause() {
+        emulator.setPaused(menuWindow != nil || confirmingExit || sheet == .settings)
     }
 
     /// While a menu window or 종료 is up a gamepad answers it rather than the
@@ -1070,7 +1072,7 @@ private struct SpeedChipStyle: ButtonStyle {
 /// The speed ruler: a tick for every tenth from 0.1x to 4x, slid sideways
 /// under a fixed needle. A finger drags it, a flick throws it on, a tap brings
 /// the tick tapped under the needle, and it always comes to rest on a tick.
-private struct SpeedRuler: View {
+struct SpeedRuler: View {
     @Binding var tenths: Int
     /// The ruler's ends, in its ticks: tenths of a speed, or percents for
     /// 화면 배율.
@@ -1643,97 +1645,181 @@ private struct GameSettingsView: View {
     var body: some View {
         NavigationView {
             Form {
-                Section {
-                    designs
-                    if padTheme == .photo {
-                        NavigationLink {
-                            PadPhotoSettingsView(landscape: arrangement == .sides || arrangement == .landscape)
-                        } label: {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("내 사진 설정")
-                                Text(photoStore.hasPicture(arrangement == .sides || arrangement == .landscape) ? "사진·방식 바꾸기" : "사진을 골라 주세요")
-                                    .font(.caption).foregroundColor(.secondary)
-                            }
-                        }
-                    }
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("위치").font(.caption).foregroundColor(.secondary)
-                        Picker("위치", selection: $padMode) {
-                            ForEach(PadMode.allCases) { Text($0.label).tag($0) }
-                        }
-                        .pickerStyle(.segmented)
-                    }
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("모양 · 이 게임(\(game.title))에만").font(.caption).foregroundColor(.secondary).lineLimit(1)
-                        Picker("모양", selection: $padShape) {
-                            ForEach(PadShape.allCases) { Text($0.label).tag($0) }
-                        }
-                        .pickerStyle(.segmented)
-                        .disabled(padMode == .overlay)
-                    }
-                    if padMode == .below {
-                        slider("패드 높이", value: $padHeight, range: 0.25...0.65)
-                        slider("불투명도", value: $opacityBelow, range: 0.2...1)
-                    } else {
-                        slider("불투명도", value: $opacityOverlay, range: 0.1...1)
-                    }
-                    slider("글자 크기", value: $labelScale, range: 0.6...1.6)
-                    Toggle("누를 때 진동", isOn: $haptics)
-                } header: {
-                    Text("가상 패드")
-                } footer: {
-                    Text("디자인은 모든 게임에 함께 적용됩니다. ‘숫자 크게’는 리듬게임처럼 숫자키를 많이 쓰는 게임용으로, 화면 아래 위치에서 쓰고 게임마다 따로 기억됩니다.")
-                }
+                previewSection
+                designSection
+                arrangementSection
+                placeSection
+                keysSection
+            }
+            .navigationTitle("조작 설정")
+            .navigationBarTitleDisplayMode(.inline)
+            .safeAreaInset(edge: .bottom) { backButton }
+        }
+        .accentColor(MenuPalette.accent)
+        .environment(\.colorScheme, .dark)
+    }
 
-                Section {
-                    Picker("펼친 화면", selection: $unfoldedSides) {
-                        Text("가로 배치").tag(true)
-                        Text("세로 배치").tag(false)
-                    }
-                    .pickerStyle(.segmented)
-                } header: {
-                    Text("펼친 화면")
-                } footer: {
-                    Text("아이패드처럼 넓은 화면에서 가로 배치는 게임 화면을 가운데, 키를 양옆에 둡니다. 세로 배치는 화면 아래에 키패드를 둡니다. 패드 위치가 ‘화면 아래’일 때 쓰이고, 모든 게임에 적용됩니다.")
-                }
+    /// The arrangement the preview shows: the pad under the screen, or 숫자 크게.
+    private var previewArrangement: PadArrangement {
+        padShape == .numbers && padMode == .below ? .numbers : .below
+    }
 
-                Section {
-                    Button("키 위치·크기 편집") {
-                        dismiss()
-                        onEditPad()
-                    }
-                    NavigationLink {
-                        PadLayoutStorageView(arrangementLabel: arrangementLabel, resetCurrent: resetLayout)
-                    } label: {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("배치 저장·백업·초기화")
-                            Text("저장 · 불러오기 · 파일 백업·복원 · 초기화").font(.caption).foregroundColor(.secondary)
-                        }
-                    }
-                } header: {
-                    Text("배치")
-                } footer: {
-                    Text("편집은 지금 배치(\(arrangementLabel))에만 적용됩니다. 배치마다 따로 저장됩니다.")
-                }
+    /// The pad as it is, and what it is called.
+    private var previewSection: some View {
+        Section {
+            GeometryReader { geometry in
+                previewPad(geometry.size)
+            }
+            .frame(height: 140)
+            .listRowInsets(EdgeInsets(top: 8, leading: 8, bottom: 8, trailing: 8))
+            HStack {
+                Text("지금 키패드").foregroundColor(.secondary)
+                Spacer()
+                Text("\(padTheme.label) · \(padShape == .numbers ? "숫자 크게" : "기본 배치")")
+                    .fontWeight(.bold)
+                    .foregroundColor(MenuPalette.accent)
+            }
+            .font(.footnote)
+        } footer: {
+            Text("설정을 바꾸는 동안 게임은 일시정지돼요.")
+        }
+    }
 
-                Section {
-                    NavigationLink("게임패드 버튼 배치") {
-                        PadMappingView()
-                    }
-                } header: {
-                    Text("게임패드")
-                } footer: {
-                    Text("블루투스나 USB로 연결한 게임패드의 버튼마다 누를 폰 키를 정합니다. 모든 게임에 함께 적용됩니다.")
+    private func previewPad(_ size: CGSize) -> some View {
+        let layout = PadLayout.standard(previewArrangement)
+        let look = PadPhotoLook(theme: padTheme, store: photoStore, landscape: false)
+        let palette = look?.palette(layout: layout) ?? padTheme.palette
+        return ZStack {
+            PadTray(palette: palette, photo: look, layout: layout, cornerRadius: 12)
+            PadFaces(layout: layout, size: size, pressed: [], labelScale: 0.8, palette: palette,
+                     letters: previewArrangement != .numbers, photo: look)
+        }
+    }
+
+    /// The design from its four pictures; 내 사진 adds its own settings.
+    private var designSection: some View {
+        Section {
+            designs
+            if padTheme == .photo {
+                NavigationLink {
+                    PadPhotoSettingsView(landscape: arrangement == .sides || arrangement == .landscape)
+                } label: {
+                    settingsRow(symbol: "photo.on.rectangle", name: "내 사진 편집",
+                                detail: photoStore.hasPicture(arrangement == .sides || arrangement == .landscape)
+                                    ? "사진, 위치, 입히는 방식" : "사진을 골라 주세요")
                 }
             }
-            .navigationTitle("화면·패드 설정")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("완료") { dismiss() }
+        } header: {
+            Text("키패드 모양 · 모든 게임")
+        }
+    }
+
+    /// The arrangement for this title, and 펼친 화면 for every title.
+    private var arrangementSection: some View {
+        Section {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("배치").fontWeight(.bold)
+                    Spacer()
+                    Text("이 게임에만").font(.caption).foregroundColor(.secondary)
                 }
+                Picker("배치", selection: $padShape) {
+                    ForEach(PadShape.allCases) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .disabled(padMode == .overlay)
+            }
+            .padding(.vertical, 4)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("펼친 화면").fontWeight(.bold)
+                    Spacer()
+                    Text("아이패드·넓은 화면에서").font(.caption).foregroundColor(.secondary)
+                }
+                Picker("펼친 화면", selection: $unfoldedSides) {
+                    Text("가로 배치").tag(true)
+                    Text("세로 배치").tag(false)
+                }
+                .pickerStyle(.segmented)
+            }
+            .padding(.vertical, 4)
+        }
+    }
+
+    /// Where the pad sits and how it is drawn.
+    private var placeSection: some View {
+        Section {
+            Picker("위치", selection: $padMode) {
+                ForEach(PadMode.allCases) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            if padMode == .below {
+                slider("패드 높이", value: $padHeight, range: 0.25...0.65)
+                slider("불투명도", value: $opacityBelow, range: 0.2...1)
+            } else {
+                slider("불투명도", value: $opacityOverlay, range: 0.1...1)
+            }
+            slider("글자 크기", value: $labelScale, range: 0.6...1.6)
+            Toggle("누를 때 진동", isOn: $haptics)
+        } header: {
+            Text("패드 위치와 크기")
+        }
+    }
+
+    /// Everything else, one list, each row saying what it is for.
+    private var keysSection: some View {
+        Section {
+            Button {
+                dismiss()
+                onEditPad()
+            } label: {
+                settingsRow(symbol: "arrow.up.and.down.and.arrow.left.and.right", name: "위치·크기 편집",
+                            detail: "키를 끌어 옮기고 크기 바꾸기 · \(arrangementLabel)")
+            }
+            NavigationLink {
+                PadLayoutStorageView(arrangementLabel: arrangementLabel, resetCurrent: resetLayout)
+            } label: {
+                settingsRow(symbol: "square.and.arrow.down", name: "배치 저장·백업", detail: "저장 · 불러오기 · 파일 백업 · 초기화")
+            }
+            NavigationLink {
+                PadMappingView()
+            } label: {
+                settingsRow(symbol: "gamecontroller", name: "게임패드 버튼", detail: "패드 버튼마다 누를 폰 키 정하기")
+            }
+        } header: {
+            Text("키와 게임패드")
+        }
+    }
+
+    private func settingsRow(symbol: String, name: String, detail: String) -> some View {
+        HStack(spacing: 14) {
+            Image(systemName: symbol)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(.secondary)
+                .frame(width: 22)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(name).foregroundColor(.primary)
+                Text(detail).font(.caption).foregroundColor(.secondary).lineLimit(1)
             }
         }
+        .padding(.vertical, 2)
+    }
+
+    private var backButton: some View {
+        Button {
+            dismiss()
+        } label: {
+            Text("게임으로 돌아가기")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundColor(MenuPalette.onAccent)
+                .frame(maxWidth: .infinity, minHeight: 52)
+                .background(RoundedRectangle(cornerRadius: 16).fill(MenuPalette.accent))
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 8)
+        .background(Color(.systemGroupedBackground).ignoresSafeArea())
     }
 
     /// Puts the arrangement in use back to its standard layout.
@@ -1858,5 +1944,252 @@ private struct LogView: View {
         } catch {
             UIPasteboard.general.string = text
         }
+    }
+}
+
+/// One tile of the game menu: what it is, what it is set to, whether that is
+/// on, and what a tap does.
+struct GameMenuTile: Identifiable {
+    let symbol: String
+    let name: String
+    let value: String
+    let on: Bool
+    let action: () -> Void
+
+    var id: String { name }
+}
+
+/// The game menu: a card over the game, the game held still under it.
+///
+/// At its head the title and that it is paused; then the six settings changed
+/// most as tiles that say what each is set to now; the game speed, set right
+/// here on the ruler or by a tenth with − and +; the log, small under 문제
+/// 해결; and the two ways out, 게임 끝내기 and, biggest, 게임으로 돌아가기 -
+/// the APK's menu, laid out the same way. On its side it is tighter, so all
+/// of it shows at once.
+struct GameMenuCard: View {
+    let title: String
+    let compact: Bool
+    let tiles: [GameMenuTile]
+    let speed: Float
+    let onSpeed: (Float) -> Void
+    let onLog: () -> Void
+    let onLeave: () -> Void
+    let onClose: () -> Void
+
+    @State private var contentHeight: CGFloat = 0
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack {
+                Color.black.opacity(0.55)
+                    .ignoresSafeArea()
+                    .onTapGesture(perform: onClose)
+                ScrollView {
+                    card
+                        .background(GeometryReader { inner in
+                            Color.clear.preference(key: GameMenuHeight.self, value: inner.size.height)
+                        })
+                }
+                .frame(height: min(contentHeight, max(geometry.size.height - 24, 120)))
+                .background(RoundedRectangle(cornerRadius: 24).fill(MenuPalette.panel))
+                .overlay(RoundedRectangle(cornerRadius: 24).stroke(MenuPalette.line, lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 24))
+                .frame(maxWidth: compact ? 420 : 380)
+                .padding(.horizontal, 14)
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+        }
+        .onPreferenceChange(GameMenuHeight.self) { contentHeight = $0 }
+        .accentColor(MenuPalette.accent)
+        .environment(\.colorScheme, .dark)
+    }
+
+    private var card: some View {
+        VStack(alignment: .leading, spacing: compact ? 10 : 16) {
+            header
+            grid
+            speedBox
+            if !compact {
+                Text("문제 해결")
+                    .font(.system(size: 11.5, weight: .bold))
+                    .foregroundColor(MenuPalette.outline)
+                    .padding(.horizontal, 4)
+                    .padding(.bottom, -10)
+            }
+            ways
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, compact ? 12 : 18)
+        .padding(.bottom, compact ? 12 : 16)
+    }
+
+    private var header: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: compact ? 16 : 18, weight: .bold))
+                    .foregroundColor(MenuPalette.ink)
+                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(Color(red: 230 / 255, green: 167 / 255, blue: 0))
+                        .frame(width: 7, height: 7)
+                    Text(compact ? "일시정지됨" : "일시정지됨 · 닫으면 이어서 진행돼요")
+                        .font(.system(size: 12))
+                        .foregroundColor(MenuPalette.muted)
+                }
+            }
+            Spacer(minLength: 8)
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(MenuPalette.ink)
+                    .frame(width: 44, height: 44)
+                    .background(Circle().fill(MenuPalette.raised))
+                    .overlay(Circle().stroke(MenuPalette.line, lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("메뉴 닫기")
+        }
+    }
+
+    private var grid: some View {
+        let columns = Array(repeating: GridItem(.flexible(), spacing: compact ? 6 : 8), count: 3)
+        return LazyVGrid(columns: columns, spacing: compact ? 6 : 8) {
+            ForEach(tiles) { tile in
+                tileView(tile)
+            }
+        }
+    }
+
+    private func tileView(_ tile: GameMenuTile) -> some View {
+        let ink = tile.on ? MenuPalette.accent : MenuPalette.muted
+        let fill = tile.on ? Color(red: 29 / 255, green: 58 / 255, blue: 63 / 255) : MenuPalette.raised
+        let edge = tile.on ? Color(red: 47 / 255, green: 111 / 255, blue: 120 / 255) : MenuPalette.line
+        return Button(action: tile.action) {
+            Group {
+                if compact {
+                    HStack(spacing: 8) {
+                        Image(systemName: tile.symbol)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(ink)
+                        tileWords(tile, ink: ink)
+                        Spacer(minLength: 0)
+                    }
+                    .frame(minHeight: 34)
+                } else {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Image(systemName: tile.symbol)
+                            .font(.system(size: 19, weight: .semibold))
+                            .foregroundColor(ink)
+                        tileWords(tile, ink: ink)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 68, alignment: .topLeading)
+                }
+            }
+            .padding(compact ? 10 : 12)
+            .background(RoundedRectangle(cornerRadius: compact ? 14 : 16).fill(fill))
+            .overlay(RoundedRectangle(cornerRadius: compact ? 14 : 16).stroke(edge, lineWidth: 1))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(tile.name), \(tile.value)")
+    }
+
+    private func tileWords(_ tile: GameMenuTile, ink: Color) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(tile.name)
+                .font(.system(size: compact ? 12 : 13, weight: .bold))
+                .foregroundColor(MenuPalette.ink)
+                .lineLimit(1)
+            Text(tile.value)
+                .font(.system(size: compact ? 11 : 12, weight: .bold))
+                .foregroundColor(ink)
+                .lineLimit(1)
+        }
+    }
+
+    private var tenths: Int {
+        Int((speed * 10).rounded())
+    }
+
+    private var speedBox: some View {
+        VStack(spacing: compact ? 4 : 8) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("게임 속도")
+                        .font(.system(size: compact ? 13 : 14, weight: .bold))
+                        .foregroundColor(MenuPalette.ink)
+                    Text(compact ? "줄자를 밀거나 −/+ 로 0.1씩" : "이 게임에만 · 소리는 원래 속도")
+                        .font(.system(size: compact ? 10.5 : 11.5))
+                        .foregroundColor(MenuPalette.muted)
+                }
+                Spacer(minLength: 4)
+                step("minus", by: -1)
+                Text(GameSpeed.format(speed))
+                    .font(.system(size: compact ? 20 : 26, weight: .heavy, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundColor(MenuPalette.accent)
+                    .frame(minWidth: compact ? 56 : 72)
+                step("plus", by: 1)
+            }
+            SpeedRuler(tenths: Binding(get: { tenths }, set: { onSpeed(Float($0) / 10) }))
+                .frame(height: compact ? 46 : 58)
+        }
+        .padding(.horizontal, compact ? 10 : 14)
+        .padding(.vertical, compact ? 6 : 12)
+        .background(RoundedRectangle(cornerRadius: 16).fill(MenuPalette.raised))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(MenuPalette.line, lineWidth: 1))
+    }
+
+    /// A round − or +: a tenth slower or faster.
+    private func step(_ symbol: String, by change: Int) -> some View {
+        Button {
+            let next = min(max(tenths + change, GameSpeed.tenths.lowerBound), GameSpeed.tenths.upperBound)
+            onSpeed(Float(next) / 10)
+        } label: {
+            Image(systemName: symbol)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(MenuPalette.ink)
+                .frame(width: compact ? 34 : 40, height: compact ? 34 : 40)
+                .overlay(Circle().stroke(MenuPalette.outline))
+        }
+        .buttonStyle(.borderless)
+        .accessibilityLabel(change < 0 ? "0.1 느리게" : "0.1 빠르게")
+    }
+
+    private var ways: some View {
+        HStack(spacing: 8) {
+            Button("로그 보기", action: onLog)
+                .font(.system(size: 12.5))
+                .foregroundColor(MenuPalette.muted)
+                .padding(.horizontal, 12)
+                .frame(minHeight: compact ? 44 : 52)
+                .overlay(RoundedRectangle(cornerRadius: 16).stroke(MenuPalette.line, lineWidth: 1))
+                .buttonStyle(.plain)
+            Button("게임 끝내기", action: onLeave)
+                .font(.system(size: 14.5, weight: .bold))
+                .foregroundColor(Color(red: 1, green: 138 / 255, blue: 128 / 255))
+                .frame(maxWidth: .infinity, minHeight: compact ? 44 : 52)
+                .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color(red: 90 / 255, green: 47 / 255, blue: 49 / 255), lineWidth: 1))
+                .buttonStyle(.plain)
+            Button("게임으로 돌아가기", action: onClose)
+                .font(.system(size: 14.5, weight: .bold))
+                .foregroundColor(MenuPalette.onAccent)
+                .frame(maxWidth: .infinity, minHeight: compact ? 44 : 52)
+                .background(RoundedRectangle(cornerRadius: 16).fill(MenuPalette.accent))
+                .buttonStyle(.plain)
+                .layoutPriority(1)
+        }
+    }
+}
+
+/// How tall the game menu's content is, so the card fits it.
+private struct GameMenuHeight: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }

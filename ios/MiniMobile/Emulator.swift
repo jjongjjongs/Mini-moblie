@@ -25,6 +25,9 @@ final class Emulator: ObservableObject {
     private var running = false
     /// Whether frames are taken doubled through hq2x. Guarded by `lock`.
     private var hq2x = false
+    /// Whether the game is held still - while the game menu is up, as the
+    /// Android player holds it. Guarded by `lock`.
+    private var paused = false
     private var thread: Thread?
     /// The newest frame not yet on the screen, and whether the main thread has
     /// been asked to put it there. Guarded by `lock`. Only the newest is kept:
@@ -78,6 +81,7 @@ final class Emulator: ObservableObject {
 
         lock.lock()
         running = true
+        paused = false
         lock.unlock()
 
         audio.start()
@@ -102,6 +106,22 @@ final class Emulator: ObservableObject {
 
     func key(_ index: Int32, pressed: Bool) {
         wie_key(index, pressed)
+    }
+
+    /// Holds the game still, or lets it run on: no tick runs while it is
+    /// held, and the last frame stays on the screen.
+    func setPaused(_ held: Bool) {
+        lock.lock()
+        let changed = paused != held && running
+        paused = held
+        lock.unlock()
+        // The sound stops with the game rather than holding a note.
+        guard changed else { return }
+        if held {
+            audio.stop()
+        } else {
+            audio.start()
+        }
     }
 
     /// Takes frames doubled through hq2x, or as the title drew them, from now
@@ -130,6 +150,14 @@ final class Emulator: ObservableObject {
 
         while isRunning {
             let started = CACurrentMediaTime()
+
+            lock.lock()
+            let held = paused
+            lock.unlock()
+            if held {
+                Thread.sleep(forTimeInterval: Self.interval)
+                continue
+            }
 
             if let failure = takeString(wie_tick(16)) {
                 finish(with: failure)
