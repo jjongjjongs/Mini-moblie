@@ -582,8 +582,9 @@ final class ControlDialogs {
      * 키패드 디자인: the designs as small pictures of the keypad itself.
      * Picking one shows it on the real keypad behind the dialog at once;
      * 적용 keeps it for every title, and anything else puts the old one back.
-     * 내 사진 opens its own settings under the list - the picture, how it is
-     * laid on and how dark and soft it is drawn - each shown at once too.
+     * 내 사진 opens its own settings under the list - for upright and on its
+     * side apart: the pictures, how they are placed and laid on - each shown
+     * at once too.
      */
     void keypadDesign() {
         if (!(this.s.a instanceof MainActivity)) {
@@ -630,9 +631,9 @@ final class ControlDialogs {
                     player.saveKeypadTheme(chosen[0]);
                     if (chosen[0] == KeypadTheme.PHOTO) {
                         player.saveKeypadPhoto(photo);
-                        ControlPatch.toast(this.s.a, photo.picture == null
-                                ? "사진을 고르기 전까지는 다크 글래스로 보여요"
-                                : "키패드 디자인: 내 사진 · " + KeypadPhoto.MODES[photo.mode]);
+                        ControlPatch.toast(this.s.a, photo.face(player.keypadLandscape()).hasPicture()
+                                ? "키패드 디자인: 내 사진"
+                                : "이 화면 방향은 사진을 고르기 전까지 다크 글래스로 보여요");
                     } else {
                         KeypadPhoto.discardPending(this.s.a);
                         player.showKeypadPhoto(keptPhoto);
@@ -651,18 +652,27 @@ final class ControlDialogs {
     }
 
     /**
-     * 내 사진's settings, under the designs: 사진 고르기, the four ways of
-     * laying the picture on, and four sliders. Every change is drawn at once
-     * on the keypad behind the dialog and on the design pictures.
+     * 내 사진's settings, under the designs. Upright and on its side each have
+     * their own, picked by the tabs at the top: one picture across the keypad
+     * or one for each half, each picture chosen, turned, placed and zoomed on
+     * its own, and the way they are laid on with four sliders. Every change is
+     * drawn at once on the keypad behind the dialog and on the design
+     * pictures; the way up the phone is not held in is seen when it is.
      */
     private View keypadPhotoPanel(final MainActivity player, final KeypadPhoto photo, final List<View> pictures) {
-        LinearLayout panel = new LinearLayout(this.style.context);
+        final LinearLayout panel = new LinearLayout(this.style.context);
         panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(this.style.dp(12), this.style.dp(12), this.style.dp(12), this.style.dp(8));
+        panel.setPadding(this.style.dp(12), this.style.dp(10), this.style.dp(12), this.style.dp(8));
         panel.setBackground(this.style.rounded(this.style.SOFT, this.style.GREEN, 1, 14));
         LinearLayout.LayoutParams panelParams = new LinearLayout.LayoutParams(-1, -2);
         panelParams.topMargin = this.style.dp(10);
         panel.setLayoutParams(panelParams);
+
+        final boolean[] side = {player.keypadLandscape()};
+        final int[] slot = {photo.face(side[0]).split ? KeypadPhoto.LEFT : KeypadPhoto.WHOLE};
+        final LinearLayout body = new LinearLayout(this.style.context);
+        body.setOrientation(LinearLayout.VERTICAL);
+        final Runnable[] render = new Runnable[1];
 
         final Runnable redraw = () -> {
             player.showKeypadPhoto(photo);
@@ -671,69 +681,123 @@ final class ControlDialogs {
             }
         };
 
-        LinearLayout pickRow = new LinearLayout(this.style.context);
-        pickRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
-        final TextView status = this.style.text(photo.picture == null ? "아직 고른 사진이 없어요" : "사진을 바꾸려면 다시 골라요", 12f, this.style.MUTED);
-        Button pick = this.style.button("사진 고르기", true);
-        pick.setOnClickListener(v -> {
-            this.keypadPhotoPicked = bitmap -> {
-                photo.setPicture(bitmap);
-                status.setText("새 사진은 적용을 누르면 저장돼요");
-                redraw.run();
-            };
-            pickKeypadPhoto();
-        });
-        pickRow.addView(pick, new LinearLayout.LayoutParams(-2, -2));
-        status.setPadding(this.style.dp(10), 0, 0, 0);
-        pickRow.addView(status, new LinearLayout.LayoutParams(0, -2, 1f));
-        panel.addView(pickRow);
+        panel.addView(chipRow(new String[]{"세로 화면", "가로 화면"}, side[0] ? 1 : 0, index -> {
+            side[0] = index == 1;
+            slot[0] = photo.face(side[0]).split ? KeypadPhoto.LEFT : KeypadPhoto.WHOLE;
+            render[0].run();
+        }));
+        panel.addView(body);
 
-        panel.addView(panelLabel("입히는 방식"));
-        final List<TextView> modes = new ArrayList<>();
-        LinearLayout modeRow = null;
-        for (int mode = 0; mode < KeypadPhoto.MODES.length; mode++) {
-            if (mode % 2 == 0) {
-                modeRow = new LinearLayout(this.style.context);
-                panel.addView(modeRow, new LinearLayout.LayoutParams(-1, -2));
+        render[0] = () -> {
+            body.removeAllViews();
+            final KeypadPhoto.Face face = photo.face(side[0]);
+            final KeypadPhoto.Slot picked = face.slots[slot[0]];
+
+            if (side[0] != player.keypadLandscape()) {
+                TextView note = this.style.text(side[0] ? "가로 화면 설정은 폰을 눕혀 게임할 때 보여요." : "세로 화면 설정은 폰을 세워 게임할 때 보여요.",
+                        11.5f, this.style.MUTED);
+                note.setPadding(0, this.style.dp(6), 0, 0);
+                body.addView(note);
             }
-            final int index = mode;
-            TextView chip = this.style.text(KeypadPhoto.MODES[mode], 12.5f, this.style.INK);
-            chip.setGravity(android.view.Gravity.CENTER);
-            chip.setPadding(this.style.dp(8), this.style.dp(9), this.style.dp(8), this.style.dp(9));
-            chip.setOnClickListener(v -> {
-                photo.mode = index;
-                markModes(modes, index);
-                redraw.run();
-            });
-            LinearLayout.LayoutParams chipParams = new LinearLayout.LayoutParams(0, -2, 1f);
-            chipParams.setMargins(index % 2 == 0 ? 0 : this.style.dp(3), this.style.dp(3), index % 2 == 0 ? this.style.dp(3) : 0, this.style.dp(3));
-            modeRow.addView(chip, chipParams);
-            modes.add(chip);
-        }
-        markModes(modes, photo.mode);
 
-        final boolean landscape = player.keypadLandscape();
-        panel.addView(photoSlider("어둡게", 80, photo.dim, v -> v + "%", v -> {
-            photo.dim = v;
-            redraw.run();
-        }));
-        panel.addView(photoSlider("흐림", 20, photo.blur, String::valueOf, v -> {
-            photo.blur = v;
-            redraw.run();
-        }));
-        panel.addView(photoSlider("키 투명도 (유리 키·색 뽑기)", 100, photo.glass, v -> v + "%", v -> {
-            photo.glass = v;
-            redraw.run();
-        }));
-        panel.addView(photoSlider(landscape ? "사진 위치 (가로 화면)" : "사진 위치 (세로 화면)", 100,
-                landscape ? photo.landscapeFocus : photo.portraitFocus, v -> v <= 10 ? "위" : v >= 90 ? "아래" : v + "%", v -> {
-                    if (landscape) {
-                        photo.landscapeFocus = v;
-                    } else {
-                        photo.portraitFocus = v;
-                    }
+            body.addView(panelLabel(side[0] ? "사진 (게임 화면 양옆에 깔려요)" : "사진"));
+            body.addView(chipRow(new String[]{"한 장", "왼쪽·오른쪽 따로"}, face.split ? 1 : 0, index -> {
+                face.split = index == 1;
+                face.changed();
+                slot[0] = face.split ? KeypadPhoto.LEFT : KeypadPhoto.WHOLE;
+                redraw.run();
+                render[0].run();
+            }));
+            if (face.split) {
+                body.addView(chipRow(new String[]{"왼쪽 (방향키 쪽)", "오른쪽 (숫자키 쪽)"}, slot[0] == KeypadPhoto.RIGHT ? 1 : 0, index -> {
+                    slot[0] = index == 1 ? KeypadPhoto.RIGHT : KeypadPhoto.LEFT;
+                    render[0].run();
+                }));
+            }
+
+            LinearLayout actions = new LinearLayout(this.style.context);
+            actions.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            actions.setPadding(0, this.style.dp(8), 0, 0);
+            Button pick = this.style.button(picked.picture == null ? "사진 고르기" : "사진 바꾸기", true);
+            final boolean pickSide = side[0];
+            final int pickSlot = slot[0];
+            pick.setOnClickListener(v -> {
+                this.keypadPhotoPicked = bitmap -> {
+                    KeypadPhoto.Face target = photo.face(pickSide);
+                    target.slots[pickSlot].setPicture(bitmap);
+                    target.changed();
+                    redraw.run();
+                    render[0].run();
+                };
+                pickKeypadPhoto(pickSide, pickSlot);
+            });
+            actions.addView(pick, new LinearLayout.LayoutParams(0, -2, 1.4f));
+            if (picked.picture != null) {
+                Button turn = this.style.button("↻ 회전", false);
+                turn.setOnClickListener(v -> {
+                    picked.turns = (picked.turns + 1) % 4;
+                    face.changed();
+                    redraw.run();
+                });
+                LinearLayout.LayoutParams turnParams = new LinearLayout.LayoutParams(0, -2, 1f);
+                turnParams.leftMargin = this.style.dp(6);
+                actions.addView(turn, turnParams);
+                Button remove = this.style.button("빼기", false);
+                this.style.quiet(remove);
+                remove.setOnClickListener(v -> {
+                    picked.clear();
+                    face.changed();
+                    redraw.run();
+                    render[0].run();
+                });
+                LinearLayout.LayoutParams removeParams = new LinearLayout.LayoutParams(0, -2, 0.8f);
+                removeParams.leftMargin = this.style.dp(6);
+                actions.addView(remove, removeParams);
+            }
+            body.addView(actions);
+
+            if (picked.picture != null) {
+                body.addView(photoSlider("가로 위치", 100, picked.focusX, v -> v <= 10 ? "왼쪽" : v >= 90 ? "오른쪽" : v + "%", v -> {
+                    picked.focusX = v;
+                    face.changed();
                     redraw.run();
                 }));
+                body.addView(photoSlider("세로 위치", 100, picked.focusY, v -> v <= 10 ? "위" : v >= 90 ? "아래" : v + "%", v -> {
+                    picked.focusY = v;
+                    face.changed();
+                    redraw.run();
+                }));
+                body.addView(photoSlider("확대", 200, picked.zoom - 100, v -> (100 + v) + "%", v -> {
+                    picked.zoom = 100 + v;
+                    face.changed();
+                    redraw.run();
+                }));
+            } else {
+                TextView none = this.style.text(face.split ? "이쪽에 사진이 없으면 디자인 바탕이 그대로 보여요." : "사진을 고르기 전까지는 다크 글래스로 보여요.",
+                        11.5f, this.style.MUTED);
+                none.setPadding(0, this.style.dp(6), 0, 0);
+                body.addView(none);
+            }
+
+            body.addView(panelLabel("입히는 방식"));
+            body.addView(chipRow(KeypadPhoto.MODES, face.mode, index -> {
+                face.mode = index;
+                redraw.run();
+            }));
+            body.addView(photoSlider("어둡게", 80, face.dim, v -> v + "%", v -> {
+                face.dim = v;
+                redraw.run();
+            }));
+            body.addView(photoSlider("흐림", 20, face.blur, String::valueOf, v -> {
+                face.blur = v;
+                redraw.run();
+            }));
+            body.addView(photoSlider("키 투명도 (유리 키·색 뽑기)", 100, face.glass, v -> v + "%", v -> {
+                face.glass = v;
+                redraw.run();
+            }));
+        };
+        render[0].run();
         return panel;
     }
 
@@ -743,11 +807,40 @@ final class ControlDialogs {
         return label;
     }
 
-    private void markModes(List<TextView> modes, int chosen) {
-        for (int index = 0; index < modes.size(); index++) {
+    /** Choices as chips two to a row, the chosen one outlined; {@code picked} hears a tap. */
+    private View chipRow(String[] labels, int chosen, final java.util.function.IntConsumer picked) {
+        LinearLayout box = new LinearLayout(this.style.context);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(0, this.style.dp(4), 0, 0);
+        final List<TextView> chips = new ArrayList<>();
+        LinearLayout row = null;
+        for (int index = 0; index < labels.length; index++) {
+            if (index % 2 == 0) {
+                row = new LinearLayout(this.style.context);
+                box.addView(row, new LinearLayout.LayoutParams(-1, -2));
+            }
+            final int which = index;
+            TextView chip = this.style.text(labels[index], 12.5f, this.style.INK);
+            chip.setGravity(android.view.Gravity.CENTER);
+            chip.setPadding(this.style.dp(8), this.style.dp(9), this.style.dp(8), this.style.dp(9));
+            chip.setOnClickListener(v -> {
+                markChips(chips, which);
+                picked.accept(which);
+            });
+            LinearLayout.LayoutParams chipParams = new LinearLayout.LayoutParams(0, -2, 1f);
+            chipParams.setMargins(index % 2 == 0 ? 0 : this.style.dp(3), this.style.dp(3), index % 2 == 0 ? this.style.dp(3) : 0, this.style.dp(3));
+            row.addView(chip, chipParams);
+            chips.add(chip);
+        }
+        markChips(chips, chosen);
+        return box;
+    }
+
+    private void markChips(List<TextView> chips, int chosen) {
+        for (int index = 0; index < chips.size(); index++) {
             boolean on = index == chosen;
-            modes.get(index).setBackground(this.style.rounded(on ? this.style.BG : this.style.SOFT, on ? this.style.GREEN : this.style.LINE, on ? 2 : 1, 10));
-            modes.get(index).setTextColor(on ? this.style.GREEN : this.style.INK);
+            chips.get(index).setBackground(this.style.rounded(on ? this.style.BG : this.style.SOFT, on ? this.style.GREEN : this.style.LINE, on ? 2 : 1, 10));
+            chips.get(index).setTextColor(on ? this.style.GREEN : this.style.INK);
         }
     }
 
@@ -786,8 +879,14 @@ final class ControlDialogs {
         return box;
     }
 
+    /** Which face and picture 사진 고르기 is choosing for. */
+    private boolean keypadPhotoSide;
+    private int keypadPhotoSlot;
+
     /** Opens the system's picture picker for 내 사진; {@link #keypadPhotoResult} takes what it brings back. */
-    private void pickKeypadPhoto() {
+    private void pickKeypadPhoto(boolean onItsSide, int slot) {
+        this.keypadPhotoSide = onItsSide;
+        this.keypadPhotoSlot = slot;
         try {
             Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
             intent.addCategory(Intent.CATEGORY_OPENABLE);
@@ -811,9 +910,11 @@ final class ControlDialogs {
         }
         final Uri uri = intent.getData();
         final Activity activity = this.s.a;
+        final boolean onItsSide = this.keypadPhotoSide;
+        final int slot = this.keypadPhotoSlot;
         new Thread(() -> {
             try {
-                final android.graphics.Bitmap bitmap = KeypadPhoto.importPicture(activity, uri);
+                final android.graphics.Bitmap bitmap = KeypadPhoto.importPicture(activity, uri, onItsSide, slot);
                 activity.runOnUiThread(() -> {
                     // The dialog may have closed while the picture was read.
                     if (this.keypadPhotoPicked == picked) {

@@ -7640,11 +7640,12 @@ public final class MainActivity extends Activity {
         @Override
         protected void onDraw(Canvas canvas) {
             KeypadTheme theme = theme();
-            KeypadPhoto photo = photo(theme);
+            KeypadPhoto.Face photo = photo(theme);
 
             // The tray, except in landscape, where this view lies over the
             // screen and the band behind it is the tray.
-            if (!landscape && (photo == null || photo.mode == KeypadPhoto.DISC)) {
+            // Under 내 사진 too: a half with no picture of its own shows it.
+            if (!landscape) {
                 shade.setShader(new android.graphics.LinearGradient(0, 0, 0, getHeight(), theme.trayTop, theme.trayBottom,
                         android.graphics.Shader.TileMode.CLAMP));
                 canvas.drawRect(0, 0, getWidth(), getHeight(), shade);
@@ -7899,42 +7900,71 @@ public final class MainActivity extends Activity {
         private int tintFace;
         private int tintAccent;
 
-        /** The 내 사진 settings to draw with, or null in a stock design or with no picture chosen yet. */
-        private KeypadPhoto photo(KeypadTheme theme) {
+        /**
+         * The 내 사진 face to draw with - upright's or on its side's, whichever
+         * way the keypad is laid out - or null in a stock design or with no
+         * picture chosen for this way up.
+         */
+        private KeypadPhoto.Face photo(KeypadTheme theme) {
             KeypadPhoto photo = keypadPhoto;
-            return theme.id == KeypadTheme.PHOTO && photo != null && photo.picture != null ? photo : null;
+            if (theme.id != KeypadTheme.PHOTO || photo == null) {
+                return null;
+            }
+            KeypadPhoto.Face face = photo.face(landscape);
+            return face.hasPicture() ? face : null;
+        }
+
+        /**
+         * Where 내 사진's pictures go. On its side, the bands either side of
+         * the game screen this view lies over, so no picture is hidden under
+         * the screen. Upright, the whole keypad for one picture, or its halves
+         * - the directions' and the numbers' - for a picture each.
+         */
+        private RectF[] photoRegions(KeypadPhoto.Face photo) {
+            int width = getWidth();
+            int height = getHeight();
+            if (landscape && gameView != null && gameView.getParent() == getParent() && gameView.getWidth() > 0) {
+                return new RectF[]{
+                        new RectF(0, 0, Math.max(1, gameView.getLeft()), height),
+                        new RectF(Math.min(width - 1, gameView.getRight()), 0, width, height),
+                };
+            }
+            if (!landscape && !photo.split) {
+                return new RectF[]{new RectF(0, 0, width, height)};
+            }
+            return new RectF[]{new RectF(0, 0, width / 2f, height), new RectF(width / 2f, 0, width, height)};
         }
 
         private float density() {
             return getResources().getDisplayMetrics().density;
         }
 
-        private void drawPhotoTray(Canvas canvas, KeypadPhoto photo) {
+        private void drawPhotoTray(Canvas canvas, KeypadPhoto.Face photo) {
             int width = getWidth();
             int height = getHeight();
             float density = density();
             float blur = photo.blur * density;
             float dim = photo.dim / 100f;
-            int focus = landscape ? photo.landscapeFocus : photo.portraitFocus;
+            RectF[] regions = photoRegions(photo);
 
             android.graphics.Bitmap tray = null;
             android.graphics.Bitmap cut = null;
             int trayColor = 0;
             switch (photo.mode) {
                 case KeypadPhoto.BACKDROP:
-                    tray = photo.layer(width, height, blur, dim, focus);
+                    tray = photo.composite(width, height, regions, blur, dim);
                     // Frosted: the keys show the same picture, softer - less
                     // so the clearer they are set, and fully clear they show
                     // it just as the tray does.
-                    cut = photo.layer(width, height, blur + 8 * density * (1f - photo.glass / 100f), dim, focus);
+                    cut = photo.composite(width, height, regions, blur + 8 * density * (1f - photo.glass / 100f), dim);
                     break;
                 case KeypadPhoto.STENCIL:
                     trayColor = 0xff0c0d10;
-                    cut = photo.layer(width, height, blur, dim * 0.8f, focus);
+                    cut = photo.composite(width, height, regions, blur, dim * 0.8f);
                     break;
                 case KeypadPhoto.TINT: {
-                    tray = photo.layer(width, height, blur + 10 * density, Math.min(0.85f, dim + 0.25f), focus);
-                    int[] palette = photo.palette();
+                    tray = photo.composite(width, height, regions, blur + 10 * density, Math.min(0.85f, dim + 0.25f));
+                    int[] palette = photo.palette(tray);
                     int dark = KeypadPhoto.mix(Color.rgb(18, 19, 24), palette[0], 0.3f);
                     tintFace = KeypadPhoto.mix(dark, palette[1], 0.18f);
                     // A dark picture's most vivid colour would vanish on its
@@ -7991,7 +8021,7 @@ public final class MainActivity extends Activity {
             }
         }
 
-        private void drawPhotoKey(Canvas canvas, KeypadTheme theme, KeypadPhoto photo, Key key) {
+        private void drawPhotoKey(Canvas canvas, KeypadTheme theme, KeypadPhoto.Face photo, Key key) {
             if (photo.mode == KeypadPhoto.DISC) {
                 drawKey(canvas, theme, key);
                 return;
@@ -8048,7 +8078,7 @@ public final class MainActivity extends Activity {
         }
 
         /** {@link #drawRing} for 내 사진: the same disc, quarters and OK, faced from the picture. */
-        private void drawPhotoRing(Canvas canvas, KeypadPhoto photo) {
+        private void drawPhotoRing(Canvas canvas, KeypadPhoto.Face photo) {
             RectF ok = keys.get(KEY_OK).bounds;
             float cx = ok.centerX();
             float cy = ok.centerY();
@@ -8078,8 +8108,7 @@ public final class MainActivity extends Activity {
                 default: {
                     // The picture fitted to the disc itself, not to the tray.
                     int size = Math.max(1, Math.round(radius * 2));
-                    android.graphics.Bitmap face = photo.layer(size, size, photo.blur * density, photo.dim / 100f,
-                            landscape ? photo.landscapeFocus : photo.portraitFocus);
+                    android.graphics.Bitmap face = photo.disc(size, photo.blur * density, photo.dim / 100f);
                     if (face != null) {
                         android.graphics.BitmapShader shader = new android.graphics.BitmapShader(face,
                                 android.graphics.Shader.TileMode.CLAMP, android.graphics.Shader.TileMode.CLAMP);
