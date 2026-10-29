@@ -721,7 +721,7 @@ final class ControlDialogs {
             photo.blur = v;
             redraw.run();
         }));
-        panel.addView(photoSlider("키 비침 (유리 키·색 뽑기)", 100, photo.glass, v -> v + "%", v -> {
+        panel.addView(photoSlider("키 투명도 (유리 키·색 뽑기)", 100, photo.glass, v -> v + "%", v -> {
             photo.glass = v;
             redraw.run();
         }));

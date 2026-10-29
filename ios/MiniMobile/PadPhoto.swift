@@ -44,7 +44,8 @@ final class PadPhotoStore: ObservableObject {
     @Published var dim: Double { didSet { save() } }
     /// How soft it is drawn, 0 to 20 points.
     @Published var blur: Double { didSet { save() } }
-    /// How much the glass keys of 배경 and the tinted keys of 색 뽑기 let through, 0 to 1.
+    /// How clear the glass keys of 배경 and the tinted keys of 색 뽑기 are, 0
+    /// to 1. Fully clear, a glass key is its outline and label over the picture.
     @Published var glass: Double { didSet { save() } }
     /// Which part of a taller picture shows, 0 (its top) to 1 (its bottom).
     /// Upright and on its side the pad is a different shape, so each keeps its own.
@@ -239,7 +240,9 @@ struct PadPhotoLook {
     /// the picture to them.
     func cut(size: CGSize) -> UIImage? {
         switch mode {
-        case .backdrop: return store.layer(size: size, blur: store.blur + 8, dim: store.dim, focus: focus)
+        // Frosted, less so the clearer the keys are set: fully clear they
+        // show the picture just as the tray does.
+        case .backdrop: return store.layer(size: size, blur: store.blur + 8 * (1 - store.glass), dim: store.dim, focus: focus)
         case .stencil: return store.layer(size: size, blur: store.blur, dim: store.dim * 0.8, focus: focus)
         case .tint, .disc: return nil
         }
@@ -264,8 +267,8 @@ struct PadPhotoLook {
         let glassShare = store.glass
         switch mode {
         case .backdrop:
-            let face = white.opacity(0.08 + glassShare * 0.26)
-            let ok = white.opacity(0.16 + glassShare * 0.26)
+            let face = white.opacity(0.30 * (1 - glassShare))
+            let ok = white.opacity(0.38 * (1 - glassShare))
             let rim = white.opacity(0.32)
             return PadPalette(
                 trayTop: Self.rgb(17, 18, 22), trayBottom: Self.rgb(17, 18, 22),
@@ -308,7 +311,7 @@ struct PadPhotoLook {
             let lift = Self.luminance(vivid) < 0.3
             let tinted = lift ? Self.mix(vivid, .white, 0.45) : vivid
             let dark = Self.mix(Self.rgb(18, 19, 24), tones.average, 0.3)
-            let through = 1 - glassShare * 0.55
+            let through = 1 - glassShare * 0.85
             let face = Self.mix(dark, vivid, 0.18).opacity(through)
             let ring = Self.mix(Self.mix(dark, vivid, 0.18), .black, 0.1).opacity(through)
             let ok = Self.mix(Self.mix(dark, vivid, 0.18), .white, 0.06).opacity(through)
@@ -535,7 +538,7 @@ struct PadPhotoSettingsView: View {
             Section {
                 slider("어둡게", value: $store.dim, range: 0...0.8, shown: "\(Int((store.dim * 100).rounded()))%")
                 slider("흐림", value: $store.blur, range: 0...20, step: 1, shown: "\(Int(store.blur.rounded()))")
-                slider("키 비침 (유리 키·색 뽑기)", value: $store.glass, range: 0...1, shown: "\(Int((store.glass * 100).rounded()))%")
+                slider("키 투명도 (유리 키·색 뽑기)", value: $store.glass, range: 0...1, shown: "\(Int((store.glass * 100).rounded()))%")
                 if landscape {
                     slider("사진 위치 (가로 화면)", value: $store.landscapeFocus, range: 0...1, shown: focusText(store.landscapeFocus))
                 } else {

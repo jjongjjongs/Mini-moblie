@@ -57,7 +57,11 @@ final class KeypadPhoto {
     int dim = 35;
     /** How soft the picture is drawn, 0 to 20 dp. */
     int blur = 2;
-    /** How much the glass keys of {@link #BACKDROP} and the tinted keys of {@link #TINT} let through, 0 to 100 percent. */
+    /**
+     * How clear the glass keys of {@link #BACKDROP} and the tinted keys of
+     * {@link #TINT} are, 0 to 100 percent. Fully clear, a glass key is its
+     * outline and label over the picture, as sharp as the tray's.
+     */
     int glass = 45;
     /**
      * Which part of the picture shows when it is taller than the keypad, 0

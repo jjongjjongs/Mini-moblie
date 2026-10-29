@@ -7592,11 +7592,11 @@ public final class MainActivity extends Activity {
         }
 
         /**
-         * The share of the disc's radius OK takes in the middle. Half: OK is
-         * the key pressed most, and at this size it is about twice what a
-         * third of the radius gave it, the arrows keeping a band as wide.
+         * The share of the disc's radius OK takes in the middle. OK is the key
+         * pressed most, and at 0.44 it has half as much again as the third of
+         * the radius it had, while the arrows keep most of their band.
          */
-        private static final float OK_SHARE = 0.5f;
+        private static final float OK_SHARE = 0.44f;
 
         /** The disc's radius: as far as the plus reaches on its shortest arm. */
         private float ringRadius() {
@@ -7923,8 +7923,10 @@ public final class MainActivity extends Activity {
             switch (photo.mode) {
                 case KeypadPhoto.BACKDROP:
                     tray = photo.layer(width, height, blur, dim, focus);
-                    // Frosted: the keys show the same picture, softer.
-                    cut = photo.layer(width, height, blur + 8 * density, dim, focus);
+                    // Frosted: the keys show the same picture, softer - less
+                    // so the clearer they are set, and fully clear they show
+                    // it just as the tray does.
+                    cut = photo.layer(width, height, blur + 8 * density * (1f - photo.glass / 100f), dim, focus);
                     break;
                 case KeypadPhoto.STENCIL:
                     trayColor = 0xff0c0d10;
@@ -8010,7 +8012,7 @@ public final class MainActivity extends Activity {
                     }
                     inkColor = KeypadPhoto.luminance(tintAccent) > 0.55f ? 0xff13161c : Color.WHITE;
                 } else {
-                    fillShape(canvas, bounds, radius, KeypadPhoto.withAlpha(tintFace, 1f - glass * 0.55f));
+                    fillShape(canvas, bounds, radius, KeypadPhoto.withAlpha(tintFace, 1f - glass * 0.85f));
                     if (key.down) {
                         fillShape(canvas, bounds, radius, KeypadPhoto.withAlpha(tintAccent, 0.55f));
                     }
@@ -8027,7 +8029,7 @@ public final class MainActivity extends Activity {
                 } else {
                     canvas.drawRoundRect(bounds, radius, radius, picture);
                     if (photo.mode == KeypadPhoto.BACKDROP) {
-                        fillShape(canvas, bounds, radius, KeypadPhoto.withAlpha(Color.WHITE, 0.08f + glass * 0.26f));
+                        fillShape(canvas, bounds, radius, KeypadPhoto.withAlpha(Color.WHITE, 0.30f * (1f - glass)));
                     }
                     if (key.down) {
                         fillShape(canvas, bounds, radius, KeypadPhoto.withAlpha(PHOTO_ACCENT, 0.5f));
@@ -8062,7 +8064,7 @@ public final class MainActivity extends Activity {
                 case KeypadPhoto.BACKDROP:
                     canvas.drawCircle(cx, cy, radius, picture);
                     fill.setShader(null);
-                    fill.setColor(KeypadPhoto.withAlpha(Color.WHITE, 0.08f + glass * 0.26f));
+                    fill.setColor(KeypadPhoto.withAlpha(Color.WHITE, 0.30f * (1f - glass)));
                     canvas.drawCircle(cx, cy, radius, fill);
                     break;
                 case KeypadPhoto.STENCIL:
@@ -8070,7 +8072,7 @@ public final class MainActivity extends Activity {
                     break;
                 case KeypadPhoto.TINT:
                     fill.setShader(null);
-                    fill.setColor(KeypadPhoto.withAlpha(KeypadPhoto.mix(tintFace, Color.BLACK, 0.1f), 1f - glass * 0.55f));
+                    fill.setColor(KeypadPhoto.withAlpha(KeypadPhoto.mix(tintFace, Color.BLACK, 0.1f), 1f - glass * 0.85f));
                     canvas.drawCircle(cx, cy, radius, fill);
                     break;
                 default: {
@@ -8137,13 +8139,13 @@ public final class MainActivity extends Activity {
             switch (mode) {
                 case KeypadPhoto.BACKDROP:
                     canvas.drawCircle(cx, cy, inner, picture);
-                    fill.setColor(KeypadPhoto.withAlpha(Color.WHITE, 0.16f + glass * 0.26f));
+                    fill.setColor(KeypadPhoto.withAlpha(Color.WHITE, 0.38f * (1f - glass)));
                     break;
                 case KeypadPhoto.STENCIL:
                     fill.setColor(0x8c0c0d10);
                     break;
                 case KeypadPhoto.TINT:
-                    fill.setColor(KeypadPhoto.withAlpha(KeypadPhoto.mix(tintFace, Color.WHITE, 0.06f), 1f - glass * 0.55f));
+                    fill.setColor(KeypadPhoto.withAlpha(KeypadPhoto.mix(tintFace, Color.WHITE, 0.06f), 1f - glass * 0.85f));
                     break;
                 default:
                     fill.setColor(0xd122252d);
