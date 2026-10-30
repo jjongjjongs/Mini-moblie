@@ -35,6 +35,20 @@ enum GameOrientation: String, CaseIterable, Identifiable {
     }
 }
 
+/// Whether a title was on its side when it was last played, so it opens that
+/// way again - kept per title, as the speed is, and written as the window
+/// turns rather than as the game is left: leaving turns the window upright
+/// for the list. As the APK keeps it.
+enum GameLandscape {
+    static func get(_ game: GameFile) -> Bool {
+        UserDefaults.standard.bool(forKey: "landscape.\(game.name)")
+    }
+
+    static func set(_ onItsSide: Bool, for game: GameFile) {
+        UserDefaults.standard.set(onItsSide, forKey: "landscape.\(game.name)")
+    }
+}
+
 /// What the app tells the system it may turn to. The list and every screen
 /// but a running game are upright; a game asks for more through
 /// `OrientationControl`.
@@ -58,7 +72,8 @@ final class OrientationLock: NSObject, UIApplicationDelegate {
 /// turned over turns the game over with it - the system's own rotation stops
 /// at the rotation lock, and a landscape game held the wrong way up is no
 /// use to anyone. Each game starts at 자동, as each Android player starts
-/// unpinned.
+/// unpinned - unless it was last left on its side, when it starts at 가로
+/// 고정, as the Android player starts held on its side.
 final class OrientationControl {
     static let shared = OrientationControl()
 
@@ -72,13 +87,14 @@ final class OrientationControl {
 
     private init() {}
 
-    /// A game has started: the phone decides.
-    func enterGame() {
+    /// A game has started: the phone decides, or, for one last left on its
+    /// side, it is held on its side again.
+    func enterGame(onItsSide: Bool = false) {
         if !inGame {
             inGame = true
             UIDevice.current.beginGeneratingDeviceOrientationNotifications()
         }
-        choice = .auto
+        choice = onItsSide ? .landscape : .auto
         apply()
     }
 

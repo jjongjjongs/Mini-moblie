@@ -261,6 +261,8 @@ struct GameView: View {
     @State private var padHidden = false
     /// Whether the window asking before the game closes is up.
     @State private var confirmingExit = false
+    /// Set as the game is closed, from when the window turns upright for the list.
+    @State private var leaving = false
     /// The game menu's window on screen, nil with the menu closed.
     @State private var menuWindow: MenuWindow?
 
@@ -329,7 +331,7 @@ struct GameView: View {
             padHidden = GamePad.hidden(game)
             padShape = GamePad.shape(game)
             PlayHistory.markPlayed(game)
-            OrientationControl.shared.enterGame()
+            OrientationControl.shared.enterGame(onItsSide: GameLandscape.get(game))
             orientation = OrientationControl.shared.choice
             emulator.start(game: game)
             let emulator = self.emulator
@@ -346,6 +348,13 @@ struct GameView: View {
         .onChange(of: quality) { value in emulator.setHq2x(value == .hq2x) }
         // Turned, or laid out the other way, the screen takes the size kept for that way.
         .onChange(of: scaleSideways) { value in scale = GameScale.get(game, sideways: value) }
+        // Which way it was left is which way it opens next, so the turn back
+        // upright for the list is not kept.
+        .onChange(of: sideways) { value in
+            if !leaving {
+                GameLandscape.set(value, for: game)
+            }
+        }
         .sheet(item: $sheet) { sheet in
             sheetContent(sheet)
         }
@@ -725,6 +734,7 @@ struct GameView: View {
     }
 
     private func closeGame() {
+        leaving = true
         confirmingExit = false
         Gamepad.shared.capture = nil
         emulator.stop()
