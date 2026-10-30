@@ -286,8 +286,15 @@ pub async fn clip_get_data(_context: &mut dyn WIPICContext, clip: WIPICWord, buf
     Ok(0)
 }
 
+/// `MC_mdaClipSetPosition` - where in the clip the next play starts.
+///
+/// KTF serves it at media slot 13. 비욘드 더 바운스 rewinds a clip before
+/// playing it again - `Stop`, then `(clip, 0)` here, then `SetVolume` and
+/// `Play` - and the slot was a stub that refused, so the first sound it
+/// replayed (the `#` key's) ended the run. A play here always starts from the
+/// top, so a rewind is already what happens and is accepted as it stands.
 pub async fn clip_set_position(_context: &mut dyn WIPICContext, clip: WIPICWord, ms: WIPICWord) -> Result<WIPICWord> {
-    tracing::warn!("stub MC_mdaClipSetPosition({clip:#x}, {ms:#x})");
+    tracing::debug!("MC_mdaClipSetPosition({clip:#x}, {ms:#x})");
 
     Ok(0)
 }

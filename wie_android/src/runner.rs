@@ -913,12 +913,20 @@ pub struct SaveIds {
 /// The directory record stores whose title names no product id are kept in.
 const EMPTY_RECORDS_ID: &str = "_";
 
+/// A root descriptor, whichever case the dump spelled its name in -
+/// 슈퍼액션 히어로5 ships `__ADF__`, which the KTF loader files as `__adf__`.
+fn descriptor_file<'a>(files: &'a BTreeMap<String, Vec<u8>>, name: &str) -> Option<&'a Vec<u8>> {
+    files
+        .get(name)
+        .or_else(|| files.iter().find(|(path, _)| path.eq_ignore_ascii_case(name)).map(|(_, data)| data))
+}
+
 pub fn save_ids(data: &[u8]) -> Option<SaveIds> {
     let files = extract_zip(data).ok()?;
 
     // The descriptor names both ids for the two archive formats that have one.
     for descriptor in ["app_info", "__adf__"] {
-        let Some(contents) = files.get(descriptor) else {
+        let Some(contents) = descriptor_file(&files, descriptor) else {
             continue;
         };
 
@@ -1100,7 +1108,7 @@ pub fn inspect(data: &[u8]) -> String {
     // The descriptor is the only place the app id, product id and main class
     // come from, and a malformed one is the usual reason a zip will not run.
     for descriptor in ["app_info", "__adf__"] {
-        let Some(contents) = files.get(descriptor) else {
+        let Some(contents) = descriptor_file(&files, descriptor) else {
             continue;
         };
 

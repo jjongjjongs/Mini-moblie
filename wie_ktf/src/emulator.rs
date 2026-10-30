@@ -33,7 +33,10 @@ use crate::{
 /// filed. Two of them would mean two archives in one zip, and which is the
 /// title is not for this to guess.
 fn descriptor_directory(files: &BTreeMap<String, Vec<u8>>) -> Option<String> {
-    let mut directories = files.keys().filter_map(|path| path.strip_suffix("/__adf__"));
+    let mut directories = files.keys().filter_map(|path| {
+        let (directory, name) = path.rsplit_once('/')?;
+        name.eq_ignore_ascii_case("__adf__").then_some(directory)
+    });
 
     match (directories.next(), directories.next()) {
         (Some(directory), None) => Some(directory.to_owned()),
@@ -69,17 +72,39 @@ fn packaged_name(path: &str) -> Option<&str> {
 /// binaries next to the game - and is dropped rather than folded in under its
 /// bare name, so nothing outside the archive can answer for a name inside it.
 fn reroot_archive(files: BTreeMap<String, Vec<u8>>) -> BTreeMap<String, Vec<u8>> {
-    let Some(directory) = descriptor_directory(&files) else {
-        return files;
+    let at_root = files.keys().any(|path| path.eq_ignore_ascii_case("__adf__"));
+    let Some(directory) = descriptor_directory(&files).filter(|_| !at_root) else {
+        return lowercase_descriptors(files);
     };
 
     tracing::info!("KTF archive is rooted at {directory}/");
 
     let prefix = format!("{directory}/");
 
+    lowercase_descriptors(
+        files
+            .into_iter()
+            .filter_map(|(path, data)| path.strip_prefix(&prefix).map(|inner| (inner.to_owned(), data)))
+            .collect(),
+    )
+}
+
+/// The descriptors a KTF archive carries beside its jar.
+const DESCRIPTORS: [&str; 3] = ["__adf__", "__env__", "__class__"];
+
+/// Files the root descriptors under the spelling the runtime asks for.
+///
+/// Dumps disagree on their case as they do on the data directory's:
+/// 슈퍼액션 히어로5 ships `__ADF__` and `__ENV__`. Looking only for the
+/// lowercase name found no descriptor, so the archive fell through to the
+/// bare-jar path, which knows no `MClass`: `Main class not found`.
+fn lowercase_descriptors(files: BTreeMap<String, Vec<u8>>) -> BTreeMap<String, Vec<u8>> {
     files
         .into_iter()
-        .filter_map(|(path, data)| path.strip_prefix(&prefix).map(|inner| (inner.to_owned(), data)))
+        .map(|(path, data)| match DESCRIPTORS.iter().find(|name| path.eq_ignore_ascii_case(name)) {
+            Some(name) if path != *name => ((*name).to_owned(), data),
+            _ => (path, data),
+        })
         .collect()
 }
 
@@ -156,7 +181,7 @@ impl KtfEmulator {
     }
 
     pub fn loadable_archive(files: &BTreeMap<String, Vec<u8>>) -> bool {
-        files.contains_key("__adf__") || descriptor_directory(files).is_some()
+        files.keys().any(|path| path.eq_ignore_ascii_case("__adf__")) || descriptor_directory(files).is_some()
     }
 
     pub fn loadable_jar(jar: &[u8]) -> bool {
@@ -605,6 +630,24 @@ mod tests {
         names.sort_unstable();
 
         assert_eq!(names, ["010261FB.jar", "P/save0", "__adf__", "__class__"]);
+    }
+
+    /// 슈퍼액션 히어로5 ships its descriptors in capitals. They are still the
+    /// descriptors, and are filed under the names the runtime asks for.
+    #[test]
+    fn descriptors_in_capitals_are_still_descriptors() {
+        let files = archive(&["__ADF__", "__ENV__", "01042E6A.jar", "P/__ADF__"]);
+
+        assert!(KtfEmulator::loadable_archive(&files));
+
+        let names: Vec<String> = reroot_archive(files).into_keys().collect();
+        assert_eq!(names, ["01042E6A.jar", "P/__ADF__", "__adf__", "__env__"], "only the root's are renamed");
+
+        let bundled = archive(&["game/hero5/__ADF__", "game/hero5/01042E6A.jar"]);
+        assert_eq!(descriptor_directory(&bundled).as_deref(), Some("game/hero5"));
+
+        let names: Vec<String> = reroot_archive(bundled).into_keys().collect();
+        assert_eq!(names, ["01042E6A.jar", "__adf__"]);
     }
 
     /// Two descriptors are two archives in one zip, and which one is the title
