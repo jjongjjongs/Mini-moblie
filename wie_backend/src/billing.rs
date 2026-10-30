@@ -1054,6 +1054,13 @@ pub fn ktf_local_school_purchase_response(request: &[u8]) -> Option<Vec<u8>> {
 /// | `0x01`, the keep-alive | type `0x01`, no body | nothing: the type is ignored |
 /// | `0x00`, session `0x3ee` (a star purchase) | type `0x00`, then type `0x04` | `0xb2afc` sends the purchase, `0xd7`, only on a `0x04` in a `0x3ee` session |
 /// | `0xd7`, `[u16be][u32be amount][u32be]` | type `0xd7`, the request's own body | `0xb3ea4` grants the stars when the amount it reads back is the one it asked for, and says `별 구매에 실패했습니다` otherwise |
+/// | `0x55`, `0x59`, `0x5f`, `0x63`, a page of the catalog (`0x59` is 동료구매) | the same type, `[u32be 0]` | `0xb3418` reads a count and that many 30-byte entries; none is `검색된 무장이 없습니다` |
+///
+/// A granted purchase shows nothing of its own: the title saves, logs back in
+/// to the shop and puts the list up again, and the stars are on the count.
+/// The catalog is the server's - ids and prices for things sold on the day -
+/// and there is no copy of it to serve, so it is answered empty rather than
+/// left to hang the shop on 접속중.
 ///
 /// The shop closes the socket itself (`네트워크 연결이 끊겼습니다`) after 1500
 /// frames with no key pressed - `0x9b42c`, on a counter only its screens reset -
@@ -1070,6 +1077,9 @@ pub fn ktf_local_tempest_response(request: &[u8]) -> Option<Vec<u8>> {
     const ACCOUNT: u8 = 0x33;
     const NOTICE: u8 = 0x35;
     const PURCHASE: u8 = 0xd7;
+    /// Pages of the shop's catalog: one handler reads them all.
+    const CATALOG_PAGE: u8 = 0x55;
+    const COMPANIONS: u8 = 0x59;
     /// What lets a purchase session send its purchase.
     const PURCHASE_READY: u8 = 0x04;
     /// The session a login opens to buy stars, at bytes 5..7.
@@ -1094,6 +1104,7 @@ pub fn ktf_local_tempest_response(request: &[u8]) -> Option<Vec<u8>> {
         ACCOUNT => &[0u8; 52],
         NOTICE => &NO_NOTICE,
         PURCHASE => &request[HEAD..],
+        CATALOG_PAGE | COMPANIONS | 0x5f | 0x63 => &[0x00, 0x00, 0x00, 0x00],
         _ => return None,
     };
 
@@ -12368,6 +12379,12 @@ mod tests {
                 0x00, 0x07, 0x00, 0x04, 0x00, 0x00, 0x00,
             ]),
             "a purchase session is let on to its purchase"
+        );
+
+        assert_eq!(
+            ktf_local_tempest_response(&[0x00, 0x09, 0x00, 0x59, 0x00, 0x00, 0x00, 0x00, 0x01]),
+            Some(vec![0x00, 0x09, 0x00, 0x59, 0x00, 0x00, 0x00, 0x00, 0x00]),
+            "동료구매's page is empty"
         );
 
         let purchase = [0x00, 0x0f, 0x00, 0xd7, 0x00, 0x00, 0x14, 0x00, 0x00, 0x03, 0xe8, 0x00, 0x00, 0x00, 0x00];

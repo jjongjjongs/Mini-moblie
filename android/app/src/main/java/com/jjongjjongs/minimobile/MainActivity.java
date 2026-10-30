@@ -5676,6 +5676,37 @@ public final class MainActivity extends Activity {
         });
     }
 
+    /**
+     * On its side, moves a shown dialog sideways until it is centred on the
+     * game screen, its size left as it is. The system centres a dialog on the
+     * room the display leaves it, which a camera cutout on one side and a
+     * system bar on the other make lopsided - 조작 설정 stood a camera's width
+     * right of the screen. Upright there is nothing to correct.
+     */
+    void centreOverGameScreen(Dialog dialog) {
+        final android.view.Window window = dialog.getWindow();
+        final android.graphics.Rect screen = gameScreenOnDisplay();
+        if (!landscapeMode || window == null || screen == null) {
+            return;
+        }
+        final int displayWidth = getResources().getDisplayMetrics().widthPixels;
+        final View decor = window.getDecorView();
+        decor.getViewTreeObserver().addOnGlobalLayoutListener(new android.view.ViewTreeObserver.OnGlobalLayoutListener() {
+            @Override
+            public void onGlobalLayout() {
+                decor.getViewTreeObserver().removeOnGlobalLayoutListener(this);
+                int wanted = Math.max(0, Math.min(displayWidth - decor.getWidth(), screen.centerX() - decor.getWidth() / 2));
+                int[] at = new int[2];
+                decor.getLocationOnScreen(at);
+                if (at[0] != wanted) {
+                    WindowManager.LayoutParams params = window.getAttributes();
+                    params.x += wanted - at[0];
+                    window.setAttributes(params);
+                }
+            }
+        });
+    }
+
     /** Run each time the player is laid out again after a turn, while a dialog over it follows it. */
     private final List<Runnable> relaidOut = new ArrayList<>();
 

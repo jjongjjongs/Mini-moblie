@@ -598,6 +598,9 @@ final class ControlDialogs {
         }
         column.addView(list);
         track(create);
+        if (player != null) {
+            player.centreOverGameScreen(create);
+        }
     }
 
     /** A small heading over a group of 조작 설정. */
