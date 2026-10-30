@@ -5189,7 +5189,7 @@ public final class MainActivity extends Activity {
                 closing.apply(this::showQualityDialog)));
         if (game != null) {
             ScreenScale scale = gameScale(game, sideLayout());
-            tiles.add(new GameMenuTile(LineIcon.Kind.SCALE, "화면 배율", scaleLabel(scale), scale.mode != SCALE_FIT,
+            tiles.add(new GameMenuTile(LineIcon.Kind.SCALE, "배율·위치", scaleLabel(scale), scale.mode != SCALE_FIT || scale.moved(),
                     closing.apply(this::showScaleDialog)));
         }
         tiles.add(new GameMenuTile(LineIcon.Kind.CONTROLS, "조작 설정", "키패드·패드 ›", false,
@@ -5967,17 +5967,36 @@ public final class MainActivity extends Activity {
         final int height;
         /** Whether 직접 조절's two rulers move together. */
         final boolean linked;
+        /**
+         * Where the screen sits in the room it leaves, each way from -100 (the
+         * left or top edge) through 0 (the middle) to 100 (the right or bottom
+         * edge) - for a gamepad that holds the phone and covers part of it.
+         * Only room the screen does not fill can be moved through.
+         */
+        final int x;
+        final int y;
 
         ScreenScale(int mode, int width, int height, boolean linked) {
+            this(mode, width, height, linked, 0, 0);
+        }
+
+        ScreenScale(int mode, int width, int height, boolean linked, int x, int y) {
             this.mode = mode;
             this.width = width;
             this.height = height;
             this.linked = linked;
+            this.x = Math.max(-100, Math.min(100, x));
+            this.y = Math.max(-100, Math.min(100, y));
         }
 
-        /** "mode,width,height,linked", as it is kept. */
+        /** Whether the screen is moved off the middle either way. */
+        boolean moved() {
+            return x != 0 || y != 0;
+        }
+
+        /** "mode,width,height,linked,x,y", as it is kept. */
         String encode() {
-            return mode + "," + width + "," + height + "," + (linked ? 1 : 0);
+            return mode + "," + width + "," + height + "," + (linked ? 1 : 0) + "," + x + "," + y;
         }
 
         /** What {@link #encode} wrote, or null for anything else. */
@@ -5986,7 +6005,8 @@ public final class MainActivity extends Activity {
                 return null;
             }
             String[] parts = text.split(",");
-            if (parts.length != 4) {
+            // Four before the screen could be moved, six since.
+            if (parts.length != 4 && parts.length != 6) {
                 return null;
             }
             try {
@@ -5996,7 +6016,9 @@ public final class MainActivity extends Activity {
                 if (mode < SCALE_FIT || mode > SCALE_CUSTOM || width < SCALE_SMALLEST || height < SCALE_SMALLEST) {
                     return null;
                 }
-                return new ScreenScale(mode, width, height, !parts[3].equals("0"));
+                int x = parts.length == 6 ? Integer.parseInt(parts[4]) : 0;
+                int y = parts.length == 6 ? Integer.parseInt(parts[5]) : 0;
+                return new ScreenScale(mode, width, height, !parts[3].equals("0"), x, y);
             } catch (NumberFormatException e) {
                 return null;
             }
@@ -6046,16 +6068,21 @@ public final class MainActivity extends Activity {
         editor.apply();
     }
 
-    /** 맞춤, 정수배, 직접 80%, or 직접 110×100% when the sides differ. */
+    /** 맞춤, 정수배, 직접 80%, or 직접 110×100% when the sides differ; " · 이동" when it is moved. */
     private static String scaleLabel(ScreenScale scale) {
+        String size;
         switch (scale.mode) {
             case SCALE_INTEGER:
-                return "정수배";
+                size = "정수배";
+                break;
             case SCALE_CUSTOM:
-                return scale.width == scale.height ? "직접 " + scale.width + "%" : "직접 " + scale.width + "×" + scale.height + "%";
+                size = scale.width == scale.height ? "직접 " + scale.width + "%" : "직접 " + scale.width + "×" + scale.height + "%";
+                break;
             default:
-                return "맞춤";
+                size = "맞춤";
+                break;
         }
+        return scale.moved() ? size + " · 이동" : size;
     }
 
     /**
@@ -6105,6 +6132,7 @@ public final class MainActivity extends Activity {
         final ScreenScale saved = gameScale(game, side);
         final int[] mode = {saved.mode};
         final boolean[] linked = {saved.linked};
+        final int[] place = {saved.x, saved.y};
         final int[] limits = gameView.customLimits();
 
         LinearLayout body = new LinearLayout(this);
@@ -6120,11 +6148,20 @@ public final class MainActivity extends Activity {
         final TextView widthRange = new TextView(this);
         final TextView heightRange = new TextView(this);
 
+        final TextView placeNote = new TextView(this);
         final Runnable preview = () -> {
-            ScreenScale chosen = new ScreenScale(mode[0], widthRuler.tenths(), heightRuler.tenths(), linked[0]);
+            ScreenScale chosen = new ScreenScale(mode[0], widthRuler.tenths(), heightRuler.tenths(), linked[0], place[0], place[1]);
             widthValue.setText(chosen.width + "%");
             heightValue.setText(chosen.height + "%");
             gameView.setScale(chosen);
+            // A way the screen fills can not be moved along; say so, and how.
+            RectF shown = gameView.screenRect(chosen);
+            boolean across = gameView.getWidth() - shown.width() >= 1f;
+            boolean down = gameView.getHeight() - shown.height() >= 1f;
+            placeNote.setText(across && down ? "화면이 칸보다 작은 만큼 옮길 수 있어요."
+                    : across ? "위아래로 꽉 차 있어요. 세로로 옮기려면 직접 조절로 줄여 주세요."
+                    : down ? "양옆으로 꽉 차 있어요. 가로로 옮기려면 직접 조절로 줄여 주세요."
+                    : "화면이 칸에 꽉 차 있어요. 옮기려면 직접 조절로 줄여 주세요.");
         };
         // Linked, both rulers stop where the nearer edge is, so the shape can
         // be kept all the way along either of them.
@@ -6210,6 +6247,7 @@ public final class MainActivity extends Activity {
             body.addView(card, matchWidth(i > 0 ? dp(8) : 0));
         }
         body.addView(custom, matchWidth(dp(8)));
+        body.addView(screenPlacePanel(place, placeNote, preview), matchWidth(dp(12)));
 
         ranges.run();
         widthRuler.setTenths(saved.width, false);
@@ -6252,11 +6290,11 @@ public final class MainActivity extends Activity {
         final boolean[] applied = {false};
         ControlStyle style = new ControlStyle(this, false);
         AlertDialog dialog = new AlertDialog.Builder(style.context)
-                .setTitle("화면 배율")
+                .setTitle("화면 배율·위치")
                 .setView(scrolling(body))
                 .setPositiveButton("적용", (d, which) -> {
                     applied[0] = true;
-                    ScreenScale chosen = new ScreenScale(mode[0], widthRuler.tenths(), heightRuler.tenths(), linked[0]);
+                    ScreenScale chosen = new ScreenScale(mode[0], widthRuler.tenths(), heightRuler.tenths(), linked[0], place[0], place[1]);
                     saveGameScale(game, side, chosen, everyGame.isChecked());
                     gameView.setScale(chosen);
                 })
@@ -6268,7 +6306,143 @@ public final class MainActivity extends Activity {
                 gameView.setScale(saved);
             }
         });
+        dialog.setButton(AlertDialog.BUTTON_NEUTRAL, "꾹 눌러 보기", (android.content.DialogInterface.OnClickListener) null);
         showMenuDialog(style, dialog);
+        peekWhileHeld(dialog);
+    }
+
+    /**
+     * 화면 위치: the screen moved left or right and up or down through the
+     * room it does not fill, each way on its own slider with the middle
+     * marked, and 가운데로 to put it back. Each move shows on the screen behind
+     * at once, through `preview`; `note` says which ways there is room.
+     */
+    private View screenPlacePanel(final int[] place, TextView note, Runnable preview) {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(12), dp(10), dp(12), dp(8));
+        panel.setBackground(roundedRect(Color.argb(60, 0, 0, 0), Color.rgb(58, 61, 71), 1, 10));
+
+        TextView title = new TextView(this);
+        title.setText("화면 위치");
+        title.setTextSize(14f);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setTextColor(COLOR_TEXT);
+        panel.addView(title);
+        note.setTextSize(11.5f);
+        note.setTextColor(COLOR_SUBTEXT);
+        note.setPadding(0, dp(2), 0, dp(4));
+        panel.addView(note);
+
+        final android.widget.SeekBar[] bars = new android.widget.SeekBar[2];
+        String[][] ends = {{"가로", "왼쪽", "오른쪽"}, {"세로", "위", "아래"}};
+        for (int axis = 0; axis < 2; axis++) {
+            final int which = axis;
+            LinearLayout head = new LinearLayout(this);
+            head.setPadding(0, dp(8), 0, 0);
+            TextView name = new TextView(this);
+            name.setText(ends[axis][0]);
+            name.setTextSize(13f);
+            name.setTextColor(COLOR_TEXT);
+            head.addView(name, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            final TextView value = new TextView(this);
+            value.setTextSize(12.5f);
+            value.setTypeface(Typeface.DEFAULT_BOLD);
+            value.setTextColor(COLOR_ACCENT);
+            head.addView(value);
+            panel.addView(head);
+
+            android.widget.SeekBar bar = new android.widget.SeekBar(this);
+            bar.setMax(200);
+            bar.setProgress(place[axis] + 100);
+            bar.setProgressTintList(android.content.res.ColorStateList.valueOf(COLOR_ACCENT));
+            bar.setThumbTintList(android.content.res.ColorStateList.valueOf(COLOR_ACCENT));
+            final String low = ends[axis][1];
+            final String high = ends[axis][2];
+            final Runnable shown = () -> {
+                int at = place[which];
+                value.setText(at == 0 ? "가운데" : at <= -100 ? low + " 끝" : at >= 100 ? high + " 끝"
+                        : (at < 0 ? low + " " + (-at) : high + " " + at) + "%");
+            };
+            shown.run();
+            bar.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
+                @Override
+                public void onProgressChanged(android.widget.SeekBar seekBar, int progress, boolean fromUser) {
+                    int at = progress - 100;
+                    // The middle catches, so it is easy to come back to.
+                    if (fromUser && Math.abs(at) <= 4) {
+                        at = 0;
+                    }
+                    place[which] = at;
+                    shown.run();
+                    preview.run();
+                }
+
+                @Override
+                public void onStartTrackingTouch(android.widget.SeekBar seekBar) {
+                }
+
+                @Override
+                public void onStopTrackingTouch(android.widget.SeekBar seekBar) {
+                    if (place[which] == 0) {
+                        seekBar.setProgress(100);
+                    }
+                }
+            });
+            bars[axis] = bar;
+            panel.addView(bar, matchWidth(0));
+
+            LinearLayout scale = new LinearLayout(this);
+            for (String end : new String[]{low, "가운데", high}) {
+                TextView mark = new TextView(this);
+                mark.setText(end);
+                mark.setTextSize(10.5f);
+                mark.setTextColor(COLOR_SUBTEXT);
+                mark.setGravity(end.equals(low) ? android.view.Gravity.START : end.equals(high) ? android.view.Gravity.END : android.view.Gravity.CENTER);
+                scale.addView(mark, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            }
+            panel.addView(scale);
+        }
+
+        TextView middle = new TextView(this);
+        middle.setText("가운데로 되돌리기");
+        middle.setTextSize(12.5f);
+        middle.setTypeface(Typeface.DEFAULT_BOLD);
+        middle.setTextColor(COLOR_ACCENT);
+        middle.setGravity(android.view.Gravity.CENTER);
+        middle.setPadding(0, dp(8), 0, dp(4));
+        middle.setOnClickListener(v -> {
+            bars[0].setProgress(100);
+            bars[1].setProgress(100);
+        });
+        panel.addView(middle, matchWidth(0));
+        return panel;
+    }
+
+    /**
+     * Turns a shown dialog's neutral button into 꾹 눌러 보기: held down, the
+     * dialog and the shade behind it go, to see the game as the choices have
+     * left it; let go, they come back. It takes the touch, so it never closes
+     * the dialog.
+     */
+    private void peekWhileHeld(AlertDialog dialog) {
+        Button peek = dialog.getButton(AlertDialog.BUTTON_NEUTRAL);
+        final android.view.Window window = dialog.getWindow();
+        if (peek == null || window == null) {
+            return;
+        }
+        final float dim = window.getAttributes().dimAmount;
+        peek.setOnTouchListener((v, event) -> {
+            int action = event.getActionMasked();
+            if (action == MotionEvent.ACTION_DOWN) {
+                window.getDecorView().setAlpha(0f);
+                window.setDimAmount(0f);
+            } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                window.getDecorView().setAlpha(1f);
+                window.setDimAmount(dim);
+            }
+            return true;
+        });
     }
 
     /** Full width, `top` below what is over it. */
@@ -7511,7 +7685,8 @@ public final class MainActivity extends Activity {
         }
 
         /**
-         * Where the screen is drawn in this view at `scale`, centred:
+         * Where the screen is drawn in this view at `scale`, centred unless
+         * `scale` moves it:
          *
          * <ul>
          * <li>맞춤, as large as fits at the screen's own shape;
@@ -7537,8 +7712,10 @@ public final class MainActivity extends Activity {
                 shownHeight = Math.min(getHeight(), shownHeight * scale.height / 100f);
             }
 
-            float left = (getWidth() - shownWidth) / 2f;
-            float top = (getHeight() - shownHeight) / 2f;
+            // Centred, unless moved: the room left over each way is split by
+            // where the screen was put in it.
+            float left = (getWidth() - shownWidth) * (scale.x + 100) / 200f;
+            float top = (getHeight() - shownHeight) * (scale.y + 100) / 200f;
             return new RectF(left, top, left + shownWidth, top + shownHeight);
         }
 
