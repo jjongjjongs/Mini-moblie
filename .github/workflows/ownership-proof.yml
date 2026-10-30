@@ -1,0 +1,67 @@
+name: Ownership proof APK
+
+# Builds the small APK that proves ownership of com.jjongjjongs.minimobile to Android
+# developer verification. See ownership-proof/README.md.
+on:
+  push:
+    branches:
+      - ownership-proof
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      # The app's signing certificate (CN=Mini Mobile, O=jjongjjongs).
+      EXPECTED_CERT_SHA256: 98126d5e00f9db6ea38926c0e0bc894a15e7ae52244773ab7d3ef82c5247737b
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build and sign
+        run: |
+          set -eu
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "::error::The ANDROID_KEYSTORE_BASE64 secret is needed"
+            exit 1
+          fi
+          tools="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -n 1)"
+          platform="$ANDROID_HOME/platforms/$(ls "$ANDROID_HOME/platforms" | sort -V | tail -n 1)/android.jar"
+          mkdir -p out
+          "$tools/aapt2" link -o out/unsigned.apk -I "$platform" \
+            --manifest ownership-proof/AndroidManifest.xml -A ownership-proof/assets \
+            --min-sdk-version 24 --target-sdk-version 34 --version-code 1 --version-name 1
+          "$tools/zipalign" -p -f 4 out/unsigned.apk out/aligned.apk
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > out/key.jks
+          # Every signing scheme, for whatever the console reads.
+          "$tools/apksigner" sign --ks out/key.jks --ks-key-alias minimobile \
+            --ks-pass env:ANDROID_KEYSTORE_PASSWORD --key-pass env:ANDROID_KEYSTORE_PASSWORD \
+            --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
+            --out MiniMobile-ownership-proof.apk out/aligned.apk
+          rm -f out/key.jks
+          certs=$("$tools/apksigner" verify --verbose --print-certs MiniMobile-ownership-proof.apk)
+          echo "$certs"
+          echo "$certs" | grep -qi "SHA-256 digest: $EXPECTED_CERT_SHA256" || {
+            echo "::error::Not signed with the Mini Mobile key"
+            exit 1
+          }
+          unzip -p MiniMobile-ownership-proof.apk assets/adi-registration.properties | grep -q . || {
+            echo "::error::assets/adi-registration.properties is missing"
+            exit 1
+          }
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          gh release view ownership-proof >/dev/null 2>&1 || \
+            gh release create ownership-proof --target "$GITHUB_SHA" --prerelease \
+              --title "Package ownership proof" \
+              --notes "For Android developer verification only. Do not install."
+          gh release upload ownership-proof MiniMobile-ownership-proof.apk --clobber
