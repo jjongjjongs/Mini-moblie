@@ -1040,13 +1040,42 @@ pub fn ktf_local_school_purchase_response(request: &[u8]) -> Option<Vec<u8>> {
 /// with nothing to restore (`0x101100(5)`), which is the truth here - there is
 /// no server - so `0x32` is answered `[00]`.
 ///
+/// 슈퍼액션 히어로5 (KTF `01042E6A`, 컴투스) reaches the same relay and frames for
+/// its 아이템샵, and stood on `접속중` because the shop's own exchanges were
+/// left unanswered. Its replies are dispatched by type at `0xb4caa` (a table of
+/// 216, most of them ignored); the session is a login whose bytes 5..7 name it:
+///
+/// | request | answer | what the title does with it |
+/// |---------|--------|------------------------------|
+/// | `0x00`, session `0x448` (the shop) | type `0x00` | goes on to upload its record and ask for the account |
+/// | `0x32`, the stars it holds | type `0x32` | nothing: the handler (`0xb09c0`) is a bare return |
+/// | `0x33`, the account | type `0x33`, 52 bytes of zeros | `0xb1bb0` reads a 20-byte name and the numbers behind it; no name is a player the server has not seen |
+/// | `0x35`, the notice after id `-1` | type `0x35`, `[u32be -1][u16be 0]` | `0xb0e2c` shows a notice for any other id - and asks for the one after it, forever - and opens the shop for `-1` |
+/// | `0x01`, the keep-alive | type `0x01`, no body | nothing: the type is ignored |
+/// | `0x00`, session `0x3ee` (a star purchase) | type `0x00`, then type `0x04` | `0xb2afc` sends the purchase, `0xd7`, only on a `0x04` in a `0x3ee` session |
+/// | `0xd7`, `[u16be][u32be amount][u32be]` | type `0xd7`, the request's own body | `0xb3ea4` grants the stars when the amount it reads back is the one it asked for, and says `별 구매에 실패했습니다` otherwise |
+///
+/// The shop closes the socket itself (`네트워크 연결이 끊겼습니다`) after 1500
+/// frames with no key pressed - `0x9b42c`, on a counter only its screens reset -
+/// which no reply here can or should hold off.
+///
 /// `None` for anything else, which is left unanswered.
 pub fn ktf_local_tempest_response(request: &[u8]) -> Option<Vec<u8>> {
     const HEAD: usize = 5;
     const LOGIN: u8 = 0x00;
+    const KEEP_ALIVE: u8 = 0x01;
     const CERTIFICATE: u8 = 0x1e;
     const COMPLETE: u8 = 0x14;
     const SAVED_GAME: u8 = 0x32;
+    const ACCOUNT: u8 = 0x33;
+    const NOTICE: u8 = 0x35;
+    const PURCHASE: u8 = 0xd7;
+    /// What lets a purchase session send its purchase.
+    const PURCHASE_READY: u8 = 0x04;
+    /// The session a login opens to buy stars, at bytes 5..7.
+    const PURCHASE_SESSION: [u8; 2] = [0x03, 0xee];
+    /// The notice id that says there is none.
+    const NO_NOTICE: [u8; 6] = [0xff, 0xff, 0xff, 0xff, 0x00, 0x00];
 
     if request.len() < HEAD || u16::from_be_bytes([request[0], request[1]]) as usize != request.len() || request[2] != 0x00 || request[4] != 0x00 {
         return None;
@@ -1057,19 +1086,36 @@ pub fn ktf_local_tempest_response(request: &[u8]) -> Option<Vec<u8>> {
         // What a login is answered with in this family, though the title only
         // looks at the type.
         LOGIN => &[0, 0, 0, 0, 0],
+        KEEP_ALIVE => &[],
         CERTIFICATE => &[0x01],
         // No message: a zero u16be length after the first byte.
         COMPLETE => &[0x00, 0x00, 0x00],
         SAVED_GAME => &[0x00],
+        ACCOUNT => &[0u8; 52],
+        NOTICE => &NO_NOTICE,
+        PURCHASE => &request[HEAD..],
         _ => return None,
     };
+
+    let mut reply = gp_frame(message_type, body);
+    if message_type == LOGIN && request.get(5..7) == Some(&PURCHASE_SESSION) {
+        reply.extend_from_slice(&gp_frame(PURCHASE_READY, &[0x00, 0x00]));
+    }
+
+    Some(reply)
+}
+
+/// One frame of the GP4 family as 템페스트 and 슈퍼액션 히어로5 read it: a
+/// `u16be` length counting the whole frame, a zero, the type, a zero, the body.
+fn gp_frame(message_type: u8, body: &[u8]) -> Vec<u8> {
+    const HEAD: usize = 5;
 
     let length = HEAD + body.len();
     let mut frame = Vec::with_capacity(length);
     frame.extend_from_slice(&(length as u16).to_be_bytes());
     frame.extend_from_slice(&[0x00, message_type, 0x00]);
     frame.extend_from_slice(body);
-    Some(frame)
+    frame
 }
 
 /// What answers 액션퍼즐패밀리1's star purchase.
@@ -12288,12 +12334,52 @@ mod tests {
         );
     }
 
+    /// 슈퍼액션 히어로5's 아이템샵, frame by frame as the title wrote them: the
+    /// shop opens past its notice, and a star purchase is granted.
+    #[test]
+    fn hero5_s_shop_opens_and_sells_stars() {
+        let mut login = vec![0x00, 0x67, 0x00, 0x00, 0x00, 0x04, 0x48, 0x00, 0x00, 0x01, 0x03];
+        login.resize(0x67, 0x00);
+        assert_eq!(
+            ktf_local_tempest_response(&login),
+            Some(vec![0x00, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),
+            "the shop's own session is only logged in"
+        );
+
+        let account = ktf_local_tempest_response(&[0x00, 0x09, 0x00, 0x33, 0x00, 0x00, 0x03, 0xff, 0xff]).unwrap();
+        assert_eq!(&account[..5], &[0x00, 0x39, 0x00, 0x33, 0x00]);
+        assert!(account[5..].iter().all(|x| *x == 0), "no name, no numbers");
+
+        assert_eq!(
+            ktf_local_tempest_response(&[0x00, 0x09, 0x00, 0x35, 0x00, 0xff, 0xff, 0xff, 0xff]),
+            Some(vec![0x00, 0x0b, 0x00, 0x35, 0x00, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00]),
+            "no notice"
+        );
+        assert_eq!(
+            ktf_local_tempest_response(&[0x00, 0x05, 0x00, 0x01, 0x00]),
+            Some(vec![0x00, 0x05, 0x00, 0x01, 0x00])
+        );
+
+        login[5..7].copy_from_slice(&[0x03, 0xee]);
+        assert_eq!(
+            ktf_local_tempest_response(&login),
+            Some(vec![
+                0x00, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+                0x00, 0x07, 0x00, 0x04, 0x00, 0x00, 0x00,
+            ]),
+            "a purchase session is let on to its purchase"
+        );
+
+        let purchase = [0x00, 0x0f, 0x00, 0xd7, 0x00, 0x00, 0x14, 0x00, 0x00, 0x03, 0xe8, 0x00, 0x00, 0x00, 0x00];
+        assert_eq!(ktf_local_tempest_response(&purchase), Some(purchase.to_vec()), "the amount comes back");
+    }
+
     /// The GP4 frames 액션퍼즐패밀리2 writes carry `0x30` where 템페스트's carry a
     /// zero, and are not taken; nor is a type the 정품인증 does not send.
     #[test]
     fn tempest_answers_only_its_own_frames() {
         assert_eq!(ktf_local_tempest_response(APF2_LOGIN), None);
-        assert_eq!(ktf_local_tempest_response(&[0x00, 0x05, 0x00, 0x33, 0x00]), None);
+        assert_eq!(ktf_local_tempest_response(&[0x00, 0x05, 0x00, 0x34, 0x00]), None);
         assert_eq!(
             ktf_local_tempest_response(&[0x00, 0x06, 0x00, 0x1e, 0x00]),
             None,

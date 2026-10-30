@@ -307,7 +307,8 @@ impl System {
         // `FastRelay` carrier library rather than a socket of its own: the
         // relay's address and the two ports its other modes dial. Answered in
         // process (`crate::billing::ktf_local_tempest_response`), the 인증서 is
-        // granted. Host-gated, so no other title is touched.
+        // granted. 슈퍼액션 히어로5's 아이템샵 is the same relay and frames. Host-gated,
+        // so no other title is touched.
         for (name, host, port) in [
             ("billing(211.115.66.252:15136)", "211.115.66.252", 15136),
             ("billing(211.115.66.252:15155)", "211.115.66.252", 15155),
