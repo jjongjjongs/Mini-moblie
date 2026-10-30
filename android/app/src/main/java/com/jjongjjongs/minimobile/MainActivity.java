@@ -4813,7 +4813,14 @@ public final class MainActivity extends Activity {
         // Except a player that opens on its side with auto-rotate off: that is
         // held in landscape the way the toggle holds it, so it still turns
         // over with the phone - see `heldOrientation`.
-        if (landscapeMode && !autoRotateOn()) {
+        //
+        // And a title last left on its side opens on its side again, held there
+        // as the toggle would hold it: the library is always upright, so the
+        // window alone would bring every title back upright.
+        if (gameLandscape(game) && !landscapeMode) {
+            orientationPinned = true;
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+        } else if (landscapeMode && !autoRotateOn()) {
             orientationPinned = true;
             setRequestedOrientation(heldOrientation());
         } else {
@@ -5617,15 +5624,25 @@ public final class MainActivity extends Activity {
      * laid out and the difference taken off.
      */
     void fitOverGameScreen(Dialog dialog, boolean clear) {
+        fitOverGameScreen(dialog, clear, false);
+    }
+
+    /**
+     * As {@link #fitOverGameScreen(Dialog, boolean)}, but {@code wrap} leaves
+     * the dialog as tall as what it holds and centres it on the game screen
+     * from top to bottom too - for a question or a short menu, which the full
+     * height only stretches into an empty panel.
+     */
+    void fitOverGameScreen(Dialog dialog, boolean clear, boolean wrap) {
         final android.view.Window window = dialog.getWindow();
-        android.graphics.Rect screen = gameScreenOnDisplay();
+        final android.graphics.Rect screen = gameScreenOnDisplay();
         if (window == null || screen == null) {
             return;
         }
         if (clear) {
             window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
         }
-        android.util.DisplayMetrics metrics = getResources().getDisplayMetrics();
+        final android.util.DisplayMetrics metrics = getResources().getDisplayMetrics();
         int width = Math.min(metrics.widthPixels, Math.max(screen.width(), dp(300)));
         int height = Math.min(metrics.heightPixels, Math.max(screen.height(), dp(280)));
         final int left = Math.max(0, Math.min(metrics.widthPixels - width, screen.centerX() - width / 2));
@@ -5635,7 +5652,7 @@ public final class MainActivity extends Activity {
         params.x = left;
         params.y = top;
         params.width = width;
-        params.height = height;
+        params.height = wrap ? WindowManager.LayoutParams.WRAP_CONTENT : height;
         window.setAttributes(params);
 
         final View decor = window.getDecorView();
@@ -5643,11 +5660,16 @@ public final class MainActivity extends Activity {
             @Override
             public void onGlobalLayout() {
                 decor.getViewTreeObserver().removeOnGlobalLayoutListener(this);
+                // Only once it is laid out is a wrapped dialog's height known,
+                // and with it where its top goes to be centred.
+                int wanted = wrap
+                        ? Math.max(0, Math.min(metrics.heightPixels - decor.getHeight(), screen.centerY() - decor.getHeight() / 2))
+                        : top;
                 int[] at = new int[2];
                 decor.getLocationOnScreen(at);
-                if (at[0] != left || at[1] != top) {
+                if (at[0] != left || at[1] != wanted) {
                     params.x -= at[0] - left;
-                    params.y -= at[1] - top;
+                    params.y -= at[1] - wanted;
                     window.setAttributes(params);
                 }
             }
@@ -6803,9 +6825,11 @@ public final class MainActivity extends Activity {
         dialog.show();
         // On its side the screen is a narrow band between the keys, and the
         // menu sits over it alone, like 키패드 디자인, rather than across the
-        // keys as well. Upright it keeps the ordinary dialog's place and size.
+        // keys as well - as tall as what it holds, so a question such as 종료
+        // is not stretched down the whole band. Upright it keeps the ordinary
+        // dialog's place and size.
         if (landscapeMode) {
-            fitOverGameScreen(dialog, false);
+            fitOverGameScreen(dialog, false, true);
         }
     }
 
@@ -6978,6 +7002,22 @@ public final class MainActivity extends Activity {
                 : ActivityInfo.SCREEN_ORIENTATION_PORTRAIT;
     }
 
+    /**
+     * Whether the title was on its side when it was last played, so it opens
+     * that way again. Kept per title, as the speed is, and written as the
+     * player turns rather than as it is left: leaving turns the window upright
+     * for the library, and by then the player is no longer the one turning.
+     */
+    private boolean gameLandscape(File game) {
+        return getSharedPreferences("mini_landscape", MODE_PRIVATE).getBoolean(game.getName(), false);
+    }
+
+    private void saveGameLandscape(File game, boolean onItsSide) {
+        if (game != null) {
+            getSharedPreferences("mini_landscape", MODE_PRIVATE).edit().putBoolean(game.getName(), onItsSide).apply();
+        }
+    }
+
     /** Whether the phone would turn its own screen if it were moved. */
     private boolean autoRotateOn() {
         return Settings.System.getInt(getContentResolver(), Settings.System.ACCELEROMETER_ROTATION, 0) == 1;
@@ -7010,6 +7050,7 @@ public final class MainActivity extends Activity {
         // configChanges), so the game thread never stops - only the views move.
         if (playerVisible && gameView != null && keypad != null) {
             landscapeMode = newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE;
+            saveGameLandscape(currentGame, landscapeMode);
             // Unfolding or folding a Fold arrives here too, as a new screen
             // size, so the player follows it without turning.
             unfolded = isUnfolded(newConfig);
