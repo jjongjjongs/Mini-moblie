@@ -42,14 +42,33 @@ struct ScreenScale: Equatable {
     var height: Int
     /// Whether 직접 조절's two rulers move together.
     var linked: Bool
+    /// Where the screen sits in the room it leaves, each way from -100 (the
+    /// left or top edge) through 0 (the middle) to 100 (the right or bottom
+    /// edge) - for a gamepad that holds the phone and covers part of it. Only
+    /// room the screen does not fill can be moved through.
+    var x = 0
+    var y = 0
 
-    /// 맞춤, 정수배, 직접 80%, or 직접 110×100% when the sides differ.
+    /// Whether the screen is moved off the middle either way.
+    var moved: Bool { x != 0 || y != 0 }
+
+    /// 맞춤, 정수배, 직접 80%, or 직접 110×100% when the sides differ; " · 이동"
+    /// when it is moved.
     var label: String {
+        let size: String
         switch mode {
-        case .fit: return "맞춤"
-        case .integer: return "정수배"
-        case .custom: return width == height ? "직접 \(width)%" : "직접 \(width)×\(height)%"
+        case .fit: size = "맞춤"
+        case .integer: size = "정수배"
+        case .custom: size = width == height ? "직접 \(width)%" : "직접 \(width)×\(height)%"
         }
+        return moved ? size + " · 이동" : size
+    }
+
+    /// How far off the middle of `area` a screen `size` big is drawn: the
+    /// room left over each way, split by where the screen was put in it.
+    func offset(of size: CGSize, in area: CGSize) -> CGSize {
+        CGSize(width: max(0, area.width - size.width) / 2 * CGFloat(x) / 100,
+               height: max(0, area.height - size.height) / 2 * CGFloat(y) / 100)
     }
 
     /// The size a frame of `image` pixels is shown at in `area`.
@@ -83,25 +102,30 @@ struct ScreenScale: Equatable {
         )
     }
 
-    /// "mode,width,height,linked", as it is kept - the Android app's form.
+    /// "mode,width,height,linked,x,y", as it is kept - the Android app's form.
     var encoded: String {
-        "\(mode.rawValue),\(width),\(height),\(linked ? 1 : 0)"
+        "\(mode.rawValue),\(width),\(height),\(linked ? 1 : 0),\(x),\(y)"
     }
 
-    init(mode: ScaleMode, width: Int, height: Int, linked: Bool) {
+    init(mode: ScaleMode, width: Int, height: Int, linked: Bool, x: Int = 0, y: Int = 0) {
         self.mode = mode
         self.width = width
         self.height = height
         self.linked = linked
+        self.x = min(max(x, -100), 100)
+        self.y = min(max(y, -100), 100)
     }
 
-    /// What `encoded` wrote, or nil for anything else.
+    /// What `encoded` wrote, or nil for anything else. Four fields before the
+    /// screen could be moved, six since.
     init?(encoded: String) {
         let parts = encoded.split(separator: ",").map { Int($0) }
-        guard parts.count == 4, let raw = parts[0], let mode = ScaleMode(rawValue: raw),
+        guard parts.count == 4 || parts.count == 6, let raw = parts[0], let mode = ScaleMode(rawValue: raw),
               let width = parts[1], let height = parts[2], let linked = parts[3],
               width >= Self.smallest, height >= Self.smallest else { return nil }
-        self.init(mode: mode, width: width, height: height, linked: linked != 0)
+        let x = parts.count == 6 ? (parts[4] ?? 0) : 0
+        let y = parts.count == 6 ? (parts[5] ?? 0) : 0
+        self.init(mode: mode, width: width, height: height, linked: linked != 0, x: x, y: y)
     }
 }
 
@@ -559,7 +583,7 @@ struct GameView: View {
                 toggleTouch()
             },
             GameMenuTile(symbol: "photo", name: "화질", value: quality.label, on: quality != .smooth) { open(.quality) },
-            GameMenuTile(symbol: "arrow.up.left.and.arrow.down.right", name: "화면 배율", value: scale.label, on: scale != .fit) {
+            GameMenuTile(symbol: "arrow.up.left.and.arrow.down.right", name: "배율·위치", value: scale.label, on: scale != .fit) {
                 open(.scale)
             },
             GameMenuTile(symbol: "slider.horizontal.3", name: "조작 설정", value: "키패드·패드 ›", on: false) { open(.settings) },
@@ -935,6 +959,8 @@ private struct GameScreen: View {
                 .resizable()
                 .frame(width: size.width, height: size.height)
                 .gesture(gesture(pixels, size), including: touch ? .all : .none)
+                // Moved by 화면 위치, touches and all.
+                .offset(scale.offset(of: size, in: area))
         }
     }
 }
@@ -1365,7 +1391,7 @@ private struct ScaleView: View {
     }
 
     var body: some View {
-        MenuPanel(title: "화면 배율") {
+        MenuPanel(title: "화면 배율·위치") {
             VStack(alignment: .leading, spacing: 8) {
                 Text("이 게임의 \(sideways ? "가로" : "세로") 화면에만 적용 · 다음에 열어도 유지")
                     .font(.system(size: 12.5))
@@ -1382,6 +1408,7 @@ private struct ScaleView: View {
                 if scale.mode == .custom {
                     customPanel
                 }
+                placePanel
                 Button {
                     everyGame.toggle()
                 } label: {
@@ -1449,6 +1476,100 @@ private struct ScaleView: View {
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 10).fill(Color.black.opacity(0.24)))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(MenuPalette.raisedLine, lineWidth: 1))
+    }
+
+    /// 화면 위치: the screen moved left or right and up or down through the
+    /// room it does not fill, each way on its own slider with the middle
+    /// catching, over a picture of where it sits; 가운데로 puts it back.
+    private var placePanel: some View {
+        let room = CGSize(width: max(area.width, 1), height: max(area.height, 1))
+        let shown = scale.size(of: pixels, in: room)
+        let across = room.width - shown.width >= 1
+        let down = room.height - shown.height >= 1
+        let note = across && down ? "화면이 칸보다 작은 만큼 옮길 수 있어요."
+            : across ? "위아래로 꽉 차 있어요. 세로로 옮기려면 직접 조절로 줄여 주세요."
+            : down ? "양옆으로 꽉 차 있어요. 가로로 옮기려면 직접 조절로 줄여 주세요."
+            : "화면이 칸에 꽉 차 있어요. 옮기려면 직접 조절로 줄여 주세요."
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("화면 위치")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(MenuPalette.ink)
+                    Text(note)
+                        .font(.system(size: 11.5))
+                        .foregroundColor(MenuPalette.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                placePicture(room: room, shown: shown)
+            }
+            placeSlider("가로", low: "왼쪽", high: "오른쪽", value: \.x)
+            placeSlider("세로", low: "위", high: "아래", value: \.y)
+            Button("가운데로 되돌리기") {
+                withAnimation(.easeOut(duration: 0.25)) {
+                    scale.x = 0
+                    scale.y = 0
+                }
+            }
+            .font(.system(size: 12.5, weight: .bold))
+            .foregroundColor(MenuPalette.accent)
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.black.opacity(0.24)))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(MenuPalette.raisedLine, lineWidth: 1))
+    }
+
+    /// One way of 화면 위치: its name and where it is now, and its slider.
+    private func placeSlider(_ name: String, low: String, high: String, value path: WritableKeyPath<ScreenScale, Int>) -> some View {
+        let at = scale[keyPath: path]
+        let shown = at == 0 ? "가운데" : at <= -100 ? "\(low) 끝" : at >= 100 ? "\(high) 끝"
+            : (at < 0 ? "\(low) \(-at)%" : "\(high) \(at)%")
+        return VStack(spacing: 2) {
+            HStack {
+                Text(name)
+                    .font(.system(size: 13))
+                    .foregroundColor(MenuPalette.ink)
+                Spacer()
+                Text(shown)
+                    .font(.system(size: 12.5, weight: .bold))
+                    .foregroundColor(MenuPalette.accent)
+            }
+            Slider(value: Binding(get: { Double(scale[keyPath: path]) }, set: { new in
+                let step = Int(new.rounded())
+                // The middle catches, so it is easy to come back to.
+                scale[keyPath: path] = abs(step) <= 4 ? 0 : step
+            }), in: -100...100)
+            HStack {
+                Text(low)
+                Spacer()
+                Text("가운데")
+                Spacer()
+                Text(high)
+            }
+            .font(.system(size: 10.5))
+            .foregroundColor(MenuPalette.muted)
+        }
+    }
+
+    /// The area, outlined, and the screen in it where 화면 위치 puts it.
+    private func placePicture(room: CGSize, shown: CGSize) -> some View {
+        let fit = min(56 / room.width, 56 / room.height)
+        let offset = scale.offset(of: shown, in: room)
+        return ZStack {
+            Color(red: 13 / 255, green: 14 / 255, blue: 17 / 255)
+            Rectangle()
+                .stroke(MenuPalette.outline, lineWidth: 1)
+                .frame(width: room.width * fit, height: room.height * fit)
+            Rectangle()
+                .fill(MenuPalette.accent)
+                .frame(width: shown.width * fit, height: shown.height * fit)
+                .offset(x: offset.width * fit, y: offset.height * fit)
+        }
+        .frame(width: 62, height: 62)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 
     /// One side's percent, taking the other with it while they are linked.
