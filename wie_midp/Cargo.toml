@@ -9,6 +9,7 @@ async-trait = { workspace = true }
 bitflags = { workspace = true }
 bytemuck = { workspace = true }
 dyn-clone = { workspace = true }
+encoding_rs = { version = "^0.8", default-features = false, features = ["alloc"] }
 futures = { workspace = true }
 tracing = { workspace = true }
 

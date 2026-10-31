@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, format, sync::Arc, vec, vec::Vec};
 
 use jvm::{
     Jvm,
@@ -6,26 +6,111 @@ use jvm::{
 };
 use wipi_types::wipic::{WIPICIndirectPtr, WIPICWord};
 
-use wie_backend::{AsyncCallable, Event, Instant, System};
+use wie_backend::{AsyncCallable, Instant, System};
 use wie_core_arm::{Allocator, ArmCore};
-use wie_util::{ByteRead, ByteWrite, Result, read_generic, write_generic};
-use wie_wipi_c::{WIPICContext, WIPICMethodBody};
+use wie_util::{ByteRead, ByteWrite, Result, WieError, read_generic, write_generic};
+use wie_wipi_c::{
+    WIPICContext, WIPICMethodBody,
+    api::{
+        filesystem::SharedFilesystemState,
+        graphics::{ContextLayout, ImageLayout},
+        im::SharedImState,
+        kernel::{self, SharedKernelState},
+        media::SharedMediaState,
+        net::SharedNetworkState,
+        serial::SharedSerialState,
+        shared_buf::SharedSharedBufState,
+    },
+};
 
 #[derive(Clone)]
 pub struct KtfWIPICContext {
     core: ArmCore,
     system: System,
     jvm: Jvm, // We need jvm to access resource in jvm. TODO is there better way to do this?
+    network_state: SharedNetworkState,
+    serial_state: SharedSerialState,
+    filesystem_state: SharedFilesystemState,
+    shared_buf_state: SharedSharedBufState,
+    im_state: SharedImState,
+    media_state: SharedMediaState,
+    kernel_state: SharedKernelState,
 }
 
 impl KtfWIPICContext {
-    pub fn new(core: ArmCore, system: System, jvm: Jvm) -> Self {
-        Self { core, system, jvm }
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        core: ArmCore,
+        system: System,
+        jvm: Jvm,
+        network_state: SharedNetworkState,
+        serial_state: SharedSerialState,
+        filesystem_state: SharedFilesystemState,
+        shared_buf_state: SharedSharedBufState,
+        im_state: SharedImState,
+        media_state: SharedMediaState,
+        kernel_state: SharedKernelState,
+    ) -> Self {
+        Self {
+            core,
+            system,
+            jvm,
+            network_state,
+            serial_state,
+            filesystem_state,
+            shared_buf_state,
+            im_state,
+            media_state,
+            kernel_state,
+        }
+    }
+}
+
+impl KtfWIPICContext {
+    /// One of the jar's own files, read once - see
+    /// [`wie_wipi_c::api::kernel::packaged_resource`].
+    async fn packaged_resource(&self, name: &str) -> Option<Arc<[u8]>> {
+        if let Some(data) = kernel::packaged_resource(&self.kernel_state, name) {
+            return Some(data);
+        }
+
+        let class_loader = self.jvm.current_class_loader().await.unwrap();
+        let stream = JavaLangClassLoader::get_resource_as_stream(&self.jvm, &class_loader, name)
+            .await
+            .unwrap()?;
+        let data = JavaIoInputStream::read_until_end(&self.jvm, &stream).await.unwrap();
+
+        Some(kernel::cache_packaged_resource(&self.kernel_state, name, data))
     }
 }
 
 #[async_trait::async_trait]
 impl WIPICContext for KtfWIPICContext {
+    /// KTF hands a title's pixel operation the source first - see the note on
+    /// the trait method.
+    fn pixel_op_takes_source_first(&self) -> bool {
+        true
+    }
+
+    /// KTF lays `MC_GrpContext` out with a word in front of the clip rectangle
+    /// - see `ContextLayout`, which has what 헬싱 and 액션히어로3D say about
+    /// every word of it.
+    fn graphics_context_layout(&self) -> ContextLayout {
+        ContextLayout::Ktf
+    }
+
+    /// KTF keeps an image's two planes behind frame buffer handles of their
+    /// own - see `ImageLayout`, which has what 폴라폴리2007's blitter reads.
+    fn image_layout(&self) -> ImageLayout {
+        ImageLayout::Handles
+    }
+
+    /// KTF answers a clip of no size with null - see the note on the trait
+    /// method, and `clip_create` for the title that depends on it.
+    fn refuses_empty_clip(&self) -> bool {
+        true
+    }
+
     fn alloc_raw(&mut self, size: WIPICWord) -> Result<WIPICWord> {
         Allocator::alloc(&mut self.core, size)
     }
@@ -51,14 +136,56 @@ impl WIPICContext for KtfWIPICContext {
         Ok(())
     }
 
+    fn free_raw_unsized(&mut self, address: WIPICWord) -> Result<()> {
+        Allocator::free_unsized(&mut self.core, address)
+    }
+
+    fn raw_alloc_size(&self, address: WIPICWord) -> Result<WIPICWord> {
+        Allocator::allocation_size(&self.core, address)
+    }
+
     fn data_ptr(&self, memory: WIPICIndirectPtr) -> Result<WIPICWord> {
         let base: WIPICWord = read_generic(&self.core, memory.0)?;
 
         Ok(base + 8) // all data has offset of 8 bytes
     }
 
+    /// `alloc` puts the data twelve bytes past the handle - the handle cell,
+    /// then the size - so the handle is twelve bytes back.
+    fn handle_of(&self, data: WIPICWord) -> WIPICWord {
+        data - 12
+    }
+
     fn system(&mut self) -> &mut System {
         &mut self.system
+    }
+
+    fn network_state(&self) -> SharedNetworkState {
+        self.network_state.clone()
+    }
+
+    fn serial_state(&self) -> SharedSerialState {
+        self.serial_state.clone()
+    }
+
+    fn filesystem_state(&self) -> SharedFilesystemState {
+        self.filesystem_state.clone()
+    }
+
+    fn shared_buf_state(&self) -> SharedSharedBufState {
+        self.shared_buf_state.clone()
+    }
+
+    fn im_state(&self) -> SharedImState {
+        self.im_state.clone()
+    }
+
+    fn media_state(&self) -> SharedMediaState {
+        self.media_state.clone()
+    }
+
+    fn kernel_state(&self) -> SharedKernelState {
+        self.kernel_state.clone()
     }
 
     async fn call_function(&mut self, address: WIPICWord, args: &[WIPICWord]) -> Result<WIPICWord> {
@@ -90,39 +217,50 @@ impl WIPICContext for KtfWIPICContext {
     }
 
     async fn get_resource_size(&self, name: &str) -> Result<Option<usize>> {
-        let class_loader = self.jvm.current_class_loader().await.unwrap();
-        let stream = JavaLangClassLoader::get_resource_as_stream(&self.jvm, &class_loader, name).await.unwrap();
+        Ok(self.packaged_resource(name).await.map(|data| data.len()))
+    }
 
-        if stream.is_none() {
-            return Ok(None);
+    /// One of the archive's own files.
+    ///
+    /// The class loader is asked first, which is where the files inside the
+    /// `.jar` are. A KTF archive also carries files beside the jar under `P/`,
+    /// which `KtfEmulator::load` mounts in the virtual filesystem with that
+    /// prefix stripped - `cert.c2s` among them - and the class loader cannot
+    /// see those, so the filesystem is the second place to look. The LGT side
+    /// has always looked in both; this looked only in the first, and then
+    /// unwrapped the `None` a missing resource answers with, so asking for a
+    /// file the jar did not hold took the emulator down rather than reporting
+    /// that it is not there.
+    async fn read_resource(&self, name: &str) -> Result<Vec<u8>> {
+        if let Some(data) = self.packaged_resource(name).await {
+            return Ok(data.to_vec());
         }
 
-        let available: i32 = self.jvm.invoke_virtual(&stream.unwrap(), "available", "()I", ()).await.unwrap();
+        let Some(size) = self.system.filesystem().size(name).await else {
+            return Err(WieError::FatalError(format!("Missing resource: {name}")));
+        };
+        let mut data = vec![0; size];
+        let read = self.system.filesystem().read(name, 0, size, &mut data).await.unwrap_or(0);
+        data.truncate(read);
 
-        Ok(Some(available as _))
+        Ok(data)
     }
 
-    async fn read_resource(&self, name: &str) -> Result<Vec<u8>> {
-        let class_loader = self.jvm.current_class_loader().await.unwrap();
-        let stream = JavaLangClassLoader::get_resource_as_stream(&self.jvm, &class_loader, name)
-            .await
-            .unwrap()
-            .unwrap();
-
-        Ok(JavaIoInputStream::read_until_end(&self.jvm, &stream).await.unwrap())
-    }
-
-    fn set_timer(&mut self, due: Instant, callback: WIPICMethodBody) {
+    fn set_timer(&mut self, id: WIPICWord, due: Instant, callback: WIPICMethodBody) {
         let context = self.clone();
 
-        self.system().event_queue().push(Event::timer(due, move || {
+        self.system().event_queue().push_timer(id, due, move || {
             let mut context = context.clone();
 
             async move {
                 callback.call(&mut context, Box::new([])).await?;
                 Ok(())
             }
-        }))
+        })
+    }
+
+    fn unset_timer(&mut self, id: WIPICWord) {
+        self.system().event_queue().cancel_timer(id);
     }
 }
 

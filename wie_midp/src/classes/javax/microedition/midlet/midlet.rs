@@ -50,9 +50,17 @@ impl MIDlet {
         )
         .await?;
 
-        let display = jvm.new_class("javax/microedition/lcdui/Display", "()V", ()).await?;
-
-        jvm.put_field(&mut this, "display", "Ljavax/microedition/lcdui/Display;", display).await?;
+        // A title may reach its Display before its constructor has finished:
+        // 엑스피드스노보드 touches com.xce.lcdui.Toolkit while this constructor
+        // is still running, and Toolkit's own <clinit> calls Display.getDisplay
+        // on this MIDlet. So creating the Display here is only the common path -
+        // Self::display creates it too if it is asked for first - and both guard
+        // on the field so exactly one Display is ever made.
+        let existing: ClassInstanceRef<Display> = jvm.get_field(&this, "display", "Ljavax/microedition/lcdui/Display;").await?;
+        if existing.is_null() {
+            let display = jvm.new_class("javax/microedition/lcdui/Display", "()V", ()).await?;
+            jvm.put_field(&mut this, "display", "Ljavax/microedition/lcdui/Display;", display).await?;
+        }
 
         Ok(())
     }
@@ -73,13 +81,36 @@ impl MIDlet {
             .await
     }
 
-    async fn notify_destroyed(_jvm: &Jvm, _context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<()> {
-        tracing::warn!("stub javax.microedition.midlet.MIDlet::notifyDestroyed({this:?})");
+    /// The title saying it is finished and asking to be shut down.
+    ///
+    /// This is how a title quits of its own accord, and doing nothing about it
+    /// left the app sitting on whatever frame was last painted, with the title's
+    /// threads gone and only the event pump still turning. 아르덴전기 answers
+    /// 아니오 to its 추가다운로드 offer by tearing its own threads down and
+    /// calling this, so the offer stayed on screen for good - the same hang a
+    /// person reports as the game having frozen, when in fact it had ended.
+    async fn notify_destroyed(_jvm: &Jvm, context: &mut WieJvmContext, this: ClassInstanceRef<Self>) -> JvmResult<()> {
+        tracing::debug!("javax.microedition.midlet.MIDlet::notifyDestroyed({this:?})");
+
+        context.system().platform().exit();
 
         Ok(())
     }
 
     pub async fn display(jvm: &Jvm, this: &ClassInstanceRef<Self>) -> JvmResult<ClassInstanceRef<Display>> {
-        jvm.get_field(this, "display", "Ljavax/microedition/lcdui/Display;").await
+        let display: ClassInstanceRef<Display> = jvm.get_field(this, "display", "Ljavax/microedition/lcdui/Display;").await?;
+        if !display.is_null() {
+            return Ok(display);
+        }
+
+        // Asked for before the constructor stored one - create it now and keep
+        // it, so the constructor finds it already there and does not make a
+        // second. See MIDlet::init.
+        let mut this = this.clone();
+        let display = jvm.new_class("javax/microedition/lcdui/Display", "()V", ()).await?;
+        jvm.put_field(&mut this, "display", "Ljavax/microedition/lcdui/Display;", display.clone())
+            .await?;
+
+        Ok(display.into())
     }
 }

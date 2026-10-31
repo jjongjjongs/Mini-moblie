@@ -26,7 +26,19 @@ impl JavaValueExt for JavaValue {
             JavaType::Class(_) => {
                 if raw != 0 {
                     let instance = JavaClassInstance::from_raw(raw, core);
-                    if instance.class().unwrap().name().unwrap().starts_with('[') {
+                    // Whether it is really an array, so the array wrapper is used
+                    // instead. Reading the class walks the pointer, and a title
+                    // can hand a garbage word here where an object belongs (삼국쟁패
+                    // does, intermittently, for a String argument). Reading it as
+                    // a plain instance rather than unwrapping the read keeps that
+                    // a Java-level failure the caller can handle, not a panic that
+                    // takes the whole run down.
+                    let is_array = instance
+                        .class()
+                        .ok()
+                        .and_then(|class| class.name().ok())
+                        .is_some_and(|name| name.starts_with('['));
+                    if is_array {
                         let instance = JavaArrayClassInstance::from_raw(raw, core);
                         JavaValue::Object(Some(Box::new(instance)))
                     } else {

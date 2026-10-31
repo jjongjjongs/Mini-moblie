@@ -12,7 +12,7 @@ use jvm::{ArrayClassDefinition, ClassInstance, JavaType, Jvm, Result as JvmResul
 use wipi_types::ktf::java::{JavaClass as RawJavaClass, JavaClassDescriptor as RawJavaClassDescriptor};
 
 use wie_core_arm::{Allocator, ArmCore};
-use wie_util::{write_generic, write_null_terminated_string_bytes};
+use wie_util::{read_generic, write_generic, write_null_terminated_string_bytes};
 
 use super::{KtfJvmSupport, Result, array_class_instance::JavaArrayClassInstance, class_definition::JavaClassDefinition};
 
@@ -36,9 +36,16 @@ impl JavaArrayClassDefinition {
 
         let ptr_raw = Allocator::alloc(core, size_of::<RawJavaClass>() as u32)?;
 
+        // What an array is an array of, where that is a class: a title reads it
+        // back out of the record - a relocated module does, before it stores
+        // into one - and an array of primitives has no class to name.
         let element_type_name = &name[1..];
-        let element_type_raw = if element_type_name.starts_with('L') {
-            let class = jvm.resolve_class(&element_type_name[1..element_type_name.len() - 1]).await.unwrap();
+        let element_type_raw = if let Some(object) = element_type_name.strip_prefix('L') {
+            let class = jvm.resolve_class(object.trim_end_matches(';')).await.unwrap();
+
+            Some(KtfJvmSupport::class_definition_raw(&*class.definition)?)
+        } else if element_type_name.starts_with('[') {
+            let class = jvm.resolve_class(element_type_name).await.unwrap();
 
             Some(KtfJvmSupport::class_definition_raw(&*class.definition)?)
         } else {
@@ -68,6 +75,12 @@ impl JavaArrayClassDefinition {
             },
         )?;
 
+        // An array is an Object to call methods on, and a compiled image calls
+        // them through the class's vtable like any other's: 메이플스토리 2007's
+        // loader makes a virtual call on a `[Lm;` - slot 1 - and with no
+        // vtable here read its method out of address 4.
+        let object: RawJavaClass = read_generic(core, java_lang_object_raw)?;
+
         write_generic(
             core,
             ptr_raw,
@@ -75,8 +88,8 @@ impl JavaArrayClassDefinition {
                 ptr_next: ptr_raw + 4,
                 unk1: 0,
                 ptr_descriptor,
-                ptr_vtable: 0,
-                vtable_count: 0,
+                ptr_vtable: object.ptr_vtable,
+                vtable_count: object.vtable_count,
                 unk_flag: 8,
             },
         )?;

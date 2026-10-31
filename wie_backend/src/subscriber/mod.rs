@@ -1,0 +1,307 @@
+//! The subscriber phone number a title is told it is running on.
+//!
+//! Titles use it as more than a number: it is the key that decrypts their
+//! `cert.c2s`, and several check it against a certificate of their own before
+//! they will start. Reporting the wrong one is what a title sees as a pirated
+//! copy, so it is recovered from the archive rather than invented - and both
+//! the WIPI-C `MC_knlGetSystemProperty("PHONENUMBER")` path and the WIPI-Java
+//! `HandsetProperty.getSystemProperty` one have to answer the same thing, or a
+//! title that reads it through both disagrees with itself.
+
+mod cert_c2s;
+mod comtus_save;
+mod ea_store;
+mod fixed_key_cert;
+mod gamevil_record;
+pub mod memory;
+mod seeded_save;
+mod shifted_cert;
+
+pub use self::{
+    cert_c2s::recover_phone_number as from_cert,
+    comtus_save::opens_under as comtus_save_opens_under,
+    ea_store::recover_phone_number as from_ea_store,
+    fixed_key_cert::{HandsetIdentity, recover_identity as identity_from_cert},
+    gamevil_record::recover_phone_number as from_gamevil_record,
+    seeded_save::recover_phone_number as from_seeded_save,
+    shifted_cert::recover_phone_number as from_shifted_cert,
+};
+
+use alloc::{
+    borrow::ToOwned,
+    string::{String, ToString},
+};
+
+/// The number reported when nothing in the archive names one.
+///
+/// A collection dumped from one handset shares its number, so this is a working
+/// default for such a set as well as a valid-looking value for a title that
+/// only checks it has one.
+pub const FALLBACK: &str = "01046119269";
+
+/// The subscriber number an LGT archive descriptor was downloaded for: the
+/// `ctn` query parameter of the `DDurl` it carries.
+///
+/// Matched only where the URL itself starts a parameter (`?ctn=` / `&ctn=`), so
+/// the `send_ctn` of a gifted copy - the sender's number, not the subscriber's -
+/// is not mistaken for it. Returns `None` unless the value is a plausible
+/// subscriber number, so a descriptor without one falls back to the caller's
+/// placeholder.
+///
+/// The store wrote the value in the carrier's padded twelve-digit form more
+/// often than in the subscriber's own, so what it names is [`unpad_mdn`]'d back
+/// to the number a handset would report.
+pub fn from_descriptor(app_info: &[u8]) -> Option<String> {
+    // Scanned as bytes: a descriptor's name and vendor fields are EUC-KR, so it
+    // is not valid UTF-8 as a whole.
+    const KEY: &[u8] = b"ctn=";
+
+    app_info
+        .windows(KEY.len())
+        .enumerate()
+        .filter(|&(at, window)| window == KEY && matches!(at.checked_sub(1).map(|before| app_info[before]), Some(b'?' | b'&')))
+        .map(|(at, _)| {
+            let digits = &app_info[at + KEY.len()..];
+            let end = digits.iter().position(|b| !b.is_ascii_digit()).unwrap_or(digits.len());
+            &digits[..end]
+        })
+        .find(|number| (10..=12).contains(&number.len()) && number.first() == Some(&b'0'))
+        .map(|number| unpad_mdn(&String::from_utf8_lossy(number)))
+}
+
+/// The subscriber's own number behind a twelve-digit MDN.
+///
+/// The store wrote the `ctn` in the carrier's twelve-digit form, which is the
+/// subscriber number with its three-digit prefix padded back out: `WPBill_Write`
+/// builds it by inserting `"00"` after the prefix of a ten-digit number and
+/// `"0"` after that of an eleven-digit one. A handset reports the number it was
+/// padded from, not the padding - so undo it, and let the billing header pad it
+/// again when that is what the header wants.
+///
+/// The two paddings are told apart the way they were made: a `"00"` after the
+/// prefix came from a ten-digit number, a single `"0"` from an eleven-digit one.
+/// Anything that is not twelve digits, or that carries no padding to remove, is
+/// already the number and is returned unchanged.
+fn unpad_mdn(number: &str) -> String {
+    if number.len() != 12 || !number.is_char_boundary(5) {
+        return number.to_owned();
+    }
+
+    match &number[3..5] {
+        "00" => alloc::format!("{}{}", &number[..3], &number[5..]),
+        padded if padded.starts_with('0') => alloc::format!("{}{}", &number[..3], &number[4..]),
+        _ => number.to_owned(),
+    }
+}
+
+/// Reads a `certification` file that is just the subscriber number as ASCII
+/// digits (optionally NUL-terminated or padded). Returns `None` when it is not a
+/// plain phone number, so a differently-formatted certification is ignored and
+/// the caller falls back to its placeholder.
+pub fn from_certification(data: &[u8]) -> Option<String> {
+    let end = data.iter().position(|&b| b == 0).unwrap_or(data.len());
+    let number = core::str::from_utf8(&data[..end]).ok()?.trim();
+    if (10..=15).contains(&number.len()) && number.bytes().all(|b| b.is_ascii_digit()) {
+        Some(number.to_string())
+    } else {
+        None
+    }
+}
+
+/// The files a title keeps its own 인증 record in, which name the subscriber
+/// it was registered to: GAMEVIL's `audio.adt` (see [`from_gamevil_record`]),
+/// EA Mobile Korea's `kickass` store (see [`from_ea_store`]) and 2011슈퍼사커's
+/// `SC_option.dat` (see [`from_seeded_save`]). Each reader answers only for its
+/// own format, so every file is offered to all of them.
+pub const RECORD_FILES: [&str; 3] = ["audio.adt", "kickass", "SC_option.dat"];
+
+/// The saves a title seals to the number it was written on, which can say
+/// whether a number is the one their handset reported: 미니게임천국5's
+/// `gamedata.dat` (see [`comtus_save_opens_under`]).
+pub const SEALED_SAVE_FILES: [&str; 1] = ["gamedata.dat"];
+
+/// The number to report on this handset: the one the archive names, or else
+/// the one another archive named before, if this archive's own sealed saves
+/// prove it is theirs - or [`FALLBACK`].
+///
+/// A collection dumped from one handset shares its number, but only some of
+/// its archives say what it is: 2011프로야구's `audio.adt` names it, and
+/// 미니게임천국5 carries nothing that does, only a `gamedata.dat` sealed to
+/// it. So every number an archive names is remembered for the handset - see
+/// [`memory`] - and offered to an archive that names none. It is taken only
+/// where one of [`SEALED_SAVE_FILES`] opens under it, so a title whose saves
+/// this handset wrote under [`FALLBACK`] keeps getting the number they need.
+pub async fn subscriber_number_on_handset(
+    repository: &dyn crate::DatabaseRepository,
+    cert: Option<&[u8]>,
+    records: &[&[u8]],
+    certification: Option<&[u8]>,
+    app_info: Option<&[u8]>,
+    sealed: &[&[u8]],
+) -> String {
+    if let Some(number) = recover(cert, records, certification, app_info) {
+        memory::remember(repository, &number).await;
+        return number;
+    }
+
+    if let Some(number) = memory::remembered(repository).await
+        && sealed.iter().any(|save| comtus_save_opens_under(save, &number) == Some(true))
+    {
+        tracing::info!("reporting the subscriber number another archive named, which this one's saves were sealed to: {number:?}");
+        return number;
+    }
+
+    FALLBACK.to_string()
+}
+
+/// The number to report, from whichever of the archive's files names it.
+///
+/// The order is the order of authority: a certificate the number was issued
+/// for, then the record a title keeps its own 인증 in - the files
+/// [`RECORD_FILES`] names, whichever of them the archive has - then a plain
+/// `certification` holding it, then the descriptor's own download URL. Each
+/// argument is the file's bytes, or `None` where the archive has no such file.
+///
+/// A `cert.c2s` comes in more than one form and each reader answers only for
+/// its own, so they are tried in turn; between themselves the order does not
+/// matter, because a certificate one of them reads is not a record another
+/// recognises.
+pub fn subscriber_number(cert: Option<&[u8]>, records: &[&[u8]], certification: Option<&[u8]>, app_info: Option<&[u8]>) -> String {
+    recover(cert, records, certification, app_info).unwrap_or_else(|| FALLBACK.to_string())
+}
+
+/// The number one of the archive's files names, in the order
+/// [`subscriber_number`] gives, or `None` when none of them names one.
+pub fn recover(cert: Option<&[u8]>, records: &[&[u8]], certification: Option<&[u8]>, app_info: Option<&[u8]>) -> Option<String> {
+    if let Some(number) = cert.and_then(from_cert) {
+        tracing::info!("recovered subscriber number from cert.c2s: {number:?}");
+        return Some(number);
+    }
+
+    if let Some(number) = cert.and_then(from_shifted_cert) {
+        tracing::info!("recovered subscriber number from shifted cert.c2s: {number:?}");
+        return Some(number);
+    }
+
+    if let Some(number) = records.iter().find_map(|record| {
+        from_gamevil_record(record)
+            .or_else(|| from_ea_store(record))
+            .or_else(|| from_seeded_save(record))
+    }) {
+        tracing::info!("recovered subscriber number from the title's own 인증 record: {number:?}");
+        return Some(number);
+    }
+
+    if let Some(number) = certification.and_then(from_certification) {
+        tracing::info!("recovered subscriber number from certification: {number:?}");
+        return Some(number);
+    }
+
+    if let Some(number) = app_info.and_then(from_descriptor) {
+        tracing::info!("recovered subscriber number from app_info: {number:?}");
+        return Some(number);
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FALLBACK, from_certification, from_descriptor, subscriber_number};
+
+    #[test]
+    fn a_certification_that_is_just_the_number_is_read_as_one() {
+        assert_eq!(from_certification(b"01000000000\0").as_deref(), Some("01000000000"));
+        assert_eq!(from_certification(b"01046119269").as_deref(), Some("01046119269"));
+
+        assert_eq!(from_certification(b"not-a-number"), None);
+        assert_eq!(from_certification(b"123"), None);
+        assert_eq!(from_certification(b""), None);
+    }
+
+    #[test]
+    fn a_descriptor_names_the_number_its_copy_was_downloaded_for() {
+        let app_info = b"AID:000315C6\r\nDDurl:http://omadn.ez-i.co.kr:9089/oma_dd.dn?ctn=010085300848&req_pltf=1\r\n";
+        assert_eq!(from_descriptor(app_info).as_deref(), Some("01085300848"));
+
+        // A descriptor with no `ctn`, and a gifted copy's `send_ctn` - the
+        // sender's number, not the subscriber's.
+        assert_eq!(from_descriptor(b"AID:000315C6\r\nDDurl:http://example/dd.dn?pid=1\r\n"), None);
+        assert_eq!(from_descriptor(b"DDurl:http://example/dd.dn?a=1&send_ctn=010022055752"), None);
+
+        // Values that are not plausible subscriber numbers.
+        assert_eq!(from_descriptor(b"DDurl:http://example/dd.dn?ctn=0100&b=2"), None);
+        assert_eq!(from_descriptor(b"DDurl:http://example/dd.dn?ctn=910085300848"), None);
+    }
+
+    #[test]
+    fn a_descriptor_number_comes_back_as_the_subscriber_s_own_not_the_padded_one() {
+        // Every `ctn` measured off these archives is the twelve-digit carrier
+        // form; a handset reports the eleven it was padded from.
+        for (padded, subscriber) in [
+            ("010055452383", "01055452383"),
+            ("010024882970", "01024882970"),
+            ("010023276993", "01023276993"),
+            ("010068780247", "01068780247"),
+            ("010077405004", "01077405004"),
+            ("010024341091", "01024341091"),
+        ] {
+            let app_info = alloc::format!("DDurl:http://example/dd.dn?ctn={padded}");
+            assert_eq!(from_descriptor(app_info.as_bytes()).as_deref(), Some(subscriber), "{padded}");
+        }
+    }
+
+    #[test]
+    fn a_ten_digit_number_is_told_from_an_eleven_digit_one_by_its_padding() {
+        // `"00"` after the prefix is what a ten-digit number was padded with.
+        assert_eq!(
+            from_descriptor(b"DDurl:http://example/dd.dn?ctn=011001234567").as_deref(),
+            Some("0111234567")
+        );
+
+        // A single `"0"` is an eleven-digit number's padding.
+        assert_eq!(
+            from_descriptor(b"DDurl:http://example/dd.dn?ctn=011012345678").as_deref(),
+            Some("01112345678")
+        );
+    }
+
+    #[test]
+    fn a_number_that_carries_no_padding_is_left_as_it_is() {
+        // Eleven digits already, and twelve with no zero where padding would be.
+        assert_eq!(
+            from_descriptor(b"DDurl:http://example/dd.dn?ctn=01055452383").as_deref(),
+            Some("01055452383")
+        );
+        assert_eq!(
+            from_descriptor(b"DDurl:http://example/dd.dn?ctn=010155452383").as_deref(),
+            Some("010155452383")
+        );
+    }
+
+    #[test]
+    fn the_files_are_consulted_in_the_order_of_their_authority() {
+        let certification = b"01011112222";
+        let app_info = b"DDurl:http://example/dd.dn?ctn=010085300848";
+
+        // The certificate outranks both, but a `cert.c2s` this cannot recover
+        // steps aside rather than blocking them.
+        assert_eq!(
+            subscriber_number(Some(b"not a certificate"), &[], Some(certification), Some(app_info)),
+            "01011112222"
+        );
+        assert_eq!(subscriber_number(None, &[], None, Some(app_info)), "01085300848");
+        assert_eq!(subscriber_number(None, &[], None, None), FALLBACK);
+    }
+
+    /// A `cert.c2s` the keyed reader does not recognise still answers when it is
+    /// one of the other forms.
+    #[test]
+    fn a_certificate_of_another_form_is_read_by_the_reader_that_knows_it() {
+        // 록맨X's, which is shifted rather than encrypted.
+        let shifted = b"          \x60\x61\x60\x63\x86\x69\x86\x61  \x72\x8f\x83\x8b\x8d\x81\x8e\x78PPPPPPPP\x60\x61\x60\x69\x66\x65\x68\x69\x65\x66\x65 \x3b\x9a\x12\xff";
+
+        assert_eq!(subscriber_number(Some(shifted), &[], None, None), "01096589565");
+        assert_eq!(subscriber_number(Some(shifted), &[], Some(b"01011112222"), None), "01096589565");
+    }
+}
