@@ -207,6 +207,20 @@ enum Input {
 /// the arrows, Enter or Space to choose, Esc or Backspace to go back, F2 and
 /// Delete for the second and third actions a screen offers, Tab for the
 /// other tab or slot of a layout and F9 to put a layout back to the defaults.
+/// The raw joystick button indices a controller mapping uses, read from the
+/// mapping string SDL hands back - fields like `a:b0,b:b1,leftshoulder:b4`.
+/// A button bound this way is `:bN`; axes (`aN`) and hats (`hN.M`) are not
+/// joystick buttons and are skipped, so what is left over are the physical
+/// buttons the standard layout has no place for.
+fn parse_claimed_buttons(mapping: &str) -> Vec<u8> {
+    mapping
+        .split(',')
+        .filter_map(|field| field.split_once(':'))
+        .filter_map(|(_, bind)| bind.trim().strip_prefix('b'))
+        .filter_map(|digits| digits.parse::<u8>().ok())
+        .collect()
+}
+
 fn key_button(scancode: i32) -> Option<Button> {
     Some(match scancode {
         82 => Button::Up,
@@ -249,6 +263,13 @@ struct App {
     audio: u32,
     /// The mouse, and the parts of the screen on show to it.
     pointer: Pointer,
+    /// Raw joystick button indices the open pad's controller mapping already
+    /// uses, so their joystick events are left to the controller layer and not
+    /// counted twice. See `open_controller`.
+    claimed_raw: Vec<u8>,
+    /// Raw joystick buttons the mapping does not claim - a Sega pad's C and Z -
+    /// in the order they were first pressed, each an extra bindable button.
+    extra_raw: Vec<u8>,
 }
 
 impl App {
@@ -334,6 +355,8 @@ impl App {
                 held: [0; BUTTON_COUNT],
                 audio,
                 pointer: Pointer::default(),
+                claimed_raw: Vec::new(),
+                extra_raw: Vec::new(),
             };
             app.apply_screen();
             for index in 0..(app.sdl.num_joysticks)() {
@@ -427,6 +450,19 @@ impl App {
                     CStr::from_ptr(name).to_string_lossy()
                 }
             );
+
+            // The buttons the standard layout covers are claimed by their raw
+            // joystick index, read out of the controller's mapping string, so a
+            // six-button pad's extra two (C and Z) can be told apart and bound
+            // on their own. The mapping is SDL's to free.
+            self.claimed_raw.clear();
+            self.extra_raw.clear();
+            let mapping = (self.sdl.game_controller_mapping)(controller);
+            if !mapping.is_null() {
+                let text = CStr::from_ptr(mapping).to_string_lossy().into_owned();
+                self.claimed_raw = parse_claimed_buttons(&text);
+                (self.sdl.free)(mapping as *mut c_void);
+            }
         }
     }
 
@@ -457,6 +493,23 @@ impl App {
                     }
                 }
                 sdl::CONTROLLERAXISMOTION => self.axis(event.control(), event.axis_value(), &mut inputs),
+                sdl::JOYBUTTONDOWN | sdl::JOYBUTTONUP => {
+                    // A raw joystick button the controller mapping does not use
+                    // is an extra button - a Sega pad's C or Z - given the next
+                    // free extra slot on its first press and held from then on.
+                    let raw = event.control();
+                    if !self.claimed_raw.contains(&raw) {
+                        let slot = self.extra_raw.iter().position(|b| *b == raw).or_else(|| {
+                            (self.extra_raw.len() < controls::EXTRA_COUNT).then(|| {
+                                self.extra_raw.push(raw);
+                                self.extra_raw.len() - 1
+                            })
+                        });
+                        if let Some(button) = slot.and_then(Button::ext) {
+                            self.hold(button, 4, event.kind() == sdl::JOYBUTTONDOWN, &mut inputs);
+                        }
+                    }
+                }
                 sdl::KEYDOWN if event.scancode() == F11 || is_mac_fullscreen_key(&event) => {
                     if self.desktop && !event.key_repeat() {
                         self.toggle_fullscreen();

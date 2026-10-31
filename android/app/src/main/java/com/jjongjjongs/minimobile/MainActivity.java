@@ -4718,7 +4718,10 @@ public final class MainActivity extends Activity {
 
     /** Copies one picked game into the library. Throws on failure. */
     private void importGameFile(Uri uri) throws Exception {
-        String name = queryName(uri).replaceAll("[^A-Za-z0-9가-힣._ -]", "_");
+        // Only characters that would actually break a filename are dropped.
+        // Brackets and parentheses are kept, because a dump's name often carries
+        // them - "게임명[큰화면]", "게임명(KT)" - and the list shows this filename.
+        String name = queryName(uri).replaceAll("[^A-Za-z0-9가-힣._ ()\\[\\]-]", "_");
         if (name.isEmpty()) {
             name = "game_" + System.currentTimeMillis() + ".zip";
         }

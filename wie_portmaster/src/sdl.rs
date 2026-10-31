@@ -56,6 +56,8 @@ pub const CONTROLLERAXISMOTION: u32 = 0x650;
 pub const CONTROLLERBUTTONDOWN: u32 = 0x651;
 pub const CONTROLLERBUTTONUP: u32 = 0x652;
 pub const CONTROLLERDEVICEADDED: u32 = 0x653;
+pub const JOYBUTTONDOWN: u32 = 0x603;
+pub const JOYBUTTONUP: u32 = 0x604;
 
 #[repr(C)]
 pub struct Rect {
@@ -235,6 +237,7 @@ functions! {
     game_controller_open = "SDL_GameControllerOpen": fn(c_int) -> *mut c_void;
     game_controller_name = "SDL_GameControllerName": fn(*mut c_void) -> *const c_char;
     game_controller_add_mappings_from_rw = "SDL_GameControllerAddMappingsFromRW": fn(*mut c_void, c_int) -> c_int;
+    game_controller_mapping = "SDL_GameControllerMapping": fn(*mut c_void) -> *mut c_char;
     rw_from_file = "SDL_RWFromFile": fn(*const c_char, *const c_char) -> *mut c_void;
     open_audio_device = "SDL_OpenAudioDevice": fn(*const c_char, c_int, *const AudioSpec, *mut AudioSpec, c_int) -> u32;
     pause_audio_device = "SDL_PauseAudioDevice": fn(u32, c_int);

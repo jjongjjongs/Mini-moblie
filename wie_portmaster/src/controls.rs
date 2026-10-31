@@ -35,9 +35,19 @@ pub enum Button {
     Start,
     Select,
     Guide,
+    // Extra physical buttons a standard pad layout has no room for - the C and
+    // Z of a Sega six-button pad, say. They arrive as raw joystick buttons the
+    // controller mapping does not claim; see `App::open_controller`.
+    Ext1,
+    Ext2,
+    Ext3,
+    Ext4,
 }
 
-pub const BUTTON_COUNT: usize = 17;
+pub const BUTTON_COUNT: usize = 21;
+
+/// How many extra (unmapped-by-the-layout) pad buttons can be bound.
+pub const EXTRA_COUNT: usize = 4;
 
 const BUTTON_NAMES: [(Button, &str); BUTTON_COUNT] = [
     (Button::Up, "UP"),
@@ -57,11 +67,21 @@ const BUTTON_NAMES: [(Button, &str); BUTTON_COUNT] = [
     (Button::Start, "START"),
     (Button::Select, "SELECT"),
     (Button::Guide, "GUIDE"),
+    (Button::Ext1, "EXTRA1"),
+    (Button::Ext2, "EXTRA2"),
+    (Button::Ext3, "EXTRA3"),
+    (Button::Ext4, "EXTRA4"),
 ];
 
 impl Button {
     pub fn index(self) -> usize {
         self as usize
+    }
+
+    /// The extra pad button for a zero-based slot, if it is one this pad can
+    /// hold.
+    pub fn ext(slot: usize) -> Option<Button> {
+        [Button::Ext1, Button::Ext2, Button::Ext3, Button::Ext4].get(slot).copied()
     }
 
     fn named(name: &str) -> Option<Button> {
@@ -144,7 +164,7 @@ pub fn key_label(key: Option<i32>) -> &'static str {
 
 /// The buttons the settings table lists, and what it calls them. SELECT is
 /// the layer key and GUIDE opens the menu, so neither is mapped there.
-pub const TABLE_BUTTONS: [(Button, &str); 15] = [
+pub const TABLE_BUTTONS: [(Button, &str); 19] = [
     (Button::Up, "D▲"),
     (Button::Down, "D▼"),
     (Button::Left, "D◀"),
@@ -160,6 +180,10 @@ pub const TABLE_BUTTONS: [(Button, &str); 15] = [
     (Button::L3, "L3"),
     (Button::R3, "R3"),
     (Button::Start, "START"),
+    (Button::Ext1, "추가1"),
+    (Button::Ext2, "추가2"),
+    (Button::Ext3, "추가3"),
+    (Button::Ext4, "추가4"),
 ];
 
 /// The handset keys the keyboard table lists, in its order.
