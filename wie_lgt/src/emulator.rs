@@ -776,12 +776,13 @@ fn title_expects_annunciator(aid: &str) -> bool {
 /// Whether the title composes its picture sideways, so what is shown has to be
 /// turned back a quarter turn.
 ///
-/// 소울게이트 (`000323B3`) is the one this was found on: it takes the upright
-/// 240x320 screen, creates a 320x240 off-screen buffer of its own - a landscape
-/// one, the screen's size transposed - composes every frame into that, and
-/// copies it onto the screen turned. It asks for no rotation because there is
-/// no such call in WIPI-C to ask with; the handset was simply turned sideways
-/// in the player's hand. See `wie_backend::present`.
+/// 질주쾌감스케쳐 (`00031347`) is such a title: it takes the upright 240x320
+/// screen, creates a 320x240 off-screen buffer of its own - a landscape one, the
+/// screen's size transposed - composes every frame into that, and copies it onto
+/// the screen turned. It asks for no rotation because there is no such call in
+/// WIPI-C to ask with; the handset was simply turned sideways in the player's
+/// hand. See `wie_backend::present`. (소울게이트 `000323B3` was once marked this
+/// way too, but its retail build draws upright - see `wie_backend::quirks`.)
 /// The name a packaged certificate file is read under at the data-dir root,
 /// when `filename` is one kept in a folder: a known auth file anywhere, or any
 /// file in a folder named for the certificate (`…인증서`, `…인증파일`). See

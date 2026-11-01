@@ -632,10 +632,12 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // instead of a stale frame. The panel stays 240x320: the title clips to the
     // full height on other screens, so it is not drawn for a shorter one.
     (TitlePlatform::Ktf, "010346A2", clears_frame()),
-    // 소울게이트: takes a 240x320 screen, composes every frame into a 320x240
-    // off-screen buffer of its own, and copies that onto the screen a quarter
-    // turn clockwise - the handset was meant to be turned sideways to play it.
-    (TitlePlatform::Lgt, "000323B3", sideways()),
+    // 소울게이트 (000323B3) was marked sideways, but this retail build (IM-U540L)
+    // draws upright on its 240x320 panel - its consent dialog, logos and title
+    // all come out portrait when shown as they are. Turned, the player showed a
+    // landscape box with every line of text reading bottom to top. It is left to
+    // the default upright handling, as 소울세이버 is, so touches reach it in the
+    // panel's own coordinates too.
     // 질주쾌감스케쳐: the same, from its terms screen on - it lays every frame
     // out sideways for a handset held landscape, so the picture reaches the
     // upright panel a quarter turn off until it is turned back.
@@ -1164,19 +1166,21 @@ mod tests {
 
     #[test]
     fn a_sideways_title_asks_for_nothing_else() {
-        let quirks = title_quirks(TitlePlatform::Lgt, "000323B3");
+        let quirks = title_quirks(TitlePlatform::Lgt, "00031347");
 
         assert!(quirks.drawn_sideways);
         assert_eq!(quirks.screen_size, None);
         assert!(!quirks.expects_annunciator);
     }
 
-    /// 소울세이버 (LGT 0003106B) draws upright on its 240x320 panel, from its
-    /// consent dialog through the title to the field. Marked sideways, every
-    /// screen was turned onto its side and its text read bottom to top.
+    /// 소울세이버 (0003106B) and 소울게이트 (000323B3) both draw upright on their
+    /// 240x320 panel - consent dialog, logos, title and field all portrait.
+    /// Marked sideways, every screen was turned onto its side and its text read
+    /// bottom to top.
     #[test]
-    fn soul_saver_is_drawn_upright() {
+    fn soul_saver_and_soul_gate_are_drawn_upright() {
         assert!(!title_quirks(TitlePlatform::Lgt, "0003106B").drawn_sideways);
+        assert!(!title_quirks(TitlePlatform::Lgt, "000323B3").drawn_sideways);
     }
 
     /// 다크슬레이어2 centres a fixed-height scene on the Canvas, so a panel sized
