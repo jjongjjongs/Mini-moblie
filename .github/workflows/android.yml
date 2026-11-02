@@ -162,6 +162,12 @@ jobs:
           cp android/app/build/outputs/apk/release/app-release.apk MiniMobile.apk
           gh release upload "$TAG" MiniMobile.apk --clobber
 
+          # The apk's version code, as a tiny asset the app reads to tell
+          # whether this build is newer than the installed one - see
+          # android .../Updater.java.
+          echo '${{ github.run_number }}' > version.txt
+          gh release upload "$TAG" version.txt --clobber
+
           # Drop the apk under the names older workflows used: it shows up
           # next to the real one and is easy to download by mistake.
           for old in app-debug.apk wie-mobile-debug.apk; do

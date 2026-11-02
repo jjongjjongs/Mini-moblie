@@ -619,6 +619,9 @@ public final class MainActivity extends Activity {
 
         showLibrary();
 
+        // Once a day, quietly: a newer build offers itself, nothing else is said.
+        Updater.autoCheck(this);
+
         scheduleEmulatorStep(0);
     }
 
@@ -996,6 +999,14 @@ public final class MainActivity extends Activity {
         pick.setOnClickListener(v -> openPicker());
         actions.addView(pick, buttonParams(dp(10)));
         content.addView(actions, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(42)));
+
+        // Updates come from the app's own release, so a patch can be installed
+        // from here rather than downloaded by hand. Auto-checked once a day too.
+        Button update = flatButton("⬇️ 업데이트 확인");
+        update.setOnClickListener(v -> Updater.check(this, true));
+        LinearLayout.LayoutParams updateParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(42));
+        updateParams.topMargin = dp(10);
+        content.addView(update, updateParams);
 
         // A returning session starts on the full, unfiltered list, not in
         // selection mode.
