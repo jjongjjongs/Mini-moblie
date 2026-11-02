@@ -3,10 +3,13 @@ package com.jjongjjongs.minimobile;
 import android.app.Activity;
 import android.app.Dialog;
 import android.app.DownloadManager;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
+import android.database.Cursor;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
@@ -16,6 +19,7 @@ import android.os.Build;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -26,56 +30,67 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.Locale;
 
 /**
- * Tells whether a newer build has been published, and sends the player to get
- * it from the browser.
+ * Updates the app from its own GitHub release: the newest build is downloaded
+ * and Android's installer opens on it by itself as soon as the download ends.
  *
  * <p>CI replaces the {@code mobile-dev} release's {@code MiniMobile.apk} and
  * {@code version.txt} on every push, {@code version.txt} being the apk's
- * version code (its CI run number). The app reads that number, and when it is
- * higher than the installed one offers to open the apk's download in the
- * browser. The new apk is signed with the same key as the installed one, so it
- * installs over it and the saves stay.
+ * version code (its CI run number). When it is higher than the installed one
+ * the app offers the update. The new apk is signed with the same key, so it
+ * installs over this one and the saves stay.
  *
- * <p>The download deliberately goes through the browser rather than installing
- * from inside the app. A self-signed apk installed by another app trips
- * Samsung's Auto Blocker ("악성 앱으로 의심", a block that cannot even be turned
- * off) and Play Protect's dropper warning, because what matters to them is
- * <em>who</em> starts the install, not the bytes - the very same apk downloaded
- * in the browser installs without a word, since the browser is a trusted
- * source. So the app hands the download to the browser and the person installs
- * it the way they would any download.
+ * <p>The download goes through the system's DownloadManager, the way Mini
+ * Emulator updates itself: its own notification, it carries on in the
+ * background, and when it finishes the app hears {@code DOWNLOAD_COMPLETE}
+ * and hands the installer the download provider's own {@code content://}
+ * URI. An apk fetched by the app itself and served from its own provider is
+ * what Samsung's Auto Blocker flagged as a suspected malicious app; the same
+ * apk handed over as a finished system download installs like any download.
  *
  * <p>This is for the build distributed outside Google Play; a Play build must
- * not offer this and would leave the check turned off.
+ * not update itself this way and would leave the check turned off.
  */
 public final class Updater {
     /** The release the CI build publishes to, under the project's public name. */
     private static final String BASE = "https://github.com/jjongjjongs/Mini-moblie/releases/download/mobile-dev/";
     private static final String VERSION_URL = BASE + "version.txt";
     private static final String APK_URL = BASE + "MiniMobile.apk";
-    /** The release page, opened if the direct download cannot be. */
+    /** The release page, opened if the download cannot be started. */
     private static final String RELEASE_PAGE = "https://github.com/jjongjjongs/Mini-moblie/releases/tag/mobile-dev";
+    private static final String APK_TYPE = "application/vnd.android.package-archive";
 
     private static final String PREFS = "mini_update";
     private static final String KEY_LAST_CHECK = "last_check";
     /** The newest version the last successful check saw, so the bar can show a dot. */
     private static final String KEY_LATEST = "latest";
+    /** The DownloadManager id of the update being fetched, and its version. */
+    private static final String KEY_DOWNLOAD = "download_id";
+    private static final String KEY_DOWNLOAD_VERSION = "download_version";
     /** Auto-check at most this often, so a launch is not a network round-trip. */
     private static final long CHECK_EVERY_MS = 24L * 60 * 60 * 1000;
+
+    /** The install waits for the "이 출처 허용" setting, opened from here. */
+    private static boolean installAfterPermission;
+    private static BroadcastReceiver downloadReceiver;
 
     private Updater() {
     }
 
+    private static SharedPreferences prefs(Context context) {
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+    }
+
     /** Whether the last check found a build newer than the installed one. */
     static boolean updateAvailable(Context context) {
-        int latest = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt(KEY_LATEST, -1);
-        return latest > installedVersion(context);
+        return prefs(context).getInt(KEY_LATEST, -1) > installedVersion(context);
     }
 
     /** The installed app's version code, or -1 if it cannot be read. */
@@ -91,12 +106,81 @@ public final class Updater {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Lifecycle: the activity registers for the download's end, and on resume
+    // picks up an install that waited for the permission or for the app.
+    // ------------------------------------------------------------------
+
+    /** From onCreate: hear the download manager say the update is in. */
+    static void register(final Activity activity) {
+        if (downloadReceiver != null) {
+            return;
+        }
+        downloadReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                long id = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1);
+                if (id != -1 && id == downloadId(activity)) {
+                    onDownloaded(activity);
+                }
+            }
+        };
+        IntentFilter filter = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
+        if (Build.VERSION.SDK_INT >= 33) {
+            // Sent by the download manager, another process: exported.
+            activity.registerReceiver(downloadReceiver, filter, Context.RECEIVER_EXPORTED);
+        } else {
+            activity.registerReceiver(downloadReceiver, filter);
+        }
+    }
+
+    /** From onDestroy. */
+    static void unregister(Activity activity) {
+        if (downloadReceiver == null) {
+            return;
+        }
+        try {
+            activity.unregisterReceiver(downloadReceiver);
+        } catch (IllegalArgumentException ignored) {
+            // Not registered.
+        }
+        downloadReceiver = null;
+    }
+
+    /**
+     * From onResume: back from "이 출처 허용", install now; and a download that
+     * finished while the app was away opens the installer on return.
+     */
+    static void resume(Activity activity) {
+        if (installAfterPermission && canInstall(activity)) {
+            installAfterPermission = false;
+            install(activity);
+            return;
+        }
+        long id = downloadId(activity);
+        if (id == -1) {
+            return;
+        }
+        long[] state = progress(activity, id);
+        boolean newer = prefs(activity).getInt(KEY_DOWNLOAD_VERSION, -1) > installedVersion(activity);
+        if (state[0] == DownloadManager.STATUS_SUCCESSFUL && newer) {
+            onDownloaded(activity);
+        } else if (state[0] == 0 || state[0] == DownloadManager.STATUS_FAILED || !newer) {
+            // Gone, failed, or already installed.
+            clearDownload(activity);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Checking
+    // ------------------------------------------------------------------
+
     /**
      * Checks once a day on launch, quietly: a newer build offers itself, and
      * anything else - up to date, or no network - says nothing.
      */
     static void autoCheck(Activity activity, Runnable onResult) {
-        SharedPreferences prefs = activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        SharedPreferences prefs = prefs(activity);
         long now = System.currentTimeMillis();
         if (now - prefs.getLong(KEY_LAST_CHECK, 0) < CHECK_EVERY_MS) {
             return;
@@ -113,6 +197,21 @@ public final class Updater {
      */
     static void check(final Activity activity, final boolean manual, final Runnable onResult) {
         final Handler ui = new Handler(Looper.getMainLooper());
+        // A download already under way: show it rather than start another.
+        long running = downloadId(activity);
+        if (manual && running != -1) {
+            long[] state = progress(activity, running);
+            if (state[0] == DownloadManager.STATUS_RUNNING || state[0] == DownloadManager.STATUS_PENDING
+                    || state[0] == DownloadManager.STATUS_PAUSED) {
+                showProgress(activity, running);
+                return;
+            }
+            if (state[0] == DownloadManager.STATUS_SUCCESSFUL
+                    && prefs(activity).getInt(KEY_DOWNLOAD_VERSION, -1) > installedVersion(activity)) {
+                install(activity);
+                return;
+            }
+        }
         if (manual) {
             Toast.makeText(activity, "업데이트 확인 중…", Toast.LENGTH_SHORT).show();
         }
@@ -128,7 +227,7 @@ public final class Updater {
             }
             // Remembered so the bar's dot survives to the next launch, and clears
             // once the installed build has caught up.
-            activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt(KEY_LATEST, latest).apply();
+            prefs(activity).edit().putInt(KEY_LATEST, latest).apply();
             final int installed = installedVersion(activity);
             ui.post(() -> {
                 if (onResult != null) {
@@ -165,7 +264,7 @@ public final class Updater {
         }
     }
 
-    /** The new-version card, in the app's green look: get it, or not now. */
+    /** The new-version card, in the app's green look: update now, or later. */
     private static void promptUpdate(final Activity activity, final int installed, final int latest) {
         Pal pal = Pal.of(activity);
         Dialog dialog = cardDialog(activity);
@@ -186,54 +285,256 @@ public final class Updater {
         versions.addView(chip(activity, pal, String.valueOf(latest), true));
         body.addView(versions);
 
-        body.addView(paragraph(activity, pal, "새 버전을 받아요. 다 받으면 뜨는 알림을 눌러 설치하세요."));
-        body.addView(meta(activity, pal, "게임과 세이브는 그대로예요"));
+        body.addView(paragraph(activity, pal, "받기가 끝나면 설치 화면이 바로 떠요. 게임과 세이브는 그대로예요."));
+        body.addView(meta(activity, pal, "받는 동안 다른 걸 해도 괜찮아요"));
         card.addView(body);
         card.addView(divider(activity, pal));
 
         LinearLayout acts = actionRow(activity);
         acts.addView(button(activity, "나중에", 0, pal.ghost, dialog::dismiss));
-        acts.addView(button(activity, "지금 받기", pal.green, pal.onGreen, () -> {
+        acts.addView(button(activity, "지금 업데이트", pal.green, pal.onGreen, () -> {
             dialog.dismiss();
-            openDownload(activity, latest);
+            startDownload(activity, latest);
         }));
         card.addView(acts);
 
         showCard(activity, dialog, card, true);
     }
 
-    /**
-     * Downloads the apk through the system's DownloadManager, which shows a
-     * progress notification and, when it finishes, one the person taps to
-     * install. The system opens the installer then, as a trusted source -
-     * unlike this app installing it itself, which Samsung's Auto Blocker flags
-     * as a suspected malicious app. The file lands in Downloads, so a missed
-     * notification is still easy to find. If the download manager cannot be
-     * used, the browser is the fallback.
-     */
-    private static void openDownload(Activity activity, int latest) {
+    // ------------------------------------------------------------------
+    // Downloading, through the system's DownloadManager
+    // ------------------------------------------------------------------
+
+    private static long downloadId(Context context) {
+        return prefs(context).getLong(KEY_DOWNLOAD, -1);
+    }
+
+    private static void clearDownload(Context context) {
+        prefs(context).edit().remove(KEY_DOWNLOAD).remove(KEY_DOWNLOAD_VERSION).apply();
+    }
+
+    private static void startDownload(Activity activity, int latest) {
         try {
             DownloadManager manager = (DownloadManager) activity.getSystemService(Context.DOWNLOAD_SERVICE);
-            if (manager == null) {
+            File dir = activity.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+            if (manager == null || dir == null) {
                 throw new IllegalStateException("다운로드 관리자를 쓸 수 없습니다.");
             }
+            // An earlier update's apk, or a half-finished one: start clean.
+            long previous = downloadId(activity);
+            if (previous != -1) {
+                manager.remove(previous);
+            }
+            String name = "MiniMobile-" + latest + ".apk";
+            File target = new File(dir, name);
+            if (target.exists()) {
+                target.delete();
+            }
             DownloadManager.Request request = new DownloadManager.Request(Uri.parse(APK_URL));
-            request.setTitle("Mini Mobile 업데이트");
-            request.setDescription("새 버전(버전 " + latest + ")을 받는 중…");
-            request.setMimeType("application/vnd.android.package-archive");
+            request.setTitle("Mini Mobile 업데이트 (버전 " + latest + ")");
+            request.setDescription("업데이트 받는 중");
+            request.setMimeType(APK_TYPE);
             request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
-            // A name with the version, so a new build never clashes with an apk
-            // left from a previous update already sitting in Downloads.
-            request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "MiniMobile-" + latest + ".apk");
-            manager.enqueue(request);
-            Toast.makeText(activity, "새 버전을 받는 중이에요.\n다 받으면 뜨는 알림을 눌러 설치하세요.", Toast.LENGTH_LONG).show();
+            request.setDestinationInExternalFilesDir(activity, Environment.DIRECTORY_DOWNLOADS, name);
+            long id = manager.enqueue(request);
+            prefs(activity).edit().putLong(KEY_DOWNLOAD, id).putInt(KEY_DOWNLOAD_VERSION, latest).apply();
+            showProgress(activity, id);
         } catch (Exception e) {
-            // No download manager, or the file is already there: fall back to
-            // the browser, which downloads it the same way.
+            // No download manager: the browser downloads it instead.
             if (!openLink(activity, APK_URL) && !openLink(activity, RELEASE_PAGE)) {
                 Toast.makeText(activity, "받을 수 없어요. 직접 받아 주세요:\n" + RELEASE_PAGE, Toast.LENGTH_LONG).show();
             }
         }
+    }
+
+    /** {status, bytes so far, total bytes}; status 0 when the download is gone. */
+    private static long[] progress(Context context, long id) {
+        DownloadManager manager = (DownloadManager) context.getSystemService(Context.DOWNLOAD_SERVICE);
+        if (manager == null) {
+            return new long[]{0, 0, 0};
+        }
+        try (Cursor cursor = manager.query(new DownloadManager.Query().setFilterById(id))) {
+            if (cursor == null || !cursor.moveToFirst()) {
+                return new long[]{0, 0, 0};
+            }
+            return new long[]{
+                    cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS)),
+                    cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR)),
+                    cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES))};
+        } catch (Exception e) {
+            return new long[]{0, 0, 0};
+        }
+    }
+
+    /**
+     * The download card: a big percent over a green bar, read from the
+     * download manager. 숨기기 leaves it running in the notification; the
+     * installer opens by itself when it ends either way.
+     */
+    private static void showProgress(final Activity activity, final long id) {
+        Pal pal = Pal.of(activity);
+        final Dialog dialog = cardDialog(activity);
+        LinearLayout card = card(activity, pal);
+
+        LinearLayout body = cardBody(activity);
+        body.addView(title(activity, pal, "업데이트 받는 중"));
+
+        LinearLayout pct = new LinearLayout(activity);
+        pct.setOrientation(LinearLayout.HORIZONTAL);
+        pct.setGravity(Gravity.BOTTOM);
+        pct.setPadding(0, dp(activity, 12), 0, 0);
+        final TextView percent = new TextView(activity);
+        percent.setText("0%");
+        percent.setTextSize(30f);
+        percent.setTypeface(null, Typeface.BOLD);
+        percent.setTextColor(pal.ink);
+        pct.addView(percent, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        final TextView sizes = new TextView(activity);
+        sizes.setTextSize(12.5f);
+        sizes.setTextColor(pal.muted);
+        sizes.setPadding(0, 0, 0, dp(activity, 5));
+        pct.addView(sizes);
+        body.addView(pct);
+
+        // The bar: a filled part and the rest, their weights the percent.
+        final LinearLayout track = new LinearLayout(activity);
+        track.setOrientation(LinearLayout.HORIZONTAL);
+        track.setWeightSum(100f);
+        track.setBackground(roundedRect(activity, pal.track, pal.track, 0, 999));
+        final View fill = new View(activity);
+        fill.setBackground(roundedRect(activity, pal.green, pal.green, 0, 999));
+        track.addView(fill, new LinearLayout.LayoutParams(0, dp(activity, 8), 0f));
+        final View rest = new View(activity);
+        track.addView(rest, new LinearLayout.LayoutParams(0, dp(activity, 8), 100f));
+        LinearLayout.LayoutParams trackParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(activity, 8));
+        trackParams.topMargin = dp(activity, 16);
+        trackParams.bottomMargin = dp(activity, 8);
+        body.addView(track, trackParams);
+
+        body.addView(paragraph(activity, pal, "다 받으면 설치 화면이 바로 떠요. 숨겨도 알림에서 계속 받아요."));
+        card.addView(body);
+        card.addView(divider(activity, pal));
+
+        LinearLayout acts = actionRow(activity);
+        acts.addView(button(activity, "취소", 0, pal.danger, () -> {
+            DownloadManager manager = (DownloadManager) activity.getSystemService(Context.DOWNLOAD_SERVICE);
+            if (manager != null) {
+                manager.remove(id);
+            }
+            clearDownload(activity);
+            dialog.dismiss();
+        }));
+        acts.addView(button(activity, "숨기기", pal.green, pal.onGreen, dialog::dismiss));
+        card.addView(acts);
+
+        showCard(activity, dialog, card, true);
+
+        final Handler handler = new Handler(Looper.getMainLooper());
+        final Runnable[] poll = new Runnable[1];
+        poll[0] = () -> {
+            if (!dialog.isShowing()) {
+                return;
+            }
+            long[] state = progress(activity, id);
+            if (state[2] > 0) {
+                int shown = (int) (100L * state[1] / state[2]);
+                percent.setText(shown + "%");
+                sizes.setText(mb(state[1]) + " / " + mb(state[2]));
+                ((LinearLayout.LayoutParams) fill.getLayoutParams()).weight = shown;
+                ((LinearLayout.LayoutParams) rest.getLayoutParams()).weight = 100 - shown;
+                track.requestLayout();
+            }
+            if (state[0] == DownloadManager.STATUS_SUCCESSFUL) {
+                // The receiver opens the installer; the card just goes.
+                dialog.dismiss();
+                return;
+            }
+            if (state[0] == DownloadManager.STATUS_FAILED || state[0] == 0) {
+                dialog.dismiss();
+                clearDownload(activity);
+                Toast.makeText(activity, "받지 못했어요. 인터넷을 확인하고 다시 해 주세요.", Toast.LENGTH_LONG).show();
+                return;
+            }
+            handler.postDelayed(poll[0], 500);
+        };
+        poll[0].run();
+    }
+
+    // ------------------------------------------------------------------
+    // Installing
+    // ------------------------------------------------------------------
+
+    private static void onDownloaded(Activity activity) {
+        if (activity.isFinishing() || activity.isDestroyed()) {
+            return;
+        }
+        install(activity);
+    }
+
+    private static boolean canInstall(Context context) {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.O || context.getPackageManager().canRequestPackageInstalls();
+    }
+
+    /**
+     * Opens Android's installer on the finished download - the download
+     * provider's own URI, which the installer is let read. The first time,
+     * Android wants this app allowed as an install source; the card opens that
+     * setting and the install goes on by itself on the way back.
+     */
+    private static void install(final Activity activity) {
+        long id = downloadId(activity);
+        DownloadManager manager = (DownloadManager) activity.getSystemService(Context.DOWNLOAD_SERVICE);
+        Uri uri = id == -1 || manager == null ? null : manager.getUriForDownloadedFile(id);
+        if (uri == null) {
+            clearDownload(activity);
+            Toast.makeText(activity, "받은 파일을 찾지 못했어요. 다시 받아 주세요.", Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (!canInstall(activity)) {
+            askInstallPermission(activity);
+            return;
+        }
+        Intent intent = new Intent(Intent.ACTION_VIEW);
+        intent.setDataAndType(uri, APK_TYPE);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            activity.startActivity(intent);
+        } catch (Exception e) {
+            Toast.makeText(activity, "설치 화면을 열지 못했어요: " + e.getMessage(), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    /** The one-time "이 출처 허용" card. */
+    private static void askInstallPermission(final Activity activity) {
+        Pal pal = Pal.of(activity);
+        Dialog dialog = cardDialog(activity);
+        LinearLayout card = card(activity, pal);
+
+        LinearLayout body = cardBody(activity);
+        body.addView(iconTile(activity, pal, LineIcon.Kind.UPDATE));
+        body.addView(title(activity, pal, "설치 허용이 한 번 필요해요"));
+        body.addView(paragraph(activity, pal,
+                "안드로이드는 앱이 업데이트를 설치하려면 한 번 허용을 받아요. 다음 화면에서 ‘이 출처 허용’을 켜고 돌아오면 바로 설치 화면이 떠요."));
+        body.addView(meta(activity, pal, "한 번만 켜면 다음부터는 안 물어봐요"));
+        card.addView(body);
+        card.addView(divider(activity, pal));
+
+        LinearLayout acts = actionRow(activity);
+        acts.addView(button(activity, "취소", 0, pal.ghost, dialog::dismiss));
+        acts.addView(button(activity, "설정 열기", pal.green, pal.onGreen, () -> {
+            dialog.dismiss();
+            installAfterPermission = true;
+            try {
+                activity.startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        Uri.parse("package:" + activity.getPackageName())));
+            } catch (Exception e) {
+                installAfterPermission = false;
+                Toast.makeText(activity, "설정을 열 수 없어요. 휴대폰 설정 › 앱 › Mini Mobile에서 ‘출처를 알 수 없는 앱 설치’를 허용해 주세요.", Toast.LENGTH_LONG).show();
+            }
+        }));
+        card.addView(acts);
+
+        showCard(activity, dialog, card, true);
     }
 
     private static boolean openLink(Activity activity, String url) {
@@ -254,6 +555,10 @@ public final class Updater {
         connection.setReadTimeout(30000);
         connection.setRequestProperty("User-Agent", "MiniMobile");
         return connection;
+    }
+
+    private static String mb(long bytes) {
+        return String.format(Locale.US, "%.1fMB", bytes / 1048576.0);
     }
 
     // ------------------------------------------------------------------
@@ -423,6 +728,8 @@ public final class Updater {
         final int greenSoft;
         final int greenLine;
         final int ghost;
+        final int track;
+        final int danger;
 
         private Pal(boolean dark) {
             if (dark) {
@@ -437,6 +744,8 @@ public final class Updater {
                 greenSoft = Color.rgb(28, 52, 38);
                 greenLine = Color.rgb(43, 74, 55);
                 ghost = Color.rgb(159, 176, 165);
+                track = Color.rgb(34, 48, 41);
+                danger = Color.rgb(255, 154, 143);
             } else {
                 panel = Color.rgb(255, 255, 255);
                 raise = Color.rgb(241, 246, 243);
@@ -449,6 +758,8 @@ public final class Updater {
                 greenSoft = Color.rgb(220, 242, 226);
                 greenLine = Color.rgb(199, 232, 209);
                 ghost = Color.rgb(100, 117, 104);
+                track = Color.rgb(223, 236, 230);
+                danger = Color.rgb(201, 58, 58);
             }
         }
 

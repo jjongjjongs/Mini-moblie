@@ -626,6 +626,8 @@ public final class MainActivity extends Activity {
         // Once a day, quietly: a newer build offers itself, nothing else is
         // said, and the top-bar dot is refreshed from what the check found.
         Updater.autoCheck(this, this::markUpdateIcon);
+        // The installer opens by itself when an update's download ends.
+        Updater.register(this);
 
         scheduleEmulatorStep(0);
     }
@@ -643,6 +645,9 @@ public final class MainActivity extends Activity {
         if (!playerVisible && !keyMapVisible) {
             refreshLibraryList();
         }
+        // Back from "이 출처 허용", or an update that finished downloading
+        // while we were away: open the installer now.
+        Updater.resume(this);
     }
 
     @Override
@@ -850,6 +855,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        Updater.unregister(this);
         ControlPatch.onDestroy(this);
         running = false;
         if (autoRotateObserver != null) {
