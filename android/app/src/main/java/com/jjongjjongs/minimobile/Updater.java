@@ -2,12 +2,10 @@ package com.jjongjjongs.minimobile;
 
 import android.app.Activity;
 import android.app.Dialog;
-import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
-import android.content.pm.PackageInstaller;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
@@ -16,7 +14,6 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
-import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -27,47 +24,41 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.util.Locale;
 
 /**
- * Updates the app from its own GitHub release, so a patch is installed from
- * inside the app instead of downloaded by hand each time.
+ * Tells whether a newer build has been published, and sends the player to get
+ * it from the browser.
  *
  * <p>CI replaces the {@code mobile-dev} release's {@code MiniMobile.apk} and
  * {@code version.txt} on every push, {@code version.txt} being the apk's
  * version code (its CI run number). The app reads that number, and when it is
- * higher than the installed one offers to download the apk and hand it to the
- * system installer. The new apk is signed with the same key as the installed
- * one, so it installs over it and the saves stay.
+ * higher than the installed one offers to open the apk's download in the
+ * browser. The new apk is signed with the same key as the installed one, so it
+ * installs over it and the saves stay.
  *
- * <p>The install goes through {@link PackageInstaller}, with the release named
- * as where the bytes came from, the way a browser attributes a download - so
- * Play Protect sees a known origin rather than an app quietly side-loading an
- * apk. The person still allows this app as an install source once, and still
- * confirms the install itself.
+ * <p>The download deliberately goes through the browser rather than installing
+ * from inside the app. A self-signed apk installed by another app trips
+ * Samsung's Auto Blocker ("악성 앱으로 의심", a block that cannot even be turned
+ * off) and Play Protect's dropper warning, because what matters to them is
+ * <em>who</em> starts the install, not the bytes - the very same apk downloaded
+ * in the browser installs without a word, since the browser is a trusted
+ * source. So the app hands the download to the browser and the person installs
+ * it the way they would any download.
  *
  * <p>This is for the build distributed outside Google Play; a Play build must
- * not update itself this way and would leave the check turned off.
+ * not offer this and would leave the check turned off.
  */
 public final class Updater {
     /** The release the CI build publishes to, under the project's public name. */
     private static final String BASE = "https://github.com/jjongjjongs/Mini-moblie/releases/download/mobile-dev/";
     private static final String VERSION_URL = BASE + "version.txt";
     private static final String APK_URL = BASE + "MiniMobile.apk";
-    /** The release page, named to the installer as where the apk came from. */
+    /** The release page, opened if the direct download cannot be. */
     private static final String RELEASE_PAGE = "https://github.com/jjongjjongs/Mini-moblie/releases/tag/mobile-dev";
-
-    /** The broadcast the install session reports its result on. */
-    static final String INSTALL_ACTION = "com.jjongjjongs.minimobile.INSTALL_RESULT";
 
     private static final String PREFS = "mini_update";
     private static final String KEY_LAST_CHECK = "last_check";
@@ -96,11 +87,6 @@ public final class Updater {
         } catch (Exception e) {
             return -1;
         }
-    }
-
-    /** Where the downloaded apk is kept. */
-    static File apkFile(Context context) {
-        return new File(new File(context.getCacheDir(), "update"), "MiniMobile.apk");
     }
 
     /**
@@ -177,11 +163,7 @@ public final class Updater {
         }
     }
 
-    // ------------------------------------------------------------------
-    // The cards
-    // ------------------------------------------------------------------
-
-    /** ① The new-version card: the version step, in the app's green look. */
+    /** The new-version card, in the app's green look: get it, or not now. */
     private static void promptUpdate(final Activity activity, final int installed, final int latest) {
         Pal pal = Pal.of(activity);
         Dialog dialog = cardDialog(activity);
@@ -202,16 +184,16 @@ public final class Updater {
         versions.addView(chip(activity, pal, String.valueOf(latest), true));
         body.addView(versions);
 
-        body.addView(paragraph(activity, pal, "설치해도 게임과 세이브는 그대로예요."));
-        body.addView(meta(activity, pal, "앱 안에서 바로 받아서 설치해요 · 설치는 한 번 더 확인해요"));
+        body.addView(paragraph(activity, pal, "브라우저에서 새 버전을 받아 설치하면 돼요. 게임과 세이브는 그대로예요."));
+        body.addView(meta(activity, pal, "브라우저로 받으면 ‘악성 앱’ 차단 없이 설치돼요."));
         card.addView(body);
         card.addView(divider(activity, pal));
 
-        LinearLayout acts = actionRow(activity, pal);
+        LinearLayout acts = actionRow(activity);
         acts.addView(button(activity, "나중에", 0, pal.ghost, dialog::dismiss));
-        acts.addView(button(activity, "지금 업데이트", pal.green, pal.onGreen, () -> {
+        acts.addView(button(activity, "브라우저에서 받기", pal.green, pal.onGreen, () -> {
             dialog.dismiss();
-            startUpdate(activity, latest);
+            openDownload(activity);
         }));
         card.addView(acts);
 
@@ -219,213 +201,23 @@ public final class Updater {
     }
 
     /**
-     * ② The install-source card, shown only when the app is not yet an allowed
-     * source, then ③ the download.
+     * Opens the apk's download in the browser. The direct link starts the
+     * download at once; if nothing can open it, the release page is the
+     * fallback.
      */
-    private static void startUpdate(final Activity activity, final int latest) {
-        // From Android 8 the app needs the person's go-ahead to install apks it
-        // downloads. Before that it was one system-wide setting, and launching
-        // the installer is enough.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !activity.getPackageManager().canRequestPackageInstalls()) {
-            Pal pal = Pal.of(activity);
-            Dialog dialog = cardDialog(activity);
-            LinearLayout card = card(activity, pal);
-
-            LinearLayout body = cardBody(activity);
-            body.addView(iconTile(activity, pal, LineIcon.Kind.SHIELD));
-            body.addView(title(activity, pal, "설치 권한 한 번만"));
-            body.addView(paragraph(activity, pal,
-                    "앱에서 업데이트를 설치하려면 이 앱을 ‘이 출처 허용’으로 한 번 켜 주세요. 설정을 열어 드릴게요."));
-            body.addView(meta(activity, pal, "한 번만 켜면 다음부터는 안 물어봐요"));
-            card.addView(body);
-            card.addView(divider(activity, pal));
-
-            LinearLayout acts = actionRow(activity, pal);
-            acts.addView(button(activity, "취소", 0, pal.ghost, dialog::dismiss));
-            acts.addView(button(activity, "설정 열기", pal.green, pal.onGreen, () -> {
-                dialog.dismiss();
-                try {
-                    activity.startActivity(new Intent(
-                            Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                            Uri.parse("package:" + activity.getPackageName())));
-                } catch (Exception e) {
-                    Toast.makeText(activity, "설정을 열 수 없어요. 휴대폰 설정에서 ‘출처를 알 수 없는 앱 설치’를 켜 주세요.", Toast.LENGTH_LONG).show();
-                }
-            }));
-            card.addView(acts);
-
-            showCard(activity, dialog, card, true);
+    private static void openDownload(Activity activity) {
+        if (openLink(activity, APK_URL) || openLink(activity, RELEASE_PAGE)) {
             return;
         }
-        download(activity, latest);
+        Toast.makeText(activity, "브라우저를 열 수 없어요. 직접 받아 주세요:\n" + RELEASE_PAGE, Toast.LENGTH_LONG).show();
     }
 
-    /** ③ The download card: a big percent over a green bar, then the install. */
-    private static void download(final Activity activity, final int latest) {
-        Pal pal = Pal.of(activity);
-        Dialog dialog = cardDialog(activity);
-        LinearLayout card = card(activity, pal);
-
-        LinearLayout body = cardBody(activity);
-        body.addView(title(activity, pal, "업데이트 받는 중"));
-
-        LinearLayout pct = new LinearLayout(activity);
-        pct.setOrientation(LinearLayout.HORIZONTAL);
-        pct.setGravity(Gravity.BOTTOM);
-        pct.setPadding(0, dp(activity, 12), 0, 0);
-        final TextView percent = new TextView(activity);
-        percent.setText("0%");
-        percent.setTextSize(30f);
-        percent.setTypeface(null, Typeface.BOLD);
-        percent.setTextColor(pal.ink);
-        pct.addView(percent, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        final TextView sizes = new TextView(activity);
-        sizes.setTextSize(12.5f);
-        sizes.setTextColor(pal.muted);
-        sizes.setPadding(0, 0, 0, dp(activity, 5));
-        pct.addView(sizes);
-        body.addView(pct);
-
-        // The bar: a filled part and the rest, their weights the percent.
-        final LinearLayout track = new LinearLayout(activity);
-        track.setOrientation(LinearLayout.HORIZONTAL);
-        track.setWeightSum(100f);
-        track.setBackground(roundedRect(activity, pal.track, pal.track, 0, 999));
-        final View fill = new View(activity);
-        fill.setBackground(roundedRect(activity, pal.green, pal.green, 0, 999));
-        track.addView(fill, new LinearLayout.LayoutParams(0, dp(activity, 8), 0f));
-        final View rest = new View(activity);
-        track.addView(rest, new LinearLayout.LayoutParams(0, dp(activity, 8), 100f));
-        LinearLayout.LayoutParams trackParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(activity, 8));
-        trackParams.topMargin = dp(activity, 16);
-        trackParams.bottomMargin = dp(activity, 8);
-        body.addView(track, trackParams);
-
-        body.addView(paragraph(activity, pal, "다 받으면 설치 화면이 떠요. 받는 동안 다른 걸 해도 괜찮아요."));
-        card.addView(body);
-        card.addView(divider(activity, pal));
-
-        final boolean[] cancelled = {false};
-        LinearLayout acts = actionRow(activity, pal);
-        acts.addView(button(activity, "취소", 0, pal.danger, () -> {
-            cancelled[0] = true;
-            dialog.dismiss();
-        }));
-        card.addView(acts);
-
-        dialog.setCancelable(false);
-        showCard(activity, dialog, card, false);
-
-        final Handler ui = new Handler(Looper.getMainLooper());
-        new Thread(() -> {
-            File out = apkFile(activity);
-            HttpURLConnection connection = null;
-            try {
-                File dir = out.getParentFile();
-                if (dir != null) {
-                    dir.mkdirs();
-                }
-                connection = open(APK_URL);
-                if (connection.getResponseCode() != HttpURLConnection.HTTP_OK) {
-                    throw new IOException("HTTP " + connection.getResponseCode());
-                }
-                int total = connection.getContentLength();
-                try (InputStream in = connection.getInputStream();
-                     FileOutputStream fileOut = new FileOutputStream(out)) {
-                    byte[] buffer = new byte[65536];
-                    long got = 0;
-                    int read;
-                    int lastPercent = -1;
-                    while ((read = in.read(buffer)) >= 0) {
-                        if (cancelled[0]) {
-                            fileOut.close();
-                            out.delete();
-                            return;
-                        }
-                        fileOut.write(buffer, 0, read);
-                        got += read;
-                        if (total > 0) {
-                            int shown = (int) (got * 100 / total);
-                            if (shown != lastPercent) {
-                                lastPercent = shown;
-                                final int shownPercent = shown;
-                                final long shownGot = got;
-                                final int shownTotal = total;
-                                ui.post(() -> {
-                                    percent.setText(shownPercent + "%");
-                                    sizes.setText(mb(shownGot) + " / " + mb(shownTotal));
-                                    ((LinearLayout.LayoutParams) fill.getLayoutParams()).weight = shownPercent;
-                                    ((LinearLayout.LayoutParams) rest.getLayoutParams()).weight = 100 - shownPercent;
-                                    track.requestLayout();
-                                });
-                            }
-                        }
-                    }
-                }
-                ui.post(() -> {
-                    dialog.dismiss();
-                    if (!cancelled[0] && !activity.isFinishing()) {
-                        install(activity, out);
-                    }
-                });
-            } catch (Exception e) {
-                out.delete();
-                ui.post(() -> {
-                    dialog.dismiss();
-                    if (!cancelled[0] && !activity.isFinishing()) {
-                        Toast.makeText(activity, "내려받기에 실패했어요. 다시 시도해 주세요.", Toast.LENGTH_LONG).show();
-                    }
-                });
-            } finally {
-                if (connection != null) {
-                    connection.disconnect();
-                }
-            }
-        }, "update-download").start();
-    }
-
-    /**
-     * Hands the downloaded apk to {@link PackageInstaller}, naming the release
-     * it came from. The session streams the apk's bytes in and commits; the
-     * system then asks the person to confirm, and {@link InstallReceiver}
-     * launches that prompt and reports the result.
-     */
-    private static void install(Activity activity, File apk) {
+    private static boolean openLink(Activity activity, String url) {
         try {
-            PackageInstaller installer = activity.getPackageManager().getPackageInstaller();
-            PackageInstaller.SessionParams params =
-                    new PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL);
-            // Say where the bytes came from, the way a browser does for a
-            // download: the file as the origin, the release page as the
-            // referrer. A named origin reads as a plain update rather than an
-            // app side-loading an apk out of nowhere.
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                params.setOriginatingUri(Uri.parse(APK_URL));
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                params.setReferrerUri(Uri.parse(RELEASE_PAGE));
-            }
-            int sessionId = installer.createSession(params);
-            try (PackageInstaller.Session session = installer.openSession(sessionId)) {
-                try (InputStream in = new FileInputStream(apk);
-                     OutputStream out = session.openWrite("MiniMobile.apk", 0, apk.length())) {
-                    byte[] buffer = new byte[65536];
-                    int read;
-                    while ((read = in.read(buffer)) >= 0) {
-                        out.write(buffer, 0, read);
-                    }
-                    session.fsync(out);
-                }
-                Intent intent = new Intent(INSTALL_ACTION).setPackage(activity.getPackageName());
-                int flags = PendingIntent.FLAG_UPDATE_CURRENT;
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    flags |= PendingIntent.FLAG_MUTABLE;
-                }
-                PendingIntent pending = PendingIntent.getBroadcast(activity, sessionId, intent, flags);
-                session.commit(pending.getIntentSender());
-            }
+            activity.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+            return true;
         } catch (Exception e) {
-            Toast.makeText(activity, "설치를 시작하지 못했어요: " + e.getMessage(), Toast.LENGTH_LONG).show();
+            return false;
         }
     }
 
@@ -438,10 +230,6 @@ public final class Updater {
         connection.setReadTimeout(30000);
         connection.setRequestProperty("User-Agent", "MiniMobile");
         return connection;
-    }
-
-    private static String mb(long bytes) {
-        return String.format(Locale.US, "%.1fMB", bytes / 1048576.0);
     }
 
     // ------------------------------------------------------------------
@@ -554,7 +342,7 @@ public final class Updater {
         return line;
     }
 
-    private static LinearLayout actionRow(Activity activity, Pal pal) {
+    private static LinearLayout actionRow(Activity activity) {
         LinearLayout acts = new LinearLayout(activity);
         acts.setOrientation(LinearLayout.HORIZONTAL);
         acts.setGravity(Gravity.END);
@@ -610,9 +398,7 @@ public final class Updater {
         final int greenDeep;
         final int greenSoft;
         final int greenLine;
-        final int track;
         final int ghost;
-        final int danger;
 
         private Pal(boolean dark) {
             if (dark) {
@@ -626,9 +412,7 @@ public final class Updater {
                 greenDeep = Color.rgb(111, 212, 154);
                 greenSoft = Color.rgb(28, 52, 38);
                 greenLine = Color.rgb(43, 74, 55);
-                track = Color.rgb(34, 48, 41);
                 ghost = Color.rgb(159, 176, 165);
-                danger = Color.rgb(255, 154, 143);
             } else {
                 panel = Color.rgb(255, 255, 255);
                 raise = Color.rgb(241, 246, 243);
@@ -640,9 +424,7 @@ public final class Updater {
                 greenDeep = Color.rgb(34, 114, 71);
                 greenSoft = Color.rgb(220, 242, 226);
                 greenLine = Color.rgb(199, 232, 209);
-                track = Color.rgb(223, 236, 230);
                 ghost = Color.rgb(100, 117, 104);
-                danger = Color.rgb(201, 58, 58);
             }
         }
 
