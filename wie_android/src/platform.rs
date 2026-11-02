@@ -7,13 +7,17 @@ use std::{
     },
 };
 
+#[cfg(not(target_arch = "wasm32"))]
+use wie_backend::Network;
 use wie_backend::{
-    AudioSink, DatabaseRepository, Filesystem, Instant, Network, Platform, Screen,
+    AudioSink, DatabaseRepository, Filesystem, Instant, Platform, Screen,
     canvas::{Image, PixelType, Rgb565Pixel},
 };
 use wie_util::Result;
 
-use crate::{audio::AndroidAudioSink, database::AndroidDatabaseRepository, filesystem::AndroidFilesystem, ma3::SynthMixer, network::AndroidNetwork};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::network::AndroidNetwork;
+use crate::{audio::AndroidAudioSink, database::AndroidDatabaseRepository, filesystem::AndroidFilesystem, ma3::SynthMixer};
 
 /// A frame handed to `Screen::paint`, kept until Java collects it.
 #[derive(Clone)]
@@ -178,6 +182,7 @@ pub struct AndroidPlatform {
     shared: Shared,
     filesystem: AndroidFilesystem,
     database_repository: AndroidDatabaseRepository,
+    #[cfg(not(target_arch = "wasm32"))]
     network: AndroidNetwork,
     handset_information: AndroidHandsetInformation,
 }
@@ -192,6 +197,7 @@ impl AndroidPlatform {
             },
             filesystem: AndroidFilesystem::new(runtime_dir.join("fs")),
             database_repository: AndroidDatabaseRepository::new(runtime_dir.join("db")),
+            #[cfg(not(target_arch = "wasm32"))]
             network: AndroidNetwork::new(),
             handset_information,
             shared,
@@ -222,6 +228,7 @@ impl Platform for AndroidPlatform {
         Box::new(AndroidAudioSink::new(self.shared.clone()))
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn network(&self) -> Option<&dyn Network> {
         Some(&self.network)
     }
