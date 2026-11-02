@@ -74,6 +74,12 @@ public final class Updater {
     /** The DownloadManager id of the update being fetched, and its version. */
     private static final String KEY_DOWNLOAD = "download_id";
     private static final String KEY_DOWNLOAD_VERSION = "download_version";
+    /**
+     * The download the installer was already opened on by itself. Coming back
+     * from the installer - installed, cancelled or refused - must not open it
+     * again; a tap on 업데이트 still does.
+     */
+    private static final String KEY_OFFERED = "offered_id";
     /** Auto-check at most this often, so a launch is not a network round-trip. */
     private static final long CHECK_EVERY_MS = 24L * 60 * 60 * 1000;
 
@@ -164,7 +170,10 @@ public final class Updater {
         long[] state = progress(activity, id);
         boolean newer = prefs(activity).getInt(KEY_DOWNLOAD_VERSION, -1) > installedVersion(activity);
         if (state[0] == DownloadManager.STATUS_SUCCESSFUL && newer) {
-            onDownloaded(activity);
+            // Opened once already: the person closed it, so leave it be.
+            if (prefs(activity).getLong(KEY_OFFERED, -1) != id) {
+                onDownloaded(activity);
+            }
         } else if (state[0] == 0 || state[0] == DownloadManager.STATUS_FAILED || !newer) {
             // Gone, failed, or already installed.
             clearDownload(activity);
@@ -310,7 +319,7 @@ public final class Updater {
     }
 
     private static void clearDownload(Context context) {
-        prefs(context).edit().remove(KEY_DOWNLOAD).remove(KEY_DOWNLOAD_VERSION).apply();
+        prefs(context).edit().remove(KEY_DOWNLOAD).remove(KEY_DOWNLOAD_VERSION).remove(KEY_OFFERED).apply();
     }
 
     private static void startDownload(Activity activity, int latest) {
@@ -499,6 +508,7 @@ public final class Updater {
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
         try {
             activity.startActivity(intent);
+            prefs(activity).edit().putLong(KEY_OFFERED, id).apply();
         } catch (Exception e) {
             Toast.makeText(activity, "설치 화면을 열지 못했어요: " + e.getMessage(), Toast.LENGTH_LONG).show();
         }
