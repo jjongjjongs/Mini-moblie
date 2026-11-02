@@ -1110,6 +1110,8 @@ pub fn get_served_method_body(table_id: WIPICTableId, function_id: u16) -> Optio
 
 #[cfg(test)]
 mod tests {
+    use alloc::string::{String, ToString};
+
     use super::*;
 
     const TABLES: [WIPICTableId; 18] = [
@@ -1168,8 +1170,11 @@ mod tests {
 
     /// What each entry of [`get_uic_method_table`] calls, read from this file:
     /// the bodies are closures and cannot say which function they are.
-    fn uic_table_entries() -> Vec<&'static str> {
-        let source = include_str!("method_table.rs");
+    fn uic_table_entries() -> Vec<String> {
+        // A Windows checkout has CRLF line endings, so normalise to LF first:
+        // otherwise the `\n    ]\n` boundary below never matches and the
+        // unwrap panics (the asserts pass on Linux and macOS, fail on Windows).
+        let source = include_str!("method_table.rs").replace("\r\n", "\n");
         let start = source.find("pub fn get_uic_method_table()").unwrap();
         let body = &source[start..];
         let body = &body[body.find("vec![").unwrap() + 5..body.find("\n    ]\n").unwrap()];
@@ -1177,7 +1182,7 @@ mod tests {
         body.lines()
             .map(str::trim)
             .filter(|line| !line.is_empty())
-            .map(|line| line.trim_end_matches(','))
+            .map(|line| line.trim_end_matches(',').to_string())
             .collect()
     }
 
