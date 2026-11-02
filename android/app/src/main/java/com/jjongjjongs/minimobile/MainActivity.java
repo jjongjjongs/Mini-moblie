@@ -97,7 +97,6 @@ public final class MainActivity extends Activity {
     private static final int PICK_GAME = 1001;
     private static final int REQUEST_WRITE_DOWNLOADS = 1002;
     private static final int PICK_SAVE = 1003;
-    private static final int REQUEST_CALL_PHONE = 1004;
 
     /**
      * How long a single tick may run, and the delay scheduled after it finishes.
@@ -457,8 +456,6 @@ public final class MainActivity extends Activity {
     private boolean unfolded;
     /** What is waiting on the storage permission, if anything. */
     private Runnable pendingDownload;
-    /** Telephone number waiting for Android's runtime CALL_PHONE permission. */
-    private String pendingPhoneCall;
 
     private volatile boolean running;
     private volatile boolean foreground = true;
@@ -4241,20 +4238,6 @@ public final class MainActivity extends Activity {
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] granted) {
         super.onRequestPermissionsResult(requestCode, permissions, granted);
 
-        if (requestCode == REQUEST_CALL_PHONE) {
-            String number = pendingPhoneCall;
-            pendingPhoneCall = null;
-
-            if (number != null
-                    && granted.length > 0
-                    && granted[0] == PackageManager.PERMISSION_GRANTED) {
-                placePhoneCall(number);
-            } else if (number != null) {
-                Toast.makeText(this, "전화 권한이 없어 통화 요청을 실행할 수 없습니다.", Toast.LENGTH_LONG).show();
-            }
-            return;
-        }
-
         Runnable action = pendingDownload;
         pendingDownload = null;
 
@@ -7440,20 +7423,18 @@ public final class MainActivity extends Activity {
 
     /**
      * Host side of WIPI-C MC_phnCallPlace. The LGT WipiPlayer implementation
-     * launches ACTION_CALL with exactly a tel: URI.
+     * launched ACTION_CALL with exactly a tel: URI; this opens the dialer with
+     * the number filled in instead, and the player presses call.
+     *
+     * <p>ACTION_DIAL needs no permission, so the app does not ask for
+     * CALL_PHONE at all. An app holding CALL_PHONE that installs an apk is the
+     * shape of the voice-phishing droppers Samsung blocks outright, and that
+     * permission is what got this app's own updates refused as a suspected
+     * malicious app.
      */
     private void placePhoneCall(String number) {
-        if (checkSelfPermission(Manifest.permission.CALL_PHONE)
-                != PackageManager.PERMISSION_GRANTED) {
-            pendingPhoneCall = number;
-            requestPermissions(
-                    new String[]{Manifest.permission.CALL_PHONE},
-                    REQUEST_CALL_PHONE);
-            return;
-        }
-
         try {
-            startActivity(new Intent(Intent.ACTION_CALL, Uri.parse("tel:" + number)));
+            startActivity(new Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + number)));
         } catch (Exception e) {
             Log.e(TAG, "Phone call failed", e);
             Toast.makeText(
