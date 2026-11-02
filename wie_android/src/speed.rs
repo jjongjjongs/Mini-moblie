@@ -144,11 +144,19 @@ mod tests {
         hold(true);
         let held = now_ms();
         std::thread::sleep(std::time::Duration::from_millis(60));
-        assert_eq!(now_ms(), held);
+        // Held, it does not move however long passes.
+        assert_eq!(now_ms(), held, "held clock moved: {held}");
+
+        // Released, it goes on from where it stood - the held stretch is not
+        // counted, so the read right after is close to `held`, not `held + 60`.
         hold(false);
+        let resumed = now_ms();
+        assert!(resumed >= held && resumed < held + 50, "resumed wrong: {held} then {resumed}");
+
+        // And from there it advances. No upper bound: a loaded CI runner can
+        // oversleep well past the 20ms asked, which is not a clock fault.
         std::thread::sleep(std::time::Duration::from_millis(20));
-        let after = now_ms();
-        assert!(after >= held + 15 && after < held + 55, "{held} then {after}");
+        assert!(now_ms() >= resumed, "clock did not go on: {resumed}");
     }
 
     /// The clock runs at its speed from the anchor, and only from the anchor.
