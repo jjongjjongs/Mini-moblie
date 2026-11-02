@@ -184,8 +184,8 @@ public final class Updater {
         versions.addView(chip(activity, pal, String.valueOf(latest), true));
         body.addView(versions);
 
-        body.addView(paragraph(activity, pal, "브라우저에서 새 버전을 받아 설치하면 돼요. 게임과 세이브는 그대로예요."));
-        body.addView(meta(activity, pal, "브라우저로 받으면 ‘악성 앱’ 차단 없이 설치돼요."));
+        body.addView(paragraph(activity, pal, "브라우저에서 새 버전을 받아요. 다 받으면 알림이나 ‘열기’를 눌러 설치하세요."));
+        body.addView(meta(activity, pal, "게임과 세이브는 그대로 · 브라우저로 받아야 ‘악성 앱’ 차단을 피해요"));
         card.addView(body);
         card.addView(divider(activity, pal));
 
