@@ -55,6 +55,8 @@ final class LineIcon extends Drawable {
         GAMEPAD,
         /** A framed hill, for 내 사진. */
         PHOTO,
+        /** An arrow down into a tray: a newer build brought in. */
+        UPDATE,
     }
 
     private static final float GRID = 24f;
@@ -83,6 +85,7 @@ final class LineIcon extends Drawable {
                 tray();
                 break;
             case DOWNLOAD:
+            case UPDATE:
                 line(12, 4, 12, 15);
                 polyline(7, 10, 12, 15, 17, 10);
                 tray();

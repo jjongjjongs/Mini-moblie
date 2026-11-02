@@ -404,6 +404,10 @@ public final class MainActivity extends Activity {
     /** The app bar's list and grid buttons. */
     private TextView libraryListButton;
     private TextView libraryGridButton;
+    /** The top bar's 업데이트 확인 icon, and the dot shown when one is waiting. */
+    private ImageView updateIcon;
+    private View updateDot;
+    private View updateButton;
     private LinearLayout libraryChipRow;
     private TextView librarySectCount;
     private TextView librarySectTitle;
@@ -619,8 +623,9 @@ public final class MainActivity extends Activity {
 
         showLibrary();
 
-        // Once a day, quietly: a newer build offers itself, nothing else is said.
-        Updater.autoCheck(this);
+        // Once a day, quietly: a newer build offers itself, nothing else is
+        // said, and the top-bar dot is refreshed from what the check found.
+        Updater.autoCheck(this, this::markUpdateIcon);
 
         scheduleEmulatorStep(0);
     }
@@ -932,6 +937,7 @@ public final class MainActivity extends Activity {
         barTitle.setTypeface(Typeface.DEFAULT_BOLD);
         barTitle.setTextColor(LIB_INK);
         bar.addView(barTitle, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        bar.addView(buildUpdateButton());
         bar.addView(buildViewToggle());
         root.addView(bar);
 
@@ -999,14 +1005,6 @@ public final class MainActivity extends Activity {
         pick.setOnClickListener(v -> openPicker());
         actions.addView(pick, buttonParams(dp(10)));
         content.addView(actions, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(42)));
-
-        // Updates come from the app's own release, so a patch can be installed
-        // from here rather than downloaded by hand. Auto-checked once a day too.
-        Button update = flatButton("⬇️ 업데이트 확인");
-        update.setOnClickListener(v -> Updater.check(this, true));
-        LinearLayout.LayoutParams updateParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(42));
-        updateParams.topMargin = dp(10);
-        content.addView(update, updateParams);
 
         // A returning session starts on the full, unfiltered list, not in
         // selection mode.
@@ -2556,6 +2554,58 @@ public final class MainActivity extends Activity {
     }
 
     /** The list and grid buttons at the top right, the one in use filled. */
+    /**
+     * The 업데이트 확인 icon that sits left of the view toggle. It is quiet grey
+     * until a check finds a newer build, when it turns green with a dot; tapping
+     * it checks on demand. Updates come from the app's own release, so a patch
+     * installs from here rather than being downloaded by hand.
+     */
+    private View buildUpdateButton() {
+        FrameLayout group = new FrameLayout(this);
+        updateIcon = new ImageView(this);
+        int pad = dp(6);
+        updateIcon.setPadding(pad, pad, pad, pad);
+        group.addView(updateIcon, new FrameLayout.LayoutParams(dp(38), dp(30)));
+
+        updateDot = new View(this);
+        FrameLayout.LayoutParams dotParams = new FrameLayout.LayoutParams(dp(9), dp(9),
+                android.view.Gravity.TOP | android.view.Gravity.END);
+        dotParams.topMargin = dp(2);
+        dotParams.rightMargin = dp(2);
+        group.addView(updateDot, dotParams);
+
+        group.setContentDescription("업데이트 확인");
+        group.setOnClickListener(v -> Updater.check(this, true, this::markUpdateIcon));
+
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(38), dp(30));
+        params.rightMargin = dp(8);
+        group.setLayoutParams(params);
+        updateButton = group;
+        markUpdateIcon();
+        return group;
+    }
+
+    /** Colours the update icon and shows its dot when a newer build is waiting. */
+    private void markUpdateIcon() {
+        if (updateIcon == null || updateButton == null) {
+            return;
+        }
+        boolean waiting = Updater.updateAvailable(this);
+        int ink = waiting ? LIB_GREEN_DEEP : LIB_MUTED;
+        updateIcon.setImageDrawable(new LineIcon(LineIcon.Kind.UPDATE, ink, 1.9f));
+        updateButton.setBackground(roundedRect(
+                waiting ? LIB_GREEN_SOFT : LIB_GREEN_SOFTER,
+                waiting ? LIB_GREEN_LINE : LIB_LINE, 1, 10));
+        if (updateDot != null) {
+            GradientDrawable dot = new GradientDrawable();
+            dot.setShape(GradientDrawable.OVAL);
+            dot.setColor(LIB_GREEN);
+            dot.setStroke(dp(2), LIB_BG);
+            updateDot.setBackground(dot);
+            updateDot.setVisibility(waiting ? View.VISIBLE : View.GONE);
+        }
+    }
+
     private View buildViewToggle() {
         LinearLayout group = new LinearLayout(this);
         group.setOrientation(LinearLayout.HORIZONTAL);

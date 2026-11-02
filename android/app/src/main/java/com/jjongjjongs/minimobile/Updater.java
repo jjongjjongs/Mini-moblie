@@ -49,10 +49,18 @@ public final class Updater {
 
     private static final String PREFS = "mini_update";
     private static final String KEY_LAST_CHECK = "last_check";
+    /** The newest version the last successful check saw, so the bar can show a dot. */
+    private static final String KEY_LATEST = "latest";
     /** Auto-check at most this often, so a launch is not a network round-trip. */
     private static final long CHECK_EVERY_MS = 24L * 60 * 60 * 1000;
 
     private Updater() {
+    }
+
+    /** Whether the last check found a build newer than the installed one. */
+    static boolean updateAvailable(Context context) {
+        int latest = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt(KEY_LATEST, -1);
+        return latest > installedVersion(context);
     }
 
     /** The installed app's version code, or -1 if it cannot be read. */
@@ -77,21 +85,23 @@ public final class Updater {
      * Checks once a day on launch, quietly: a newer build offers itself, and
      * anything else - up to date, or no network - says nothing.
      */
-    static void autoCheck(Activity activity) {
+    static void autoCheck(Activity activity, Runnable onResult) {
         SharedPreferences prefs = activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         long now = System.currentTimeMillis();
         if (now - prefs.getLong(KEY_LAST_CHECK, 0) < CHECK_EVERY_MS) {
             return;
         }
         prefs.edit().putLong(KEY_LAST_CHECK, now).apply();
-        check(activity, false);
+        check(activity, false, onResult);
     }
 
     /**
      * Checks for a newer build. When {@code manual}, every outcome is shown -
      * up to date, a failure, or a new build; an auto check shows only a new one.
+     * {@code onResult} runs on the UI thread once the check settles, so the bar
+     * can redraw its dot from {@link #updateAvailable}; it may be null.
      */
-    static void check(final Activity activity, final boolean manual) {
+    static void check(final Activity activity, final boolean manual, final Runnable onResult) {
         final Handler ui = new Handler(Looper.getMainLooper());
         if (manual) {
             Toast.makeText(activity, "업데이트 확인 중…", Toast.LENGTH_SHORT).show();
@@ -106,8 +116,14 @@ public final class Updater {
                 }
                 return;
             }
+            // Remembered so the bar's dot survives to the next launch, and clears
+            // once the installed build has caught up.
+            activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt(KEY_LATEST, latest).apply();
             final int installed = installedVersion(activity);
             ui.post(() -> {
+                if (onResult != null) {
+                    onResult.run();
+                }
                 if (activity.isFinishing()) {
                     return;
                 }
