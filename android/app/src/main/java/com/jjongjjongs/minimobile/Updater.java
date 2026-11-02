@@ -2,6 +2,7 @@ package com.jjongjjongs.minimobile;
 
 import android.app.Activity;
 import android.app.Dialog;
+import android.app.DownloadManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -12,6 +13,7 @@ import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.Gravity;
@@ -184,16 +186,16 @@ public final class Updater {
         versions.addView(chip(activity, pal, String.valueOf(latest), true));
         body.addView(versions);
 
-        body.addView(paragraph(activity, pal, "브라우저에서 새 버전을 받아요. 다 받으면 알림이나 ‘열기’를 눌러 설치하세요."));
-        body.addView(meta(activity, pal, "게임과 세이브는 그대로 · 브라우저로 받아야 ‘악성 앱’ 차단을 피해요"));
+        body.addView(paragraph(activity, pal, "새 버전을 받아요. 다 받으면 뜨는 알림을 눌러 설치하세요."));
+        body.addView(meta(activity, pal, "게임과 세이브는 그대로예요"));
         card.addView(body);
         card.addView(divider(activity, pal));
 
         LinearLayout acts = actionRow(activity);
         acts.addView(button(activity, "나중에", 0, pal.ghost, dialog::dismiss));
-        acts.addView(button(activity, "브라우저에서 받기", pal.green, pal.onGreen, () -> {
+        acts.addView(button(activity, "지금 받기", pal.green, pal.onGreen, () -> {
             dialog.dismiss();
-            openDownload(activity);
+            openDownload(activity, latest);
         }));
         card.addView(acts);
 
@@ -201,15 +203,37 @@ public final class Updater {
     }
 
     /**
-     * Opens the apk's download in the browser. The direct link starts the
-     * download at once; if nothing can open it, the release page is the
-     * fallback.
+     * Downloads the apk through the system's DownloadManager, which shows a
+     * progress notification and, when it finishes, one the person taps to
+     * install. The system opens the installer then, as a trusted source -
+     * unlike this app installing it itself, which Samsung's Auto Blocker flags
+     * as a suspected malicious app. The file lands in Downloads, so a missed
+     * notification is still easy to find. If the download manager cannot be
+     * used, the browser is the fallback.
      */
-    private static void openDownload(Activity activity) {
-        if (openLink(activity, APK_URL) || openLink(activity, RELEASE_PAGE)) {
-            return;
+    private static void openDownload(Activity activity, int latest) {
+        try {
+            DownloadManager manager = (DownloadManager) activity.getSystemService(Context.DOWNLOAD_SERVICE);
+            if (manager == null) {
+                throw new IllegalStateException("다운로드 관리자를 쓸 수 없습니다.");
+            }
+            DownloadManager.Request request = new DownloadManager.Request(Uri.parse(APK_URL));
+            request.setTitle("Mini Mobile 업데이트");
+            request.setDescription("새 버전(버전 " + latest + ")을 받는 중…");
+            request.setMimeType("application/vnd.android.package-archive");
+            request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+            // A name with the version, so a new build never clashes with an apk
+            // left from a previous update already sitting in Downloads.
+            request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "MiniMobile-" + latest + ".apk");
+            manager.enqueue(request);
+            Toast.makeText(activity, "새 버전을 받는 중이에요.\n다 받으면 뜨는 알림을 눌러 설치하세요.", Toast.LENGTH_LONG).show();
+        } catch (Exception e) {
+            // No download manager, or the file is already there: fall back to
+            // the browser, which downloads it the same way.
+            if (!openLink(activity, APK_URL) && !openLink(activity, RELEASE_PAGE)) {
+                Toast.makeText(activity, "받을 수 없어요. 직접 받아 주세요:\n" + RELEASE_PAGE, Toast.LENGTH_LONG).show();
+            }
         }
-        Toast.makeText(activity, "브라우저를 열 수 없어요. 직접 받아 주세요:\n" + RELEASE_PAGE, Toast.LENGTH_LONG).show();
     }
 
     private static boolean openLink(Activity activity, String url) {
