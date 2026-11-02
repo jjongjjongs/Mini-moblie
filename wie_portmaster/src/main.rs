@@ -38,6 +38,7 @@ mod sdl;
 mod search;
 mod settings;
 mod ui;
+mod update;
 
 use std::{
     ffi::{CStr, CString, c_int, c_void},
@@ -270,6 +271,8 @@ struct App {
     /// Raw joystick buttons the mapping does not claim - a Sega pad's C and Z -
     /// in the order they were first pressed, each an extra bindable button.
     extra_raw: Vec<u8>,
+    /// Whether a newer build is out, for the list menu's 업데이트 tile.
+    update: update::State,
 }
 
 impl App {
@@ -357,6 +360,7 @@ impl App {
                 pointer: Pointer::default(),
                 claimed_raw: Vec::new(),
                 extra_raw: Vec::new(),
+                update: update::State::new(),
             };
             app.apply_screen();
             for index in 0..(app.sdl.num_joysticks)() {

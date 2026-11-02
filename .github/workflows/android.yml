@@ -202,6 +202,10 @@ jobs:
           cargo install --locked cargo-zigbuild@0.23.4
 
       - name: Build
+        # The run number is baked in, so the app can tell whether the release
+        # holds a newer build - see wie_portmaster/src/update.rs.
+        env:
+          MINIMOBILE_BUILD: ${{ github.run_number }}
         run: cargo zigbuild --release -p wie_portmaster --features jit --target x86_64-unknown-linux-gnu.2.17
 
       - name: Package
@@ -266,6 +270,10 @@ jobs:
           cargo install --locked cargo-zigbuild@0.23.4
 
       - name: Build
+        # The run number is baked in, so the port can swap itself to a newer
+        # build - see wie_portmaster/src/update.rs.
+        env:
+          MINIMOBILE_BUILD: ${{ github.run_number }}
         run: cargo zigbuild --release -p wie_portmaster --features jit --target aarch64-unknown-linux-gnu.2.17
 
       - name: Package
@@ -319,6 +327,10 @@ jobs:
           key: windows
 
       - name: Build
+        # The run number is baked in, so the app can point at a newer build -
+        # see wie_portmaster/src/update.rs.
+        env:
+          MINIMOBILE_BUILD: ${{ github.run_number }}
         run: cargo build --release -p wie_portmaster --features jit
 
       - name: Fetch SDL2
@@ -382,6 +394,10 @@ jobs:
           key: mac
 
       - name: Build
+        # The run number is baked in, so the app can point at a newer build -
+        # see wie_portmaster/src/update.rs.
+        env:
+          MINIMOBILE_BUILD: ${{ github.run_number }}
         run: |
           set -eu
           cargo build --release -p wie_portmaster --features jit --target aarch64-apple-darwin
@@ -464,6 +480,8 @@ jobs:
         run: |
           set -eu
           xcodegen generate
+          # The run number is the build number, so the app can tell whether the
+          # release holds a newer build than its own - see ios .../Updater.swift.
           xcodebuild \
             -project MiniMobile.xcodeproj \
             -scheme MiniMobile \
@@ -471,6 +489,7 @@ jobs:
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath build \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             build
 

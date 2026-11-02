@@ -57,6 +57,8 @@ final class LineIcon extends Drawable {
         PHOTO,
         /** An arrow down into a tray: a newer build brought in. */
         UPDATE,
+        /** A shield with a tick: the install-source permission. */
+        SHIELD,
     }
 
     private static final float GRID = 24f;
@@ -181,6 +183,13 @@ final class LineIcon extends Drawable {
                 line(5, 12.5f, 9, 12.5f);
                 line(15.5f, 11, 15.6f, 11);
                 line(18, 13.5f, 18.1f, 13.5f);
+                break;
+            case SHIELD:
+                // A shield outline - top point, down each side to a rounded
+                // base - with a tick inside, the "one safe step" of the
+                // install-source permission.
+                polyline(12, 3, 19, 6, 19, 11, 17, 16, 12, 20, 7, 16, 5, 11, 5, 6, 12, 3);
+                polyline(9, 12, 11, 14, 15, 10);
                 break;
         }
     }

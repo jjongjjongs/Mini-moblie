@@ -73,6 +73,10 @@ struct LibraryView: View {
     /// kept between runs.
     @AppStorage("library.grid") private var grid = false
     @AppStorage("library.sort") private var sortRaw = LibrarySort.recent.rawValue
+    /// The newest build the last check saw, and when it last ran, so the
+    /// update icon can light without a round-trip on every launch.
+    @AppStorage("update.latest") private var updateLatest = -1
+    @AppStorage("update.lastCheck") private var updateLastCheck = 0.0
 
     @State private var editMode = EditMode.inactive
     @State private var selection = Set<String>()
@@ -140,6 +144,56 @@ struct LibraryView: View {
         .onAppear {
             PlayHistory.dropOldCovers()
             reload()
+            autoCheckForUpdate()
+        }
+    }
+
+    /// Whether the last check saw a build newer than this one.
+    private var updateReady: Bool { updateLatest > Updater.installedBuild }
+
+    /// Once a day on launch, quietly: a newer build offers the release page,
+    /// anything else says nothing.
+    private func autoCheckForUpdate() {
+        let now = Date().timeIntervalSince1970
+        guard now - updateLastCheck > Updater.checkEvery else {
+            return
+        }
+        Updater.fetchLatest { latest in
+            guard let latest else { return }
+            updateLatest = latest
+            updateLastCheck = now
+            if latest > Updater.installedBuild {
+                promptUpdate(latest)
+            }
+        }
+    }
+
+    /// The update icon tapped: check now, and show every outcome.
+    private func checkForUpdate(manual: Bool) {
+        Updater.fetchLatest { latest in
+            guard let latest else {
+                notice = Notice(title: "업데이트 확인", message: "확인하지 못했어요. 인터넷을 확인해 주세요.")
+                return
+            }
+            updateLatest = latest
+            updateLastCheck = Date().timeIntervalSince1970
+            if latest > Updater.installedBuild {
+                promptUpdate(latest)
+            } else {
+                notice = Notice(title: "업데이트 확인", message: "이미 최신 버전이에요 (버전 \(Updater.installedBuild)).")
+            }
+        }
+    }
+
+    /// The new-build card, in the library's own look: open the release page,
+    /// or not now.
+    private func promptUpdate(_ latest: Int) {
+        withAnimation(.easeOut(duration: 0.15)) {
+            pending = PendingConfirm(
+                title: "업데이트 있음",
+                message: "새 버전(버전 \(latest))이 있어요.\n받는 곳을 열어 새 파일을 설치하세요.\n\n아이폰은 앱이 직접 설치할 수 없어, AltStore·SideStore 같은 설치 도구로 받아요. 세이브는 그대로예요.",
+                action: "받는 곳 열기", danger: false
+            ) { Updater.openReleasePage() }
         }
     }
 
@@ -459,6 +513,13 @@ struct LibraryView: View {
                 Image(systemName: dark ? "sun.max.fill" : "moon.fill")
             }
             .accessibilityLabel(dark ? "라이트 모드" : "다크 모드")
+            Button {
+                checkForUpdate(manual: true)
+            } label: {
+                Image(systemName: updateReady ? "arrow.down.circle.fill" : "arrow.down.circle")
+                    .foregroundColor(updateReady ? .green : .accentColor)
+            }
+            .accessibilityLabel(updateReady ? "업데이트 있음" : "업데이트 확인")
             Menu {
                 Button { pick(.games) } label: { Label("게임 가져오기", systemImage: "plus") }
                 Button { pick(.save) } label: { Label("세이브 가져오기", systemImage: "square.and.arrow.down") }

@@ -54,11 +54,14 @@
             android:exported="false"
             android:grantUriPermissions="true" />
 
-        <!-- The update apk handed to the system installer by 업데이트 확인. -->
-        <provider
-            android:name=".ApkProvider"
-            android:authorities="${applicationId}.apk"
-            android:exported="false"
-            android:grantUriPermissions="true" />
+        <!-- Hears the result of the install session 업데이트 확인 commits, so it
+             can launch the system's confirm screen and report how it went. -->
+        <receiver
+            android:name=".InstallReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.jjongjjongs.minimobile.INSTALL_RESULT" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

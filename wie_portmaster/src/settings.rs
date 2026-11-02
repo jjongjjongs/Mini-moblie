@@ -78,6 +78,7 @@ enum Item {
     Volume,
     Saves,
     Delete,
+    Update,
     EndGame,
     Close,
     QuitApp,
@@ -301,7 +302,13 @@ impl App {
         if context.in_game() {
             items.push(Item::EndGame);
         } else {
-            items.extend([Item::Close, Item::QuitApp]);
+            items.extend([Item::Update, Item::Close, Item::QuitApp]);
+        }
+
+        // On the list, see once whether a newer build is out, so the 업데이트
+        // tile can say so without the player asking.
+        if !context.in_game() {
+            self.update.ensure_checked();
         }
 
         let mut cursor: usize = 0;
@@ -312,6 +319,10 @@ impl App {
         let mut dirty = true;
         let icon = context.game.and_then(icons::extract);
         loop {
+            // A background update check finishing redraws the 업데이트 tile.
+            if self.update.poll() {
+                dirty = true;
+            }
             let pressed = self.presses(&mut repeat);
             // A click on the volume card's meter sets the level it is on,
             // and is not also the A that takes the tile up or puts it down.
@@ -402,6 +413,10 @@ impl App {
                                 self.store.set_fixed(&game, if fixed.is_some() { None } else { Some(&active) });
                             }
                         }
+                        Item::Update => {
+                            self.update_select();
+                            dirty = true;
+                        }
                     },
                     _ => {}
                 }
@@ -476,6 +491,7 @@ impl App {
             Item::Volume => ("♪", "소리"),
             Item::Saves => ("♡", "세이브"),
             Item::Delete => ("×", "게임 삭제"),
+            Item::Update => ("⬇", "업데이트"),
             Item::EndGame => ("⏏", "게임 끝내기"),
             Item::Close => ("←", "닫기"),
             Item::QuitApp => ("⏏", "앱 종료"),
@@ -494,6 +510,7 @@ impl App {
                 let fixed = context.game_file().and_then(|game| self.store.fixed(&game).map(str::to_owned));
                 fixed.unwrap_or_else(|| "끔".to_owned())
             }
+            Item::Update => self.update.label(),
             _ => String::new(),
         }
     }
