@@ -28,6 +28,7 @@ mod capture;
 mod com2us;
 mod dragoneyes;
 mod dsp;
+mod fisher;
 mod fortress;
 mod funter;
 mod gpang;

@@ -40,7 +40,7 @@
 
 use alloc::{boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 
-use super::{LocalConnection, LocalEndpoint, LocalRead, candy_shop::CandyShop, com2us, levelup, sejung, stadium};
+use super::{LocalConnection, LocalEndpoint, LocalRead, candy_shop::CandyShop, com2us, fisher, levelup, sejung, stadium};
 
 /// The names the gateway went by. Both resolve to [`ADDRESS`].
 const HOSTS: [&str; 2] = ["ngw.gxg.com", "ngph.gxg.com"];
@@ -478,6 +478,11 @@ impl LocalConnection for GxgConnection {
                         None => tracing::warn!("gxg: no answer for data to {:?}", self.target),
                     }
                 }
+                // 원조낚시광3's billing server; see [`fisher`].
+                b"DP" if self.target.as_ref().is_some_and(|(host, port)| (host.as_str(), *port) == fisher::TARGET) => match fisher::answer(&body) {
+                    Some(answer) => self.outgoing.extend_from_slice(&frame(&version, b"DPC", &answer)),
+                    None => tracing::warn!("gxg: no answer for data to {:?}", self.target),
+                },
                 // 1등은니꺼's 세중 authentication; see [`sejung`].
                 b"DP" if self.target.as_ref().is_some_and(|(host, port)| (host.as_str(), *port) == sejung::TARGET) => match sejung::answer(&body) {
                     Some(answer) => self.outgoing.extend_from_slice(&frame(&version, b"DPC", &answer)),

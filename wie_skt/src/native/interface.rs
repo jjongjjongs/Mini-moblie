@@ -161,21 +161,31 @@ fn kernel_body(slot: u32) -> Option<WIPICMethodBody> {
 /// 파일이 저장한 단말기 번호와 다릅니다" when the handset reports another. Its
 /// archive has no `certification` to recover the number from, but every
 /// `.mod` does - see [`mod_subscriber_number`].
+///
+/// 슈퍼프로야구2012 (9000541219) writes the `MIN` into `mmm.sav` on its first
+/// run and, every run after, compares the handset's with it: another is "인증에
+/// 실패하였습니다" and nothing more. Its saves came off a handset that reported
+/// `0000000000`, so it is told the `MIN` its save holds - see [`saved_min`].
 async fn get_system_property(context: &mut dyn WIPICContext, id: WIPICWord, out: WIPICWord, out_size: WIPICWord) -> Result<i32> {
     const PHONE_MODEL: &str = "SCH-W830";
 
     let name = read_null_terminated_string_bytes(context, id)?;
-    let value = match name.as_slice() {
-        b"PHONEMODEL" => PHONE_MODEL.into(),
-        // The handset's optional features, comma-separated - 아이뮤지션 looks
-        // for `Touchscreen` among them. This one has none, and an answer that
-        // is refused leaves the title cutting up whatever its stack held.
-        b"TERMSVCOPT" => String::new(),
-        b"PHONENUMBER" | b"MIN" if !archive_names_subscriber(context, &name).await => match mod_subscriber_number(context).await {
-            Some(number) => number,
-            None => return kernel::get_system_property(context, id, out, out_size).await,
-        },
-        _ => return kernel::get_system_property(context, id, out, out_size).await,
+    let saved = if name.as_slice() == b"MIN" { saved_min(context).await } else { None };
+    let value = if let Some(min) = saved {
+        min
+    } else {
+        match name.as_slice() {
+            b"PHONEMODEL" => PHONE_MODEL.into(),
+            // The handset's optional features, comma-separated - 아이뮤지션 looks
+            // for `Touchscreen` among them. This one has none, and an answer that
+            // is refused leaves the title cutting up whatever its stack held.
+            b"TERMSVCOPT" => String::new(),
+            b"PHONENUMBER" | b"MIN" if !archive_names_subscriber(context, &name).await => match mod_subscriber_number(context).await {
+                Some(number) => number,
+                None => return kernel::get_system_property(context, id, out, out_size).await,
+            },
+            _ => return kernel::get_system_property(context, id, out, out_size).await,
+        }
     };
 
     tracing::info!("SKT MC_knlGetSystemProperty({:?}) -> {value:?}", String::from_utf8_lossy(&name));
@@ -201,6 +211,28 @@ async fn archive_names_subscriber(context: &mut dyn WIPICContext, property: &[u8
             .read_resource("cert.c2s")
             .await
             .is_ok_and(|cert| wie_backend::subscriber::identity_from_cert(&cert).is_some())
+}
+
+/// Titles that keep the `MIN` they were first run under in a save of their
+/// own, and refuse a handset that reports another, with that save's name.
+const MIN_SAVES: &[(&str, &str)] = &[
+    // 슈퍼프로야구2012: `0x126e04` compares `MIN` with `mmm.sav`.
+    ("9000541219", "mmm.sav"),
+];
+
+/// The `MIN` a title's saves were made under, for a title that keeps it in a
+/// save ([`MIN_SAVES`]) and has one: the digits the save opens with.
+async fn saved_min(context: &mut dyn WIPICContext) -> Option<String> {
+    let pid = context.system().pid().to_owned();
+    let (_, save) = MIN_SAVES.iter().find(|(id, _)| *id == pid)?;
+    let data = context.read_resource(save).await.ok()?;
+
+    let digits: Vec<u8> = data.iter().copied().take_while(|x| *x != 0).collect();
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+
+    String::from_utf8(digits).ok()
 }
 
 /// The subscriber number a title was bought on, from the key in its `.mod`.
