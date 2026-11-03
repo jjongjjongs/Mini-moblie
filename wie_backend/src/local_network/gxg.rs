@@ -40,7 +40,7 @@
 
 use alloc::{boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 
-use super::{LocalConnection, LocalEndpoint, LocalRead, candy_shop::CandyShop, com2us, levelup, stadium};
+use super::{LocalConnection, LocalEndpoint, LocalRead, candy_shop::CandyShop, com2us, levelup, sejung, stadium};
 
 /// The names the gateway went by. Both resolve to [`ADDRESS`].
 const HOSTS: [&str; 2] = ["ngw.gxg.com", "ngph.gxg.com"];
@@ -466,6 +466,23 @@ impl LocalConnection for GxgConnection {
                         None => tracing::warn!("gxg: no answer for data to {:?}", self.target),
                     }
                 }
+                // 렙업만이살길3's server; see [`levelup`].
+                b"DP"
+                    if self
+                        .target
+                        .as_ref()
+                        .is_some_and(|(host, port)| (host.as_str(), *port) == levelup::THIRD_TARGET) =>
+                {
+                    match levelup::third_answer(&body) {
+                        Some(answer) => self.outgoing.extend_from_slice(&frame(&version, b"DPC", &answer)),
+                        None => tracing::warn!("gxg: no answer for data to {:?}", self.target),
+                    }
+                }
+                // 1등은니꺼's 세중 authentication; see [`sejung`].
+                b"DP" if self.target.as_ref().is_some_and(|(host, port)| (host.as_str(), *port) == sejung::TARGET) => match sejung::answer(&body) {
+                    Some(answer) => self.outgoing.extend_from_slice(&frame(&version, b"DPC", &answer)),
+                    None => tracing::warn!("gxg: no answer for data to {:?}", self.target),
+                },
                 // 초코초코타이쿤2's star shop; see [`com2us`].
                 b"DP" if self.target.as_ref().is_some_and(|(host, port)| (host.as_str(), *port) == com2us::TARGET) => {
                     match com2us::star_answer(&body).or_else(|| answer_data(&body)) {

@@ -115,6 +115,42 @@ pub fn sequel_answer(data: &[u8]) -> Option<Vec<u8>> {
     Some(vec![GRANTED as u8])
 }
 
+/// Where 렙업만이살길3 (SKT `9000541051`) asks the gateway to carry it.
+///
+/// Its requests are 렙업2's shape - a kind byte, a big-endian `u16` count of
+/// what follows, the handset's number behind a length byte (eleven digits
+/// here), then the kind's own fields - built by `0x13013e` from the kind at
+/// `0x1031b54`. The answer is read by `0x13021c`, by the same kind.
+pub const THIRD_TARGET: (&str, u16) = ("121.78.119.73", 45001);
+
+/// 렙업만이살길3's SMS 수신동의 (agreeing to its event texts): kind 5, the
+/// number and three words, and a byte for yes.
+///
+/// Its reader (`0x130392`) takes nothing out of the answer: any answer shows
+/// `완료하였습니다.` and closes the connection. With none the title sat on the
+/// question for good, the gateway gone.
+const THIRD_SMS_CONSENT: u8 = 5;
+
+/// 렙업만이살길3's answer through the gateway, for the requests it is known for.
+pub fn third_answer(data: &[u8]) -> Option<Vec<u8>> {
+    let whole = data.len() > SEQUEL_HEADER && u16::from_be_bytes([data[1], data[2]]) as usize == data.len() - SEQUEL_HEADER;
+    if !whole {
+        tracing::info!("levelup3: no reply shaped for {} bytes {:02x?}", data.len(), data);
+        return None;
+    }
+
+    match data[0] {
+        THIRD_SMS_CONSENT => {
+            tracing::info!("levelup3: SMS consent recorded");
+            Some(vec![0])
+        }
+        kind => {
+            tracing::info!("levelup3: no reply known for kind {kind}, {} bytes {:02x?}", data.len(), data);
+            None
+        }
+    }
+}
+
 /// Answers 렙업만이살길1's shop server.
 pub struct LevelUpEndpoint;
 
@@ -202,8 +238,23 @@ impl LevelUpConnection {
 mod tests {
     use alloc::{vec, vec::Vec};
 
-    use super::{LevelUpConnection, LevelUpEndpoint};
+    use super::{LevelUpConnection, LevelUpEndpoint, third_answer};
     use crate::local_network::{LocalConnection, LocalEndpoint, LocalRead};
+
+    /// 렙업만이살길3's SMS consent, as the log has it, is answered; a kind it
+    /// is not known for is not.
+    #[test]
+    fn the_third_titles_sms_consent_is_answered() {
+        let consent = [
+            0x05, 0x00, 0x19, 0x0b, b'0', b'1', b'0', b'4', b'6', b'1', b'1', b'9', b'2', b'6', b'9', 0, 0, 0, 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+        ];
+        assert_eq!(third_answer(&consent), Some(vec![0]));
+
+        let mut other = consent;
+        other[0] = 0x13;
+        assert_eq!(third_answer(&other), None);
+        assert_eq!(third_answer(&consent[..10]), None);
+    }
 
     fn request(command: u32, size: usize) -> Vec<u8> {
         let mut request = vec![0u8; size];

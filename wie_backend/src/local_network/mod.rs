@@ -39,6 +39,7 @@ mod pawapro;
 pub(crate) mod pigmy;
 mod relay;
 mod sdw;
+mod sejung;
 mod snowboard;
 mod stadium;
 mod sudden_attack2;
