@@ -74,6 +74,14 @@ struct ActiveSmaf {
     /// latest one the title allocated (which the sink never played).
     sink_handle: AudioHandle,
     stop_flag: Arc<AtomicBool>,
+    /// What the title is told about the playback ending - its `Playback`'s
+    /// `stopped`. Set the moment the title stops the music, whatever is done
+    /// with the sound itself: a title may wait to hear the music stopped
+    /// before it plays the effect it stopped it for (제노니아3 does, and frees
+    /// the clip from that callback), so a report held back until the deferred
+    /// stop was over let the music go before the effect ever came. A fresh one
+    /// for each re-play after a stop, so that play's ending is told too.
+    reported: Arc<AtomicBool>,
     completed: Arc<AtomicBool>,
     /// Set instead of nothing when this playback is replaced by another rather
     /// than stopped, so its ending is not reported as one. See
@@ -277,17 +285,23 @@ impl Audio {
             active.pending_stop_polls = None;
             active.effect = None;
             active.handle = audio_handle;
+            // Re-played without a stop in between, it is the one playback,
+            // watched once (놈ZERO asks for its music again and again).
+            if active.reported.load(Ordering::Acquire) {
+                active.reported = Arc::new(AtomicBool::new(false));
+            }
             let playback = Playback {
                 completed: active.completed.clone(),
-                stopped: active.stop_flag.clone(),
+                stopped: active.reported.clone(),
                 superseded: active.superseded.clone(),
             };
+            let stop_flag = active.stop_flag.clone();
             // The sink still plays this clip under the handle it first started
             // on, so the volume has to go there rather than to the fresh handle
             // the title just allocated - see `ActiveSmaf::sink_handle`.
             let sink_handle = active.sink_handle;
             self.sink.set_clip_volume(sink_handle, self.effective(volume.load(Ordering::Relaxed)));
-            self.playing.insert(audio_handle, playback.stopped.clone());
+            self.playing.insert(audio_handle, stop_flag);
             return Ok(playback);
         }
 
@@ -305,6 +319,9 @@ impl Audio {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let completed = Arc::new(AtomicBool::new(false));
         let superseded = Arc::new(AtomicBool::new(false));
+        // Told to the title in place of the stop flag when this play becomes
+        // the active music - see `ActiveSmaf::reported`.
+        let reported = Arc::new(AtomicBool::new(false));
         self.playing.insert(audio_handle, stop_flag.clone());
 
         // Offer the file to the sink's own renderer first. When it takes it, the
@@ -322,6 +339,7 @@ impl Audio {
                     handle: audio_handle,
                     sink_handle: audio_handle,
                     stop_flag: stop_flag.clone(),
+                    reported: reported.clone(),
                     completed: completed.clone(),
                     superseded: superseded.clone(),
                     pending_stop_polls: None,
@@ -361,6 +379,7 @@ impl Audio {
                         handle: audio_handle,
                         sink_handle: audio_handle,
                         stop_flag: stop_flag.clone(),
+                        reported: reported.clone(),
                         completed: completed.clone(),
                         superseded: superseded.clone(),
                         pending_stop_polls: None,
@@ -392,9 +411,10 @@ impl Audio {
                     Ok(())
                 });
             }
+            let stopped = if self.is_active(&stop_flag) { reported } else { stop_flag };
             return Ok(Playback {
                 completed,
-                stopped: stop_flag,
+                stopped,
                 superseded,
             });
         }
@@ -429,6 +449,7 @@ impl Audio {
                 handle: audio_handle,
                 sink_handle: audio_handle,
                 stop_flag: stop_flag.clone(),
+                reported: reported.clone(),
                 completed: completed.clone(),
                 superseded: superseded.clone(),
                 pending_stop_polls: None,
@@ -455,11 +476,25 @@ impl Audio {
             Ok(())
         });
 
+        let stopped = if self.is_active(&stop_flag) { reported } else { stop_flag };
         Ok(Playback {
             completed,
-            stopped: stop_flag,
+            stopped,
             superseded,
         })
+    }
+
+    /// Whether the play that sounds under `stop_flag` is the active music -
+    /// not a play of the same clip once over it.
+    fn is_active(&self, stop_flag: &Arc<AtomicBool>) -> bool {
+        self.active.as_ref().is_some_and(|active| Arc::ptr_eq(&active.stop_flag, stop_flag))
+    }
+
+    /// The stop flag of the sound `audio_handle` plays, as opposed to what the
+    /// title is told.
+    #[cfg(test)]
+    fn sound_of(&self, audio_handle: AudioHandle) -> Arc<AtomicBool> {
+        self.playing.get(&audio_handle).cloned().unwrap_or_default()
     }
 
     pub fn is_playing(&self, audio_handle: AudioHandle) -> bool {
@@ -554,6 +589,8 @@ impl Audio {
             if active.pending_stop_polls.is_none() && active.effect.is_none() {
                 active.pending_stop_polls = Some(PENDING_STOP_GRACE_POLLS);
             }
+            // The title hears it stopped now; the sound goes on a while.
+            active.reported.store(true, Ordering::Release);
 
             // The handle may also be sounding once over the loop: 파워풀프로야구
             // 2009's name entry plays its looping clip, then the same clip once,
@@ -593,6 +630,7 @@ impl Audio {
                 active.superseded.store(true, Ordering::Relaxed);
             }
             active.stop_flag.store(true, Ordering::Relaxed);
+            active.reported.store(true, Ordering::Release);
             self.playing.remove(&active.handle);
         }
     }
@@ -1353,15 +1391,19 @@ mod tests {
 
         let music = system.audio().load_smaf(b"MA5-BGM").unwrap();
         let looping = system.audio().play_with_completion(&system, music, true).unwrap();
+        let sound = system.audio().sound_of(music);
 
+        // 제노니아3 stops it, waits to hear it stopped, then frees it and
+        // plays the effect.
         system.audio().stop(music);
+        assert!(looping.stopped.load(Ordering::Relaxed), "the title hears it stopped at once");
         let _ = system.audio().close(music);
         let sfx = system.audio().load_smaf(b"SFX-HIT").unwrap();
         let effect = system.audio().play_with_completion(&system, sfx, false).unwrap();
         for _ in 0..50 {
             system.audio().reap();
         }
-        assert!(!looping.stopped.load(Ordering::Relaxed), "the stream plays on under the effect");
+        assert!(!sound.load(Ordering::Relaxed), "the stream plays on under the effect");
 
         effect.completed.store(true, Ordering::Relaxed);
         system.audio().reap();
@@ -1370,8 +1412,9 @@ mod tests {
         for _ in 0..50 {
             system.audio().reap();
         }
-        assert!(!looping.stopped.load(Ordering::Relaxed), "carried on, not restarted");
-        assert!(Arc::ptr_eq(&looping.stopped, &resumed.stopped), "the re-play is the same stream");
+        assert!(!sound.load(Ordering::Relaxed), "carried on, not restarted");
+        assert!(Arc::ptr_eq(&sound, &system.audio().sound_of(again)), "the re-play is the same stream");
+        assert!(!resumed.stopped.load(Ordering::Relaxed), "the re-play has an ending of its own to tell");
     }
 
     /// And a live stream left stopped after the effect does stop.
@@ -1412,11 +1455,13 @@ mod tests {
 
         let handle = system.audio().load_smaf(b"BGM-DATA").unwrap();
         let looping = system.audio().play_with_completion(&system, handle, true).unwrap();
+        let sound = system.audio().sound_of(handle);
         let once = system.audio().play_with_completion(&system, handle, false).unwrap();
         system.audio().stop(handle);
 
         assert!(once.stopped.load(Ordering::Relaxed), "the one-shot's watcher is released");
-        assert!(!looping.stopped.load(Ordering::Relaxed), "the loop's stop is still deferred");
+        assert!(looping.stopped.load(Ordering::Relaxed), "the title hears the loop stopped");
+        assert!(!sound.load(Ordering::Relaxed), "the loop's stop is still deferred");
     }
 
     #[futures_test::test]
