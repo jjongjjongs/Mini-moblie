@@ -507,7 +507,7 @@ struct MixerVoice {
     /// not cut the tail.
     closing: bool,
     /// Frames rendered since the clip let it go, so a tail that never decays
-    /// - a note left held, an envelope that sustains - is cut after
+    /// (a note left held, an envelope that sustains) is cut after
     /// [`CLOSING_TAIL_FRAMES`] rather than kept forever.
     closed_for: usize,
 }
@@ -519,8 +519,8 @@ struct MixerVoice {
 const CLOSING_TAIL_FRAMES: usize = 3 * SAMPLE_RATE as usize;
 
 /// The most recorded waves waiting to be mixed. A wave leaves the queue only
-/// as the output plays it, so while the output is not being pulled - a
-/// device that stalled, a pause - a title that fires a sound every frame would
+/// as the output plays it, so while the output is not being pulled (a device
+/// that stalled, a pause) a title that fires a sound every frame would
 /// otherwise grow the queue for as long as it ran.
 const MAX_QUEUED_PCM: usize = 32;
 
