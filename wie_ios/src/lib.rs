@@ -392,6 +392,13 @@ pub extern "C" fn wie_pointer(action: i32, x: i32, y: i32) {
     host::pointer(action, x, y);
 }
 
+/// Whether a title's effects play over the music it stopped for them (같이
+/// 듣기) or the music stops the way the title asked (따로 듣기).
+#[unsafe(no_mangle)]
+pub extern "C" fn wie_set_effects_over_music(over: bool) {
+    host::set_effects_over_music(over);
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn wie_set_touch(enabled: bool) {
     host::set_touch(enabled);

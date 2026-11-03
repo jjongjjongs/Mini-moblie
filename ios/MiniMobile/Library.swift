@@ -375,6 +375,34 @@ enum GameScale {
 /// Whether touches on the game screen reach a title, kept per title as the
 /// speed is. Off unless the player turned it on for a title made for a touch
 /// handset.
+/// Whether a title's effects play over its music (같이 듣기) or the music stops
+/// for them as the title asks (따로 듣기): its own choice, else the one made
+/// for every title, else 같이 듣기.
+enum GameSound {
+    private static let prefix = "sound."
+    private static let everyGame = "sound.*"
+
+    static func get(_ game: GameFile) -> Bool {
+        let defaults = UserDefaults.standard
+        let stored = defaults.object(forKey: prefix + game.name) ?? defaults.object(forKey: everyGame)
+        return (stored as? Bool) ?? true
+    }
+
+    /// Keeps the choice for `game`, or for every title - dropping each one's
+    /// own, so they all follow it.
+    static func set(_ together: Bool, for game: GameFile, everyGame all: Bool) {
+        let defaults = UserDefaults.standard
+        if all {
+            for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(prefix) {
+                defaults.removeObject(forKey: key)
+            }
+            defaults.set(together, forKey: everyGame)
+        } else {
+            defaults.set(together, forKey: prefix + game.name)
+        }
+    }
+}
+
 enum GameTouch {
     static func get(_ game: GameFile) -> Bool {
         UserDefaults.standard.bool(forKey: "touch.\(game.name)")

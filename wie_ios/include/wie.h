@@ -112,6 +112,11 @@ void wie_pointer(int32_t action, int32_t x, int32_t y);
 void wie_set_touch(bool enabled);
 bool wie_touch(void);
 
+// Whether a title's effects play over the music it stopped for them (같이
+// 듣기, true) or the music stops the way the title asked (따로 듣기, false).
+// Takes effect from the next effect; safe while a title runs.
+void wie_set_effects_over_music(bool over);
+
 // The log collected for this run. Free with `wie_free_string`.
 char *wie_log(void);
 

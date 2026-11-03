@@ -191,6 +191,7 @@ private enum MenuWindow {
 private enum GameSheet: String, Identifiable {
     case speed
     case quality
+    case sound
     case scale
     case settings
     case photo
@@ -249,6 +250,8 @@ struct GameView: View {
     @State private var speed: Float = 1
     /// How the screen is enlarged (see `GameQuality`).
     @State private var quality = ScreenQuality.dot
+    /// Whether effects play over the music (see `GameSound`).
+    @State private var soundTogether = true
     /// The layout being edited, nil when the pad is in play.
     @State private var draft: PadLayout?
     @State private var selectedKey: Int32?
@@ -326,6 +329,7 @@ struct GameView: View {
         .onAppear {
             speed = GameSpeed.get(game)
             quality = GameQuality.get(game)
+            soundTogether = GameSound.get(game)
             scale = GameScale.get(game, sideways: scaleSideways)
             touch = GameTouch.get(game)
             padHidden = GamePad.hidden(game)
@@ -346,6 +350,7 @@ struct GameView: View {
             OrientationControl.shared.leaveGame()
         }
         .onChange(of: quality) { value in emulator.setHq2x(value == .hq2x) }
+        .onChange(of: soundTogether) { value in wie_set_effects_over_music(value) }
         // Turned, or laid out the other way, the screen takes the size kept for that way.
         .onChange(of: scaleSideways) { value in scale = GameScale.get(game, sideways: value) }
         // Which way it was left is which way it opens next, so the turn back
@@ -369,6 +374,8 @@ struct GameView: View {
             SpeedView(game: game, speed: $speed)
         case .quality:
             QualityView(game: game, emulator: emulator, quality: $quality)
+        case .sound:
+            SoundView(game: game, together: $soundTogether)
         case .scale:
             ScaleView(game: game, sideways: scaleSideways, area: screenArea, pixels: titlePixels, scale: $scale)
         case .settings:
@@ -568,6 +575,12 @@ struct GameView: View {
                 GameSpeed.set(value, for: game)
                 wie_set_speed(value)
             },
+            soundTogether: soundTogether,
+            onSound: { value in
+                soundTogether = value
+                GameSound.set(value, for: game, everyGame: false)
+            },
+            onSoundMore: { open(.sound) },
             onLog: { open(.log) },
             onLeave: {
                 menuWindow = nil
@@ -1301,6 +1314,139 @@ private struct QualityView: View {
         .background(RoundedRectangle(cornerRadius: 10).fill(on ? MenuPalette.accent.opacity(0.1) : Color.clear))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(on ? MenuPalette.accent : MenuPalette.raisedLine, lineWidth: 1))
         .contentShape(Rectangle())
+    }
+}
+
+/// 배경음 · 효과음, from the menu's 자세히 ›: 같이 듣기 and 따로 듣기, each with
+/// a picture of when the music and an effect sound. A choice is heard at once;
+/// 취소 puts it back.
+private struct SoundView: View {
+    let game: GameFile
+    @Binding var together: Bool
+    @Environment(\.dismiss) private var dismiss
+    @State private var everyGame = false
+    @State private var saved: Bool
+    @State private var applied = false
+
+    init(game: GameFile, together: Binding<Bool>) {
+        self.game = game
+        _together = together
+        _saved = State(initialValue: together.wrappedValue)
+    }
+
+    var body: some View {
+        MenuPanel(title: "배경음 · 효과음") {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("이 게임에만 적용 · 다음에 열어도 유지")
+                    .font(.system(size: 12.5))
+                    .foregroundColor(MenuPalette.muted)
+                Button {
+                    together = true
+                } label: {
+                    card(true, name: "같이 듣기", tag: "기본", detail: "효과음이 나와도 배경음이 끊기지 않고 겹쳐 들려요.")
+                }
+                .buttonStyle(.plain)
+                Button {
+                    together = false
+                } label: {
+                    card(false, name: "따로 듣기", tag: "원래 폰 방식", detail: "효과음이 나오는 동안 배경음이 멈췄다가 다시 나와요. 그 시절 폰처럼 한 번에 한 소리만 나요.")
+                }
+                .buttonStyle(.plain)
+                Button {
+                    everyGame.toggle()
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: everyGame ? "checkmark.square.fill" : "square")
+                            .foregroundColor(MenuPalette.accent)
+                        Text("모든 게임에 이 방식 쓰기")
+                            .font(.system(size: 12.5))
+                            .foregroundColor(MenuPalette.muted)
+                    }
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 2)
+            }
+        } footer: {
+            Spacer()
+            Button("취소") { dismiss() }
+                .buttonStyle(MenuButtonStyle(kind: .secondary))
+            Button("적용") {
+                applied = true
+                GameSound.set(together, for: game, everyGame: everyGame)
+                dismiss()
+            }
+            .buttonStyle(MenuButtonStyle(kind: .primary))
+        }
+        // However the window goes away without 적용, the sound goes back.
+        .onDisappear {
+            if !applied {
+                together = saved
+            }
+        }
+    }
+
+    private func card(_ option: Bool, name: String, tag: String, detail: String) -> some View {
+        let on = together == option
+        return HStack(spacing: 11) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(name)
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundColor(MenuPalette.ink)
+                    Text(tag)
+                        .font(.system(size: 11))
+                        .foregroundColor(MenuPalette.muted)
+                }
+                Text(detail)
+                    .font(.system(size: 12))
+                    .foregroundColor(MenuPalette.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                lanes(option)
+                    .padding(.top, 2)
+            }
+            Spacer(minLength: 0)
+            Circle()
+                .fill(on ? MenuPalette.accent : Color.clear)
+                .overlay(Circle().stroke(on ? MenuPalette.accent : MenuPalette.outline, lineWidth: 2))
+                .frame(width: 18, height: 18)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(on ? MenuPalette.accent.opacity(0.1) : Color.clear))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(on ? MenuPalette.accent : MenuPalette.raisedLine, lineWidth: 1))
+        .contentShape(Rectangle())
+    }
+
+    /// Two lanes, 배경음 over 효과음, marking when each sounds: under 같이 듣기
+    /// the music runs straight through the effect, under 따로 듣기 it breaks
+    /// off for it.
+    private func lanes(_ together: Bool) -> some View {
+        let music = Color(red: 58 / 255, green: 110 / 255, blue: 117 / 255)
+        let effect = Color(red: 201 / 255, green: 162 / 255, blue: 74 / 255)
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Text("배경음").font(.system(size: 10)).foregroundColor(MenuPalette.muted).frame(width: 34, alignment: .leading)
+                GeometryReader { box in
+                    let w = box.size.width
+                    ZStack(alignment: .leading) {
+                        if together {
+                            Capsule().fill(music).frame(width: w)
+                        } else {
+                            Capsule().fill(music).frame(width: w * 0.35)
+                            Capsule().fill(music).frame(width: w * 0.47).offset(x: w * 0.53)
+                        }
+                    }
+                }
+                .frame(height: 8)
+            }
+            HStack(spacing: 6) {
+                Text("효과음").font(.system(size: 10)).foregroundColor(MenuPalette.muted).frame(width: 34, alignment: .leading)
+                GeometryReader { box in
+                    let w = box.size.width
+                    Capsule().fill(effect).frame(width: w * 0.18).offset(x: w * 0.35)
+                }
+                .frame(height: 8)
+            }
+        }
     }
 }
 
@@ -2104,6 +2250,9 @@ struct GameMenuCard: View {
     let tiles: [GameMenuTile]
     let speed: Float
     let onSpeed: (Float) -> Void
+    let soundTogether: Bool
+    let onSound: (Bool) -> Void
+    let onSoundMore: () -> Void
     let onLog: () -> Void
     let onLeave: () -> Void
     let onClose: () -> Void
@@ -2140,6 +2289,7 @@ struct GameMenuCard: View {
         VStack(alignment: .leading, spacing: compact ? 10 : 16) {
             header
             grid
+            soundBox
             speedBox
             if !compact {
                 Text("문제 해결")
@@ -2239,6 +2389,63 @@ struct GameMenuCard: View {
                 .foregroundColor(ink)
                 .lineLimit(1)
         }
+    }
+
+    /// 배경음 · 효과음: 같이 듣기 or 따로 듣기, for this title, taking at once;
+    /// 자세히 › opens the window that says what each is. A row rather than a
+    /// seventh tile, which would sit alone in the grid - as on Android.
+    private var soundBox: some View {
+        VStack(alignment: .leading, spacing: compact ? 6 : 8) {
+            HStack(spacing: 8) {
+                Text("배경음 · 효과음")
+                    .font(.system(size: compact ? 12 : 13, weight: .bold))
+                    .foregroundColor(MenuPalette.ink)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                if !compact {
+                    Text("이 게임에만")
+                        .font(.system(size: 11.5))
+                        .foregroundColor(MenuPalette.muted)
+                }
+                Button("자세히 ›", action: onSoundMore)
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(MenuPalette.accent)
+                    .buttonStyle(.plain)
+            }
+            HStack(spacing: 3) {
+                soundHalf("같이 듣기", together: true)
+                soundHalf("따로 듣기", together: false)
+            }
+            .padding(3)
+            .background(RoundedRectangle(cornerRadius: 12).fill(Color(red: 18 / 255, green: 19 / 255, blue: 23 / 255)))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(MenuPalette.line, lineWidth: 1))
+            if !compact {
+                Text(soundTogether ? "효과음이 나와도 배경음이 계속 들려요." : "효과음이 나오는 동안 배경음이 잠깐 멈춰요. 원래 폰 방식이에요.")
+                    .font(.system(size: 12))
+                    .foregroundColor(MenuPalette.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.horizontal, compact ? 10 : 14)
+        .padding(.vertical, compact ? 8 : 12)
+        .background(RoundedRectangle(cornerRadius: 16).fill(MenuPalette.raised))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(MenuPalette.line, lineWidth: 1))
+    }
+
+    private func soundHalf(_ name: String, together: Bool) -> some View {
+        let on = soundTogether == together
+        return Button {
+            onSound(together)
+        } label: {
+            Text(name)
+                .font(.system(size: compact ? 12 : 13, weight: .bold))
+                .foregroundColor(on ? MenuPalette.onAccent : MenuPalette.muted)
+                .frame(maxWidth: .infinity, minHeight: compact ? 30 : 36)
+                .background(RoundedRectangle(cornerRadius: 9).fill(on ? MenuPalette.accent : Color.clear))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(on ? "\(name), 선택됨" : name)
     }
 
     private var tenths: Int {

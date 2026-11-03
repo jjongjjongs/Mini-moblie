@@ -76,6 +76,7 @@ enum Item {
     Speed,
     Quality,
     Volume,
+    Mix,
     Saves,
     Delete,
     Update,
@@ -214,6 +215,11 @@ impl Quality {
     }
 }
 
+/// What the 배경음·효과음 tile says it is set to.
+fn mix_label(together: bool) -> &'static str {
+    if together { "같이 듣기" } else { "따로 듣기" }
+}
+
 fn screen_label(scale: u32) -> String {
     if scale == 0 {
         "전체화면".to_owned()
@@ -282,7 +288,7 @@ impl App {
     pub fn settings_menu(&mut self, context: &Context) -> Outcome {
         let mut items = Vec::new();
         if context.in_game() {
-            items.extend([Item::Resume, Item::Speed, Item::Quality, Item::Volume]);
+            items.extend([Item::Resume, Item::Speed, Item::Quality, Item::Volume, Item::Mix]);
         }
         if self.desktop {
             items.push(Item::Keyboard);
@@ -294,7 +300,7 @@ impl App {
         // What is done to a game's files is done from the list, with the game
         // stopped.
         if context.game.is_some() && !context.in_game() {
-            items.extend([Item::Speed, Item::Quality, Item::Volume, Item::Saves, Item::Delete]);
+            items.extend([Item::Speed, Item::Quality, Item::Volume, Item::Mix, Item::Saves, Item::Delete]);
         }
         if self.desktop {
             items.push(Item::Screen);
@@ -360,6 +366,12 @@ impl App {
                                     self.set_game_quality(game, quality);
                                 }
                             }
+                            Item::Mix => {
+                                if let Some(game) = context.game {
+                                    let together = self.game_together(game);
+                                    self.set_game_together(game, !together);
+                                }
+                            }
                             Item::Screen => self.cycle_screen(forward),
                             Item::Volume => {
                                 let (volume, _) = self.store.volume();
@@ -393,7 +405,7 @@ impl App {
                         Item::Keyboard => self.keyboard_layout(),
                         Item::Layout => self.layout(),
                         Item::Preset => self.presets(context),
-                        Item::Screen | Item::Speed | Item::Quality | Item::Volume => adjusting = true,
+                        Item::Screen | Item::Speed | Item::Quality | Item::Volume | Item::Mix => adjusting = true,
                         Item::Saves => {
                             if let Some(game) = context.game {
                                 self.save_manager(game);
@@ -470,6 +482,19 @@ impl App {
         host::show_frame_again();
     }
 
+    /// Whether `game`'s effects play over its music (같이 듣기) or the music
+    /// stops for them as the game asks (따로 듣기).
+    pub(crate) fn game_together(&self, game: &Path) -> bool {
+        self.store.together(&file_of(game))
+    }
+
+    /// Remembers whether `game`'s effects play over its music, and hears it
+    /// so from the next effect - only one game runs, the one the menu is for.
+    fn set_game_together(&mut self, game: &Path, together: bool) {
+        self.store.set_together(&file_of(game), together);
+        host::set_effects_over_music(together);
+    }
+
     /// The active preset's name, starred once the mapping has moved off it.
     pub(crate) fn active_label(&self) -> String {
         let star = if self.store.modified() { "*" } else { "" };
@@ -489,6 +514,7 @@ impl App {
             Item::Speed => ("»", "배속"),
             Item::Quality => ("◇", "화질"),
             Item::Volume => ("♪", "소리"),
+            Item::Mix => ("♫", "배경음·효과음"),
             Item::Saves => ("♡", "세이브"),
             Item::Delete => ("×", "게임 삭제"),
             Item::Update => ("⬇", "업데이트"),
@@ -506,6 +532,7 @@ impl App {
             Item::Speed => speed_label(context.game.map_or(1.0, |game| self.game_speed(game))),
             Item::Quality => context.game.map_or(Quality::Dot, |game| self.game_quality(game)).label().to_owned(),
             Item::Volume => volume_label(self.store.volume()),
+            Item::Mix => mix_label(context.game.is_none_or(|game| self.game_together(game))).to_owned(),
             Item::Fix => {
                 let fixed = context.game_file().and_then(|game| self.store.fixed(&game).map(str::to_owned));
                 fixed.unwrap_or_else(|| "끔".to_owned())
@@ -662,6 +689,23 @@ impl App {
                         quality.detail(),
                     );
                 }
+                Item::Mix => {
+                    let together = context.game.is_none_or(|game| self.game_together(game));
+                    draw_choice_card(
+                        &mut screen,
+                        card_x,
+                        (h - 62.0) / 2.0 - 10.0,
+                        card_width,
+                        "배경음·효과음",
+                        &["같이 듣기", "따로 듣기"],
+                        if together { 0 } else { 1 },
+                        if together {
+                            "효과음이 나와도 배경음이 계속 들려요"
+                        } else {
+                            "효과음 동안 배경음이 멈춰요 · 원래 폰 방식"
+                        },
+                    );
+                }
                 Item::Volume => {
                     self.draw_volume_card(&mut screen, card_x, (h - 62.0) / 2.0 - 10.0, card_width, cursor);
                 }
@@ -693,7 +737,7 @@ impl App {
             Item::Volume if adjusting => self.hint("◀▶ 10%씩  Y 음소거  A 완료", "◀▶ 10%씩  M 음소거  Enter 완료"),
             Item::Volume => self.hint("A 바꾸기  Y 음소거  ◀▶▲▼ 이동", "Enter 바꾸기  M 음소거  ◀▶▲▼ 이동"),
             _ if adjusting => self.hint("◀▶ 바꾸기  A 완료", "◀▶ 바꾸기  Enter 완료"),
-            Item::Speed | Item::Quality | Item::Screen => self.hint("A 바꾸기  ◀▶▲▼ 이동", "Enter 바꾸기  ◀▶▲▼ 이동"),
+            Item::Speed | Item::Quality | Item::Mix | Item::Screen => self.hint("A 바꾸기  ◀▶▲▼ 이동", "Enter 바꾸기  ◀▶▲▼ 이동"),
             Item::Preset => self.hint("A 목록  ◀▶▲▼ 이동", "Enter 목록  ◀▶▲▼ 이동"),
             _ => self.hint("A 선택  ◀▶▲▼ 이동", "Enter 선택  ◀▶▲▼ 이동"),
         };

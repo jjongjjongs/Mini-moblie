@@ -32,6 +32,9 @@ pub struct Store {
     /// Game file name, and how its screen is enlarged when that is not 도트:
     /// 0 기본, 2 HQ2X, as the Android app numbers them.
     qualities: Vec<(String, u8)>,
+    /// Game file names whose effects stop the music as the game asks (따로
+    /// 듣기) rather than playing over it, which every other game does.
+    apart: Vec<String>,
     /// Game file name, and when it was last started, in seconds since 1970.
     played: Vec<(String, u64)>,
     /// How a desktop window is shown: its size as a multiple of 320x240, or
@@ -51,6 +54,7 @@ impl Store {
             fixed: Vec::new(),
             speeds: Vec::new(),
             qualities: Vec::new(),
+            apart: Vec::new(),
             played: Vec::new(),
             screen: 3,
             volume: 100,
@@ -77,6 +81,7 @@ impl Store {
                             store.qualities.push(((*game).to_owned(), quality));
                         }
                     }
+                    ["apart", game] => store.apart.push((*game).to_owned()),
                     ["played", game, at] => {
                         if let Ok(at) = at.parse::<u64>() {
                             store.played.push(((*game).to_owned(), at));
@@ -273,6 +278,20 @@ impl Store {
         self.save();
     }
 
+    /// Whether `game`'s effects play over its music: 같이 듣기, unless it was
+    /// set to 따로 듣기.
+    pub fn together(&self, game: &str) -> bool {
+        !self.apart.iter().any(|x| x == game)
+    }
+
+    pub fn set_together(&mut self, game: &str, together: bool) {
+        self.apart.retain(|x| x != game);
+        if !together {
+            self.apart.push(game.to_owned());
+        }
+        self.save();
+    }
+
     /// When each game was last started, by file name.
     pub fn played_all(&self) -> std::collections::HashMap<String, u64> {
         self.played.iter().cloned().collect()
@@ -293,6 +312,7 @@ impl Store {
         self.fixed.retain(|(x, _)| x != game);
         self.speeds.retain(|(x, _)| x != game);
         self.qualities.retain(|(x, _)| x != game);
+        self.apart.retain(|x| x != game);
         self.played.retain(|(x, _)| x != game);
         self.save();
     }
@@ -320,6 +340,9 @@ impl Store {
         }
         for (game, quality) in &self.qualities {
             state.push_str(&format!("quality\t{game}\t{quality}\n"));
+        }
+        for game in &self.apart {
+            state.push_str(&format!("apart\t{game}\n"));
         }
         for (game, at) in &self.played {
             state.push_str(&format!("played\t{game}\t{at}\n"));

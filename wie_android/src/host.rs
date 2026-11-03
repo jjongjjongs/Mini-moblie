@@ -190,6 +190,13 @@ pub fn touch() -> bool {
     wie_backend::touch_enabled()
 }
 
+/// Whether a title's effects play over the music it stopped for them (같이
+/// 듣기) or the music stops the way the title asked (따로 듣기). Takes effect
+/// from the next effect.
+pub fn set_effects_over_music(over: bool) {
+    wie_backend::set_effects_over_music(over);
+}
+
 /// How fast the title runs, 1.0 being real time.
 pub fn set_speed(value: f32) {
     let _ = std::panic::catch_unwind(AssertUnwindSafe(|| speed::set_speed(value)));

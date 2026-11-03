@@ -961,6 +961,8 @@ impl App {
         // The speed it was last played at; starting puts the clock back on the
         // time of day and runs it from there at that speed.
         host::set_speed(speed);
+        // Effects over the music or not, as it was left for this game.
+        host::set_effects_over_music(self.game_together(game));
         let failure = host::start(data, runtime_dir, "Linux".to_owned());
         if !failure.is_empty() {
             return Err(failure);
