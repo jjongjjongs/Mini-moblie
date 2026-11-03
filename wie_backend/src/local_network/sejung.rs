@@ -29,6 +29,15 @@
 //! 3000 용돈 the title promises and moves on - and any other has its `+5`
 //! read for which failure it was (`0x20` the 팅 limit, `0x27`, `0x28`,
 //! `0x62`). So that is answered with its request too, `+4` set to `0x79`.
+//!
+//! # The shop
+//!
+//! A purchase in the 상점 is a 44-byte request of kind `0x6e`: the number,
+//! `NHtest`, and two big-endian words - the item (`0x27`) and its price (300).
+//! The callback reads it in its state `0x11` (`0x145196`): `+4` = `0x6f` is the
+//! purchase going through, and the title hands over what it had picked by its
+//! own index (용돈 packs, the 드럼통, ...); anything else reads `+5`, `0x20`
+//! the 팅 limit. It is answered with its request, `+4` set to `0x6f`.
 
 use alloc::vec::Vec;
 
@@ -41,6 +50,8 @@ const REQUEST: u8 = 1;
 const AUTHENTICATED: u8 = 2;
 const CONVERSION: u8 = 0x7b;
 const CONVERTED: u8 = 0x79;
+const PURCHASE: u8 = 0x6e;
+const PURCHASED: u8 = 0x6f;
 
 /// The answer to the title's authentication - authenticated - and to its
 /// conversion - converted.
@@ -54,6 +65,10 @@ pub fn answer(data: &[u8]) -> Option<Vec<u8>> {
         Some(&CONVERSION) if whole => {
             tracing::info!("sejung: converted");
             CONVERTED
+        }
+        Some(&PURCHASE) if whole => {
+            tracing::info!("sejung: purchased");
+            PURCHASED
         }
         _ => {
             tracing::info!("sejung: no reply shaped for {} bytes {:02x?}", data.len(), data);
@@ -101,6 +116,19 @@ mod tests {
 
         assert_eq!(reply.len(), 47);
         assert_eq!(reply[4], 0x79);
+        assert_eq!(reply[5..], request[5..]);
+    }
+
+    /// A purchase in the shop, as the log has it.
+    const PURCHASE: &str = "0000002c6e013130343631313932363920202020202000004e4874657374202020203031000000270000012c";
+
+    #[test]
+    fn a_purchase_is_answered_purchased() {
+        let request = bytes(PURCHASE);
+        let reply = answer(&request).unwrap();
+
+        assert_eq!(reply.len(), 44);
+        assert_eq!(reply[4], 0x6f);
         assert_eq!(reply[5..], request[5..]);
     }
 
