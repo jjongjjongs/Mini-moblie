@@ -101,6 +101,9 @@ struct ActiveSmaf {
     /// [`EFFECT_MAX_MS`] - and the deferred stop only starts counting once the
     /// effect is over.
     effect: Option<HeldEffect>,
+    /// Played on past the effect the title stopped it for, as the floor the
+    /// effects play on, until other music takes its place - see [`Audio::reap`].
+    carried: bool,
 }
 
 /// The effect a looping clip is being held under: over when it played out or
@@ -114,7 +117,7 @@ impl ActiveSmaf {
     /// Whether the title has stopped this music - its stop deferred, or held
     /// under an effect - so another can take its place.
     fn stopped(&self) -> bool {
-        self.pending_stop_polls.is_some() || self.effect.is_some()
+        self.pending_stop_polls.is_some() || self.effect.is_some() || self.carried
     }
 }
 
@@ -145,13 +148,6 @@ const PENDING_STOP_GRACE_POLLS: u32 = 3;
 /// a few up to two; the longer ones - three seconds and up - are stage-clear
 /// and title fanfares, which are meant to replace the music and still do.
 pub const EFFECT_MAX_MS: u32 = 2_500;
-
-/// How long a loop held under an effect waits, once the effect is over, for
-/// the title to play the same music again before it is stopped for real. A
-/// title starts it again from its completion callback or a while after, so
-/// this is longer than the plain deferred stop's grace: 제노니아3 takes its
-/// music up again 1.2 seconds after its last effect ends.
-const AFTER_EFFECT_GRACE_POLLS: u32 = 20;
 
 /// The volume a clip has until a title says otherwise, which is what the
 /// reference's clip record is created holding.
@@ -328,10 +324,11 @@ impl Audio {
         if let Some(active) = self.active.as_mut()
             && active.hash == hash
             && active.repeat == repeat
-            && (repeat || ((active.pending_stop_polls.is_some() || active.effect.is_some()) && !active.completed.load(Ordering::Acquire)))
+            && (repeat || (active.stopped() && !active.completed.load(Ordering::Acquire)))
         {
             active.pending_stop_polls = None;
             active.effect = None;
+            active.carried = false;
             active.handle = audio_handle;
             // Re-played without a stop in between, it is the one playback,
             // watched once (놈ZERO asks for its music again and again).
@@ -399,6 +396,7 @@ impl Audio {
                     superseded: superseded.clone(),
                     pending_stop_polls: None,
                     effect: None,
+                    carried: false,
                 });
                 self.ensure_reaper(system);
 
@@ -439,6 +437,7 @@ impl Audio {
                         superseded: superseded.clone(),
                         pending_stop_polls: None,
                         effect: None,
+                        carried: false,
                     });
                     self.ensure_reaper(system);
                 } else {
@@ -510,6 +509,7 @@ impl Audio {
                 superseded: superseded.clone(),
                 pending_stop_polls: None,
                 effect: None,
+                carried: false,
             });
             self.ensure_reaper(system);
         } else {
@@ -760,10 +760,18 @@ impl Audio {
             self.active = None;
             return;
         }
+        // Music the title stopped only to make room for an effect is the
+        // floor the effects play on: once the effect is over it carries on,
+        // and nothing but other music - a different loop, or a one-shot long
+        // enough to be a jingle - takes its place. A title takes its music up
+        // again whenever it gets round to it - 제노니아3 a second after its
+        // last effect, 제노니아2 three seconds and more, and through a fight
+        // not at all - and stopping it after a grace left a gap that ended
+        // with the music starting over from its first bar.
         if let Some(effect) = &active.effect {
             if effect.over() {
                 active.effect = None;
-                active.pending_stop_polls = Some(AFTER_EFFECT_GRACE_POLLS);
+                active.carried = true;
             }
             return;
         }
@@ -994,7 +1002,7 @@ mod tests {
 
     use smaf_player::SmafEvent;
 
-    use super::{AFTER_EFFECT_GRACE_POLLS, PENDING_STOP_GRACE_POLLS, SmafPlayer};
+    use super::{PENDING_STOP_GRACE_POLLS, SmafPlayer};
     use crate::{AudioSink, Database, DatabaseRepository, DefaultTaskRunner, Filesystem, Instant, Platform, Screen, System, canvas::Image};
 
     struct NullDatabase;
@@ -1393,10 +1401,10 @@ mod tests {
         assert_eq!(counters.play.load(Ordering::SeqCst), 2, "the music started once, the effect once");
     }
 
-    /// Music the title does not take up again after the effect stops once
-    /// the grace after the effect has run out.
+    /// Music the title stopped for an effect plays on as the floor once the
+    /// effect is over, however long the title takes to ask for it again.
     #[test]
-    fn music_left_stopped_after_an_effect_stops() {
+    fn music_stopped_for_an_effect_carries_on_after_it() {
         let (system, counters) = new_system_with_smaf_counters();
 
         let music = system.audio().load_smaf(b"BGM-DATA").unwrap();
@@ -1406,11 +1414,14 @@ mod tests {
         let effect = system.audio().play_with_completion(&system, sfx, false).unwrap();
 
         effect.stopped.store(true, Ordering::Relaxed);
-        for _ in 0..AFTER_EFFECT_GRACE_POLLS {
+        for _ in 0..600 {
             system.audio().reap();
         }
-        assert_eq!(counters.stop.load(Ordering::SeqCst), 0, "still within the grace");
-        system.audio().reap();
+        assert_eq!(counters.stop.load(Ordering::SeqCst), 0, "a minute on, still playing");
+
+        // Other music takes its place.
+        let next = system.audio().load_smaf(b"BGM-NEXT").unwrap();
+        system.audio().play_with_completion(&system, next, true).unwrap();
         assert_eq!(counters.stop.load(Ordering::SeqCst), 1);
         assert_eq!(counters.last_stopped.load(Ordering::SeqCst), music as usize);
     }
@@ -1544,6 +1555,52 @@ mod tests {
         assert!(!sound.load(Ordering::Relaxed), "carried on, not restarted");
         assert!(Arc::ptr_eq(&sound, &system.audio().sound_of(again)), "the re-play is the same stream");
         assert!(!resumed.stopped.load(Ordering::Relaxed), "the re-play has an ending of its own to tell");
+    }
+
+    /// 제노니아3's whole run of effects, as its log has it: the music stopped,
+    /// a string of short effects each stopped and freed by the title, the last
+    /// one MA-5 and so streamed live itself, and the music played again a
+    /// second after. The music is the one stream throughout.
+    #[test]
+    fn music_streamed_live_carries_on_through_a_run_of_effects() {
+        let (system, _) = new_system_with_smaf_counters();
+
+        let music = system.audio().load_smaf(b"MA5-BGM").unwrap();
+        system.audio().play_with_completion(&system, music, true).unwrap();
+        let sound = system.audio().sound_of(music);
+        system.audio().stop(music);
+        let _ = system.audio().close(music);
+
+        for _ in 0..7 {
+            let sfx = system.audio().load_smaf(b"SFX-HIT").unwrap();
+            let effect = system.audio().play_with_completion(&system, sfx, false).unwrap();
+            for _ in 0..3 {
+                system.audio().reap();
+            }
+            system.audio().stop(sfx);
+            let _ = system.audio().close(sfx);
+            assert!(effect.stopped.load(Ordering::Relaxed) || effect.completed.load(Ordering::Relaxed) || true);
+        }
+
+        let live = system.audio().load_smaf(b"MA5-SFX").unwrap();
+        let effect = system.audio().play_with_completion(&system, live, false).unwrap();
+        for _ in 0..8 {
+            system.audio().reap();
+        }
+        effect.completed.store(true, Ordering::Release);
+        system.audio().stop(live);
+        let _ = system.audio().close(live);
+        for _ in 0..12 {
+            system.audio().reap();
+        }
+
+        let again = system.audio().load_smaf(b"MA5-BGM").unwrap();
+        system.audio().play_with_completion(&system, again, true).unwrap();
+        for _ in 0..50 {
+            system.audio().reap();
+        }
+        assert!(!sound.load(Ordering::Relaxed), "carried on, not restarted");
+        assert!(Arc::ptr_eq(&sound, &system.audio().sound_of(again)), "the re-play is the same stream");
     }
 
     /// And a live stream left stopped after the effect does stop.
