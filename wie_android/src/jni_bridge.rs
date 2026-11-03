@@ -172,6 +172,19 @@ pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativ
     guard(|| speed::set_speed(value));
 }
 
+/// `nativeSetEffectsOverMusic(int over)`
+///
+/// Whether a title's effects play over the music it stopped for them (같이
+/// 듣기, nonzero) or the music stops the way the title asked (따로 듣기, 0).
+/// Takes effect from the next effect.
+///
+/// # Safety
+/// Called by the JVM with a valid `env` reference.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativeSetEffectsOverMusic(_env: JNIEnv, _class: JClass, over: jint) {
+    guard(|| wie_backend::set_effects_over_music(over != 0));
+}
+
 /// `nativeGuestProgress() -> long`
 ///
 /// Guest instructions retired so far. It climbs while the title is running and

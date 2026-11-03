@@ -60,6 +60,13 @@ final class NativeBridge {
     static native void nativeSetSpeed(float speed);
 
     /**
+     * Whether a title's effects play over the music it stopped for them (같이
+     * 듣기, nonzero) or the music stops the way the title asked (따로 듣기, 0).
+     * Takes effect from the next effect, so the UI thread can call it any time.
+     */
+    static native void nativeSetEffectsOverMusic(int over);
+
+    /**
      * Guest instructions retired so far. It climbs while the title is running
      * and stops dead when it is not, which is what tells a title doing a long
      * piece of work - a loading screen is one tick that can last seconds -

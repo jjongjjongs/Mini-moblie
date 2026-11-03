@@ -5259,6 +5259,12 @@ public final class MainActivity extends Activity {
         body.addView(gameMenuGrid(tiles, compact), gridParams);
 
         if (game != null) {
+            LinearLayout.LayoutParams soundParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            soundParams.topMargin = dp(compact ? 8 : 12);
+            body.addView(gameMenuSound(game, compact, closing.apply(this::showSoundDialog)), soundParams);
+        }
+
+        if (game != null) {
             LinearLayout.LayoutParams speedParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
             speedParams.topMargin = dp(compact ? 8 : 12);
             body.addView(gameMenuSpeed(game, compact), speedParams);
@@ -5467,6 +5473,117 @@ public final class MainActivity extends Activity {
         words.addView(value);
         box.addView(words, new LinearLayout.LayoutParams(compact ? 0 : ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT, compact ? 1f : 0f));
+        return box;
+    }
+
+    /**
+     * 배경음 · 효과음, set in the menu itself: 같이 듣기 or 따로 듣기, for this
+     * title, taking at once. 자세히 › opens the window that says what each is.
+     * A row rather than a seventh tile, which would sit alone in the grid.
+     */
+    private View gameMenuSound(File game, boolean compact, Runnable more) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(compact ? 10 : 14), dp(compact ? 8 : 12), dp(compact ? 10 : 14), dp(compact ? 8 : 10));
+        box.setBackground(roundedRect(COLOR_PANEL_2, COLOR_HAIR, 1, compact ? 14 : 16));
+
+        TextView label = new TextView(this);
+        label.setText("배경음 · 효과음");
+        label.setTextSize(compact ? 12f : 13f);
+        label.setTypeface(Typeface.DEFAULT_BOLD);
+        label.setTextColor(COLOR_TEXT);
+        label.setSingleLine(true);
+
+        TextView link = new TextView(this);
+        link.setText("자세히 ›");
+        link.setTextSize(12f);
+        link.setTypeface(Typeface.DEFAULT_BOLD);
+        link.setTextColor(COLOR_ACCENT);
+        link.setPadding(dp(8), dp(4), 0, dp(4));
+        link.setClickable(true);
+        link.setFocusable(true);
+        link.setOnClickListener(v -> more.run());
+
+        LinearLayout segment = new LinearLayout(this);
+        segment.setOrientation(LinearLayout.HORIZONTAL);
+        segment.setPadding(dp(3), dp(3), dp(3), dp(3));
+        segment.setBackground(roundedRect(COLOR_BG, COLOR_HAIR, 1, 12));
+        final TextView[] halves = new TextView[2];
+        final String[] names = {"같이 듣기", "따로 듣기"};
+        for (int i = 0; i < 2; i++) {
+            TextView half = new TextView(this);
+            half.setText(names[i]);
+            half.setTextSize(compact ? 12f : 13f);
+            half.setTypeface(Typeface.DEFAULT_BOLD);
+            half.setGravity(android.view.Gravity.CENTER);
+            half.setPadding(0, dp(compact ? 6 : 9), 0, dp(compact ? 6 : 9));
+            half.setClickable(true);
+            half.setFocusable(true);
+            LinearLayout.LayoutParams halfParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            if (i > 0) {
+                halfParams.leftMargin = dp(3);
+            }
+            segment.addView(half, halfParams);
+            halves[i] = half;
+        }
+
+        final TextView line = new TextView(this);
+        line.setTextSize(12f);
+        line.setTextColor(COLOR_SUBTEXT);
+        line.setLineSpacing(0f, 1.15f);
+
+        final Runnable refresh = () -> {
+            for (int i = 0; i < 2; i++) {
+                boolean on = (i == 0) == soundTogether;
+                halves[i].setBackground(on ? roundedRect(COLOR_ACCENT, 0, 0, 9) : null);
+                halves[i].setTextColor(on ? Color.rgb(12, 42, 47) : COLOR_SUBTEXT);
+                halves[i].setContentDescription(names[i] + (on ? ", 선택됨" : ""));
+            }
+            line.setText(soundTogether ? "효과음이 나와도 배경음이 계속 들려요." : "효과음이 나오는 동안 배경음이 잠깐 멈춰요. 원래 폰 방식이에요.");
+        };
+        for (int i = 0; i < 2; i++) {
+            final boolean together = i == 0;
+            halves[i].setOnClickListener(v -> {
+                saveGameSound(game, together, false);
+                applySound(together);
+                refresh.run();
+            });
+        }
+        refresh.run();
+
+        if (compact) {
+            // On its side, one line: the name, the choice, then 자세히.
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            row.addView(label, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            LinearLayout.LayoutParams segmentParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            segmentParams.leftMargin = dp(10);
+            row.addView(segment, segmentParams);
+            row.addView(link);
+            box.addView(row);
+            return box;
+        }
+
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        head.addView(label, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        TextView scope = new TextView(this);
+        scope.setText("이 게임에만");
+        scope.setTextSize(11.5f);
+        scope.setTextColor(COLOR_SUBTEXT);
+        head.addView(scope);
+        box.addView(head);
+
+        LinearLayout.LayoutParams segmentParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        segmentParams.topMargin = dp(10);
+        box.addView(segment, segmentParams);
+        LinearLayout.LayoutParams lineParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lineParams.topMargin = dp(8);
+        box.addView(line, lineParams);
+        box.addView(link, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        link.setPadding(0, dp(6), dp(8), dp(2));
         return box;
     }
 
@@ -5942,6 +6059,153 @@ public final class MainActivity extends Activity {
      * says to.
      */
     private volatile int screenQuality = QUALITY_DOT;
+
+    /** The key, among the per-title ones, for the sound choice made for every title. */
+    private static final String SOUND_EVERY_GAME = "*";
+
+    /**
+     * Whether the running title's effects play over its music (같이 듣기) or
+     * the music stops for them as the title asks (따로 듣기).
+     */
+    private volatile boolean soundTogether = true;
+
+    /**
+     * Whether `game`'s effects play over its music: its own choice, else the
+     * one made for every title, else 같이 듣기.
+     */
+    private boolean gameSoundTogether(File game) {
+        SharedPreferences prefs = getSharedPreferences("mini_sound", MODE_PRIVATE);
+        return prefs.getBoolean(game.getName(), prefs.getBoolean(SOUND_EVERY_GAME, true));
+    }
+
+    /**
+     * Keeps the sound choice for `game`, or for every title - dropping each
+     * one's own, so they all follow it.
+     */
+    private void saveGameSound(File game, boolean together, boolean everyGame) {
+        SharedPreferences.Editor editor = getSharedPreferences("mini_sound", MODE_PRIVATE).edit();
+        if (everyGame) {
+            editor.clear().putBoolean(SOUND_EVERY_GAME, together);
+        } else {
+            editor.putBoolean(game.getName(), together);
+        }
+        editor.apply();
+    }
+
+    /** Plays the running title's effects over its music, or not, from now on. */
+    private void applySound(boolean together) {
+        soundTogether = together;
+        NativeBridge.nativeSetEffectsOverMusic(together ? 1 : 0);
+    }
+
+    /**
+     * The 배경음 · 효과음 window from the menu's 자세히 ›: 같이 듣기 and 따로
+     * 듣기, each with a picture of when the music and an effect sound. A
+     * choice is heard at once; 취소 puts it back.
+     */
+    private void showSoundDialog() {
+        final File game = currentGame;
+        if (game == null) {
+            return;
+        }
+        final boolean saved = soundTogether;
+        final boolean[] chosen = {saved};
+
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(16), 0, dp(16), dp(4));
+        body.addView(settingScope("이 게임에만 적용 · 다음에 열어도 유지"));
+
+        final View together = optionCard("같이 듣기", "기본", "효과음이 나와도 배경음이 끊기지 않고 겹쳐 들려요.", null, soundLanes(true));
+        final View apart = optionCard("따로 듣기", "원래 폰 방식",
+                "효과음이 나오는 동안 배경음이 멈췄다가 다시 나와요. 그 시절 폰처럼 한 번에 한 소리만 나요.", null, soundLanes(false));
+        final Runnable refresh = () -> {
+            markOption(together, chosen[0]);
+            markOption(apart, !chosen[0]);
+        };
+        together.setOnClickListener(v -> {
+            chosen[0] = true;
+            applySound(true);
+            refresh.run();
+        });
+        apart.setOnClickListener(v -> {
+            chosen[0] = false;
+            applySound(false);
+            refresh.run();
+        });
+        body.addView(together, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams apartParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        apartParams.topMargin = dp(8);
+        body.addView(apart, apartParams);
+
+        final android.widget.CheckBox everyGame = new android.widget.CheckBox(this);
+        everyGame.setText("모든 게임에 이 방식 쓰기");
+        everyGame.setTextColor(COLOR_SUBTEXT);
+        everyGame.setTextSize(12.5f);
+        everyGame.setButtonTintList(android.content.res.ColorStateList.valueOf(COLOR_ACCENT));
+        LinearLayout.LayoutParams everyParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        everyParams.topMargin = dp(8);
+        body.addView(everyGame, everyParams);
+        refresh.run();
+
+        final boolean[] applied = {false};
+        ControlStyle style = new ControlStyle(this, false);
+        AlertDialog dialog = new AlertDialog.Builder(style.context)
+                .setTitle("배경음 · 효과음")
+                .setView(scrolling(body))
+                .setPositiveButton("적용", (d, which) -> {
+                    applied[0] = true;
+                    saveGameSound(game, chosen[0], everyGame.isChecked());
+                    applySound(chosen[0]);
+                })
+                .setNegativeButton("취소", null)
+                .create();
+        // However the window goes away without 적용, the sound goes back.
+        dialog.setOnDismissListener(d -> {
+            if (!applied[0]) {
+                applySound(saved);
+            }
+        });
+        showMenuDialog(style, dialog);
+    }
+
+    /**
+     * Two lanes, 배경음 over 효과음, marking when each sounds: under 같이 듣기
+     * the music runs straight through the effect, under 따로 듣기 it breaks
+     * off for it.
+     */
+    private View soundLanes(final boolean together) {
+        final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
+        text.setTextSize(dp(10));
+        text.setColor(COLOR_SUBTEXT);
+        final Paint music = new Paint(Paint.ANTI_ALIAS_FLAG);
+        music.setColor(Color.rgb(58, 110, 117));
+        final Paint effect = new Paint(Paint.ANTI_ALIAS_FLAG);
+        effect.setColor(Color.rgb(201, 162, 74));
+        View lanes = new View(this) {
+            @Override
+            protected void onDraw(Canvas canvas) {
+                float left = dp(38);
+                float width = getWidth() - left;
+                float bar = dp(8);
+                float radius = dp(4);
+                float[] rows = {dp(2), dp(17)};
+                canvas.drawText("배경음", 0, rows[0] + bar, text);
+                canvas.drawText("효과음", 0, rows[1] + bar, text);
+                if (together) {
+                    canvas.drawRoundRect(new RectF(left, rows[0], left + width, rows[0] + bar), radius, radius, music);
+                } else {
+                    canvas.drawRoundRect(new RectF(left, rows[0], left + width * 0.35f, rows[0] + bar), radius, radius, music);
+                    canvas.drawRoundRect(new RectF(left + width * 0.53f, rows[0], left + width, rows[0] + bar), radius, radius, music);
+                }
+                canvas.drawRoundRect(new RectF(left + width * 0.35f, rows[1], left + width * 0.53f, rows[1] + bar), radius, radius, effect);
+            }
+        };
+        lanes.setMinimumHeight(dp(28));
+        lanes.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(28)));
+        return lanes;
+    }
 
     /**
      * How `game`'s screen is enlarged: its own choice, else the one made for
@@ -7190,6 +7454,8 @@ public final class MainActivity extends Activity {
             // turned it on for one made for a touch handset.
             touchOn = gameTouch(game);
             NativeBridge.nativeSetTouch(touchOn ? 1 : 0);
+            // Effects over the music or not, as the player left it for this title.
+            applySound(gameSoundTogether(game));
             // The screen as the player left it for this title.
             int quality = gameQuality(game);
             screenQuality = quality;

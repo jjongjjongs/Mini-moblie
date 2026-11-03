@@ -152,6 +152,24 @@ const AFTER_EFFECT_GRACE_POLLS: u32 = 20;
 /// reference's clip record is created holding.
 pub const FULL_VOLUME: u8 = 100;
 
+/// Whether an effect plays over the music the title stopped for it (같이
+/// 듣기), or the music goes the way the title asked (따로 듣기): the
+/// handsets of the day sounded one thing at a time, and titles stop their
+/// music for every effect to fit that. A player's choice, so it stays across
+/// titles until the host says otherwise.
+static EFFECTS_OVER_MUSIC: AtomicBool = AtomicBool::new(true);
+
+/// Sets whether effects play over the music - see [`EFFECTS_OVER_MUSIC`].
+/// Takes effect from the next effect played.
+pub fn set_effects_over_music(over: bool) {
+    EFFECTS_OVER_MUSIC.store(over, Ordering::Relaxed);
+}
+
+/// Whether effects play over the music - see [`set_effects_over_music`].
+pub fn effects_over_music() -> bool {
+    EFFECTS_OVER_MUSIC.load(Ordering::Relaxed)
+}
+
 /// A playback in flight, and the three things a caller watching for its ending
 /// needs to tell apart.
 pub struct Playback {
@@ -690,6 +708,11 @@ impl Audio {
     /// one-shot is a jingle meant to replace the music: the music's stop goes
     /// ahead. See [`EFFECT_MAX_MS`].
     fn hold_loop_under(&mut self, length_ms: u32, completed: &Arc<AtomicBool>, stopped: &Arc<AtomicBool>) {
+        // 따로 듣기: the music goes when the title stops it, as it did on
+        // the handset.
+        if !effects_over_music() {
+            return;
+        }
         let Some(active) = self.active.as_mut() else {
             return;
         };

@@ -24,6 +24,7 @@ pub(crate) use self::event_queue::note_frame_presented;
 use self::{audio::Audio, event_queue::EventQueue, input_method::InputMethod};
 
 pub use self::{
+    audio::{effects_over_music, set_effects_over_music},
     event_queue::{Event, KeyCode, PointerKind, set_touch_enabled, touch_enabled},
     file_system::FilesystemOverlay,
     input_method::InputMethodOutput,
