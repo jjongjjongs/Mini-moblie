@@ -575,6 +575,10 @@ fn media_body(slot: u32) -> Option<WIPICMethodBody> {
 /// 11)` at 30, `SetMaxTextSize(box, 16)` at 33, the box painted at 5 every
 /// frame and handed its keys at 8. Unserved, the box was never made and
 /// nothing typed reached it.
+///
+/// 41 is `GetCursorPos`: 슈퍼프로야구2012's name box (`0x1060f8`) hands it
+/// its keys at 8, reads the length at 34 and the text at 35, then asks 41
+/// with the box alone and keeps the answer where the caret is drawn from.
 fn uic_body(slot: u32) -> Option<WIPICMethodBody> {
     Some(match slot {
         0 => uic::create_application_context.into_body(),
@@ -618,6 +622,7 @@ fn uic_body(slot: u32) -> Option<WIPICMethodBody> {
         38 => uic::remove_list_item.into_body(),
         39 => uic::set_active_list_item.into_body(),
         40 => uic::get_active_list_item.into_body(),
+        41 => uic::get_cursor_pos.into_body(),
         _ => return None,
     })
 }

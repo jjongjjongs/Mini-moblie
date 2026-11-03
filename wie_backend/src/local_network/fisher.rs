@@ -15,6 +15,11 @@
 //! `0x118d36`'s failure. The server is long gone, so the conversion sat
 //! waiting.
 //!
+//! The title's 인증 is kind `1` (sent from `0x103658`): the product's name
+//! and id. Its answer (`0x118e18`) is one result byte: 1 is popup `0x4e`,
+//! `인증이 완료되었습니다`; 0 is `인증에 실패하였습니다` and 2 `이미
+//! 인증하셨습니다`.
+//!
 //! A shop purchase is kind `3` (sent from `0x1080a0` and `0x10f570`): a flag
 //! byte, the item, the price as a little-endian word, the product's id and
 //! name. Its answer (`0x118f3a`) is one result byte the shop reads through
@@ -30,6 +35,9 @@ pub const TARGET: (&str, u16) = ("222.122.160.61", 11001);
 const CARRIER: &[u8; 3] = b"SKT";
 const HEAD_MARK: u8 = 0x1b;
 
+const AUTHENTICATION: u8 = 0x01;
+const AUTHENTICATED: u8 = 1;
+
 const CONVERSION: u8 = 0x0d;
 const CONVERTED: u8 = 1;
 
@@ -44,6 +52,10 @@ pub fn answer(data: &[u8]) -> Option<Vec<u8>> {
     };
 
     match kind {
+        AUTHENTICATION => {
+            tracing::info!("fisher: authenticated");
+            Some(reply(AUTHENTICATION, &[AUTHENTICATED]))
+        }
         CONVERSION => {
             tracing::info!("fisher: converted");
             Some(reply(CONVERSION, &[CONVERTED]))
@@ -91,6 +103,9 @@ mod tests {
     /// The shop purchase 원조낚시광3 sent, as the log has it.
     const PURCHASE: &str = "534b54313034363131393236391b03010200000001d00700003930303035323439353200c7c1b7cec6e4bcc5b3ce20c6d0c5b0c1f600000000000000000000000000000000000000000000003730303630bff8c1b6b3acbdc3b1a43328b9abc3bc295fc0cfb9dd5f46726565496e7374616c6c000000000000";
 
+    /// The 인증 원조낚시광3 sent, as the log has it.
+    const AUTHENTICATION: &str = "534b54313034363131393236391b01bff8c1b6b3acbdc3b1a43328b9abc3bc295fc0cfb9dd5f46726565496e7374616c6c000000000000000000000000000000003730303630";
+
     fn bytes(hex: &str) -> alloc::vec::Vec<u8> {
         (0..hex.len())
             .step_by(2)
@@ -103,6 +118,13 @@ mod tests {
         let reply = answer(&bytes(CONVERSION)).unwrap();
 
         assert_eq!(reply, [6, 0, 0, 0, 0x0d, 1]);
+    }
+
+    #[test]
+    fn the_authentication_is_granted() {
+        let reply = answer(&bytes(AUTHENTICATION)).unwrap();
+
+        assert_eq!(reply, [6, 0, 0, 0, 0x01, 1]);
     }
 
     #[test]
