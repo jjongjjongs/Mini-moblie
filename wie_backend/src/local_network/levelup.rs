@@ -131,6 +131,16 @@ pub const THIRD_TARGET: (&str, u16) = ("121.78.119.73", 45001);
 /// question for good, the gateway gone.
 const THIRD_SMS_CONSENT: u8 = 5;
 
+/// 렙업만이살길3's charges - its 정식전환 among them: kind 0, the number, three
+/// words and what is bought.
+///
+/// Its reader (`0x1304b8`) takes one result byte. Zero is the charge going
+/// through (`0x12f8cc(1)`), 8 that the title is already converted; 1 to 7, 9,
+/// 10, 0x10, 0x12 and 0x20 are the failures it knows (팅 or the monthly limit
+/// short, the charge refused, ...).
+const THIRD_CHARGE: u8 = 0;
+const THIRD_CHARGED: u8 = 0;
+
 /// 렙업만이살길3's answer through the gateway, for the requests it is known for.
 pub fn third_answer(data: &[u8]) -> Option<Vec<u8>> {
     let whole = data.len() > SEQUEL_HEADER && u16::from_be_bytes([data[1], data[2]]) as usize == data.len() - SEQUEL_HEADER;
@@ -143,6 +153,10 @@ pub fn third_answer(data: &[u8]) -> Option<Vec<u8>> {
         THIRD_SMS_CONSENT => {
             tracing::info!("levelup3: SMS consent recorded");
             Some(vec![0])
+        }
+        THIRD_CHARGE => {
+            tracing::info!("levelup3: charge granted");
+            Some(vec![THIRD_CHARGED])
         }
         kind => {
             tracing::info!("levelup3: no reply known for kind {kind}, {} bytes {:02x?}", data.len(), data);
@@ -249,6 +263,13 @@ mod tests {
             0x05, 0x00, 0x19, 0x0b, b'0', b'1', b'0', b'4', b'6', b'1', b'1', b'9', b'2', b'6', b'9', 0, 0, 0, 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 1,
         ];
         assert_eq!(third_answer(&consent), Some(vec![0]));
+
+        // The 정식전환, as the log has it: charged.
+        let conversion = [
+            0x00, 0x00, 0x1c, 0x0b, b'0', b'1', b'0', b'4', b'6', b'1', b'1', b'9', b'2', b'6', b'9', 0, 0, 0, 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0x06, 0xe8,
+        ];
+        assert_eq!(third_answer(&conversion), Some(vec![0]));
 
         let mut other = consent;
         other[0] = 0x13;

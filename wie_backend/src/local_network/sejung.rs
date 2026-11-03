@@ -19,6 +19,16 @@
 //! server is long gone, so nothing came back and the conversion never began.
 //!
 //! The answer is the request with `+4` set to 2.
+//!
+//! # The conversion
+//!
+//! Authenticated, the title sends its 정식판 전환 on the same connection: a
+//! 47-byte request of kind `0x7b`, the number, `NHtest`, and after a newline
+//! the product's id. The callback reads it in its state 7 (`0x14544e`): an
+//! answer whose `+4` is `0x79` is the conversion going through - it adds the
+//! 3000 용돈 the title promises and moves on - and any other has its `+5`
+//! read for which failure it was (`0x20` the 팅 limit, `0x27`, `0x28`,
+//! `0x62`). So that is answered with its request too, `+4` set to `0x79`.
 
 use alloc::vec::Vec;
 
@@ -29,19 +39,30 @@ const REQUEST_SIZE: usize = 48;
 const KIND_AT: usize = 4;
 const REQUEST: u8 = 1;
 const AUTHENTICATED: u8 = 2;
+const CONVERSION: u8 = 0x7b;
+const CONVERTED: u8 = 0x79;
 
-/// The answer to the title's authentication: authenticated.
+/// The answer to the title's authentication - authenticated - and to its
+/// conversion - converted.
 pub fn answer(data: &[u8]) -> Option<Vec<u8>> {
-    let whole =
-        data.len() == REQUEST_SIZE && u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize == REQUEST_SIZE && data[KIND_AT] == REQUEST;
-    if !whole {
-        tracing::info!("sejung: no reply shaped for {} bytes {:02x?}", data.len(), data);
-        return None;
-    }
+    let whole = data.len() > KIND_AT && u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize == data.len();
+    let reply = match data.get(KIND_AT) {
+        Some(&REQUEST) if whole && data.len() == REQUEST_SIZE => {
+            tracing::info!("sejung: authenticated");
+            AUTHENTICATED
+        }
+        Some(&CONVERSION) if whole => {
+            tracing::info!("sejung: converted");
+            CONVERTED
+        }
+        _ => {
+            tracing::info!("sejung: no reply shaped for {} bytes {:02x?}", data.len(), data);
+            return None;
+        }
+    };
 
-    tracing::info!("sejung: authenticated");
     let mut answer = data.to_vec();
-    answer[KIND_AT] = AUTHENTICATED;
+    answer[KIND_AT] = reply;
     Some(answer)
 }
 
@@ -67,6 +88,19 @@ mod tests {
         assert_eq!(reply.len(), 48);
         assert_eq!(reply[4], 2);
         assert_eq!(reply[..4], request[..4]);
+        assert_eq!(reply[5..], request[5..]);
+    }
+
+    /// The conversion that follows, as the log has it.
+    const CONVERSION: &str = "0000002f7b013130343631313932363920202020202000004e48746573742020202030310a39303030353234383839";
+
+    #[test]
+    fn the_conversion_is_answered_converted() {
+        let request = bytes(CONVERSION);
+        let reply = answer(&request).unwrap();
+
+        assert_eq!(reply.len(), 47);
+        assert_eq!(reply[4], 0x79);
         assert_eq!(reply[5..], request[5..]);
     }
 

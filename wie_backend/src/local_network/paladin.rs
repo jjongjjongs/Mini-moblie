@@ -34,6 +34,16 @@
 //! title goes on to its menu. Anything else shows `네트워크 오류로 인증 실패
 //! 하였습니다`.
 //!
+//! # The conversion
+//!
+//! 정식판 전환 is type 2: the header, the number, the title's id
+//! (`9000524875`) and the price, 4000 as a little-endian word. Its handler
+//! (`0x132b4c`) takes a zero status and a word at `+8`: 1 lets the charge go
+//! ahead - the title opens Nexon's GXG gateway (which [`super::gxg`] answers)
+//! to this server and charges through it, and that gateway's `CC` is what
+//! clears the trial flag and shows `정식판 전환 성공` - 0 is the monthly limit
+//! reached, and status 12 another failure.
+//!
 //! The ranking itself is answered with nothing; the title's ranking screens
 //! are where they were.
 
@@ -55,6 +65,7 @@ const HEADER: usize = 8;
 const SECOND_FIELD: u16 = 12;
 
 const CERTIFICATE: u8 = 1;
+const CONVERSION: u8 = 2;
 const OK: u8 = 0;
 const GRANTED: u32 = 1;
 
@@ -117,6 +128,10 @@ impl LocalConnection for PaladinConnection {
             CERTIFICATE => {
                 tracing::info!("paladin: certificate granted");
                 self.outgoing.extend_from_slice(&message(CERTIFICATE, OK, &GRANTED.to_le_bytes()));
+            }
+            CONVERSION => {
+                tracing::info!("paladin: conversion may go ahead");
+                self.outgoing.extend_from_slice(&message(CONVERSION, OK, &GRANTED.to_le_bytes()));
             }
             kind => tracing::info!("paladin: no answer for type {kind}, {} bytes {:02x?}", request.len(), request),
         }
@@ -194,6 +209,22 @@ mod tests {
         assert_eq!(answer[6], 1, "type 1");
         assert_eq!(answer[7], 0, "status zero");
         assert_eq!(u32::from_le_bytes(answer[8..12].try_into().unwrap()), 1, "granted");
+    }
+
+    /// The conversion as the log has it: let go ahead.
+    #[test]
+    fn the_conversion_may_go_ahead() {
+        let mut connection = PaladinConnection::default();
+        let mut request = b"WM".to_vec();
+        request.extend_from_slice(&[0x13, 0, 0x0c, 0, 2, 0]);
+        request.extend_from_slice(b"01046119269\09000524875\0\0");
+        request.extend_from_slice(&4000u32.to_le_bytes());
+        connection.write(&request);
+
+        let answer = read_all(&mut connection);
+        assert_eq!(answer[6], 2, "type 2");
+        assert_eq!(answer[7], 0, "status zero");
+        assert_eq!(u32::from_le_bytes(answer[8..12].try_into().unwrap()), 1, "go ahead");
     }
 
     #[test]
