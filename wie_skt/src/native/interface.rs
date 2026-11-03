@@ -576,9 +576,11 @@ fn media_body(slot: u32) -> Option<WIPICMethodBody> {
 /// frame and handed its keys at 8. Unserved, the box was never made and
 /// nothing typed reached it.
 ///
-/// 41 is `GetCursorPos`: 슈퍼프로야구2012's name box (`0x1060f8`) hands it
-/// its keys at 8, reads the length at 34 and the text at 35, then asks 41
-/// with the box alone and keeps the answer where the caret is drawn from.
+/// 41 is `GetCursorPos` and 42 `SetCursorPos`: 슈퍼프로야구2012's name box
+/// (`0x1060f8`) hands it its keys at 8, reads the length at 34 and the text
+/// at 35, then asks 41 with the box alone and keeps the answer where the
+/// caret is drawn from; it puts the caret behind the name it inserts at 30
+/// with `(box, 6)` at 42.
 fn uic_body(slot: u32) -> Option<WIPICMethodBody> {
     Some(match slot {
         0 => uic::create_application_context.into_body(),
@@ -613,8 +615,8 @@ fn uic_body(slot: u32) -> Option<WIPICMethodBody> {
         29 => uic::get_active_menu_item.into_body(),
         30 => uic::insert_text.into_body(),
         31 => uic::delete_text.into_body(),
-        32 => uic::get_max_text_size.into_body(),
-        33 => uic::set_max_text_size.into_body(),
+        32 => get_max_text_size.into_body(),
+        33 => set_max_text_size.into_body(),
         34 => uic::get_text_size.into_body(),
         35 => uic::get_text.into_body(),
         36 => uic::add_list_item.into_body(),
@@ -623,8 +625,29 @@ fn uic_body(slot: u32) -> Option<WIPICMethodBody> {
         39 => uic::set_active_list_item.into_body(),
         40 => uic::get_active_list_item.into_body(),
         41 => uic::get_cursor_pos.into_body(),
+        42 => uic::set_cursor_pos.into_body(),
         _ => return None,
     })
+}
+
+/// SKT's `MC_uicSetMaxTextSize` counts the text a box holds, not the buffer
+/// behind it with its terminating NUL the way LGT's does (see
+/// [`uic::set_max_text_size`]). 슈퍼프로야구2012's name box is `(box, 8)` -
+/// four Hangul syllables - and opens holding a six-byte name; with the NUL
+/// counted in, the next syllable no longer fit, so no key typed a thing until
+/// the name was cleared and `#`'s space was all that went in.
+async fn set_max_text_size(context: &mut dyn WIPICContext, component: WIPICWord, size: i32) -> Result<i32> {
+    let buffer = if size > 0 { size.saturating_add(1) } else { size };
+    let previous = uic::set_max_text_size(context, component, buffer).await?;
+
+    Ok(if previous > 0 { previous - 1 } else { previous })
+}
+
+/// The size [`set_max_text_size`] was given, the NUL left out again.
+async fn get_max_text_size(context: &mut dyn WIPICContext, component: WIPICWord) -> Result<i32> {
+    let buffer = uic::get_max_text_size(context, component).await?;
+
+    Ok(if buffer > 0 { buffer - 1 } else { buffer })
 }
 
 /// LGT's order: 해적편 opens its serial port with the configuration string
