@@ -162,6 +162,11 @@ impl System {
         // `crate::local_network::sdw`.
         local_network.register(Box::new(crate::local_network::SdwEndpoint));
 
+        // 디펜스히어로's ranking server, which hands out the 인증서 the title
+        // will not play without, gone for years. See
+        // `crate::local_network::paladin`.
+        local_network.register(Box::new(crate::local_network::PaladinEndpoint));
+
         // The game server EA프로야구2010's SKT builds ask for the subscriber's
         // saves, gone for years. See `crate::local_network::dsp`.
         local_network.register(Box::new(crate::local_network::DspEndpoint));

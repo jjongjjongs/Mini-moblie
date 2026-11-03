@@ -35,6 +35,7 @@ mod gxg;
 mod kodan;
 mod levelup;
 mod noreason;
+mod paladin;
 mod pawapro;
 pub(crate) mod pigmy;
 mod relay;
@@ -57,6 +58,7 @@ pub use self::{
     gxg::{GxgEndpoint, NexonRelayEndpoint},
     levelup::LevelUpEndpoint,
     noreason::NoReasonEndpoint,
+    paladin::PaladinEndpoint,
     pawapro::PawaproEndpoint,
     relay::RelayEndpoint,
     sdw::SdwEndpoint,
