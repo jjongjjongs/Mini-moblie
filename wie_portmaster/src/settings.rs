@@ -321,6 +321,9 @@ impl App {
         // A value tile - the speed, the quality, the window - taken up to
         // change: ◀ and ▶ step it instead of moving off it.
         let mut adjusting = false;
+        // On the 배경음·효과음 card, the line ◀▶ changes: 0 the way it is
+        // heard, 1 the music's level, 2 the effects'.
+        let mut mix_row: usize = 0;
         let mut repeat = Repeat::new();
         let mut dirty = true;
         let icon = context.game.and_then(icons::extract);
@@ -368,8 +371,20 @@ impl App {
                             }
                             Item::Mix => {
                                 if let Some(game) = context.game {
-                                    let together = self.game_together(game);
-                                    self.set_game_together(game, !together);
+                                    match mix_row {
+                                        0 => {
+                                            let together = self.game_together(game);
+                                            self.set_game_together(game, !together);
+                                        }
+                                        row => {
+                                            let (music, effect) = self.game_mix(game);
+                                            if row == 1 {
+                                                self.set_game_mix(game, volume_step(music, forward), effect);
+                                            } else {
+                                                self.set_game_mix(game, music, volume_step(effect, forward));
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             Item::Screen => self.cycle_screen(forward),
@@ -385,6 +400,15 @@ impl App {
                             }
                             _ => {}
                         }
+                    }
+                    // On the 배경음·효과음 card ▲▼ pick its line rather than
+                    // leaving it.
+                    Button::Up | Button::Down if adjusting && items[cursor] == Item::Mix => {
+                        mix_row = if button == Button::Up {
+                            mix_row.saturating_sub(1)
+                        } else {
+                            (mix_row + 1).min(2)
+                        };
                     }
                     Button::Up | Button::Down | Button::Left | Button::Right => {
                         adjusting = false;
@@ -405,7 +429,11 @@ impl App {
                         Item::Keyboard => self.keyboard_layout(),
                         Item::Layout => self.layout(),
                         Item::Preset => self.presets(context),
-                        Item::Screen | Item::Speed | Item::Quality | Item::Volume | Item::Mix => adjusting = true,
+                        Item::Mix => {
+                            adjusting = true;
+                            mix_row = 0;
+                        }
+                        Item::Screen | Item::Speed | Item::Quality | Item::Volume => adjusting = true,
                         Item::Saves => {
                             if let Some(game) = context.game {
                                 self.save_manager(game);
@@ -435,7 +463,7 @@ impl App {
             }
 
             if dirty || self.take_redraw() {
-                self.draw_menu(context, icon.as_ref(), &items, cursor, adjusting);
+                self.draw_menu(context, icon.as_ref(), &items, cursor, adjusting, mix_row);
                 dirty = false;
             }
             std::thread::sleep(FRAME);
@@ -495,6 +523,18 @@ impl App {
         host::set_effects_over_music(together);
     }
 
+    /// How loud `game`'s music and effects play, in percent.
+    pub(crate) fn game_mix(&self, game: &Path) -> (u8, u8) {
+        self.store.mix(&file_of(game))
+    }
+
+    /// Remembers how loud `game`'s music and effects play, and hears it so at
+    /// once - only one game runs, the one the menu is for.
+    fn set_game_mix(&mut self, game: &Path, music: u8, effect: u8) {
+        self.store.set_mix(&file_of(game), music, effect);
+        host::set_mix_levels(music, effect);
+    }
+
     /// The active preset's name, starred once the mapping has moved off it.
     pub(crate) fn active_label(&self) -> String {
         let star = if self.store.modified() { "*" } else { "" };
@@ -532,7 +572,13 @@ impl App {
             Item::Speed => speed_label(context.game.map_or(1.0, |game| self.game_speed(game))),
             Item::Quality => context.game.map_or(Quality::Dot, |game| self.game_quality(game)).label().to_owned(),
             Item::Volume => volume_label(self.store.volume()),
-            Item::Mix => mix_label(context.game.is_none_or(|game| self.game_together(game))).to_owned(),
+            Item::Mix => match context.game {
+                Some(game) => match self.game_mix(game) {
+                    (100, 100) => mix_label(self.game_together(game)).to_owned(),
+                    (music, effect) => format!("{} {music}·{effect}", if self.game_together(game) { "같이" } else { "따로" }),
+                },
+                None => mix_label(true).to_owned(),
+            },
             Item::Fix => {
                 let fixed = context.game_file().and_then(|game| self.store.fixed(&game).map(str::to_owned));
                 fixed.unwrap_or_else(|| "끔".to_owned())
@@ -545,7 +591,7 @@ impl App {
     /// The menu: a drawer down the left, over the game when one is running,
     /// its items in tiles three to a row so all of them fit at once, with
     /// what the tile picked sets shown large beside it.
-    fn draw_menu(&mut self, context: &Context, icon: Option<&Picture>, items: &[Item], cursor: usize, adjusting: bool) {
+    fn draw_menu(&mut self, context: &Context, icon: Option<&Picture>, items: &[Item], cursor: usize, adjusting: bool, mix_row: usize) {
         let (width, height, _) = self.menu_size();
         let mut screen = Screen::new(width, height);
         self.clear_hits();
@@ -691,20 +737,9 @@ impl App {
                 }
                 Item::Mix => {
                     let together = context.game.is_none_or(|game| self.game_together(game));
-                    draw_choice_card(
-                        &mut screen,
-                        card_x,
-                        (h - 62.0) / 2.0 - 10.0,
-                        card_width,
-                        "배경음·효과음",
-                        &["같이 듣기", "따로 듣기"],
-                        if together { 0 } else { 1 },
-                        if together {
-                            "효과음이 나와도 배경음이 계속 들려요"
-                        } else {
-                            "효과음 동안 배경음이 멈춰요 · 원래 폰 방식"
-                        },
-                    );
+                    let (music, effect) = context.game.map_or((100, 100), |game| self.game_mix(game));
+                    let row = adjusting.then_some(mix_row);
+                    draw_mix_card(&mut screen, card_x, (h - 96.0) / 2.0 - 10.0, card_width, together, music, effect, row);
                 }
                 Item::Volume => {
                     self.draw_volume_card(&mut screen, card_x, (h - 62.0) / 2.0 - 10.0, card_width, cursor);
@@ -734,6 +769,7 @@ impl App {
 
         let hint = match items[cursor] {
             Item::Speed if adjusting => self.hint("◀▶ 0.1씩  A 완료", "◀▶ 0.1씩  Enter 완료"),
+            Item::Mix if adjusting => self.hint("▲▼ 줄  ◀▶ 바꾸기  A 완료", "▲▼ 줄  ◀▶ 바꾸기  Enter 완료"),
             Item::Volume if adjusting => self.hint("◀▶ 10%씩  Y 음소거  A 완료", "◀▶ 10%씩  M 음소거  Enter 완료"),
             Item::Volume => self.hint("A 바꾸기  Y 음소거  ◀▶▲▼ 이동", "Enter 바꾸기  M 음소거  ◀▶▲▼ 이동"),
             _ if adjusting => self.hint("◀▶ 바꾸기  A 완료", "◀▶ 바꾸기  Enter 완료"),
@@ -1047,6 +1083,67 @@ pub(crate) fn panel_bar(screen: &mut Screen, x: i32, y: i32, width: u32, left: &
         );
     }
     screen.fill(x + 8, y + BAR, width - 16, 1, EDGE);
+}
+
+/// The 배경음·효과음 card: the way it is heard over the two levels, each a
+/// meter of ten bars, the line ◀▶ changes ringed in green while the tile is
+/// taken up (`row`).
+#[allow(clippy::too_many_arguments)]
+fn draw_mix_card(screen: &mut Screen, x: f32, y: f32, width: f32, together: bool, music: u8, effect: u8, row: Option<usize>) {
+    let height = 96.0;
+    let muted = rgb(0x64, 0x75, 0x68);
+    screen.round(x, y + 1.5, width, height, 8.0, Color { a: 0x50, r: 0, g: 0, b: 0 });
+    screen.round(x, y, width, height, 8.0, WHITE);
+    screen.text_styled("배경음·효과음", x + 10.0, y + 6.0, SMALL, TextAlignment::Left, INK);
+    let (left, right) = (x + 8.0, x + width - 8.0);
+    let lines: [(&str, String); 3] = [
+        ("방식", mix_label(together).to_owned()),
+        ("배경음", format!("{music}%")),
+        ("효과음", format!("{effect}%")),
+    ];
+    for (index, (name, value)) in lines.iter().enumerate() {
+        let line_y = y + 24.0 + index as f32 * 17.0;
+        if row == Some(index) {
+            screen.round(left, line_y - 1.0, right - left, 16.0, 5.0, rgb(0xe6, 0xf6, 0xee));
+        }
+        screen.text_styled(name, left + 5.0, line_y + 1.5, TINY_BOLD, TextAlignment::Left, INK);
+        screen.text_styled(
+            value,
+            right - 5.0,
+            line_y + 1.5,
+            TINY_BOLD,
+            TextAlignment::Right,
+            if value == "0%" { DANGER } else { INK },
+        );
+        if index > 0 {
+            let level = if index == 1 { music } else { effect };
+            let (meter_left, meter_right) = (left + 42.0, right - 36.0);
+            let bars = 10usize;
+            let gap = 1.5;
+            let bar_width = (meter_right - meter_left - gap * (bars - 1) as f32) / bars as f32;
+            let base = line_y + 12.0;
+            for bar in 0..bars {
+                let bar_height = 3.0 + 8.0 * (bar + 1) as f32 / bars as f32;
+                let fill = if bar < (level / 10) as usize { GREEN } else { rgb(0xd5, 0xdb, 0xe0) };
+                screen.round(
+                    meter_left + bar as f32 * (bar_width + gap),
+                    base - bar_height,
+                    bar_width,
+                    bar_height,
+                    1.0,
+                    fill,
+                );
+            }
+        }
+    }
+    let note = if row.is_some() {
+        "▲▼ 줄 고르기 · ◀▶ 바꾸기"
+    } else if together {
+        "효과음이 나와도 배경음이 계속 들려요"
+    } else {
+        "효과음 동안 배경음이 멈춰요 · 원래 폰 방식"
+    };
+    screen.text_styled(note, x + width / 2.0, y + height - 16.0, TINY, TextAlignment::Center, muted);
 }
 
 /// A card of choices in a row, the one in use picked out, with a line on it

@@ -399,6 +399,12 @@ pub extern "C" fn wie_set_effects_over_music(over: bool) {
     host::set_effects_over_music(over);
 }
 
+/// How loud the music and the effects play, each 0 to 100 percent.
+#[unsafe(no_mangle)]
+pub extern "C" fn wie_set_mix_levels(music: u8, effect: u8) {
+    host::set_mix_levels(music, effect);
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn wie_set_touch(enabled: bool) {
     host::set_touch(enabled);

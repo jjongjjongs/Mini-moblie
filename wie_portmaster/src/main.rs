@@ -963,6 +963,8 @@ impl App {
         host::set_speed(speed);
         // Effects over the music or not, as it was left for this game.
         host::set_effects_over_music(self.game_together(game));
+        let (music, effect) = self.game_mix(game);
+        host::set_mix_levels(music, effect);
         let failure = host::start(data, runtime_dir, "Linux".to_owned());
         if !failure.is_empty() {
             return Err(failure);

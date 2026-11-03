@@ -403,6 +403,39 @@ enum GameSound {
     }
 }
 
+/// How loud a title's music and effects play, in percent: its own choice, else
+/// the one made for every title, else 100 and 100.
+enum GameMix {
+    private static let prefix = "mix."
+    private static let everyGame = "mix.*"
+
+    static func get(_ game: GameFile) -> (music: Int, effect: Int) {
+        let defaults = UserDefaults.standard
+        let stored = (defaults.array(forKey: prefix + game.name) ?? defaults.array(forKey: everyGame)) as? [Int]
+        guard let stored, stored.count == 2 else { return (100, 100) }
+        return (min(max(stored[0], 0), 100), min(max(stored[1], 0), 100))
+    }
+
+    /// Keeps the levels for `game`, or for every title - dropping each one's
+    /// own, so they all follow them.
+    static func set(music: Int, effect: Int, for game: GameFile, everyGame all: Bool) {
+        let defaults = UserDefaults.standard
+        if all {
+            for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(prefix) {
+                defaults.removeObject(forKey: key)
+            }
+            defaults.set([music, effect], forKey: everyGame)
+        } else {
+            defaults.set([music, effect], forKey: prefix + game.name)
+        }
+    }
+
+    /// Has the running title play at these levels from now on.
+    static func apply(music: Int, effect: Int) {
+        wie_set_mix_levels(UInt8(min(max(music, 0), 100)), UInt8(min(max(effect, 0), 100)))
+    }
+}
+
 enum GameTouch {
     static func get(_ game: GameFile) -> Bool {
         UserDefaults.standard.bool(forKey: "touch.\(game.name)")

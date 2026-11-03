@@ -33,8 +33,8 @@ pub use self::{
     quirks::{TitlePlatform, TitleQuirks, title_quirks, title_quirks_for_descriptor, title_quirks_for_product, title_quirks_on_panel},
     screen::{Screen, frame_point_on_panel, present, quarter_turn_left},
     system::{
-        Event, FilesystemOverlay, InputMethodOutput, KeyCode, PointerKind, System, effects_over_music, set_effects_over_music, set_touch_enabled,
-        touch_enabled,
+        Event, FilesystemOverlay, InputMethodOutput, KeyCode, PointerKind, System, effects_over_music, mix_levels, set_effects_over_music,
+        set_mix_levels, set_touch_enabled, touch_enabled,
     },
     task::YieldFuture,
     task_runner::{DefaultTaskRunner, TaskRunner},

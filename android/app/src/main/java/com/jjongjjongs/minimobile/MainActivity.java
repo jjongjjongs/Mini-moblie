@@ -5476,6 +5476,20 @@ public final class MainActivity extends Activity {
         return box;
     }
 
+    /** The line under the 배경음 · 효과음 choice: what is heard, and how loud. */
+    private static String soundLine(boolean together, int music, int effect) {
+        if (music == 0 && effect == 0) {
+            return "배경음과 효과음이 모두 꺼져 있어요.";
+        }
+        if (music == 0) {
+            return "배경음이 꺼져 있어요. 효과음만 들려요.";
+        }
+        if (effect == 0) {
+            return "효과음이 꺼져 있어요. 배경음만 들려요.";
+        }
+        return together ? "효과음이 나와도 배경음이 " + music + "% 크기로 계속 들려요." : "효과음이 나오는 동안 배경음이 잠깐 멈춰요. 원래 폰 방식이에요.";
+    }
+
     /**
      * 배경음 · 효과음, set in the menu itself: 같이 듣기 or 따로 듣기, for this
      * title, taking at once. 자세히 › opens the window that says what each is.
@@ -5539,8 +5553,19 @@ public final class MainActivity extends Activity {
                 halves[i].setTextColor(on ? Color.rgb(12, 42, 47) : COLOR_SUBTEXT);
                 halves[i].setContentDescription(names[i] + (on ? ", 선택됨" : ""));
             }
-            line.setText(soundTogether ? "효과음이 나와도 배경음이 계속 들려요." : "효과음이 나오는 동안 배경음이 잠깐 멈춰요. 원래 폰 방식이에요.");
+            line.setText(soundLine(soundTogether, soundMusic, soundEffect));
         };
+        // The levels, heard as they move and kept for this title.
+        final LinearLayout musicRow = mixRow("배경음", COLOR_MIX_MUSIC, soundMusic, compact, level -> {
+            applyMix(level, soundEffect);
+            saveGameMix(game, soundMusic, soundEffect, false);
+            refresh.run();
+        });
+        final LinearLayout effectRow = mixRow("효과음", COLOR_MIX_EFFECT, soundEffect, compact, level -> {
+            applyMix(soundMusic, level);
+            saveGameMix(game, soundMusic, soundEffect, false);
+            refresh.run();
+        });
         for (int i = 0; i < 2; i++) {
             final boolean together = i == 0;
             halves[i].setOnClickListener(v -> {
@@ -5562,6 +5587,16 @@ public final class MainActivity extends Activity {
             row.addView(segment, segmentParams);
             row.addView(link);
             box.addView(row);
+            // The two levels side by side under it.
+            LinearLayout levels = new LinearLayout(this);
+            levels.setOrientation(LinearLayout.HORIZONTAL);
+            levels.addView(musicRow, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            LinearLayout.LayoutParams effectParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            effectParams.leftMargin = dp(12);
+            levels.addView(effectRow, effectParams);
+            LinearLayout.LayoutParams levelsParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            levelsParams.topMargin = dp(4);
+            box.addView(levels, levelsParams);
             return box;
         }
 
@@ -5579,8 +5614,12 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams segmentParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         segmentParams.topMargin = dp(10);
         box.addView(segment, segmentParams);
+        LinearLayout.LayoutParams musicParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        musicParams.topMargin = dp(8);
+        box.addView(musicRow, musicParams);
+        box.addView(effectRow, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         LinearLayout.LayoutParams lineParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lineParams.topMargin = dp(8);
+        lineParams.topMargin = dp(6);
         box.addView(line, lineParams);
         box.addView(link, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         link.setPadding(0, dp(6), dp(8), dp(2));
@@ -6068,6 +6107,109 @@ public final class MainActivity extends Activity {
      * the music stops for them as the title asks (따로 듣기).
      */
     private volatile boolean soundTogether = true;
+    /** How loud the running title's music and effects play, in percent. */
+    private volatile int soundMusic = 100;
+    private volatile int soundEffect = 100;
+
+    /**
+     * How loud `game`'s music and effects play, in percent: its own choice,
+     * else the one made for every title, else 100 and 100.
+     */
+    private int[] gameMixLevels(File game) {
+        SharedPreferences prefs = getSharedPreferences("mini_mix", MODE_PRIVATE);
+        int music = prefs.getInt(game.getName() + "#music", prefs.getInt(SOUND_EVERY_GAME + "#music", 100));
+        int effect = prefs.getInt(game.getName() + "#effect", prefs.getInt(SOUND_EVERY_GAME + "#effect", 100));
+        return new int[] {Math.max(0, Math.min(100, music)), Math.max(0, Math.min(100, effect))};
+    }
+
+    /** Keeps the levels for `game`, or for every title - dropping each one's own. */
+    private void saveGameMix(File game, int music, int effect, boolean everyGame) {
+        SharedPreferences.Editor editor = getSharedPreferences("mini_mix", MODE_PRIVATE).edit();
+        String key = everyGame ? SOUND_EVERY_GAME : game.getName();
+        if (everyGame) {
+            editor.clear();
+        }
+        editor.putInt(key + "#music", music).putInt(key + "#effect", effect).apply();
+    }
+
+    /** Plays the running title's music and effects at these levels from now on. */
+    private void applyMix(int music, int effect) {
+        soundMusic = music;
+        soundEffect = effect;
+        NativeBridge.nativeSetMixLevels(music, effect);
+    }
+
+    /**
+     * A 배경음 or 효과음 level row: its name with the colour its lane is drawn
+     * in, a slider in tenths, and the percent. `onChange` hears each step.
+     */
+    private LinearLayout mixRow(String name, int colour, int value, boolean compact, java.util.function.IntConsumer onChange) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+
+        View dot = new View(this);
+        GradientDrawable mark = new GradientDrawable();
+        mark.setShape(GradientDrawable.OVAL);
+        mark.setColor(colour);
+        dot.setBackground(mark);
+        LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(dp(8), dp(8));
+        dotParams.rightMargin = dp(6);
+        row.addView(dot, dotParams);
+
+        TextView label = new TextView(this);
+        label.setText(name);
+        label.setTextSize(compact ? 11.5f : 12.5f);
+        label.setTypeface(Typeface.DEFAULT_BOLD);
+        label.setTextColor(COLOR_TEXT);
+        row.addView(label, new LinearLayout.LayoutParams(dp(compact ? 40 : 46), ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        final TextView percent = new TextView(this);
+        percent.setTextSize(compact ? 11.5f : 12.5f);
+        percent.setTypeface(Typeface.DEFAULT_BOLD);
+        percent.setGravity(android.view.Gravity.END);
+        percent.setText(value + "%");
+        percent.setTextColor(value == 0 ? Color.rgb(255, 138, 128) : COLOR_TEXT);
+
+        android.widget.SeekBar bar = new android.widget.SeekBar(this);
+        bar.setMax(10);
+        bar.setProgress(Math.round(value / 10f));
+        bar.setContentDescription(name + " 음량");
+        bar.setProgressTintList(android.content.res.ColorStateList.valueOf(COLOR_ACCENT));
+        bar.setThumbTintList(android.content.res.ColorStateList.valueOf(COLOR_ACCENT));
+        bar.setProgressBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.rgb(70, 74, 86)));
+        bar.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(android.widget.SeekBar seekBar, int progress, boolean fromUser) {
+                int level = progress * 10;
+                percent.setText(level + "%");
+                percent.setTextColor(level == 0 ? Color.rgb(255, 138, 128) : COLOR_TEXT);
+                if (fromUser) {
+                    onChange.accept(level);
+                }
+            }
+
+            @Override
+            public void onStartTrackingTouch(android.widget.SeekBar seekBar) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(android.widget.SeekBar seekBar) {
+            }
+        });
+        row.addView(bar, new LinearLayout.LayoutParams(0, dp(32), 1f));
+        row.addView(percent, new LinearLayout.LayoutParams(dp(compact ? 38 : 44), ViewGroup.LayoutParams.WRAP_CONTENT));
+        row.setTag(bar);
+        return row;
+    }
+
+    /** Moves a {@link #mixRow}'s slider to `value` without it being heard as a change. */
+    private static void setMixRow(LinearLayout row, int value) {
+        ((android.widget.SeekBar) row.getTag()).setProgress(Math.round(value / 10f));
+    }
+
+    private static final int COLOR_MIX_MUSIC = Color.rgb(58, 143, 153);
+    private static final int COLOR_MIX_EFFECT = Color.rgb(201, 162, 74);
 
     /**
      * Whether `game`'s effects play over its music: its own choice, else the
@@ -6110,6 +6252,9 @@ public final class MainActivity extends Activity {
         }
         final boolean saved = soundTogether;
         final boolean[] chosen = {saved};
+        final int savedMusic = soundMusic;
+        final int savedEffect = soundEffect;
+        final int[] levels = {savedMusic, savedEffect};
 
         LinearLayout body = new LinearLayout(this);
         body.setOrientation(LinearLayout.VERTICAL);
@@ -6138,8 +6283,85 @@ public final class MainActivity extends Activity {
         apartParams.topMargin = dp(8);
         body.addView(apart, apartParams);
 
+        // 음량: the two levels, a picture of the two lanes at those levels,
+        // and the common mixes a tap away. Heard as they move.
+        LinearLayout volumeBox = new LinearLayout(this);
+        volumeBox.setOrientation(LinearLayout.VERTICAL);
+        volumeBox.setPadding(dp(12), dp(10), dp(12), dp(12));
+        volumeBox.setBackground(roundedRect(COLOR_PANEL_2, COLOR_HAIR, 1, 12));
+        LinearLayout volumeHead = new LinearLayout(this);
+        volumeHead.setOrientation(LinearLayout.HORIZONTAL);
+        TextView volumeLabel = new TextView(this);
+        volumeLabel.setText("음량");
+        volumeLabel.setTextSize(13f);
+        volumeLabel.setTypeface(Typeface.DEFAULT_BOLD);
+        volumeLabel.setTextColor(COLOR_TEXT);
+        volumeHead.addView(volumeLabel, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        TextView volumeHint = new TextView(this);
+        volumeHint.setText("기본 100% · 100%");
+        volumeHint.setTextSize(11.5f);
+        volumeHint.setTextColor(COLOR_SUBTEXT);
+        volumeHead.addView(volumeHint);
+        volumeBox.addView(volumeHead);
+        final View mixPicture = mixLanes(levels);
+        final LinearLayout musicRow = mixRow("배경음", COLOR_MIX_MUSIC, levels[0], false, level -> {
+            levels[0] = level;
+            applyMix(levels[0], levels[1]);
+            mixPicture.invalidate();
+        });
+        final LinearLayout effectRow = mixRow("효과음", COLOR_MIX_EFFECT, levels[1], false, level -> {
+            levels[1] = level;
+            applyMix(levels[0], levels[1]);
+            mixPicture.invalidate();
+        });
+        LinearLayout.LayoutParams firstRow = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        firstRow.topMargin = dp(6);
+        volumeBox.addView(musicRow, firstRow);
+        volumeBox.addView(effectRow);
+        LinearLayout.LayoutParams pictureParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(32));
+        pictureParams.topMargin = dp(4);
+        volumeBox.addView(mixPicture, pictureParams);
+        android.widget.HorizontalScrollView presetScroll = new android.widget.HorizontalScrollView(this);
+        presetScroll.setHorizontalScrollBarEnabled(false);
+        LinearLayout presets = new LinearLayout(this);
+        presets.setOrientation(LinearLayout.HORIZONTAL);
+        final String[] presetNames = {"기본", "효과음 또렷하게", "배경음 위주", "배경음 끄기"};
+        final int[][] presetLevels = {{100, 100}, {60, 100}, {100, 50}, {0, 100}};
+        for (int i = 0; i < presetNames.length; i++) {
+            final int[] preset = presetLevels[i];
+            TextView chip = new TextView(this);
+            chip.setText(presetNames[i]);
+            chip.setTextSize(12f);
+            chip.setTypeface(Typeface.DEFAULT_BOLD);
+            chip.setTextColor(COLOR_SUBTEXT);
+            chip.setPadding(dp(11), dp(6), dp(11), dp(6));
+            chip.setBackground(roundedRect(COLOR_BG, COLOR_HAIR, 1, 999));
+            chip.setClickable(true);
+            chip.setFocusable(true);
+            chip.setOnClickListener(v -> {
+                levels[0] = preset[0];
+                levels[1] = preset[1];
+                setMixRow(musicRow, levels[0]);
+                setMixRow(effectRow, levels[1]);
+                applyMix(levels[0], levels[1]);
+                mixPicture.invalidate();
+            });
+            LinearLayout.LayoutParams chipParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            if (i > 0) {
+                chipParams.leftMargin = dp(6);
+            }
+            presets.addView(chip, chipParams);
+        }
+        presetScroll.addView(presets);
+        LinearLayout.LayoutParams presetParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        presetParams.topMargin = dp(8);
+        volumeBox.addView(presetScroll, presetParams);
+        LinearLayout.LayoutParams volumeParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        volumeParams.topMargin = dp(10);
+        body.addView(volumeBox, volumeParams);
+
         final android.widget.CheckBox everyGame = new android.widget.CheckBox(this);
-        everyGame.setText("모든 게임에 이 방식 쓰기");
+        everyGame.setText("모든 게임에 이 설정 쓰기");
         everyGame.setTextColor(COLOR_SUBTEXT);
         everyGame.setTextSize(12.5f);
         everyGame.setButtonTintList(android.content.res.ColorStateList.valueOf(COLOR_ACCENT));
@@ -6158,6 +6380,8 @@ public final class MainActivity extends Activity {
                     applied[0] = true;
                     saveGameSound(game, chosen[0], everyGame.isChecked());
                     applySound(chosen[0]);
+                    saveGameMix(game, levels[0], levels[1], everyGame.isChecked());
+                    applyMix(levels[0], levels[1]);
                 })
                 .setNegativeButton("취소", null)
                 .create();
@@ -6165,6 +6389,7 @@ public final class MainActivity extends Activity {
         dialog.setOnDismissListener(d -> {
             if (!applied[0]) {
                 applySound(saved);
+                applyMix(savedMusic, savedEffect);
             }
         });
         showMenuDialog(style, dialog);
@@ -6175,6 +6400,38 @@ public final class MainActivity extends Activity {
      * the music runs straight through the effect, under 따로 듣기 it breaks
      * off for it.
      */
+    /**
+     * The 음량 picture: 배경음 over 효과음, each lane as thick as its level, so
+     * the balance between them shows at a glance. Drawn from `levels`, which
+     * the sliders change; invalidate it after.
+     */
+    private View mixLanes(final int[] levels) {
+        final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
+        text.setTextSize(dp(10));
+        text.setColor(COLOR_SUBTEXT);
+        final Paint music = new Paint(Paint.ANTI_ALIAS_FLAG);
+        music.setColor(COLOR_MIX_MUSIC);
+        final Paint effect = new Paint(Paint.ANTI_ALIAS_FLAG);
+        effect.setColor(COLOR_MIX_EFFECT);
+        return new View(this) {
+            @Override
+            protected void onDraw(Canvas canvas) {
+                float left = dp(38);
+                float width = getWidth() - left;
+                float most = dp(12);
+                float[] middles = {dp(8), dp(24)};
+                canvas.drawText("배경음", 0, middles[0] + dp(4), text);
+                canvas.drawText("효과음", 0, middles[1] + dp(4), text);
+                float m = Math.max(dp(2), most * levels[0] / 100f);
+                float e = Math.max(dp(2), most * levels[1] / 100f);
+                music.setAlpha(levels[0] == 0 ? 64 : 255);
+                effect.setAlpha(levels[1] == 0 ? 64 : 255);
+                canvas.drawRoundRect(new RectF(left, middles[0] - m / 2, left + width, middles[0] + m / 2), dp(4), dp(4), music);
+                canvas.drawRoundRect(new RectF(left + width * 0.35f, middles[1] - e / 2, left + width * 0.53f, middles[1] + e / 2), dp(4), dp(4), effect);
+            }
+        };
+    }
+
     private View soundLanes(final boolean together) {
         final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
         text.setTextSize(dp(10));
@@ -7456,6 +7713,8 @@ public final class MainActivity extends Activity {
             NativeBridge.nativeSetTouch(touchOn ? 1 : 0);
             // Effects over the music or not, as the player left it for this title.
             applySound(gameSoundTogether(game));
+            int[] mix = gameMixLevels(game);
+            applyMix(mix[0], mix[1]);
             // The screen as the player left it for this title.
             int quality = gameQuality(game);
             screenQuality = quality;

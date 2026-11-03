@@ -117,6 +117,10 @@ bool wie_touch(void);
 // Takes effect from the next effect; safe while a title runs.
 void wie_set_effects_over_music(bool over);
 
+// How loud the music and the effects play, each 0 to 100 percent of what the
+// title and the handset set. Heard on what is sounding at once.
+void wie_set_mix_levels(uint8_t music, uint8_t effect);
+
 // The log collected for this run. Free with `wie_free_string`.
 char *wie_log(void);
 

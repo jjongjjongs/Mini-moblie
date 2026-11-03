@@ -66,6 +66,8 @@ final class Emulator: ObservableObject {
         wie_set_speed(GameSpeed.get(game))
         wie_set_touch(GameTouch.get(game))
         wie_set_effects_over_music(GameSound.get(game))
+        let mix = GameMix.get(game)
+        GameMix.apply(music: mix.music, effect: mix.effect)
         lock.lock()
         hq2x = GameQuality.get(game) == .hq2x
         lock.unlock()

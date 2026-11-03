@@ -67,6 +67,13 @@ final class NativeBridge {
     static native void nativeSetEffectsOverMusic(int over);
 
     /**
+     * How loud the music and the effects play, each 0 to 100 percent of what
+     * the title and the handset set. Heard on what is sounding at once, so the
+     * UI thread can call it while a slider moves.
+     */
+    static native void nativeSetMixLevels(int music, int effect);
+
+    /**
      * Guest instructions retired so far. It climbs while the title is running
      * and stops dead when it is not, which is what tells a title doing a long
      * piece of work - a loading screen is one tick that can last seconds -

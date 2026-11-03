@@ -197,6 +197,12 @@ pub fn set_effects_over_music(over: bool) {
     wie_backend::set_effects_over_music(over);
 }
 
+/// How loud the music and the effects play, each 0 to 100 percent of what the
+/// title and the handset set. Heard on what is sounding at once.
+pub fn set_mix_levels(music: u8, effect: u8) {
+    wie_backend::set_mix_levels(music, effect);
+}
+
 /// How fast the title runs, 1.0 being real time.
 pub fn set_speed(value: f32) {
     let _ = std::panic::catch_unwind(AssertUnwindSafe(|| speed::set_speed(value)));

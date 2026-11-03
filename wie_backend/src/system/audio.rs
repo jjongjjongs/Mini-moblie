@@ -4,7 +4,7 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 use smaf_player::{SmafEvent, parse_smaf};
 
@@ -56,6 +56,11 @@ pub struct Audio {
     active: Option<ActiveSmaf>,
     /// Whether the deferred-stop reaper task has been spawned (once per Audio).
     reaper_started: bool,
+    /// The handles whose play is music, at the player's music level; every
+    /// other is an effect, at the effect level. See [`set_mix_levels`].
+    music: BTreeSet<AudioHandle>,
+    /// The [`MIX_GENERATION`] the clips sounding were levelled at.
+    mix_seen: u32,
 }
 
 /// A pre-rendered SMAF clip playing through the sink, tracked so an immediate
@@ -159,6 +164,29 @@ pub const FULL_VOLUME: u8 = 100;
 /// titles until the host says otherwise.
 static EFFECTS_OVER_MUSIC: AtomicBool = AtomicBool::new(true);
 
+/// How loud the music plays and how loud the effects, in percent, over the
+/// clip's own level and the handset's: the player's mix, not the title's. A
+/// play is music when it loops or runs longer than [`EFFECT_MAX_MS`], an
+/// effect otherwise - the same line the hold under an effect draws.
+static MUSIC_LEVEL: AtomicU8 = AtomicU8::new(FULL_VOLUME);
+static EFFECT_LEVEL: AtomicU8 = AtomicU8::new(FULL_VOLUME);
+/// Bumped whenever the mix changes, so an `Audio` sees it and re-levels the
+/// clips already sounding.
+static MIX_GENERATION: AtomicU32 = AtomicU32::new(0);
+
+/// Sets how loud the music and the effects play, each 0 to 100 percent. Heard
+/// on what is sounding within a tenth of a second.
+pub fn set_mix_levels(music: u8, effect: u8) {
+    MUSIC_LEVEL.store(music.min(FULL_VOLUME), Ordering::Relaxed);
+    EFFECT_LEVEL.store(effect.min(FULL_VOLUME), Ordering::Relaxed);
+    MIX_GENERATION.fetch_add(1, Ordering::Release);
+}
+
+/// How loud the music and the effects play - see [`set_mix_levels`].
+pub fn mix_levels() -> (u8, u8) {
+    (MUSIC_LEVEL.load(Ordering::Relaxed), EFFECT_LEVEL.load(Ordering::Relaxed))
+}
+
 /// Sets whether effects play over the music - see [`EFFECTS_OVER_MUSIC`].
 /// Takes effect from the next effect played.
 pub fn set_effects_over_music(over: bool) {
@@ -210,6 +238,8 @@ impl Audio {
             default_clip_handle: None,
             active: None,
             reaper_started: false,
+            music: BTreeSet::new(),
+            mix_seen: MIX_GENERATION.load(Ordering::Acquire),
         }
     }
 
@@ -318,7 +348,9 @@ impl Audio {
             // on, so the volume has to go there rather than to the fresh handle
             // the title just allocated - see `ActiveSmaf::sink_handle`.
             let sink_handle = active.sink_handle;
-            self.sink.set_clip_volume(sink_handle, self.effective(volume.load(Ordering::Relaxed)));
+            self.music.insert(audio_handle);
+            self.sink
+                .set_clip_volume(sink_handle, self.level(audio_handle, volume.load(Ordering::Relaxed)));
             self.playing.insert(audio_handle, stop_flag);
             return Ok(playback);
         }
@@ -332,7 +364,11 @@ impl Audio {
         }
 
         self.stop(audio_handle);
-        self.sink.set_clip_volume(audio_handle, self.effective(volume.load(Ordering::Relaxed)));
+        self.relevel_if_mixed();
+        // An effect until it proves to be music, once its length is known.
+        self.music.remove(&audio_handle);
+        self.sink
+            .set_clip_volume(audio_handle, self.level(audio_handle, volume.load(Ordering::Relaxed)));
 
         let stop_flag = Arc::new(AtomicBool::new(false));
         let completed = Arc::new(AtomicBool::new(false));
@@ -348,6 +384,7 @@ impl Audio {
         if events.is_none()
             && let Some(duration_ms) = self.sink.play_smaf(audio_handle, &data, repeat)
         {
+            self.classify(audio_handle, repeat || duration_ms > EFFECT_MAX_MS, &volume);
             if repeat {
                 // Track the looping clip so an identical re-play coalesces and a
                 // real stop is honored by the reaper after a short grace.
@@ -451,6 +488,7 @@ impl Audio {
         // stop finally happens, through the same stop flag the title's own
         // stop would have set.
         let length_ms = u32::try_from(player.length_ms()).unwrap_or(u32::MAX);
+        self.classify(audio_handle, repeat || length_ms > EFFECT_MAX_MS, &volume);
         let music_once = !repeat
             && length_ms > EFFECT_MAX_MS
             && self
@@ -535,9 +573,54 @@ impl Audio {
         let volume = volume.min(FULL_VOLUME);
         state.store(volume, Ordering::Relaxed);
 
-        self.sink.set_clip_volume(self.sink_handle_of(audio_handle), self.effective(volume));
+        self.sink
+            .set_clip_volume(self.sink_handle_of(audio_handle), self.level(audio_handle, volume));
 
         Ok(())
+    }
+
+    /// What `audio_handle` sounds at: its own level, scaled by the handset's
+    /// and by the player's music or effect level, whichever its play is.
+    fn level(&self, audio_handle: AudioHandle, clip_volume: u8) -> u8 {
+        let (music, effect) = mix_levels();
+        let mix = if self.music.contains(&audio_handle) { music } else { effect };
+        ((self.effective(clip_volume) as u16 * mix as u16) / FULL_VOLUME as u16) as u8
+    }
+
+    /// Files `audio_handle`'s play as music or an effect, and sounds it at
+    /// that level.
+    fn classify(&mut self, audio_handle: AudioHandle, music: bool, volume: &AtomicU8) {
+        if music {
+            self.music.insert(audio_handle);
+        } else {
+            self.music.remove(&audio_handle);
+        }
+        self.sink
+            .set_clip_volume(audio_handle, self.level(audio_handle, volume.load(Ordering::Relaxed)));
+    }
+
+    /// Re-levels every clip if the player's mix changed since they were last
+    /// levelled. Called from the reaper's poll and before each play, so a
+    /// slider moved while the music plays is heard on the music.
+    fn relevel_if_mixed(&mut self) {
+        let generation = MIX_GENERATION.load(Ordering::Acquire);
+        if generation == self.mix_seen {
+            return;
+        }
+        self.mix_seen = generation;
+        self.relevel();
+    }
+
+    /// Sends every clip's level to the sink again.
+    fn relevel(&mut self) {
+        let levels: Vec<(AudioHandle, u8)> = self
+            .volumes
+            .iter()
+            .map(|(handle, state)| (*handle, state.load(Ordering::Relaxed)))
+            .collect();
+        for (handle, clip_volume) in levels {
+            self.sink.set_clip_volume(self.sink_handle_of(handle), self.level(handle, clip_volume));
+        }
     }
 
     /// A clip's level scaled by the handset's, which is what the sink plays at.
@@ -559,15 +642,7 @@ impl Audio {
     /// music plays is heard on the music rather than at the next track.
     pub fn set_master_volume(&mut self, volume: u8) {
         self.master = volume.min(FULL_VOLUME);
-
-        let levels: Vec<(AudioHandle, u8)> = self
-            .volumes
-            .iter()
-            .map(|(handle, state)| (*handle, state.load(Ordering::Relaxed)))
-            .collect();
-        for (handle, clip_volume) in levels {
-            self.sink.set_clip_volume(self.sink_handle_of(handle), self.effective(clip_volume));
-        }
+        self.relevel();
     }
 
     /// The handset's own media level.
@@ -676,6 +751,7 @@ impl Audio {
     /// once the effect is over, and a deferred stop whose grace has run out
     /// stops the sink.
     fn reap(&mut self) {
+        self.relevel_if_mixed();
         let Some(active) = self.active.as_mut() else {
             return;
         };
@@ -739,6 +815,7 @@ impl Audio {
             return Err(AudioError::InvalidHandle);
         }
         self.volumes.remove(&audio_handle);
+        self.music.remove(&audio_handle);
         // A closed clip has no volume of its own any more, and saying so is what
         // keeps the sink from remembering a level per handle for a title that
         // loads and closes thousands of them. Not the looping stream still
@@ -1403,6 +1480,35 @@ mod tests {
         let again = system.audio().load_smaf(b"BGM-DATA").unwrap();
         system.audio().play_with_completion(&system, again, false).unwrap();
         assert_eq!(counters.play.load(Ordering::SeqCst), 2, "started over");
+    }
+
+    /// A loop or a track-length play is music, a short one-shot an effect:
+    /// the line the player's 배경음 and 효과음 levels are drawn along, on both
+    /// the pre-rendered and the live path.
+    #[test]
+    fn plays_are_filed_as_music_or_effects() {
+        let (system, _) = new_system_with_smaf_counters();
+
+        let music = system.audio().load_smaf(b"BGM-DATA").unwrap();
+        system.audio().play_with_completion(&system, music, true).unwrap();
+        let sfx = system.audio().load_smaf(b"SFX-HIT").unwrap();
+        system.audio().play_with_completion(&system, sfx, false).unwrap();
+        let jingle = system.audio().load_smaf(b"JINGLE").unwrap();
+        system.audio().play_with_completion(&system, jingle, false).unwrap();
+        let live = system.audio().load_smaf(b"MA5-BGM").unwrap();
+        system.audio().play_with_completion(&system, live, true).unwrap();
+
+        let audio = system.audio();
+        assert!(audio.music.contains(&music));
+        assert!(!audio.music.contains(&sfx));
+        assert!(audio.music.contains(&jingle), "a 16-second one-shot is music");
+        assert!(audio.music.contains(&live));
+        drop(audio);
+
+        // A closed clip is forgotten.
+        let _ = system.audio().close(sfx);
+        let _ = system.audio().close(jingle);
+        assert!(!system.audio().music.contains(&jingle));
     }
 
     /// Music the renderer declines and streams live (제노니아3's MA-5 loop)

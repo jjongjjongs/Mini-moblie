@@ -35,6 +35,9 @@ pub struct Store {
     /// Game file names whose effects stop the music as the game asks (따로
     /// 듣기) rather than playing over it, which every other game does.
     apart: Vec<String>,
+    /// Game file name, and how loud its music and effects play when that is
+    /// not 100% and 100%.
+    mixes: Vec<(String, u8, u8)>,
     /// Game file name, and when it was last started, in seconds since 1970.
     played: Vec<(String, u64)>,
     /// How a desktop window is shown: its size as a multiple of 320x240, or
@@ -55,6 +58,7 @@ impl Store {
             speeds: Vec::new(),
             qualities: Vec::new(),
             apart: Vec::new(),
+            mixes: Vec::new(),
             played: Vec::new(),
             screen: 3,
             volume: 100,
@@ -82,6 +86,11 @@ impl Store {
                         }
                     }
                     ["apart", game] => store.apart.push((*game).to_owned()),
+                    ["mix", game, music, effect] => {
+                        if let (Ok(music), Ok(effect)) = (music.parse::<u8>(), effect.parse::<u8>()) {
+                            store.mixes.push(((*game).to_owned(), music.min(100), effect.min(100)));
+                        }
+                    }
                     ["played", game, at] => {
                         if let Ok(at) = at.parse::<u64>() {
                             store.played.push(((*game).to_owned(), at));
@@ -292,6 +301,22 @@ impl Store {
         self.save();
     }
 
+    /// How loud `game`'s music and effects play, in percent.
+    pub fn mix(&self, game: &str) -> (u8, u8) {
+        self.mixes
+            .iter()
+            .find(|(x, ..)| x == game)
+            .map_or((100, 100), |(_, music, effect)| (*music, *effect))
+    }
+
+    pub fn set_mix(&mut self, game: &str, music: u8, effect: u8) {
+        self.mixes.retain(|(x, ..)| x != game);
+        if (music, effect) != (100, 100) {
+            self.mixes.push((game.to_owned(), music, effect));
+        }
+        self.save();
+    }
+
     /// When each game was last started, by file name.
     pub fn played_all(&self) -> std::collections::HashMap<String, u64> {
         self.played.iter().cloned().collect()
@@ -313,6 +338,7 @@ impl Store {
         self.speeds.retain(|(x, _)| x != game);
         self.qualities.retain(|(x, _)| x != game);
         self.apart.retain(|x| x != game);
+        self.mixes.retain(|(x, ..)| x != game);
         self.played.retain(|(x, _)| x != game);
         self.save();
     }
@@ -343,6 +369,9 @@ impl Store {
         }
         for game in &self.apart {
             state.push_str(&format!("apart\t{game}\n"));
+        }
+        for (game, music, effect) in &self.mixes {
+            state.push_str(&format!("mix\t{game}\t{music}\t{effect}\n"));
         }
         for (game, at) in &self.played {
             state.push_str(&format!("played\t{game}\t{at}\n"));

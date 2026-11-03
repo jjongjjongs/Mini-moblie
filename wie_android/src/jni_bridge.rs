@@ -185,6 +185,23 @@ pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativ
     guard(|| wie_backend::set_effects_over_music(over != 0));
 }
 
+/// `nativeSetMixLevels(int music, int effect)`
+///
+/// How loud the music and the effects play, each 0 to 100 percent of what the
+/// title and the handset set. Heard on what is sounding at once.
+///
+/// # Safety
+/// Called by the JVM with a valid `env` reference.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_jjongjjongs_minimobile_NativeBridge_nativeSetMixLevels(
+    _env: JNIEnv,
+    _class: JClass,
+    music: jint,
+    effect: jint,
+) {
+    guard(|| wie_backend::set_mix_levels(music.clamp(0, 100) as u8, effect.clamp(0, 100) as u8));
+}
+
 /// `nativeGuestProgress() -> long`
 ///
 /// Guest instructions retired so far. It climbs while the title is running and

@@ -252,6 +252,9 @@ struct GameView: View {
     @State private var quality = ScreenQuality.dot
     /// Whether effects play over the music (see `GameSound`).
     @State private var soundTogether = true
+    /// How loud the music and the effects play, in percent (see `GameMix`).
+    @State private var soundMusic = 100
+    @State private var soundEffect = 100
     /// The layout being edited, nil when the pad is in play.
     @State private var draft: PadLayout?
     @State private var selectedKey: Int32?
@@ -330,6 +333,9 @@ struct GameView: View {
             speed = GameSpeed.get(game)
             quality = GameQuality.get(game)
             soundTogether = GameSound.get(game)
+            let mix = GameMix.get(game)
+            soundMusic = mix.music
+            soundEffect = mix.effect
             scale = GameScale.get(game, sideways: scaleSideways)
             touch = GameTouch.get(game)
             padHidden = GamePad.hidden(game)
@@ -375,7 +381,7 @@ struct GameView: View {
         case .quality:
             QualityView(game: game, emulator: emulator, quality: $quality)
         case .sound:
-            SoundView(game: game, together: $soundTogether)
+            SoundView(game: game, together: $soundTogether, music: $soundMusic, effect: $soundEffect)
         case .scale:
             ScaleView(game: game, sideways: scaleSideways, area: screenArea, pixels: titlePixels, scale: $scale)
         case .settings:
@@ -581,6 +587,14 @@ struct GameView: View {
                 GameSound.set(value, for: game, everyGame: false)
             },
             onSoundMore: { open(.sound) },
+            soundMusic: soundMusic,
+            soundEffect: soundEffect,
+            onMix: { music, effect in
+                soundMusic = music
+                soundEffect = effect
+                GameMix.set(music: music, effect: effect, for: game, everyGame: false)
+                GameMix.apply(music: music, effect: effect)
+            },
             onLog: { open(.log) },
             onLeave: {
                 menuWindow = nil
@@ -1317,21 +1331,129 @@ private struct QualityView: View {
     }
 }
 
+/// The colours the music's and the effects' lanes and levels are drawn in, and
+/// the line that says what is heard.
+enum MixColor {
+    static let music = Color(red: 58 / 255, green: 143 / 255, blue: 153 / 255)
+    static let effect = Color(red: 201 / 255, green: 162 / 255, blue: 74 / 255)
+
+    static func line(together: Bool, music: Int, effect: Int) -> String {
+        if music == 0 && effect == 0 { return "배경음과 효과음이 모두 꺼져 있어요." }
+        if music == 0 { return "배경음이 꺼져 있어요. 효과음만 들려요." }
+        if effect == 0 { return "효과음이 꺼져 있어요. 배경음만 들려요." }
+        return together ? "효과음이 나와도 배경음이 \(music)% 크기로 계속 들려요." : "효과음이 나오는 동안 배경음이 잠깐 멈춰요. 원래 폰 방식이에요."
+    }
+}
+
+/// A 배경음 or 효과음 level: its name by the colour its lane is drawn in, a
+/// slider in tenths, and the percent. `onChange` hears each step.
+struct MixSlider: View {
+    let name: String
+    let color: Color
+    let value: Int
+    let compact: Bool
+    let onChange: (Int) -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle().fill(color).frame(width: 8, height: 8)
+            Text(name)
+                .font(.system(size: compact ? 11.5 : 12.5, weight: .bold))
+                .foregroundColor(MenuPalette.ink)
+                .frame(width: compact ? 38 : 44, alignment: .leading)
+            Slider(value: Binding(get: { Double(value) }, set: { onChange(Int(($0 / 10).rounded()) * 10) }), in: 0...100, step: 10)
+                .accessibilityLabel("\(name) 음량")
+            Text("\(value)%")
+                .font(.system(size: compact ? 11.5 : 12.5, weight: .bold))
+                .monospacedDigit()
+                .foregroundColor(value == 0 ? Color(red: 1, green: 138 / 255, blue: 128 / 255) : MenuPalette.ink)
+                .frame(width: compact ? 36 : 42, alignment: .trailing)
+        }
+    }
+}
+
 /// 배경음 · 효과음, from the menu's 자세히 ›: 같이 듣기 and 따로 듣기, each with
 /// a picture of when the music and an effect sound. A choice is heard at once;
 /// 취소 puts it back.
 private struct SoundView: View {
     let game: GameFile
     @Binding var together: Bool
+    @Binding var music: Int
+    @Binding var effect: Int
     @Environment(\.dismiss) private var dismiss
     @State private var everyGame = false
     @State private var saved: Bool
+    @State private var savedMusic: Int
+    @State private var savedEffect: Int
     @State private var applied = false
 
-    init(game: GameFile, together: Binding<Bool>) {
+    init(game: GameFile, together: Binding<Bool>, music: Binding<Int>, effect: Binding<Int>) {
         self.game = game
         _together = together
+        _music = music
+        _effect = effect
         _saved = State(initialValue: together.wrappedValue)
+        _savedMusic = State(initialValue: music.wrappedValue)
+        _savedEffect = State(initialValue: effect.wrappedValue)
+    }
+
+    /// The common mixes, a tap away.
+    private static let presets: [(String, Int, Int)] = [("기본", 100, 100), ("효과음 또렷하게", 60, 100), ("배경음 위주", 100, 50), ("배경음 끄기", 0, 100)]
+
+    private func setMix(_ newMusic: Int, _ newEffect: Int) {
+        music = newMusic
+        effect = newEffect
+        GameMix.apply(music: newMusic, effect: newEffect)
+    }
+
+    /// 음량: the two levels, the two lanes as thick as their levels, and the
+    /// common mixes.
+    private var volumeBox: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("음량").font(.system(size: 13, weight: .bold)).foregroundColor(MenuPalette.ink)
+                Spacer()
+                Text("기본 100% · 100%").font(.system(size: 11.5)).foregroundColor(MenuPalette.muted)
+            }
+            MixSlider(name: "배경음", color: MixColor.music, value: music, compact: false) { setMix($0, effect) }
+            MixSlider(name: "효과음", color: MixColor.effect, value: effect, compact: false) { setMix(music, $0) }
+            VStack(alignment: .leading, spacing: 5) {
+                mixLane("배경음", color: MixColor.music, level: music, from: 0, width: 1)
+                mixLane("효과음", color: MixColor.effect, level: effect, from: 0.35, width: 0.18)
+            }
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(Self.presets.indices, id: \.self) { index in
+                        let preset = Self.presets[index]
+                        Button(preset.0) { setMix(preset.1, preset.2) }
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundColor(MenuPalette.muted)
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 6)
+                            .background(Capsule().fill(Color(red: 18 / 255, green: 19 / 255, blue: 23 / 255)))
+                            .overlay(Capsule().stroke(MenuPalette.line, lineWidth: 1))
+                            .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 12).fill(MenuPalette.raised))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(MenuPalette.line, lineWidth: 1))
+    }
+
+    private func mixLane(_ name: String, color: Color, level: Int, from: CGFloat, width: CGFloat) -> some View {
+        HStack(spacing: 6) {
+            Text(name).font(.system(size: 10)).foregroundColor(MenuPalette.muted).frame(width: 34, alignment: .leading)
+            GeometryReader { box in
+                Capsule()
+                    .fill(color.opacity(level == 0 ? 0.25 : 1))
+                    .frame(width: box.size.width * width, height: max(2, 12 * CGFloat(level) / 100))
+                    .offset(x: box.size.width * from)
+                    .frame(maxHeight: .infinity)
+            }
+            .frame(height: 14)
+        }
     }
 
     var body: some View {
@@ -1352,13 +1474,14 @@ private struct SoundView: View {
                     card(false, name: "따로 듣기", tag: "원래 폰 방식", detail: "효과음이 나오는 동안 배경음이 멈췄다가 다시 나와요. 그 시절 폰처럼 한 번에 한 소리만 나요.")
                 }
                 .buttonStyle(.plain)
+                volumeBox
                 Button {
                     everyGame.toggle()
                 } label: {
                     HStack(spacing: 8) {
                         Image(systemName: everyGame ? "checkmark.square.fill" : "square")
                             .foregroundColor(MenuPalette.accent)
-                        Text("모든 게임에 이 방식 쓰기")
+                        Text("모든 게임에 이 설정 쓰기")
                             .font(.system(size: 12.5))
                             .foregroundColor(MenuPalette.muted)
                     }
@@ -1373,6 +1496,7 @@ private struct SoundView: View {
             Button("적용") {
                 applied = true
                 GameSound.set(together, for: game, everyGame: everyGame)
+                GameMix.set(music: music, effect: effect, for: game, everyGame: everyGame)
                 dismiss()
             }
             .buttonStyle(MenuButtonStyle(kind: .primary))
@@ -1381,6 +1505,7 @@ private struct SoundView: View {
         .onDisappear {
             if !applied {
                 together = saved
+                setMix(savedMusic, savedEffect)
             }
         }
     }
@@ -2253,6 +2378,9 @@ struct GameMenuCard: View {
     let soundTogether: Bool
     let onSound: (Bool) -> Void
     let onSoundMore: () -> Void
+    let soundMusic: Int
+    let soundEffect: Int
+    let onMix: (Int, Int) -> Void
     let onLog: () -> Void
     let onLeave: () -> Void
     let onClose: () -> Void
@@ -2419,8 +2547,17 @@ struct GameMenuCard: View {
             .padding(3)
             .background(RoundedRectangle(cornerRadius: 12).fill(Color(red: 18 / 255, green: 19 / 255, blue: 23 / 255)))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(MenuPalette.line, lineWidth: 1))
+            if compact {
+                HStack(spacing: 12) {
+                    MixSlider(name: "배경음", color: MixColor.music, value: soundMusic, compact: true) { onMix($0, soundEffect) }
+                    MixSlider(name: "효과음", color: MixColor.effect, value: soundEffect, compact: true) { onMix(soundMusic, $0) }
+                }
+            } else {
+                MixSlider(name: "배경음", color: MixColor.music, value: soundMusic, compact: false) { onMix($0, soundEffect) }
+                MixSlider(name: "효과음", color: MixColor.effect, value: soundEffect, compact: false) { onMix(soundMusic, $0) }
+            }
             if !compact {
-                Text(soundTogether ? "효과음이 나와도 배경음이 계속 들려요." : "효과음이 나오는 동안 배경음이 잠깐 멈춰요. 원래 폰 방식이에요.")
+                Text(MixColor.line(together: soundTogether, music: soundMusic, effect: soundEffect))
                     .font(.system(size: 12))
                     .foregroundColor(MenuPalette.muted)
                     .fixedSize(horizontal: false, vertical: true)
