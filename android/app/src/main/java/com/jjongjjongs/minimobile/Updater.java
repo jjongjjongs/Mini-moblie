@@ -165,6 +165,7 @@ public final class Updater {
         }
         long id = downloadId(activity);
         if (id == -1) {
+            sweep(activity);
             return;
         }
         long[] state = progress(activity, id);
@@ -175,8 +176,43 @@ public final class Updater {
                 onDownloaded(activity);
             }
         } else if (state[0] == 0 || state[0] == DownloadManager.STATUS_FAILED || !newer) {
-            // Gone, failed, or already installed.
+            // Gone, failed, or already installed: the apk goes with it, or
+            // every update left one behind in the app's storage.
+            DownloadManager manager = (DownloadManager) activity.getSystemService(Context.DOWNLOAD_SERVICE);
+            if (manager != null) {
+                manager.remove(id);
+            }
             clearDownload(activity);
+            sweep(activity);
+        }
+    }
+
+    /**
+     * Deletes the update apks no longer of any use: those of this version or
+     * older. Earlier builds forgot their apk once it was installed, so one
+     * piled up per update; this clears those too.
+     */
+    private static void sweep(Context context) {
+        File dir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+        File[] files = dir == null ? null : dir.listFiles();
+        if (files == null) {
+            return;
+        }
+        int installed = installedVersion(context);
+        for (File file : files) {
+            String name = file.getName();
+            if (!name.startsWith("MiniMobile-") || !name.endsWith(".apk")) {
+                continue;
+            }
+            int version;
+            try {
+                version = Integer.parseInt(name.substring("MiniMobile-".length(), name.length() - ".apk".length()));
+            } catch (NumberFormatException e) {
+                version = -1;
+            }
+            if (version <= installed) {
+                file.delete();
+            }
         }
     }
 
