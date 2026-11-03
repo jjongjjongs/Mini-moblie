@@ -97,6 +97,14 @@ struct HeldEffect {
     stopped: Arc<AtomicBool>,
 }
 
+impl ActiveSmaf {
+    /// Whether the title has stopped this music - its stop deferred, or held
+    /// under an effect - so another can take its place.
+    fn stopped(&self) -> bool {
+        self.pending_stop_polls.is_some() || self.effect.is_some()
+    }
+}
+
 impl HeldEffect {
     fn over(&self) -> bool {
         self.completed.load(Ordering::Relaxed) || self.stopped.load(Ordering::Relaxed)
@@ -255,10 +263,15 @@ impl Audio {
         // bytes (시드 restarts its BGM every paint) keeps the existing sink
         // playback instead of restarting from zero. Adopt the fresh handle and
         // cancel any deferred stop.
-        if repeat
-            && let Some(active) = self.active.as_mut()
-            && active.repeat
+        //
+        // Music played once goes on the same way, but only where the title
+        // stopped it and takes it up again - to make room for an effect - and
+        // only while it is still sounding: played out, its next play is the
+        // title starting it over, which it does from its completion callback.
+        if let Some(active) = self.active.as_mut()
             && active.hash == hash
+            && active.repeat == repeat
+            && (repeat || ((active.pending_stop_polls.is_some() || active.effect.is_some()) && !active.completed.load(Ordering::Acquire)))
         {
             active.pending_stop_polls = None;
             active.effect = None;
@@ -324,7 +337,38 @@ impl Audio {
                     Ok(())
                 });
             } else {
-                self.hold_loop_under(duration_ms, &completed, &stop_flag);
+                // Not the active music's own clip played once more over it
+                // (파워풀프로야구 2009's name entry): the stop this play just
+                // made of it is not the title setting it aside.
+                if duration_ms > EFFECT_MAX_MS
+                    && self
+                        .active
+                        .as_ref()
+                        .is_none_or(|active| active.stopped() && active.handle != audio_handle)
+                {
+                    // Music played once - some titles never loop their music,
+                    // they play it to its end and start it again (슈퍼액션
+                    // 히어로5's title track). It is the music now, taking the
+                    // place of any the title had stopped, so an effect the
+                    // title stops it for is held over it like over a loop.
+                    // Its watcher below only ends it when it is really
+                    // stopped: a title's stop of the active music is deferred.
+                    self.flush_active(true);
+                    self.active = Some(ActiveSmaf {
+                        hash,
+                        repeat: false,
+                        handle: audio_handle,
+                        sink_handle: audio_handle,
+                        stop_flag: stop_flag.clone(),
+                        completed: completed.clone(),
+                        superseded: superseded.clone(),
+                        pending_stop_polls: None,
+                        effect: None,
+                    });
+                    self.ensure_reaper(system);
+                } else {
+                    self.hold_loop_under(duration_ms, &completed, &stop_flag);
+                }
 
                 let system_clone = system.clone();
                 let sink_clone = self.sink.clone();
@@ -548,6 +592,11 @@ impl Audio {
         let Some(active) = self.active.as_mut() else {
             return;
         };
+        // Music played once that has played out: nothing left to stop.
+        if !active.repeat && active.completed.load(Ordering::Acquire) {
+            self.active = None;
+            return;
+        }
         if let Some(effect) = &active.effect {
             if effect.over() {
                 active.effect = None;
@@ -575,9 +624,9 @@ impl Audio {
         let Some(active) = self.active.as_mut() else {
             return;
         };
-        // Only a loop the title has stopped: one still playing is mixed with
-        // the effect anyway.
-        if active.pending_stop_polls.is_none() && active.effect.is_none() {
+        // Only music the title has stopped and that is still sounding: music
+        // still playing is mixed with the effect anyway.
+        if !active.stopped() || (!active.repeat && active.completed.load(Ordering::Acquire)) {
             return;
         }
         if length_ms <= EFFECT_MAX_MS {
@@ -1210,6 +1259,54 @@ mod tests {
         }
         assert_eq!(counters.stop.load(Ordering::SeqCst), 1);
         assert_eq!(counters.last_stopped.load(Ordering::SeqCst), music as usize);
+    }
+
+    /// Music a title plays once and starts again itself rather than looping
+    /// (슈퍼액션 히어로5) is held under an effect the same way, and carried on
+    /// when the title plays it again.
+    #[test]
+    fn music_played_once_is_held_under_an_effect_too() {
+        let (system, counters) = new_system_with_smaf_counters();
+
+        // Track length, so music rather than an effect.
+        let music = system.audio().load_smaf(b"BGM-DATA").unwrap();
+        system.audio().play_with_completion(&system, music, false).unwrap();
+
+        system.audio().stop(music);
+        let _ = system.audio().close(music);
+        let sfx = system.audio().load_smaf(b"SFX-HIT").unwrap();
+        let effect = system.audio().play_with_completion(&system, sfx, false).unwrap();
+        for _ in 0..50 {
+            system.audio().reap();
+        }
+        assert_eq!(counters.stop.load(Ordering::SeqCst), 0, "the music plays on under the effect");
+
+        effect.completed.store(true, Ordering::Relaxed);
+        system.audio().reap();
+        let again = system.audio().load_smaf(b"BGM-DATA").unwrap();
+        system.audio().play_with_completion(&system, again, false).unwrap();
+        for _ in 0..50 {
+            system.audio().reap();
+        }
+        assert_eq!(counters.stop.load(Ordering::SeqCst), 0);
+        assert_eq!(counters.play.load(Ordering::SeqCst), 2, "the music started once, the effect once");
+    }
+
+    /// Music played once that has played out starts over when the title plays
+    /// it again: that is the title looping it.
+    #[test]
+    fn music_played_once_starts_over_after_it_ends() {
+        let (system, counters) = new_system_with_smaf_counters();
+
+        let music = system.audio().load_smaf(b"BGM-DATA").unwrap();
+        let first = system.audio().play_with_completion(&system, music, false).unwrap();
+        first.completed.store(true, Ordering::Relaxed);
+        system.audio().reap();
+        system.audio().stop(music);
+
+        let again = system.audio().load_smaf(b"BGM-DATA").unwrap();
+        system.audio().play_with_completion(&system, again, false).unwrap();
+        assert_eq!(counters.play.load(Ordering::SeqCst), 2, "started over");
     }
 
     /// Music still playing is not touched by an effect: the two just mix.
