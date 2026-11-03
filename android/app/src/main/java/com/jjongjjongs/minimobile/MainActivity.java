@@ -4995,7 +4995,7 @@ public final class MainActivity extends Activity {
 
     private int gearOpacity() {
         int v = getSharedPreferences("mini_ui", MODE_PRIVATE).getInt("gear_opacity", 70);
-        return Math.max(15, Math.min(100, v));
+        return Math.max(GEAR_OPACITY_MIN, Math.min(100, v));
     }
 
     private void setGearOpacity(int value) {
@@ -5003,8 +5003,15 @@ public final class MainActivity extends Activity {
     }
 
     /**
+     * The faintest the gear can be set. At 0 it is not drawn at all, but it is
+     * still there to be tapped - and long-pressed, which is how it is brought
+     * back.
+     */
+    private static final int GEAR_OPACITY_MIN = 0;
+
+    /**
      * Long-pressing the gear opens this: a slider that changes the gear's
-     * transparency live (15–100%). 적용 keeps it, 취소 or dismissing puts the
+     * transparency live (0–100%). 적용 keeps it, 취소 or dismissing puts the
      * old value back, 기본값 resets to 70%.
      */
     private void showGearOpacityDialog(final Button gear) {
@@ -5035,12 +5042,12 @@ public final class MainActivity extends Activity {
         content.addView(labelRow);
 
         final android.widget.SeekBar bar = new android.widget.SeekBar(ctx);
-        bar.setMax(85);
-        bar.setProgress(original - 15);
+        bar.setMax(100 - GEAR_OPACITY_MIN);
+        bar.setProgress(original - GEAR_OPACITY_MIN);
         bar.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(android.widget.SeekBar seekBar, int progress, boolean fromUser) {
-                int v = 15 + progress;
+                int v = GEAR_OPACITY_MIN + progress;
                 current[0] = v;
                 value.setText(v + "%");
                 gear.setAlpha(v / 100f);
@@ -5060,7 +5067,7 @@ public final class MainActivity extends Activity {
 
         LinearLayout ends = new LinearLayout(ctx);
         TextView low = new TextView(ctx);
-        low.setText("흐리게 15%");
+        low.setText("안 보이게 " + GEAR_OPACITY_MIN + "%");
         low.setTextColor(COLOR_SUBTEXT);
         low.setTextSize(11f);
         ends.addView(low, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
@@ -5082,7 +5089,7 @@ public final class MainActivity extends Activity {
                 .create();
         dialog.show();
         // 기본값: reset to 70% without closing (the slider drives the live gear).
-        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> bar.setProgress(70 - 15));
+        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> bar.setProgress(70 - GEAR_OPACITY_MIN));
     }
 
     /** The short side, in dp, from which an upright window counts as unfolded. */
