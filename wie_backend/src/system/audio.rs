@@ -135,9 +135,10 @@ pub const EFFECT_MAX_MS: u32 = 2_500;
 
 /// How long a loop held under an effect waits, once the effect is over, for
 /// the title to play the same music again before it is stopped for real. A
-/// title starts it again from its completion callback, a frame or a few later,
-/// so this is longer than the plain deferred stop's grace.
-const AFTER_EFFECT_GRACE_POLLS: u32 = 10;
+/// title starts it again from its completion callback or a while after, so
+/// this is longer than the plain deferred stop's grace: 제노니아3 takes its
+/// music up again 1.2 seconds after its last effect ends.
+const AFTER_EFFECT_GRACE_POLLS: u32 = 20;
 
 /// The volume a clip has until a title says otherwise, which is what the
 /// reference's clip record is created holding.
@@ -403,8 +404,38 @@ impl Audio {
             Some(events) => SmafPlayer::from_events(events),
             None => SmafPlayer::new(&data),
         };
-        if !repeat {
-            let length_ms = u32::try_from(player.length_ms()).unwrap_or(u32::MAX);
+        // Music streamed live is the music as much as a pre-rendered stream:
+        // the renderer declines MA-5 voices, and 제노니아3's music is all
+        // MA-5, so its loop is streamed here. Kept as the active music the
+        // same way - a different loop already took the old one's place above
+        // - so the title's stop of it is deferred and held under an effect,
+        // and an identical re-play carries it on. The stream ends when the
+        // stop finally happens, through the same stop flag the title's own
+        // stop would have set.
+        let length_ms = u32::try_from(player.length_ms()).unwrap_or(u32::MAX);
+        let music_once = !repeat
+            && length_ms > EFFECT_MAX_MS
+            && self
+                .active
+                .as_ref()
+                .is_none_or(|active| active.stopped() && active.handle != audio_handle);
+        if repeat || music_once {
+            if music_once {
+                self.flush_active(true);
+            }
+            self.active = Some(ActiveSmaf {
+                hash,
+                repeat,
+                handle: audio_handle,
+                sink_handle: audio_handle,
+                stop_flag: stop_flag.clone(),
+                completed: completed.clone(),
+                superseded: superseded.clone(),
+                pending_stop_polls: None,
+                effect: None,
+            });
+            self.ensure_reaper(system);
+        } else {
             self.hold_loop_under(length_ms, &completed, &stop_flag);
         }
         let clip = audio_handle;
@@ -1059,8 +1090,12 @@ mod tests {
         fn play_smaf(&self, id: u32, data: &[u8], _repeat: bool) -> Option<u32> {
             self.play.fetch_add(1, Ordering::SeqCst);
             self.last_played.store(id as usize, Ordering::SeqCst);
-            // Data a test names as an effect is short; anything else is a
-            // track-length clip.
+            // Data a test names as MA-5 is declined, so it streams live as
+            // the renderer declines 제노니아3's music; data named as an
+            // effect is short; anything else is a track-length clip.
+            if data.starts_with(b"MA5") {
+                return None;
+            }
             Some(if data.starts_with(b"SFX") { 300 } else { 16_000 })
         }
 
@@ -1307,6 +1342,50 @@ mod tests {
         let again = system.audio().load_smaf(b"BGM-DATA").unwrap();
         system.audio().play_with_completion(&system, again, false).unwrap();
         assert_eq!(counters.play.load(Ordering::SeqCst), 2, "started over");
+    }
+
+    /// Music the renderer declines and streams live (제노니아3's MA-5 loop)
+    /// is held under an effect too, and carried on when the title plays it
+    /// again - its stream is never told to stop.
+    #[test]
+    fn music_streamed_live_is_held_under_an_effect_too() {
+        let (system, _) = new_system_with_smaf_counters();
+
+        let music = system.audio().load_smaf(b"MA5-BGM").unwrap();
+        let looping = system.audio().play_with_completion(&system, music, true).unwrap();
+
+        system.audio().stop(music);
+        let _ = system.audio().close(music);
+        let sfx = system.audio().load_smaf(b"SFX-HIT").unwrap();
+        let effect = system.audio().play_with_completion(&system, sfx, false).unwrap();
+        for _ in 0..50 {
+            system.audio().reap();
+        }
+        assert!(!looping.stopped.load(Ordering::Relaxed), "the stream plays on under the effect");
+
+        effect.completed.store(true, Ordering::Relaxed);
+        system.audio().reap();
+        let again = system.audio().load_smaf(b"MA5-BGM").unwrap();
+        let resumed = system.audio().play_with_completion(&system, again, true).unwrap();
+        for _ in 0..50 {
+            system.audio().reap();
+        }
+        assert!(!looping.stopped.load(Ordering::Relaxed), "carried on, not restarted");
+        assert!(Arc::ptr_eq(&looping.stopped, &resumed.stopped), "the re-play is the same stream");
+    }
+
+    /// And a live stream left stopped after the effect does stop.
+    #[test]
+    fn music_streamed_live_left_stopped_stops() {
+        let (system, _) = new_system_with_smaf_counters();
+
+        let music = system.audio().load_smaf(b"MA5-BGM").unwrap();
+        let looping = system.audio().play_with_completion(&system, music, true).unwrap();
+        system.audio().stop(music);
+        for _ in 0..PENDING_STOP_GRACE_POLLS {
+            system.audio().reap();
+        }
+        assert!(looping.stopped.load(Ordering::Relaxed));
     }
 
     /// Music still playing is not touched by an effect: the two just mix.
