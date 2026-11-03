@@ -580,7 +580,8 @@ fn media_body(slot: u32) -> Option<WIPICMethodBody> {
 /// (`0x1060f8`) hands it its keys at 8, reads the length at 34 and the text
 /// at 35, then asks 41 with the box alone and keeps the answer where the
 /// caret is drawn from; it puts the caret behind the name it inserts at 30
-/// with `(box, 6)` at 42.
+/// with `(box, 6)` at 42. Its 35 asks for exactly the text's size, which
+/// SKT's `GetText` hands back whole - see [`uic::get_text_counted`].
 fn uic_body(slot: u32) -> Option<WIPICMethodBody> {
     Some(match slot {
         0 => uic::create_application_context.into_body(),
@@ -618,7 +619,7 @@ fn uic_body(slot: u32) -> Option<WIPICMethodBody> {
         32 => get_max_text_size.into_body(),
         33 => set_max_text_size.into_body(),
         34 => uic::get_text_size.into_body(),
-        35 => uic::get_text.into_body(),
+        35 => uic::get_text_counted.into_body(),
         36 => uic::add_list_item.into_body(),
         37 => uic::get_list_item.into_body(),
         38 => uic::remove_list_item.into_body(),

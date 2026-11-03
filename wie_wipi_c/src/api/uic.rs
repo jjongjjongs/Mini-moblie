@@ -1503,6 +1503,57 @@ pub async fn get_text(context: &mut dyn WIPICContext, component: WIPICWord, posi
     Ok(uic_read_c_string(context, output)?.len() as i32)
 }
 
+/// SKT's `MC_uicGetText`, where `buflen` is how many bytes to hand back rather
+/// than room for them and their NUL the way LGT's is (see [`get_text`]).
+///
+/// 슈퍼프로야구2012's name box zeroes a 256-byte buffer, asks the text's size
+/// and then for exactly that many bytes. LGT's contract answers that with
+/// nothing, so the box drew empty whatever it held. This copies the suffix
+/// from `position`, up to `buflen` bytes, NUL-terminates it when that still
+/// fits inside `buflen`, and answers the bytes copied.
+pub async fn get_text_counted(context: &mut dyn WIPICContext, component: WIPICWord, position: i32, output: WIPICWord, buflen: i32) -> Result<i32> {
+    tracing::debug!("MC_uicGetText({component:#x}, {position}, {output:#x}, {buflen}) counted");
+
+    let component = uic_struct(context, component);
+
+    if component == 0 {
+        return Ok(0);
+    }
+
+    let component_type: WIPICWord = read_generic(context, component)?;
+    if !(1..=5).contains(&component_type) {
+        return Ok(0);
+    }
+
+    if output == 0 || buflen <= 0 {
+        return Ok(0);
+    }
+
+    if component_type != 3 {
+        return Ok(-9);
+    }
+
+    let text: WIPICWord = read_generic(context, component + 0x44)?;
+    if text == 0 {
+        return Ok(0);
+    }
+
+    let source = uic_read_c_string(context, text)?;
+    let position = position.max(0) as usize;
+    if source.len() < position {
+        return Ok(0);
+    }
+
+    let suffix = &source[position..];
+    let copied = suffix.len().min(buflen as usize);
+    context.write_bytes(output, &suffix[..copied])?;
+    if copied < buflen as usize {
+        context.write_bytes(output.wrapping_add(copied as u32), &[0])?;
+    }
+
+    Ok(copied as i32)
+}
+
 /// LGT/KTF `MC_uicSetMaxTextSize`.
 ///
 /// Native returns the previous capacity on success. Invalid/null components
@@ -3385,10 +3436,10 @@ mod tests {
     use super::{
         TM_FIELDS, UIC_DRAW_MARKER_BASE, UIC_EMPTY_LABEL, UIC_TIMER_MARKER_TEXT, add_list_item, add_menu_item, configure, create, delete_text,
         destroy, get_active_list_item, get_active_menu_item, get_class, get_class_name, get_cursor_pos, get_font, get_geometry, get_label,
-        get_list_item, get_max_text_size, get_menu_item, get_text, get_text_size, get_time, handle_event, insert_text, is_instance, remove_list_item,
-        remove_menu_item, repaint, set_active_list_item, set_active_menu_item, set_bg_color, set_callback, set_cursor_pos, set_enable,
-        set_event_handler, set_fg_color, set_font, set_label, set_label_alignment, set_max_text_size, set_time, set_time_long, set_time_mask,
-        uic_color_to_rgb565, uic_draw_text_into, uic_read_c_string, uic_repaint_rect, uic_skip_time_separator,
+        get_list_item, get_max_text_size, get_menu_item, get_text, get_text_counted, get_text_size, get_time, handle_event, insert_text, is_instance,
+        remove_list_item, remove_menu_item, repaint, set_active_list_item, set_active_menu_item, set_bg_color, set_callback, set_cursor_pos,
+        set_enable, set_event_handler, set_fg_color, set_font, set_label, set_label_alignment, set_max_text_size, set_time, set_time_long,
+        set_time_mask, uic_color_to_rgb565, uic_draw_text_into, uic_read_c_string, uic_repaint_rect, uic_skip_time_separator,
     };
 
     const COMPONENT: u32 = 0x1000;
@@ -4004,6 +4055,26 @@ mod tests {
 
         context.read_bytes(0x3000, &mut actual).unwrap();
         assert_eq!(&actual[..7], b"abcdef\0");
+    }
+
+    #[futures_test::test]
+    async fn skt_uic_get_text_hands_back_buflen_bytes() {
+        let mut context = TestContext::new();
+        init_text_component(&mut context, b"\xbd\xb4\xc7\xc1\xbe\xdf\0", 16, 6);
+
+        context.write_bytes(0x3000, &[0xcc; 16]).unwrap();
+        assert_eq!(get_text_counted(&mut context, COMPONENT, 0, 0x3000, 6).await.unwrap(), 6);
+        let mut actual = [0u8; 8];
+        context.read_bytes(0x3000, &mut actual).unwrap();
+        assert_eq!(actual, [0xbd, 0xb4, 0xc7, 0xc1, 0xbe, 0xdf, 0xcc, 0xcc]);
+
+        context.write_bytes(0x3000, &[0xcc; 16]).unwrap();
+        assert_eq!(get_text_counted(&mut context, COMPONENT, 2, 0x3000, 8).await.unwrap(), 4);
+        context.read_bytes(0x3000, &mut actual).unwrap();
+        assert_eq!(&actual[..6], &[0xc7, 0xc1, 0xbe, 0xdf, 0, 0xcc]);
+
+        assert_eq!(get_text_counted(&mut context, COMPONENT, 7, 0x3000, 8).await.unwrap(), 0);
+        assert_eq!(get_text_counted(&mut context, COMPONENT, 0, 0x3000, 0).await.unwrap(), 0);
     }
 
     #[futures_test::test]
