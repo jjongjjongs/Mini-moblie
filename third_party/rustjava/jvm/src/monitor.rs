@@ -192,6 +192,12 @@ impl MonitorWait {
 }
 
 impl MonitorWaitTimeout {
+    /// Whether the wait this times out is still waiting: neither notified nor
+    /// timed out yet. A timer that finds it is not has nothing left to do.
+    pub fn is_pending(&self) -> bool {
+        self.monitor.state.lock().waiters.iter().any(|waiter| waiter.id == self.waiter_id)
+    }
+
     pub fn notify(self) {
         let event = {
             let mut state = self.monitor.state.lock();
@@ -330,6 +336,28 @@ mod tests {
         monitor.exit(3).unwrap();
         second_wait.wait().await;
         monitor.exit(2).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_timeout_knows_once_its_wait_has_ended() {
+        let monitor = Arc::new(Monitor::new());
+        monitor.enter(1).await;
+        let (wait, timeout) = monitor.prepare_wait(1).unwrap();
+        assert!(timeout.is_pending());
+
+        monitor.enter(2).await;
+        monitor.notify(2, 1).unwrap();
+        assert!(!timeout.is_pending());
+        monitor.exit(2).unwrap();
+        wait.wait().await;
+        monitor.exit(1).unwrap();
+
+        monitor.enter(1).await;
+        let (wait, timeout) = monitor.prepare_wait(1).unwrap();
+        timeout.clone().notify();
+        assert!(!timeout.is_pending());
+        wait.wait().await;
+        monitor.exit(1).unwrap();
     }
 
     #[tokio::test]

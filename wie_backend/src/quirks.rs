@@ -504,6 +504,12 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // 하이킥 screens 24 rows short over a white band, and its title's PRESS ANY
     // KEY under the panel. Told 296 it lays every screen out to the edge.
     (TitlePlatform::Ktf, "01039F5A", panel(240, 296)),
+    // 타코야키타이쿤(큰화): drawn for the 296 rows a handset leaves under its
+    // strip - the island map is a 296-row picture - and told 320 it left a
+    // 24-row band of plain colour under the map and the story pictures. It
+    // lays its scenes out from the height it is told, so told 296 every
+    // screen reaches the edge.
+    (TitlePlatform::Ktf, "010406EB", panel(240, 296)),
     // 마이애미 나이츠: every screen - the title, the menu, character select -
     // stops at row 296 of its 240x320 panel, over a white strip.
     (TitlePlatform::Ktf, "01038150", panel(240, 320).with_bottom_cropped(24)),

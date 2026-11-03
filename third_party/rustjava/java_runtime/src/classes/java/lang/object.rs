@@ -159,6 +159,9 @@ impl Object {
             return Err(jvm.exception("java/lang/IllegalArgumentException", "invalid wait timeout").await);
         }
 
+        /// How often a timed wait's timer looks whether the wait already ended.
+        const TIMEOUT_POLL_MS: u64 = 50;
+
         struct TimeoutNotifier {
             timeout: u64,
             waiter: MonitorWaitTimeout,
@@ -168,7 +171,21 @@ impl Object {
         #[async_trait::async_trait]
         impl SpawnCallback for TimeoutNotifier {
             async fn call(&self) -> Result<()> {
-                self.context.sleep(Duration::from_millis(self.timeout)).await;
+                // Woken by a notify, the wait needs no timer any more - and a
+                // timer sleeping out the rest of a long timeout regardless is a
+                // task, and on some hosts a thread with its stack, per wait.
+                // 타코야키타이쿤's sound thread waits on its lock with a long
+                // timeout and is notified for every effect, so those timers
+                // piled up one per sound until the heap ran out mid-game.
+                let mut remaining = self.timeout;
+                while remaining > 0 {
+                    if !self.waiter.is_pending() {
+                        return Ok(());
+                    }
+                    let step = remaining.min(TIMEOUT_POLL_MS);
+                    self.context.sleep(Duration::from_millis(step)).await;
+                    remaining -= step;
+                }
                 self.waiter.clone().notify();
                 Ok(())
             }
