@@ -79,10 +79,28 @@ struct ActiveSmaf {
     /// than stopped, so its ending is not reported as one. See
     /// [`Audio::flush_active`].
     superseded: Arc<AtomicBool>,
-    /// Reaper polls remaining before a deferred stop actually stops the sink;
+    /// Reaper polls left before a deferred stop actually stops the sink;
     /// `None` while playing. A re-play clears it, so continuous re-play never
     /// stops; a genuine stop with no re-play flushes after the grace.
     pending_stop_polls: Option<u32>,
+    /// A short effect the title stopped this loop to make room for, while it
+    /// sounds. The loop is held under it instead of being stopped - see
+    /// [`EFFECT_MAX_MS`] - and the deferred stop only starts counting once the
+    /// effect is over.
+    effect: Option<HeldEffect>,
+}
+
+/// The effect a looping clip is being held under: over when it played out or
+/// was stopped.
+struct HeldEffect {
+    completed: Arc<AtomicBool>,
+    stopped: Arc<AtomicBool>,
+}
+
+impl HeldEffect {
+    fn over(&self) -> bool {
+        self.completed.load(Ordering::Relaxed) || self.stopped.load(Ordering::Relaxed)
+    }
 }
 
 /// Reaper poll interval and the grace (in polls) before a deferred stop takes
@@ -90,6 +108,28 @@ struct ActiveSmaf {
 /// that a real stop is barely audible as a tail.
 const REAPER_POLL_MS: u64 = 100;
 const PENDING_STOP_GRACE_POLLS: u32 = 3;
+
+/// The longest a one-shot can be and still count as a sound effect played over
+/// the music, rather than a jingle that takes the music's place.
+///
+/// The handsets these titles were written for sounded one clip at a time, so a
+/// title makes room for an effect itself: it stops its looping music, plays
+/// the effect, and starts the same music again when the effect is done. Played
+/// back as asked, no effect is ever heard over the music. So a loop the title
+/// stops just before a short one-shot is held under it rather than stopped,
+/// and the title's re-play of the same music continues it (see the seamless
+/// re-play in [`Audio::play_with_completion`]) instead of starting it over.
+///
+/// The one-shots in the logs players have sent are almost all under a second,
+/// a few up to two; the longer ones - three seconds and up - are stage-clear
+/// and title fanfares, which are meant to replace the music and still do.
+pub const EFFECT_MAX_MS: u32 = 2_500;
+
+/// How long a loop held under an effect waits, once the effect is over, for
+/// the title to play the same music again before it is stopped for real. A
+/// title starts it again from its completion callback, a frame or a few later,
+/// so this is longer than the plain deferred stop's grace.
+const AFTER_EFFECT_GRACE_POLLS: u32 = 10;
 
 /// The volume a clip has until a title says otherwise, which is what the
 /// reference's clip record is created holding.
@@ -221,6 +261,7 @@ impl Audio {
             && active.hash == hash
         {
             active.pending_stop_polls = None;
+            active.effect = None;
             active.handle = audio_handle;
             let playback = Playback {
                 completed: active.completed.clone(),
@@ -270,6 +311,7 @@ impl Audio {
                     completed: completed.clone(),
                     superseded: superseded.clone(),
                     pending_stop_polls: None,
+                    effect: None,
                 });
                 self.ensure_reaper(system);
 
@@ -282,6 +324,8 @@ impl Audio {
                     Ok(())
                 });
             } else {
+                self.hold_loop_under(duration_ms, &completed, &stop_flag);
+
                 let system_clone = system.clone();
                 let sink_clone = self.sink.clone();
                 let stop_flag_clone = stop_flag.clone();
@@ -315,6 +359,10 @@ impl Audio {
             Some(events) => SmafPlayer::from_events(events),
             None => SmafPlayer::new(&data),
         };
+        if !repeat {
+            let length_ms = u32::try_from(player.length_ms()).unwrap_or(u32::MAX);
+            self.hold_loop_under(length_ms, &completed, &stop_flag);
+        }
         let clip = audio_handle;
         let mut system_clone = system.clone();
         let sink_clone = self.sink.clone();
@@ -427,8 +475,9 @@ impl Audio {
         if let Some(active) = self.active.as_mut()
             && active.handle == audio_handle
         {
-            if active.pending_stop_polls.is_none() {
-                active.pending_stop_polls = Some(0);
+            // Held under an effect, it waits for the effect instead.
+            if active.pending_stop_polls.is_none() && active.effect.is_none() {
+                active.pending_stop_polls = Some(PENDING_STOP_GRACE_POLLS);
             }
 
             // The handle may also be sounding once over the loop: 파워풀프로야구
@@ -462,6 +511,9 @@ impl Audio {
             // Stop the stream the sink actually plays, not the latest handle the
             // title allocated - they differ once a looping clip has re-played.
             self.sink.stop_smaf(active.sink_handle);
+            // Its volume was kept while it played on past its own clip's close
+            // (see `close`); with the stream gone it can go too.
+            self.sink.set_clip_volume(active.sink_handle, FULL_VOLUME);
             if superseded {
                 active.superseded.store(true, Ordering::Relaxed);
             }
@@ -484,25 +536,59 @@ impl Audio {
             loop {
                 system_clone.sleep(REAPER_POLL_MS).await;
 
-                let mut audio = system_clone.audio();
-                let flush = match audio.active.as_mut() {
-                    Some(active) => match active.pending_stop_polls {
-                        Some(polls) if polls + 1 >= PENDING_STOP_GRACE_POLLS => true,
-                        Some(polls) => {
-                            active.pending_stop_polls = Some(polls + 1);
-                            false
-                        }
-                        None => false,
-                    },
-                    None => false,
-                };
-                if flush {
-                    // The title asked for this stop and may be waiting to hear
-                    // that it happened, so it is not a supersede.
-                    audio.flush_active(false);
-                }
+                system_clone.audio().reap();
             }
         });
+    }
+
+    /// One poll of the reaper: a loop held under an effect starts its grace
+    /// once the effect is over, and a deferred stop whose grace has run out
+    /// stops the sink.
+    fn reap(&mut self) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        if let Some(effect) = &active.effect {
+            if effect.over() {
+                active.effect = None;
+                active.pending_stop_polls = Some(AFTER_EFFECT_GRACE_POLLS);
+            }
+            return;
+        }
+        match active.pending_stop_polls {
+            Some(polls) if polls <= 1 => {
+                // The title asked for this stop and may be waiting to hear
+                // that it happened, so it is not a supersede.
+                self.flush_active(false);
+            }
+            Some(polls) => active.pending_stop_polls = Some(polls - 1),
+            None => {}
+        }
+    }
+
+    /// A one-shot of `length_ms` is starting. If the title has just stopped
+    /// its looping music and this is short enough to be an effect, keep the
+    /// music sounding under it rather than letting the stop take it. A longer
+    /// one-shot is a jingle meant to replace the music: the music's stop goes
+    /// ahead. See [`EFFECT_MAX_MS`].
+    fn hold_loop_under(&mut self, length_ms: u32, completed: &Arc<AtomicBool>, stopped: &Arc<AtomicBool>) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        // Only a loop the title has stopped: one still playing is mixed with
+        // the effect anyway.
+        if active.pending_stop_polls.is_none() && active.effect.is_none() {
+            return;
+        }
+        if length_ms <= EFFECT_MAX_MS {
+            active.pending_stop_polls = None;
+            active.effect = Some(HeldEffect {
+                completed: completed.clone(),
+                stopped: stopped.clone(),
+            });
+        } else if active.effect.take().is_some() {
+            active.pending_stop_polls = Some(PENDING_STOP_GRACE_POLLS);
+        }
     }
 
     pub fn close(&mut self, audio_handle: AudioHandle) -> Result<(), AudioError> {
@@ -514,8 +600,13 @@ impl Audio {
         self.volumes.remove(&audio_handle);
         // A closed clip has no volume of its own any more, and saying so is what
         // keeps the sink from remembering a level per handle for a title that
-        // loads and closes thousands of them.
-        self.sink.set_clip_volume(audio_handle, FULL_VOLUME);
+        // loads and closes thousands of them. Not the looping stream still
+        // sounding on past its close, though - held under an effect, or waiting
+        // out its grace - which would jump to full scale; `flush_active` gives
+        // its level back when it really stops.
+        if self.active.as_ref().is_none_or(|active| active.sink_handle != audio_handle) {
+            self.sink.set_clip_volume(audio_handle, FULL_VOLUME);
+        }
 
         Ok(())
     }
@@ -685,7 +776,7 @@ mod tests {
 
     use smaf_player::SmafEvent;
 
-    use super::SmafPlayer;
+    use super::{AFTER_EFFECT_GRACE_POLLS, PENDING_STOP_GRACE_POLLS, SmafPlayer};
     use crate::{AudioSink, Database, DatabaseRepository, DefaultTaskRunner, Filesystem, Instant, Platform, Screen, System, canvas::Image};
 
     struct NullDatabase;
@@ -916,10 +1007,12 @@ mod tests {
         fn midi_pitch_bend(&self, _voice: u32, _channel_id: u8, _value: u16) {}
         fn midi_sysex(&self, _voice: u32, _data: &[u8]) {}
 
-        fn play_smaf(&self, id: u32, _data: &[u8], _repeat: bool) -> Option<u32> {
+        fn play_smaf(&self, id: u32, data: &[u8], _repeat: bool) -> Option<u32> {
             self.play.fetch_add(1, Ordering::SeqCst);
             self.last_played.store(id as usize, Ordering::SeqCst);
-            Some(16_000)
+            // Data a test names as an effect is short; anything else is a
+            // track-length clip.
+            Some(if data.starts_with(b"SFX") { 300 } else { 16_000 })
         }
 
         fn stop_smaf(&self, id: u32) {
@@ -1039,6 +1132,100 @@ mod tests {
             h1 as usize,
             "the stop must target the stream the sink played (h1), not a later handle"
         );
+    }
+
+    /// What a title written for one sound at a time does for every effect, as
+    /// the logs players sent show it: stop and free its music, play the effect
+    /// on a fresh clip, and play the same music again once the effect is done.
+    /// The music plays on under the effect and is carried on, not restarted.
+    #[test]
+    fn an_effect_plays_over_the_music_the_title_stopped_for_it() {
+        let (system, counters) = new_system_with_smaf_counters();
+
+        let music = system.audio().load_smaf(b"BGM-DATA").unwrap();
+        system.audio().play_with_completion(&system, music, true).unwrap();
+
+        // Room for the effect, made the way such a title makes it.
+        system.audio().stop(music);
+        system.audio().stop(music);
+        let _ = system.audio().close(music);
+        let sfx = system.audio().load_smaf(b"SFX-HIT").unwrap();
+        let effect = system.audio().play_with_completion(&system, sfx, false).unwrap();
+
+        // However long the effect takes, the music is not stopped under it.
+        for _ in 0..50 {
+            system.audio().reap();
+        }
+        assert_eq!(counters.stop.load(Ordering::SeqCst), 0, "the music plays on under the effect");
+
+        // The effect ends, and the title starts the same music again: it
+        // carries on rather than starting over.
+        effect.completed.store(true, Ordering::Relaxed);
+        system.audio().reap();
+        let again = system.audio().load_smaf(b"BGM-DATA").unwrap();
+        system.audio().play_with_completion(&system, again, true).unwrap();
+        for _ in 0..50 {
+            system.audio().reap();
+        }
+        assert_eq!(counters.stop.load(Ordering::SeqCst), 0);
+        assert_eq!(counters.play.load(Ordering::SeqCst), 2, "the music started once, the effect once");
+    }
+
+    /// Music the title does not take up again after the effect stops once
+    /// the grace after the effect has run out.
+    #[test]
+    fn music_left_stopped_after_an_effect_stops() {
+        let (system, counters) = new_system_with_smaf_counters();
+
+        let music = system.audio().load_smaf(b"BGM-DATA").unwrap();
+        system.audio().play_with_completion(&system, music, true).unwrap();
+        system.audio().stop(music);
+        let sfx = system.audio().load_smaf(b"SFX-HIT").unwrap();
+        let effect = system.audio().play_with_completion(&system, sfx, false).unwrap();
+
+        effect.stopped.store(true, Ordering::Relaxed);
+        for _ in 0..AFTER_EFFECT_GRACE_POLLS {
+            system.audio().reap();
+        }
+        assert_eq!(counters.stop.load(Ordering::SeqCst), 0, "still within the grace");
+        system.audio().reap();
+        assert_eq!(counters.stop.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.last_stopped.load(Ordering::SeqCst), music as usize);
+    }
+
+    /// A one-shot too long to be an effect - a stage-clear fanfare - still
+    /// takes the music's place, as the title meant.
+    #[test]
+    fn a_jingle_still_replaces_the_music() {
+        let (system, counters) = new_system_with_smaf_counters();
+
+        let music = system.audio().load_smaf(b"BGM-DATA").unwrap();
+        system.audio().play_with_completion(&system, music, true).unwrap();
+        system.audio().stop(music);
+        let jingle = system.audio().load_smaf(b"JINGLE").unwrap();
+        system.audio().play_with_completion(&system, jingle, false).unwrap();
+
+        for _ in 0..PENDING_STOP_GRACE_POLLS {
+            system.audio().reap();
+        }
+        assert_eq!(counters.stop.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.last_stopped.load(Ordering::SeqCst), music as usize);
+    }
+
+    /// Music still playing is not touched by an effect: the two just mix.
+    #[test]
+    fn an_effect_over_music_still_playing_leaves_it_alone() {
+        let (system, counters) = new_system_with_smaf_counters();
+
+        let music = system.audio().load_smaf(b"BGM-DATA").unwrap();
+        let looping = system.audio().play_with_completion(&system, music, true).unwrap();
+        let sfx = system.audio().load_smaf(b"SFX-HIT").unwrap();
+        system.audio().play_with_completion(&system, sfx, false).unwrap();
+        for _ in 0..50 {
+            system.audio().reap();
+        }
+        assert_eq!(counters.stop.load(Ordering::SeqCst), 0);
+        assert!(!looping.stopped.load(Ordering::Relaxed));
     }
 
     /// A clip played once over its own looping playback, then stopped, stops
