@@ -31,6 +31,7 @@ mod icons;
 mod library;
 mod manage;
 mod mapping;
+mod memory;
 mod pointer;
 mod presets;
 mod saves;
@@ -1025,6 +1026,10 @@ impl App {
         // Whether the frame on screen carries it, to draw it again without
         // once its time is up.
         let mut toast_up = false;
+        // The device's memory, so a game that keeps taking it is stopped
+        // before the whole handheld stops answering.
+        let mut memory = memory::MemoryWatch::new();
+        eprintln!("[game] {name}");
 
         loop {
             let tick_started = Instant::now();
@@ -1111,6 +1116,10 @@ impl App {
             let failure = host::tick(16);
             if !failure.is_empty() {
                 return Err(failure);
+            }
+            if let Some(message) = memory.check() {
+                release_all(&mut pressed, &mut keys);
+                return Err(message);
             }
             // Doubled through hq2x as it is taken when the game is set to it.
             let quality = self.game_quality(game);
