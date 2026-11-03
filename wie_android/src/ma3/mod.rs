@@ -506,7 +506,23 @@ struct MixerVoice {
     /// decays (release tails finished), then `render` drops it, so a stop does
     /// not cut the tail.
     closing: bool,
+    /// Frames rendered since the clip let it go, so a tail that never decays
+    /// - a note left held, an envelope that sustains - is cut after
+    /// [`CLOSING_TAIL_FRAMES`] rather than kept forever.
+    closed_for: usize,
 }
+
+/// The longest a let-go voice rings on before it is dropped. Every voice is
+/// synthesised on the audio thread, so voices that never fall silent pile up
+/// into work that a slow handheld cannot keep up with - three seconds is past
+/// any release tail a title writes.
+const CLOSING_TAIL_FRAMES: usize = 3 * SAMPLE_RATE as usize;
+
+/// The most recorded waves waiting to be mixed. A wave leaves the queue only
+/// as the output plays it, so while the output is not being pulled - a
+/// device that stalled, a pause - a title that fires a sound every frame would
+/// otherwise grow the queue for as long as it ran.
+const MAX_QUEUED_PCM: usize = 32;
 
 /// A recorded wave playing back into the mix, resampled from its own rate to the
 /// output rate on the fly.
@@ -628,6 +644,9 @@ impl SynthMixer {
             return;
         }
         let step = f64::from(source_rate) / f64::from(SAMPLE_RATE);
+        if self.pcm.len() >= MAX_QUEUED_PCM {
+            self.pcm.remove(0);
+        }
         self.pcm.push(PcmOneShot {
             samples,
             position: 0.0,
@@ -642,7 +661,15 @@ impl SynthMixer {
         self.next_id = self.next_id.wrapping_add(1).max(1);
         let mut synth = Synth::new();
         synth.set_master_volume(self.clip_volume(clip));
-        self.voices.insert(id, MixerVoice { clip, synth, closing: false });
+        self.voices.insert(
+            id,
+            MixerVoice {
+                clip,
+                synth,
+                closing: false,
+                closed_for: 0,
+            },
+        );
         id
     }
 
@@ -709,6 +736,13 @@ impl SynthMixer {
         let mut active_voices = 0usize;
 
         for (id, entry) in &mut self.voices {
+            if entry.closing {
+                entry.closed_for += frames;
+                if entry.closed_for > CLOSING_TAIL_FRAMES {
+                    finished.push(*id);
+                    continue;
+                }
+            }
             match entry.synth.render(frames) {
                 Some(samples) => {
                     active_voices += 1;
@@ -885,7 +919,34 @@ fn wav(samples: &[i16]) -> Vec<u8> {
 mod tests {
     use std::sync::Arc;
 
-    use super::{CHANNELS, Channel, MAX_VOICES, SAMPLE_RATE, Synth, SynthMixer, modulation_depth};
+    use super::{CHANNELS, CLOSING_TAIL_FRAMES, Channel, MAX_QUEUED_PCM, MAX_VOICES, SAMPLE_RATE, Synth, SynthMixer, modulation_depth};
+
+    /// A voice let go with a note still held is dropped once its tail has had
+    /// its time, rather than synthesised for ever.
+    #[test]
+    fn a_let_go_voice_that_never_decays_is_dropped() {
+        let mut mixer = SynthMixer::new();
+        let voice = mixer.open(1);
+        mixer.note_on(voice, 0, 60, 100);
+        mixer.close(voice);
+
+        let mut rendered = 0;
+        while rendered <= CLOSING_TAIL_FRAMES + 1024 && mixer.voices.contains_key(&voice) {
+            mixer.render(1024);
+            rendered += 1024;
+        }
+        assert!(!mixer.voices.contains_key(&voice));
+    }
+
+    /// Recorded waves no output is pulling stop piling up at the cap.
+    #[test]
+    fn queued_waves_are_capped() {
+        let mut mixer = SynthMixer::new();
+        for _ in 0..MAX_QUEUED_PCM * 4 {
+            mixer.push_pcm(vec![1; 4410], SAMPLE_RATE);
+        }
+        assert_eq!(mixer.pcm.len(), MAX_QUEUED_PCM);
+    }
 
     #[test]
     fn song_mixes_then_finishes() {
