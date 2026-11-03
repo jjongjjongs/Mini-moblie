@@ -23,6 +23,7 @@
 
 mod ack;
 mod billing_gateway;
+mod bpnet;
 pub(crate) mod candy_shop;
 mod capture;
 mod com2us;
