@@ -114,6 +114,14 @@ fn j2me_panel(data: &[u8]) -> Option<(u32, u32)> {
         // lot of empty room. The 128x160 it was drawn for packs the picture back
         // in, which the host then scales up to the device.
         "f70b755c0455e1b42d363976472246c8" => Some((128, 160)),
+        // 바람의나라 (Ensony, MIDlet "zw"), packed as an .alz. Its canvas puts
+        // its origin at `((getWidth() - 120) / 2 - 4, (getHeight() - 120) / 2 - 3)`
+        // and draws everything from two rows above that to 123 below, 128 wide
+        // - so on the default 240x320 the whole game sat small in the middle.
+        // 128x130 puts the origin at (0, 2): every screen, the story's heading
+        // and the soft-key labels included, fills the panel, which the host
+        // then scales up to the device.
+        "8d4f482957aa2a41ffd5663a8b12013b" => Some((128, 130)),
         // 지혜의검 (LGT, MIDlet "Brain"). Its DESC.jad names the handset it was
         // drawn for - `MIDletX-LCD-Size:176,200` - and the canvas lays itself
         // out from getWidth/getHeight, so the default 240x320 panel puts every
