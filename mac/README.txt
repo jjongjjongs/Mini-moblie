@@ -16,7 +16,7 @@ Android 앱, Windows판과 같은 에뮬레이터로 KTF / LGT / SKT / BREW / J2
      맨 아래의 "MiniMobile" 옆 "그래도 열기"를 누릅니다.
    - "손상되었기 때문에 열 수 없습니다"가 뜨면 터미널에서 한 번:
          xattr -dr com.apple.quarantine /Applications/MiniMobile.app
-3. 게임 파일(.zip, .jar)을 창에 끌어다 놓거나 games 폴더에 넣습니다.
+3. 게임 파일(.zip, .jar, .alz)을 창에 끌어다 놓거나 games 폴더에 넣습니다.
    (게임 목록에서 fn+F2를 누르면 games 폴더가 Finder로 열립니다.)
 
 키 (기본값, 설정에서 바꿀 수 있음)

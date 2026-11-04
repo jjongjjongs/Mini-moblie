@@ -10,7 +10,7 @@ Android 앱과 같은 에뮬레이터로 KTF / LGT / SKT / BREW / J2ME 게임을
 1. 압축을 풀면 나오는 MiniMobile.sh 와 minimobile 폴더를 기기 SD카드의
    ports 폴더에 그대로 복사합니다. (ports 폴더 위치는 펌웨어마다 다릅니다.
    ArkOS·ROCKNIX는 roms/ports 입니다.)
-2. 게임 파일(.zip, .jar)을 minimobile/games 폴더에 넣습니다.
+2. 게임 파일(.zip, .jar, .alz)을 minimobile/games 폴더에 넣습니다.
 3. 게임 목록을 새로 고친 뒤 Ports 메뉴에서 MiniMobile을 실행합니다.
 
 버튼

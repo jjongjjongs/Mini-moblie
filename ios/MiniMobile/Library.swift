@@ -31,7 +31,7 @@ func takeString(_ pointer: UnsafeMutablePointer<CChar>?) -> String? {
 /// Where games and their saves live. Everything is under Documents, so the
 /// Files app reaches it too (UIFileSharingEnabled).
 enum Library {
-    static let extensions: Set<String> = ["zip", "jar", "jad"]
+    static let extensions: Set<String> = ["zip", "jar", "jad", "alz"]
 
     static var documents: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]

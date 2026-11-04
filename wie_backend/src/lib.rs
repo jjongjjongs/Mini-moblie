@@ -1,6 +1,7 @@
 #![no_std]
 extern crate alloc;
 
+mod alz;
 mod audio_sink;
 pub mod billing;
 pub mod canvas;
@@ -219,6 +220,12 @@ pub fn extract_zip(zip: &[u8]) -> Result<BTreeMap<String, Vec<u8>>> {
 
     use std::io::{Cursor, Read};
     use zip::ZipArchive;
+
+    // A dump packed with ALZip holds the same files a zip would, so it is read
+    // here and every loader and host takes it as it takes a zip.
+    if alz::is_alz(zip) {
+        return alz::extract_alz(zip).map(strip_common_directory);
+    }
 
     // Korean handset archives carry filenames in EUC-KR alongside an Info-ZIP
     // Unicode Path extra field whose checksum does not match, because the name

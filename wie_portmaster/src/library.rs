@@ -970,7 +970,7 @@ pub fn draw_message(text: &str, hint: &str, width: u32, height: u32) -> Vec<u8> 
 fn is_game(path: &Path) -> bool {
     path.extension()
         .and_then(|x| x.to_str())
-        .is_some_and(|x| x.eq_ignore_ascii_case("zip") || x.eq_ignore_ascii_case("jar"))
+        .is_some_and(|x| x.eq_ignore_ascii_case("zip") || x.eq_ignore_ascii_case("jar") || x.eq_ignore_ascii_case("alz"))
 }
 
 /// What the list calls a game: its file name without the extension.

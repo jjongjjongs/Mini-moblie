@@ -10,7 +10,7 @@ Android 앱과 같은 에뮬레이터로 KTF / LGT / SKT / BREW / J2ME 게임을
        tar xzf MiniMobile-linux-x86_64.tar.gz
 2. MiniMobile.sh를 실행합니다.
        ./MiniMobile/MiniMobile.sh
-3. 게임 파일(.zip, .jar)을 창에 끌어다 놓거나 games 폴더에 넣습니다.
+3. 게임 파일(.zip, .jar, .alz)을 창에 끌어다 놓거나 games 폴더에 넣습니다.
 
 시스템의 SDL2를 씁니다. 대부분의 데스크톱 배포판에는 이미 있고, 없으면
 설치하세요.

@@ -1,5 +1,10 @@
 use alloc::{boxed::Box, format, vec, vec::Vec};
-use core::iter;
+use core::{
+    future::Future,
+    iter,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 use classfile::{AttributeInfoCode, ConstantPoolReference, Opcode};
 use jvm::{ClassInstance, JavaChar, JavaError, JavaType, JavaValue, Jvm, Result};
@@ -10,6 +15,39 @@ enum ExecuteNext {
     Continue,
     Jump(u32),
     Return(JavaValue),
+}
+
+/// How many backward jumps a method makes between turns it hands to the
+/// other threads.
+///
+/// Java threads are preemptive and these are not: a thread runs until it
+/// waits on something. A title written for a handset can wait without
+/// waiting - 바람의나라's MIDlet thread is a bare
+/// `while (true) { if (flag) { ... } }`, the flag set by its canvas when it
+/// paints - and that loop, never giving a turn, kept the canvas from ever
+/// painting. Every loop goes back through a backward jump, so counting them
+/// is what gives every loop a turn, while one that runs a few thousand times
+/// and ends barely notices.
+const BACKWARD_JUMPS_PER_TURN: u32 = 4096;
+
+/// Hands the turn to the executor's other tasks once, and carries on when
+/// polled again.
+struct PassTurn {
+    passed: bool,
+}
+
+impl Future for PassTurn {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if self.passed {
+            return Poll::Ready(());
+        }
+        self.passed = true;
+        cx.waker().wake_by_ref();
+
+        Poll::Pending
+    }
 }
 
 pub struct Interpreter;
@@ -37,14 +75,22 @@ impl Interpreter {
             .extend(iter::repeat_n(JavaValue::Void, code_attribute.max_locals as usize));
 
         let mut iter = code_attribute.code.range(0..);
+        let mut backward_jumps = 0u32;
         while let Some((offset, opcode)) = iter.next() {
             tracing::trace!("Opcode {opcode:?}");
 
             let result = Self::execute_opcode(jvm, *offset, opcode, &mut stack_frame, return_type).await;
             match result {
                 Ok(ExecuteNext::Continue) => {}
-                Ok(ExecuteNext::Jump(offset)) => {
-                    iter = code_attribute.code.range(offset..);
+                Ok(ExecuteNext::Jump(target)) => {
+                    if target <= *offset {
+                        backward_jumps += 1;
+                        if backward_jumps >= BACKWARD_JUMPS_PER_TURN {
+                            backward_jumps = 0;
+                            PassTurn { passed: false }.await;
+                        }
+                    }
+                    iter = code_attribute.code.range(target..);
                 }
                 Ok(ExecuteNext::Return(value)) => return Ok(value),
                 Err(JavaError::JavaException(e)) => {
