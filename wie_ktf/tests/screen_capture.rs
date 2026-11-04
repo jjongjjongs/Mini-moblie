@@ -53,6 +53,9 @@
 //! - `WIE_WATCH` - branch traces and write watches, spelled as the handset's
 //!   probe setting is (`pc:3a376/500,w:1518700`) - see
 //!   `wie_backend::probe::set_watches`.
+//! - `WIE_DUTY` - every this many ticks, the host time those ticks took
+//!   against the guest time they covered, as a percentage: how much of a
+//!   core the title keeps busy, which is what a handset feels as heat.
 //! - `WIE_REDRAW_ON_REQUEST` - feed a host paint only when the title asks for
 //!   one, which is what the Android frontend does. Off, a paint arrives every
 //!   forty ticks regardless, and a repaint the runtime loses is covered up.
@@ -767,6 +770,17 @@ fn run_once(
     }
     let mut fired = vec![Fired::default(); script.len()];
 
+    let duty_every: Option<u32> = std::env::var("WIE_DUTY").ok().and_then(|x| x.parse().ok()).filter(|x| *x > 0);
+    let mut duty_host = Duration::ZERO;
+    let mut duty_guest_from = tick_clock.now_ms();
+    let executed = || {
+        (
+            wie_core_arm::EXECUTED_INSTRUCTIONS.load(core::sync::atomic::Ordering::Relaxed),
+            wie_core_arm::SVC_COUNT.load(core::sync::atomic::Ordering::Relaxed),
+        )
+    };
+    let mut duty_executed_from = executed();
+
     let mut ticks = 0;
     let mut stopped = None;
     while ticks < ticks_limit && !exited.load(Ordering::SeqCst) {
@@ -812,6 +826,26 @@ fn run_once(
             break;
         }
         let tick_took = tick_started.elapsed();
+        if let Some(every) = duty_every {
+            duty_host += tick_took;
+            if (ticks + 1) % every == 0 {
+                let guest = tick_clock.now_ms() - duty_guest_from;
+                let (insns, svcs) = executed();
+                eprintln!(
+                    "[probe] duty ticks {}..{}: host {}ms for guest {}ms ({}%), {} insns, {} svcs",
+                    ticks + 1 - every,
+                    ticks + 1,
+                    duty_host.as_millis(),
+                    guest,
+                    duty_host.as_millis() as u64 * 100 / guest.max(1),
+                    insns - duty_executed_from.0,
+                    svcs - duty_executed_from.1
+                );
+                duty_host = Duration::ZERO;
+                duty_guest_from = tick_clock.now_ms();
+                duty_executed_from = (insns, svcs);
+            }
+        }
         if tick_took > core::time::Duration::from_millis(200) {
             let insns = wie_core_arm::EXECUTED_INSTRUCTIONS.load(core::sync::atomic::Ordering::Relaxed) - before.0;
             let svcs = wie_core_arm::SVC_COUNT.load(core::sync::atomic::Ordering::Relaxed) - before.1;

@@ -1,11 +1,11 @@
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, task::Wake, vec::Vec};
 use core::{
     future::Future,
     pin::Pin,
-    task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
+    task::{Context, Poll, Waker},
 };
 
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use spin::Mutex;
 
 use wie_util::{Result, WieError};
@@ -13,6 +13,31 @@ use wie_util::{Result, WieError};
 use crate::time::Instant;
 
 type Task = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+
+/// How long a parked task is left before it is polled again unwoken, in
+/// milliseconds. See [`ExecutorInner::parked_tasks`].
+const PARKED_REPOLL_MS: u64 = 20;
+
+/// The tasks woken since they were last polled. Kept apart from
+/// [`ExecutorInner`] so a wake - which can come from inside another task's
+/// poll, or from a drop - never needs the executor's own lock.
+type Woken = Arc<Mutex<HashSet<usize>>>;
+
+/// A task's waker: waking it marks the task as having something to do.
+struct TaskWaker {
+    task_id: usize,
+    woken: Woken,
+}
+
+impl Wake for TaskWaker {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.woken.lock().insert(self.task_id);
+    }
+}
 
 pub struct ExecutorInner {
     current_task_id: Option<usize>,
@@ -29,6 +54,21 @@ pub struct ExecutorInner {
     /// Whether the last step did nothing but pass the CPU around. See
     /// [`Executor::note_yield`].
     last_step_only_yielded: bool,
+    /// Tasks waiting on something that will wake them - a monitor, a
+    /// `wait`, a class another thread is loading - with when they last ran.
+    ///
+    /// Every task used to be polled on every step, so a guest thread blocked
+    /// in a monitor was switched in, found still blocked and switched out
+    /// again thousands of times a second, and the tick never ended early for
+    /// it: 영웅서기 ZERO, whose threads spend their time waiting on one another,
+    /// held two thirds of a desktop core on its logo, and a handset warm. A
+    /// task that comes back pending without sleeping, yielding or waking
+    /// itself is left here until its waker fires - or, so that a future that
+    /// never wakes anything still gets on, until it has sat for
+    /// [`PARKED_REPOLL_MS`].
+    parked_tasks: HashMap<usize, Instant>,
+    /// Each task's waker, made once.
+    wakers: HashMap<usize, Waker>,
 }
 
 pub trait AsyncCallable<R>: Send
@@ -71,6 +111,7 @@ impl AsyncCallableResult for () {
 #[derive(Clone)]
 pub struct Executor {
     inner: Arc<Mutex<ExecutorInner>>,
+    woken: Woken,
 }
 
 impl Executor {
@@ -85,9 +126,14 @@ impl Executor {
             last_now: Instant::from_epoch_millis(0),
             yielded_tasks: Vec::new(),
             last_step_only_yielded: false,
+            parked_tasks: HashMap::new(),
+            wakers: HashMap::new(),
         }));
 
-        Self { inner }
+        Self {
+            inner,
+            woken: Arc::new(Mutex::new(HashSet::new())),
+        }
     }
 
     pub fn spawn<C, R>(&self, callable: C) -> usize
@@ -110,9 +156,42 @@ impl Executor {
             inner.last_task_id
         };
 
-        self.inner.lock().tasks.insert(task_id, Box::pin(fut));
+        let waker = Waker::from(Arc::new(TaskWaker {
+            task_id,
+            woken: self.woken.clone(),
+        }));
+        let mut inner = self.inner.lock();
+        inner.wakers.insert(task_id, waker);
+        inner.tasks.insert(task_id, Box::pin(fut));
 
         task_id
+    }
+
+    /// The tasks with something to do: neither asleep nor parked.
+    fn runnable_count(inner: &ExecutorInner) -> usize {
+        inner.tasks.len() - inner.sleeping_tasks.len() - inner.parked_tasks.len()
+    }
+
+    /// When the earliest sleeping task wakes or parked task is polled again
+    /// anyway, if there is one.
+    fn next_wakeup(inner: &ExecutorInner) -> Option<Instant> {
+        let sleeping = inner.sleeping_tasks.values().copied();
+        let parked = inner.parked_tasks.values().map(|&parked_at| parked_at + PARKED_REPOLL_MS);
+
+        sleeping.chain(parked).min()
+    }
+
+    /// Takes the parked tasks that have been woken back into the running.
+    fn unpark_woken(&self) {
+        let woken = core::mem::take(&mut *self.woken.lock());
+        if woken.is_empty() {
+            return;
+        }
+
+        let mut inner = self.inner.lock();
+        for task_id in woken {
+            inner.parked_tasks.remove(&task_id);
+        }
     }
 
     // TODO we need to remove error handling from here. we need to JoinHandle like on spawn..
@@ -128,14 +207,14 @@ impl Executor {
                 break;
             }
 
+            self.unpark_woken();
             {
                 let inner = self.inner.lock();
-                let running_task_count = inner.tasks.len() - inner.sleeping_tasks.len();
-                if running_task_count == 0 && !inner.sleeping_tasks.is_empty() {
-                    let next_wakeup = *inner.sleeping_tasks.values().min().unwrap();
-                    if now < next_wakeup {
-                        break;
-                    }
+                if Self::runnable_count(&inner) == 0
+                    && let Some(next_wakeup) = Self::next_wakeup(&inner)
+                    && now < next_wakeup
+                {
+                    break;
                 }
             }
 
@@ -161,6 +240,7 @@ impl Executor {
     /// the host stop spinning a budget out and sleep until real work is due,
     /// instead of busy-waiting through the idle remainder of every tick.
     pub fn is_idle(&self) -> bool {
+        self.unpark_woken();
         let inner = self.inner.lock();
 
         // Or every task that is awake is only spinning, which is idle in every
@@ -170,8 +250,7 @@ impl Executor {
             return true;
         }
 
-        let running = inner.tasks.len() - inner.sleeping_tasks.len();
-        running == 0 && inner.sleeping_tasks.values().min().is_some_and(|&wakeup| inner.last_now < wakeup)
+        Self::runnable_count(&inner) == 0 && Self::next_wakeup(&inner).is_some_and(|wakeup| inner.last_now < wakeup)
     }
 
     /// How long until there is work again, in milliseconds, when there is none
@@ -189,18 +268,18 @@ impl Executor {
     /// than sleeping - a spin has no wake-up to wait for, and the host's
     /// interval is what keeps it from pegging the thread.
     pub fn idle_for(&self, now: Instant) -> Option<u64> {
+        self.unpark_woken();
         let inner = self.inner.lock();
 
         if inner.last_step_only_yielded {
             return None;
         }
 
-        let running = inner.tasks.len() - inner.sleeping_tasks.len();
-        if running != 0 {
+        if Self::runnable_count(&inner) != 0 {
             return None;
         }
 
-        let wakeup = *inner.sleeping_tasks.values().min()?;
+        let wakeup = Self::next_wakeup(&inner)?;
 
         (wakeup > now).then(|| wakeup - now)
     }
@@ -246,12 +325,14 @@ impl Executor {
         let mut polled = 0usize;
 
         let mut first_error = None;
-        let waker = self.create_waker();
 
         for &task_id in poll_order.iter() {
+            self.unpark_woken();
+
             // Everything the poll needs is settled under one lock: whether the
-            // task is still asleep, the task itself, and whose task it is.
-            let mut task = {
+            // task is still asleep or parked, the task itself, and whose task
+            // it is.
+            let (mut task, waker) = {
                 let mut inner = self.inner.lock();
 
                 match inner.sleeping_tasks.get(&task_id) {
@@ -262,20 +343,37 @@ impl Executor {
                     None => {}
                 }
 
+                match inner.parked_tasks.get(&task_id) {
+                    Some(&parked_at) if now < parked_at + PARKED_REPOLL_MS => continue,
+                    Some(_) => {
+                        inner.parked_tasks.remove(&task_id);
+                    }
+                    None => {}
+                }
+
+                let Some(waker) = inner.wakers.get(&task_id).cloned() else {
+                    continue;
+                };
                 match inner.tasks.remove(&task_id) {
                     Some(task) => {
                         inner.current_task_id = Some(task_id);
-                        task
+                        (task, waker)
                     }
                     // Gone since the order was taken - a task another one finished off.
                     None => continue,
                 }
             };
 
+            // A wake from before this poll is spent by it; one during it means
+            // the task has more to do straight away.
+            self.woken.lock().remove(&task_id);
+
             let mut context = Context::from_waker(&waker);
 
             polled += 1;
             let poll = task.as_mut().poll(&mut context);
+
+            let woken_during_poll = self.woken.lock().remove(&task_id);
 
             // `inner` is declared after `task`, so the lock is released before a
             // finished task is dropped - a drop that reached back into the executor
@@ -288,6 +386,8 @@ impl Executor {
                     // A task that finished while asleep takes its wake-up with it.
                     // Left behind, it would count as a sleeper with no task forever.
                     inner.sleeping_tasks.remove(&task_id);
+                    inner.parked_tasks.remove(&task_id);
+                    inner.wakers.remove(&task_id);
 
                     if let Err(err) = result
                         && first_error.is_none()
@@ -296,6 +396,13 @@ impl Executor {
                     }
                 }
                 Poll::Pending => {
+                    // Waiting on something that wakes it: leave it until it
+                    // does. See `ExecutorInner::parked_tasks`.
+                    let sleeping = inner.sleeping_tasks.contains_key(&task_id);
+                    let yielded = inner.yielded_tasks.contains(&task_id);
+                    if !sleeping && !yielded && !woken_during_poll {
+                        inner.parked_tasks.insert(task_id, now);
+                    }
                     inner.tasks.insert(task_id, task);
                 }
             }
@@ -343,22 +450,6 @@ impl Executor {
         let until = self.inner.lock().last_now + timeout;
         self.inner.lock().sleeping_tasks.insert(task_id, until);
     }
-
-    fn create_waker(&self) -> Waker {
-        unsafe fn noop_clone(_data: *const ()) -> RawWaker {
-            noop_raw_waker()
-        }
-
-        unsafe fn noop(_data: *const ()) {}
-
-        const NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(noop_clone, noop, noop, noop);
-
-        const fn noop_raw_waker() -> RawWaker {
-            RawWaker::new(core::ptr::null(), &NOOP_WAKER_VTABLE)
-        }
-
-        unsafe { Waker::from_raw(noop_raw_waker()) }
-    }
 }
 
 #[cfg(test)]
@@ -384,11 +475,12 @@ mod tests {
     impl Future for YieldOnce {
         type Output = ();
 
-        fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
             if self.0 {
                 Poll::Ready(())
             } else {
                 self.0 = true;
+                cx.waker().wake_by_ref();
                 Poll::Pending
             }
         }
@@ -458,6 +550,91 @@ mod tests {
 
         assert!(turns.load(Ordering::Relaxed) > 1, "the working task has to keep being polled");
         assert!(!executor.is_idle());
+    }
+
+    /// Waits until `open` is set, waking nothing itself - the way a guest
+    /// thread waits on a monitor: whoever opens it wakes the waiter.
+    struct Gate {
+        open: Arc<AtomicBool>,
+        waker: Arc<Mutex<Option<core::task::Waker>>>,
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl Future for Gate {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            self.polls.fetch_add(1, Ordering::Relaxed);
+            if self.open.load(Ordering::Relaxed) {
+                return Poll::Ready(());
+            }
+            *self.waker.lock() = Some(cx.waker().clone());
+
+            Poll::Pending
+        }
+    }
+
+    /// A task waiting on something that will wake it is not polled again
+    /// until it is woken: it does not hold the tick, and the host may sleep.
+    /// 영웅서기 ZERO's threads wait on each other's monitors, and polling them
+    /// all on every step kept two thirds of a core busy on its logo.
+    #[test]
+    fn a_task_waiting_to_be_woken_is_left_until_it_is() {
+        let mut executor = Executor::new();
+
+        let open = Arc::new(AtomicBool::new(false));
+        let waker = Arc::new(Mutex::new(None));
+        let polls = Arc::new(AtomicUsize::new(0));
+        let done = Arc::new(AtomicBool::new(false));
+        let gate = Gate {
+            open: open.clone(),
+            waker: waker.clone(),
+            polls: polls.clone(),
+        };
+        let finished = done.clone();
+        executor.spawn(move || async move {
+            gate.await;
+            finished.store(true, Ordering::Relaxed);
+        });
+
+        executor.tick(advancing_clock(0)).unwrap();
+        assert_eq!(polls.load(Ordering::Relaxed), 1, "a parked task is not polled over and over");
+        assert!(executor.is_idle(), "a task waiting to be woken leaves the host free to sleep");
+
+        open.store(true, Ordering::Relaxed);
+        waker.lock().take().unwrap().wake();
+        assert!(!executor.is_idle(), "a woken task is work to do");
+
+        executor.tick(advancing_clock(1)).unwrap();
+        assert!(done.load(Ordering::Relaxed));
+    }
+
+    /// And one whose future never wakes anything still gets on, a little late.
+    #[test]
+    fn a_parked_task_that_is_never_woken_is_polled_again_after_a_while() {
+        let mut executor = Executor::new();
+
+        let open = Arc::new(AtomicBool::new(false));
+        let polls = Arc::new(AtomicUsize::new(0));
+        let done = Arc::new(AtomicBool::new(false));
+        let gate = Gate {
+            open: open.clone(),
+            waker: Arc::new(Mutex::new(None)),
+            polls: polls.clone(),
+        };
+        let finished = done.clone();
+        executor.spawn(move || async move {
+            gate.await;
+            finished.store(true, Ordering::Relaxed);
+        });
+
+        executor.tick(advancing_clock(0)).unwrap();
+        open.store(true, Ordering::Relaxed);
+        executor.tick(advancing_clock(5)).unwrap();
+        assert!(!done.load(Ordering::Relaxed));
+
+        executor.tick(advancing_clock(100)).unwrap();
+        assert!(done.load(Ordering::Relaxed));
     }
 
     #[test]
