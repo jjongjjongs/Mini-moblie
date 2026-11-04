@@ -84,6 +84,8 @@ pub struct System {
     /// How many rows are cropped from the bottom of the frame before it reaches
     /// the screen. See [`System::title_present_crop_bottom`].
     title_present_crop_bottom: Arc<AtomicU32>,
+    /// See [`System::title_present_crop_top`].
+    title_present_crop_top: Arc<AtomicU32>,
     /// The picture size enlarged to the panel as it is decoded, as
     /// `width << 16 | height`, `0` for none.
     /// See [`System::title_stretched_picture`].
@@ -350,6 +352,7 @@ impl System {
             title_repaints_whole_frame: Arc::new(AtomicBool::new(false)),
             title_blank_mutable_image_transparent: Arc::new(AtomicBool::new(false)),
             title_present_crop_bottom: Arc::new(AtomicU32::new(0)),
+            title_present_crop_top: Arc::new(AtomicU32::new(0)),
             title_stretched_picture: Arc::new(AtomicU32::new(0)),
             missing_file_fails_read_open: Arc::new(AtomicBool::new(false)),
         }
@@ -582,6 +585,15 @@ impl System {
 
     pub fn set_title_present_crop_bottom(&self, rows: u32) {
         self.title_present_crop_bottom.store(rows, Ordering::SeqCst);
+    }
+
+    /// See [`crate::quirks::TitleQuirks::present_crop_top`].
+    pub fn title_present_crop_top(&self) -> u32 {
+        self.title_present_crop_top.load(Ordering::SeqCst)
+    }
+
+    pub fn set_title_present_crop_top(&self, rows: u32) {
+        self.title_present_crop_top.store(rows, Ordering::SeqCst);
     }
 
     /// The size of a picture that is enlarged to the panel as it is decoded,

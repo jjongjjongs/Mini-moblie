@@ -29,7 +29,7 @@ use alloc::{
 use jvm::{Result as JvmResult, runtime::JavaLangString};
 use jvm_rust::ClassDefinitionImpl;
 
-use wie_backend::{Platform, System, TaskRunner};
+use wie_backend::{Platform, System, TaskRunner, TitlePlatform, title_quirks};
 use wie_core_arm::{Allocator, ArmCore};
 use wie_jvm_support::{JvmSupport, RustJavaJvmImplementation};
 use wie_util::{Result, WieError};
@@ -108,10 +108,16 @@ pub fn load(platform: Box<dyn Platform>, files: BTreeMap<String, Vec<u8>>) -> Re
     );
     image.relocate(TEXT_BASE, DATA_BASE)?;
 
+    let quirks = title_quirks(TitlePlatform::Skt, &id);
+    let annunciator_rows = quirks.annunciator_rows.unwrap_or(0);
+
     let mut core = ArmCore::new(false, None)?;
-    write_annunciator_rows(&mut core)?;
+    write_annunciator_rows(&mut core, annunciator_rows)?;
 
     let system = System::new(platform, &id, &id, SktNativeTaskRunner { core: core.clone() });
+    system.set_title_annunciator_rows(quirks.annunciator_rows);
+    system.set_title_present_crop_top(quirks.present_crop_top);
+    system.set_title_present_crop_bottom(quirks.present_crop_bottom);
 
     for (name, data) in &files {
         let name = match &directory {
@@ -141,9 +147,9 @@ pub fn load(platform: Box<dyn Platform>, files: BTreeMap<String, Vec<u8>>) -> Re
 }
 
 /// The title draws over the whole panel; nothing is kept back for a status
-/// strip.
-fn write_annunciator_rows(core: &mut ArmCore) -> Result<()> {
-    wie_util::write_generic(core, wie_wipi_c::api::graphics::ANNUNCIATOR_ROWS_PTR, 0u32)
+/// strip, unless its quirks say a strip of `rows` is there.
+fn write_annunciator_rows(core: &mut ArmCore, rows: u32) -> Result<()> {
+    wie_util::write_generic(core, wie_wipi_c::api::graphics::ANNUNCIATOR_ROWS_PTR, rows)
 }
 
 #[tracing::instrument(name = "start", skip_all)]

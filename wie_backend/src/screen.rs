@@ -37,7 +37,7 @@ pub fn present(system: &System, image: &dyn Image) {
     // A title whose engine draws a band it does not want shown - a GAMEVIL
     // on-screen keypad along the bottom - has those rows trimmed here, before
     // anything else, so the rest of this works on the frame the player sees.
-    let cropped = crop_bottom(image, system.title_present_crop_bottom());
+    let cropped = crop_rows(image, system.title_present_crop_top(), system.title_present_crop_bottom());
     let image: &dyn Image = cropped.as_deref().unwrap_or(image);
 
     if system.title_draws_sideways()
@@ -56,7 +56,8 @@ pub fn present(system: &System, image: &dyn Image) {
 /// row counts the panel's columns back from the right. `panel_width` is the
 /// panel's, which is the turned frame's height.
 ///
-/// Cropped rows come off the bottom, so they move nothing above them.
+/// Rows cropped off the bottom move nothing above them. A title cropped at
+/// the top is one played on the keypad, which has no point to place.
 pub fn frame_point_on_panel(sideways: bool, panel_width: u32, x: i32, y: i32) -> (i32, i32) {
     if sideways { (panel_width as i32 - 1 - y, x) } else { (x, y) }
 }
@@ -68,7 +69,16 @@ pub fn frame_point_on_panel(sideways: bool, panel_width: u32, x: i32, y: i32) ->
 /// copied for it), for a crop that would take the whole frame or more, and for
 /// a frame whose bytes do not amount to the size it reports - each of which
 /// leaves the caller showing the frame it already has.
+#[cfg(test)]
 fn crop_bottom(image: &dyn Image, rows: u32) -> Option<Box<dyn Image>> {
+    crop_rows(image, 0, rows)
+}
+
+/// A copy of `image` with its top `top` and bottom `bottom` rows dropped, or
+/// `None` when there is nothing to do or nothing sensible to do - the same
+/// cases as for the bottom alone above.
+fn crop_rows(image: &dyn Image, top: u32, bottom: u32) -> Option<Box<dyn Image>> {
+    let rows = top.saturating_add(bottom);
     if rows == 0 {
         return None;
     }
@@ -82,30 +92,21 @@ fn crop_bottom(image: &dyn Image, rows: u32) -> Option<Box<dyn Image>> {
     let kept = height - rows;
     let bpp = image.bytes_per_pixel();
     let raw = image.raw();
-    let wanted = (kept as usize) * (width as usize) * (bpp as usize);
-    if raw.len() < wanted {
+    let stride = (width as usize) * (bpp as usize);
+    let start = (top as usize) * stride;
+    let end = start + (kept as usize) * stride;
+    if raw.len() < end {
         return None;
     }
 
-    // Rows are contiguous and row-major, so the kept frame is the leading
+    // Rows are contiguous and row-major, so the kept frame is one run of
     // `kept` rows of bytes - no per-pixel work, just the right pixel type over
-    // the leading bytes.
+    // those bytes.
+    let bytes = &raw[start..end];
     match bpp {
-        1 => Some(Box::new(VecImageBuffer::<Rgb332Pixel>::from_raw(
-            width,
-            kept,
-            pod_collect_to_vec(&raw[..wanted]),
-        ))),
-        2 => Some(Box::new(VecImageBuffer::<Rgb565Pixel>::from_raw(
-            width,
-            kept,
-            pod_collect_to_vec(&raw[..wanted]),
-        ))),
-        4 => Some(Box::new(VecImageBuffer::<Rgb8Pixel>::from_raw(
-            width,
-            kept,
-            pod_collect_to_vec(&raw[..wanted]),
-        ))),
+        1 => Some(Box::new(VecImageBuffer::<Rgb332Pixel>::from_raw(width, kept, pod_collect_to_vec(bytes)))),
+        2 => Some(Box::new(VecImageBuffer::<Rgb565Pixel>::from_raw(width, kept, pod_collect_to_vec(bytes)))),
+        4 => Some(Box::new(VecImageBuffer::<Rgb8Pixel>::from_raw(width, kept, pod_collect_to_vec(bytes)))),
         _ => None,
     }
 }
@@ -159,7 +160,7 @@ where
 mod tests {
     use alloc::vec;
 
-    use super::{crop_bottom, frame_point_on_panel, quarter_turn_left};
+    use super::{crop_bottom, crop_rows, frame_point_on_panel, quarter_turn_left};
     use crate::canvas::{Image, Rgb565Pixel, VecImageBuffer};
 
     /// Rows read bottom-up as columns, which is a quarter turn to the left.
@@ -221,6 +222,17 @@ mod tests {
         let image = VecImageBuffer::<Rgb565Pixel>::from_raw(4, 4, vec![1, 2, 3, 4]);
 
         assert!(quarter_turn_left(&image).is_none());
+    }
+
+    /// Dropping rows off the top keeps the rows under them exactly.
+    #[test]
+    fn cropping_the_top_keeps_the_rows_under_it() {
+        let image = VecImageBuffer::<Rgb565Pixel>::from_raw(2, 4, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+
+        let cropped = crop_rows(&image, 1, 1).unwrap();
+
+        assert_eq!((cropped.width(), cropped.height()), (2, 2));
+        assert_eq!(cropped.raw().as_ref(), bytemuck::cast_slice(&[3u16, 4, 5, 6]));
     }
 
     /// Dropping the bottom rows keeps the leading rows exactly and shortens the

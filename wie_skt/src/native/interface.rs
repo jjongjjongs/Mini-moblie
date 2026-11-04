@@ -12,7 +12,15 @@
 //! 메이플스토리 해적편 passes it and does with the answer; each table below
 //! says which.
 
-use alloc::{borrow::ToOwned, boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    sync::Arc,
+    vec,
+    vec::Vec,
+};
 
 use jvm::Jvm;
 use wipi_types::wipic::WIPICWord;
@@ -356,12 +364,15 @@ async fn show_annunciator(_context: &mut dyn WIPICContext, id: WIPICWord, show: 
 /// Writes one fact about the status strip, as a decimal string, into the
 /// caller's buffer. 해적편 and 도적편 ask for `"HEIGHT"` and `atoi` the
 /// answer into how far down their screen starts; 0, because no strip is
-/// drawn. A title that cannot read it - the answer is not 0 - exits on the
-/// spot, which is what the first run of 0083070426 did.
+/// drawn, unless the title's quirks give it a strip (해적편's 4, whose rows
+/// are cropped again as the frame is shown). A title that cannot read it -
+/// the answer is not 0 - exits on the spot, which is what the first run of
+/// 0083070426 did.
 async fn get_annunciator_info(context: &mut dyn WIPICContext, id: WIPICWord, key: WIPICWord, out: WIPICWord, out_size: WIPICWord) -> Result<i32> {
     let key = read_null_terminated_string_bytes(context, key)?;
+    let height = context.system().title_annunciator_rows().unwrap_or(0).to_string();
     let value: &[u8] = match key.as_slice() {
-        b"HEIGHT" => b"0",
+        b"HEIGHT" => height.as_bytes(),
         b"WIDTH" => b"240",
         _ => {
             tracing::warn!("SKT grpGetAnnunciatorInfo({id}, {:?}): unknown key", String::from_utf8_lossy(&key));

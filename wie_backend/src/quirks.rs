@@ -160,6 +160,11 @@ pub struct TitleQuirks {
     /// [`crate::System::title_present_crop_bottom`].
     pub present_crop_bottom: u32,
 
+    /// Rows cut off the top of every frame before it reaches the screen, the
+    /// way [`present_crop_bottom`](Self::present_crop_bottom) cuts the bottom:
+    /// rows a title leaves for a status strip it was told is there.
+    pub present_crop_top: u32,
+
     /// The size of a full-screen picture the title draws at its own size on a
     /// larger panel, which is enlarged to the panel as it is decoded. `None`
     /// leaves every picture at the size it was drawn.
@@ -190,6 +195,7 @@ const fn panel(width: u32, height: u32) -> TitleQuirks {
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
         present_crop_bottom: 0,
+        present_crop_top: 0,
         stretched_picture: None,
     }
 }
@@ -209,6 +215,7 @@ const fn panel_transparent_mutable(width: u32, height: u32) -> TitleQuirks {
         repaints_whole_frame: false,
         blank_mutable_image_transparent: true,
         present_crop_bottom: 0,
+        present_crop_top: 0,
         stretched_picture: None,
     }
 }
@@ -226,6 +233,7 @@ const fn annunciator() -> TitleQuirks {
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
         present_crop_bottom: 0,
+        present_crop_top: 0,
         stretched_picture: None,
     }
 }
@@ -244,6 +252,7 @@ const fn annunciator_of(rows: u32) -> TitleQuirks {
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
         present_crop_bottom: 0,
+        present_crop_top: 0,
         stretched_picture: None,
     }
 }
@@ -261,6 +270,7 @@ const fn sideways() -> TitleQuirks {
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
         present_crop_bottom: 0,
+        present_crop_top: 0,
         stretched_picture: None,
     }
 }
@@ -280,6 +290,7 @@ const fn clears_frame() -> TitleQuirks {
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
         present_crop_bottom: 0,
+        present_crop_top: 0,
         stretched_picture: None,
     }
 }
@@ -311,6 +322,7 @@ const fn clip_includes_far_edge() -> TitleQuirks {
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
         present_crop_bottom: 0,
+        present_crop_top: 0,
         stretched_picture: None,
     }
 }
@@ -330,6 +342,7 @@ const fn skvm_scancode_keys() -> TitleQuirks {
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
         present_crop_bottom: 0,
+        present_crop_top: 0,
         stretched_picture: None,
     }
 }
@@ -349,6 +362,7 @@ const fn owns_graphics_state() -> TitleQuirks {
         repaints_whole_frame: false,
         blank_mutable_image_transparent: false,
         present_crop_bottom: 0,
+        present_crop_top: 0,
         stretched_picture: None,
     }
 }
@@ -369,6 +383,7 @@ const fn repaints_whole_frame() -> TitleQuirks {
         repaints_whole_frame: true,
         blank_mutable_image_transparent: false,
         present_crop_bottom: 0,
+        present_crop_top: 0,
         stretched_picture: None,
     }
 }
@@ -399,6 +414,15 @@ impl TitleQuirks {
     const fn with_bottom_cropped(self, rows: u32) -> Self {
         Self {
             present_crop_bottom: rows,
+            ..self
+        }
+    }
+
+    /// This entry, with the top `rows` cropped the way
+    /// [`present_crop_top`](Self::present_crop_top) describes.
+    const fn with_top_cropped(self, rows: u32) -> Self {
+        Self {
+            present_crop_top: rows,
             ..self
         }
     }
@@ -664,6 +688,12 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // an orange grid over every screen. Counting the far edge in draws the whole
     // cell and the grid is gone.
     (TitlePlatform::Skt, "0052335225", clip_includes_far_edge()),
+    // 메이플스토리 해적편: lays its screen out under a status strip as tall as
+    // the handset says, and draws the map's back layer from four rows down
+    // whatever it is told - so told the strip is 0 rows, the top four rows
+    // of every map kept scraps of other tiles over the sky. Told 4 they are
+    // cleared, and cut off as the frame is shown, so the map reaches the top.
+    (TitlePlatform::Skt, "0078410881", annunciator_of(4).with_top_cropped(4)),
     // 동방사신기: drawn for a handset whose clip took in its far edge. It clips
     // the whole screen with `setClip(0, 0, 239, 319)` where 239 and 319 are the
     // last pixel, not a width and a height - and its field a tile at a time the
