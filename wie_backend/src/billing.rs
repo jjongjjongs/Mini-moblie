@@ -2709,6 +2709,17 @@ fn next_box_draw(records: u8) -> u8 {
 /// A step of a xorshift rather than a counter, so consecutive draws are not the
 /// table in order, and deterministic within a run, which is what lets a test say
 /// what it does.
+/// The draw a 해적편 hatching picks its item by.
+///
+/// [`next_draw`] alone starts from the same seed every launch, so the first
+/// 피그미 hatched after starting the game was the same item every time. The
+/// frames presented so far - how long and how this session has been played -
+/// differ from one launch to the next, so they are mixed in.
+fn pirate_hatch_draw() -> u32 {
+    let frames = crate::system::frames_presented();
+    next_draw(u32::MAX) ^ (frames as u32).wrapping_mul(0x9e37_79b9) ^ (frames >> 32) as u32
+}
+
 fn next_draw(range: u32) -> u32 {
     use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -4492,7 +4503,14 @@ pub fn lgt_local_marked_command_response(request: &[u8]) -> Option<Vec<u8>> {
         // from the subscriber-led charge frames. Its reader takes the 도적편-style
         // confirmation body and none of it gates the hatch, so the granted result
         // carries that body zeroed.
-        PIRATE_CONFIRM_REQUEST if body.len() <= 4 => (PIRATE_CONFIRM_ANSWER, vec![0u8; HATCH_BODY]),
+        //
+        // An ordinary 피그미's is answered with what it hatched into, the way
+        // 시그너스기사단's is: zeroed, every one hatched into item 0,
+        // 브라운로키반다나. See `crate::local_network::pigmy::pirate_answer`.
+        PIRATE_CONFIRM_REQUEST if body.len() <= 4 => (
+            PIRATE_CONFIRM_ANSWER,
+            crate::local_network::pigmy::pirate_answer(body, pirate_hatch_draw()).unwrap_or_else(|| vec![0u8; HATCH_BODY]),
+        ),
         // 시그너스기사단's 피그미 hatching, told apart by its short body the same
         // way, answered with what it hatched into.
         CYGNUS_HATCH_REQUEST if body.len() <= 4 => (
@@ -15617,24 +15635,34 @@ mod tests {
     #[test]
     fn the_pirate_egg_hatch_confirmation_is_granted() {
         // What the title writes: command 0x06 and the short category body its
-        // item-range switch picked, the 10-byte frame it showed on the wire.
+        // item-range switch picked, the 10-byte frame it showed on the wire -
+        // an ordinary 피그미 raised by a character of up to level 20.
         let request = [0x0a, 0x00, 0x00, 0x00, 0xff, 0xff, 0x06, 0x00, 0x01, 0x00];
         assert_eq!(request.len(), 0x0a);
 
-        let response = lgt_local_marked_command_response(&request).unwrap();
+        let mut items = Vec::new();
+        for _ in 0..8 {
+            let response = lgt_local_marked_command_response(&request).unwrap();
 
-        // The length counts the whole frame and the marker and answering command
-        // are in place.
-        assert_eq!(u32::from_le_bytes(response[0..4].try_into().unwrap()) as usize, response.len());
-        assert_eq!(&response[4..6], &[0xff, 0xff]);
-        assert_eq!(u16::from_le_bytes(response[6..8].try_into().unwrap()), 0x0007);
+            // The length counts the whole frame and the marker and answering
+            // command are in place.
+            assert_eq!(u32::from_le_bytes(response[0..4].try_into().unwrap()) as usize, response.len());
+            assert_eq!(&response[4..6], &[0xff, 0xff]);
+            assert_eq!(u16::from_le_bytes(response[6..8].try_into().unwrap()), 0x0007);
 
-        // The reader takes a status it treats as granted only when zero and then
-        // fields that only feed the confirmation it draws; the whole payload is
-        // zero, so the status is granted wherever the reader reads it and no
-        // field gates the hatch. The body past the marker is the command and the
-        // 0x3c-byte payload its reader walks - the same 0x3e bytes the 0x0e hatch
-        // answers with.
+            // Granted, with one piece of equipment worn from up to level 20,
+            // in the 0x3c-byte payload its reader walks - the same 0x3e bytes
+            // past the marker the 0x0e hatch answers with.
+            assert_eq!(response[8], 0, "granted");
+            assert_eq!(&response[13..21], &[0, 0, 0, 0, 1, 0, 0, 0], "one piece of equipment");
+            assert_eq!(response.len() - 6, 0x3e);
+            items.push(u32::from_le_bytes(response[9..13].try_into().unwrap()));
+        }
+        assert!(items.iter().any(|&item| item != items[0]), "hatchings differ: {items:?}");
+
+        // Its other eggs are answered as before: granted, every field zero.
+        let other = [0x0a, 0x00, 0x00, 0x00, 0xff, 0xff, 0x06, 0x00, 0x09, 0x00];
+        let response = lgt_local_marked_command_response(&other).unwrap();
         assert!(response[8..].iter().all(|&byte| byte == 0));
         assert_eq!(response.len() - 6, 0x3e);
     }

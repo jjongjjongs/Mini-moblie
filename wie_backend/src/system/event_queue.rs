@@ -133,6 +133,11 @@ pub(crate) fn note_frame_presented() {
     FRAMES_PRESENTED.fetch_add(1, Ordering::Relaxed);
 }
 
+/// How many frames have been presented since the emulator started.
+pub(crate) fn frames_presented() -> u64 {
+    FRAMES_PRESENTED.load(Ordering::Relaxed)
+}
+
 /// The longest a release waits for that frame, so a title that draws nothing
 /// while a key is down still hears it let go.
 const RELEASE_HOLD_MAX_MS: u64 = 250;

@@ -31,6 +31,15 @@
 //! `0x0b` to `0x0d` for its other eggs; the second is zero or one. Its
 //! equipment table is `/data/item_equip.dat`, 88 bytes an item, the level at
 //! `+0x25`.
+//!
+//! 메이플스토리 해적편, the LGT and the SKT build alike, asks with command
+//! `0x0006` (built at the LGT build's `0x251a0`) and reads `0x0007` laid out
+//! the same again (`0x2592a`): the item, zero for equipment, how many. Its
+//! first byte is an ordinary 피그미's bracket - one for levels 1 to 20, one
+//! more for each ten after that, and eight for 81 and on - or `0x09` to
+//! `0x0e` for its other eggs; the second is zero or one. Its equipment table
+//! is `/data/item_equip.dat` again, LZMA-packed: 173 items of 62 bytes behind
+//! a four-byte head, the name at `+3` and the level at `+0x17`.
 
 use alloc::vec::Vec;
 
@@ -135,6 +144,27 @@ const CYGNUS_LEVELS: [u8; 541] = [
 /// table's last items, worn from 115.
 const CYGNUS_BRACKETS: u8 = 10;
 
+/// 해적편's equipment table as [`LEVELS`] keeps Live's: the level each item
+/// is worn from, or 255 for one a 피그미 does not hatch into - the
+/// beginner's 몽둥이 and the medals (81 to 86), and the 메이플 sets a quest
+/// gives with the 아이젠 a quest asks for (102 to 120).
+#[rustfmt::skip]
+const PIRATE_LEVELS: [u8; 173] = [
+    10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 10, 15, 20, 25, 30, 35,
+    40, 45, 50, 55, 60, 65, 70, 75, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65,
+    70, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 10, 15, 20, 25, 30,
+    35, 40, 45, 50, 55, 60, 65, 70, 75, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60,
+    65, 255, 255, 255, 255, 255, 255, 40, 60, 80, 40, 60, 80, 90, 40, 60, 80, 90, 40, 60,
+    80, 90, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 10, 20, 30, 40, 50, 60, 70, 80, 85, 90, 95, 10, 20, 30, 40, 50, 60, 70, 80,
+    85, 90, 95, 75, 80, 85, 90, 95, 70, 75, 80, 85, 90, 10, 20, 30, 40, 50, 60, 70,
+    80, 85, 90, 10, 20, 30, 40, 50, 60, 70, 80, 85, 90,
+];
+
+/// 해적편's last ordinary bracket, levels 81 and on, which reaches its
+/// table's last items, worn from 95.
+const PIRATE_BRACKETS: u8 = 8;
+
 /// What a 피그미 raised as `body` hatches into on its `draw`th hatching, or
 /// `None` for a request that is not a hatching.
 pub(super) fn answer(body: &[u8], draw: u32) -> Option<Vec<u8>> {
@@ -160,6 +190,22 @@ pub(crate) fn cygnus_answer(body: &[u8], draw: u32) -> Option<Vec<u8>> {
         0..=u32::from(u8::MAX - 1)
     };
     Some(granted(pick(&CYGNUS_LEVELS, levels, draw)))
+}
+
+/// What 해적편's 피그미 raised as `body` hatches into on its `draw`th
+/// hatching: for an ordinary 피그미, equipment worn from within twenty levels
+/// below its bracket's top. `None` for its other eggs, which are left as they
+/// were answered before, and for a body that is not a hatching.
+pub(crate) fn pirate_answer(body: &[u8], draw: u32) -> Option<Vec<u8>> {
+    let [bracket, 0 | 1] = *body else {
+        return None;
+    };
+    if !(1..=PIRATE_BRACKETS).contains(&bracket) {
+        return None;
+    }
+
+    let top = 10 * u32::from(bracket) + if bracket == PIRATE_BRACKETS { 20 } else { 10 };
+    Some(granted(pick(&PIRATE_LEVELS, top - 20..=top, draw)))
 }
 
 /// The answer granting `item`, one piece of equipment.
@@ -256,6 +302,30 @@ mod tests {
         assert!(cygnus_answer(&[0x0b, 0], 3).is_some());
         assert!(cygnus_answer(&[2, 1], 3).is_some());
         assert_eq!(cygnus_answer(&[2], 3), None);
+    }
+
+    #[test]
+    fn pirate_hatches_equipment_worn_within_its_bracket() {
+        for bracket in 1..=PIRATE_BRACKETS {
+            let top = 10 * u32::from(bracket) + if bracket == PIRATE_BRACKETS { 20 } else { 10 };
+            let items: Vec<u32> = (0..64)
+                .map(|draw| u32::from_le_bytes(pirate_answer(&[bracket, 0], draw).unwrap()[1..5].try_into().unwrap()))
+                .collect();
+            for &item in &items {
+                let level = u32::from(PIRATE_LEVELS[item as usize]);
+                assert!((top - 20..=top).contains(&level), "bracket {bracket} gave level {level}");
+            }
+            assert!(items.windows(2).any(|pair| pair[0] != pair[1]), "bracket {bracket} always the same");
+        }
+
+        // A first hatching's flag is a hatching too; the other eggs are not
+        // this answer's.
+        assert!(pirate_answer(&[3, 1], 0).is_some());
+        assert_eq!(pirate_answer(&[0x09, 0], 0), None);
+        assert_eq!(pirate_answer(&[3], 0), None);
+        // Item 0, 브라운로키반다나, is worn from 10; the medals are never hatched.
+        assert_eq!(PIRATE_LEVELS[0], 10);
+        assert!(PIRATE_LEVELS[82..=86].iter().all(|level| *level == 255));
     }
 
     #[test]

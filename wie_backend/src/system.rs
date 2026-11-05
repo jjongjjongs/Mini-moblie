@@ -20,7 +20,7 @@ use crate::{
     task_runner::TaskRunner,
 };
 
-pub(crate) use self::event_queue::note_frame_presented;
+pub(crate) use self::event_queue::{frames_presented, note_frame_presented};
 use self::{audio::Audio, event_queue::EventQueue, input_method::InputMethod};
 
 pub use self::{
