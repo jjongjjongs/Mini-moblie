@@ -120,42 +120,62 @@ final class Gamepad: ObservableObject {
         }
         center.addObserver(forName: .GCControllerDidDisconnect, object: nil, queue: .main) { [weak self] _ in
             self?.releaseAll()
-            self?.connected = GCController.controllers().first(where: { $0.extendedGamepad != nil })?.vendorName
+            self?.connected = GCController.controllers().first(where: Gamepad.isPad)?.vendorName
         }
         GCController.controllers().forEach(configure)
     }
 
+    /// Whether a controller is a pad this can play with: one with a D-pad or
+    /// an A button. Read through its physical profile rather than as an
+    /// extended gamepad, which only a pad with thumbsticks is - 8BitDo's
+    /// FlipPad, a D-pad and buttons and no sticks, is a directional gamepad,
+    /// and was never seen at all.
+    static func isPad(_ controller: GCController) -> Bool {
+        let profile = controller.physicalInputProfile
+        return profile.dpads[GCInputDirectionPad] != nil || profile.buttons[GCInputButtonA] != nil
+    }
+
     private func configure(_ controller: GCController) {
-        guard let pad = controller.extendedGamepad else { return }
+        guard Gamepad.isPad(controller) else { return }
         connected = controller.vendorName ?? "게임패드"
-        var inputs: [(GCControllerButtonInput, PadButton)] = [
-            (pad.dpad.up, .up), (pad.dpad.down, .down), (pad.dpad.left, .left), (pad.dpad.right, .right),
-            (pad.buttonA, .a), (pad.buttonB, .b), (pad.buttonX, .x), (pad.buttonY, .y),
-            (pad.leftShoulder, .l1), (pad.rightShoulder, .r1), (pad.leftTrigger, .l2), (pad.rightTrigger, .r2),
-            (pad.buttonMenu, .start),
-        ]
-        if let stick = pad.leftThumbstickButton {
-            inputs.append((stick, .l3))
+        let profile = controller.physicalInputProfile
+
+        var inputs: [(GCControllerButtonInput, PadButton)] = []
+        if let dpad = profile.dpads[GCInputDirectionPad] {
+            inputs += [(dpad.up, .up), (dpad.down, .down), (dpad.left, .left), (dpad.right, .right)]
         }
-        if let stick = pad.rightThumbstickButton {
-            inputs.append((stick, .r3))
+        // Whatever of these the pad has; a pad without one leaves its
+        // button unpressable rather than the pad unusable.
+        let named: [(String, PadButton)] = [
+            (GCInputButtonA, .a), (GCInputButtonB, .b), (GCInputButtonX, .x), (GCInputButtonY, .y),
+            (GCInputLeftShoulder, .l1), (GCInputRightShoulder, .r1),
+            (GCInputLeftTrigger, .l2), (GCInputRightTrigger, .r2),
+            (GCInputButtonMenu, .start),
+            (GCInputLeftThumbstickButton, .l3), (GCInputRightThumbstickButton, .r3),
+        ]
+        for (name, button) in named {
+            if let input = profile.buttons[name] {
+                inputs.append((input, button))
+            }
         }
         for (input, button) in inputs {
             input.pressedChangedHandler = { [weak self] _, _, pressed in
                 self?.press(button, pressed, from: button.rawValue)
             }
         }
-        // The left stick steers as the D-pad does, pressing what it has.
-        let stick: [(GCControllerButtonInput, PadButton)] = [
-            (pad.leftThumbstick.up, .up), (pad.leftThumbstick.down, .down),
-            (pad.leftThumbstick.left, .left), (pad.leftThumbstick.right, .right),
-        ]
-        for (input, button) in stick {
-            input.pressedChangedHandler = { [weak self] _, _, pressed in
-                self?.press(button, pressed, from: 100 + button.rawValue)
+        // The left stick, on a pad that has one, steers as the D-pad does,
+        // pressing what it has.
+        if let stick = profile.dpads[GCInputLeftThumbstick] {
+            let directions: [(GCControllerButtonInput, PadButton)] = [
+                (stick.up, .up), (stick.down, .down), (stick.left, .left), (stick.right, .right),
+            ]
+            for (input, button) in directions {
+                input.pressedChangedHandler = { [weak self] _, _, pressed in
+                    self?.press(button, pressed, from: 100 + button.rawValue)
+                }
             }
         }
-        pad.buttonOptions?.pressedChangedHandler = { [weak self] _, _, pressed in
+        profile.buttons[GCInputButtonOptions]?.pressedChangedHandler = { [weak self] _, _, pressed in
             self?.selectHeld = pressed
             if pressed {
                 self?.capture?(nil)
