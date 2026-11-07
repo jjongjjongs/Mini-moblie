@@ -33,6 +33,10 @@
 //! after which the title writes the handset's own `epic19.dat` (`0x15654c`) and
 //! goes on to its title screen. Answered with three empty slots and nothing
 //! else, it is a new account on this handset.
+//!
+//! Every launch after that logs in at start-up with command `0x012e` - the
+//! version word, twelve bytes the licence keeps, the program's id and the
+//! model - and waits on `0x012f`, whose body the title does not read.
 
 use alloc::{boxed::Box, vec::Vec};
 
@@ -47,6 +51,12 @@ const HEADER: usize = 8;
 
 const AUTHENTICATE: u16 = 0x012c;
 const AUTHENTICATED: u16 = 0x012d;
+
+/// Every launch after the first logs in with what the licence keeps; the
+/// answer's body is not read (`0x1bf822` goes straight on), so an empty one
+/// lets it in.
+const LOG_IN: u16 = 0x012e;
+const LOGGED_IN: u16 = 0x012f;
 
 const SLOTS: usize = 3;
 const SLOT: usize = 0x1c;
@@ -147,6 +157,10 @@ fn answer(frame: &[u8]) -> Option<Vec<u8>> {
             tracing::info!("epichearts: 최초인증 granted, a new account");
             Some(reply(AUTHENTICATED, &new_account()))
         }
+        LOG_IN => {
+            tracing::info!("epichearts: logged in");
+            Some(reply(LOGGED_IN, &[]))
+        }
         _ => None,
     }
 }
@@ -240,5 +254,29 @@ mod tests {
             assert_eq!(body[slot * 0x1c + 7], 0xff, "slot {slot} is empty");
         }
         assert!(body[3 * 0x1c..].iter().all(|&byte| byte == 0));
+    }
+
+    /// A launch after the first logs in, off the device log, and is let in.
+    #[test]
+    fn a_later_launch_logs_in() {
+        let mut log_in = vec![0x46, 0x00, 0x00, 0x00, 0xff, 0xff, 0x2e, 0x01, 0x45, 0x00, 0x02, 0x01];
+        log_in.extend_from_slice(&[0xad, 0xde, 0x24, 0xce, 0x04, 0x80, 0xc0, 0x2b, 0x76, 0x40, 0x10, 0xce]);
+        log_in.extend_from_slice(&[0; 8]);
+        log_in.extend_from_slice(b"0001042932");
+        log_in.extend_from_slice(&[0; 11]);
+        log_in.extend_from_slice(b"Emulator");
+        log_in.extend_from_slice(&[0; 9]);
+        assert_eq!(log_in.len(), 0x46);
+
+        let mut connection = EpicHeartsConnection::new();
+        let mut greeting = [0u8; 9];
+        let _ = connection.read(&mut greeting);
+        connection.write(&log_in);
+
+        let mut out = vec![0u8; 64];
+        let LocalRead::Data(read) = connection.read(&mut out) else {
+            panic!("no answer");
+        };
+        assert_eq!(&out[..read], &[8, 0, 0, 0, 0xff, 0xff, 0x2f, 0x01]);
     }
 }
