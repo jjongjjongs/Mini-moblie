@@ -34,14 +34,13 @@
 //! goes on to its title screen. Answered with three empty slots and nothing
 //! else, it is a new account on this handset.
 //!
-//! Every launch after that logs in at start-up with command `0x012e` - the
-//! version word, twelve bytes the licence keeps, the program's id and the
-//! model - and is answered the way the 최초인증 is, with the account under
-//! `0x012d`. (The dispatcher's other answer, `0x012f` at `0x1bf822`, clears
-//! the character slot the account last named and saves - a deleted slot, not
-//! a login; given for the login, the title said `네트웍 서버와 통신 중에 오류가
-//! 있었습니다`.) This server keeps no characters, so the account comes back
-//! as the 최초인증 left it.
+//! A later launch logs in with command `0x012e` - the version word, the
+//! twelve bytes of the account's key (`+0xe4`), the program's id and the
+//! model; its builder (`0x1bec90`) sends it expecting `0x012f`, and answered
+//! `0x012d` instead the title says `예상하지 못한 패킷이 들어왔습니다 … : 301`.
+//! `0x012f`'s branch reads nothing of the body. What the title asks for after
+//! it is not known yet: the requests it sends from here on are traced, so a
+//! device log names them.
 //!
 //! No frame from this server may have an empty body: the reader (`0x19ec0c`)
 //! takes the head, then waits for the body's length in bytes before it
@@ -61,9 +60,11 @@ const HEADER: usize = 8;
 const AUTHENTICATE: u16 = 0x012c;
 const AUTHENTICATED: u16 = 0x012d;
 
-/// Every launch after the first logs in with what the licence keeps, and is
-/// answered with the account, as [`AUTHENTICATE`] is.
+/// A later launch's login, sent expecting [`LOGGED_IN`] (`0x1becb8`).
 const LOG_IN: u16 = 0x012e;
+const LOGGED_IN: u16 = 0x012f;
+/// Not read, but a frame's body cannot be empty.
+const LOGGED_IN_BODY: [u8; 1] = [0];
 
 const SLOTS: usize = 3;
 const SLOT: usize = 0x1c;
@@ -166,7 +167,7 @@ fn answer(frame: &[u8]) -> Option<Vec<u8>> {
         }
         LOG_IN => {
             tracing::info!("epichearts: logged in");
-            Some(reply(AUTHENTICATED, &new_account()))
+            Some(reply(LOGGED_IN, &LOGGED_IN_BODY))
         }
         _ => None,
     }
@@ -284,10 +285,8 @@ mod tests {
         let LocalRead::Data(read) = connection.read(&mut out) else {
             panic!("no answer");
         };
-        // The account, under 0x012d - not 0x012f, which deletes a slot.
-        let reply = &out[..read];
-        assert_eq!(u32::from_le_bytes(reply[..4].try_into().unwrap()) as usize, reply.len());
-        assert_eq!(&reply[4..8], &[0xff, 0xff, 0x2d, 0x01]);
-        assert_eq!(reply.len() - 8, 3 * 0x1c + 15);
+        // 0x012f, which the login is sent expecting, with a body however
+        // short: the reader only dispatches a frame once some of it arrives.
+        assert_eq!(&out[..read], &[9, 0, 0, 0, 0xff, 0xff, 0x2f, 0x01, 0]);
     }
 }
