@@ -789,7 +789,7 @@ async fn handle_svc(core: &mut ArmCore, state: &mut SvcState, id: SvcId) -> Resu
 /// second in town, as KTF's titles do - see `wie_ktf`'s `try_fast_wipic_call`.
 fn try_fast_graphics(core: &mut ArmCore, slot: u32) -> Result<Option<WIPICWord>> {
     use graphics::{ContextLayout, WIPICGraphicsContextIdx};
-    const LAYOUT: ContextLayout = ContextLayout::Ktf;
+    const LAYOUT: ContextLayout = ContextLayout::Skt;
 
     Ok(Some(match slot {
         5 => {

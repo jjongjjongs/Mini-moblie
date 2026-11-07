@@ -55,9 +55,10 @@ pub struct SktWIPICContext {
 #[async_trait::async_trait]
 impl WIPICContext for SktWIPICContext {
     /// The handset's `MC_GrpContext` is the whole struct, mask first - the
-    /// layout KTF keeps too. See `ContextLayout`.
+    /// layout KTF keeps too - with an alpha that is also the operation's
+    /// parameter. See `ContextLayout::Skt`.
     fn graphics_context_layout(&self) -> ContextLayout {
-        ContextLayout::Ktf
+        ContextLayout::Skt
     }
 
     /// The planes behind frame buffer handles of their own, as on KTF.

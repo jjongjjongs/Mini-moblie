@@ -337,9 +337,14 @@ where
             }
         }
         // The reference ignores an alpha outside 0..=0xff rather than storing it.
+        // SKT's hands it to the operation as well, whatever it is - see
+        // [`ContextLayout::Skt`].
         WIPICGraphicsContextIdx::AlphaIdx => {
             if pv <= 0xff {
                 grp_ctx.alpha = pv;
+            }
+            if layout.offsets().alpha_is_param {
+                grp_ctx.param1 = pv;
             }
         }
         WIPICGraphicsContextIdx::PixelopIdx => {
@@ -5259,6 +5264,33 @@ mod tests {
 
         assert_eq!(non_black, 900);
         assert_eq!(colours, 2);
+    }
+
+    /// 포춘골프2 sets its operation's fade level and key through the alpha,
+    /// `0x7f00f81f`, and never sets op 6. SKT hands that to the operation; KTF
+    /// keeps the reference's rule and drops an alpha past `0xff`, parameter and
+    /// all.
+    #[test]
+    fn skt_alpha_is_also_the_operations_parameter() {
+        const CTX: u32 = 0x1000;
+
+        for (layout, alpha, param1) in [(ContextLayout::Skt, 0xff, 0x7f00_f81f), (ContextLayout::Ktf, 0xff, 0xff)] {
+            let mut context = TestContext::new();
+            super::init_context_in(&mut context, layout, CTX).unwrap();
+            super::set_context_in(&mut context, layout, CTX, Idx::AlphaIdx, 0x7f00_f81f).unwrap();
+            super::set_context_in(&mut context, layout, CTX, Idx::PixelopIdx, 0x1137fd).unwrap();
+
+            let grp_ctx = super::read_context(&context, layout, CTX).unwrap();
+            assert_eq!(grp_ctx.alpha, alpha, "{layout:?}");
+            assert_eq!(grp_ctx.param1, param1, "{layout:?}");
+        }
+
+        // An alpha in range is still the alpha on SKT, and its parameter too.
+        let mut context = TestContext::new();
+        super::init_context_in(&mut context, ContextLayout::Skt, CTX).unwrap();
+        super::set_context_in(&mut context, ContextLayout::Skt, CTX, Idx::AlphaIdx, 0x80).unwrap();
+        let grp_ctx = super::read_context(&context, ContextLayout::Skt, CTX).unwrap();
+        assert_eq!((grp_ctx.alpha, grp_ctx.param1), (0x80, 0x80));
     }
 
     /// A clet saves the drawing state with `MC_grpGetContext` and later restores

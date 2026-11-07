@@ -112,6 +112,20 @@ pub enum ContextLayout {
     Lgt,
     /// `MC_GrpContext` whole: a mask, then the clip rectangle at `+0x04`.
     Ktf,
+    /// KTF's words, where the alpha is also the operation's parameter.
+    ///
+    /// 포춘골프2 says how its handset sets the alpha: its own setter
+    /// (`0x102498`), which it uses on the context it fills itself, writes op 4
+    /// to both `+0x20` and `+0x30`. On the context it hands `MC_grpDrawImage` it
+    /// calls `MC_grpSetContext` with op 4 and then op 5, never op 6, and the
+    /// alpha it sets is no alpha at all but its operation's argument - a fade
+    /// level in the top byte over the magenta it keys on, `0x7f00f81f`. Its
+    /// operation (`0x1137fd`) keeps the screen's pixel for the key and otherwise
+    /// moves it towards the sprite's by that level. Taken as KTF's reference
+    /// takes it - an alpha past `0xff` dropped, the parameter left at its
+    /// `0xff` - the level read as nothing, and the title menu was drawn as the
+    /// screen it lands on.
+    Skt,
 }
 
 /// Where one layout keeps each field, as a byte offset from the context.
@@ -141,6 +155,9 @@ pub(crate) struct ContextOffsets {
     /// `+0x1c` is its operation slot instead, so storing one there would plant
     /// a colour where an address goes.
     pub keeps_transparent: bool,
+    /// Whether op 4 sets the operation's parameter too, whatever its value - see
+    /// [`ContextLayout::Skt`].
+    pub alpha_is_param: bool,
 }
 
 impl ContextLayout {
@@ -169,8 +186,9 @@ impl ContextLayout {
                 transparent: 0x2c,
                 offset: 0x30,
                 keeps_transparent: false,
+                alpha_is_param: false,
             },
-            Self::Ktf => ContextOffsets {
+            Self::Ktf | Self::Skt => ContextOffsets {
                 mask: Some(0x00),
                 clip: 0x04,
                 fgpxl: 0x14,
@@ -183,6 +201,7 @@ impl ContextLayout {
                 font: 0x38,
                 style: 0x3c,
                 keeps_transparent: true,
+                alpha_is_param: self == Self::Skt,
             },
         }
     }
