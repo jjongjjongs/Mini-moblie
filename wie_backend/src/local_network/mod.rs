@@ -29,6 +29,7 @@ mod capture;
 mod com2us;
 mod dragoneyes;
 mod dsp;
+mod epichearts;
 mod fisher;
 mod fortress;
 mod funter;
@@ -54,6 +55,7 @@ pub use self::{
     capture::{CaptureAddress, CaptureEndpoint},
     dragoneyes::DragonEyesEndpoint,
     dsp::DspEndpoint,
+    epichearts::EpicHeartsEndpoint,
     fortress::FortressEndpoint,
     funter::FunterEndpoint,
     gpang::GpangEndpoint,

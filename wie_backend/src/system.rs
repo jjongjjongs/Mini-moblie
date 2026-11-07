@@ -311,6 +311,10 @@ impl System {
         // sat on its connecting box. See `crate::local_network::fortress`.
         local_network.register(Box::new(crate::local_network::FortressEndpoint));
 
+        // 에픽하츠's 최초인증 server, gone for years, which it reaches through
+        // `FastRelay`. See `crate::local_network::epichearts`.
+        local_network.register(Box::new(crate::local_network::EpicHeartsEndpoint));
+
         // 템페스트's 정품인증 servers, gone for years, which it reaches through the
         // `FastRelay` carrier library rather than a socket of its own: the
         // relay's address and the two ports its other modes dial. Answered in

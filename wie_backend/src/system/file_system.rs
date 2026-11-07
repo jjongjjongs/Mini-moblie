@@ -226,6 +226,14 @@ impl FilesystemOverlay {
         self.virtual_files.lock().get(&normalized).map(|d| d.len())
     }
 
+    /// The size of the file the archive shipped under `path`, whatever the
+    /// title has written there since - what came with the program, not what
+    /// it took up.
+    pub fn shipped_size(&self, path: &str) -> Option<usize> {
+        let normalized = normalize_guest_path(path)?;
+        self.virtual_files.lock().get(&normalized).map(|data| data.len())
+    }
+
     pub async fn read(&self, path: &str, offset: usize, count: usize, buf: &mut [u8]) -> Option<usize> {
         let normalized = normalize_guest_path(path)?;
 

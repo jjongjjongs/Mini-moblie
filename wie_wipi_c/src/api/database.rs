@@ -2107,9 +2107,16 @@ pub async fn available_storage_ktf(context: &mut dyn WIPICContext) -> Result<i32
         }
     }
 
+    // Shipped in the jar or beside it in `P/`: 에픽하츠 carries 3.3MB of maps
+    // and sprites as `P/epic*.dat`, and counted against the handset that read
+    // as a full disk - `MC_fsAvailable` 0 - so its first-run authentication
+    // stopped on `파일 공간이 필요합니다` before it ever dialled.
     let mut used = 0usize;
     for (name, bytes) in stored {
-        let packaged = context.get_resource_size(&name).await?.unwrap_or(0);
+        let packaged = match context.get_resource_size(&name).await? {
+            Some(size) => size,
+            None => context.system().filesystem().shipped_size(&name).unwrap_or(0),
+        };
         used += bytes.saturating_sub(packaged);
     }
 
@@ -2192,6 +2199,16 @@ async fn shipped_bytes(context: &mut dyn WIPICContext, name: &str) -> Result<Opt
     Ok(Some(data))
 }
 
+/// Licences a title's first-run authentication writes, sealed to the handset
+/// that ran it, by the title's AID and the store's name.
+///
+/// 에픽하츠 (01042932) checks `epic19.dat` at start-up (`0x15685c`) against
+/// `PHONENUMBER`, `PHONEMODEL`, `ESN` and `MANUFACTURE` and quits on the
+/// first frame where they differ - which they always do for one a dumped
+/// archive ships. Without one it asks for its 최초인증 instead, as on a fresh
+/// install, and writes this handset's own.
+const SEALED_LICENCES: &[(&str, &str)] = &[("01042932", "epic19.dat")];
+
 /// The names 메이플스토리 Live keeps its saves and their checksum under:
 /// `mapleliveuser`, `maplelive0`..`maplelive5`, their `r` records and
 /// `maplelivek`. See [`packaged_store_bytes`].
@@ -2227,7 +2244,25 @@ const MAPLE_LIVE_SAVE_PREFIX: &str = "maplelive";
 /// store copies it into the repository, so a copy an earlier run made - still
 /// byte for byte the one shipped, which this handset never wrote - goes too;
 /// otherwise the repository would go on handing the title the same saves.
+///
+/// A licence a title's first-run authentication wrote, sealed to the handset
+/// that ran it, goes the same way - see [`SEALED_LICENCES`].
 pub(crate) async fn packaged_store_bytes(context: &mut dyn WIPICContext, name: &str) -> Result<Option<Vec<u8>>> {
+    let aid = context.system().aid().to_owned();
+    if SEALED_LICENCES.iter().any(|(licensed, licence)| *licensed == aid && *licence == name) {
+        if let Some(shipped) = shipped_bytes(context, name).await? {
+            let system = context.system();
+            let pid = system.pid().to_owned();
+            let repository = system.platform().database_repository();
+            if repository.exists(name, &pid).await && repository.open(name, &pid).await.get(1).await.as_deref() == Some(shipped.as_slice()) {
+                tracing::info!("{name:?} is a copy of a licence sealed to another handset; removing it");
+                repository.delete(name, &pid).await;
+            }
+            tracing::info!("{name:?} is a licence sealed to another handset; leaving it out");
+        }
+        return Ok(None);
+    }
+
     if name.starts_with(MAPLE_LIVE_SAVE_PREFIX) {
         if let Some(shipped) = shipped_bytes(context, name).await? {
             let system = context.system();
