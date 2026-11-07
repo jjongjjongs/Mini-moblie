@@ -2200,14 +2200,19 @@ async fn shipped_bytes(context: &mut dyn WIPICContext, name: &str) -> Result<Opt
 }
 
 /// Licences a title's first-run authentication writes, sealed to the handset
-/// that ran it, by the title's AID and the store's name.
+/// that ran it, and saves bound to the account that licence opened, by the
+/// title's AID and the store's name.
 ///
 /// 에픽하츠 (01042932) checks `epic19.dat` at start-up (`0x15685c`) against
 /// `PHONENUMBER`, `PHONEMODEL`, `ESN` and `MANUFACTURE` and quits on the
 /// first frame where they differ - which they always do for one a dumped
 /// archive ships. Without one it asks for its 최초인증 instead, as on a fresh
-/// install, and writes this handset's own.
-const SEALED_LICENCES: &[(&str, &str)] = &[("01042932", "epic19.dat")];
+/// install, and writes this handset's own. The archive also ships the dumped
+/// handset's first character, `epic20.dat`: listed under 이어하기 as `Lv.00
+/// 00:00:00` - the account it belonged to is not this one - and chosen, it
+/// stopped on `메모리부족 등 오류로 게임을 실행할 수 없습니다`. Left out, the
+/// slot is a new one.
+const SEALED_LICENCES: &[(&str, &str)] = &[("01042932", "epic19.dat"), ("01042932", "epic20.dat")];
 
 /// The names 메이플스토리 Live keeps its saves and their checksum under:
 /// `mapleliveuser`, `maplelive0`..`maplelive5`, their `r` records and
@@ -2255,10 +2260,10 @@ pub(crate) async fn packaged_store_bytes(context: &mut dyn WIPICContext, name: &
             let pid = system.pid().to_owned();
             let repository = system.platform().database_repository();
             if repository.exists(name, &pid).await && repository.open(name, &pid).await.get(1).await.as_deref() == Some(shipped.as_slice()) {
-                tracing::info!("{name:?} is a copy of a licence sealed to another handset; removing it");
+                tracing::info!("{name:?} is a copy of a store sealed to another handset; removing it");
                 repository.delete(name, &pid).await;
             }
-            tracing::info!("{name:?} is a licence sealed to another handset; leaving it out");
+            tracing::info!("{name:?} is sealed to another handset; leaving it out");
         }
         return Ok(None);
     }
