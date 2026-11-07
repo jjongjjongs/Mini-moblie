@@ -36,9 +36,16 @@
 //!
 //! Every launch after that logs in at start-up with command `0x012e` - the
 //! version word, twelve bytes the licence keeps, the program's id and the
-//! model - and waits on `0x012f`, whose body the title does not read. No
-//! frame from this server may have an empty body: the reader dispatches one
-//! only once some of its body has arrived.
+//! model - and is answered the way the 최초인증 is, with the account under
+//! `0x012d`. (The dispatcher's other answer, `0x012f` at `0x1bf822`, clears
+//! the character slot the account last named and saves - a deleted slot, not
+//! a login; given for the login, the title said `네트웍 서버와 통신 중에 오류가
+//! 있었습니다`.) This server keeps no characters, so the account comes back
+//! as the 최초인증 left it.
+//!
+//! No frame from this server may have an empty body: the reader (`0x19ec0c`)
+//! takes the head, then waits for the body's length in bytes before it
+//! dispatches the frame, and asked for none it reads none, over and over.
 
 use alloc::{boxed::Box, vec::Vec};
 
@@ -54,14 +61,9 @@ const HEADER: usize = 8;
 const AUTHENTICATE: u16 = 0x012c;
 const AUTHENTICATED: u16 = 0x012d;
 
-/// Every launch after the first logs in with what the licence keeps; the
-/// answer's body is not read (`0x1bf822` goes straight on), but it cannot be
-/// empty: the reader (`0x19ec0c`) takes the head, then waits for the body's
-/// length in bytes before it dispatches the frame, and asked for none it reads
-/// none, over and over - the title stayed on `네트워크 접속중`. One byte does.
+/// Every launch after the first logs in with what the licence keeps, and is
+/// answered with the account, as [`AUTHENTICATE`] is.
 const LOG_IN: u16 = 0x012e;
-const LOGGED_IN: u16 = 0x012f;
-const LOGGED_IN_BODY: [u8; 1] = [0];
 
 const SLOTS: usize = 3;
 const SLOT: usize = 0x1c;
@@ -164,7 +166,7 @@ fn answer(frame: &[u8]) -> Option<Vec<u8>> {
         }
         LOG_IN => {
             tracing::info!("epichearts: logged in");
-            Some(reply(LOGGED_IN, &LOGGED_IN_BODY))
+            Some(reply(AUTHENTICATED, &new_account()))
         }
         _ => None,
     }
@@ -278,12 +280,14 @@ mod tests {
         let _ = connection.read(&mut greeting);
         connection.write(&log_in);
 
-        let mut out = vec![0u8; 64];
+        let mut out = vec![0u8; 256];
         let LocalRead::Data(read) = connection.read(&mut out) else {
             panic!("no answer");
         };
-        // A body however short: the reader only dispatches a frame once some
-        // of its body has arrived.
-        assert_eq!(&out[..read], &[9, 0, 0, 0, 0xff, 0xff, 0x2f, 0x01, 0]);
+        // The account, under 0x012d - not 0x012f, which deletes a slot.
+        let reply = &out[..read];
+        assert_eq!(u32::from_le_bytes(reply[..4].try_into().unwrap()) as usize, reply.len());
+        assert_eq!(&reply[4..8], &[0xff, 0xff, 0x2d, 0x01]);
+        assert_eq!(reply.len() - 8, 3 * 0x1c + 15);
     }
 }
