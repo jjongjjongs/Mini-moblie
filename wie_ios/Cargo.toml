@@ -1,0 +1,14 @@
+[package]
+name = "wie_ios"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The iOS app links this as a static library and calls it through
+# `include/wie.h`. iOS refuses executable memory to an installed app, so the
+# block engine runs its blocks as decoded ops there: no `jit` feature.
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+wie_android = { path = "../wie_android" }

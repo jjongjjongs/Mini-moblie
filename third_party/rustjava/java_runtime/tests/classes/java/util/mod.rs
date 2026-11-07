@@ -1,0 +1,16 @@
+mod jar;
+mod test_array_list;
+mod test_date;
+mod test_gregorian_calendar;
+mod test_hash_map;
+mod test_hash_set;
+mod test_hashtable;
+mod test_locale;
+mod test_properties;
+mod test_random;
+mod test_stack;
+mod test_timer;
+mod test_timezone;
+mod test_url;
+mod test_vector;
+mod zip;

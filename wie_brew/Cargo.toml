@@ -1,0 +1,24 @@
+[package]
+name = "wie_brew"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Enable the machine-code JIT engine (see wie_core_arm).
+jit = ["wie_core_arm/jit"]
+
+[dependencies]
+async-trait = { workspace = true }
+encoding_rs = { version = "^0.8", default-features = false, features = ["alloc"] }
+spin = { workspace = true }
+tracing = { workspace = true }
+
+wie_backend = { workspace = true }
+wie_core_arm = { workspace = true }
+wie_util = { workspace = true }
+wie_wipi_c = { workspace = true }
+
+[dev-dependencies]
+test_utils = { workspace = true }
+tracing-subscriber = { version = "^0.3", features = ["env-filter"] }
