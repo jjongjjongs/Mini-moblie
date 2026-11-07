@@ -36,7 +36,9 @@
 //!
 //! Every launch after that logs in at start-up with command `0x012e` - the
 //! version word, twelve bytes the licence keeps, the program's id and the
-//! model - and waits on `0x012f`, whose body the title does not read.
+//! model - and waits on `0x012f`, whose body the title does not read. No
+//! frame from this server may have an empty body: the reader dispatches one
+//! only once some of its body has arrived.
 
 use alloc::{boxed::Box, vec::Vec};
 
@@ -53,10 +55,13 @@ const AUTHENTICATE: u16 = 0x012c;
 const AUTHENTICATED: u16 = 0x012d;
 
 /// Every launch after the first logs in with what the licence keeps; the
-/// answer's body is not read (`0x1bf822` goes straight on), so an empty one
-/// lets it in.
+/// answer's body is not read (`0x1bf822` goes straight on), but it cannot be
+/// empty: the reader (`0x19ec0c`) takes the head, then waits for the body's
+/// length in bytes before it dispatches the frame, and asked for none it reads
+/// none, over and over - the title stayed on `네트워크 접속중`. One byte does.
 const LOG_IN: u16 = 0x012e;
 const LOGGED_IN: u16 = 0x012f;
+const LOGGED_IN_BODY: [u8; 1] = [0];
 
 const SLOTS: usize = 3;
 const SLOT: usize = 0x1c;
@@ -159,7 +164,7 @@ fn answer(frame: &[u8]) -> Option<Vec<u8>> {
         }
         LOG_IN => {
             tracing::info!("epichearts: logged in");
-            Some(reply(LOGGED_IN, &[]))
+            Some(reply(LOGGED_IN, &LOGGED_IN_BODY))
         }
         _ => None,
     }
@@ -277,6 +282,8 @@ mod tests {
         let LocalRead::Data(read) = connection.read(&mut out) else {
             panic!("no answer");
         };
-        assert_eq!(&out[..read], &[8, 0, 0, 0, 0xff, 0xff, 0x2f, 0x01]);
+        // A body however short: the reader only dispatches a frame once some
+        // of its body has arrived.
+        assert_eq!(&out[..read], &[9, 0, 0, 0, 0xff, 0xff, 0x2f, 0x01, 0]);
     }
 }
