@@ -53,6 +53,18 @@ pub(crate) const fn array_payload_offset(element_size: u32) -> u32 {
 const GUEST_GLOBAL_DATA_BASE: u32 = 0x7fff0000;
 const GUEST_GLOBAL_DATA_SIZE: u32 = 0x4000;
 
+/// Collect on every this many object allocations as well as on heap
+/// exhaustion; 0, the default, collects only when the heap is full. A probe
+/// sets it to bring the collector into a short run - a title takes many
+/// minutes of play to fill its heap.
+static GC_STRESS_EVERY: AtomicU32 = AtomicU32::new(0);
+static GC_STRESS_COUNT: AtomicU32 = AtomicU32::new(0);
+
+/// See [`GC_STRESS_EVERY`].
+pub fn set_gc_stress(every: u32) {
+    GC_STRESS_EVERY.store(every, Ordering::Relaxed);
+}
+
 #[derive(Clone, Debug)]
 pub struct JavaFieldBinding {
     pub class_name: String,
@@ -124,6 +136,12 @@ pub struct JavaHandles {
     /// crossing pins its objects here for its duration. Identity to nesting
     /// count, since the same object can be pinned by nested crossings.
     bridge_pins: Arc<Mutex<BTreeMap<usize, u32>>>,
+    /// Guest handles this runtime holds in its own Rust state while it builds
+    /// something out of several allocations - a multidimensional array's outer
+    /// array while its rows are allocated. Nothing in guest memory names it
+    /// yet, so a collection one of those allocations runs would free it.
+    /// Handle to nesting count.
+    handle_pins: Arc<Mutex<BTreeMap<u32, u32>>>,
     /// The live save points, whose jmp_buf blocks and captured register
     /// contexts are GC roots: a longjmp restores those registers, so an object
     /// named only there is still reachable. Set once the state exists.
@@ -147,6 +165,28 @@ impl Drop for BridgePin {
                 *count -= 1;
                 if *count == 0 {
                     pins.remove(identity);
+                }
+            }
+        }
+    }
+}
+
+/// Keeps guest handles rooted against the collector for as long as it is held
+/// - see [`JavaHandles::pin_handles`].
+#[must_use = "the pin is released as soon as the guard is dropped"]
+pub struct HandlePin {
+    pins: Arc<Mutex<BTreeMap<u32, u32>>>,
+    handles: Vec<u32>,
+}
+
+impl Drop for HandlePin {
+    fn drop(&mut self) {
+        let mut pins = self.pins.lock();
+        for handle in &self.handles {
+            if let Some(count) = pins.get_mut(handle) {
+                *count -= 1;
+                if *count == 0 {
+                    pins.remove(handle);
                 }
             }
         }
@@ -179,6 +219,7 @@ impl JavaHandles {
             gc_static_roots: Default::default(),
             jvm: Default::default(),
             bridge_pins: Default::default(),
+            handle_pins: Default::default(),
             save_points: Default::default(),
         }
     }
@@ -210,6 +251,22 @@ impl JavaHandles {
         BridgePin {
             pins: self.bridge_pins.clone(),
             identities,
+        }
+    }
+
+    /// Roots the given guest handles until the returned guard is dropped, for
+    /// code here that holds an object only in its own state across further
+    /// allocations.
+    pub fn pin_handles(&self, handles: Vec<u32>) -> HandlePin {
+        {
+            let mut pins = self.handle_pins.lock();
+            for &handle in &handles {
+                *pins.entry(handle).or_insert(0) += 1;
+            }
+        }
+        HandlePin {
+            pins: self.handle_pins.clone(),
+            handles,
         }
     }
 
@@ -404,6 +461,12 @@ impl JavaHandles {
     /// Allocates a guest block; if the heap is exhausted, runs the collector to
     /// reclaim unreachable objects and retries once before giving up.
     fn alloc_reporting_leaks(&self, core: &mut ArmCore, size: u32) -> Result<u32> {
+        let every = GC_STRESS_EVERY.load(Ordering::Relaxed);
+        if every != 0 && GC_STRESS_COUNT.fetch_add(1, Ordering::Relaxed) % every == every - 1 {
+            let (freed, freed_bytes) = self.gc_collect();
+            tracing::debug!("GC (stress) reclaimed {freed} objects ({freed_bytes} bytes)");
+        }
+
         match Allocator::alloc(core, size) {
             Ok(address) => Ok(address),
             Err(WieError::AllocationFailure) => {
@@ -445,6 +508,7 @@ impl JavaHandles {
             None => (Vec::new(), Vec::new()),
         };
         seeds.extend_from_slice(&save_point_registers);
+        seeds.extend(self.handle_pins.lock().keys().copied());
 
         for &(low, high) in stack_ranges
             .iter()
@@ -531,13 +595,41 @@ impl JavaHandles {
         // Pin objects the JVM still reaches. Gathered before taking the object
         // lock so a JVM read lock is never held across our heap mutation.
         let jvm_pinned: BTreeSet<usize> = jvm.gc_reachable_identities().into_iter().collect();
-        self.gc_collect_with_pins(&jvm_pinned)
+
+        // What a live guest object's JVM face holds is live too - see
+        // `gc_collect_with`.
+        let held_by = |handles: &[u32]| -> Vec<usize> {
+            let roots: Vec<Box<dyn ClassInstance>> = {
+                let entries = self.entries.lock();
+                handles.iter().filter_map(|handle| entries.get(handle).cloned()).collect()
+            };
+            if roots.is_empty() {
+                return Vec::new();
+            }
+
+            jvm.identities_reachable_from(&roots)
+        };
+
+        self.gc_collect_with(&jvm_pinned, &held_by)
     }
 
-    /// The sweep itself: frees every managed object reachable from neither the
-    /// guest roots nor `jvm_pinned` (JVM instance identities to keep). Split out
-    /// so the mechanics can be exercised without standing up a JVM.
-    fn gc_collect_with_pins(&self, jvm_pinned: &BTreeSet<usize>) -> (u32, u64) {
+    /// The sweep itself: frees every managed object that is live by none of
+    /// the guest roots, `jvm_pinned` (JVM instance identities to keep), the
+    /// bridge pins, or `held_by` - which names the identities the JVM faces of
+    /// the given handles reach in the JVM's own graph. Split out so the
+    /// mechanics can be exercised without standing up a JVM.
+    ///
+    /// The two graphs are walked together, to a fixed point. A guest object
+    /// can be live only through the JVM: 레전드오브마스터 keeps its items in a
+    /// `java.util.Vector` that a guest field names, and nothing the JVM's own
+    /// roots reach leads to that `Vector`, so the JVM pin never covered its
+    /// elements. A collection freed the items' guest blocks, and the next
+    /// `elementAt` handed each JVM instance a fresh, zeroed block - the
+    /// equipment list filled with blank weapons, and its paint threw an
+    /// `ArrayIndexOutOfBoundsException` every frame from then on. A JVM-pinned
+    /// guest object's own fields name guest objects too, so they are followed
+    /// as well.
+    fn gc_collect_with(&self, jvm_pinned: &BTreeSet<usize>, held_by: &dyn Fn(&[u32]) -> Vec<usize>) -> (u32, u64) {
         let seeds = self.gc_seeds();
         let mut core = self.core.clone();
 
@@ -546,8 +638,33 @@ impl JavaHandles {
             return (0, 0);
         }
 
-        let marked = self.gc_reachable(&objects, &seeds);
-        let bridge_pins = self.bridge_pins.lock();
+        let mut live_identities: BTreeSet<usize> = jvm_pinned.clone();
+        live_identities.extend(self.bridge_pins.lock().keys().copied());
+
+        // The handles behind live identities, which the guest marking starts
+        // from as well as from the root words.
+        let handles_of = |identities: &mut dyn Iterator<Item = &usize>| -> Vec<u32> {
+            let addresses = self.addresses.lock();
+            identities.filter_map(|identity| addresses.get(identity).copied()).collect()
+        };
+
+        let mut marked: BTreeSet<u32> = BTreeSet::new();
+        let mut frontier: Vec<u32> = seeds;
+        frontier.extend(handles_of(&mut live_identities.iter()));
+
+        loop {
+            let newly = self.gc_mark(&objects, &mut marked, &frontier);
+            if newly.is_empty() {
+                break;
+            }
+
+            let reached: Vec<usize> = held_by(&newly).into_iter().filter(|identity| live_identities.insert(*identity)).collect();
+            frontier = handles_of(&mut reached.iter());
+            if frontier.is_empty() {
+                break;
+            }
+        }
+
         let entries = self.entries.lock();
         let dead: Vec<u32> = objects
             .keys()
@@ -559,16 +676,12 @@ impl JavaHandles {
                 // Guest-unreachable, but keep it if the JVM still holds it or a
                 // bridge crossing has pinned it (its Rust-stack argument).
                 match entries.get(handle) {
-                    Some(instance) => {
-                        let identity = instance.identity();
-                        !jvm_pinned.contains(&identity) && !bridge_pins.contains_key(&identity)
-                    }
+                    Some(instance) => !live_identities.contains(&instance.identity()),
                     None => true,
                 }
             })
             .collect();
         drop(entries);
-        drop(bridge_pins);
 
         let mut freed = 0u32;
         let mut freed_bytes: u64 = 0;
@@ -598,22 +711,21 @@ impl JavaHandles {
         (freed, freed_bytes)
     }
 
-    /// The managed objects reachable from `seeds` (candidate root words),
-    /// following each object's payload words as further candidate references.
-    /// Conservative: any word equal to a managed handle is treated as a live
-    /// reference, so the result never under-approximates the live set.
-    fn gc_reachable(&self, objects: &BTreeMap<u32, GcObject>, seeds: &[u32]) -> BTreeSet<u32> {
+    /// Marks, into `marked`, the managed objects `words` name and everything
+    /// their payloads lead to, and returns the ones this call marked.
+    fn gc_mark(&self, objects: &BTreeMap<u32, GcObject>, marked: &mut BTreeSet<u32>, words: &[u32]) -> Vec<u32> {
         let core = self.core.clone();
-        let mut marked: BTreeSet<u32> = BTreeSet::new();
+        let mut newly: Vec<u32> = Vec::new();
         let mut worklist: Vec<u32> = Vec::new();
 
-        for &word in seeds {
+        for &word in words {
             if objects.contains_key(&word) && marked.insert(word) {
                 worklist.push(word);
             }
         }
 
         while let Some(handle) = worklist.pop() {
+            newly.push(handle);
             let object = objects[&handle];
             let mut offset = 0;
             while offset < object.payload_size {
@@ -626,6 +738,17 @@ impl JavaHandles {
                 offset += 4;
             }
         }
+
+        newly
+    }
+
+    /// The managed objects reachable from `seeds` (candidate root words),
+    /// following each object's payload words as further candidate references.
+    /// Conservative: any word equal to a managed handle is treated as a live
+    /// reference, so the result never under-approximates the live set.
+    fn gc_reachable(&self, objects: &BTreeMap<u32, GcObject>, seeds: &[u32]) -> BTreeSet<u32> {
+        let mut marked = BTreeSet::new();
+        self.gc_mark(objects, &mut marked, seeds);
 
         marked
     }
@@ -925,7 +1048,7 @@ mod tests {
         let point = save_points.alloc(&mut core, 0).unwrap();
         write_generic(&mut core, point + 0x20, kept).unwrap();
 
-        handles.gc_collect_with_pins(&BTreeSet::new());
+        handles.gc_collect_with(&BTreeSet::new(), &|_| Vec::new());
 
         assert!(
             handles.gc_objects.lock().contains_key(&kept),
@@ -956,7 +1079,7 @@ mod tests {
         write_generic(&mut core, slot, kept).unwrap();
         handles.register_gc_static_root(slot, slot + 4);
 
-        handles.gc_collect_with_pins(&BTreeSet::new());
+        handles.gc_collect_with(&BTreeSet::new(), &|_| Vec::new());
 
         assert!(
             handles.gc_objects.lock().contains_key(&kept),
@@ -1133,7 +1256,7 @@ mod tests {
 
         // No live threads means no roots, and no JVM pins, so both objects are
         // unreachable and the collector reclaims them and clears its registry.
-        let (freed, freed_bytes) = handles.gc_collect_with_pins(&alloc::collections::BTreeSet::new());
+        let (freed, freed_bytes) = handles.gc_collect_with(&alloc::collections::BTreeSet::new(), &|_| Vec::new());
         assert_eq!(freed, 2);
         assert!(freed_bytes > 0);
         assert!(handles.gc_objects.lock().is_empty());
@@ -1142,6 +1265,45 @@ mod tests {
         let c = handles.allocate_instance_with_fields(0, 8).unwrap();
         assert_ne!(c, 0);
         assert_eq!(handles.gc_objects.lock().len(), 1);
+    }
+
+    /// 레전드오브마스터's items: a live guest object's JVM face (a `Vector`)
+    /// holds an item's JVM instance, and nothing else names the item. The item
+    /// is live, and so is whatever its own guest fields name; only an object
+    /// nothing leads to is freed.
+    #[test]
+    fn gc_keeps_what_a_live_objects_jvm_face_holds() {
+        use wie_util::write_generic;
+
+        let mut core = ArmCore::new(false, None).unwrap();
+        Allocator::init(&mut core).unwrap();
+        let handles = JavaHandles::new(core.clone());
+
+        let holder = handles.allocate_instance_with_fields(0, 4).unwrap();
+        let item = handles.allocate_instance_with_fields(0, 4).unwrap();
+        let named_by_item = handles.allocate_instance_with_fields(0, 4).unwrap();
+        let garbage = handles.allocate_instance_with_fields(0, 4).unwrap();
+
+        let item_fields: u32 = read_generic(&core, item + INSTANCE_FIELDS_OFFSET).unwrap();
+        write_generic(&mut core, item_fields, named_by_item).unwrap();
+
+        const HOLDER: usize = 0x100;
+        const ITEM: usize = 0x200;
+        handles.addresses.lock().insert(HOLDER, holder);
+        handles.addresses.lock().insert(ITEM, item);
+
+        // The JVM's roots reach the holder; its JVM face reaches the item.
+        let pinned: BTreeSet<usize> = [HOLDER].into_iter().collect();
+        let held_by = |marked: &[u32]| -> Vec<usize> { if marked.contains(&holder) { alloc::vec![ITEM] } else { Vec::new() } };
+
+        let (freed, _) = handles.gc_collect_with(&pinned, &held_by);
+
+        assert_eq!(freed, 1);
+        let objects = handles.gc_objects.lock();
+        assert!(objects.contains_key(&holder));
+        assert!(objects.contains_key(&item), "an item only the holder's JVM face names");
+        assert!(objects.contains_key(&named_by_item), "what the item's own fields name");
+        assert!(!objects.contains_key(&garbage));
     }
 
     #[test]

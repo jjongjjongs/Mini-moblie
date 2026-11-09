@@ -23,7 +23,7 @@ use crate::{
     },
     error::JavaError,
     field::Field,
-    garbage_collector::{determine_garbage, reachable_identities},
+    garbage_collector::{determine_garbage, identities_reachable_from, reachable_identities},
     invoke_arg::InvokeArg,
     method::Method,
     monitor::{Monitor, MonitorWait, MonitorWaitTimeout},
@@ -992,6 +992,13 @@ impl Jvm {
         }
 
         Ok(garbage_count)
+    }
+
+    /// The identities of the objects reachable from `roots` alone, without the
+    /// JVM's own roots. For an embedder whose objects hold JVM objects the JVM's
+    /// roots do not see.
+    pub fn identities_reachable_from(&self, roots: &[Box<dyn ClassInstance>]) -> Vec<usize> {
+        identities_reachable_from(self, roots)
     }
 
     /// Object identities reachable from the JVM's own GC roots, without

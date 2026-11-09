@@ -1491,6 +1491,10 @@ async fn handle_init_svc(core: &mut ArmCore, context: &mut InitSvcContext, id: S
             }
 
             let root = vm_instantiate_array(&context.java_handles, &context.array_classes, class, lengths[0]).await?;
+            // Every row below is an allocation that can collect, and until this
+            // returns nothing but this function names the outer array; each row
+            // is reachable through it once stored.
+            let _pin = context.java_handles.pin_handles(vec![root]);
 
             let mut current_class = class;
             let mut parents = vec![root];

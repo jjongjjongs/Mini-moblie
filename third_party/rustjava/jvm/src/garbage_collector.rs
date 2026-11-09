@@ -40,6 +40,21 @@ pub fn reachable_identities(
     reachable_objects.iter().map(|x| x.identity()).collect()
 }
 
+/// The identities of everything reachable from `roots` alone - the roots
+/// themselves, and what their fields and elements lead to.
+///
+/// For an embedder whose own objects hold JVM objects the JVM's roots do not
+/// see: a guest-side field naming a `Vector` keeps the `Vector`, and with it
+/// every element, alive, though no JVM frame or static refers to any of them.
+pub fn identities_reachable_from(jvm: &Jvm, roots: &[Box<dyn ClassInstance>]) -> Vec<usize> {
+    let mut reachable_objects = HashSet::new();
+    for root in roots {
+        find_reachable_objects(jvm, root, &mut reachable_objects);
+    }
+
+    reachable_objects.iter().map(|x| x.identity()).collect()
+}
+
 fn compute_reachable_objects(
     jvm: &Jvm,
     threads: &BTreeMap<u64, JvmThread>,

@@ -7,6 +7,8 @@ mod emulator;
 mod runtime;
 
 pub use emulator::LgtEmulator;
+/// A probe's lever on the collector - see `JavaHandles`.
+pub use runtime::java::handles::set_gc_stress;
 
 // The firmware loader (P1 of docs/firmware-emulation.md). Exposed at the crate
 // root so it is reachable as public API while it is still dormant - it is not

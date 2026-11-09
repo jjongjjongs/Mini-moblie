@@ -566,7 +566,9 @@ fn capture_legend_of_master() {
 /// `300:OK,5200:OK,39000:OK`; each holds the key for 20 ticks. `WIE_TICKS`
 /// caps the run (default 60000). `WIE_SHOT_DIR`, when set, gets a `step_<n>.ppm`
 /// written ~300 ticks after each press so every step's screen is visible, plus
-/// `final.ppm` at the end.
+/// `final.ppm` at the end. `WIE_GC_EVERY=N` collects on every Nth object
+/// allocation, with `WIE_SAVE_ZIP` a way to meet a long session's collections
+/// in seconds.
 fn run_scripted(label: &str, archive: &[u8], ticks_limit: u32, script: &[(u32, wie_backend::KeyCode)]) {
     run_scripted_over(label, archive, ticks_limit, script, saved_state());
 }
@@ -584,6 +586,12 @@ fn run_scripted_over(
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_writer(std::io::stderr)
         .try_init();
+
+    // `WIE_GC_EVERY=N` collects on every Nth object allocation, so a run of
+    // seconds puts the collector through what a title meets after an hour.
+    if let Some(every) = std::env::var("WIE_GC_EVERY").ok().and_then(|x| x.parse().ok()) {
+        wie_lgt::set_gc_stress(every);
+    }
 
     let exited = Arc::new(AtomicBool::new(false));
     let exited_clone = exited.clone();
