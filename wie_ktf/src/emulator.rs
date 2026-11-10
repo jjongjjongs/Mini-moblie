@@ -150,6 +150,32 @@ pub struct KtfEmulator {
     lcd_explicit_present_at: Option<Instant>,
 }
 
+/// The archive's jar: the one its descriptor's AID names, as a handset files
+/// it, or else the only jar beside the descriptor.
+///
+/// A copy passed around after a patch can carry its jar under another name -
+/// 마스터 오브 소드 5's modified archive declares `CC010101` and ships
+/// `010100AE.jar`. Asked for `CC010101.jar`, the loader found no jar to read a
+/// `client.bin` name from, fell back to opening the missing file through the
+/// JVM, and the title stopped on 에뮬레이터 내부 오류 before its first frame.
+pub(crate) fn jar_name(files: &BTreeMap<String, Vec<u8>>, aid: &str) -> String {
+    let declared = format!("{aid}.jar");
+    if files.contains_key(&declared) {
+        return declared;
+    }
+
+    let mut jars = files
+        .keys()
+        .filter(|name| !name.contains('/') && name.to_ascii_lowercase().ends_with(".jar"));
+    match (jars.next(), jars.next()) {
+        (Some(only), None) => {
+            tracing::info!("no {declared} in the archive; running {only}, its only jar");
+            only.clone()
+        }
+        _ => declared,
+    }
+}
+
 impl KtfEmulator {
     pub fn from_archive(platform: Box<dyn Platform>, files: BTreeMap<String, Vec<u8>>, options: Options) -> Result<Self> {
         let files = reroot_archive(files);
@@ -161,7 +187,7 @@ impl KtfEmulator {
 
         tracing::info!("Loading app {}, pid {}, mclass {}", adf.aid, adf.pid, adf.mclass);
 
-        let jar_filename = format!("{}.jar", adf.aid);
+        let jar_filename = jar_name(&files, &adf.aid);
 
         Self::load(platform, &jar_filename, &adf.pid, &adf.aid, Some(adf.mclass), &files, options)
     }
@@ -592,10 +618,25 @@ mod tests {
         vec::Vec,
     };
 
-    use super::{KtfEmulator, descriptor_directory, packaged_name, reroot_archive};
+    use super::{KtfEmulator, descriptor_directory, jar_name, packaged_name, reroot_archive};
 
     fn archive(paths: &[&str]) -> BTreeMap<String, Vec<u8>> {
         paths.iter().map(|path| ((*path).to_string(), vec![0u8; 1])).collect()
+    }
+
+    /// 마스터 오브 소드 5's modified copy names its jar after another id than
+    /// the descriptor's; its only jar is the one to run. With the declared
+    /// one present, or with more than one to choose from, the AID decides.
+    #[test]
+    fn a_jar_under_another_name_is_still_the_jar() {
+        let renamed = archive(&["__adf__", "__class__", "010100AE.jar", "P/save0"]);
+        assert_eq!(jar_name(&renamed, "CC010101"), "010100AE.jar");
+
+        let both = archive(&["__adf__", "CC010101.jar", "010100AE.jar"]);
+        assert_eq!(jar_name(&both, "CC010101"), "CC010101.jar");
+
+        let two_others = archive(&["__adf__", "A.jar", "B.jar"]);
+        assert_eq!(jar_name(&two_others, "CC010101"), "CC010101.jar");
     }
 
     /// A descriptor at the root is already where it belongs.
