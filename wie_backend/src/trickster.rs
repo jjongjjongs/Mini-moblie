@@ -22,6 +22,16 @@
 //!   strings, each `[u16le length][bytes]`; answered with none, the title goes
 //!   on into the community.
 //!
+//! The shop buys over the same socket, with no login before it:
+//!
+//! - `0x65`, a purchase: the handset's number, then the item and one byte
+//!   more (`0x9cec`; `07 00` on the device log). `0x9d78` reads its reply as a
+//!   byte, a count of online coupons, and that many `0x42`-byte coupon
+//!   records. With no coupons the title hands the item over itself and says
+//!   `'%s' 획득하셧습니다` (`0x1557c`); one or two are the PC game's coupons
+//!   (`온라인 아이템을 획득하셧습니다|아이템:%s|쿠폰번호:%s`), which there is
+//!   nothing behind any more.
+//!
 //! Every other request is left unanswered and traced, so a device log names
 //! the next one to shape.
 
@@ -34,6 +44,7 @@ const HEADER: usize = 4;
 
 const LOG_IN: u16 = 0x191;
 const AFTER_LOG_IN: u16 = 0x2bd;
+const PURCHASE: u16 = 0x65;
 
 /// The result byte a successful reply opens its body with.
 const OK: u8 = 0;
@@ -62,6 +73,11 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
             data.push(0);
 
             Some(reply(command, &data))
+        }
+        PURCHASE => {
+            tracing::info!("트릭스터 shop: purchase granted");
+            // A byte the title does not look at, then no coupons.
+            Some(reply(command, &[0, 0]))
         }
         _ => None,
     }
@@ -104,6 +120,16 @@ mod tests {
         request.push(0x64);
 
         assert_eq!(response(&request).unwrap(), [6, 0, 0xbd, 0x02, 0, 0, 0, 0, 0, 0]);
+    }
+
+    /// A purchase off the device log: the number, item 7 and a zero.
+    #[test]
+    fn a_purchase_is_granted_with_no_coupons() {
+        let purchase = [
+            0x0e, 0x00, 0x65, 0x00, b'0', b'1', b'1', b'1', b'1', b'1', b'1', b'1', b'1', b'1', b'1', b'2', 0x07, 0x00,
+        ];
+
+        assert_eq!(response(&purchase).unwrap(), [3, 0, 0x65, 0x00, 0, 0, 0]);
     }
 
     #[test]
