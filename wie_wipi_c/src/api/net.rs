@@ -983,6 +983,9 @@ struct LgtBillingGateway {
     /// records are answered at the request plus one throughout. See
     /// `wie_backend::billing::lgt_local_big_endian_record_next_response`.
     answers_next: bool,
+    /// Whether this is 트릭스터's community connection, answered by
+    /// `wie_backend::trickster`.
+    trickster: bool,
 }
 
 impl LgtBillingGateway {
@@ -991,6 +994,15 @@ impl LgtBillingGateway {
             pending: Vec::new(),
             settling: false,
             answers_next: false,
+            trickster: false,
+        }
+    }
+
+    /// The gateway for the title `aid` names.
+    fn for_title(aid: &str) -> Self {
+        Self {
+            trickster: aid == wie_backend::trickster::AID,
+            ..Self::new()
         }
     }
 }
@@ -1007,7 +1019,9 @@ impl wie_backend::LocalConnection for LgtBillingGateway {
         if wie_backend::billing::lgt_big_endian_login_names_its_handset(request) {
             self.answers_next = true;
         }
-        let response = if self.answers_next {
+        let response = if self.trickster {
+            wie_backend::trickster::response(request)
+        } else if self.answers_next {
             wie_backend::billing::lgt_local_big_endian_record_next_response(request).or_else(|| wie_backend::billing::response(request))
         } else {
             wie_backend::billing::response(request)
@@ -1473,7 +1487,7 @@ pub async fn socket_connect(
             let system = context.system();
             let mut local_network = system.local_network();
 
-            local_network.open("LGT billing gateway", Box::new(LgtBillingGateway::new()))
+            local_network.open("LGT billing gateway", Box::new(LgtBillingGateway::for_title(&aid)))
         };
 
         {

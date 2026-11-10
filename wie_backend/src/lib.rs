@@ -18,6 +18,7 @@ mod system;
 mod task;
 mod task_runner;
 mod time;
+pub mod trickster;
 
 pub use self::{
     audio_sink::AudioSink,
