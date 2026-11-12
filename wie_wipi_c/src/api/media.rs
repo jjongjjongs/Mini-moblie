@@ -757,6 +757,17 @@ pub async fn unk19(_context: &mut dyn WIPICContext, category: WIPICWord, level: 
     Ok(0)
 }
 
+/// KTF media slot 21, `(clip, level)`: 와일드프론티어1 calls it once, on the
+/// clip it has just created, with 100 - a per-clip level, the shape slot 26's
+/// `MC_mdaClipSetVolume` has. Accepted and not acted on: the clip plays at the
+/// level the title sets through the calls this runtime does serve. Left a stub
+/// that refuses, the title stopped in `startApp` before its first frame.
+pub async fn unk21(_context: &mut dyn WIPICContext, clip: WIPICWord, level: WIPICWord) -> Result<WIPICWord> {
+    tracing::debug!("MC_mdaUnk21({clip:#x}, {level})");
+
+    Ok(0)
+}
+
 pub async fn unk18(_context: &mut dyn WIPICContext, clip: WIPICWord) -> Result<WIPICWord> {
     tracing::warn!("stub MC_mdaUnk18({clip:#x})");
 

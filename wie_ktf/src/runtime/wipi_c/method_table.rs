@@ -375,7 +375,7 @@ pub fn get_media_method_table() -> Vec<WIPICMethodBody> {
         media::unk18.into_body(),
         media::unk19.into_body(),
         gen_stub(20, "MC_mdaUnk20"),
-        gen_stub(21, "MC_mdaUnk21"),
+        media::unk21.into_body(),
         gen_stub(22, "MC_mdaUnk22"),
         gen_stub(23, "MC_mdaUnk23"),
         gen_stub(24, "MC_mdaUnk24"),
