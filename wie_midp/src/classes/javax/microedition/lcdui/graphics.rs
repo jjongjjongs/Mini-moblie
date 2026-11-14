@@ -8,7 +8,7 @@ use java_class_proto::{JavaFieldProto, JavaMethodProto, TypeConverter};
 use java_constants::MethodAccessFlags;
 use java_runtime::classes::java::lang::String;
 
-use wie_backend::canvas::{ArgbPixel, Canvas as BackendCanvas, Clip, PixelType, Rgb8Pixel, TextAlignment, VecImageBuffer};
+use wie_backend::canvas::{ArgbPixel, Canvas as BackendCanvas, Clip, Color, PixelType, Rgb8Pixel, TextAlignment, VecImageBuffer};
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 
 use crate::{
@@ -378,7 +378,7 @@ impl Graphics {
             height as _,
             arc_width as _,
             arc_height as _,
-            Rgb8Pixel::to_color(rgb as _),
+            Self::paint(jvm, &this, rgb).await?,
             clip,
         );
 
@@ -418,7 +418,7 @@ impl Graphics {
             height as _,
             start_angle,
             arc_angle,
-            Rgb8Pixel::to_color(rgb as _),
+            Self::paint(jvm, &this, rgb).await?,
             clip,
         );
 
@@ -446,7 +446,7 @@ impl Graphics {
             (translate_y + y) as _,
             width as _,
             height as _,
-            Rgb8Pixel::to_color(rgb as _),
+            Self::paint(jvm, &this, rgb).await?,
             clip,
         );
 
@@ -474,7 +474,7 @@ impl Graphics {
         let translate_x: i32 = jvm.get_field(&this, "translateX", "I").await?;
         let translate_y: i32 = jvm.get_field(&this, "translateY", "I").await?;
         let clip = Self::clip(jvm, &this).await?;
-        let color = Rgb8Pixel::to_color(rgb as _);
+        let color = Self::paint(jvm, &this, rgb).await?;
 
         let points = [(x1, y1), (x2, y2), (x3, y3)];
         let top = y1.min(y2).min(y3);
@@ -536,7 +536,7 @@ impl Graphics {
             (translate_y + y) as _,
             width as u32 + 1,
             height as u32 + 1,
-            Rgb8Pixel::to_color(rgb as _),
+            Self::paint(jvm, &this, rgb).await?,
             clip,
         );
 
@@ -965,7 +965,7 @@ impl Graphics {
             height as u32 + 1,
             arc_width as _,
             arc_height as _,
-            Rgb8Pixel::to_color(rgb as _),
+            Self::paint(jvm, &this, rgb).await?,
             clip,
         );
 
@@ -1006,7 +1006,7 @@ impl Graphics {
             height as u32 + 1,
             start_angle,
             arc_angle,
-            Rgb8Pixel::to_color(rgb as _),
+            Self::paint(jvm, &this, rgb).await?,
             clip,
         );
 
@@ -1228,6 +1228,22 @@ impl Graphics {
         jvm.put_field(&mut this, "color", "I", color).await?;
 
         Ok(())
+    }
+
+    /// The colour a shape is filled or stroked with: the current colour at the
+    /// translucency the graphics was set to.
+    ///
+    /// A WIPI `Graphics.setAlpha` and LG's `GraphicsX.setAlpha` reach every
+    /// drawing call, not only images. 테일즈 오브 커먼즈 lays each character's
+    /// shadow under it as `setAlpha(128)` and a black `fillArc` - drawn
+    /// opaque, it was a black bar across the feet - and blanks its scene with
+    /// a full-screen `fillRect` at `setAlpha(0)`, which draws nothing.
+    async fn paint(jvm: &Jvm, this: &ClassInstanceRef<Graphics>, rgb: i32) -> JvmResult<Color> {
+        let alpha: i32 = jvm.get_field(this, "__wieAlpha", "I").await?;
+        let mut color = Rgb8Pixel::to_color(rgb as _);
+        color.a = alpha.clamp(0, 255) as u8;
+
+        Ok(color)
     }
 
     async fn canvas(jvm: &Jvm, this: &mut ClassInstanceRef<Graphics>) -> JvmResult<Box<dyn BackendCanvas>> {

@@ -270,9 +270,14 @@ impl Graphics {
     async fn set_alpha(jvm: &Jvm, _context: &mut WieJvmContext, mut this: ClassInstanceRef<Self>, alpha: i32) -> JvmResult<()> {
         tracing::debug!("org.kwis.msp.lcdui.Graphics::setAlpha({this:?}, {alpha})");
 
-        let midp_graphics = jvm.get_field(&this, "midpGraphics", "Ljavax/microedition/lcdui/Graphics;").await?;
+        // A blend level over everything drawn after it, 0 to 255: 테일즈 오브
+        // 커먼즈 draws its shadows at 128 and its map-name bar at 165, and
+        // reading anything but 0 as opaque made the shadows black bars.
+        let alpha = alpha.clamp(0, 255);
+        let mut midp_graphics: ClassInstanceRef<MidpGraphics> = jvm.get_field(&this, "midpGraphics", "Ljavax/microedition/lcdui/Graphics;").await?;
         let _: () = jvm.invoke_virtual(&midp_graphics, "setXORMode", "(Z)V", (false,)).await?;
-        jvm.put_field(&mut this, "alpha", "I", if alpha == 0 { 0 } else { 255 }).await?;
+        jvm.put_field(&mut midp_graphics, "__wieAlpha", "I", alpha).await?;
+        jvm.put_field(&mut this, "alpha", "I", alpha).await?;
         jvm.put_field(&mut this, "xorMode", "Z", false).await?;
 
         Ok(())
@@ -1572,7 +1577,7 @@ mod test {
             assert_eq!(jvm.invoke_virtual::<_, i32>(&graphics, "getAlpha", "()I", ()).await?, 0);
             assert!(!jvm.invoke_virtual::<_, bool>(&graphics, "isXORMode", "()Z", ()).await?);
             let _: () = jvm.invoke_virtual(&graphics, "setAlpha", "(I)V", (42,)).await?;
-            assert_eq!(jvm.invoke_virtual::<_, i32>(&graphics, "getAlpha", "()I", ()).await?, 255);
+            assert_eq!(jvm.invoke_virtual::<_, i32>(&graphics, "getAlpha", "()I", ()).await?, 42);
 
             let _: () = jvm.invoke_virtual(&graphics, "setColor", "(I)V", (0x123456,)).await?;
             assert_eq!(jvm.invoke_virtual::<_, i32>(&graphics, "getRedComponent", "()I", ()).await?, 0x12);
@@ -1630,6 +1635,36 @@ mod test {
             assert_eq!(null_face, default_face);
             assert_eq!(null_style, default_style);
             assert_eq!(null_size, default_size);
+
+            Ok(())
+        })
+    }
+
+    /// 테일즈 오브 커먼즈's shadow: black at `setAlpha(128)` over a lit floor
+    /// comes out half as bright, not black; at `setAlpha(0)` a fill leaves
+    /// what was there.
+    #[test]
+    fn test_set_alpha_blends_what_is_filled() -> Result<()> {
+        run_jvm_test(Box::new([wie_midp::get_protos().into(), get_protos().into()]), |jvm| async move {
+            let image: ClassInstanceRef<Image> = jvm
+                .invoke_static("org/kwis/msp/lcdui/Image", "createImage", "(II)Lorg/kwis/msp/lcdui/Image;", (4, 4))
+                .await?;
+            let graphics: ClassInstanceRef<Graphics> = jvm.invoke_virtual(&image, "getGraphics", "()Lorg/kwis/msp/lcdui/Graphics;", ()).await?;
+
+            let _: () = jvm.invoke_virtual(&graphics, "setColor", "(I)V", (0xf8_fc_f8,)).await?;
+            let _: () = jvm.invoke_virtual(&graphics, "fillRect", "(IIII)V", (0, 0, 4, 4)).await?;
+
+            let _: () = jvm.invoke_virtual(&graphics, "setColor", "(I)V", (0,)).await?;
+            let _: () = jvm.invoke_virtual(&graphics, "setAlpha", "(I)V", (0,)).await?;
+            let _: () = jvm.invoke_virtual(&graphics, "fillRect", "(IIII)V", (0, 0, 4, 4)).await?;
+            let untouched: i32 = jvm.invoke_virtual(&graphics, "getPixel", "(II)I", (0, 0)).await?;
+            assert_eq!(untouched, 0xf8_fc_f8);
+
+            let _: () = jvm.invoke_virtual(&graphics, "setAlpha", "(I)V", (128,)).await?;
+            let _: () = jvm.invoke_virtual(&graphics, "fillArc", "(IIIIII)V", (0, 0, 4, 4, 0, 360)).await?;
+            let shaded: i32 = jvm.invoke_virtual(&graphics, "getPixel", "(II)I", (1, 1)).await?;
+            let red = (shaded >> 16) & 0xff;
+            assert!((0x70..=0x80).contains(&red), "half of the floor shows through: {shaded:#x}");
 
             Ok(())
         })
