@@ -31,6 +31,8 @@ const FUNCTIONS_BASE: u32 = 0x71000000;
 // well over the 4096 stubs a 64 KiB arena held, so give it room for ~64K.
 const FUNCTIONS_SIZE: usize = 0x100000;
 const SVC_STUB_SIZE: u32 = 16;
+/// The SVC number of a Thumb semihosting call. See [`ArmCore::semihosting`].
+const SEMIHOSTING: u32 = 0xab;
 pub const RUN_FUNCTION_LR: u32 = 0x7f000000;
 
 /// Instruction budget for one `engine.run` batch. The engine returns the moment
@@ -129,6 +131,9 @@ pub(crate) struct ArmCoreInner {
     data_regions: Vec<(u32, u32)>,
     /// State a platform keeps per core. See [`ArmCore::extension`].
     extensions: BTreeMap<TypeId, Arc<dyn Any + Send + Sync>>,
+    /// What the guest has written through semihosting since it last exited.
+    /// See [`ArmCore::semihosting`].
+    semihosting_output: Vec<u8>,
 }
 
 /// Upper bound on pooled thread stacks. Peak concurrency is small (a handful),
@@ -211,6 +216,7 @@ impl ArmCore {
             thread_owned_allocations: BTreeMap::new(),
             data_regions: vec![(GLOBAL_DATA_BASE, GLOBAL_DATA_BASE + 0x4000)],
             extensions: BTreeMap::new(),
+            semihosting_output: Vec::new(),
         };
 
         let result = Self {
@@ -780,11 +786,18 @@ impl ArmCore {
 
                     let function = {
                         let inner = self.inner.lock();
-                        inner
-                            .svc_handlers
-                            .get(&category)
-                            .cloned()
-                            .ok_or_else(|| WieError::FatalError(format!("Unknown SVC handler category: {category}")))?
+                        inner.svc_handlers.get(&category).cloned()
+                    };
+                    let Some(function) = function else {
+                        if category == SEMIHOSTING {
+                            if let Err(err) = self.semihosting() {
+                                self.restore_context(&previous_context);
+                                return Err(err);
+                            }
+                            continue;
+                        }
+
+                        return Err(WieError::FatalError(format!("Unknown SVC handler category: {category}")));
                     };
 
                     let mut self1 = self.clone();
@@ -815,6 +828,53 @@ impl ArmCore {
         self.restore_context(&previous_context);
 
         Ok(result)
+    }
+
+    /// A semihosting call, `svc 0xab` in Thumb code.
+    ///
+    /// No title asks for one on purpose: it is how the ARM C library a title
+    /// was linked with reports a runtime error. Its default signal handler
+    /// writes the error a character at a time (`SYS_WRITEC`, `r0 = 3`, `r1`
+    /// at the character) and then stops the program (`SYS_EXIT`, `r0 = 0x18`).
+    /// DJMAX GXG got there on dividing by the notes it had judged - none, on a
+    /// downloaded song whose chart was missing - and the call came out as an
+    /// unknown SVC category 171, which named nothing. The text it writes is
+    /// collected here and the exit stops the title with it, so the error says
+    /// what the title's library said: `Divide By Zero`.
+    fn semihosting(&mut self) -> Result<()> {
+        const SYS_WRITEC: u32 = 0x03;
+        const SYS_WRITE0: u32 = 0x04;
+        const SYS_EXIT: u32 = 0x18;
+
+        let (operation, parameter) = {
+            let inner = self.inner.lock();
+            (inner.engine.reg_read(ArmRegister::R0), inner.engine.reg_read(ArmRegister::R1))
+        };
+
+        match operation {
+            SYS_WRITEC => {
+                let byte: u8 = read_generic(self, parameter)?;
+                self.inner.lock().semihosting_output.push(byte);
+            }
+            SYS_WRITE0 => {
+                let text = wie_util::read_null_terminated_string_bytes(self, parameter)?;
+                self.inner.lock().semihosting_output.extend_from_slice(&text);
+            }
+            SYS_EXIT => {
+                let output = core::mem::take(&mut self.inner.lock().semihosting_output);
+                let text = String::from_utf8_lossy(&output);
+                let text = text.trim();
+                tracing::error!("Guest C library stopped the title: {text:?} (exit {parameter:#x})");
+
+                return Err(WieError::FatalError(format!("Guest C library error: {text}")));
+            }
+            _ => {
+                tracing::warn!("Semihosting call {operation:#x}({parameter:#x}) not served");
+                self.inner.lock().engine.reg_write(ArmRegister::R0, u32::MAX);
+            }
+        }
+
+        Ok(())
     }
 
     pub fn register_svc_handler<F, C, R, P>(&mut self, category: u32, handler: F, context: &C) -> Result<()>
@@ -1509,6 +1569,57 @@ mod tests {
         assert_eq!(after.r4, caller.r4);
         assert_eq!(after.r7, caller.r7);
         assert_eq!(after.sp, caller.sp);
+    }
+
+    /// The ARM C library's own report of a runtime error: the message a
+    /// character at a time through `SYS_WRITEC`, then `SYS_EXIT`. The title
+    /// stops with what it wrote rather than on an unknown SVC category.
+    #[test]
+    fn a_semihosted_exit_stops_the_title_with_what_it_wrote() {
+        use core::{
+            future::Future,
+            task::{Context, Poll},
+        };
+        use futures_test::task::new_count_waker;
+
+        let mut core = ArmCore::new(false, None).unwrap();
+        core.map(0x1000, 0x2000).unwrap();
+        #[rustfmt::skip]
+        let code: [u16; 12] = [
+            0x2003, // movs r0, #3          SYS_WRITEC
+            0x4904, // ldr r1, [pc, #16]    the message
+            0xdfab, // svc #0xab
+            0x2003, // movs r0, #3
+            0x3101, // adds r1, #1
+            0xdfab, // svc #0xab
+            0x2018, // movs r0, #0x18       SYS_EXIT
+            0xdfab, // svc #0xab
+            0xe7fe, // b .
+            0x0000,
+            0x1800, 0x0000, // .word 0x1800
+        ];
+        for (index, half) in code.iter().enumerate() {
+            write_generic(&mut core, 0x1000 + index as u32 * 2, *half).unwrap();
+        }
+        write_generic(&mut core, 0x1800, *b"OK\0\0").unwrap();
+
+        let mut caller = core.save_context();
+        caller.sp = 0x2f00;
+        core.restore_context(&caller);
+
+        let mut runner = core.clone();
+        let mut call = Box::pin(async move { runner.run_function::<u32>(0x1001, &[]).await });
+        let (waker, _) = new_count_waker();
+        let mut cx = Context::from_waker(&waker);
+        let result = match call.as_mut().poll(&mut cx) {
+            Poll::Ready(x) => x,
+            Poll::Pending => panic!("nothing waits"),
+        };
+
+        match result {
+            Err(WieError::FatalError(message)) => assert_eq!(message, "Guest C library error: OK"),
+            other => panic!("expected the library's error, got {other:?}"),
+        }
     }
 
     #[test]
