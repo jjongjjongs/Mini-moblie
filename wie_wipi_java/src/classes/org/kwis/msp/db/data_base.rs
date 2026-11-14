@@ -3,7 +3,7 @@ use alloc::vec;
 use java_class_proto::{JavaFieldProto, JavaMethodProto};
 use java_constants::MethodAccessFlags;
 use java_runtime::classes::java::lang::String;
-use jvm::{Array, ClassInstanceRef, Jvm, Result as JvmResult};
+use jvm::{Array, ClassInstanceRef, JavaError, Jvm, Result as JvmResult, runtime::JavaLangString};
 
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 use wie_midp::classes::javax::microedition::rms::RecordStore;
@@ -118,14 +118,43 @@ impl DataBase {
     ) -> JvmResult<ClassInstanceRef<DataBase>> {
         tracing::debug!("org.kwis.msp.db.DataBase::openDataBase({data_base_name:?}, {record_size}, {create}, {flags})");
 
-        let record_store: ClassInstanceRef<RecordStore> = jvm
+        // The store lives on the MIDP side, and so does the class it raises
+        // when there is none to open. A WIPI title has never heard of that
+        // class: what it writes `catch` for is this package's own
+        // `DataBaseException`, so a store that is simply not there has to
+        // arrive as one.
+        //
+        // 주타이쿤2's 사육장 선택 opens the exhibit's database without asking
+        // for it to be created. Told the miss in MIDP's words, its own handler
+        // did not match, an outer one turned it into an `IOException`, and the
+        // screen ended the run with an `IllegalStateException` instead of
+        // starting the exhibit.
+        let record_store: ClassInstanceRef<RecordStore> = match jvm
             .invoke_static(
                 "javax/microedition/rms/RecordStore",
                 "openRecordStore",
                 "(Ljava/lang/String;Z)Ljavax/microedition/rms/RecordStore;",
                 (data_base_name, create),
             )
-            .await?;
+            .await
+        {
+            Ok(x) => x,
+            Err(JavaError::JavaException(raised)) if jvm.is_instance(&*raised, "javax/microedition/rms/RecordStoreException") => {
+                let message: ClassInstanceRef<String> = jvm.invoke_virtual(&raised, "getMessage", "()Ljava/lang/String;", ()).await?;
+
+                return Err(jvm
+                    .exception(
+                        "org/kwis/msp/db/DataBaseException",
+                        &if message.is_null() {
+                            alloc::string::String::from("no such database")
+                        } else {
+                            JavaLangString::to_rust_string(jvm, &message).await?
+                        },
+                    )
+                    .await);
+            }
+            Err(x) => return Err(x),
+        };
 
         let mut instance: ClassInstanceRef<DataBase> = jvm
             .new_class("org/kwis/msp/db/DataBase", "(Ljavax/microedition/rms/RecordStore;)V", (record_store,))
@@ -252,8 +281,21 @@ impl DataBase {
         Ok(())
     }
 
-    async fn delete_data_base_with_flag(_: &Jvm, _: &mut WieJvmContext, data_base_name: ClassInstanceRef<String>, flag: i32) -> JvmResult<()> {
-        tracing::warn!("stub org.kwis.msp.db.DataBase::deleteDataBase({data_base_name:?}, {flag})");
+    async fn delete_data_base_with_flag(jvm: &Jvm, _: &mut WieJvmContext, data_base_name: ClassInstanceRef<String>, flag: i32) -> JvmResult<()> {
+        tracing::debug!("org.kwis.msp.db.DataBase::deleteDataBase({data_base_name:?}, {flag})");
+
+        // The flag selects the store's location (handset vs card); our record
+        // stores are keyed by name alone, so deletion is the same as the
+        // flagless form - which the stub silently skipped, leaving the store
+        // behind.
+        let _: () = jvm
+            .invoke_static(
+                "javax/microedition/rms/RecordStore",
+                "deleteRecordStore",
+                "(Ljava/lang/String;)V",
+                (data_base_name,),
+            )
+            .await?;
 
         Ok(())
     }
@@ -441,7 +483,9 @@ mod test {
             let databases: ClassInstanceRef<Array<String>> = jvm
                 .invoke_static("org/kwis/msp/db/DataBase", "listDataBases", "()[Ljava/lang/String;", ())
                 .await?;
-            assert_eq!(jvm.array_length(&databases).await?, 0);
+            assert_eq!(jvm.array_length(&databases).await?, 1);
+            let listed: ClassInstanceRef<String> = jvm.load_array(&databases, 0, 1).await?.pop().unwrap();
+            assert_eq!(JavaLangString::to_rust_string(&jvm, &listed).await?.as_str(), "storage-handset");
 
             let access_mode: i32 = jvm
                 .invoke_static("org/kwis/msp/db/DataBase", "getAccessMode", "(Ljava/lang/String;)I", (name.clone(),))
@@ -457,6 +501,12 @@ mod test {
             let _: () = jvm
                 .invoke_static("org/kwis/msp/db/DataBase", "deleteDataBase", "(Ljava/lang/String;I)V", (name, 1))
                 .await?;
+
+            // Deletion is now real: the store is gone from the listing.
+            let remaining: ClassInstanceRef<Array<String>> = jvm
+                .invoke_static("org/kwis/msp/db/DataBase", "listDataBases", "()[Ljava/lang/String;", ())
+                .await?;
+            assert_eq!(jvm.array_length(&remaining).await?, 0);
 
             Ok(())
         })
@@ -511,5 +561,77 @@ mod test {
 
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::boxed::Box;
+
+    use jvm::{ClassInstanceRef, JavaError, Result as JvmResult, runtime::JavaLangString};
+    use test_utils::run_jvm_test;
+    use wie_util::Result;
+
+    use super::DataBase;
+    use crate::get_protos;
+
+    /// A database that is not there is a `DataBaseException`, in this package's
+    /// own words rather than the store's.
+    ///
+    /// 주타이쿤2 opens its exhibit's database without asking for it to be
+    /// created, and catches for this class. Handed MIDP's `RecordStoreException`
+    /// instead, its handler did not match and the screen ended the run.
+    #[test]
+    fn a_database_that_is_not_there_is_a_data_base_exception() -> Result<()> {
+        run_jvm_test(
+            Box::new([Box::new(get_protos()) as Box<[_]>, Box::new(wie_midp::get_protos()) as Box<[_]>]),
+            async |jvm| {
+                let name = JavaLangString::from_rust_string(&jvm, "l0e1").await?;
+                let result: JvmResult<ClassInstanceRef<DataBase>> = jvm
+                    .invoke_static(
+                        "org/kwis/msp/db/DataBase",
+                        "openDataBase",
+                        "(Ljava/lang/String;IZ)Lorg/kwis/msp/db/DataBase;",
+                        (name, 1000, false),
+                    )
+                    .await;
+
+                let Err(JavaError::JavaException(raised)) = result else {
+                    panic!("opening a database that is not there has to raise");
+                };
+
+                assert!(
+                    jvm.is_instance(&*raised, "org/kwis/msp/db/DataBaseException"),
+                    "a WIPI title catches this package's own class, not the store's"
+                );
+
+                Ok(())
+            },
+        )
+    }
+
+    /// The same open, told to create, makes one - so the translation above only
+    /// speaks for the miss.
+    #[test]
+    fn an_open_that_may_create_still_opens() -> Result<()> {
+        run_jvm_test(
+            Box::new([Box::new(get_protos()) as Box<[_]>, Box::new(wie_midp::get_protos()) as Box<[_]>]),
+            async |jvm| {
+                let name = JavaLangString::from_rust_string(&jvm, "l0e1").await?;
+                let opened = jvm
+                    .invoke_static(
+                        "org/kwis/msp/db/DataBase",
+                        "openDataBase",
+                        "(Ljava/lang/String;IZ)Lorg/kwis/msp/db/DataBase;",
+                        (name, 1000, true),
+                    )
+                    .await?;
+
+                let records: i32 = jvm.invoke_virtual(&opened, "getNumberOfRecords", "()I", ()).await?;
+                assert_eq!(records, 0, "a database just created holds nothing");
+
+                Ok(())
+            },
+        )
     }
 }

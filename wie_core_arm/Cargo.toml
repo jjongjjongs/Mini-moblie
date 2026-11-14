@@ -4,6 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# Have the block engine (JitEngine) compile its blocks to native x86-64 /
+# AArch64. Without it - or on any other host - the engine runs the decoded
+# blocks itself. Correctness is pinned by differential tests against the
+# interpreter in `engine::jit`.
+jit = ["dep:dynasmrt"]
+
 [dependencies]
 async-trait = { workspace = true }
 bytemuck = { workspace = true }
@@ -13,7 +21,7 @@ spin = { workspace = true }
 toml = { version = "^1", default-features = false, features = ["parse", "serde"] }
 tracing = { workspace = true }
 
-arm32_cpu = { git = "https://github.com/dlunch/arm32_cpu.git" }
+arm32_cpu = { path = "../third_party/arm32_cpu" }
 
 wie_backend = { workspace = true }
 wie_util = { workspace = true }
@@ -22,6 +30,11 @@ wie_util = { workspace = true }
 gdbstub = { version = "^0.7" }
 gdbstub_arch = { version = "^0.3" }
 crossbeam = { version = "^0.8" }
+
+# Runtime assembler for the machine-code JIT. Only pulled in on architectures it
+# can emit for; the `jit` feature/module are gated to the same set.
+[target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
+dynasmrt = { version = "^5", optional = true }
 
 [dev-dependencies]
 futures = { workspace = true, features = ["executor"] }

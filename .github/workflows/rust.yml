@@ -51,8 +51,12 @@ jobs:
         run: choco install ninja
 
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --all -- -D warnings
-      - run: cargo clippy --target wasm32-unknown-unknown -- -D warnings
+      # chunks_exact_to_as_chunks is a style lint newer clippy adds; it flags
+      # chunks_exact(CONST) all over the existing code, which as_chunks would
+      # only rewrite, not fix. Allowed so a toolchain bump does not turn the
+      # whole tree red on an equivalent idiom.
+      - run: cargo clippy --all -- -D warnings -A clippy::chunks_exact_to_as_chunks
+      - run: cargo clippy --target wasm32-unknown-unknown -- -D warnings -A clippy::chunks_exact_to_as_chunks
 
       - if: matrix.os == 'windows-latest'
         run: |

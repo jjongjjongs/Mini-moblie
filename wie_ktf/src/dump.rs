@@ -22,7 +22,7 @@ pub async fn dump_image(zip: &[u8]) -> Result<Vec<u8>> {
         return Err(WieError::FatalError("Missing AID in __adf__".to_string()));
     }
 
-    let jar_filename = format!("{}.jar", adf.aid);
+    let jar_filename = crate::emulator::jar_name(&files, &adf.aid);
     let jar = files
         .get(&jar_filename)
         .ok_or_else(|| WieError::FatalError(format!("Missing {jar_filename} in KTF archive")))?;
