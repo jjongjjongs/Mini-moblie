@@ -16,6 +16,7 @@ mod gamevil_record;
 pub mod memory;
 mod seeded_save;
 mod shifted_cert;
+mod usim_cert;
 
 pub use self::{
     cert_c2s::recover_phone_number as from_cert,
@@ -25,6 +26,7 @@ pub use self::{
     gamevil_record::recover_phone_number as from_gamevil_record,
     seeded_save::recover_phone_number as from_seeded_save,
     shifted_cert::recover_phone_number as from_shifted_cert,
+    usim_cert::recover_min as min_from_usim_cert,
 };
 
 use alloc::{

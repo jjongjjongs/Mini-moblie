@@ -178,7 +178,14 @@ async fn get_system_property(context: &mut dyn WIPICContext, id: WIPICWord, out:
     const PHONE_MODEL: &str = "SCH-W830";
 
     let name = read_null_terminated_string_bytes(context, id)?;
-    let saved = if name.as_slice() == b"MIN" { saved_min(context).await } else { None };
+    let saved = if name.as_slice() == b"MIN" {
+        match saved_min(context).await {
+            Some(min) => Some(min),
+            None => usim_cert_min(context).await,
+        }
+    } else {
+        None
+    };
     let value = if let Some(min) = saved {
         min
     } else {
@@ -241,6 +248,21 @@ async fn saved_min(context: &mut dyn WIPICContext) -> Option<String> {
     }
 
     String::from_utf8(digits).ok()
+}
+
+/// The `MIN` a Com2uS title's `usimcert.c2s` was written under, for an
+/// archive that carries one: 0083660661 keys the file with the `MIN` on its
+/// first run and stops at "인증 오류 입니다 … 오류번호 : 1004" on every run after
+/// unless the handset reports that `MIN` again. It is the subscriber number
+/// without its leading zero - see `wie_backend::subscriber::min_from_usim_cert`.
+async fn usim_cert_min(context: &mut dyn WIPICContext) -> Option<String> {
+    let cert = context.read_resource("usimcert.c2s").await.ok()?;
+    let number = match mod_subscriber_number(context).await {
+        Some(number) => number,
+        None => kernel::subscriber_number(context).await,
+    };
+
+    wie_backend::subscriber::min_from_usim_cert(&cert, &number)
 }
 
 /// The subscriber number a title was bought on, from the key in its `.mod`.

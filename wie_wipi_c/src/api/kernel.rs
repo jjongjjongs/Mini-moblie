@@ -145,7 +145,7 @@ pub async fn get_system_property(context: &mut dyn WIPICContext, ptr_id: WIPICWo
 /// WIPI-Java `HandsetProperty` path uses too so the two always agree - or the
 /// one another archive named on this handset, where this one's sealed saves
 /// prove it; see [`wie_backend::subscriber::subscriber_number_on_handset`].
-pub(crate) async fn subscriber_number(context: &mut dyn WIPICContext) -> String {
+pub async fn subscriber_number(context: &mut dyn WIPICContext) -> String {
     let cert = context.read_resource("cert.c2s").await.ok();
     let mut records = Vec::new();
     for name in wie_backend::subscriber::RECORD_FILES {
