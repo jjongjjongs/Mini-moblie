@@ -3433,6 +3433,11 @@ public final class MainActivity extends Activity {
         }
 
         SharedPreferences prefs = getSharedPreferences("mini_ui", MODE_PRIVATE);
+        // Folders exported before the gallery was kept out: hidden once.
+        if (!prefs.getBoolean("folders_nomedia", false)) {
+            prefs.edit().putBoolean("folders_nomedia", true).apply();
+            new Thread(() -> Downloads.hideFromGallery(this, DataFolder.ROOT), "hide-folders").start();
+        }
         if (prefs.getBoolean("folders_seeded", false)) {
             return;
         }

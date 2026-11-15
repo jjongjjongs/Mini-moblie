@@ -83,6 +83,37 @@ final class Downloads {
         }
     }
 
+    /**
+     * Keeps the gallery out of {@code Download/<subDir>/}: a game's data can
+     * hold the pictures it downloaded, and every one of them would otherwise
+     * show among the person's photos. An empty {@code .nomedia} there (the
+     * media scanner skips that folder and the ones under it), then a rescan
+     * of it so what is already listed drops out. Best effort.
+     */
+    static void hideFromGallery(Context context, String subDir) {
+        File dir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), subDir);
+        File marker = new File(dir, ".nomedia");
+        try {
+            if (!marker.exists() && (dir.isDirectory() || dir.mkdirs())) {
+                new FileOutputStream(marker).close();
+            }
+        } catch (Exception ignored) {
+            // Scoped storage may refuse the path; MediaStore below.
+        }
+        if (!marker.exists() && !needsPermission()) {
+            try {
+                writeInto(context, subDir, ".nomedia", "application/octet-stream", new byte[0]);
+            } catch (Exception ignored) {
+                // Nothing more to try.
+            }
+        }
+        try {
+            android.media.MediaScannerConnection.scanFile(context, new String[] {dir.getAbsolutePath()}, null, null);
+        } catch (Exception ignored) {
+            // The scanner catches up on its own.
+        }
+    }
+
     /** One exported save zip found in the saves folder. */
     static final class SaveFile {
         final String name;
