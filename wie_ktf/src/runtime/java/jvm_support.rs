@@ -632,6 +632,70 @@ mod test {
         Ok((jvm, core))
     }
 
+    /// A throw that no `try` anywhere in the chain covers goes back out to the
+    /// JVM side as the exception it is, for whoever made the call to catch.
+    /// It used to end the run: 테일즈 오브 커먼즈's `paint` draws an image it has
+    /// not loaded yet for one frame after a menu choice, and the event loop -
+    /// which logs such an exception and paints again - never got to see it.
+    #[test]
+    fn a_throw_no_try_covers_goes_back_to_the_caller() -> Result<()> {
+        let mut system = System::new(Box::new(TestPlatform::new()), "", "", DefaultTaskRunner);
+
+        let done = Arc::new(AtomicBool::new(false));
+        let done_clone = done.clone();
+        let mut system_clone = system.clone();
+
+        system.spawn(async move || {
+            let (jvm, mut core) = init_jvm(&mut system_clone).await?;
+
+            let entry = Allocator::alloc(&mut core, size_of::<JavaMethodExceptionTableEntry>() as _)?;
+            write_generic(
+                &mut core,
+                entry,
+                JavaMethodExceptionTableEntry {
+                    from_pc: 0x942,
+                    to_pc: 0x976,
+                    target: 0x979,
+                    ptr_class: 0,
+                },
+            )?;
+            let table = Allocator::alloc(&mut core, 4)?;
+            write_generic(&mut core, table, entry)?;
+            let method = Allocator::alloc(&mut core, size_of::<JavaMethodDefinition>() as _)?;
+            let mut definition: JavaMethodDefinition = bytemuck::Zeroable::zeroed();
+            definition.fn_body_native_or_exception_table = table;
+            definition.exception_table_count = 1;
+            write_generic(&mut core, method, definition)?;
+
+            // Thrown at 0x147, outside the one range the method protects.
+            let handler = Allocator::alloc(&mut core, size_of::<JavaExceptionHandler>() as _)?;
+            let mut record: JavaExceptionHandler = bytemuck::Zeroable::zeroed();
+            record.ptr_method = method;
+            record.current_pc = 0x147;
+            write_generic(&mut core, handler, record)?;
+            KtfJvmSupport::set_current_java_exception_handler(&mut core, handler)?;
+
+            let exception = jvm.new_class("java/lang/NullPointerException", "()V", ()).await.unwrap();
+            let exception_raw = KtfJvmSupport::class_instance_raw(&exception);
+
+            match JavaMethod::handle_exception(&mut core, &jvm, exception).await {
+                Err(WieError::JavaException(thrown)) => assert_eq!(thrown, exception_raw),
+                Err(other) => panic!("expected the exception back, got {other:?}"),
+                Ok(_) => panic!("expected the exception back, got a return"),
+            }
+
+            done_clone.store(true, Ordering::SeqCst);
+
+            Ok(())
+        });
+
+        while !done.load(Ordering::SeqCst) {
+            system.tick()?;
+        }
+
+        Ok(())
+    }
+
     /// A throw that no `try` in the innermost frame covers belongs to whichever
     /// frame further out does cover it. Each protected call links its record to
     /// the one it is nested inside, and searching only the head means only the

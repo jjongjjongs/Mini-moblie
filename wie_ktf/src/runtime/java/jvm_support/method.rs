@@ -10,7 +10,6 @@ use core::{
     ops::{Deref, DerefMut},
 };
 use futures::TryFutureExt;
-use wie_jvm_support::JvmSupport;
 
 use java_class_proto::{JavaMethodProto, MethodBody};
 use java_constants::MethodAccessFlags;
@@ -281,6 +280,10 @@ impl JavaMethod {
             // hands back the registers it was entered with rather than the ones
             // the caller had - so they go back here after every round.
             let caller = core.save_context();
+            // The innermost `try` record as this call found it. A throw no
+            // record covers leaves the call with the records of the frames it
+            // abandons still pushed, and they go with it.
+            let handler_head = KtfJvmSupport::current_java_exception_handler(core)?;
 
             loop {
                 match core.run_function::<JavaMethodRunResult>(pc, &args).await {
@@ -317,6 +320,16 @@ impl JavaMethod {
                         core.restore_context(&caller);
                         pc = next_pc;
                         args = module_unwound_arguments(core, context_base, target)?;
+                    }
+                    // A throw no guest `try` covered: the frames it came
+                    // through are gone, and it is this call's caller's to
+                    // catch - the JVM side, which turns it back into a Java
+                    // exception (see `Method::run`).
+                    Err(WieError::JavaException(exception)) => {
+                        core.restore_context(&caller);
+                        KtfJvmSupport::set_current_java_exception_handler(core, handler_head)?;
+
+                        return Err(WieError::JavaException(exception));
                     }
                     Err(e) => return Err(e),
                 }
@@ -399,7 +412,7 @@ impl JavaMethod {
                 None => {
                     tracing::warn!("No try in the module's chain for {exception:?}");
 
-                    Err(JvmSupport::to_wie_err(jvm, JavaError::JavaException(exception)).await)
+                    Err(WieError::JavaException(exception_raw))
                 }
             };
         }
@@ -532,7 +545,14 @@ impl JavaMethod {
             if searched.is_empty() { " none" } else { &searched }
         );
 
-        Err(JvmSupport::to_wie_err(jvm, JavaError::JavaException(exception)).await)
+        // Uncaught in the title's compiled code is not the end of the title:
+        // it goes back out to whoever on the JVM side made the call, as the
+        // Java exception it is. That caller may well catch it - the event
+        // loop logs an exception out of a `paint` and paints again on the
+        // next frame - where ending the run here took the title down over
+        // one frame. 테일즈 오브 커먼즈 draws an image it has not loaded yet for
+        // one frame after a menu choice, and stopped on "image is null".
+        Err(WieError::JavaException(exception_raw))
     }
 
     /// Whether the native entry point at `address` is one this platform
