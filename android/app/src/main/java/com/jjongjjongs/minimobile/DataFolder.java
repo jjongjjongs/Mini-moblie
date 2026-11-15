@@ -95,9 +95,6 @@ final class DataFolder {
         }
 
         writeFile(context, base, "", README_NAME, "text/plain", README_TEXT.getBytes("UTF-8"));
-        // The data's pictures stay out of the gallery.
-        Downloads.hideFromGallery(context, ROOT);
-        Downloads.hideFromGallery(context, base);
 
         return new Result(files, displayPath(title));
     }
