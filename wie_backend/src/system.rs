@@ -258,6 +258,28 @@ impl System {
             18183,
         )));
 
+        // EA Mobile's server, gone for years. Its KTF titles ask the 게임정보 SMS
+        // 수신 consent on every start until the server has taken the answer:
+        // 비욘드 더 바운스 (KTF 0104202F) writes `SMSAGREE <number> G1000145 N`
+        // to 11531, and with no server it said `서버와의 접속이 원활하지 않습니다
+        // (F23100)` and asked again next time. The lines are the ones 하얀섬
+        // and 검은방 send to the ports beside it, answered the same way with
+        // the line the title's box shows behind it
+        // (`crate::billing::ktf_local_ea_text_response`); a line it does not
+        // know is left unanswered, as before. Host-gated, so no other title
+        // is touched.
+        for (name, port) in [
+            ("ea(210.222.18.28:11530)", 11530),
+            ("ea(210.222.18.28:11531)", 11531),
+            ("ea(210.222.18.28:11532)", 11532),
+        ] {
+            local_network.register(Box::new(crate::local_network::BillingGatewayEndpoint::new_ea_text(
+                name,
+                "210.222.18.28",
+                port,
+            )));
+        }
+
         // 크로이센's shop server for its KTF build (222.231.57.145:56000), gone
         // for years. A purchase dials it and waits on a connect that never
         // completes. Answered in process with the record its LGT build is

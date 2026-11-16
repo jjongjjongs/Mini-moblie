@@ -751,6 +751,42 @@ pub fn lgt_local_ea_text_response(request: &[u8]) -> Option<Vec<u8>> {
     Some(vec![result, 0x00])
 }
 
+/// What answers EA Mobile's text commands from a KTF title, which reaches
+/// the server over a plain socket and shows what it says.
+///
+/// 비욘드 더 바운스 (KTF `0104202F`) sends the same `SMSAGREE` line 하얀섬 does
+/// (`SMSAGREE <number> G1000145 N`) to `210.222.18.28:11531`, reads the same
+/// two-byte head - the result, then how much text follows - and then reads
+/// that text and puts it in a box with `확인` under it. Answered with no text,
+/// as [`lgt_local_ea_text_response`] answers, the box came up empty and the
+/// title sat on it; with no server at all it said `서버와의 접속이 원활하지
+/// 않습니다 (F23100)` and asked the consent again on the next start. So the
+/// answer here carries the line the box shows, in the title's EUC-KR.
+pub fn ktf_local_ea_text_response(request: &[u8]) -> Option<Vec<u8>> {
+    /// `SMS 수신 동의가 처리되었습니다.`
+    const AGREED: &[u8] = &[
+        0x53, 0x4d, 0x53, 0x20, 0xbc, 0xf6, 0xbd, 0xc5, 0x20, 0xb5, 0xbf, 0xc0, 0xc7, 0xb0, 0xa1, 0x20, 0xc3, 0xb3, 0xb8, 0xae, 0xb5, 0xc7, 0xbe,
+        0xfa, 0xbd, 0xc0, 0xb4, 0xcf, 0xb4, 0xd9, 0x2e,
+    ];
+    /// `SMS 수신 거부가 처리되었습니다.`
+    const DECLINED: &[u8] = &[
+        0x53, 0x4d, 0x53, 0x20, 0xbc, 0xf6, 0xbd, 0xc5, 0x20, 0xb0, 0xc5, 0xba, 0xce, 0xb0, 0xa1, 0x20, 0xc3, 0xb3, 0xb8, 0xae, 0xb5, 0xc7, 0xbe,
+        0xfa, 0xbd, 0xc0, 0xb4, 0xcf, 0xb4, 0xd9, 0x2e,
+    ];
+
+    let mut reply = lgt_local_ea_text_response(request)?;
+    if !request.starts_with(b"SMSAGREE ") {
+        return Some(reply);
+    }
+
+    let line = &request[..request.iter().position(|&byte| byte == 0)?];
+    let text = if line.ends_with(b" Y") { AGREED } else { DECLINED };
+    reply[1] = text.len() as u8;
+    reply.extend_from_slice(text);
+
+    Some(reply)
+}
+
 /// The word 하얀섬2's own server protocol XORs every body with.
 const RANN_PR_KEY: [u8; 4] = [0x6e, 0x63, 0x2b, 0xc4];
 
@@ -12157,6 +12193,22 @@ mod tests {
         assert_eq!(lgt_local_ea_text_response(b"CHARGE 01057375505 G1000135 C2000468\0"), Some(vec![0, 0]));
         assert_eq!(lgt_local_ea_text_response(b"KOIN_REQ_P2 01057375505 G1000135\0"), None);
         assert_eq!(lgt_local_ea_text_response(b"SMSAGREE 01057375505 G1000135 N"), None);
+    }
+
+    /// 비욘드 더 바운스's consent, off the probe, is recorded with a line for
+    /// the box it shows the answer in; a charge is answered as for 하얀섬.
+    #[test]
+    fn beyond_the_bounds_consent_carries_its_message() {
+        let reply = ktf_local_ea_text_response(b"SMSAGREE 01046119269 G1000145 N\0").unwrap();
+        assert_eq!(reply[0], 2, "recorded");
+        assert_eq!(reply[1] as usize, reply.len() - 2, "the text the head counts");
+        assert!(reply.len() > 2);
+
+        let agreed = ktf_local_ea_text_response(b"SMSAGREE 01046119269 G1000145 Y\0").unwrap();
+        assert_ne!(agreed[2..], reply[2..], "agreeing and declining say different things");
+
+        assert_eq!(ktf_local_ea_text_response(b"CHARGE 01046119269 G1000145 C2000468\0"), Some(vec![0, 0]));
+        assert_eq!(ktf_local_ea_text_response(b"KOIN_REQ_P2 01046119269 G1000145\0"), None);
     }
 
     /// 검은방2's and 검은방3's consent, off the device logs, NUL-padded to the

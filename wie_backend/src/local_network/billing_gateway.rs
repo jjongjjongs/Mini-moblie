@@ -66,6 +66,10 @@ enum Framing {
     /// `["WM"][u16le length][u16le][command][status][body]`, one write to a
     /// frame - 디펜스히어로's 인증. See [`crate::billing::ktf_local_wm_response`].
     Wm,
+    /// One NUL-ended text command to a write - EA Mobile's server, which the
+    /// KTF builds dial over a plain socket. See
+    /// [`crate::billing::ktf_local_ea_text_response`].
+    EaText,
 }
 
 /// Answers the carrier billing frames a title writes over a plain socket to one
@@ -174,6 +178,17 @@ impl BillingGatewayEndpoint {
         }
     }
 
+    /// Answers `host:port` for EA Mobile's text commands - `SMSAGREE` and
+    /// `CHARGE` - which its KTF titles write over a plain socket.
+    pub const fn new_ea_text(name: &'static str, host: &'static str, port: u16) -> Self {
+        Self {
+            name,
+            host,
+            port,
+            framing: Framing::EaText,
+        }
+    }
+
     /// Answers `host:port` for a title that reaches its server through the
     /// `FastRelay` carrier library - 템페스트's 정품인증.
     pub const fn new_relay(name: &'static str, host: &'static str, port: u16) -> Self {
@@ -223,7 +238,7 @@ impl BillingGatewayConnection {
             Framing::BigEndianLength | Framing::Relay => self.take_length_prefixed_frame(),
             Framing::KpTagged => self.take_kp_tagged_frame(),
             Framing::BigEndianLength32 => self.take_u32_length_prefixed_frame(),
-            Framing::MiniHeroes | Framing::Wm => self.take_write(),
+            Framing::MiniHeroes | Framing::Wm | Framing::EaText => self.take_write(),
             Framing::LittleEndianLength => self.take_little_endian_frame(),
             Framing::Ens => self.take_ens_frame(),
         }
@@ -400,6 +415,7 @@ impl LocalConnection for BillingGatewayConnection {
                 Framing::MiniHeroes => crate::billing::ktf_local_miniheroes2_response(&frame),
                 Framing::LittleEndianLength => crate::billing::ktf_local_gamevil_2011_response(&frame),
                 Framing::Wm => crate::billing::ktf_local_wm_response(&frame),
+                Framing::EaText => crate::billing::ktf_local_ea_text_response(&frame),
                 _ => crate::billing::response(&frame),
             };
             match reply {
