@@ -139,6 +139,47 @@ fn mmf_hash(data: &[u8]) -> u64 {
 /// level and only peaks round off.
 const MMF_GAIN: f32 = 2.0;
 
+/// How far over full scale the drive may push a stream: the share of its
+/// samples that may be rounded off at the top.
+const DRIVE_CLIP_SHARE: f32 = 0.001;
+
+/// The gain a rendered stream is driven with: [`MMF_GAIN`], or as much of it as
+/// the stream has headroom for.
+///
+/// The 2x lift is for a sequence mixed quietly, which most are; one mixed hot
+/// has nowhere to go. 테일즈 오브 커먼즈's title and town themes already reach
+/// full scale as rendered, and doubled, a fifth of every sample was cut flat at
+/// the top - the music came out torn. So the drive stops where more than a
+/// thousandth of the stream would clip, and never goes below unity: a quiet
+/// track is lifted as before, a hot one is left as it was rendered.
+fn drive_gain(pcm: &[f32]) -> f32 {
+    const BINS: usize = 1024;
+
+    if pcm.is_empty() {
+        return MMF_GAIN;
+    }
+
+    let mut histogram = [0u32; BINS];
+    for sample in pcm {
+        let bin = ((sample.abs().min(1.0)) * (BINS - 1) as f32) as usize;
+        histogram[bin] += 1;
+    }
+
+    // The level only that share of the stream rises above.
+    let allowed = (pcm.len() as f32 * DRIVE_CLIP_SHARE) as u64;
+    let mut above = 0u64;
+    let mut level = 1.0f32;
+    for (bin, count) in histogram.iter().enumerate().rev() {
+        above += u64::from(*count);
+        if above > allowed {
+            level = (bin + 1) as f32 / (BINS - 1) as f32;
+            break;
+        }
+    }
+
+    (1.0 / level.max(f32::EPSILON)).clamp(1.0, MMF_GAIN)
+}
+
 /// The mixer the audio thread pulls from. The Java audio pump renders chunks on
 /// demand through [`render_audio_bytes`], clocked by its own AudioTrack, so
 /// playback advances in real time on a thread of its own rather than in the
@@ -395,10 +436,12 @@ impl wie_backend::AudioSink for AndroidAudioSink {
             // AudioTrack at 0.5), which leaves everything below half scale at its
             // full level and only clips the peaks - a loudness lift, not a plain
             // halving. Match it here so a sequence carries the same body it does
-            // on the handset rather than playing back at half the level.
+            // on the handset rather than playing back at half the level - as far
+            // as the stream has room for it; see `drive_gain`.
+            let gain = drive_gain(&pcm);
             let samples: Arc<Vec<i16>> = Arc::new(
                 pcm.iter()
-                    .map(|&s| (s * MMF_GAIN * 32767.0).round().clamp(-32768.0, 32767.0) as i16)
+                    .map(|&s| (s * gain * 32767.0).round().clamp(-32768.0, 32767.0) as i16)
                     .collect(),
             );
 
@@ -435,6 +478,22 @@ mod tests {
     use std::sync::Arc;
 
     use super::{HEADER_LEN, RENDER_CACHE_BYTES, RenderCache, mmf_hash, play_wave_command, scale_wave_volume, vibrate_command};
+
+    /// A quietly mixed stream gets the whole 2x lift; one that already
+    /// reaches full scale is not driven into clipping.
+    #[test]
+    fn the_drive_backs_off_a_stream_that_is_already_loud() {
+        let quiet: Vec<f32> = (0..10_000).map(|i| ((i as f32) * 0.01).sin() * 0.3).collect();
+        assert_eq!(super::drive_gain(&quiet), super::MMF_GAIN);
+
+        let hot: Vec<f32> = (0..10_000).map(|i| ((i as f32) * 0.01).sin() * 0.98).collect();
+        let gain = super::drive_gain(&hot);
+        assert!((1.0..=1.03).contains(&gain), "left about where it was rendered: {gain}");
+
+        let middling: Vec<f32> = (0..10_000).map(|i| ((i as f32) * 0.01).sin() * 0.7).collect();
+        let gain = super::drive_gain(&middling);
+        assert!((1.35..=1.45).contains(&gain), "lifted to just short of full scale: {gain}");
+    }
 
     /// The same bytes are rendered once and handed out again after that.
     ///
