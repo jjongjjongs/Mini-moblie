@@ -643,8 +643,18 @@ impl Graphics {
     ) -> JvmResult<()> {
         tracing::debug!("org.kwis.msp.lcdui.Graphics::drawImage({this:?}, {image:?}, {x}, {y}, {anchor})");
 
+        // Nothing to draw is drawn as nothing. 테일즈 오브 커먼즈 loads its
+        // Korean font sheets per text colour and only for the colours a scene
+        // uses - 0, 1, 2, 4, 6 and 7 in its prologue - and still draws the
+        // glyphs of colour 3 under the line "뭐지? 이 노래 소리는...". Thrown,
+        // that null took the whole paint with it on every frame from there on:
+        // the dialog box sat empty and the game never drew again. The title
+        // was sold on handsets where the same line plays through, and it draws
+        // an image it has not loaded for a frame after a menu choice as well,
+        // so the handset's own `drawImage` did not throw on one.
         if image.is_null() {
-            return Err(jvm.exception("java/lang/NullPointerException", "image is null").await);
+            tracing::debug!("org.kwis.msp.lcdui.Graphics::drawImage: no image, nothing drawn");
+            return Ok(());
         }
 
         let mut midp_graphics: ClassInstanceRef<MidpGraphics> = jvm.get_field(&this, "midpGraphics", "Ljavax/microedition/lcdui/Graphics;").await?;
@@ -1643,6 +1653,29 @@ mod test {
     /// 테일즈 오브 커먼즈's shadow: black at `setAlpha(128)` over a lit floor
     /// comes out half as bright, not black; at `setAlpha(0)` a fill leaves
     /// what was there.
+    #[test]
+    fn test_drawing_no_image_draws_nothing() -> Result<()> {
+        run_jvm_test(Box::new([wie_midp::get_protos().into(), get_protos().into()]), |jvm| async move {
+            let image: ClassInstanceRef<Image> = jvm
+                .invoke_static("org/kwis/msp/lcdui/Image", "createImage", "(II)Lorg/kwis/msp/lcdui/Image;", (4, 4))
+                .await?;
+            let graphics: ClassInstanceRef<Graphics> = jvm.invoke_virtual(&image, "getGraphics", "()Lorg/kwis/msp/lcdui/Graphics;", ()).await?;
+
+            let _: () = jvm.invoke_virtual(&graphics, "setColor", "(I)V", (0xf8_fc_f8,)).await?;
+            let _: () = jvm.invoke_virtual(&graphics, "fillRect", "(IIII)V", (0, 0, 4, 4)).await?;
+
+            let none: ClassInstanceRef<Image> = None.into();
+            let _: () = jvm
+                .invoke_virtual(&graphics, "drawImage", "(Lorg/kwis/msp/lcdui/Image;III)V", (none, 0, 0, 0))
+                .await?;
+
+            let untouched: i32 = jvm.invoke_virtual(&graphics, "getPixel", "(II)I", (0, 0)).await?;
+            assert_eq!(untouched, 0xf8_fc_f8);
+
+            Ok(())
+        })
+    }
+
     #[test]
     fn test_set_alpha_blends_what_is_filled() -> Result<()> {
         run_jvm_test(Box::new([wie_midp::get_protos().into(), get_protos().into()]), |jvm| async move {
