@@ -1,0 +1,2126 @@
+//! The platform a BREW module runs against.
+//!
+//! A module meets three kinds of thing, and every call it makes lands in one
+//! of them:
+//!
+//! 1. **The flat table below the image.** The word at `IMAGE_BASE - 4` points
+//!    at it, and the module reaches it from everywhere through that one word:
+//!    `memcpy`, `strlen`, `sprintf`, the allocator, a millisecond clock and
+//!    "which application am I". This is the AEE helper table.
+//! 2. **The object handed to the entry point** - the shell. Its first three
+//!    methods raise a count, drop it and answer a query by interface number;
+//!    the rest load resources, post events and hand over a frame callback.
+//! 3. **One object per interface number** the module queries: the display,
+//!    memory, files, sound, a timed service, the handset.
+//!
+//! Each is a table of trap stubs here, one stub per slot, and a slot nobody
+//! answers returns zero - which is how this was mapped: run, see which slot the
+//! module asked for, answer it, run again.
+
+use alloc::{
+    collections::BTreeMap,
+    format,
+    string::{String, ToString},
+    sync::Arc,
+    vec,
+    vec::Vec,
+};
+
+use spin::Mutex;
+
+use wie_backend::{
+    System,
+    canvas::{
+        ArgbPixel, Canvas, Clip, Color, Image, ImageBufferCanvas, PixelType, Rgb565Pixel, TextAlignment, VecImageBuffer, baseline_px, string_width_px,
+    },
+};
+use wie_core_arm::{Allocator, ArmCore, SvcId};
+use wie_util::{ByteRead, ByteWrite, Result, WieError, read_generic, read_null_terminated_string_bytes, write_generic};
+
+use crate::{archive::BrewArchive, bitmap, resource::ResourceFile};
+
+/// Where the module is loaded. It is position independent - it carries no
+/// relocations and reaches its own data PC-relatively - so this is the
+/// platform's choice; it is the address KTF maps its executables at.
+pub const IMAGE_BASE: u32 = 0x0010_0000;
+
+const PAGE: u32 = 0x1000;
+
+/// The page under the image, whose last two words are the interface version
+/// and the platform table.
+const HEADER_BASE: u32 = IMAGE_BASE - PAGE;
+const INTERFACE_VERSION: u32 = 0x10000;
+
+/// Trap tables, one page each, and the scratch words the start-up calls are
+/// handed.
+const TABLE_BASE: u32 = 0x3000_0000;
+const TABLE_SLOTS: u32 = 128;
+const MAX_SURFACES: u32 = 16;
+const SCRATCH_BASE: u32 = TABLE_BASE + MAX_SURFACES * PAGE;
+const ENTRY_OBJECT: u32 = SCRATCH_BASE;
+const ENTRY_SPARE: u32 = SCRATCH_BASE + 0x100;
+const ENTRY_OUT: u32 = SCRATCH_BASE + 0x200;
+const APPLICATION_OUT: u32 = SCRATCH_BASE + 0x300;
+
+pub const SVC_CATEGORY: u32 = 1;
+
+// The flat table.
+const SLOT_MEMORY_COPY: u32 = 0x00;
+const SLOT_MEMORY_SET: u32 = 0x04;
+const SLOT_STRING_COPY: u32 = 0x08;
+const SLOT_STRING_JOIN: u32 = 0x0c;
+const SLOT_STRING_COMPARE: u32 = 0x10;
+const SLOT_STRING_SIZE: u32 = 0x14;
+const SLOT_FORMAT: u32 = 0x20;
+const SLOT_CREATE_OBJECT: u32 = 0x64;
+const SLOT_ALLOCATE: u32 = 0x68;
+const SLOT_FREE: u32 = 0x6c;
+const SLOT_REALLOCATE: u32 = 0x74;
+const SLOT_INITIAL: u32 = 0x8c;
+const SLOT_ATOI: u32 = 0x90;
+const SLOT_FLOAT_OPERATION: u32 = 0x94;
+const SLOT_MILLISECONDS: u32 = 0xac;
+const SLOT_ELAPSED: u32 = 0xb0;
+const SLOT_DESTROY_OBJECT: u32 = 0xbc;
+const SLOT_CURRENT_APPLICATION: u32 = 0xc0;
+const SLOT_BOUNDED_COPY: u32 = 0xc8;
+const SLOT_TEXT_TO_WIDE: u32 = 0xe4;
+const SLOT_COMPARE: u32 = 0xcc;
+const SLOT_BOUNDED_STRING_COMPARE: u32 = 0xdc;
+
+// Every object's first three methods.
+const OBJECT_ADD_REF: u32 = 0x00;
+const OBJECT_RELEASE: u32 = 0x04;
+const OBJECT_QUERY_INTERFACE: u32 = 0x08;
+
+// The shell.
+const SHELL_DISPLAY_INFO: u32 = 0x10;
+const SHELL_CLOSE_APPLET: u32 = 0x18;
+const SHELL_ACTIVE_APPLET: u32 = 0x20;
+const SHELL_SCHEDULE: u32 = 0x2c;
+const SHELL_CANCEL_TIMER: u32 = 0x30;
+const SHELL_LOAD_RESOURCE: u32 = 0x48;
+const SHELL_FREE_RESOURCE: u32 = 0x50;
+const SHELL_POST_EVENT: u32 = 0x54;
+
+// The interfaces, by the number the module queries.
+const INTERFACE_DISPLAY: u32 = 0x100_1001;
+const INTERFACE_MEMORY: u32 = 0x100_1002;
+const INTERFACE_FILE: u32 = 0x100_1003;
+const INTERFACE_TIMED: u32 = 0x100_100b;
+const INTERFACE_SOUND: u32 = 0x100_2000;
+const INTERFACE_GRAPHICS: u32 = 0x100_2001;
+const INTERFACE_CERTIFICATE: u32 = 0x103_028a;
+const INTERFACE_HANDSET: u32 = 0x180_00fe;
+/// `INetMgr`. 한쿠아 큰화 creates it while it starts, opens a socket and
+/// gives up its start-up when that answer is null; it only ever sets the
+/// socket up and releases it.
+const INTERFACE_NETWORK: u32 = 0x100_1105;
+/// KTF's connection over a socket `INetMgr` opened: the one 카트라이더레이싱
+/// connects and writes through, reading off the socket itself.
+const INTERFACE_CONNECTION: u32 = 0x180_00fc;
+/// The number the socket is kept under: no interface the shell is asked for
+/// has the top bit set.
+const INTERFACE_SOCKET: u32 = 0x8100_1105;
+
+const NETWORK_RESOLVE: u32 = 0x0c;
+const NETWORK_OPEN_SOCKET: u32 = 0x14;
+const NETWORK_SET_LINGER: u32 = 0x20;
+const CONNECTION_ATTACH: u32 = 0x08;
+const CONNECTION_CONNECT: u32 = 0x0c;
+const CONNECTION_WRITE: u32 = 0x14;
+const SOCKET_READABLE: u32 = 0x08;
+const SOCKET_READ: u32 = 0x0c;
+const SOCKET_CANCEL: u32 = 0x10;
+/// `AEECallback`'s function and its argument.
+const CALLBACK_FUNCTION: u32 = 0x10;
+const CALLBACK_CONTEXT: u32 = 0x14;
+/// What a name resolves to: no title here looks at the address.
+const RESOLVED_ADDRESS: [u8; 4] = [127, 0, 0, 1];
+/// `AEE_NET_WOULDBLOCK`.
+const NET_WOULD_BLOCK: u32 = u32::MAX;
+/// The entaz servers' domain; see [`wie_backend::billing::ktf_brew_entaz_response`].
+const ENTAZ_DOMAIN: &str = ".entaz.com";
+
+const DISPLAY_FONT_METRICS: u32 = 0x08;
+// `DrawText`'s placement flags, `IDF_ALIGN_*`. 카샨 centres its messages with
+// `0x8220` and the screen's middle as `x` and `y`; 한쿠아 큰화 its choices with
+// `0x8020`, `x` zero and the line's own `y`.
+const TEXT_ALIGN_LEFT: u32 = 0x10;
+const TEXT_ALIGN_CENTRE: u32 = 0x20;
+const TEXT_ALIGN_RIGHT: u32 = 0x40;
+const TEXT_ALIGN_TOP: u32 = 0x100;
+const TEXT_ALIGN_MIDDLE: u32 = 0x200;
+const TEXT_ALIGN_BOTTOM: u32 = 0x400;
+const DISPLAY_MEASURE_TEXT: u32 = 0x0c;
+const DISPLAY_TEXT: u32 = 0x10;
+const DISPLAY_RECTANGLE: u32 = 0x14;
+const DISPLAY_BLIT: u32 = 0x18;
+const DISPLAY_PRESENT: u32 = 0x1c;
+const DISPLAY_KEEP_AWAKE: u32 = 0x24;
+const DISPLAY_COLOUR: u32 = 0x28;
+
+// `IGraphics`, which draws on the same screen the display does. 어둠의전설
+// draws its dialog boxes and bars with it, a line at a time, and 한쿠아 큰화
+// the bars along the top and bottom of its screens, a filled rectangle each.
+const GRAPHICS_SET_COLOUR: u32 = 0x10;
+const GRAPHICS_SET_FILL_MODE: u32 = 0x18;
+const GRAPHICS_SET_FILL_COLOUR: u32 = 0x20;
+const GRAPHICS_SET_POINT_SIZE: u32 = 0x28;
+const GRAPHICS_SET_CLIP: u32 = 0x30;
+const GRAPHICS_POINT: u32 = 0x50;
+const GRAPHICS_LINE: u32 = 0x54;
+/// `AEEClip`'s shape: a rectangle, its x, y, width and height from byte 4.
+const CLIP_RECTANGLE: u8 = 1;
+const GRAPHICS_RECTANGLE: u32 = 0x58;
+
+const MEMORY_FITS: u32 = 0x18;
+const MEMORY_FREE: u32 = 0x1c;
+
+const SOURCE_ADD_LISTENER: u32 = 0x08;
+
+const TIMED_START: u32 = 0x28;
+const TIMED_STOP: u32 = 0x2c;
+const TIMED_EVENT_KIND: u32 = 1;
+const TIMED_EVENT_END: u32 = 2;
+
+const SOUND_SET_CLIP: u32 = 0x0c;
+const SOUND_PLAY: u32 = 0x10;
+const SOUND_STOP: u32 = 0x14;
+const SOUND_EVENT_KIND: u32 = 1;
+const SOUND_EVENT_END: u32 = 14;
+
+const CERTIFICATE_CHECK: u32 = 0x08;
+
+const HANDSET_RECORD: u32 = 0x08;
+const HANDSET_RECORD_SIZE: usize = 0x26;
+
+// The file interface, and the object one open file is.
+const FILES_OPEN: u32 = 0x08;
+const FILES_INFORMATION: u32 = 0x0c;
+const FILES_CREATE: u32 = 0x10;
+const FILES_EXISTS: u32 = 0x1c;
+const FILES_FREE_SPACE: u32 = 0x20;
+const FILES_LAST_ERROR: u32 = 0x24;
+const FILE_CLOSE: u32 = 0x04;
+const FILE_READ: u32 = 0x0c;
+const FILE_WRITE: u32 = 0x14;
+const FILE_STATUS: u32 = 0x18;
+const FILE_SEEK: u32 = 0x1c;
+const FILE_RECORD_SIZE: usize = 0x0c;
+const FILE_LENGTH_OFFSET: usize = 0x08;
+const FILE_FAILED: u32 = 1;
+/// The handset's storage, as `GetFreeSpace` reports it.
+const STORAGE_TOTAL: u32 = 16 << 20;
+const STORAGE_FREE: u32 = 8 << 20;
+const MODE_READ: u32 = 1;
+const MODE_CREATE: u32 = 4;
+
+/// The class `createObject` is asked for when it is handed a bitmap.
+const CLASS_IMAGE: u32 = 0x100_4001;
+/// `AEEImageInfo`: `cx`, `cy`, `nColors`, `bAnimated` and `cxFrame`.
+const IMAGE_INFO_SIZE: usize = 10;
+
+/// The handset's own picture, which `createObject` makes of a bitmap: the
+/// bitmap it was made from, the width and the height as `u16`s, where its
+/// pixels are, and then the pixels - RGB565, a row after another.
+///
+/// Titles look inside it. 카트라이더레이싱 converts a small picture of known
+/// colours and reads back where the size and the pixels sit and how a pixel
+/// is packed, then makes pictures of its own in that shape - the race's
+/// track is one, its tiles copied in - and hands them to `BitBlt`.
+const IMAGE_HEADER: u32 = 0x10;
+const IMAGE_WIDTH_FIELD: usize = 4;
+const IMAGE_HEIGHT_FIELD: usize = 6;
+const IMAGE_PIXELS_FIELD: usize = 8;
+const MAX_IMAGE_SIDE: u32 = 4096;
+
+/// What the title's own object takes as events.
+pub const EVENT_START: u32 = 0;
+const EVENT_KEY_TYPED: u32 = 0x100;
+const EVENT_KEY_DOWN: u32 = 0x101;
+const EVENT_KEY_UP: u32 = 0x102;
+
+const MAX_STRING: u32 = 64 << 10;
+const MAX_TRANSFER: u32 = 8 << 20;
+const MAX_TEXT: i32 = 4 << 10;
+const MAX_QUEUED: usize = 1024;
+
+/// The handset's face, in pixels.
+const FONT_HEIGHT: f32 = 12.0;
+
+/// Magenta, which the platform's images never draw.
+const TRANSPARENT_565: u16 = 0xf81f;
+
+const TEXT_COLOUR_ITEM: u32 = 1;
+/// `CLR_USER_BACKGROUND`, what a fill of `RGB_NONE` - `IDISPLAY_EraseRect`,
+/// `ClearScreen` - paints with.
+const BACKGROUND_COLOUR_ITEM: u32 = 2;
+/// `RGB_NONE`.
+const NO_COLOUR: u32 = u32::MAX;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Surface {
+    Platform,
+    Shell,
+    File,
+    Interface(u32),
+}
+
+struct Listener {
+    source: u32,
+    function: u32,
+    context: u32,
+}
+
+/// A timer `ISHELL_SetTimer` armed: it fires once, and a title that wants
+/// another arms it again from the callback.
+struct Schedule {
+    function: u32,
+    context: u32,
+    due: u64,
+}
+
+/// The one connection a title makes, to a server that lives here: what it
+/// asked for by name, what the server has said that the title has not read,
+/// and the callback waiting for that.
+#[derive(Default)]
+struct Connection {
+    host: String,
+    inbox: Vec<u8>,
+    readable: Option<(u32, u32)>,
+}
+
+struct KeptImage {
+    data: u32,
+    bytes: Vec<u8>,
+}
+
+struct OpenFile {
+    key: String,
+    data: Vec<u8>,
+    position: usize,
+    writable: bool,
+}
+
+struct State {
+    surfaces: Vec<(Surface, u32)>,
+    interfaces: BTreeMap<u32, u32>,
+    blocks: BTreeMap<u32, u32>,
+    application: u32,
+    class: u32,
+    started: u64,
+
+    width: u32,
+    height: u32,
+    screen: ImageBufferCanvas<VecImageBuffer<ArgbPixel>>,
+    dirty: bool,
+    images: BTreeMap<u32, KeptImage>,
+    colours: BTreeMap<u32, u32>,
+    graphics_colour: Color,
+    graphics_fill: Color,
+    graphics_filled: bool,
+    graphics_point: u32,
+    graphics_clip: Option<Clip>,
+
+    listeners: Vec<Listener>,
+    timers: Vec<Schedule>,
+    /// Callbacks owed to the title - a name resolved, a connection made,
+    /// data arrived - with the argument each is called with.
+    calls: Vec<(u32, u32, u32)>,
+    connection: Connection,
+    /// When the timed service ends, on the clock [`Brew::now`] reads.
+    timed_due: Option<u64>,
+    posted: Vec<(u32, u32, u32)>,
+
+    files: BTreeMap<u32, OpenFile>,
+    file_table: u32,
+    file_failure: u32,
+    resources: BTreeMap<String, Option<Arc<ResourceFile>>>,
+
+    clip: Option<u32>,
+    sounding: bool,
+}
+
+/// What the trap handler and the run loop share.
+#[derive(Clone)]
+pub struct Brew {
+    system: System,
+    state: Arc<Mutex<State>>,
+}
+
+impl Brew {
+    /// Maps the module and the platform it finds below it.
+    pub fn new(core: &mut ArmCore, system: &System, archive: &BrewArchive) -> Result<Self> {
+        let mapped = (archive.module.len() as u32).next_multiple_of(PAGE);
+        core.load(&archive.module, IMAGE_BASE, mapped as usize)?;
+        core.map(HEADER_BASE, PAGE)?;
+        core.map(TABLE_BASE, (MAX_SURFACES + 1) * PAGE)?;
+        Allocator::init(core)?;
+
+        let (width, height) = {
+            let screen = system.platform().screen();
+            (screen.width(), screen.height())
+        };
+
+        let mut screen = ImageBufferCanvas::new(VecImageBuffer::<ArgbPixel>::new(width, height));
+        screen.fill_rect(0, 0, width, height, BLACK, full_clip(width, height));
+
+        let brew = Self {
+            system: system.clone(),
+            state: Arc::new(Mutex::new(State {
+                surfaces: Vec::new(),
+                interfaces: BTreeMap::new(),
+                blocks: BTreeMap::new(),
+                application: 0,
+                class: 0,
+                started: system.platform().now().raw(),
+                width,
+                height,
+                screen,
+                dirty: true,
+                images: BTreeMap::new(),
+                colours: BTreeMap::new(),
+                graphics_colour: Color { a: 0xff, r: 0, g: 0, b: 0 },
+                graphics_fill: Color {
+                    a: 0xff,
+                    r: 0xff,
+                    g: 0xff,
+                    b: 0xff,
+                },
+                graphics_filled: false,
+                graphics_point: 1,
+                graphics_clip: None,
+                listeners: Vec::new(),
+                timers: Vec::new(),
+                calls: Vec::new(),
+                connection: Connection::default(),
+                timed_due: None,
+                posted: Vec::new(),
+                files: BTreeMap::new(),
+                file_table: 0,
+                file_failure: 0,
+                resources: BTreeMap::new(),
+                clip: None,
+                sounding: false,
+            })),
+        };
+
+        core.register_svc_handler(SVC_CATEGORY, handle_trap, &brew)?;
+
+        let platform = brew.add_surface(core, Surface::Platform)?;
+        let shell = brew.add_surface(core, Surface::Shell)?;
+        let file = brew.add_surface(core, Surface::File)?;
+        brew.state.lock().file_table = file;
+
+        write_generic(core, ENTRY_OBJECT, shell)?;
+        write_generic(core, IMAGE_BASE - 8, INTERFACE_VERSION)?;
+        write_generic(core, IMAGE_BASE - 4, platform)?;
+
+        Ok(brew)
+    }
+
+    /// A trap table: every slot a stub that traps with its surface and slot.
+    fn add_surface(&self, core: &mut ArmCore, surface: Surface) -> Result<u32> {
+        let index = self.state.lock().surfaces.len() as u32;
+        if index >= MAX_SURFACES {
+            return Err(WieError::FatalError(format!("BREW module asked for more than {MAX_SURFACES} interfaces")));
+        }
+
+        let table = TABLE_BASE + index * PAGE;
+        for slot in 0..TABLE_SLOTS {
+            let stub = core.make_svc_stub(SVC_CATEGORY, (index << 16) | slot)?;
+            write_generic(core, table + slot * 4, stub)?;
+        }
+
+        self.state.lock().surfaces.push((surface, table));
+
+        Ok(table)
+    }
+
+    /// Calls the entry, has it build the title's object, and sends that object
+    /// its start event.
+    ///
+    /// The entry is `AEEMod_Load(IShell *, void *, IModule **)`: it writes a
+    /// module object through its third argument. That object's third method is
+    /// `IModule::CreateInstance(IModule *, IShell *, AEECLSID, void **)`, asked
+    /// for the ClassID the information file carries, and it writes the title's
+    /// object through its last argument - both answers are read off the out
+    /// parameter, never the result. A small integer sent to the title's object
+    /// is an event, and 0 is the one that starts it.
+    pub async fn boot(&self, core: &mut ArmCore, identifier: u32) -> Result<()> {
+        core.run_function::<u32>(IMAGE_BASE, &[ENTRY_OBJECT, ENTRY_SPARE, ENTRY_OUT]).await?;
+
+        let module: u32 = read_generic(core, ENTRY_OUT)?;
+        if module == 0 {
+            return Err(WieError::FatalError("BREW module entry wrote no module object".into()));
+        }
+        let methods: u32 = read_generic(core, module)?;
+        let create_instance: u32 = read_generic(core, methods + 8)?;
+
+        core.run_function::<u32>(create_instance, &[module, ENTRY_OBJECT, identifier, APPLICATION_OUT])
+            .await?;
+
+        let application: u32 = read_generic(core, APPLICATION_OUT)?;
+        if application == 0 {
+            return Err(WieError::FatalError(format!("BREW module refused to create application {identifier:#x}")));
+        }
+        {
+            let mut state = self.state.lock();
+            state.application = application;
+            state.class = identifier;
+        }
+
+        tracing::info!("BREW application {identifier} created at {application:#x}");
+
+        self.send_event(core, EVENT_START, 0, 0).await?;
+
+        Ok(())
+    }
+
+    async fn send_event(&self, core: &mut ArmCore, event: u32, first: u32, second: u32) -> Result<u32> {
+        let application = self.state.lock().application;
+        let methods: u32 = read_generic(core, application)?;
+        let handle_event: u32 = read_generic(core, methods + 8)?;
+
+        core.run_function::<u32>(handle_event, &[application, event, first, second]).await
+    }
+
+    /// Delivers a key: the press and then the key typed, or the release.
+    pub async fn key(&self, core: &mut ArmCore, code: u32, pressed: bool) -> Result<()> {
+        if pressed {
+            let down = self.send_event(core, EVENT_KEY_DOWN, code, 0).await?;
+            let typed = self.send_event(core, EVENT_KEY_TYPED, code, 0).await?;
+            tracing::debug!("BREW key {code:#x} down: handled {down}, typed: handled {typed}");
+        } else {
+            let up = self.send_event(core, EVENT_KEY_UP, code, 0).await?;
+            tracing::debug!("BREW key {code:#x} up: handled {up}");
+        }
+
+        Ok(())
+    }
+
+    fn now(&self) -> u64 {
+        self.system.platform().now().raw()
+    }
+
+    /// Runs whatever is due, and answers how long until something is.
+    ///
+    /// The title has no loop of its own. Its start event ends by handing the
+    /// shell an interval, a function and a context, and everything after that
+    /// happens inside that function: it reads the clock, steps its state,
+    /// draws, and is called again.
+    pub async fn step(&self, core: &mut ArmCore) -> Result<Option<u64>> {
+        let posted = core::mem::take(&mut self.state.lock().posted);
+        for (event, first, second) in posted {
+            self.send_event(core, event, first, second).await?;
+        }
+
+        self.advance_sound(core).await?;
+        self.advance_timed(core).await?;
+
+        let calls = core::mem::take(&mut self.state.lock().calls);
+        for (function, context, argument) in calls {
+            core.run_function::<u32>(function, &[context, argument]).await?;
+        }
+
+        let now = self.now();
+        let due = {
+            let mut state = self.state.lock();
+            let index = (0..state.timers.len()).min_by_key(|x| state.timers[*x].due);
+            match index {
+                Some(index) if state.timers[index].due <= now => state.timers.remove(index),
+                // Nothing due: the wait runs to the nearer of the shell's
+                // timers and the timed service. Leaving the timed service
+                // out slept a title past it for as long as the loop's poll
+                // whenever it was the nearer, or the only one running.
+                _ => {
+                    let next = state.timers.iter().map(|x| x.due).chain(state.timed_due).min();
+                    return Ok(next.map(|due| due.saturating_sub(now)));
+                }
+            }
+        };
+        core.run_function::<u32>(due.function, &[due.context]).await?;
+
+        Ok(Some(0))
+    }
+
+    /// The screen, when something has been drawn on it since it was last
+    /// asked for.
+    pub fn take_frame(&self, present: impl FnOnce(&dyn Image)) {
+        let mut state = self.state.lock();
+        if !state.dirty {
+            return;
+        }
+        state.dirty = false;
+
+        present(state.screen.image());
+    }
+
+    async fn advance_sound(&self, core: &mut ArmCore) -> Result<()> {
+        let (clip, sounding) = {
+            let state = self.state.lock();
+            (state.clip, state.sounding)
+        };
+        let Some(clip) = clip else { return Ok(()) };
+        if !sounding || self.system.audio().is_playing(clip) {
+            return Ok(());
+        }
+
+        self.state.lock().sounding = false;
+        self.deliver(core, INTERFACE_SOUND, SOUND_EVENT_KIND, SOUND_EVENT_END).await
+    }
+
+    async fn advance_timed(&self, core: &mut ArmCore) -> Result<()> {
+        let due = self.state.lock().timed_due;
+        match due {
+            Some(due) if self.now() >= due => {
+                self.state.lock().timed_due = None;
+                self.deliver(core, INTERFACE_TIMED, TIMED_EVENT_KIND, TIMED_EVENT_END).await
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Calls the listener the title registered on `source`, if it registered
+    /// one.
+    async fn deliver(&self, core: &mut ArmCore, source: u32, first: u32, second: u32) -> Result<()> {
+        let listener = self
+            .state
+            .lock()
+            .listeners
+            .iter()
+            .find(|x| x.source == source)
+            .map(|x| (x.function, x.context));
+
+        if let Some((function, context)) = listener
+            && function != 0
+        {
+            core.run_function::<u32>(function, &[context, first, second]).await?;
+        }
+
+        Ok(())
+    }
+}
+
+const BLACK: Color = Color { a: 0xff, r: 0, g: 0, b: 0 };
+
+/// An image's pixels as the handset keeps them, RGB565.
+fn native_pixels(image: &VecImageBuffer<ArgbPixel>) -> Vec<u8> {
+    image
+        .colors()
+        .into_iter()
+        .flat_map(|x| Rgb565Pixel::from_color(x).to_le_bytes())
+        .collect()
+}
+
+fn full_clip(width: u32, height: u32) -> Clip {
+    Clip { x: 0, y: 0, width, height }
+}
+
+/// Colours arrive as BREW's `RGBVAL`, `MAKE_RGB(r, g, b)` packing them as
+/// `0xBBGGRRxx`. Read the other way round, 한쿠아 큰화's sea - `0xf2975000`,
+/// a blue - came out orange, and its light blue message boxes peach.
+fn packed_colour(packed: u32) -> Color {
+    Color {
+        a: 0xff,
+        r: (packed >> 8) as u8,
+        g: (packed >> 16) as u8,
+        b: (packed >> 24) as u8,
+    }
+}
+
+fn params<const N: usize>(core: &ArmCore) -> Result<[u32; N]> {
+    let mut result = [0; N];
+    for (index, value) in result.iter_mut().enumerate() {
+        *value = core.read_param(index)?;
+    }
+
+    Ok(result)
+}
+
+fn read_bytes(core: &ArmCore, address: u32, length: u32) -> Result<Vec<u8>> {
+    let mut data = vec![0; length as usize];
+    core.read_bytes(address, &mut data)?;
+
+    Ok(data)
+}
+
+fn read_string(core: &ArmCore, address: u32) -> Result<Vec<u8>> {
+    if address == 0 {
+        return Err(WieError::FatalError("BREW library call on a null string".into()));
+    }
+
+    let text = read_null_terminated_string_bytes(core, address)?;
+    if text.len() as u32 >= MAX_STRING {
+        return Err(WieError::FatalError(format!("BREW string at {address:#x} is not terminated")));
+    }
+
+    Ok(text)
+}
+
+fn decode_euc_kr(bytes: &[u8]) -> String {
+    encoding_rs::EUC_KR.decode(bytes).0.to_string()
+}
+
+/// The name a file is kept under: its base name, in lower case. A title asks
+/// for its own files by bare name and in whatever case its code spelled.
+fn file_key(name: &str) -> String {
+    let name = name.replace('\\', "/");
+
+    name.rsplit('/').next().unwrap_or(&name).to_ascii_lowercase()
+}
+
+async fn handle_trap(core: &mut ArmCore, brew: &mut Brew, id: SvcId) -> Result<u32> {
+    let (index, slot) = (id.0 >> 16, id.0 & 0xffff);
+    let offset = slot * 4;
+
+    let surface = brew
+        .state
+        .lock()
+        .surfaces
+        .get(index as usize)
+        .map(|x| x.0)
+        .ok_or_else(|| WieError::FatalError(format!("BREW trap on surface {index}, which does not exist")))?;
+
+    if tracing::enabled!(tracing::Level::TRACE) {
+        let (_, lr) = core.read_pc_lr()?;
+        let arguments: [u32; 4] = params(core)?;
+        tracing::trace!("BREW trap {index}:{offset:#x} ({arguments:x?}) from lr={lr:#x}");
+    }
+
+    let result = match (surface, offset) {
+        (Surface::Platform, SLOT_MEMORY_COPY | SLOT_BOUNDED_COPY) => memory_copy(core),
+        (Surface::Platform, SLOT_MEMORY_SET) => memory_set(core),
+        (Surface::Platform, SLOT_STRING_COPY) => string_copy(core),
+        (Surface::Platform, SLOT_STRING_JOIN) => string_join(core),
+        (Surface::Platform, SLOT_STRING_COMPARE) => string_compare(core),
+        (Surface::Platform, SLOT_BOUNDED_STRING_COMPARE) => bounded_string_compare(core),
+        (Surface::Platform, SLOT_STRING_SIZE) => Ok(read_string(core, core.read_param(0)?)?.len() as u32),
+        (Surface::Platform, SLOT_FORMAT) => format(core),
+        (Surface::Platform, SLOT_COMPARE) => memory_compare(core),
+        (Surface::Platform, SLOT_TEXT_TO_WIDE) => text_to_wide(core),
+        (Surface::Platform, SLOT_ALLOCATE) => brew.allocate(core, core.read_param(0)?),
+        (Surface::Platform, SLOT_FREE) => {
+            brew.free(core, core.read_param(0)?)?;
+            Ok(0)
+        }
+        (Surface::Platform, SLOT_REALLOCATE) => {
+            let [address, size] = params(core)?;
+            brew.reallocate(core, address, size)
+        }
+        (Surface::Platform, SLOT_INITIAL) => Ok(0),
+        (Surface::Platform, SLOT_ATOI) => atoi(core),
+        (Surface::Platform, SLOT_FLOAT_OPERATION) => float_operation(core),
+        (Surface::Platform, SLOT_MILLISECONDS | SLOT_ELAPSED) => Ok((brew.now() - brew.state.lock().started) as u32),
+        (Surface::Platform, SLOT_CURRENT_APPLICATION) => {
+            let application = brew.state.lock().application;
+            if application == 0 {
+                Err(WieError::FatalError("BREW module asked for its application before creating it".into()))
+            } else {
+                Ok(application)
+            }
+        }
+        (Surface::Platform, SLOT_CREATE_OBJECT) => brew.create_object(core),
+        (Surface::Platform, SLOT_DESTROY_OBJECT) => {
+            let object = core.read_param(0)?;
+            if object == 0 {
+                Ok(0)
+            } else {
+                let image = brew.state.lock().images.remove(&object);
+                if let Some(image) = image {
+                    brew.free(core, image.data)?;
+                }
+                brew.free(core, object)?;
+                Ok(1)
+            }
+        }
+
+        (_, OBJECT_ADD_REF | OBJECT_RELEASE) if surface != Surface::File => Ok(1),
+        (Surface::Shell, OBJECT_QUERY_INTERFACE) => brew.query_interface(core),
+        (Surface::Shell, SHELL_DISPLAY_INFO) => brew.display_info(core),
+        // `ISHELL_CloseApplet`, which is what the title's 게임종료 calls. The
+        // title stops scheduling frames once it has asked; the handset goes
+        // back to its menu.
+        (Surface::Shell, SHELL_CLOSE_APPLET) => {
+            tracing::info!("BREW application closed itself");
+            brew.state.lock().timers.clear();
+            brew.system.platform().exit();
+            Ok(0)
+        }
+        // `ISHELL_ActiveApplet`: the class of the application in front, which
+        // is this one. 카트라이더레이싱 checks it against its own before it
+        // reads its files, and went on with buffers it never filled.
+        (Surface::Shell, SHELL_ACTIVE_APPLET) => Ok(brew.state.lock().class),
+        // `ISHELL_SetTimer(milliseconds, callback, context)`. A title can
+        // have more than one running: 카트라이더레이싱 arms a 4-second one to
+        // end its loading screen alongside its 200 ms frame timer, and with
+        // one slot the frame timer took its place and the loading screen
+        // never ended. Arming a callback and context again moves its timer.
+        (Surface::Shell, SHELL_SCHEDULE) => {
+            let [_, interval, function, context] = params(core)?;
+            let due = brew.now() + interval.max(1) as u64;
+            let mut state = brew.state.lock();
+            state.timers.retain(|x| (x.function, x.context) != (function, context));
+            if state.timers.len() < MAX_QUEUED {
+                state.timers.push(Schedule { function, context, due });
+            }
+            Ok(0)
+        }
+        // `ISHELL_CancelTimer(callback, context)`; a null callback cancels
+        // every timer of the context.
+        (Surface::Shell, SHELL_CANCEL_TIMER) => {
+            let [_, function, context] = params(core)?;
+            brew.state
+                .lock()
+                .timers
+                .retain(|x| x.context != context || (function != 0 && x.function != function));
+            Ok(0)
+        }
+        (Surface::Shell, SHELL_POST_EVENT) => {
+            let [_, _, _, event, first, second] = params(core)?;
+            let mut state = brew.state.lock();
+            if state.posted.len() < MAX_QUEUED {
+                state.posted.push((event, first, second));
+            }
+            Ok(1)
+        }
+        (Surface::Shell, SHELL_LOAD_RESOURCE) => brew.load_resource(core).await,
+        (Surface::Shell, SHELL_FREE_RESOURCE) => {
+            brew.free(core, core.read_param(1)?)?;
+            Ok(0)
+        }
+
+        (Surface::Interface(INTERFACE_DISPLAY), DISPLAY_FONT_METRICS) => font_metrics(core),
+        (Surface::Interface(INTERFACE_DISPLAY), DISPLAY_MEASURE_TEXT) => measure_text(core),
+        (Surface::Interface(INTERFACE_DISPLAY), DISPLAY_TEXT) => brew.draw_text(core),
+        (Surface::Interface(INTERFACE_DISPLAY), DISPLAY_RECTANGLE) => brew.draw_rectangle(core),
+        (Surface::Interface(INTERFACE_DISPLAY), DISPLAY_BLIT) => brew.blit(core),
+        (Surface::Interface(INTERFACE_DISPLAY), DISPLAY_PRESENT) => {
+            brew.state.lock().dirty = true;
+            Ok(1)
+        }
+        (Surface::Interface(INTERFACE_DISPLAY), DISPLAY_KEEP_AWAKE) => Ok(1),
+        (Surface::Interface(INTERFACE_DISPLAY), DISPLAY_COLOUR) => {
+            let [_, item, value] = params(core)?;
+            brew.state.lock().colours.insert(item, value);
+            Ok(0)
+        }
+
+        (Surface::Interface(INTERFACE_GRAPHICS), GRAPHICS_SET_COLOUR | GRAPHICS_SET_FILL_COLOUR) => {
+            let [_, r, g, b] = params(core)?;
+            let colour = Color {
+                a: 0xff,
+                r: r as u8,
+                g: g as u8,
+                b: b as u8,
+            };
+            let mut state = brew.state.lock();
+            if offset == GRAPHICS_SET_COLOUR {
+                state.graphics_colour = colour;
+            } else {
+                state.graphics_fill = colour;
+            }
+            Ok(0)
+        }
+        (Surface::Interface(INTERFACE_GRAPHICS), GRAPHICS_SET_FILL_MODE) => {
+            let filled = core.read_param(1)? != 0;
+            let previous = core::mem::replace(&mut brew.state.lock().graphics_filled, filled);
+            Ok(previous as u32)
+        }
+        (Surface::Interface(INTERFACE_GRAPHICS), GRAPHICS_SET_POINT_SIZE) => {
+            let size = core.read_param(1)? & 0xff;
+            Ok(core::mem::replace(&mut brew.state.lock().graphics_point, size.max(1)))
+        }
+        (Surface::Interface(INTERFACE_GRAPHICS), GRAPHICS_SET_CLIP) => brew.set_graphics_clip(core),
+        (Surface::Interface(INTERFACE_GRAPHICS), GRAPHICS_POINT) => brew.draw_point(core),
+        (Surface::Interface(INTERFACE_GRAPHICS), GRAPHICS_LINE) => brew.draw_line(core),
+        (Surface::Interface(INTERFACE_GRAPHICS), GRAPHICS_RECTANGLE) => brew.draw_graphics_rectangle(core),
+
+        // The module walks its request up until this says no, and keeps the
+        // largest block both this and the allocator will give.
+        (Surface::Interface(INTERFACE_MEMORY), MEMORY_FITS) => Ok((core.read_param(1)? <= brew.available()) as u32),
+        (Surface::Interface(INTERFACE_MEMORY), MEMORY_FREE) => Ok(brew.available()),
+
+        (Surface::Interface(source @ (INTERFACE_SOUND | INTERFACE_TIMED)), SOURCE_ADD_LISTENER) => {
+            let [_, function, context] = params(core)?;
+            brew.state.lock().listeners.push(Listener { source, function, context });
+            Ok(1)
+        }
+        (Surface::Interface(INTERFACE_TIMED), TIMED_START) => {
+            let milliseconds = core.read_param(1)? as u64;
+            brew.state.lock().timed_due = Some(brew.now() + milliseconds);
+            Ok(1)
+        }
+        (Surface::Interface(INTERFACE_TIMED), TIMED_STOP) => {
+            brew.state.lock().timed_due = None;
+            Ok(1)
+        }
+        (Surface::Interface(INTERFACE_SOUND), SOUND_SET_CLIP) => brew.set_clip(core),
+        (Surface::Interface(INTERFACE_SOUND), SOUND_PLAY) => {
+            let clip = brew.state.lock().clip;
+            if let Some(clip) = clip {
+                let _ = brew.system.audio().play(&brew.system, clip, false);
+                brew.state.lock().sounding = true;
+            }
+            Ok(1)
+        }
+        (Surface::Interface(INTERFACE_SOUND), SOUND_STOP) => {
+            let clip = brew.state.lock().clip;
+            if let Some(clip) = clip {
+                brew.system.audio().stop(clip);
+            }
+            brew.state.lock().sounding = false;
+            Ok(1)
+        }
+
+        (Surface::Interface(INTERFACE_NETWORK), NETWORK_OPEN_SOCKET) => brew.interface_object(core, INTERFACE_SOCKET),
+        (Surface::Interface(INTERFACE_NETWORK), NETWORK_SET_LINGER) => Ok(0),
+        (Surface::Interface(INTERFACE_NETWORK), NETWORK_RESOLVE) => brew.resolve(core),
+        (Surface::Interface(INTERFACE_CONNECTION), CONNECTION_ATTACH) => Ok(0),
+        // `(callback, context, flag)`: the connection is made, and the
+        // callback told so with no error.
+        (Surface::Interface(INTERFACE_CONNECTION), CONNECTION_CONNECT) => {
+            let [_, function, context] = params(core)?;
+            brew.state.lock().calls.push((function, context, 0));
+            Ok(0)
+        }
+        (Surface::Interface(INTERFACE_CONNECTION), CONNECTION_WRITE) => brew.write_connection(core),
+        (Surface::Interface(INTERFACE_SOCKET), SOCKET_READABLE) => {
+            let [_, function, context] = params(core)?;
+            let mut state = brew.state.lock();
+            if state.connection.inbox.is_empty() {
+                state.connection.readable = Some((function, context));
+            } else {
+                state.calls.push((function, context, 0));
+            }
+            Ok(0)
+        }
+        (Surface::Interface(INTERFACE_SOCKET), SOCKET_READ) => brew.read_connection(core),
+        (Surface::Interface(INTERFACE_SOCKET), SOCKET_CANCEL) => {
+            brew.state.lock().connection.readable = None;
+            Ok(0)
+        }
+
+        (Surface::Interface(INTERFACE_CERTIFICATE), CERTIFICATE_CHECK) => Ok(0),
+        (Surface::Interface(INTERFACE_HANDSET), HANDSET_RECORD) => {
+            let out = core.read_param(1)?;
+            if out == 0 {
+                Ok(0)
+            } else {
+                let mut record = [0u8; HANDSET_RECORD_SIZE];
+                let number = wie_backend::subscriber::FALLBACK.as_bytes();
+                record[..number.len()].copy_from_slice(number);
+                core.write_bytes(out, &record)?;
+                Ok(1)
+            }
+        }
+
+        (Surface::Interface(INTERFACE_FILE), FILES_OPEN) => brew.open_file(core).await,
+        (Surface::Interface(INTERFACE_FILE), FILES_INFORMATION) => brew.file_information(core).await,
+        (Surface::Interface(INTERFACE_FILE), FILES_EXISTS) => brew.file_exists(core).await,
+        (Surface::Interface(INTERFACE_FILE), FILES_CREATE) => brew.create_file(core).await,
+        // `GetFreeSpace(total)`. 열혈춘향 wants 600 bytes free before it starts
+        // and stopped on 여유 공간이 부족합니다 when told none.
+        (Surface::Interface(INTERFACE_FILE), FILES_FREE_SPACE) => {
+            let total = core.read_param(1)?;
+            if total != 0 {
+                write_generic(core, total, STORAGE_TOTAL)?;
+            }
+            Ok(STORAGE_FREE)
+        }
+        (Surface::Interface(INTERFACE_FILE), FILES_LAST_ERROR) => Ok(brew.state.lock().file_failure),
+
+        (Surface::File, FILE_CLOSE) => brew.close_file(core).await,
+        (Surface::File, FILE_READ) => brew.read_file(core),
+        (Surface::File, FILE_WRITE) => brew.write_file(core).await,
+        (Surface::File, FILE_SEEK) => brew.seek_file(core),
+        (Surface::File, FILE_STATUS) => brew.file_status(core),
+
+        _ => {
+            let (_, lr) = core.read_pc_lr()?;
+            let arguments: [u32; 4] = params(core)?;
+            let name = match surface {
+                Surface::Platform => "platform".to_string(),
+                Surface::Shell => "shell".to_string(),
+                Surface::File => "file".to_string(),
+                Surface::Interface(id) => format!("interface {id:#x}"),
+            };
+            tracing::warn!("BREW {name} slot {offset:#x} is not answered ({arguments:x?}) from lr={lr:#x}");
+
+            Ok(0)
+        }
+    };
+
+    if let Ok(value) = &result {
+        tracing::trace!("BREW trap {index}:{offset:#x} answered {value:#x}");
+    }
+
+    result
+}
+
+fn memory_copy(core: &mut ArmCore) -> Result<u32> {
+    let [destination, source, length] = params(core)?;
+    if length == 0 {
+        return Ok(destination);
+    }
+    if length > MAX_TRANSFER {
+        return Err(WieError::FatalError(format!("BREW copy of {length} bytes from {source:#x}")));
+    }
+
+    let data = read_bytes(core, source, length)?;
+    core.write_bytes(destination, &data)?;
+
+    Ok(destination)
+}
+
+fn memory_set(core: &mut ArmCore) -> Result<u32> {
+    let [destination, value, length] = params(core)?;
+    if length == 0 {
+        return Ok(destination);
+    }
+    if length > MAX_TRANSFER {
+        return Err(WieError::FatalError(format!("BREW fill of {length} bytes at {destination:#x}")));
+    }
+
+    core.write_bytes(destination, &vec![value as u8; length as usize])?;
+
+    Ok(destination)
+}
+
+fn memory_compare(core: &mut ArmCore) -> Result<u32> {
+    let [first, second, length] = params(core)?;
+    if length == 0 {
+        return Ok(0);
+    }
+    if length > MAX_TRANSFER {
+        return Err(WieError::FatalError(format!("BREW comparison of {length} bytes at {first:#x}")));
+    }
+
+    let left = read_bytes(core, first, length)?;
+    let right = read_bytes(core, second, length)?;
+
+    Ok(match left.cmp(&right) {
+        core::cmp::Ordering::Less => u32::MAX,
+        core::cmp::Ordering::Equal => 0,
+        core::cmp::Ordering::Greater => 1,
+    })
+}
+
+/// `STRCMP`: 어둠의전설 looks its resources up by name with it ("ascii",
+/// "item", "logo"), and an unanswered slot said every pair matched.
+fn string_compare(core: &mut ArmCore) -> Result<u32> {
+    let [first, second] = params(core)?;
+    let left = read_string(core, first)?;
+    let right = read_string(core, second)?;
+
+    Ok(match left.cmp(&right) {
+        core::cmp::Ordering::Less => u32::MAX,
+        core::cmp::Ordering::Equal => 0,
+        core::cmp::Ordering::Greater => 1,
+    })
+}
+
+/// `(source, length, destination, size)`: a title's KS X 1001 text turned
+/// into the wide text the display draws, the destination answered. 한쿠아 큰화
+/// passes every line it shows through this - `현재 랭킹을 확인하시겠습니까?`,
+/// `1 : 확인` - and drew empty boxes while it went unanswered.
+///
+/// Each character becomes one 16-bit unit, as the title counts them: it
+/// steps through a line by the units `MeasureTextEx` says fit. A syllable's
+/// two bytes are kept as they are and a single-byte character gets a zero
+/// beside it, so dropping the zeros gives the handset's bytes back - which is
+/// what the display reads, here and in [`padded_text`].
+fn text_to_wide(core: &mut ArmCore) -> Result<u32> {
+    let [source, length, destination, size] = params(core)?;
+    if source == 0 || destination == 0 || size < 2 {
+        return Ok(destination);
+    }
+
+    let mut text = read_string(core, source)?;
+    text.truncate(length as usize);
+
+    let room = (size as usize - 2) & !1;
+    let mut wide = Vec::with_capacity(text.len() * 2 + 2);
+    let mut bytes = text.iter().copied();
+    while let Some(byte) = bytes.next() {
+        let unit = match (byte >= 0x80).then(|| bytes.next()).flatten() {
+            Some(trail) => [byte, trail],
+            None => [byte, 0],
+        };
+        if wide.len() + 2 > room {
+            break;
+        }
+        wide.extend_from_slice(&unit);
+    }
+    wide.extend_from_slice(&[0, 0]);
+    core.write_bytes(destination, &wide)?;
+
+    Ok(destination)
+}
+
+/// Up to `count` 16-bit units of wide text, or up to its wide null when
+/// `count` is negative, each as the handset's bytes with the zeros dropped.
+fn wide_units(core: &ArmCore, address: u32, count: i32) -> Result<Vec<Vec<u8>>> {
+    let limit = if count < 0 { MAX_TEXT } else { count.min(MAX_TEXT) };
+
+    let mut units = Vec::new();
+    for index in 0..limit as u32 {
+        let unit = read_bytes(core, address + index * 2, 2)?;
+        if count < 0 && unit == [0, 0] {
+            break;
+        }
+        units.push(unit.into_iter().filter(|x| *x != 0).collect());
+    }
+
+    Ok(units)
+}
+
+/// `ATOI`: 카트라이더레이싱 reads the numbers its tracks are set up with -
+/// lap times like `14000`, counts like `6` - as text out of its resource
+/// archive. Every one read as zero, and the race never finished loading.
+fn atoi(core: &mut ArmCore) -> Result<u32> {
+    let text = read_string(core, core.read_param(0)?)?;
+    let text = text.trim_ascii_start();
+    let (negative, digits) = match text.first() {
+        Some(b'-') => (true, &text[1..]),
+        Some(b'+') => (false, &text[1..]),
+        _ => (false, text),
+    };
+    let value = digits
+        .iter()
+        .take_while(|x| x.is_ascii_digit())
+        .fold(0i32, |value, digit| value.wrapping_mul(10).wrapping_add((digit - b'0') as i32));
+
+    Ok(if negative { value.wrapping_neg() } else { value } as u32)
+}
+
+/// `STRNCMP`: 카트라이더레이싱 matches two-letter codes in its data with it.
+fn bounded_string_compare(core: &mut ArmCore) -> Result<u32> {
+    let [first, second, length] = params(core)?;
+    let length = length.min(MAX_TRANSFER) as usize;
+    let mut left = read_string(core, first)?;
+    let mut right = read_string(core, second)?;
+    left.truncate(length);
+    right.truncate(length);
+
+    Ok(match left.cmp(&right) {
+        core::cmp::Ordering::Less => u32::MAX,
+        core::cmp::Ordering::Equal => 0,
+        core::cmp::Ordering::Greater => 1,
+    })
+}
+
+/// `f_op(first, second, operation)`, the helper behind `FADD`, `FSUB`,
+/// `FMUL` and `FDIV`: two doubles in `r0`-`r1` and `r2`-`r3`, the operation
+/// on the stack, and the double answered in `r0`-`r1`. 카트라이더레이싱 works
+/// its karts' speeds and its lap clock out this way - milliseconds over
+/// `1000.0` - and with every answer zero its karts never moved.
+fn float_operation(core: &mut ArmCore) -> Result<u32> {
+    let [first_low, first_high, second_low, second_high, operation] = params(core)?;
+    let first = f64::from_bits(((first_high as u64) << 32) | first_low as u64);
+    let second = f64::from_bits(((second_high as u64) << 32) | second_low as u64);
+
+    let result = match operation {
+        0 => first + second,
+        1 => first - second,
+        2 => first * second,
+        3 => first / second,
+        _ => {
+            tracing::warn!("BREW floating operation {operation} on {first} and {second} is not answered");
+            0.0
+        }
+    };
+
+    let bits = result.to_bits();
+    core.write_return_value(&[bits as u32, (bits >> 32) as u32])?;
+
+    Ok(bits as u32)
+}
+
+fn string_copy(core: &mut ArmCore) -> Result<u32> {
+    let [destination, source] = params(core)?;
+    let mut text = read_string(core, source)?;
+    text.push(0);
+    core.write_bytes(destination, &text)?;
+
+    Ok(destination)
+}
+
+fn string_join(core: &mut ArmCore) -> Result<u32> {
+    let [destination, source] = params(core)?;
+    let head = read_string(core, destination)?;
+    let mut tail = read_string(core, source)?;
+    tail.push(0);
+    core.write_bytes(destination + head.len() as u32, &tail)?;
+
+    Ok(destination)
+}
+
+/// `sprintf(buffer, format, ...)`, through the WIPI-C formatter, with the
+/// variadic words read from `r2` on and then off the stack.
+fn format(core: &mut ArmCore) -> Result<u32> {
+    let [destination, format_address] = params(core)?;
+    let template = read_string(core, format_address)?;
+
+    let mut arguments = Vec::with_capacity(12);
+    for index in 2..14 {
+        arguments.push(core.read_param(index)?);
+    }
+
+    let mut rendered = wie_wipi_c::api::kernel::format_varargs(&template, &arguments, &mut |address| read_string(core, address))?;
+    let length = rendered.len() as u32;
+    rendered.push(0);
+    core.write_bytes(destination, &rendered)?;
+
+    Ok(length)
+}
+
+/// `MeasureTextEx(font, text, count, max_width, fits)`: how wide the text is,
+/// and through `fits` how many of its units fit in `max_width` (a negative
+/// width takes them all). 한쿠아 큰화 wraps its messages with it, a line of
+/// as many units as fit at a time; answered zero, no unit ever fit and the
+/// title went round the same line for good.
+fn measure_text(core: &mut ArmCore) -> Result<u32> {
+    let [_, _, address, count, max_width, fits_out] = params(core)?;
+    if address == 0 {
+        return Ok(0);
+    }
+
+    let units = wide_units(core, address, count as i32)?;
+    let max_width = max_width as i32;
+    let (mut width, mut fits) = (0f32, 0u32);
+    for unit in &units {
+        let next = width + string_width_px(&decode_euc_kr(unit), FONT_HEIGHT);
+        // A unit wider than the line still goes on it, or the title would
+        // never get past it.
+        if max_width >= 0 && next > max_width as f32 && fits > 0 {
+            break;
+        }
+        width = next;
+        fits += 1;
+    }
+
+    if fits_out != 0 {
+        write_generic(core, fits_out, fits)?;
+    }
+
+    Ok(width.ceil() as u32)
+}
+
+/// The handset face's height, with its ascent and descent written through the
+/// two pointers given.
+fn font_metrics(core: &mut ArmCore) -> Result<u32> {
+    let [_, _, ascent_out, descent_out] = params(core)?;
+    let ascent = baseline_px(FONT_HEIGHT) as u32;
+    let descent = FONT_HEIGHT as u32 - ascent;
+
+    if ascent_out != 0 {
+        write_generic(core, ascent_out, ascent)?;
+    }
+    if descent_out != 0 {
+        write_generic(core, descent_out, descent)?;
+    }
+
+    Ok(FONT_HEIGHT as u32)
+}
+
+/// How much the title is told it may allocate, in all.
+const ARENA_SIZE: u32 = 6 << 20;
+
+impl Brew {
+    fn available(&self) -> u32 {
+        let used: u32 = self.state.lock().blocks.values().sum();
+
+        ARENA_SIZE.saturating_sub(used)
+    }
+
+    /// `MALLOC`. Nothing is zero bytes long here: 스쿨해저드 and 카트라이더레이싱
+    /// read their packed files an entry at a time, allocating each entry's
+    /// length before reading it, and the last entry is empty. A request no
+    /// handset could meet answers null, which the title checks for.
+    fn allocate(&self, core: &mut ArmCore, size: u32) -> Result<u32> {
+        if size > MAX_TRANSFER {
+            tracing::warn!("BREW allocation of {size} bytes refused");
+            return Ok(0);
+        }
+
+        let size = size.max(1).next_multiple_of(8);
+        let address = Allocator::alloc(core, size)?;
+        core.write_bytes(address, &vec![0; size as usize])?;
+        self.state.lock().blocks.insert(address, size);
+
+        Ok(address)
+    }
+
+    /// Frees a block this platform handed out, and nothing else: a title frees
+    /// what it never allocated as often as not.
+    fn free(&self, core: &mut ArmCore, address: u32) -> Result<()> {
+        let size = self.state.lock().blocks.remove(&address);
+        if let Some(size) = size {
+            Allocator::free(core, address, size)?;
+        }
+
+        Ok(())
+    }
+
+    fn reallocate(&self, core: &mut ArmCore, address: u32, size: u32) -> Result<u32> {
+        if size == 0 {
+            self.free(core, address)?;
+            return Ok(0);
+        }
+
+        let grown = self.allocate(core, size)?;
+        let kept = self.state.lock().blocks.get(&address).copied();
+        if let Some(kept) = kept {
+            let data = read_bytes(core, address, kept.min(size))?;
+            core.write_bytes(grown, &data)?;
+        }
+        self.free(core, address)?;
+
+        Ok(grown)
+    }
+
+    /// Answers an interface by number with an object of its own trap table,
+    /// written through the out parameter. The module checks the pointer it
+    /// passed rather than the result.
+    fn query_interface(&self, core: &mut ArmCore) -> Result<u32> {
+        let [_, identifier, out] = params(core)?;
+
+        let object = self.interface_object(core, identifier)?;
+        write_generic(core, out, object)?;
+
+        Ok(0)
+    }
+
+    /// The one object answering for `identifier`, made on the first ask.
+    fn interface_object(&self, core: &mut ArmCore, identifier: u32) -> Result<u32> {
+        let existing = self.state.lock().interfaces.get(&identifier).copied();
+        let object = match existing {
+            Some(object) => object,
+            None => {
+                let table = self.add_surface(core, Surface::Interface(identifier))?;
+                let object = self.allocate(core, 4)?;
+                write_generic(core, object, table)?;
+                self.state.lock().interfaces.insert(identifier, object);
+
+                tracing::debug!("BREW interface {identifier:#x} at {object:#x}");
+
+                object
+            }
+        };
+
+        Ok(object)
+    }
+
+    /// `GetHostByName(result, name, callback)`: every name resolves, and the
+    /// callback is called once the title is back from asking.
+    fn resolve(&self, core: &mut ArmCore) -> Result<u32> {
+        let [_, result, name, callback] = params(core)?;
+        let host = String::from_utf8_lossy(&read_string(core, name)?).to_string();
+        tracing::info!("BREW resolving {host}");
+
+        let mut record = [0u8; 8];
+        record[0] = 1;
+        record[4..].copy_from_slice(&RESOLVED_ADDRESS);
+        core.write_bytes(result, &record)?;
+
+        let function = read_generic(core, callback + CALLBACK_FUNCTION)?;
+        let context = read_generic(core, callback + CALLBACK_CONTEXT)?;
+        let mut state = self.state.lock();
+        state.connection = Connection { host, ..Default::default() };
+        state.calls.push((function, context, 0));
+
+        Ok(0)
+    }
+
+    /// `(buffer, length)`: the whole of it goes, and the server's answer is
+    /// there to read straight away. A server nothing here stands in for says
+    /// nothing, and the title gives up on its own time.
+    fn write_connection(&self, core: &mut ArmCore) -> Result<u32> {
+        let [_, buffer, length] = params(core)?;
+        let request = read_bytes(core, buffer, length.min(MAX_TRANSFER))?;
+        tracing::debug!("BREW {} write {request:02x?}", self.state.lock().connection.host);
+
+        let mut state = self.state.lock();
+        let answer = if state.connection.host.ends_with(ENTAZ_DOMAIN) {
+            wie_backend::billing::ktf_brew_entaz_response(&request)
+        } else {
+            None
+        };
+        match answer {
+            Some(answer) => {
+                state.connection.inbox.extend_from_slice(&answer);
+                if let Some((function, context)) = state.connection.readable.take() {
+                    state.calls.push((function, context, 0));
+                }
+            }
+            None => tracing::warn!("BREW {} wrote {request:02x?}, which nothing answers", state.connection.host),
+        }
+
+        Ok(length)
+    }
+
+    /// `ISOCKET_Read(buffer, length)`.
+    fn read_connection(&self, core: &mut ArmCore) -> Result<u32> {
+        let [_, buffer, length] = params(core)?;
+        let data = {
+            let mut state = self.state.lock();
+            let inbox = &mut state.connection.inbox;
+            if inbox.is_empty() {
+                return Ok(NET_WOULD_BLOCK);
+            }
+            let count = (length as usize).min(inbox.len());
+            inbox.drain(..count).collect::<Vec<_>>()
+        };
+        core.write_bytes(buffer, &data)?;
+
+        Ok(data.len() as u32)
+    }
+
+    fn display_info(&self, core: &mut ArmCore) -> Result<u32> {
+        let out = core.read_param(1)?;
+        let (width, height) = {
+            let state = self.state.lock();
+            (state.width, state.height)
+        };
+
+        let mut record = [0u8; 0x10];
+        record[0..2].copy_from_slice(&(width as u16).to_le_bytes());
+        record[2..4].copy_from_slice(&(height as u16).to_le_bytes());
+        record[0xe..0x10].copy_from_slice(&16u16.to_le_bytes());
+        core.write_bytes(out, &record)?;
+
+        Ok(1)
+    }
+
+    /// Fills the rectangle at `r1` (four 16-bit fields), or the whole screen
+    /// when that is null, with the packed colour in `r3`. `RGB_NONE` there is
+    /// an erase, in the background colour: 불꽃놀이XG sets that to black and
+    /// clears its night sky so, which came out white.
+    fn draw_rectangle(&self, core: &mut ArmCore) -> Result<u32> {
+        let [_, rectangle, _, colour] = params(core)?;
+
+        let mut state = self.state.lock();
+        let colour = if colour == NO_COLOUR {
+            state.colours.get(&BACKGROUND_COLOUR_ITEM).copied().unwrap_or(NO_COLOUR)
+        } else {
+            colour
+        };
+        let (width, height) = (state.width, state.height);
+        let clip = full_clip(width, height);
+
+        let (x, y, w, h) = if rectangle != 0 {
+            let record = read_bytes(core, rectangle, 8)?;
+            let field = |offset: usize| i16::from_le_bytes([record[offset], record[offset + 1]]) as i32;
+            (field(0), field(2), field(4), field(6))
+        } else {
+            (0, 0, width as i32, height as i32)
+        };
+
+        if w > 0 && h > 0 {
+            state.screen.fill_rect(x, y, w as u32, h as u32, packed_colour(colour), clip);
+        }
+
+        Ok(1)
+    }
+
+    /// `IGRAPHICS_SetClip(clip, flags)`: a rectangle keeps what the graphics
+    /// draw inside it, any other shape - or none - lets them reach the whole
+    /// screen.
+    fn set_graphics_clip(&self, core: &mut ArmCore) -> Result<u32> {
+        let record = core.read_param(1)?;
+        let clip = if record == 0 {
+            None
+        } else {
+            let record = read_bytes(core, record, 12)?;
+            let field = |offset: usize| i16::from_le_bytes([record[offset], record[offset + 1]]) as i32;
+            (record[0] == CLIP_RECTANGLE).then(|| (field(4), field(6), field(8), field(10)))
+        };
+
+        let mut state = self.state.lock();
+        let screen = full_clip(state.width, state.height);
+        state.graphics_clip = clip.map(|(x, y, w, h)| {
+            let (left, top) = (x.max(0), y.max(0));
+            let right = (x + w).clamp(left, screen.width as i32);
+            let bottom = (y + h).clamp(top, screen.height as i32);
+            Clip {
+                x: left,
+                y: top,
+                width: (right - left) as u32,
+                height: (bottom - top) as u32,
+            }
+        });
+
+        Ok(1)
+    }
+
+    /// `IGRAPHICS_DrawPoint`: `r1` points at x and y as 16-bit fields; the
+    /// point is as wide as `SetPointSize` last said. 불꽃놀이XG draws its
+    /// fireworks a spark at a time with it.
+    fn draw_point(&self, core: &mut ArmCore) -> Result<u32> {
+        let point = core.read_param(1)?;
+        if point == 0 {
+            return Ok(0);
+        }
+        let record = read_bytes(core, point, 4)?;
+        let (x, y) = (
+            i16::from_le_bytes([record[0], record[1]]) as i32,
+            i16::from_le_bytes([record[2], record[3]]) as i32,
+        );
+
+        let mut state = self.state.lock();
+        let clip = state.graphics_clip.unwrap_or(full_clip(state.width, state.height));
+        let (colour, size) = (state.graphics_colour, state.graphics_point);
+        state.screen.fill_rect(x, y, size, size, colour, clip);
+
+        Ok(1)
+    }
+
+    /// `IGRAPHICS_DrawLine`: `r1` points at the line, its start and end as
+    /// four 16-bit fields, drawn in the colour `SetColor` last gave.
+    fn draw_line(&self, core: &mut ArmCore) -> Result<u32> {
+        let line = core.read_param(1)?;
+        if line == 0 {
+            return Ok(0);
+        }
+        let record = read_bytes(core, line, 8)?;
+        let field = |offset: usize| i16::from_le_bytes([record[offset], record[offset + 1]]) as i32;
+
+        let mut state = self.state.lock();
+        let clip = state.graphics_clip.unwrap_or(full_clip(state.width, state.height));
+        let colour = state.graphics_colour;
+        state.screen.draw_line(field(0), field(2), field(4), field(6), colour, clip);
+
+        Ok(1)
+    }
+
+    /// `IGRAPHICS_DrawRect`: `r1` points at x, y, width and height as 16-bit
+    /// fields. Filled in the fill colour when the fill mode is on, and
+    /// outlined in the colour `SetColor` last gave.
+    fn draw_graphics_rectangle(&self, core: &mut ArmCore) -> Result<u32> {
+        let rectangle = core.read_param(1)?;
+        if rectangle == 0 {
+            return Ok(0);
+        }
+        let record = read_bytes(core, rectangle, 8)?;
+        let field = |offset: usize| i16::from_le_bytes([record[offset], record[offset + 1]]) as i32;
+        let (x, y, w, h) = (field(0), field(2), field(4), field(6));
+        if w <= 0 || h <= 0 {
+            return Ok(1);
+        }
+
+        let mut state = self.state.lock();
+        let clip = state.graphics_clip.unwrap_or(full_clip(state.width, state.height));
+        let (colour, fill, filled) = (state.graphics_colour, state.graphics_fill, state.graphics_filled);
+        if filled {
+            state.screen.fill_rect(x, y, w as u32, h as u32, fill, clip);
+        }
+        state.screen.draw_rect(x, y, w as u32, h as u32, colour, clip);
+
+        Ok(1)
+    }
+
+    /// Draws part of an image: `r1`-`r3` are x, y and width, and the stack
+    /// carries the height, the image object, the source x and y and a mode.
+    /// Magenta is never drawn.
+    ///
+    /// The pixels are read where the image keeps them, so what a title wrote
+    /// into a picture - or into one it made itself - is what is drawn.
+    fn blit(&self, core: &mut ArmCore) -> Result<u32> {
+        let [_, x, y, width, height, object, source_x, source_y] = params(core)?;
+        let (x, y, width, height, source_x, source_y) = (x as i32, y as i32, width as i32, height as i32, source_x as i32, source_y as i32);
+        if object == 0 {
+            return Ok(0);
+        }
+
+        self.follow_bitmap(core, object)?;
+
+        let Ok(header) = read_bytes(core, object, IMAGE_HEADER) else {
+            return Ok(0);
+        };
+        let field = |offset: usize| u16::from_le_bytes([header[offset], header[offset + 1]]) as u32;
+        let (image_width, image_height) = (field(IMAGE_WIDTH_FIELD), field(IMAGE_HEIGHT_FIELD));
+        let pixels = u32::from_le_bytes(header[IMAGE_PIXELS_FIELD..IMAGE_PIXELS_FIELD + 4].try_into().unwrap());
+        if pixels == 0 || image_width == 0 || image_height == 0 || image_width > MAX_IMAGE_SIDE || image_height > MAX_IMAGE_SIDE {
+            return Ok(0);
+        }
+
+        let left = source_x.max(0);
+        let top = source_y.max(0);
+        let right = source_x.saturating_add(width).min(image_width as i32);
+        let bottom = source_y.saturating_add(height).min(image_height as i32);
+        if right <= left || bottom <= top {
+            return Ok(1);
+        }
+
+        let (part_width, part_height) = ((right - left) as u32, (bottom - top) as u32);
+        let span = (part_height - 1) * image_width + part_width;
+        let Ok(raw) = read_bytes(core, pixels + (top as u32 * image_width + left as u32) * 2, span * 2) else {
+            return Ok(0);
+        };
+        let mut part = Vec::with_capacity((part_width * part_height) as usize);
+        for row in 0..part_height {
+            let start = (row * image_width * 2) as usize;
+            part.extend(
+                raw[start..start + part_width as usize * 2]
+                    .chunks_exact(2)
+                    .map(|x| u16::from_le_bytes([x[0], x[1]])),
+            );
+        }
+        let part = VecImageBuffer::<Rgb565Pixel>::from_raw(part_width, part_height, part);
+
+        let mut state = self.state.lock();
+        let clip = full_clip(state.width, state.height);
+        state.screen.draw_with_color_key(
+            x + (left - source_x),
+            y + (top - source_y),
+            part_width,
+            part_height,
+            &part,
+            0,
+            0,
+            clip,
+            TRANSPARENT_565,
+        );
+
+        Ok(1)
+    }
+
+    /// The bitmap an image was made from stays the title's to reach through
+    /// the image's first word; what it writes there is converted again.
+    fn follow_bitmap(&self, core: &mut ArmCore, object: u32) -> Result<()> {
+        let Some((data, length)) = self.state.lock().images.get(&object).map(|x| (x.data, x.bytes.len() as u32)) else {
+            return Ok(());
+        };
+
+        let current = read_bytes(core, data, length)?;
+        {
+            let mut state = self.state.lock();
+            let Some(image) = state.images.get_mut(&object) else {
+                return Ok(());
+            };
+            if image.bytes == current {
+                return Ok(());
+            }
+            image.bytes = current.clone();
+        }
+
+        let Ok(decoded) = bitmap::decode(&current) else {
+            return Ok(());
+        };
+        let header = read_bytes(core, object, IMAGE_HEADER)?;
+        let same_size = u16::from_le_bytes([header[IMAGE_WIDTH_FIELD], header[IMAGE_WIDTH_FIELD + 1]]) as u32 == decoded.width()
+            && u16::from_le_bytes([header[IMAGE_HEIGHT_FIELD], header[IMAGE_HEIGHT_FIELD + 1]]) as u32 == decoded.height();
+        if same_size {
+            core.write_bytes(object + IMAGE_HEADER, &native_pixels(&decoded))?;
+        }
+
+        Ok(())
+    }
+
+    /// `DrawText(font, text, count, x, y, rectangle, flags)`: the handset's
+    /// EUC-KR text, terminated when `count` is negative, its line's top at
+    /// `y`.
+    ///
+    /// The flags place the text in the rectangle, or the screen without one,
+    /// and the text is clipped to it: 한쿠아 큰화 centres its menus, its
+    /// `1 : 확인` choices and its screen titles that way and gives `x` as
+    /// zero, so drawn at `x` they ran off the left edge.
+    fn draw_text(&self, core: &mut ArmCore) -> Result<u32> {
+        let [_, _, address, count, x, y, rectangle, flags] = params(core)?;
+        if address == 0 {
+            return Ok(1);
+        }
+
+        let count = count as i32;
+        let raw = if count < 0 {
+            let text = read_string(core, address)?;
+            padded_text(core, address, text)?
+        } else if count == 0 || count > MAX_TEXT {
+            return Ok(1);
+        } else {
+            // A count is of 16-bit units: 한쿠아 큰화 draws a line at a time,
+            // as many as `MeasureTextEx` said fit.
+            wide_units(core, address, count)?.concat()
+        };
+        let text = decode_euc_kr(&raw);
+
+        let bounds = if rectangle != 0 {
+            let record = read_bytes(core, rectangle, 8)?;
+            let field = |offset: usize| i16::from_le_bytes([record[offset], record[offset + 1]]) as i32;
+            Some((field(0), field(2), field(4), field(6)))
+        } else {
+            None
+        };
+
+        let mut state = self.state.lock();
+        let ink = state.colours.get(&TEXT_COLOUR_ITEM).map_or(BLACK, |x| packed_colour(*x));
+        let (bx, by, bw, bh) = bounds.unwrap_or((0, 0, state.width as i32, state.height as i32));
+
+        let width = string_width_px(&text, FONT_HEIGHT).ceil() as i32;
+        let x = if flags & TEXT_ALIGN_CENTRE != 0 {
+            bx + (bw - width) / 2
+        } else if flags & TEXT_ALIGN_RIGHT != 0 {
+            bx + bw - width
+        } else if flags & TEXT_ALIGN_LEFT != 0 {
+            bx
+        } else {
+            x as i32
+        };
+        let line = FONT_HEIGHT as i32;
+        let y = if flags & TEXT_ALIGN_MIDDLE != 0 {
+            by + (bh - line) / 2
+        } else if flags & TEXT_ALIGN_BOTTOM != 0 {
+            by + bh - line
+        } else if flags & TEXT_ALIGN_TOP != 0 {
+            by
+        } else {
+            y as i32
+        };
+
+        let screen = full_clip(state.width, state.height);
+        let clip = match bounds {
+            Some((bx, by, bw, bh)) if bw > 0 && bh > 0 => {
+                let (left, top) = (bx.max(0), by.max(0));
+                let right = (bx + bw).min(screen.width as i32);
+                let bottom = (by + bh).min(screen.height as i32);
+                if right <= left || bottom <= top {
+                    return Ok(1);
+                }
+                Clip {
+                    x: left,
+                    y: top,
+                    width: (right - left) as u32,
+                    height: (bottom - top) as u32,
+                }
+            }
+            _ => screen,
+        };
+
+        state
+            .screen
+            .draw_text(&text, x, y, FONT_HEIGHT, baseline_px(FONT_HEIGHT), TextAlignment::Left, ink, clip);
+
+        Ok(1)
+    }
+
+    /// `createObject(class, data, info, reallocated)`. The one class answered
+    /// is the image: the title hands over a pointer into a bitmap it loaded,
+    /// and gets the handset's picture of it - see [`IMAGE_HEADER`] - whose
+    /// first word is a copy of the bitmap.
+    ///
+    /// The picture's size goes back through `info`, an `AEEImageInfo` - width,
+    /// height, colours, animated, frame width - and `reallocated` is told no.
+    /// 어둠의전설 keeps that size beside each sprite and blits it at that size,
+    /// centring on it too; left unwritten, every sprite was zero by zero and
+    /// its letters, menus and dialogue never reached the screen.
+    fn create_object(&self, core: &mut ArmCore) -> Result<u32> {
+        let [class, data, info, reallocated] = params(core)?;
+        if class != CLASS_IMAGE {
+            tracing::warn!("BREW createObject of class {class:#x} is not answered");
+            return Ok(0);
+        }
+
+        let header = read_bytes(core, data, bitmap::HEADER_SIZE as u32)?;
+        let length = bitmap::bitmap_length(&header).ok_or_else(|| WieError::FatalError(format!("BREW image at {data:#x} is not a bitmap")))?;
+        let bytes = read_bytes(core, data, length as u32)?;
+
+        let decoded = bitmap::decode(&bytes)?;
+        let kept = self.allocate(core, length as u32)?;
+        core.write_bytes(kept, &bytes)?;
+
+        let pixels = native_pixels(&decoded);
+        let object = self.allocate(core, IMAGE_HEADER + pixels.len() as u32)?;
+        let mut header = [0u8; IMAGE_HEADER as usize];
+        header[..4].copy_from_slice(&kept.to_le_bytes());
+        header[IMAGE_WIDTH_FIELD..IMAGE_WIDTH_FIELD + 2].copy_from_slice(&(decoded.width() as u16).to_le_bytes());
+        header[IMAGE_HEIGHT_FIELD..IMAGE_HEIGHT_FIELD + 2].copy_from_slice(&(decoded.height() as u16).to_le_bytes());
+        header[IMAGE_PIXELS_FIELD..IMAGE_PIXELS_FIELD + 4].copy_from_slice(&(object + IMAGE_HEADER).to_le_bytes());
+        core.write_bytes(object, &header)?;
+        core.write_bytes(object + IMAGE_HEADER, &pixels)?;
+
+        if info != 0 {
+            let (width, height) = (decoded.width() as u16, decoded.height() as u16);
+            let mut record = [0u8; IMAGE_INFO_SIZE];
+            record[0..2].copy_from_slice(&width.to_le_bytes());
+            record[2..4].copy_from_slice(&height.to_le_bytes());
+            record[4..6].copy_from_slice(&256u16.to_le_bytes());
+            record[8..10].copy_from_slice(&width.to_le_bytes());
+            core.write_bytes(info, &record)?;
+        }
+        if reallocated != 0 {
+            core.write_bytes(reallocated, &[0])?;
+        }
+
+        self.state.lock().images.insert(object, KeptImage { data: kept, bytes });
+
+        Ok(object)
+    }
+
+    async fn contents(&self, name: &str) -> Option<Vec<u8>> {
+        let key = file_key(name);
+        let filesystem = self.system.filesystem();
+
+        let size = filesystem.size(&key).await?;
+        let mut data = vec![0; size];
+        filesystem.read(&key, 0, size, &mut data).await?;
+
+        Some(data)
+    }
+
+    async fn keep(&self, key: &str, data: &[u8]) {
+        let filesystem = self.system.filesystem();
+        filesystem.truncate(key, 0).await;
+        if !data.is_empty() {
+            filesystem.write(key, 0, data).await;
+        }
+    }
+
+    /// `loadResource(shell, file, number, kind)`: an item out of a resource
+    /// file, copied into a block of its own.
+    async fn load_resource(&self, core: &mut ArmCore) -> Result<u32> {
+        let [_, name, number, kind] = params(core)?;
+        let name = String::from_utf8_lossy(&read_string(core, name)?).to_string();
+
+        let cached = self.state.lock().resources.get(&name).cloned();
+        let file = match cached {
+            Some(file) => file,
+            None => {
+                let file = match self.contents(&name).await {
+                    Some(data) => match ResourceFile::parse(data) {
+                        Ok(file) => Some(Arc::new(file)),
+                        Err(error) => {
+                            tracing::warn!("BREW {name} is not a resource file: {error}");
+                            None
+                        }
+                    },
+                    None => None,
+                };
+                self.state.lock().resources.insert(name.clone(), file.clone());
+                file
+            }
+        };
+
+        let Some(item) = file.as_ref().and_then(|file| file.item(kind as u16, number as u16)) else {
+            tracing::debug!("BREW {name} carries no resource {number} of kind {kind}");
+            return Ok(0);
+        };
+        if item.is_empty() {
+            return Ok(0);
+        }
+
+        let block = self.allocate(core, item.len() as u32)?;
+        core.write_bytes(block, item)?;
+
+        Ok(block)
+    }
+
+    fn file_result(&self, worked: bool) -> u32 {
+        let failure = if worked { 0 } else { FILE_FAILED };
+        self.state.lock().file_failure = failure;
+
+        failure
+    }
+
+    /// `open(files, name, mode)`: a file object, or null when the file is not
+    /// there. Only `_OFM_CREATE` (mode 4) makes a missing file, and here it
+    /// truncates one that is there.
+    ///
+    /// 불꽃놀이XG opens its `option.dat` to read and write (mode 2) and keeps
+    /// its own settings when that fails. Made empty instead, the file read as
+    /// nothing, the settings were whatever the stack held, and the frame
+    /// interval among them came out at weeks: its music played, and not one
+    /// frame was drawn.
+    async fn open_file(&self, core: &mut ArmCore) -> Result<u32> {
+        let [_, name, mode] = params(core)?;
+        let name = String::from_utf8_lossy(&read_string(core, name)?).to_string();
+        let key = file_key(&name);
+        let writable = mode != MODE_READ;
+
+        let mut data = self.contents(&name).await;
+        tracing::debug!("BREW open {name} mode {mode}: {}", if data.is_some() { "found" } else { "missing" });
+
+        if data.is_some() && mode == MODE_CREATE {
+            self.keep(&key, &[]).await;
+            data = Some(Vec::new());
+        }
+        let data = match data {
+            Some(data) => data,
+            None if mode == MODE_CREATE => {
+                self.keep(&key, &[]).await;
+                Vec::new()
+            }
+            None => {
+                self.file_result(false);
+                return Ok(0);
+            }
+        };
+
+        let object = self.allocate(core, 4)?;
+        let table = self.state.lock().file_table;
+        write_generic(core, object, table)?;
+        self.state.lock().files.insert(
+            object,
+            OpenFile {
+                key,
+                data,
+                position: 0,
+                writable,
+            },
+        );
+
+        Ok(object)
+    }
+
+    async fn file_information(&self, core: &mut ArmCore) -> Result<u32> {
+        let [_, name, out] = params(core)?;
+        let name = String::from_utf8_lossy(&read_string(core, name)?).to_string();
+        let data = self.contents(&name).await;
+        tracing::debug!("BREW information {name}: {:?}", data.as_ref().map(|x| x.len()));
+
+        let mut record = [0u8; FILE_RECORD_SIZE];
+        if let Some(data) = &data {
+            record[FILE_LENGTH_OFFSET..FILE_LENGTH_OFFSET + 4].copy_from_slice(&(data.len() as u32).to_le_bytes());
+        }
+        core.write_bytes(out, &record)?;
+
+        Ok(self.file_result(data.is_some()))
+    }
+
+    /// `IFILEMGR_Test`: whether a file is there, as a result code - zero when
+    /// it is. The module's own wrapper reads it that way (`exists = result ==
+    /// 0`), and so does every save and licence check behind it.
+    async fn file_exists(&self, core: &mut ArmCore) -> Result<u32> {
+        let name = String::from_utf8_lossy(&read_string(core, core.read_param(1)?)?).to_string();
+        let found = self.contents(&name).await.is_some();
+        tracing::debug!("BREW exists {name}: {found}");
+
+        Ok(self.file_result(found))
+    }
+
+    async fn create_file(&self, core: &mut ArmCore) -> Result<u32> {
+        let name = String::from_utf8_lossy(&read_string(core, core.read_param(1)?)?).to_string();
+        if self.contents(&name).await.is_none() {
+            self.keep(&file_key(&name), &[]).await;
+        }
+
+        Ok(self.file_result(true))
+    }
+
+    async fn close_file(&self, core: &mut ArmCore) -> Result<u32> {
+        let object = core.read_param(0)?;
+        let file = self.state.lock().files.remove(&object);
+        if let Some(file) = file
+            && file.writable
+        {
+            self.keep(&file.key, &file.data).await;
+        }
+        self.free(core, object)?;
+
+        Ok(0)
+    }
+
+    fn file_status(&self, core: &mut ArmCore) -> Result<u32> {
+        let [object, out] = params(core)?;
+        let length = match self.state.lock().files.get(&object) {
+            Some(file) => file.data.len() as u32,
+            None => return Err(WieError::FatalError(format!("BREW file call on {object:#x}, which is not an open file"))),
+        };
+
+        let mut record = [0u8; FILE_RECORD_SIZE];
+        record[FILE_LENGTH_OFFSET..FILE_LENGTH_OFFSET + 4].copy_from_slice(&length.to_le_bytes());
+        core.write_bytes(out, &record)?;
+
+        Ok(1)
+    }
+
+    fn read_file(&self, core: &mut ArmCore) -> Result<u32> {
+        let [object, buffer, length] = params(core)?;
+
+        let chunk = {
+            let mut state = self.state.lock();
+            let file = state
+                .files
+                .get_mut(&object)
+                .ok_or_else(|| WieError::FatalError(format!("BREW read on {object:#x}, which is not an open file")))?;
+
+            if file.position >= file.data.len() || length == 0 {
+                return Ok(0);
+            }
+            let end = (file.position + length as usize).min(file.data.len());
+            let chunk = file.data[file.position..end].to_vec();
+            file.position = end;
+
+            chunk
+        };
+        core.write_bytes(buffer, &chunk)?;
+
+        Ok(chunk.len() as u32)
+    }
+
+    async fn write_file(&self, core: &mut ArmCore) -> Result<u32> {
+        let [object, buffer, length] = params(core)?;
+        if length == 0 {
+            return Ok(0);
+        }
+        if length > MAX_TRANSFER {
+            return Err(WieError::FatalError(format!("BREW write of {length} bytes")));
+        }
+        let chunk = read_bytes(core, buffer, length)?;
+
+        let kept = {
+            let mut state = self.state.lock();
+            let file = state
+                .files
+                .get_mut(&object)
+                .ok_or_else(|| WieError::FatalError(format!("BREW write on {object:#x}, which is not an open file")))?;
+            if !file.writable {
+                return Ok(0);
+            }
+
+            let end = file.position + chunk.len();
+            if end > file.data.len() {
+                file.data.resize(end, 0);
+            }
+            file.data[file.position..end].copy_from_slice(&chunk);
+            file.position = end;
+
+            (file.key.clone(), file.data.clone())
+        };
+        self.keep(&kept.0, &kept.1).await;
+
+        Ok(length)
+    }
+
+    /// `seek(file, whence, offset)`: 0 from the start, 1 from the end, 2 from
+    /// where it is. A result of zero is success.
+    fn seek_file(&self, core: &mut ArmCore) -> Result<u32> {
+        let [object, whence, offset] = params(core)?;
+        let mut state = self.state.lock();
+        let file = state
+            .files
+            .get_mut(&object)
+            .ok_or_else(|| WieError::FatalError(format!("BREW seek on {object:#x}, which is not an open file")))?;
+
+        let offset = offset as i32 as i64;
+        let position = match whence {
+            0 => offset,
+            // `_SEEK_END`, the offset counted from the end: 한쿠아 큰화 seeks
+            // `-1` there to read `mileage.nhn`'s last byte, and fails its
+            // start-up when that read comes back empty.
+            1 => file.data.len() as i64 + offset,
+            2 => file.position as i64 + offset,
+            _ => return Ok(1),
+        };
+        if position < 0 || position > file.data.len() as i64 {
+            return Ok(1);
+        }
+        file.position = position as usize;
+
+        Ok(0)
+    }
+
+    /// `setClip(sound, kind, data)`: a SMAF clip the title loaded, played on
+    /// `play`. Anything that is not SMAF is refused.
+    fn set_clip(&self, core: &mut ArmCore) -> Result<u32> {
+        let address = core.read_param(2)?;
+        if address == 0 {
+            return Ok(0);
+        }
+
+        let header = read_bytes(core, address, 8)?;
+        if &header[..4] != b"MMMD" {
+            return Ok(0);
+        }
+        let length = u32::from_be_bytes(header[4..8].try_into().unwrap()) + 8;
+        if length > 4 << 20 {
+            return Ok(0);
+        }
+        let data = read_bytes(core, address, length)?;
+
+        let previous = self.state.lock().clip.take();
+        let mut audio = self.system.audio();
+        if let Some(previous) = previous {
+            let _ = audio.close(previous);
+        }
+        match audio.load_smaf(&data) {
+            Ok(handle) => {
+                self.state.lock().clip = Some(handle);
+                Ok(1)
+            }
+            Err(_) => Ok(0),
+        }
+    }
+}
+
+/// A terminated string of odd length may be the start of text padded to two
+/// bytes per character, with a zero byte in the pad; the run is read on to the
+/// first all-zero pair, dropping the zeros.
+fn padded_text(core: &ArmCore, address: u32, first: Vec<u8>) -> Result<Vec<u8>> {
+    if first.len().is_multiple_of(2) {
+        return Ok(first);
+    }
+
+    let Ok(raw) = read_bytes(core, address, MAX_TEXT as u32) else {
+        return Ok(first);
+    };
+
+    let mut run = Vec::with_capacity(raw.len());
+    for pair in raw.chunks_exact(2) {
+        if pair[0] == 0 && pair[1] == 0 {
+            break;
+        }
+        run.extend(pair.iter().copied().filter(|x| *x != 0));
+    }
+
+    Ok(run)
+}
+
+/// The code the title acts on for each key: the handset's virtual key codes,
+/// `AVK_*`.
+///
+/// The digits are a block from `0xe021`, then star, pound, power, end, send
+/// and clear, then the pad - up, down, left, right, select - and the soft
+/// keys. The right soft key is the handset's back key, so it is clear.
+pub fn key_code(key: wie_backend::KeyCode) -> Option<u32> {
+    use wie_backend::KeyCode;
+
+    const DIGIT_BASE: u32 = 0xe021;
+    const STAR: u32 = 0xe02b;
+    const POUND: u32 = 0xe02c;
+    const END: u32 = 0xe02e;
+    const SEND: u32 = 0xe02f;
+    const CLEAR: u32 = 0xe030;
+    const UP: u32 = 0xe031;
+    const DOWN: u32 = 0xe032;
+    const LEFT: u32 = 0xe033;
+    const RIGHT: u32 = 0xe034;
+    const SELECT: u32 = 0xe035;
+    const SOFT1: u32 = 0xe036;
+
+    Some(match key {
+        KeyCode::UP => UP,
+        KeyCode::DOWN => DOWN,
+        KeyCode::LEFT => LEFT,
+        KeyCode::RIGHT => RIGHT,
+        KeyCode::OK => SELECT,
+        KeyCode::LEFT_SOFT_KEY => SOFT1,
+        KeyCode::CLEAR | KeyCode::RIGHT_SOFT_KEY => CLEAR,
+        KeyCode::CALL => SEND,
+        KeyCode::HANGUP => END,
+        KeyCode::NUM0 => DIGIT_BASE,
+        KeyCode::NUM1 => DIGIT_BASE + 1,
+        KeyCode::NUM2 => DIGIT_BASE + 2,
+        KeyCode::NUM3 => DIGIT_BASE + 3,
+        KeyCode::NUM4 => DIGIT_BASE + 4,
+        KeyCode::NUM5 => DIGIT_BASE + 5,
+        KeyCode::NUM6 => DIGIT_BASE + 6,
+        KeyCode::NUM7 => DIGIT_BASE + 7,
+        KeyCode::NUM8 => DIGIT_BASE + 8,
+        KeyCode::NUM9 => DIGIT_BASE + 9,
+        KeyCode::STAR => STAR,
+        KeyCode::HASH => POUND,
+        _ => return None,
+    })
+}

@@ -6,7 +6,7 @@ use jvm::{ClassInstanceRef, Jvm, Result as JvmResult};
 
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
 use wie_midp::classes::javax::microedition::{
-    lcdui::{Display, Font, Graphics},
+    lcdui::{Display, Font, Graphics, Image},
     midlet::MIDlet,
 };
 
@@ -19,7 +19,47 @@ impl Toolkit {
             name: "com/xce/lcdui/Toolkit",
             parent_class: Some("java/lang/Object"),
             interfaces: vec![],
-            methods: vec![JavaMethodProto::new("<clinit>", "()V", Self::cl_init, MethodAccessFlags::STATIC)],
+            methods: vec![
+                JavaMethodProto::new("<clinit>", "()V", Self::cl_init, MethodAccessFlags::STATIC),
+                // The input method's indicator icons - capitals, small letters,
+                // digits, symbols, Hangul - and the hint drawn behind them.
+                JavaMethodProto::new(
+                    "ueimImg",
+                    "()Ljavax/microedition/lcdui/Image;",
+                    Self::indicator_image,
+                    MethodAccessFlags::STATIC,
+                ),
+                JavaMethodProto::new(
+                    "leimImg",
+                    "()Ljavax/microedition/lcdui/Image;",
+                    Self::indicator_image,
+                    MethodAccessFlags::STATIC,
+                ),
+                JavaMethodProto::new(
+                    "nimImg",
+                    "()Ljavax/microedition/lcdui/Image;",
+                    Self::indicator_image,
+                    MethodAccessFlags::STATIC,
+                ),
+                JavaMethodProto::new(
+                    "simImg",
+                    "()Ljavax/microedition/lcdui/Image;",
+                    Self::indicator_image,
+                    MethodAccessFlags::STATIC,
+                ),
+                JavaMethodProto::new(
+                    "kimImg",
+                    "()Ljavax/microedition/lcdui/Image;",
+                    Self::indicator_image,
+                    MethodAccessFlags::STATIC,
+                ),
+                JavaMethodProto::new(
+                    "imHintImg",
+                    "()Ljavax/microedition/lcdui/Image;",
+                    Self::indicator_image,
+                    MethodAccessFlags::STATIC,
+                ),
+            ],
             fields: vec![
                 JavaFieldProto::new("graphics", "Ljavax/microedition/lcdui/Graphics;", FieldAccessFlags::STATIC),
                 JavaFieldProto::new("DEFAULT_FONT", "Ljavax/microedition/lcdui/Font;", FieldAccessFlags::STATIC),
@@ -27,6 +67,14 @@ impl Toolkit {
             ],
             access_flags: Default::default(),
         }
+    }
+
+    /// The handset's input method icons came out of its ROM, which this
+    /// runtime does not have, so there is no picture to give. Null is what a
+    /// title gets for one: 매지컬프린세스 draws them through a helper (`a.e`)
+    /// that steps over a null image, and its name field works without them.
+    async fn indicator_image(_jvm: &Jvm, _: &mut WieJvmContext) -> JvmResult<ClassInstanceRef<Image>> {
+        Ok(None.into())
     }
 
     async fn cl_init(jvm: &Jvm, _: &mut WieJvmContext) -> JvmResult<()> {

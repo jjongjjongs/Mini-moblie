@@ -1,7 +1,7 @@
 use alloc::vec;
 
 use java_class_proto::{JavaFieldProto, JavaMethodProto};
-use java_constants::FieldAccessFlags;
+use java_constants::{FieldAccessFlags, MethodAccessFlags};
 use jvm::{ClassInstanceRef, Jvm, Result as JvmResult};
 
 use wie_jvm_support::{WieJavaClassProto, WieJvmContext};
@@ -16,8 +16,8 @@ impl AlertType {
             parent_class: Some("java/lang/Object"),
             interfaces: vec![],
             methods: vec![
-                JavaMethodProto::new("<init>", "(Ljava/lang/String;)V", Self::init, Default::default()),
-                JavaMethodProto::new("<clinit>", "()V", Self::cl_init, Default::default()),
+                JavaMethodProto::new("<init>", "(I)V", Self::init, Default::default()),
+                JavaMethodProto::new("<clinit>", "()V", Self::cl_init, MethodAccessFlags::STATIC),
             ],
             fields: vec![
                 JavaFieldProto::new("ALARM", "Ljavax/microedition/lcdui/AlertType;", FieldAccessFlags::STATIC),
@@ -45,7 +45,7 @@ impl AlertType {
             "javax/microedition/lcdui/AlertType",
             "ALARM",
             "Ljavax/microedition/lcdui/AlertType;",
-            jvm.new_class("javax/microedition/lcdui/AlertType", "(Ljava/lang/String;)V", (0,)).await?,
+            jvm.new_class("javax/microedition/lcdui/AlertType", "(I)V", (0,)).await?,
         )
         .await?;
 
@@ -53,7 +53,7 @@ impl AlertType {
             "javax/microedition/lcdui/AlertType",
             "CONFIRMATION",
             "Ljavax/microedition/lcdui/AlertType;",
-            jvm.new_class("javax/microedition/lcdui/AlertType", "(Ljava/lang/String;)V", (1,)).await?,
+            jvm.new_class("javax/microedition/lcdui/AlertType", "(I)V", (1,)).await?,
         )
         .await?;
 
@@ -61,7 +61,7 @@ impl AlertType {
             "javax/microedition/lcdui/AlertType",
             "ERROR",
             "Ljavax/microedition/lcdui/AlertType;",
-            jvm.new_class("javax/microedition/lcdui/AlertType", "(Ljava/lang/String;)V", (2,)).await?,
+            jvm.new_class("javax/microedition/lcdui/AlertType", "(I)V", (2,)).await?,
         )
         .await?;
 
@@ -69,7 +69,7 @@ impl AlertType {
             "javax/microedition/lcdui/AlertType",
             "INFO",
             "Ljavax/microedition/lcdui/AlertType;",
-            jvm.new_class("javax/microedition/lcdui/AlertType", "(Ljava/lang/String;)V", (3,)).await?,
+            jvm.new_class("javax/microedition/lcdui/AlertType", "(I)V", (3,)).await?,
         )
         .await?;
 
@@ -77,7 +77,7 @@ impl AlertType {
             "javax/microedition/lcdui/AlertType",
             "WARNING",
             "Ljavax/microedition/lcdui/AlertType;",
-            jvm.new_class("javax/microedition/lcdui/AlertType", "(Ljava/lang/String;)V", (4,)).await?,
+            jvm.new_class("javax/microedition/lcdui/AlertType", "(I)V", (4,)).await?,
         )
         .await?;
 

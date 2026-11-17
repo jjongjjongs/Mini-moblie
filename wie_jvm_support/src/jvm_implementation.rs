@@ -43,7 +43,12 @@ impl JvmImplementation for RustJavaJvmImplementation {
     }
 
     async fn define_class_java(&self, jvm: &Jvm, data: &[u8]) -> JvmResult<Box<dyn ClassDefinition>> {
-        match ClassDefinitionImpl::from_classfile(data) {
+        // Some SK-VM titles lock themselves to the handset they were bought on
+        // and call `System.exit` when the licence digest does not match; the
+        // check is neutralised as the class loads. A class without it is
+        // borrowed back unchanged.
+        let data = crate::authentication::neutralize_license_check(data);
+        match ClassDefinitionImpl::from_classfile(&data) {
             Ok(class) => Ok(Box::new(class)),
             Err(ClassDefinitionError::InvalidClassFile) => Err(jvm.exception("java/lang/ClassFormatError", "Invalid class file").await),
             Err(ClassDefinitionError::UnsupportedClassVersion(version)) => Err(jvm

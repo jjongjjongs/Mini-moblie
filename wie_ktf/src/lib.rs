@@ -4,7 +4,11 @@ extern crate alloc;
 mod adf;
 mod dump;
 mod emulator;
+mod handset_bound;
+pub mod module;
+mod packaged_database;
 mod runtime;
 
 pub use dump::dump_image;
 pub use emulator::KtfEmulator;
+pub use runtime::GC_STRESS_INTERVAL;
