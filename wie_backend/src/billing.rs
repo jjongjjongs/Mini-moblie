@@ -11367,6 +11367,150 @@ mod chronoswing_tests {
     }
 }
 
+/// 조각그림맞추기2 (LGT `000308C1`, 모비릭스)'s ring purchase.
+///
+/// The shop connects to `211.233.19.21:47500` and writes one record: a
+/// big-endian length, the handset's number, the service code, the item and the
+/// price.
+///
+/// ```text
+/// 00 00 00 20  "010075597734"  "1029"  "000308C1" "001" 00  00 00 0f a0
+/// ```
+///
+/// Its reader (`0x282dc`) takes four bytes, reads that many more as the
+/// big-endian length, and hands the whole record to `0x27b8c`, which reads the
+/// big-endian word at `[0x20]`: the price it charged when the purchase went
+/// through, or one of the server's refusals (`1234567`, `9876543`, `98765432`,
+/// `61004` - the daily, monthly and lifetime limits and a closed event). A
+/// price that matches the item's own is the purchase granted - "링 %d개를 충전
+/// 완료" - and anything else is "접속을 실패 하였습니다".
+///
+/// The server answered with the record it was sent, the price in its place, so
+/// that is the answer.
+///
+/// `None` for anything that is not this record: its length, a number of digits,
+/// a four-digit service code, an eight-character aid, a three-digit item and the
+/// zero after it.
+fn lgt_local_mobirix_ring_response(request: &[u8]) -> Option<Vec<u8>> {
+    const LENGTH: usize = 0x24;
+    const NUMBER: core::ops::Range<usize> = 4..16;
+    const SERVICE: core::ops::Range<usize> = 16..20;
+    const AID: core::ops::Range<usize> = 20..28;
+    const ITEM: core::ops::Range<usize> = 28..31;
+    const PAD: usize = 31;
+
+    if request.len() != LENGTH || u32::from_be_bytes(request[0..4].try_into().ok()?) as usize != LENGTH - 4 {
+        return None;
+    }
+
+    let digits = |range: core::ops::Range<usize>| request[range].iter().all(u8::is_ascii_digit);
+    if !digits(NUMBER) || !digits(SERVICE) || !digits(ITEM) || !request[AID].iter().all(u8::is_ascii_hexdigit) || request[PAD] != 0 {
+        return None;
+    }
+
+    Some(request.to_vec())
+}
+
+/// 방탈출3 (LGT `0003091C`, 게임데이)'s item purchase.
+///
+/// The shop connects to `210.114.220.195:1009`; `0x2992c` writes the purchase
+/// as big-endian halfwords - the length, `3`, `5`, `3`, the item and the price -
+/// then the aid and the item's three digits, and `0x295f0` closes every frame
+/// with `0x17`:
+///
+/// ```text
+/// 00 18 00 03 00 05 00 03 00 0f 07 d0  "0003091C004"  17
+/// ```
+///
+/// Its reader (`0x29ab4`) takes four bytes and copies them out as a native
+/// word - little-endian - for how many more to read. For a purchase (the state
+/// machine sets `0x1502f79` as it sends one) the verdict is the big-endian
+/// word at `[8]`: `1` is the purchase granted, `-2`, `-3`, `-4`, `-5` and
+/// `-10` are the server's refusals (`@81`, `@83`, `@84`, `@88`, `@80`), and
+/// anything else is `@76`.
+///
+/// So the answer is a little-endian eight, four bytes of nothing and a
+/// big-endian `1`.
+///
+/// `None` for anything that is not this purchase: the length, the `3 5 3`
+/// that open it, an eight-character aid, a three-digit item and the `0x17`
+/// that closes it.
+fn lgt_local_gameday_purchase_response(request: &[u8]) -> Option<Vec<u8>> {
+    const LENGTH: usize = 0x18;
+    const OPENING: [u8; 6] = [0x00, 0x03, 0x00, 0x05, 0x00, 0x03];
+    const AID: core::ops::Range<usize> = 12..20;
+    const ITEM: core::ops::Range<usize> = 20..23;
+    const END: u8 = 0x17;
+    const GRANTED: i32 = 1;
+
+    if request.len() != LENGTH
+        || u16::from_be_bytes([request[0], request[1]]) as usize != LENGTH
+        || request[2..8] != OPENING
+        || request[LENGTH - 1] != END
+        || !request[AID].iter().all(u8::is_ascii_hexdigit)
+        || !request[ITEM].iter().all(u8::is_ascii_digit)
+    {
+        return None;
+    }
+
+    let mut response = Vec::with_capacity(12);
+    response.extend_from_slice(&8u32.to_le_bytes());
+    response.extend_from_slice(&[0; 4]);
+    response.extend_from_slice(&GRANTED.to_be_bytes());
+
+    Some(response)
+}
+
+#[cfg(test)]
+mod mobirix_gameday_tests {
+    use super::*;
+
+    /// 조각그림맞추기2's purchase, byte for byte off the device log: item `001`
+    /// for 4000원.
+    const RING: [u8; 36] = [
+        0x00, 0x00, 0x00, 0x20, 0x30, 0x31, 0x30, 0x30, 0x37, 0x35, 0x35, 0x39, 0x37, 0x37, 0x33, 0x34, 0x31, 0x30, 0x32, 0x39, 0x30, 0x30, 0x30,
+        0x33, 0x30, 0x38, 0x43, 0x31, 0x30, 0x30, 0x31, 0x00, 0x00, 0x00, 0x0f, 0xa0,
+    ];
+
+    /// 방탈출3's purchase, off its device log: item 15 for 2000원.
+    const ESCAPE: [u8; 24] = [
+        0x00, 0x18, 0x00, 0x03, 0x00, 0x05, 0x00, 0x03, 0x00, 0x0f, 0x07, 0xd0, 0x30, 0x30, 0x30, 0x33, 0x30, 0x39, 0x31, 0x43, 0x30, 0x30, 0x34,
+        0x17,
+    ];
+
+    #[test]
+    fn the_ring_purchase_comes_back_with_its_price() {
+        let reply = response(&RING).expect("answered");
+
+        // The reader's length, then the price where `0x27b8c` reads it.
+        assert_eq!(u32::from_be_bytes(reply[0..4].try_into().unwrap()) as usize, reply.len() - 4);
+        assert_eq!(u32::from_be_bytes(reply[0x20..0x24].try_into().unwrap()), 4000);
+    }
+
+    #[test]
+    fn the_escape_purchase_is_granted() {
+        let reply = response(&ESCAPE).expect("answered");
+
+        assert_eq!(u32::from_le_bytes(reply[0..4].try_into().unwrap()) as usize, reply.len() - 4);
+        assert_eq!(i32::from_be_bytes(reply[8..12].try_into().unwrap()), 1);
+    }
+
+    #[test]
+    fn records_out_of_shape_are_left_alone() {
+        let mut ring = RING;
+        ring[31] = b'1';
+        assert_eq!(lgt_local_mobirix_ring_response(&ring), None);
+        assert_eq!(lgt_local_mobirix_ring_response(&RING[..35]), None);
+
+        let mut escape = ESCAPE;
+        escape[23] = 0;
+        assert_eq!(lgt_local_gameday_purchase_response(&escape), None);
+        let mut escape = ESCAPE;
+        escape[5] = 6;
+        assert_eq!(lgt_local_gameday_purchase_response(&escape), None);
+    }
+}
+
 pub fn response(request: &[u8]) -> Option<Vec<u8>> {
     // First: its signature is four things at once - see
     // `lgt_local_maguer2011_response` - so nothing else can be taken for it,
@@ -11431,6 +11575,8 @@ pub fn response(request: &[u8]) -> Option<Vec<u8>> {
         .or_else(|| lgt_local_rann_pr_response(request))
         .or_else(|| lgt_local_ea_text_response(request))
         .or_else(|| ktf_local_school_purchase_response(request))
+        .or_else(|| lgt_local_mobirix_ring_response(request))
+        .or_else(|| lgt_local_gameday_purchase_response(request))
         // Last: it takes any record whose length is its own and whose command
         // is even, so everything with a narrower shape goes first.
         .or_else(|| ktf_local_gamevil_2011_response(request))

@@ -499,6 +499,11 @@ const QUIRKS: &[(TitlePlatform, &str, TitleQuirks)] = &[
     // are not drawn at all. Told the 296 a strip leaves, it asks for 240x296
     // and fills it from its first row.
     (TitlePlatform::Lgt, "00030DD8", annunciator()),
+    // 조각그림맞추기2 (모비릭스): lays every screen out a strip down and flushes
+    // 344 rows - the 320 it is told plus the strip. Without it reserved the
+    // whole game sits 24 rows low behind a black band, and the bottom of every
+    // screen (the title's "Press any key", the menu's last row) is cut.
+    (TitlePlatform::Lgt, "000308C1", annunciator()),
     // 셔터2 데스트니: the same SDK and the same arithmetic - it clips every
     // screen to 176x204 on its 176x220 panel - and it answers the same way,
     // 57 colours down to 6 without the strip.

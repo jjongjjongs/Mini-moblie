@@ -882,6 +882,7 @@ mod annunciator_tests {
         assert!(title_expects_annunciator("00030DD8"));
         assert!(title_expects_annunciator("00029F79")); // 초코초코타이쿤
         assert!(title_expects_annunciator("0002A8D4")); // KBO 프로야구 2009
+        assert!(title_expects_annunciator("000308C1")); // 조각그림맞추기2
         assert!(title_expects_annunciator("0002728F")); // 베이징올림픽 2008
     }
 
